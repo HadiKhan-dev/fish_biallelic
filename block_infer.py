@@ -1,9 +1,11 @@
 import numpy as np
 import pysam
+import math
 import matplotlib.pyplot as plt
 import seaborn as sns
 import sklearn.cluster
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 import hdbscan
 from multiprocess import Pool
 from sklearn.manifold import TSNE
@@ -149,13 +151,16 @@ def generate_distance_matrix(genotype_array,missing_penalty="None"):
     
     num_samples = genotype_array.shape[0]
     
+    genotype_copy = genotype_array.copy()
+
+    
     processing_pool = Pool(processes=8)
     
     
     dist_matrix = []
     
     dist_matrix = processing_pool.map(
-        lambda x : calc_distance_row(x[0],genotype_array,x[1],missing_penalty),
+        lambda x : calc_distance_row(x[0],genotype_copy,x[1],missing_penalty),
         list(zip(genotype_array,range(num_samples))))
     
     #Convert to array and fill up lower diagonal
@@ -173,7 +178,11 @@ def get_heterozygosity(genotype):
     
     return 100*num_hetero/num_sites
 
-def hdbscan_cluster(dist_matrix,min_cluster_size=2,cluster_selection_method="eom",alpha=1):
+def hdbscan_cluster(dist_matrix,
+                    min_cluster_size=2,
+                    min_samples=1,
+                    cluster_selection_method="eom",
+                    alpha=1):
     def cluster_details(clustering,cut_distance,min_cluster_size):
         new_clustering = clustering.dbscan_clustering(cut_distance=cut_distance,min_cluster_size=min_cluster_size)
 
@@ -195,6 +204,7 @@ def hdbscan_cluster(dist_matrix,min_cluster_size=2,cluster_selection_method="eom
     #Create clustering object from sklearn
     base_clustering = hdbscan.HDBSCAN(metric="precomputed",
                                       min_cluster_size=min_cluster_size,
+                                      min_samples=min_samples,
                                       cluster_selection_method=cluster_selection_method,
                                       alpha=alpha)
     
@@ -212,7 +222,7 @@ def hdbscan_cluster(dist_matrix,min_cluster_size=2,cluster_selection_method="eom
     
     #Get outliers
     outliers = np.where(initial_labels == -1)[0]
-    print(f"Outliers: {outliers}")
+    #print(f"Outliers: {outliers}")
     num_outliers = np.count_nonzero(initial_labels == -1)
     
     all_clusters = set(initial_labels)
@@ -220,64 +230,7 @@ def hdbscan_cluster(dist_matrix,min_cluster_size=2,cluster_selection_method="eom
     
     initial_num_clusters = len(all_clusters)
     
-    cluster_eps_dict = {}
-    
-    for eps in range(600,800):
-        cluster_details(base_clustering,1*eps,min_cluster_size=2)
-    
-    
     return [initial_labels,initial_probabilities,base_clustering]
-
-def get_initial_haps_one(genotype_array,
-                     dist_matrix,
-                     het_cutoff=10,
-                     make_pca=False):
-    """
-    Get our initial haplotypes by finding high homozygosity samples
-    """
-    het_vals = np.array([get_heterozygosity(genotype_array[i]) for i in range(len(genotype_array))])
-    
-    homs_where = np.where(het_vals <= het_cutoff)[0]
-    
-    homs_array = genotype_array[homs_where]
-
-    dist_submatrix = dist_matrix[np.ix_(homs_where,homs_where)]
-    
-    print(homs_array.shape)
-    print(dist_submatrix.shape)
-    
-    initial_clusters = hdbscan_cluster(
-                            dist_submatrix,
-                            min_cluster_size=5,
-                            cluster_selection_method="eom",
-                            alpha=1.1)
-    
-    (representatives,filled_data) = fill_nan(
-        homs_array,initial_clusters[0],
-        cluster_probs=initial_clusters[1],
-        prob_cutoff=1)
-    
-    if make_pca:
-        
-        pca = PCA(n_components=2)
-
-        pca_proj = pca.fit_transform(filled_data)
-
-        print("PCA SHAPE",pca_proj.shape)
-        
-        color_palette = sns.color_palette('Paired', 20)
-        cluster_colors = [(color_palette[x]) if x >= 0
-                          else (0.5, 0.5, 0.5)
-                          for x in initial_clusters[0]]
-
-
-        fig,ax = plt.subplots()
-        plt.scatter(*pca_proj.T,c=cluster_colors)
-        plt.title(f"PCA, Block size: {block_size}")
-        fig.set_size_inches(8,6)
-        plt.show()
-    
-    return representatives
 
 def fix_cluster_labels(c_labels):
     """
@@ -309,7 +262,9 @@ def fill_nan(data_vals,clusters,cluster_probs=np.array([]),prob_cutoff=0.8,ambig
 
     cluster_names = set(clusters)
     cluster_representatives = {}
+    raw_clusters = {}
     filled_clusters = {}
+    
     
     #List which will store the data with NaN values filled in
     filled_data = [[]]*len(data_vals)
@@ -329,6 +284,7 @@ def fill_nan(data_vals,clusters,cluster_probs=np.array([]),prob_cutoff=0.8,ambig
 
         #Pick out these indices and get the data for the cluster
         cluster_data = data_array[indices,:]
+    
         
         #Calculate average value at each site for the samples which fall into the cluster
         site_sum = np.nansum(cluster_data,axis=0)
@@ -342,14 +298,16 @@ def fill_nan(data_vals,clusters,cluster_probs=np.array([]),prob_cutoff=0.8,ambig
         
         #Add representative for cluster to dictionary as well as add data for cluster to dictionary
         cluster_representatives[cluster] = site_rounded
-        filled_clusters[cluster] = cluster_data
+        raw_clusters[cluster] = cluster_data
         
         #Find location of all NaN values in the cluster data
         missing = np.where(np.isnan(cluster_data))
         
         #Create a copy of the data for the cluster with NaN values filled in by the representative value for that site
+        #Add this data to the filled clusters
         cluster_filled = np.copy(cluster_data)
         cluster_filled[missing] = np.take(site_rounded,missing[1])
+        filled_clusters[cluster] = cluster_filled
         
         #Populate the filled data portion corresponding to this cluster
         for i in range(len(indices)):
@@ -362,8 +320,165 @@ def fill_nan(data_vals,clusters,cluster_probs=np.array([]),prob_cutoff=0.8,ambig
             filled_data[i] = np.nan_to_num(data_vals[i],nan=0)
 
     #Return the results
-    return (cluster_representatives,np.array(filled_data))
+    return (cluster_representatives,np.array(filled_data),raw_clusters,filled_clusters)
 
+def get_initial_haps(genotype_array,
+                     het_cutoff_start=10,
+                     het_excess_add=6,
+                     het_max_cutoff=20,
+                     deeper_analysis=False,
+                     deeper_tolerance=5,
+                     make_pca=False,
+                     verbose=False):
+    """
+    Get our initial haplotypes by finding high homozygosity samples
+    """
+    het_vals = np.array([get_heterozygosity(genotype_array[i]) for i in range(len(genotype_array))])
+    
+    found_homs = False
+    cur_het_cutoff = het_cutoff_start
+    
+    while not found_homs:
+        
+        if cur_het_cutoff > het_max_cutoff:
+            if verbose:
+                print("Unable to find samples with high homozygosity in region")
+            return ([],[])
+        homs_where = np.where(het_vals <= cur_het_cutoff)[0]
+    
+        homs_array = genotype_array[homs_where]
+        
+        homs_array[homs_array == 1] = np.nan
+    
+        homs_array = homs_array/2
+    
+    
+        dist_submatrix = generate_distance_matrix(
+            homs_array,
+            missing_penalty="None")
+    
+        initial_clusters = hdbscan_cluster(
+                            dist_submatrix,
+                            min_cluster_size=2,
+                            min_samples=1,
+                            cluster_selection_method="eom",
+                            alpha=1.0)
+        num_clusters = 1+np.max(initial_clusters[0])
+        
+        #If we don't find any clusters the increase the het threshold and repeat
+        if num_clusters < 1:
+            cur_het_cutoff += het_excess_add
+            continue
+        else:
+            print()
+            found_homs = True
+        
+        
+        
+        num_outliers = np.count_nonzero(initial_clusters[0] == -1)
+    
+    (representatives,filled_data,raw_clusters,filled_clusters) = fill_nan(
+        homs_array,initial_clusters[0])
+    
+    pca_labels = initial_clusters[0]
+    
+    if deeper_analysis:
+        second_clustering = hdbscan.HDBSCAN(metric="l1",
+                            cluster_selection_method="eom",
+                            min_cluster_size=2,
+                            min_samples=1,
+                            alpha=1.0,
+                            allow_single_cluster=False)
+        second_clustering.fit(filled_data)
+        second_labels = np.array(second_clustering.labels_)
+
+        (new_representatives,filled_data,new_raw,new_filled) = fill_nan(
+            filled_data,second_labels)
+        
+        color_palette = sns.color_palette('Paired', 20)
+        second_clustering.condensed_tree_.plot(select_clusters=True,selection_palette=color_palette)
+        plt.show()
+        
+        initial_representatives = np.array(list(representatives.values()))
+        second_representatives = np.array(list(new_representatives.values()))
+        
+        (final_representatives,label_mappings) = combine_haplotypes(
+            initial_representatives,second_representatives,
+            unique_cutoff=deeper_tolerance)
+        
+        final_labels = list(map(lambda x:label_mappings[x],second_labels))
+        pca_labels = final_labels
+    
+    if make_pca:
+        
+        pca_plotting = PCA(n_components=2)
+        
+        standardised = StandardScaler().fit_transform(filled_data)
+
+
+        pca_plot_proj = pca_plotting.fit_transform(standardised)
+
+        color_palette = sns.color_palette('Paired', 20)
+        cluster_colors = [(color_palette[x]) if x >= 0
+                          else (0.5, 0.5, 0.5)
+                          for x in pca_labels]
+        
+        fig,ax = plt.subplots()
+        plt.scatter(*pca_plot_proj.T,c=cluster_colors)
+        plt.title(f"PCA, Block size: {block_size}")
+        fig.set_size_inches(8,6)
+        plt.show()
+    
+    if deeper_analysis:
+        return (representatives,new_representatives)
+    else:
+        return (representatives,[])
+
+def combine_haplotypes(initial_haps,new_candidate_haps,unique_cutoff=2):
+    """
+    Takes two lists of haplotypes and creates a new dictionary of
+    haplotypes containing all the first ones as well as those
+    from the second which are at least unique_cutoff percent
+    different from all of the ones in the first list/any of 
+    those in the second list already chosen.
+    
+    Returns a dictionary detailing the new set of haplotypes
+    as well as a dictionary showing where all the haps in the 
+    second list map to in the new thing.
+
+    """
+    cur_haps = {}
+    haps_len = len(initial_haps[0])
+    new_haps_mapping = {-1:-1}
+    
+    cutoff = math.ceil(unique_cutoff*haps_len/100)
+    i = 0
+    j = 0
+    
+    for hap in initial_haps:
+        cur_haps[i] = hap
+        i += 1
+    
+    for hap in new_candidate_haps:
+        add = True
+        for k in range(len(cur_haps)):
+            compare = cur_haps[k]
+            num_differences = len(np.where(hap != compare)[0])
+            
+            if num_differences < cutoff:
+                add = False
+                new_haps_mapping[j] = k
+                j += 1
+                break
+        if add:
+            cur_haps[i] = hap
+            new_haps_mapping[j] = i
+            i += 1
+            j += 1
+    
+    return (cur_haps,new_haps_mapping)
+    
+    
 def fix_hap(haplotype):
     """
     Fix a haplotype by removing negative values and
@@ -552,7 +667,7 @@ def split_representatives(cluster_representatives,
             low_heterog.append(i)
             basic_haps.append(halve_genotype(cluster_representatives[i],trim_one=True))
 
-    print(f"Basic len: {len(basic_haps)}")
+    #print(f"Basic len: {len(basic_haps)}")
     
     #Exit early if we don't find any basic haps
     if len(basic_haps) == 0:
@@ -655,7 +770,7 @@ def generate_haplotypes_all(chromosome_data):
     
     return haps
 #%%
-bcf = read_bcf_file("./AsAc.AulStuGenome.biallelic.bcf.gz")
+bcf = read_bcf_file("./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz")
 contigs = bcf.header.contigs
 names = bcf.header.samples
 #%%
@@ -665,7 +780,7 @@ print("OneDone")
 #%%
 generate_haplotypes_all(chr1)
 #%%
-test = chr1[23]
+test = chr1[40]
 res = generate_haplotypes_block(test,make_pca=True)
 (positions,genotype_array) = cleanup_block(test)
 
@@ -685,73 +800,8 @@ print(np.mean(remaining))
 print(np.mean(losses))
 
 #%%
-def get_initial_haps_two(genotype_array,
-                     het_cutoff=10,
-                     make_pca=False):
-    """
-    Get our initial haplotypes by finding high homozygosity samples
-    """
-    het_vals = np.array([get_heterozygosity(genotype_array[i]) for i in range(len(genotype_array))])
-    
-    homs_where = np.where(het_vals <= het_cutoff)[0]
-    
-    homs_array = genotype_array[homs_where]
-    
-    homs_array[homs_array == 1] = np.nan
-    
-    print(homs_array.shape)
-    
-    homs_array = homs_array/2
-    
-    dist_submatrix = generate_distance_matrix(
-            homs_array,
-            missing_penalty="None")
-    
-    initial_clusters = hdbscan_cluster(
-                            dist_submatrix,
-                            min_cluster_size=2,
-                            cluster_selection_method="eom",
-                            alpha=3.5)
-    
-    (representatives,filled_data) = fill_nan(
-        homs_array,initial_clusters[0])
-    
-    print(initial_clusters[0])
-    
-    if make_pca:
-        
-        pca = PCA(n_components=2)
-
-        pca_proj = pca.fit_transform(filled_data)
-
-        second_clustering = hdbscan.HDBSCAN(metric="l1",
-                                          min_cluster_size=5)
-        
-        second_clustering.fit(dist_submatrix)
-        
-        second_labels = np.array(second_clustering.labels_)
-        print("Num clusters: ",max(second_labels)+1)
-        
-        (new_representatives,filled_data) = fill_nan(
-            homs_array,second_labels)
-        
-        print("PCA SHAPE",pca_proj.shape)
-        
-        color_palette = sns.color_palette('Paired', 20)
-        cluster_colors = [(color_palette[x]) if x >= 0
-                          else (0.5, 0.5, 0.5)
-                          for x in second_labels]
-        
-
-        fig,ax = plt.subplots()
-        plt.scatter(*pca_proj.T,c=cluster_colors)
-        plt.title(f"PCA, Block size: {block_size}")
-        fig.set_size_inches(8,6)
-        plt.show()
-    
-    return (representatives,new_representatives)
 #%%
-test = chr1[422]
+test = chr1[40]
 (positions,genotype_array) = cleanup_block(test)
 dist_matrix = generate_distance_matrix(
         genotype_array,
@@ -760,7 +810,10 @@ dist_matrix = generate_distance_matrix(
 hets = [get_heterozygosity(genotype_array[i]) for i in range(len(genotype_array))]
 plt.plot(np.array(sorted(hets)))
 plt.show()
-print(np.array(sorted(hets)[:20]))
 
-#firsts = get_initial_haps_one(genotype_array,dist_matrix,make_pca=True)
-seconds = get_initial_haps_two(genotype_array,make_pca=True)
+seconds = get_initial_haps(genotype_array,make_pca=True,deeper_analysis=True,)
+#%%
+def generate_further_haps(genotype_array,
+                          initial_haps):
+    pass
+    
