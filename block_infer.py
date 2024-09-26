@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from collections import defaultdict
 import hdbscan
 from multiprocess import Pool
 import time
@@ -50,12 +49,13 @@ def break_contig(vcf_data,contig_name,block_size=100000,shift=100000):
                     starting_index += 1
             else:
                 break
-        cur_start += shift
         
         if starting_index >= len(full_data):
             done = True
 
-        yield data_list
+        yield (data_list,(cur_start,cur_start+block_size))
+        
+        cur_start += shift
 
 def gt_sum(gt_tuple):
     """
@@ -202,6 +202,8 @@ def magnitude_percentage(vec):
     A percentage measure of how far away a diploid is from zero in the 
     L1 metric compared to a vector of 2s. Can be bigger than 100%
     """
+    if np.count_nonzero(~np.isnan(vec)) == 0:
+        return 0
     return 100*size_l1(vec)/(2*np.count_nonzero(~np.isnan(vec)))
 
 def perc_wrong(array):
@@ -233,28 +235,15 @@ def hdbscan_cluster(dist_matrix,
                     min_cluster_size=2,
                     min_samples=1,
                     cluster_selection_method="eom",
-                    alpha=1):
-    def cluster_details(clustering,cut_distance,min_cluster_size):
-        new_clustering = clustering.dbscan_clustering(cut_distance=cut_distance,min_cluster_size=min_cluster_size)
-
-        new_labels = np.array(new_clustering)
-        #new_probabilities = np.array(new_clustering.probabilities_)
-        
-        new_clusters = set(new_labels)
-        new_clusters.discard(-1)
-        
-        
-        #print(f"EPS: {cut_distance :.2f}, NUM OUTLIERS: {new_outlier_count}, NUM CLUSTERS: {new_num_clusters}")
-        
-        return new_labels
-
+                    alpha=1,
+                    allow_single_cluster=False):
 
     #Create clustering object from sklearn
     base_clustering = hdbscan.HDBSCAN(metric="precomputed",
                                       min_cluster_size=min_cluster_size,
                                       min_samples=min_samples,
                                       cluster_selection_method=cluster_selection_method,
-                                      alpha=alpha)
+                                      alpha=alpha,allow_single_cluster=allow_single_cluster)
     
     
     #Fit data to clustering
@@ -268,15 +257,8 @@ def hdbscan_cluster(dist_matrix,
     initial_labels = np.array(base_clustering.labels_)
     initial_probabilities = np.array(base_clustering.probabilities_)
     
-    #Get outliers
-    outliers = np.where(initial_labels == -1)[0]
-    #print(f"Outliers: {outliers}")
-    num_outliers = np.count_nonzero(initial_labels == -1)
-    
     all_clusters = set(initial_labels)
     all_clusters.discard(-1)
-    
-    initial_num_clusters = len(all_clusters)
     
     return [initial_labels,initial_probabilities,base_clustering]
 
@@ -370,7 +352,131 @@ def fill_nan(data_vals,clusters,cluster_probs=np.array([]),prob_cutoff=0.8,ambig
     #Return the results
     return (cluster_representatives,np.array(filled_data),raw_clusters,filled_clusters)
 
-def combine_haplotypes(initial_haps,new_candidate_haps,unique_cutoff=5):
+def match_best(haps_dict,diploids):
+    """
+    Find the best matches of a pair of haploids for each diploid in the diploid list
+    """
+    
+    dips_matches = []
+    haps_usage = {}
+    errs = []
+    
+    for i in range(len(diploids)):
+        cur_best = (None,None)
+        cur_div = np.inf
+        
+        for j in haps_dict.keys():
+            for k in haps_dict.keys():
+                difference = diploids[i]-haps_dict[j]-haps_dict[k]
+                div = magnitude_percentage(difference)
+                
+                if div < cur_div:
+                    cur_div = div
+                    cur_best = (j,k)
+        
+        for index in cur_best:
+            if index not in haps_usage.keys():
+                haps_usage[index] = 0
+            haps_usage[index] += 1
+        errs.append(cur_div)
+        dips_matches.append((cur_best,cur_div))
+    
+    return (dips_matches,haps_usage,np.array(errs))
+
+def combine_haplotypes(initial_haps,
+                       new_candidate_haps,
+                       usages=None,
+                       unique_cutoff=5,
+                       max_hap_add=1000):
+    """
+    Takes two dictionaries of haplotypes and a list of new potential
+    haptotype and creates a new dictionary of haplotypes containing
+    all the first ones as well as those from the second which are at
+    least unique_cutoff percent different from all of the
+    ones in the first list/any of those in the second list already chosen.
+    
+    usages is an optional parameter which is an indicator of 
+    how often a new candidate haplotype is used in the generated
+    haplotype list. It works with max_hap_add to ensure that if
+    we have a limit on the maximum number of added haplotypes 
+    we preferentially add the haplotypes that have highest usage
+    
+    Returns a dictionary detailing the new set of haplotypes
+    as well as a dictionary showing where all the haps in the 
+    second list map to in the new thing.
+
+    """
+    
+    for x in initial_haps.keys(): #Get the legth of a haplotype
+        haplotype_length = len(initial_haps[x])
+        break
+    
+    new_haps_mapping = {-1:-1}
+    
+    if usages == None:
+        usages = {x:1 for x in new_candidate_haps.keys()}
+    usages = {k: v for k, v in sorted(usages.items(), key=lambda item: item[1])} #Get a sorted version of the usage dictionary
+    
+    combined_dict = {x:(new_candidate_haps[x],usages[x]) for x in usages.keys()}
+    
+    cutoff = math.ceil(unique_cutoff*haplotype_length/100)
+    
+    i = 0
+    j = 0
+    num_added = 0
+    
+    cur_haps = {}
+    for idx in initial_haps.keys():
+        cur_haps[i] = initial_haps[idx]
+        i += 1
+    
+    for identifier in combined_dict.keys():
+        (hap,hap_usage) = combined_dict[identifier]
+        add = True
+        for k in range(len(cur_haps)):
+            compare = cur_haps[k]
+            num_differences = len(np.where(hap != compare)[0])
+            if num_differences < cutoff:
+                add = False
+                new_haps_mapping[j] = k
+                j += 1
+                break
+        if add and num_added < max_hap_add:
+            cur_haps[i] = hap
+            new_haps_mapping[j] = i
+            i += 1
+            j += 1
+            num_added += 1
+        if num_added >= max_hap_add:
+            break
+    
+    return (cur_haps,new_haps_mapping)
+
+def get_addition_statistics(starting_haps,
+                            candidate_haps,
+                            addition_index,genotype_array):
+    """
+    Add one hap from our list of candidate haps and see how much worse
+    of a total fit we get.
+    """
+    added_haps = starting_haps.copy()
+    adding_name = max(added_haps.keys())+1
+    
+    added_haps[adding_name] = candidate_haps[addition_index]
+    
+    added_matches = match_best(added_haps,genotype_array)
+    
+    added_mean = np.mean(added_matches[2])
+    added_max = np.max(added_matches[2])
+    added_std = np.std(added_matches[2])
+    
+    return (added_mean,added_max,added_std,added_matches)
+
+
+def combine_haplotypes_smart(initial_haps,
+                        new_candidate_haps,
+                        genotype_array,
+                        loss_reduction_cutoff_ratio =0.98):
     """
     Takes two lists of haplotypes and creates a new dictionary of
     haplotypes containing all the first ones as well as those
@@ -381,41 +487,72 @@ def combine_haplotypes(initial_haps,new_candidate_haps,unique_cutoff=5):
     Returns a dictionary detailing the new set of haplotypes
     as well as a dictionary showing where all the haps in the 
     second list map to in the new thing.
+    
+    Alternate method to combine_haplotype that smartly looks at 
+    which candidate hap will reduce the mean error the most, adds
+    that to the list and continues until the reduction is too small
+    to matter
+    
+    Unlike combine_haplotype not all candidate haplotypes get mapped,
+    so there is no new_haps_mapping being returned
 
     """
-    cur_haps = {}
-    haps_len = len(initial_haps[0])
-    new_haps_mapping = {-1:-1}
     
-    cutoff = math.ceil(unique_cutoff*haps_len/100)
+    processing_pool = Pool(processes=8)
+    
     i = 0
-    j = 0
+    cur_haps = {}
+    for idx in initial_haps.keys():
+        cur_haps[i] = initial_haps[idx]
+        i += 1
+        
+    cur_matches = match_best(cur_haps,genotype_array)
+    cur_error = np.mean(cur_matches[2])
     
-    for hap in initial_haps:
-        cur_haps[i] = hap
+    
+    candidate_haps = new_candidate_haps.copy()
+    
+    addition_complete = False
+    
+    while not addition_complete:
+        cand_keys = list(candidate_haps.keys())
+        addition_indicators = processing_pool.starmap(lambda x:
+                            get_addition_statistics(cur_haps,
+                            candidate_haps,x,
+                            genotype_array),
+                            zip(cand_keys))            
+        
+        smallest_result = min(addition_indicators,key=lambda x:x[0])
+        smallest_index = addition_indicators.index(smallest_result)
+        smallest_name = cand_keys[smallest_index]
+        smallest_value = smallest_result[0]
+        
+        if smallest_value/cur_error < loss_reduction_cutoff_ratio:
+            new_index = max(cur_haps.keys())+1
+            cur_haps[new_index] = candidate_haps[smallest_name]
+            candidate_haps.pop(smallest_name)
+            
+            cur_matches = match_best(cur_haps,genotype_array)
+            cur_error = np.mean(cur_matches[2])
+            
+            
+        else:
+            addition_complete = True
+        
+        if len(candidate_haps) == 0:
+            addition_complete = True
+            
+    final_haps = {}
+    i = 0
+    for idx in cur_haps.keys():
+        final_haps[i] = cur_haps[idx]
         i += 1
     
-    for hap in new_candidate_haps:
-        add = True
-        for k in range(len(cur_haps)):
-            compare = cur_haps[k]
-            num_differences = len(np.where(hap != compare)[0])
-            if num_differences < cutoff:
-                add = False
-                new_haps_mapping[j] = k
-                j += 1
-                break
-        if add:
-            cur_haps[i] = hap
-            new_haps_mapping[j] = i
-            i += 1
-            j += 1
-    
-    return (cur_haps,new_haps_mapping)
+    return final_haps
 
 def get_initial_haps(genotype_array,
                      het_cutoff_start=10,
-                     het_excess_add=6,
+                     het_excess_add=2,
                      het_max_cutoff=20,
                      deeper_analysis=False,
                      deeper_tolerance=5,
@@ -429,32 +566,56 @@ def get_initial_haps(genotype_array,
     found_homs = False
     cur_het_cutoff = het_cutoff_start
     
+    accept_singleton = (het_cutoff_start+het_max_cutoff)/2
+    
     while not found_homs:
         
         if cur_het_cutoff > het_max_cutoff:
             if verbose:
                 print("Unable to find samples with high homozygosity in region")
-            return ([],[])
+            return {}
         homs_where = np.where(het_vals <= cur_het_cutoff)[0]
     
         homs_array = genotype_array[homs_where]
         
+        if len(homs_array) < 1:
+            cur_het_cutoff += het_excess_add
+            continue
+        
         homs_array[homs_array == 1] = np.nan
     
         homs_array = homs_array/2
-    
+        
     
         dist_submatrix = generate_distance_matrix(
             homs_array,
             missing_penalty="None")
-    
-        initial_clusters = hdbscan_cluster(
-                            dist_submatrix,
-                            min_cluster_size=2,
-                            min_samples=1,
-                            cluster_selection_method="eom",
-                            alpha=1.0)
-        num_clusters = 1+np.max(initial_clusters[0])
+        
+        #First do clustering looking for at least 2 clusters, if that fails rerun allowing single clusters
+        try:
+            initial_clusters = hdbscan_cluster(
+                                dist_submatrix,
+                                min_cluster_size=2,
+                                min_samples=1,
+                                cluster_selection_method="eom",
+                                alpha=1.0)
+            num_clusters = 1+np.max(initial_clusters[0])
+            
+            if num_clusters == 0:
+                assert False
+        except:
+            if cur_het_cutoff < accept_singleton:
+                cur_het_cutoff += het_excess_add
+                continue
+            initial_clusters = hdbscan_cluster(
+                                dist_submatrix,
+                                min_cluster_size=2,
+                                min_samples=1,
+                                cluster_selection_method="eom",
+                                alpha=1.0,
+                                allow_single_cluster=True)
+            num_clusters = 1+np.max(initial_clusters[0])
+
         
         #If we don't find any clusters the increase the het threshold and repeat
         if num_clusters < 1:
@@ -462,8 +623,6 @@ def get_initial_haps(genotype_array,
             continue
         else:
             found_homs = True
-        
-        num_outliers = np.count_nonzero(initial_clusters[0] == -1)
     
     (representatives,filled_data,raw_clusters,filled_clusters) = fill_nan(
         homs_array,initial_clusters[0])
@@ -483,15 +642,8 @@ def get_initial_haps(genotype_array,
         (new_representatives,filled_data,new_raw,new_filled) = fill_nan(
             filled_data,second_labels)
         
-        color_palette = sns.color_palette('Paired', 20)
-        second_clustering.condensed_tree_.plot(select_clusters=True,selection_palette=color_palette)
-        plt.show()
-        
-        initial_representatives = np.array(list(representatives.values()))
-        second_representatives = np.array(list(new_representatives.values()))
-        
         (final_representatives,label_mappings) = combine_haplotypes(
-            initial_representatives,second_representatives,
+            representatives,new_representatives,
             unique_cutoff=deeper_tolerance)
         
         final_labels = list(map(lambda x:label_mappings[x],second_labels))
@@ -505,8 +657,6 @@ def get_initial_haps(genotype_array,
 
 
         pca_plot_proj = pca_plotting.fit_transform(standardised)
-        
-        print(pca_plot_proj.shape)
 
         color_palette = sns.color_palette('Paired', 20)
         cluster_colors = [(color_palette[x]) if x >= 0
@@ -531,17 +681,27 @@ def get_initial_haps(genotype_array,
 def generate_further_haps(genotype_array,
                           initial_haps,
                           wrongness_cutoff=10,
-                          uniqueness_threshold=10,
+                          uniqueness_threshold=5,
+                          max_hap_add = 1000,
+                          min_perc_usage = 5,
                           make_pca = False):
     """
     Given a genotype array and a set of initial haplotypes
     which are present in some of the samples of the array
-    calculates other new haplotypes which are also present
+    calculates other new haplotypes which are also present.
+    
     het_cutoff is the maximum percentage of sites which are not 0,1
-    for a candidate hap to consider it further as a new haplotype,
+    for a candidate hap to consider it further as a new haplotype
+    
     uniqueness_threshold is a percentage lower bound of how different
     a new candidate hap has to be from all the initial haps to be considered
     further.
+    
+    max_hap_add is the maximum number of additional haplotypes to add
+    
+    min_perc_usage is the minimum percentage of derived samples that
+    must fall into a cluster for its representative to be considered
+    as a potential new haplotype
     """
     candidate_haps = []
     initial_list = np.array(list(initial_haps.values()))
@@ -549,7 +709,6 @@ def generate_further_haps(genotype_array,
     for geno in genotype_array:
         for init_hap in initial_list:
             diff = geno-init_hap
-            
 
             wrongness = perc_wrong(diff)
             
@@ -583,7 +742,22 @@ def generate_further_haps(genotype_array,
     (representatives,filled_data,raw_clusters,filled_clusters) = fill_nan(
         candidate_haps,initial_clusters[0])
     
-    new_reps_list = np.array(list(representatives.values()))
+    #If we're getting a very large list of new representatives then correspondingly cut down on new_perc_usage so that we still get some candidates
+    # min_perc_usage = min(min_perc_usage,100/len(representatives))
+    
+    # new_reps_usage = {x:len(filled_clusters[x]) for x in representatives.keys()}
+    # total_usage = np.sum(list(new_reps_usage.values()))
+    # print(total_usage)
+    # new_reps_usage_perc = {x:100*new_reps_usage[x]/total_usage for x in representatives.keys()}
+
+    # filtered_reps = {}
+    # filtered_usages = {}
+    # for i in representatives.keys():
+    #     if new_reps_usage_perc[i] >= min_perc_usage:
+    #         filtered_reps[i] = representatives[i]
+    #         filtered_usages[i] = new_reps_usage_perc[i]
+    
+    # print("Usage:",new_reps_usage_perc)
     
     pca_labels = initial_clusters[0]
     
@@ -607,122 +781,11 @@ def generate_further_haps(genotype_array,
         fig.set_size_inches(8,6)
         plt.show()
         
-    final_haps = combine_haplotypes(initial_list,new_reps_list,unique_cutoff=uniqueness_threshold)[0]
-    
-    
+
+    final_haps = combine_haplotypes_smart(initial_haps,
+                representatives,genotype_array)
     
     return final_haps
-
-def match_best(haps_dict,diploids):
-    """
-    Find the best matches of a pair of haploids for each diploid in the diploid list
-    """
-    
-    dips_matches = []
-    haps_usage = {}
-    errs = []
-    
-    for i in range(len(diploids)):
-        cur_best = (None,None)
-        cur_div = np.inf
-        
-        for j in haps_dict.keys():
-            for k in haps_dict.keys():
-                difference = diploids[i]-haps_dict[j]-haps_dict[k]
-                div = magnitude_percentage(difference)
-                
-                if div < cur_div:
-                    cur_div = div
-                    cur_best = (j,k)
-        for index in cur_best:
-            if index not in haps_usage.keys():
-                haps_usage[index] = 0
-            haps_usage[index] += 1
-        errs.append(cur_div)
-        dips_matches.append((cur_best,cur_div))
-    
-    return (dips_matches,haps_usage,np.array(errs))
-
-#%%
-
-def generate_haplotypes_all(chromosome_data):
-    haps = []
-    
-    for i in range(len(chromosome_data)):
-        print(i,len(chromosome_data))
-        
-        haps.append(generate_haplotypes_block(chromosome_data[i]))
-    
-    return haps
-#%%
-bcf = read_bcf_file("./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz")
-contigs = bcf.header.contigs
-names = bcf.header.samples
-#%%
-block_size = 100000
-chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=block_size))
-
-#%%
-def generate_haplotypes_block(block_data,
-                              error_reduction_cutoff = 0.98,
-                              max_cutoff_error_increase = 1.05,
-                              max_hapfind_iter=5,
-                              make_pca=False,
-                              deeper_analysis_initial=False):
-    """
-    Given a block of sample data generates the haplotypes that make up
-    the samples present
-    
-    """
-    
-    (positions,genotype_array) = cleanup_block(block_data)
-    dist_matrix = generate_distance_matrix(
-            genotype_array,
-            missing_penalty="None")
-    
-    initial_haps = get_initial_haps(genotype_array,make_pca=make_pca,deeper_analysis=deeper_analysis_initial)
-    initial_matches = match_best(initial_haps,genotype_array)
-    initial_error = np.mean(initial_matches[2])
-    
-    matches_history = [initial_matches]
-    errors_history = [initial_error]
-    haps_history = [initial_haps]
-    
-    all_found = False
-    cur_haps = initial_haps
-    
-    print(initial_error)
-    
-    while not all_found:
-        cur_haps = generate_further_haps(genotype_array,cur_haps)
-        cur_matches = match_best(cur_haps,genotype_array)
-        cur_error = np.mean(cur_matches[2])
-        
-        # matches_history.append(cur_matches)
-        # errors_history.append(cur_error)
-        # haps_history.append(cur_haps)
-        
-        print(cur_error,len(cur_haps))
-        
-        
-        if cur_error/errors_history[-1] >= error_reduction_cutoff and len(errors_history) > 2:
-            all_found = True
-            break
-        if len(errors_history) > max_hapfind_iter+1:
-            all_found = True
-            
-        matches_history.append(cur_matches)
-        errors_history.append(cur_error)
-        haps_history.append(cur_haps)
-    
-    print(errors_history)
-    print("Pre truncation len",len(cur_haps))
-    
-    truncated_haps = truncate_haps(haps_history[-1],matches_history[-1],genotype_array,
-                                   max_cutoff_error_increase=max_cutoff_error_increase)
-        
-        
-    return truncated_haps
 
 def get_removal_statistics(candidate_haps,candidate_matches,removal_value,genotype_array):
     """
@@ -736,10 +799,6 @@ def get_removal_statistics(candidate_haps,candidate_matches,removal_value,genoty
     truncated_mean = np.mean(truncated_matches[2])
     truncated_max = np.max(truncated_matches[2])
     truncated_std = np.std(truncated_matches[2])
-    
-    old_mean = np.mean(candidate_matches[2])
-    old_max = np.max(candidate_matches[2])
-    old_std = np.std(candidate_matches[2])
     
     return (truncated_mean,truncated_max,truncated_std,truncated_matches)
 
@@ -755,8 +814,6 @@ def truncate_haps(candidate_haps,candidate_matches,genotype_array,
     used_haps = cand_matches[1].keys()
     
     starting_error = np.mean(cand_matches[2])
-    starting_error_max = np.max(cand_matches[2])
-    
     
     for hap in list(cand_copy.keys()):
         if hap not in used_haps:
@@ -770,10 +827,9 @@ def truncate_haps(candidate_haps,candidate_matches,genotype_array,
     
     while not truncation_complete:
         removal_indicators = processing_pool.starmap(lambda x:
-                                                 get_removal_statistics(cand_copy,
-                                                                        cand_matches,x,
-                                                                        genotype_array),
-                                                 zip(haps_names))
+                            get_removal_statistics(cand_copy,
+                            cand_matches,x,genotype_array),
+                            zip(haps_names))
         
         smallest_value = min(removal_indicators,key=lambda x:x[0])
         smallest_index = removal_indicators.index(smallest_value)
@@ -792,16 +848,147 @@ def truncate_haps(candidate_haps,candidate_matches,genotype_array,
     for j in cand_copy.keys():
         final_haps[i] = cand_copy[j]
         i += 1
-        
-    final_matches = match_best(final_haps,genotype_array)
-    
-    print(np.mean(final_matches[2]))
     
     return final_haps
+
+def generate_haplotypes_block(block_data,
+                              error_reduction_cutoff = 0.98,
+                              max_cutoff_error_increase = 1.02,
+                              max_hapfind_iter=5,
+                              make_pca=False,
+                              deeper_analysis_initial=False,
+                              min_num_haps=0):
+    """
+    Given a block of sample data generates the haplotypes that make up
+    the samples present
+    
+    min_num_haps is a (soft) minimum value for the number of haplotypes,
+    if we have fewer than that many haps we iterate further to get more 
+    haps.
+    
+    
+    """
+    
+    (positions,genotype_array) = cleanup_block(block_data)
+    
+    initial_haps = get_initial_haps(genotype_array,
+                                    make_pca=make_pca,
+                                    deeper_analysis=deeper_analysis_initial)
+    
+    initial_matches = match_best(initial_haps,genotype_array)
+    initial_error = np.mean(initial_matches[2])
+    
+    matches_history = [initial_matches]
+    errors_history = [initial_error]
+    haps_history = [initial_haps]
+    
+    all_found = False
+    cur_haps = initial_haps
+    
+    minimum_strikes = 0 #Counter that increases every time we get fewer than the required minimum number of haplotypes, if it hits 3 we break out of our loop to find further haps
+    striking_up = False
+    
+    uniqueness_threshold=5
+    wrongness_cutoff = 10
+    
+    while not all_found:
+        cur_haps = generate_further_haps(genotype_array,
+                    cur_haps,uniqueness_threshold=uniqueness_threshold,
+                    wrongness_cutoff=wrongness_cutoff,
+                    min_perc_usage=0.0)
+        cur_matches = match_best(cur_haps,genotype_array)
+        cur_error = np.mean(cur_matches[2])
+        
+        # matches_history.append(cur_matches)
+        # errors_history.append(cur_error)
+        # haps_history.append(cur_haps)
+        
+        if cur_error/errors_history[-1] >= error_reduction_cutoff and len(errors_history) >= 2:
+            if len(cur_haps) >= min_num_haps or minimum_strikes >= 3:
+                all_found = True
+                break
+            else:
+                minimum_strikes += 1
+                uniqueness_threshold -= 1
+                wrongness_cutoff += 2
+                striking_up = True
+                
+        if len(cur_haps) == len(haps_history[-1]) and not striking_up: #Break if in the last iteration we didn't find a single new hap
+            all_found = True
+            break
+            
+        if len(errors_history) > max_hapfind_iter+1:
+            all_found = True
+            
+        matches_history.append(cur_matches)
+        errors_history.append(cur_error)
+        haps_history.append(cur_haps)
+        
+        striking_up = False
+    
+    truncated_haps = truncate_haps(haps_history[-1],matches_history[-1],genotype_array,
+                                   max_cutoff_error_increase=max_cutoff_error_increase)
+        
+    return truncated_haps
+
+#%%
+
+def generate_haplotypes_all(chromosome_data):
+    haps = []
+    
+    for i in range(len(chromosome_data)):
+        print(i,len(chromosome_data))
+        
+        haps.append(generate_haplotypes_block(chromosome_data[i]))
+    
+    return haps
+#%%
+bcf = read_bcf_file("./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz")
+contigs = bcf.header.contigs
+names = bcf.header.samples
+#%%
+block_size = 100000
+shift_size = 50000
+chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
+
     
 #%%
 st= time.time()
-test = chr1[73]
-test_haps = generate_haplotypes_block(test)
-print(time.time()-st)
+test = chr1[64][0]
+test_haps = generate_haplotypes_block(test,
+            deeper_analysis_initial=False,
+            min_num_haps=6,
+            max_hapfind_iter=10)
+print("Number haps found:",len(test_haps))
+print("Time:",time.time()-st)
 #%%
+test = chr1[64]
+(positions,genotype_array) = cleanup_block(test)
+dist_matrix = generate_distance_matrix(
+        genotype_array,
+        missing_penalty="None")
+
+initial_haps = get_initial_haps(genotype_array,make_pca=True,deeper_analysis=True)
+initial_matches = match_best(initial_haps,genotype_array)
+h2 = generate_further_haps(genotype_array,
+            initial_haps,uniqueness_threshold=5,
+            wrongness_cutoff=10)
+
+h3 = generate_further_haps(genotype_array,
+            h2,uniqueness_threshold=5,
+            wrongness_cutoff=10)
+h4 = generate_further_haps(genotype_array,
+            h3,uniqueness_threshold=4,
+            wrongness_cutoff=12)
+h5 = generate_further_haps(genotype_array,
+            h3,uniqueness_threshold=3,
+            wrongness_cutoff=14)
+h6 = generate_further_haps(genotype_array,
+            h3,uniqueness_threshold=2,
+            wrongness_cutoff=16)
+
+#%%
+for x in h4.keys():
+    for y in h4.keys():
+        print(x,y,len(np.where(h4[x] != h4[y])[0]))
+    print()
