@@ -578,7 +578,7 @@ def get_initial_haps(genotype_array,
     
         homs_array = genotype_array[homs_where]
         
-        if len(homs_array) < 1:
+        if len(homs_array) < 5:
             cur_het_cutoff += het_excess_add
             continue
         
@@ -590,6 +590,9 @@ def get_initial_haps(genotype_array,
         dist_submatrix = generate_distance_matrix(
             homs_array,
             missing_penalty="None")
+        
+        print(len(homs_array))
+        print(dist_submatrix)
         
         #First do clustering looking for at least 2 clusters, if that fails rerun allowing single clusters
         try:
@@ -937,9 +940,12 @@ def generate_haplotypes_all(chromosome_data):
     haps = []
     
     for i in range(len(chromosome_data)):
-        print(i,len(chromosome_data))
+        print(i,chromosome_data[i][1])
         
-        haps.append(generate_haplotypes_block(chromosome_data[i]))
+        found_haps = generate_haplotypes_block(chromosome_data[i][0])
+        print(len(found_haps))
+        print()
+        haps.append(found_haps)
     
     return haps
 #%%
@@ -951,10 +957,11 @@ block_size = 100000
 shift_size = 50000
 chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
-    
+#%%
+full_haps = generate_haplotypes_all(chr1)    
 #%%
 st= time.time()
-test = chr1[64][0]
+test = chr1[189][0]
 test_haps = generate_haplotypes_block(test,
             deeper_analysis_initial=False,
             min_num_haps=6,
@@ -962,13 +969,15 @@ test_haps = generate_haplotypes_block(test,
 print("Number haps found:",len(test_haps))
 print("Time:",time.time()-st)
 #%%
-test = chr1[64]
+test = chr1[189][0]
 (positions,genotype_array) = cleanup_block(test)
 dist_matrix = generate_distance_matrix(
         genotype_array,
         missing_penalty="None")
 
 initial_haps = get_initial_haps(genotype_array,make_pca=True,deeper_analysis=True)
+#%%
+
 initial_matches = match_best(initial_haps,genotype_array)
 h2 = generate_further_haps(genotype_array,
             initial_haps,uniqueness_threshold=5,
