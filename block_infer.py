@@ -77,6 +77,7 @@ def cleanup_block(block_list,min_frequency=0.1):
     if len(block_list) == 0:
         return (np.array([]),np.array([]))
     
+    keep_flags = []
     cleaned_positions = []
     cleaned_list = []
     
@@ -85,17 +86,22 @@ def cleanup_block(block_list,min_frequency=0.1):
     for row in block_list:
             
         allele_freq = row.info.get("AF")[0]
-        if allele_freq > 0 and allele_freq < 1 and allele_freq >= min_frequency:
+        
+        if allele_freq >= min_frequency and allele_freq <= 1-min_frequency:
+            keep_flags.append(1)
+        else:
+            keep_flags.append(0)
+        
+        
+        cleaned_positions.append(row.pos)
             
-            cleaned_positions.append(row.pos)
+        row_vals = []
             
-            row_vals = []
+        for sample in samples:
+            row_vals.append(gt_sum(row.samples.get(sample).get("GT")))
             
-            for sample in samples:
-                row_vals.append(gt_sum(row.samples.get(sample).get("GT")))
-            
-            cleaned_list.append(row_vals)
-    return (cleaned_positions,np.ascontiguousarray(np.array(cleaned_list).transpose()))
+        cleaned_list.append(row_vals)
+    return (cleaned_positions,np.array(keep_flags),np.ascontiguousarray(np.array(cleaned_list).transpose()))
 
 def calc_distance(first_row,second_row,missing_penalty):
     """
@@ -143,7 +149,17 @@ def calc_distance_row(row,data_matrix,start_point,missing_penalty):
     
     return row_vals
     
-def generate_distance_matrix(genotype_array,missing_penalty="None"):
+def generate_distance_matrix(genotype_array,
+                             keep_flags=None,
+                             missing_penalty="None"):
+    
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(genotype_array.shape[1])])
+    
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+          
+    genotype_array = genotype_array[:,keep_flags]
     
     num_samples = genotype_array.shape[0]
     
@@ -168,28 +184,56 @@ def generate_distance_matrix(genotype_array,missing_penalty="None"):
     return dist_matrix
 
 #%%
-def get_heterozygosity(genotype):
+def get_heterozygosity(genotype,keep_flags=None):
     """
     Calculate the heterozygosity of a genotype
     """
-    num_sites = len(genotype)
-    num_hetero = np.count_nonzero(genotype == 1)
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(len(genotype))])
+        
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+        
+    
+    gt_use = np.array(genotype)
+    gt_use = gt_use[keep_flags]
+    
+    num_sites = len(gt_use)
+    num_hetero = np.count_nonzero(gt_use == 1)
     
     return 100*num_hetero/num_sites
 
-def hap_distance(hap_one,hap_two):
+def hap_distance(hap_one,hap_two,keep_flags=None):
     """
     Absolute distance between two haplotypes calculated
-    via L1 metric
+    via L1 metric, keep_flags is a boolean mask of site
+    to calculate the distance over
     """
-    return np.sum(np.abs(hap_one-hap_two))
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(len(hap_one))])
+        
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+        
+    one_keep = hap_one[keep_flags]
+    two_keep = hap_two[keep_flags]
+        
+    return np.sum(np.abs(one_keep-two_keep))
 
-def hap_divergence(hap_one,hap_two):
+def hap_divergence(hap_one,hap_two,keep_flags=None):
     """
     Percentage of sites in two haplotypes that differ
     by allele
     """
-    return 100*hap_distance(hap_one,hap_two)/len(hap_one)
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(len(hap_one))])
+        
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+        
+    num_keep = np.count_nonzero(keep_flags)
+        
+    return 100*hap_distance(hap_one,hap_two,keep_flags=keep_flags)/num_keep
 
 def size_l1(vec):
     """
@@ -206,15 +250,22 @@ def magnitude_percentage(vec):
         return 0
     return 100*size_l1(vec)/(2*np.count_nonzero(~np.isnan(vec)))
 
-def perc_wrong(array):
+def perc_wrong(haplotype,keep_flags=None):
     """
     Get the percentage of sites that are wrong (not between 0 and 1)
     for a haplotype
     """
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(len(haplotype))])
+        
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+        
+    hap_use = haplotype[keep_flags]
 
-    num_wrong = np.count_nonzero(np.logical_or(np.array(array) < 0,np.array(array) > 1))
+    num_wrong = np.count_nonzero(np.logical_or(np.array(hap_use) < 0,np.array(hap_use) > 1))
     
-    num_tot = len(array)
+    num_tot = len(hap_use)
     
     return 100*num_wrong/num_tot
 
@@ -352,10 +403,21 @@ def fill_nan(data_vals,clusters,cluster_probs=np.array([]),prob_cutoff=0.8,ambig
     #Return the results
     return (cluster_representatives,np.array(filled_data),raw_clusters,filled_clusters)
 
-def match_best(haps_dict,diploids):
+def match_best(haps_dict,diploids,keep_flags=None):
     """
     Find the best matches of a pair of haploids for each diploid in the diploid list
     """
+    
+    dip_length = len(diploids[0])
+    
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(dip_length)])
+    
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+        
+    haps_dict = {x:haps_dict[x][keep_flags] for x in haps_dict.keys()}
+    diploids = diploids[:,keep_flags]
     
     dips_matches = []
     haps_usage = {}
@@ -385,6 +447,7 @@ def match_best(haps_dict,diploids):
 
 def combine_haplotypes(initial_haps,
                        new_candidate_haps,
+                       keep_flags=None,
                        usages=None,
                        unique_cutoff=5,
                        max_hap_add=1000):
@@ -407,9 +470,18 @@ def combine_haplotypes(initial_haps,
 
     """
     
+    
     for x in initial_haps.keys(): #Get the legth of a haplotype
         haplotype_length = len(initial_haps[x])
         break
+    
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(haplotype_length)])
+    
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+    
+    keep_length = np.count_nonzero(keep_flags)
     
     new_haps_mapping = {-1:-1}
     
@@ -419,7 +491,7 @@ def combine_haplotypes(initial_haps,
     
     combined_dict = {x:(new_candidate_haps[x],usages[x]) for x in usages.keys()}
     
-    cutoff = math.ceil(unique_cutoff*haplotype_length/100)
+    cutoff = math.ceil(unique_cutoff*keep_length/100)
     
     i = 0
     j = 0
@@ -432,10 +504,12 @@ def combine_haplotypes(initial_haps,
     
     for identifier in combined_dict.keys():
         (hap,hap_usage) = combined_dict[identifier]
+        hap_keep = hap[keep_flags]
         add = True
         for k in range(len(cur_haps)):
             compare = cur_haps[k]
-            num_differences = len(np.where(hap != compare)[0])
+            compare_keep = compare[keep_flags]
+            num_differences = len(np.where(hap_keep != compare_keep)[0])
             if num_differences < cutoff:
                 add = False
                 new_haps_mapping[j] = k
@@ -454,17 +528,30 @@ def combine_haplotypes(initial_haps,
 
 def get_addition_statistics(starting_haps,
                             candidate_haps,
-                            addition_index,genotype_array):
+                            addition_index,
+                            genotype_array,
+                            keep_flags = None):
     """
     Add one hap from our list of candidate haps and see how much worse
     of a total fit we get.
     """
+    
+    for x in initial_haps.keys():
+        orig_hap_len = len(starting_haps[x])
+        break
+    
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(orig_hap_len)])
+    
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+        
     added_haps = starting_haps.copy()
     adding_name = max(added_haps.keys())+1
     
     added_haps[adding_name] = candidate_haps[addition_index]
     
-    added_matches = match_best(added_haps,genotype_array)
+    added_matches = match_best(added_haps,genotype_array,keep_flags=keep_flags)
     
     added_mean = np.mean(added_matches[2])
     added_max = np.max(added_matches[2])
@@ -476,6 +563,7 @@ def get_addition_statistics(starting_haps,
 def combine_haplotypes_smart(initial_haps,
                         new_candidate_haps,
                         genotype_array,
+                        keep_flags=None,
                         loss_reduction_cutoff_ratio =0.98):
     """
     Takes two lists of haplotypes and creates a new dictionary of
@@ -500,13 +588,23 @@ def combine_haplotypes_smart(initial_haps,
     
     processing_pool = Pool(processes=8)
     
+    for x in initial_haps.keys():
+        orig_hap_len = len(initial_haps[x])
+        break
+    
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(orig_hap_len)])
+    
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+    
     i = 0
     cur_haps = {}
     for idx in initial_haps.keys():
         cur_haps[i] = initial_haps[idx]
         i += 1
         
-    cur_matches = match_best(cur_haps,genotype_array)
+    cur_matches = match_best(cur_haps,genotype_array,keep_flags=keep_flags)
     cur_error = np.mean(cur_matches[2])
     
     
@@ -519,7 +617,7 @@ def combine_haplotypes_smart(initial_haps,
         addition_indicators = processing_pool.starmap(lambda x:
                             get_addition_statistics(cur_haps,
                             candidate_haps,x,
-                            genotype_array),
+                            genotype_array,keep_flags=keep_flags),
                             zip(cand_keys))            
         
         smallest_result = min(addition_indicators,key=lambda x:x[0])
@@ -551,17 +649,28 @@ def combine_haplotypes_smart(initial_haps,
     return final_haps
 
 def get_initial_haps(genotype_array,
+                     keep_flags=None,
                      het_cutoff_start=10,
                      het_excess_add=2,
                      het_max_cutoff=20,
                      deeper_analysis=False,
-                     deeper_tolerance=5,
+                     uniqueness_tolerance=5,
                      make_pca=False,
                      verbose=False):
     """
     Get our initial haplotypes by finding high homozygosity samples
+    
+    keep_flags is a optional boolean array which is 1 at those sites which
+    we wish to consider for purposes of the analysis and 0 elsewhere,
+    if not provided we use all sites
     """
-    het_vals = np.array([get_heterozygosity(genotype_array[i]) for i in range(len(genotype_array))])
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(genotype_array.shape[1])])
+    
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+
+    het_vals = np.array([get_heterozygosity(genotype_array[i],keep_flags) for i in range(len(genotype_array))])
     
     found_homs = False
     cur_het_cutoff = het_cutoff_start
@@ -588,11 +697,8 @@ def get_initial_haps(genotype_array,
         
     
         dist_submatrix = generate_distance_matrix(
-            homs_array,
+            homs_array,keep_flags=keep_flags,
             missing_penalty="None")
-        
-        print(len(homs_array))
-        print(dist_submatrix)
         
         #First do clustering looking for at least 2 clusters, if that fails rerun allowing single clusters
         try:
@@ -627,8 +733,18 @@ def get_initial_haps(genotype_array,
         else:
             found_homs = True
     
-    (representatives,filled_data,raw_clusters,filled_clusters) = fill_nan(
+    (representatives,
+     filled_data,
+     raw_clusters,
+     filled_clusters) = fill_nan(
         homs_array,initial_clusters[0])
+    
+    
+    #Remove any haps that are too close to each other
+    (representatives,
+     label_mappings) = combine_haplotypes(
+             {},representatives,keep_flags=keep_flags,
+             unique_cutoff=uniqueness_tolerance)
     
     pca_labels = initial_clusters[0]
     
@@ -642,15 +758,19 @@ def get_initial_haps(genotype_array,
         second_clustering.fit(filled_data)
         second_labels = np.array(second_clustering.labels_)
 
-        (new_representatives,filled_data,new_raw,new_filled) = fill_nan(
+        (new_representatives,filled_data,
+         new_raw,new_filled) = fill_nan(
             filled_data,second_labels)
         
-        (final_representatives,label_mappings) = combine_haplotypes(
+        (final_representatives,
+         label_mappings) = combine_haplotypes(
             representatives,new_representatives,
-            unique_cutoff=deeper_tolerance)
+            keep_flags=keep_flags,
+            unique_cutoff=uniqueness_tolerance)
         
         final_labels = list(map(lambda x:label_mappings[x],second_labels))
         pca_labels = final_labels
+    
     
     if make_pca:
         
@@ -683,11 +803,13 @@ def get_initial_haps(genotype_array,
 
 def generate_further_haps(genotype_array,
                           initial_haps,
+                          keep_flags=None,
                           wrongness_cutoff=10,
                           uniqueness_threshold=5,
                           max_hap_add = 1000,
                           min_perc_usage = 5,
-                          make_pca = False):
+                          make_pca = False,
+                          verbose=False):
     """
     Given a genotype array and a set of initial haplotypes
     which are present in some of the samples of the array
@@ -706,6 +828,12 @@ def generate_further_haps(genotype_array,
     must fall into a cluster for its representative to be considered
     as a potential new haplotype
     """
+    if keep_flags is None:
+        keep_flags = np.array([True for _ in range(genotype_array.shape[1])])
+    
+    if keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags,dtype=bool)
+        
     candidate_haps = []
     initial_list = np.array(list(initial_haps.values()))
     
@@ -713,7 +841,7 @@ def generate_further_haps(genotype_array,
         for init_hap in initial_list:
             diff = geno-init_hap
 
-            wrongness = perc_wrong(diff)
+            wrongness = perc_wrong(diff,keep_flags=keep_flags)
             
             if wrongness <= wrongness_cutoff:
                 fixed_diff = fix_hap(diff)
@@ -722,7 +850,7 @@ def generate_further_haps(genotype_array,
                 for comp_hap in initial_list:
                     
                     
-                    perc_diff = hap_divergence(fixed_diff,comp_hap)
+                    perc_diff = hap_divergence(fixed_diff,comp_hap,keep_flags=keep_flags)
                     if perc_diff < uniqueness_threshold:
                         add = False
                         break
@@ -731,8 +859,14 @@ def generate_further_haps(genotype_array,
                     candidate_haps.append(fixed_diff)
     
     candidate_haps = np.array(candidate_haps)
+    
+    if len(candidate_haps) == 0:
+        if verbose:
+            print("Unable to find candidate haplotypes when generating further haps")
+        return initial_haps
+    
     dist_submatrix = generate_distance_matrix(
-        candidate_haps,
+        candidate_haps,keep_flags=keep_flags,
         missing_penalty="None")
 
     initial_clusters = hdbscan_cluster(
@@ -742,25 +876,12 @@ def generate_further_haps(genotype_array,
                         cluster_selection_method="eom",
                         alpha=1.0)
     
-    (representatives,filled_data,raw_clusters,filled_clusters) = fill_nan(
+    (representatives,
+     filled_data,
+     raw_clusters,
+     filled_clusters) = fill_nan(
         candidate_haps,initial_clusters[0])
     
-    #If we're getting a very large list of new representatives then correspondingly cut down on new_perc_usage so that we still get some candidates
-    # min_perc_usage = min(min_perc_usage,100/len(representatives))
-    
-    # new_reps_usage = {x:len(filled_clusters[x]) for x in representatives.keys()}
-    # total_usage = np.sum(list(new_reps_usage.values()))
-    # print(total_usage)
-    # new_reps_usage_perc = {x:100*new_reps_usage[x]/total_usage for x in representatives.keys()}
-
-    # filtered_reps = {}
-    # filtered_usages = {}
-    # for i in representatives.keys():
-    #     if new_reps_usage_perc[i] >= min_perc_usage:
-    #         filtered_reps[i] = representatives[i]
-    #         filtered_usages[i] = new_reps_usage_perc[i]
-    
-    # print("Usage:",new_reps_usage_perc)
     
     pca_labels = initial_clusters[0]
     
@@ -786,7 +907,8 @@ def generate_further_haps(genotype_array,
         
 
     final_haps = combine_haplotypes_smart(initial_haps,
-                representatives,genotype_array)
+                representatives,genotype_array,
+                keep_flags=keep_flags)
     
     return final_haps
 
@@ -872,9 +994,9 @@ def generate_haplotypes_block(block_data,
     
     """
     
-    (positions,genotype_array) = cleanup_block(block_data)
+    (positions,keep_flags,genotype_array) = cleanup_block(block_data)
     
-    initial_haps = get_initial_haps(genotype_array,
+    initial_haps = get_initial_haps(genotype_array,keep_flags,
                                     make_pca=make_pca,
                                     deeper_analysis=deeper_analysis_initial)
     
@@ -970,12 +1092,15 @@ print("Number haps found:",len(test_haps))
 print("Time:",time.time()-st)
 #%%
 test = chr1[189][0]
-(positions,genotype_array) = cleanup_block(test)
+(positions,keep_flags,genotype_array) = cleanup_block(test,min_frequency=0.1)
+
 dist_matrix = generate_distance_matrix(
-        genotype_array,
+        genotype_array,keep_flags=keep_flags,
         missing_penalty="None")
 
-initial_haps = get_initial_haps(genotype_array,make_pca=True,deeper_analysis=True)
+initial_haps = get_initial_haps(genotype_array,
+                keep_flags=keep_flags,
+                make_pca=True,deeper_analysis=True)
 #%%
 
 initial_matches = match_best(initial_haps,genotype_array)
