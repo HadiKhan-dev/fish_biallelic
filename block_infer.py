@@ -597,6 +597,9 @@ def combine_haplotypes_smart(initial_haps,
     
     if keep_flags.dtype != bool:
         keep_flags = np.array(keep_flags,dtype=bool)
+        
+    if len(new_candidate_haps) == 0:
+        return initial_haps
     
     i = 0
     cur_haps = {}
