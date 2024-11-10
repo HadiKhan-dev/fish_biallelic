@@ -553,10 +553,6 @@ def match_best(haps_dict,diploids,keep_flags=None):
             if (j,i) not in combined_haps.keys():
                 combined_haps[(i,j)] = comb
     
-    # for h in haps_dict.keys():
-    #     print("HAP",h,np.where(np.isnan(haps_dict[h])))
-    # for k in combined_haps.keys():
-    #     print(k,np.where(np.isnan(combined_haps[k])))
     for i in range(len(diploids)):
         cur_best = (None,None)
         cur_div = np.inf
@@ -1156,24 +1152,32 @@ def generate_haplotypes_all(chromosome_data):
     of the list of blocks of VCF data
     """
     
-    total_positions = []
-    total_keep_flags = []
-    reads_arrays = []
-    haps = []
+    # total_positions = []
+    # total_keep_flags = []
+    # reads_arrays = []
+    # haps = []
+    
+    overall_haplotypes = []
     
     for i in range(len(chromosome_data)):
         print(i,chromosome_data[i][1])
         
-        (positions,keep_flags,reads_arr,found_haps) = generate_haplotypes_block(
-            chromosome_data[i][0])
-        print(len(found_haps))
-        print()
-        total_positions.append(positions)
-        total_keep_flags.append(keep_flags)
-        reads_arrays.append(reads_arr)
-        haps.append(found_haps)
+        
+        overall_haplotypes.append(generate_haplotypes_block(
+            chromosome_data[i][0]))
+        
+        # (positions,keep_flags,reads_arr,found_haps) = generate_haplotypes_block(
+        #     chromosome_data[i][0])
+        
+        # print(len(found_haps))
+        # print()
+        # total_positions.append(positions)
+        # total_keep_flags.append(keep_flags)
+        # reads_arrays.append(reads_arr)
+        # haps.append(found_haps)
     
-    return (total_positions,total_keep_flags,reads_arrays,haps)
+    return overall_haplotypes
+    #return (total_positions,total_keep_flags,reads_arrays,haps)
 
 def greatest_likelihood_hap(hap):
     """
@@ -1182,7 +1186,7 @@ def greatest_likelihood_hap(hap):
     """
     return np.argmax(hap,axis=1)
 
-def match_haplotypes(block_level_haps,
+def match_haplotypes_by_overlap(block_level_haps,
                      hap_cutoff_autoinclude=2,
                      hap_cutoff_noninclude=5):
     """
@@ -1204,24 +1208,24 @@ def match_haplotypes(block_level_haps,
     block_haps_names = []
     block_counts = {}
     
-    for i in range(1,len(block_level_haps[0])):
-        start_position = block_level_haps[0][i][0]
-        insertion_point = np.searchsorted(block_level_haps[0][i-1],start_position)
+    for i in range(1,len(block_level_haps)):
+        start_position = block_level_haps[i][0][0]
+        insertion_point = np.searchsorted(block_level_haps[i-1][0],start_position)
         next_starting.append(insertion_point)
         
-    for i in range(len(block_level_haps[0])):
+    for i in range(len(block_level_haps)):
         block_haps_names.append([])
-        block_counts[i] = len(block_level_haps[3][i])
-        for name in block_level_haps[3][i].keys():
+        block_counts[i] = len(block_level_haps[i][3])
+        for name in block_level_haps[i][3].keys():
             block_haps_names[-1].append((i,name))
 
 
-    for i in range(len(block_level_haps[0])-1):
+    for i in range(len(block_level_haps)-1):
         start_point = next_starting[i]
-        overlap_length = len(block_level_haps[0][i])-start_point   
+        overlap_length = len(block_level_haps[i][0])-start_point   
         
-        cur_ends = {k:block_level_haps[3][i][k][start_point:] for k in block_level_haps[3][i].keys()}
-        next_ends = {k:block_level_haps[3][i+1][k][:overlap_length] for k in block_level_haps[3][i+1].keys()}
+        cur_ends = {k:block_level_haps[i][3][k][start_point:] for k in block_level_haps[i][3].keys()}
+        next_ends = {k:block_level_haps[i+1][3][k][:overlap_length] for k in block_level_haps[i+1][3].keys()}
 
         matches.append([])
         
@@ -1230,8 +1234,6 @@ def match_haplotypes(block_level_haps,
             min_expected_connections = 0
             
         amount_added = 0
-        connected = {k: False for k in cur_ends.keys()}
-        next_connected = {k: False for k in cur_ends.keys()}
         all_edges_consideration = {}
         
         for first_name in cur_ends.keys(): 
@@ -1250,8 +1252,6 @@ def match_haplotypes(block_level_haps,
                 if dist_values[k] <= hap_cutoff_autoinclude:
                     matches[-1].append(((i,k[0]),(i+1,k[1])))
                     amount_added += 1
-                    connected[first_name] = True
-                    next_connected[second_name] = True
                     removals.append(k)
                 if dist_values[k] >= hap_cutoff_noninclude:
                     removals.append(k)
@@ -1265,17 +1265,71 @@ def match_haplotypes(block_level_haps,
         for key in all_edges_consideration:
             if amount_added < min_expected_connections:
                 matches[-1].append(((i,key[0]),(i+1,key[1])))
-                connected[key[0]] = True
-                next_connected[key[1]] = True
                 amount_added += 1
                 continue
-            if False:
-            # if connected[key[0]] == False or next_connected[key[1]] == False:
-                matches[-1].append(((i,key[0]),(i+1,key[1])))
-                connected[key[0]] = True
-                next_connected[key[1]] = True
-                amount_added += 1
-                continue
+            
+    return (block_haps_names,matches)
+
+def match_haplotypes_by_overlap_probabalistic(block_level_haps):
+    """
+    Probabalistic version of match_haplotypes_by_overlap which
+    instead of returning a list of edges it returns a likelihood of 
+    an edge for each pair of nodes in neighbouring layers
+    
+    Takes as input a list of positions and block level haplotypes and
+    finds which haps from which block 
+    """
+    next_starting = []
+    matches = []
+    
+    block_haps_names = []
+    block_counts = {}
+    
+    for i in range(1,len(block_level_haps)):
+        start_position = block_level_haps[i][0][0]
+        insertion_point = np.searchsorted(block_level_haps[i-1][0],start_position)
+        next_starting.append(insertion_point)
+        
+    for i in range(len(block_level_haps)):
+        block_haps_names.append([])
+        block_counts[i] = len(block_level_haps[i][3])
+        for name in block_level_haps[i][3].keys():
+            block_haps_names[-1].append((i,name))
+
+
+    for i in range(len(block_level_haps)-1):
+        start_point = next_starting[i]
+        overlap_length = len(block_level_haps[i][0])-start_point   
+        
+        cur_ends = {k:block_level_haps[i][3][k][start_point:] for k in block_level_haps[i][3].keys()}
+        next_ends = {k:block_level_haps[i+1][3][k][:overlap_length] for k in block_level_haps[i+1][3].keys()}
+           
+        similarities = {}
+        for first_name in cur_ends.keys(): 
+
+            for second_name in next_ends.keys():
+                
+                haps_dist = 100*calc_distance(cur_ends[first_name],
+                                  next_ends[second_name],
+                                  calc_type="haploid")/overlap_length
+                if haps_dist > 50:
+                    similarity = 0
+                else:
+                    similarity = 2*(50-haps_dist)
+                
+                #print(first_name,second_name,haps_dist,similarity)
+                similarities[((i,first_name),(i+1,second_name))] = similarity
+            
+        #Scale and transform the similarities into a score
+        transform_similarities = {}
+            
+        for item in similarities.keys():
+            val = similarities[item]/100
+                
+            transformed = 50*(val**2)
+            transform_similarities[item] = transformed
+            
+        matches.append(transform_similarities)
             
     return (block_haps_names,matches)
 
@@ -1310,9 +1364,9 @@ def match_usage_find(first_hap,first_matches,second_matches):
     
     return second_usages
     
-def match_haplotypes_second(full_haps_data):
+def match_haplotypes_by_samples(full_haps_data):
     """
-    Alternate method of matching haplotypes is nearby blocks together
+    Alternate method of matching haplotypes in nearby blocks together
     by matching hap A with hap B if the samples which use hap A at its location
     disproportionately use hap B at its location
     
@@ -1321,84 +1375,239 @@ def match_haplotypes_second(full_haps_data):
     for each block.
     """
     
+    def hap_matching_inner_loop(haps_data):
+        """
+        Takes haps data for a single block and calculates 
+        the best matches for the haps for that block
+        """
+        keep_flags = haps_data[1]
+        reads_array = haps_data[2]
+        haps = haps_data[3]
+        (site_priors,probs_array) = reads_to_probabilities(reads_array)
+        
+        matches = match_best(haps,probs_array,keep_flags=keep_flags)
+        
+        return matches
+
+    def hap_matching_comparison(haps_data,matches_data,first_block_index,second_block_index):
+        """
+        For each hap at the first_block_index block this fn. compares
+        where the samples which use that hap end up for the block at
+        second_block_index and converts these numbers into percentage
+        usages for each hap at index first_block_index
+        
+        It then choose those edges which have a high enough usage score
+        and selectes them for having edges in the final graph
+        """
+        
+        forward_matches = []
+        backward_matches = []
+        
+        first_haps_data = haps_data[first_block_index][3]
+        second_haps_data = haps_data[second_block_index][3]
+        
+        first_matches_data = matches_data[first_block_index]
+        second_matches_data = matches_data[second_block_index]
+        
+        for hap in first_haps_data.keys():
+            hap_usages = match_usage_find(hap,first_matches_data,second_matches_data)
+            total_matches = sum(hap_usages.values())
+            hap_percs = {x:100*hap_usages[x]/total_matches for x in hap_usages.keys()}
+            
+            if len(hap_percs) > 0:
+                best_match = max(hap_percs,key=hap_percs.get)
+                best_perc = hap_percs[best_match]
+                make_links = []
+                
+                for k in hap_percs.keys():
+                    if hap_percs[k]/best_perc > max_reduction_include or hap_percs[k] > auto_add_perc:
+                        make_links.append(k)
+                
+                for node in make_links:
+                    forward_matches.append(((first_block_index,hap),(second_block_index,node)))
+        
+        for hap in second_haps_data.keys():
+            hap_usages = match_usage_find(hap,second_matches_data,first_matches_data)
+            total_matches = sum(hap_usages.values())
+            hap_percs = {x:100*hap_usages[x]/total_matches for x in hap_usages.keys()}
+            
+            if len(hap_percs) > 0:
+                best_match = max(hap_percs,key=hap_percs.get)
+                best_perc = hap_percs[best_match]
+                
+                make_links = []
+                
+                for k in hap_percs.keys():
+                    if hap_percs[k]/best_perc > max_reduction_include or hap_percs[k] > auto_add_perc:
+                        make_links.append(k)
+                
+                for node in make_links:
+                    backward_matches.append(((first_block_index,node),(second_block_index,hap)))
+        
+        return (forward_matches,backward_matches)
+        
+    num_blocks = len(full_haps_data)
+    
     auto_add_perc = 40
     max_reduction_include = 0.8
     
     all_matches = []
-    forward_matches = []
-    backward_matches = []
     
     block_haps_names = []
-    for i in range(len(full_haps_data[0])):
+    for i in range(len(full_haps_data)):
         block_haps_names.append([])
         
-        for nm in full_haps_data[3][i].keys():
+        for nm in full_haps_data[i][3].keys():
             block_haps_names[-1].append((i,nm))
+    
+    match_best_results = []
+    
+    processing_pool = Pool(8)
+    
+    match_best_results = processing_pool.starmap(hap_matching_inner_loop,
+                                                 zip(full_haps_data))
+    
+    neighbouring_usages = processing_pool.starmap(lambda x,y:
+                        hap_matching_comparison(full_haps_data,match_best_results,x,y),
+                        zip(list(range(num_blocks-1)),list(range(1,num_blocks))))
+    
+    forward_matches = [neighbouring_usages[x][0] for x in range(num_blocks-1)]
+    backward_matches = [neighbouring_usages[x][1] for x in range(num_blocks-1)]
+    
 
-    for i in range(len(full_haps_data[0])-1):
-        
-        forward_matches.append([])
-        backward_matches.append([])
-        
-        keep_flags = full_haps_data[1][i]
-        reads_array = full_haps_data[2][i]
-        haps = full_haps_data[3][i]
-        (site_priors,probs_array) = reads_to_probabilities(reads_array)
-        
-        keep_flags_next = full_haps_data[1][i+1]
-        reads_array_next = full_haps_data[2][i+1]
-        haps_next = full_haps_data[3][i+1]
-        (site_priors_next,probs_array_next) = reads_to_probabilities(reads_array_next)
-            
-        matches = match_best(haps,probs_array,keep_flags=keep_flags)
-        matches_next = match_best(haps_next,probs_array_next,keep_flags=keep_flags_next)
-        
-        for hap in haps.keys():
-            hap_usages = match_usage_find(hap,matches,matches_next)
-            total_matches = sum(hap_usages.values())
-            hap_percs = {x:100*hap_usages[x]/total_matches for x in hap_usages.keys()}
-            #print("Forward",hap,hap_usages)
-            
-            if len(hap_percs) > 0:
-                best_match = max(hap_percs,key=hap_percs.get)
-                best_perc = hap_percs[best_match]
-                print(f"Forward {best_perc :.3f}")
-                make_links = []
-                
-                for k in hap_percs.keys():
-                    if hap_percs[k]/best_perc > max_reduction_include or hap_percs[k] > auto_add_perc:
-                        make_links.append(k)
-                
-                for node in make_links:
-                   forward_matches[-1].append(((i,hap),(i+1,node)))
-        
-        for hap in haps_next.keys():
-            hap_usages = match_usage_find(hap,matches_next,matches)
-            total_matches = sum(hap_usages.values())
-            hap_percs = {x:100*hap_usages[x]/total_matches for x in hap_usages.keys()}
-            #print("Reverse",hap,hap_usages)
-            
-            if len(hap_percs) > 0:
-                best_match = max(hap_percs,key=hap_percs.get)
-                best_perc = hap_percs[best_match]
-                
-                make_links = []
-                
-                for k in hap_percs.keys():
-                    if hap_percs[k]/best_perc > max_reduction_include or hap_percs[k] > auto_add_perc:
-                        make_links.append(k)
-                
-                for node in make_links:
-                   backward_matches[-1].append(((i,node),(i+1,hap)))
-        
+    for i in range(len(forward_matches)):
         commons = []
-        
-        for x in forward_matches[-1]:
-            if x in backward_matches[-1]:
+        for x in forward_matches[i]:
+            if x in backward_matches[i]:
                 commons.append(x)
         all_matches.append(commons)
         
     return [(block_haps_names,forward_matches),(block_haps_names,backward_matches),(block_haps_names,all_matches)]
+        
+def match_haplotypes_by_samples_probabalistic(full_haps_data):
+    """
+    Probabalistic version of match_haplotypes_by_samples that gives 
+    a likelihood for each possible edge between neighbouring layers
+    
+    full_haps_data is the return from a run of generate_haplotypes_all,
+    containing info about the positions, read count array and haplotypes
+    for each block.
+    
+    Returns a list of node labels and a list of dictionaries with scaled
+    scores for how strong of an edge there is between the first element and the 
+    second element of the key for each key in each dictionary
+    """
+    
+    def hap_matching_inner_loop(haps_data):
+        """
+        Takes haps data for a single block and calculates 
+        the best matches for the haps for that block
+        """
+        keep_flags = haps_data[1]
+        reads_array = haps_data[2]
+        haps = haps_data[3]
+        (site_priors,probs_array) = reads_to_probabilities(reads_array)
+        
+        matches = match_best(haps,probs_array,keep_flags=keep_flags)
+        
+        return matches
+
+    def hap_matching_comparison(haps_data,matches_data,first_block_index,second_block_index):
+        """
+        For each hap at the first_block_index block this fn. compares
+        where the samples which use that hap end up for the block at
+        second_block_index and converts these numbers into percentage
+        usages for each hap at index first_block_index
+        
+        It also then scales these scores and returns the scaled version of 
+        these scores back to us as a dictionary
+        """
+        
+        forward_scores = {}
+        backward_scores = {}
+        
+        first_haps_data = haps_data[first_block_index][3]
+        second_haps_data = haps_data[second_block_index][3]
+        
+        first_matches_data = matches_data[first_block_index]
+        second_matches_data = matches_data[second_block_index]
+        
+        for hap in first_haps_data.keys():
+            hap_usages = match_usage_find(hap,first_matches_data,second_matches_data)
+            total_matches = sum(hap_usages.values())
+            hap_percs = {x:100*hap_usages[x]/total_matches for x in hap_usages.keys()}
+            
+            scaled_scores = {}
+            
+            for other_hap in second_haps_data.keys():
+                if other_hap in hap_percs.keys():
+                    scaled_val = 50*(min(1,2*hap_percs[other_hap]/100))**2
+                    
+                    scaled_scores[((first_block_index,hap),
+                                   (second_block_index,other_hap))] = scaled_val
+                elif other_hap not in hap_percs.keys():
+                    scaled_scores[((first_block_index,hap),
+                                   (second_block_index,other_hap))] = 0
+            forward_scores.update(scaled_scores)
+            
+        for hap in second_haps_data.keys():
+            hap_usages = match_usage_find(hap,first_matches_data,second_matches_data)
+            total_matches = sum(hap_usages.values())
+            hap_percs = {x:100*hap_usages[x]/total_matches for x in hap_usages.keys()}
+            
+            scaled_scores = {}
+            
+            for other_hap in first_haps_data.keys():
+                if other_hap in hap_percs.keys():
+                    scaled_val = 50*(min(1,2*hap_percs[other_hap]/100))**2
+                    
+                    scaled_scores[((first_block_index,other_hap),
+                                   (second_block_index,hap))] = scaled_val
+                elif other_hap not in hap_percs.keys():
+                    scaled_scores[((first_block_index,other_hap),
+                                   (second_block_index,hap))] = 0
+            backward_scores.update(scaled_scores)
+        
+        return (forward_scores,backward_scores)
+        
+    num_blocks = len(full_haps_data)
+    
+    auto_add_perc = 40
+    max_reduction_include = 0.8
+    
+    
+    block_haps_names = []
+    for i in range(len(full_haps_data)):
+        block_haps_names.append([])
+        
+        for nm in full_haps_data[i][3].keys():
+            block_haps_names[-1].append((i,nm))
+    
+    match_best_results = []
+    
+    processing_pool = Pool(8)
+    
+    match_best_results = processing_pool.starmap(hap_matching_inner_loop,
+                                                 zip(full_haps_data))
+    
+    neighbouring_usages = processing_pool.starmap(lambda x,y:
+                        hap_matching_comparison(full_haps_data,match_best_results,x,y),
+                        zip(list(range(num_blocks-1)),list(range(1,num_blocks))))
+    
+    forward_match_scores = [neighbouring_usages[x][0] for x in range(num_blocks-1)]
+    backward_match_scores = [neighbouring_usages[x][1] for x in range(num_blocks-1)]
+    
+    combined_scores = []
+    
+
+    for i in range(len(forward_match_scores)):
+        commons = {}
+        for x in forward_match_scores[i].keys():
+            commons[x] = (forward_match_scores[i][x]+backward_match_scores[i][x])/2
+            
+        combined_scores.append(commons)
+        
+    return [(block_haps_names,forward_match_scores),(block_haps_names,backward_match_scores),(block_haps_names,combined_scores)]
         
 
 def nodes_list_to_pos(nodes_list,layer_dist = 4,vert_dist=2):
@@ -1502,14 +1711,14 @@ def change_labeling(haplotype_data,relabeling_dict):
     new_labeling = []
     
     for i in range(len(haplotype_data)):
-        hap_dict = haplotype_data[i]
+        hap_dict = haplotype_data[i][3]
         new_hap_dict = {}
         
         for k in hap_dict.keys():
             new_hap_dict[relabeling_dict[(i,k)][1]] = hap_dict[k]
         
         new_hap_dict = dict(sorted(new_hap_dict.items()))
-        new_labeling.append(new_hap_dict)
+        new_labeling.append([haplotype_data[0],haplotype_data[1],haplotype_data[2],new_hap_dict])
     
     return new_labeling
     
@@ -1579,148 +1788,14 @@ shift_size = 50000
 chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
 #%%
-combi = [chr1[i] for i in range(50,100)]
+combi = [chr1[i] for i in range(50,55)]
 my_haps = generate_haplotypes_all(combi)
-
-#%%
-(positions,keep_flags,reads_arr,found_haps) = generate_haplotypes_block(
-    combi[2][0])
-#%%
-
     
 #%%
-
-def match_usage_find(first_hap,first_matches,second_matches):
-    """
-    Counts the relative usage of haps in second_matches for those
-    samples which include first_hap in first_matches
-    
-    first_matches and second_matches must correspond to the same 
-    samples in order (so the first element of both are from the same 
-    sample etc. etc.)
-    """
-    use_indices = []
-    
-    for sample in range(len(first_matches[0])):
-        if first_matches[0][sample][0][0] == first_hap:
-            use_indices.append(sample)
-        if first_matches[0][sample][0][1] == first_hap:
-            use_indices.append(sample)
-    
-    second_usages = {}
-    
-    for sample in use_indices:
-        dat = second_matches[0][sample][0]
-        
-        for s in dat:
-            if s not in second_usages.keys():
-                second_usages[s] = 0
-            second_usages[s] += 1
-    
-    second_usages = {k: v for k, v in sorted(second_usages.items(), key=lambda item: item[1])}
-    
-    return second_usages
-    
-def match_haplotypes_second(full_haps_data):
-    """
-    Alternate method of matching haplotypes is nearby blocks together
-    by matching hap A with hap B if the samples which use hap A at its location
-    disproportionately use hap B at its location
-    
-    full_haps_data is the return from a run of generate_haplotypes_all,
-    containing info about the positions, read count array and haplotypes
-    for each block.
-    """
-    
-    auto_add_perc = 40
-    max_reduction_include = 0.8
-    
-    all_matches = []
-    forward_matches = []
-    backward_matches = []
-    
-    block_haps_names = []
-    for i in range(len(full_haps_data[0])):
-        block_haps_names.append([])
-        
-        for nm in full_haps_data[3][i].keys():
-            block_haps_names[-1].append((i,nm))
-
-    for i in range(len(full_haps_data[0])-1):
-        
-        forward_matches.append([])
-        backward_matches.append([])
-        
-        keep_flags = full_haps_data[1][i]
-        reads_array = full_haps_data[2][i]
-        haps = full_haps_data[3][i]
-        (site_priors,probs_array) = reads_to_probabilities(reads_array)
-        
-        keep_flags_next = full_haps_data[1][i+1]
-        reads_array_next = full_haps_data[2][i+1]
-        haps_next = full_haps_data[3][i+1]
-        (site_priors_next,probs_array_next) = reads_to_probabilities(reads_array_next)
-            
-        matches = match_best(haps,probs_array,keep_flags=keep_flags)
-        matches_next = match_best(haps_next,probs_array_next,keep_flags=keep_flags_next)
-        
-
-        print(i)
-        for hap in haps.keys():
-            hap_usages = match_usage_find(hap,matches,matches_next)
-            total_matches = sum(hap_usages.values())
-            hap_percs = {x:100*hap_usages[x]/total_matches for x in hap_usages.keys()}
-            #print("Forward",hap,hap_usages)
-            
-            if len(hap_percs) > 0:
-                best_match = max(hap_percs,key=hap_percs.get)
-                best_perc = hap_percs[best_match]
-                print(f"Forward {best_perc :.3f}")
-                make_links = []
-                
-                for k in hap_percs.keys():
-                    if hap_percs[k]/best_perc > max_reduction_include or hap_percs[k] > auto_add_perc:
-                        make_links.append(k)
-                
-                for node in make_links:
-                   forward_matches[-1].append(((i,hap),(i+1,node)))
-        
-        for hap in haps_next.keys():
-            hap_usages = match_usage_find(hap,matches_next,matches)
-            total_matches = sum(hap_usages.values())
-            hap_percs = {x:100*hap_usages[x]/total_matches for x in hap_usages.keys()}
-            #print("Reverse",hap,hap_usages)
-            
-            if len(hap_percs) > 0:
-                best_match = max(hap_percs,key=hap_percs.get)
-                best_perc = hap_percs[best_match]
-                
-                make_links = []
-                
-                for k in hap_percs.keys():
-                    if hap_percs[k]/best_perc > max_reduction_include or hap_percs[k] > auto_add_perc:
-                        make_links.append(k)
-                
-                for node in make_links:
-                   backward_matches[-1].append(((i,node),(i+1,hap)))
-        
-        commons = []
-        
-        for x in forward_matches[-1]:
-            if x in backward_matches[-1]:
-                commons.append(x)
-        all_matches.append(commons)
-        
-    return [(block_haps_names,forward_matches),(block_haps_names,backward_matches),(block_haps_names,all_matches)]
-        
+hat = match_haplotypes_by_overlap(my_haps)
+ham = match_haplotypes_by_samples(my_haps)
 #%%
-
-#%%
-hat = match_haplotypes([x[:] for x in my_haps])
-ham = match_haplotypes_second([x[:] for x in my_haps])
-#%%
-planar_mapping = planarify_graph(ham[2][0],ham[2][1])[2]
-#%%
-my_haps = (my_haps[0],my_haps[1],my_haps[2],change_labeling(my_haps[3],planar_mapping))
+hax = match_haplotypes_by_overlap_probabalistic(my_haps)
+has = match_haplotypes_by_samples_probabalistic(my_haps)
 #%%
 generate_graph_from_matches(ham[2],planarify=True)
