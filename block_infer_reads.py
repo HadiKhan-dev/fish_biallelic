@@ -1326,7 +1326,7 @@ def match_haplotypes_by_overlap_probabalistic(block_level_haps):
         for item in similarities.keys():
             val = similarities[item]/100
                 
-            transformed = 50*(val**2)
+            transformed = 100*(val**2)
             transform_similarities[item] = transformed
             
         matches.append(transform_similarities)
@@ -1541,7 +1541,7 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
             
             for other_hap in second_haps_data.keys():
                 if other_hap in hap_percs.keys():
-                    scaled_val = 50*(min(1,2*hap_percs[other_hap]/100))**2
+                    scaled_val = 100*(min(1,2*hap_percs[other_hap]/100))**2
                     
                     scaled_scores[((first_block_index,hap),
                                    (second_block_index,other_hap))] = scaled_val
@@ -1559,7 +1559,7 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
             
             for other_hap in first_haps_data.keys():
                 if other_hap in hap_percs.keys():
-                    scaled_val = 50*(min(1,2*hap_percs[other_hap]/100))**2
+                    scaled_val = 100*(min(1,2*hap_percs[other_hap]/100))**2
                     
                     scaled_scores[((first_block_index,other_hap),
                                    (second_block_index,hap))] = scaled_val
@@ -1571,10 +1571,6 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
         return (forward_scores,backward_scores)
         
     num_blocks = len(full_haps_data)
-    
-    auto_add_perc = 40
-    max_reduction_include = 0.8
-    
     
     block_haps_names = []
     for i in range(len(full_haps_data)):
@@ -1608,6 +1604,35 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
         combined_scores.append(commons)
         
     return [(block_haps_names,forward_match_scores),(block_haps_names,backward_match_scores),(block_haps_names,combined_scores)]
+        
+def get_combined_hap_score(hap_overlap_scores,hap_sample_scores,
+                           overlap_importance=1):
+    """
+    Combines the results from match_haplotypes_by_overlap_probabalistic
+    and match_haplotypes_by_samples_probabalistic (just the combined output
+    of this function and not the forward/backward ones) to get one single
+    likelihood score for each edge which is normalised to a maximum value
+    of 100. 
+    
+    overlap_importance is a measure of how much we weight the overlap score vs
+    the sample scores (individually). A value of 1 here means we weight the
+    combined sample score twice as much as the overlap score (because sample
+    score is combined version of both forward and backward sample scores).
+    
+    """
+    ovr = hap_overlap_scores[1]
+    samps = hap_sample_scores[1]
+    
+    total_weight = overlap_importance+2
+    
+    combined_dict = {}
+    
+    for i in range(len(ovr)):
+        for d in ovr[i].keys():
+            comb = (overlap_importance*ovr[i][d]+2*samps[i][d])/total_weight      
+            combined_dict[d] = comb
+    
+    return combined_dict
         
 
 def nodes_list_to_pos(nodes_list,layer_dist = 4,vert_dist=2):
@@ -1728,7 +1753,6 @@ def generate_graph_from_matches(matches_list,
                                 vert_dist = 2,
                                 planarify=False):
     """
-    
     Takes as input a list of two elements: a list of nodes
     and a list of edges between nodes.
     
@@ -1738,12 +1762,9 @@ def generate_graph_from_matches(matches_list,
     If planarify = True then function tries to create
     a graph that is as planar as possible
     """
-    
-    
-    
+        
     nodes = matches_list[0]
     edges = matches_list[1]
-    #print(nodes)
     
     if planarify:
         pdr = planarify_graph(nodes,edges)
@@ -1798,4 +1819,165 @@ ham = match_haplotypes_by_samples(my_haps)
 hax = match_haplotypes_by_overlap_probabalistic(my_haps)
 has = match_haplotypes_by_samples_probabalistic(my_haps)
 #%%
-generate_graph_from_matches(ham[2],planarify=True)
+generate_graph_from_matches(ham[1],planarify=False)
+#%%
+scor = get_combined_hap_score(hax,has[2])
+#%%
+def get_block_hap_similarities(hap_vals):
+    """
+    Takes as input a dictionary of haps in a block and 
+    calculates a similarity matrix between them with values 
+    from 0 to 1 with higher values denoting more similar haps
+    """
+    
+    scores = []
+    
+    for i in hap_vals.keys():
+        scores.append([])
+        for j in hap_vals.keys():
+            if j < i:
+                scores[-1].append(0)
+            else:
+                similarity = 1.0-min(1.0,2.0*calc_distance(hap_vals[i],hap_vals[j],calc_type="haploid")/len(hap_vals[i]))
+                scores[-1].append(similarity)
+                
+    scores = np.array(scores)
+    scores = scores+scores.T-np.diag(scores.diagonal())
+    
+    scr_diag = np.sqrt(scores.diagonal())
+    
+    scores = scores/scr_diag
+    scores = scores/scr_diag.reshape(1,-1).T
+    
+    return scores    
+
+
+def generate_long_haplotypes(haplotype_data,nodes_list,combined_scores,num_haplotypes,
+                             node_usage_penalty=10,edge_usage_penalty=10):
+    """
+    Generates num_haplotypes many chromosome length haplotypes given
+    a layered list of the nodes and a dictionary containing the combined likelihood
+    scores for each possible edge between layers.
+    
+    Returns the haplotypes as a list of nodes, one from each layer from the start to 
+    the end.
+    
+    This function works through a reverse Breadth First Search algorithm trying to maximize
+    the score between the start and the end. The first haplotype is just the maximal path.
+    
+    For future haplotypes we apply a penalty to each node/edge already on a discovered 
+    haplotype with a penalty also applied to other similar nodes to used nodes in the same
+    layer and run the Breadth First search again. We repeat this process until we generate
+    num_haplotypes many haplotypes.
+    """
+    
+    num_layers = len(nodes_list)
+    
+    processing_pool = Pool(8)
+    
+    similarity_matrices = processing_pool.starmap(get_block_hap_similarities,
+                                       zip([haplotype_data[x][3] for x in range(len(haplotype_data))]))#Similarity matrices for calculating the associated penalty when we use a node
+    
+    current_edge_scores = combined_scores.copy()
+    current_node_scores = {"I":0,"S":0}
+    for i in range(len(nodes_list)):
+        for node in nodes_list[i]:
+            current_node_scores[node] = 0
+    
+    nodes_copy = nodes_list.copy()
+    nodes_copy.insert(0,["I"])
+    nodes_copy.append(["S"])
+    
+    #Add edges from the dummy nodes to first and last layers
+    for xm in range(len(nodes_list[0])):
+        current_edge_scores[("I",(0,xm))] = 0
+    for xm in range(len(nodes_list[-1])):
+        current_edge_scores[((num_layers-1,xm),"S")] = 0
+    
+    found_haps = []
+    
+    for ite in range(num_haplotypes):
+        best_scores = calc_best_scoring(nodes_copy,current_node_scores,current_edge_scores)
+        
+        found_hap = scorings_to_optimal_path(best_scores,nodes_copy,current_node_scores,current_edge_scores)
+        
+        #Now that we have our hap apply node penalties
+        for i in range(1,len(found_hap)-1):
+            layer = found_hap[i][0]
+            used_hap = found_hap[i][1]
+            reductions = (node_usage_penalty)*similarity_matrices[layer][used_hap,:]
+            for nm in range(len(reductions)):
+                current_node_scores[(layer,nm)] -= reductions[nm]
+        
+        #And apply edge penalties
+        for i in range(1,len(found_hap)-2):
+            current_edge_scores[(found_hap[i],found_hap[i+1])] -= edge_usage_penalty
+        
+        found_haps.append(found_hap[1:-1])
+        
+        print(found_hap,best_scores[0]["I"])
+        print()
+    
+    return found_haps
+        
+def calc_best_scoring(padded_nodes_list,node_scores,edge_scores):
+    """
+    Uses Breadth First Search going backwards to calculate the best scoring possible for each starting 
+    node assuming we get to the end. This uses "I" as a dummy initial starting node
+    and "S" as the final sink node
+    """
+    
+    num_layers = len(padded_nodes_list)
+
+    
+    scorings = [{"S":0}]
+    
+    for layer in range(num_layers-2,-1,-1):
+        this_nodes = padded_nodes_list[layer]
+        next_nodes = padded_nodes_list[layer+1]
+        
+        layer_scores = {}
+        
+        for node in this_nodes:
+            best_score = -np.inf
+            for other in next_nodes:
+                new_score = node_scores[node]+edge_scores[(node,other)]+scorings[-1][other]
+                
+                if new_score > best_score:
+                    best_score = new_score
+                
+            layer_scores[node] = best_score
+            
+        scorings.append(layer_scores)
+    
+    return scorings[::-1]
+    
+def scorings_to_optimal_path(scorings,padded_nodes_list,node_scores,edge_scores):
+    """
+    Takes a list of dictionaries of optimal scorings from each node to the end and
+    calculates the optimal path starting at I and ending at S
+    """
+    cur_path = ["I"]
+    cur_node = "I"
+    
+    for i in range(len(padded_nodes_list)-1):
+
+        cur_score = scorings[i][cur_node]
+        
+        next_nodes = padded_nodes_list[i+1]
+        for new_node in next_nodes:
+            score_removal = node_scores[cur_node]+edge_scores[(cur_node,new_node)]
+            remaining_score = cur_score-score_removal
+            
+            if abs(remaining_score-scorings[i+1][new_node]) < 10**-10:
+                cur_path.append(new_node)
+                cur_node = new_node
+                break
+    
+    return cur_path
+#%%
+finals = generate_long_haplotypes(my_haps,hax[0],scor,6,edge_usage_penalty=0)
+    
+    
+
+        
