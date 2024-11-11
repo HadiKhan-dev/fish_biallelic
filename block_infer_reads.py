@@ -1363,6 +1363,20 @@ def match_usage_find(first_hap,first_matches,second_matches):
     second_usages = {k: v for k, v in sorted(second_usages.items(), key=lambda item: item[1])}
     
     return second_usages
+
+def hap_matching_from_haps(haps_data):
+    """
+    Takes haps data for a single block and calculates 
+    the best matches for the haps for that block
+    """
+    keep_flags = haps_data[1]
+    reads_array = haps_data[2]
+    haps = haps_data[3]
+    (site_priors,probs_array) = reads_to_probabilities(reads_array)
+    
+    matches = match_best(haps,probs_array,keep_flags=keep_flags)
+    
+    return matches
     
 def match_haplotypes_by_samples(full_haps_data):
     """
@@ -1374,20 +1388,6 @@ def match_haplotypes_by_samples(full_haps_data):
     containing info about the positions, read count array and haplotypes
     for each block.
     """
-    
-    def hap_matching_inner_loop(haps_data):
-        """
-        Takes haps data for a single block and calculates 
-        the best matches for the haps for that block
-        """
-        keep_flags = haps_data[1]
-        reads_array = haps_data[2]
-        haps = haps_data[3]
-        (site_priors,probs_array) = reads_to_probabilities(reads_array)
-        
-        matches = match_best(haps,probs_array,keep_flags=keep_flags)
-        
-        return matches
 
     def hap_matching_comparison(haps_data,matches_data,first_block_index,second_block_index):
         """
@@ -1464,7 +1464,7 @@ def match_haplotypes_by_samples(full_haps_data):
     
     processing_pool = Pool(8)
     
-    match_best_results = processing_pool.starmap(hap_matching_inner_loop,
+    match_best_results = processing_pool.starmap(hap_matching_from_haps,
                                                  zip(full_haps_data))
     
     neighbouring_usages = processing_pool.starmap(lambda x,y:
@@ -1497,20 +1497,6 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
     scores for how strong of an edge there is between the first element and the 
     second element of the key for each key in each dictionary
     """
-    
-    def hap_matching_inner_loop(haps_data):
-        """
-        Takes haps data for a single block and calculates 
-        the best matches for the haps for that block
-        """
-        keep_flags = haps_data[1]
-        reads_array = haps_data[2]
-        haps = haps_data[3]
-        (site_priors,probs_array) = reads_to_probabilities(reads_array)
-        
-        matches = match_best(haps,probs_array,keep_flags=keep_flags)
-        
-        return matches
 
     def hap_matching_comparison(haps_data,matches_data,first_block_index,second_block_index):
         """
@@ -1583,7 +1569,7 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
     
     processing_pool = Pool(8)
     
-    match_best_results = processing_pool.starmap(hap_matching_inner_loop,
+    match_best_results = processing_pool.starmap(hap_matching_from_haps,
                                                  zip(full_haps_data))
     
     neighbouring_usages = processing_pool.starmap(lambda x,y:
@@ -1809,7 +1795,7 @@ shift_size = 50000
 chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
 #%%
-combi = [chr1[i] for i in range(50,55)]
+combi = [chr1[i] for i in range(50,151)]
 my_haps = generate_haplotypes_all(combi)
     
 #%%
@@ -1914,9 +1900,7 @@ def generate_long_haplotypes(haplotype_data,nodes_list,combined_scores,num_haplo
             current_edge_scores[(found_hap[i],found_hap[i+1])] -= edge_usage_penalty
         
         found_haps.append(found_hap[1:-1])
-        
-        print(found_hap,best_scores[0]["I"])
-        print()
+
     
     return found_haps
         
@@ -1975,9 +1959,57 @@ def scorings_to_optimal_path(scorings,padded_nodes_list,node_scores,edge_scores)
                 break
     
     return cur_path
-#%%
-finals = generate_long_haplotypes(my_haps,hax[0],scor,6,edge_usage_penalty=0)
-    
-    
 
+def get_node_hap_associations(long_haps):
+    """
+    Given a list of full length haplotypes return a dictionary where each key is a block
+    haplotype and the value is a list showing which long haps they
+    are present in.
+    """
+    
+    assoc_dict = {}
+    
+    for i in range(len(long_haps)):
+        for element in long_haps[i]:
+            if element not in assoc_dict.keys():
+                assoc_dict[element] = []
+            assoc_dict[element].append(f"H{i}")
+    return assoc_dict
+
+def get_sample_associations(assoc_dict,all_matches):
+    """
+    Given a dictionary of associations for block haplotypes
+    with long range haplotypes and a list of best matches
+    for each sample at each block get the associated long
+    range haplotype at each block for each sample
+    """
+    num_samples = len(all_matches[0][0])
+    
+    total_haps = []
+    for s in range(num_samples):
+        hap_making = []
+        for i in range(len(all_matches)):
+            hap_here = all_matches[i][0][s][0]
+            dict_finds = [(i,hap_here[0]),(i,hap_here[1])]
+            
+            totals = []
+            for item in dict_finds:
+                if item in assoc_dict.keys():
+                    totals.extend(assoc_dict[item])
+            hap_making.append(totals)
+        total_haps.append(hap_making)
+    
+    return total_haps
+
+#%%
+finals = generate_long_haplotypes(my_haps,hax[0],scor,6,edge_usage_penalty=10,node_usage_penalty=10)
+    
+assocs = get_node_hap_associations(finals)
+    
+p = Pool(8)
+
+all_matches = p.starmap(hap_matching_from_haps,zip(my_haps))
+
+#%%
+smp = get_sample_associations(assocs,all_matches)
         
