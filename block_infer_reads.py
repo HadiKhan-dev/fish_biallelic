@@ -1,6 +1,7 @@
 import numpy as np
 import pysam
 import math
+import copy
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.decomposition import PCA
@@ -57,6 +58,28 @@ def break_contig(vcf_data,contig_name,block_size=100000,shift=50000):
         yield (data_list,(cur_start,cur_start+block_size))
         
         cur_start += shift
+
+def get_vcf_subset(vcf_data,contig_name,start_index,end_index):
+    """
+    Simple function to extract records from a portion of a contig
+    between two positions
+    """
+    
+    data_list = []
+    
+    full_data = list(vcf_data.fetch(contig_name))
+    
+    for i in range(len(full_data)):
+        record = full_data[i]
+        if record.pos < start_index:
+            continue
+        if record.pos >= end_index:
+            break
+        
+        data_list.append(record)
+    
+    return data_list
+    
     
 def cleanup_block_reads(block_list,min_frequency=0.0,
                         read_error_prob=0.02,min_total_reads=5):
@@ -65,6 +88,10 @@ def cleanup_block_reads(block_list,min_frequency=0.0,
     a list of site positions and a 3d matrix of the 
     number of reads for ref/alt for that sample at
     that site
+    
+    Also returns a boolean array of those sites which had enough
+    total reads mapped to them to be reliable (control this through
+    changing read_error_prob and min_total_reads)
     """
     
     if len(block_list) == 0:
@@ -618,7 +645,7 @@ def match_best(haps_dict,diploids,keep_flags=None):
     
     return (dips_matches,haps_usage,np.array(errs))
 
-def combine_haplotypes(initial_haps,
+def add_distinct_haplotypes(initial_haps,
                        new_candidate_haps,
                        keep_flags=None,
                        unique_cutoff=5,
@@ -729,7 +756,7 @@ def get_addition_statistics(starting_haps,
     return (added_mean,added_max,added_std,added_matches)
 
 
-def combine_haplotypes_smart(initial_haps,
+def add_distinct_haplotypes_smart(initial_haps,
                         new_candidate_haps,
                         probs_array,
                         keep_flags=None,
@@ -923,9 +950,9 @@ def get_initial_haps(site_priors,
         corresp_reads_array,initial_clusters[0],
         read_error_prob=read_error_prob)
     
-    #Remove any haps that are too close to each other
+    #Hacky way to remove any haps that are too close to each other
     (representatives,
-      label_mappings) = combine_haplotypes(
+      label_mappings) = add_distinct_haplotypes(
               {},representatives,keep_flags=keep_flags,
               unique_cutoff=uniqueness_tolerance)
         
@@ -1042,7 +1069,7 @@ def generate_further_haps(site_priors,
         site_priors,candidate_haps,initial_clusters[0])
     
 
-    final_haps = combine_haplotypes_smart(initial_haps,
+    final_haps = add_distinct_haplotypes_smart(initial_haps,
                 representatives,probs_array,
                 keep_flags=keep_flags)
     
@@ -2022,6 +2049,40 @@ def combine_all_blocks_to_long_haps(all_haps,
     long_haps = [processing_results[x][1] for x in range(len(processing_results))]
     
     return [sites_loc,long_haps]
+
+def combine_long_haplotypes(long_haps):
+    """
+    Create each possible combination of long diploids from 
+    a set of long haplotypes and return the result as a high
+    dimensional array
+    
+    This uses multiprocessing to speed up computation
+    """
+    def extract_and_combine(full_haps,first_index,second_index):
+        first_hap = full_haps[first_index]
+        second_hap = full_haps[second_index]
+        
+        return combine_haploids(first_hap,second_hap)
+    
+    num_haps = len(long_haps)
+    all_combs = [(i,j) for i in range(num_haps) for j in range(num_haps)]
+    
+    processing_pool = Pool(8)
+    
+    all_combined = processing_pool.starmap(lambda x,y: extract_and_combine(long_haps,x,y),
+                                           all_combs)
+    
+    #Reshape the flat array of size num_haps**2 into a num_haps*num_haps array
+    total_combined = []
+    for i in range(num_haps):
+        subset = all_combined[num_haps*i:num_haps*(i+1)]
+        total_combined.append(subset)
+    
+    total_combined = np.array(total_combined)
+    
+    print(total_combined.shape)
+    
+    return total_combined
 #%%
 
 def nodes_list_to_pos(nodes_list,layer_dist = 4,vert_dist=2):
@@ -2198,13 +2259,16 @@ shift_size = 50000
 chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
 #%%
-combi = [chr1[i] for i in range(50,151)]
+starting = 50
+ending = 101
+#%%
+full_data = get_vcf_subset(bcf,"chr1",starting*shift_size,(ending+1)*shift_size)
+(full_positions,full_keep_flags,full_reads_array) = cleanup_block_reads(full_data,min_frequency=0)
+(full_site_priors,full_probs_array) = reads_to_probabilities(full_reads_array)
+#%%
+combi = [chr1[i] for i in range(starting,ending)]
 my_haps = generate_haplotypes_all(combi)
 
-#%%
-um = [chr1[i] for i in range(50,70)]
-um_haps = generate_haplotypes_all(um)
-#%%
 
 #%%
 hat = match_haplotypes_by_overlap(my_haps)
@@ -2217,68 +2281,186 @@ generate_graph_from_matches(ham[2],planarify=True)
 #%%
 scor = get_combined_hap_score(hax,has[2])
 #%%
-
-def get_node_hap_associations(long_haps):
-    """
-    Given a list of full length block haplotypes return a dictionary where each key is a block
-    haplotype and the value is a list showing which long haps they
-    are present in.
-    """
-    
-    assoc_dict = {}
-    
-    for i in range(len(long_haps)):
-        for element in long_haps[i]:
-            if element not in assoc_dict.keys():
-                assoc_dict[element] = []
-            assoc_dict[element].append(f"H{i}")
-    return assoc_dict
-
-def get_sample_associations(assoc_dict,all_matches):
-    """
-    Given a dictionary of associations for block haplotypes
-    with long range haplotypes and a list of best matches
-    for each sample at each block get the associated long
-    range haplotype at each block for each sample
-    """
-    num_samples = len(all_matches[0][0])
-    
-    total_haps = []
-    for s in range(num_samples):
-        hap_making = []
-        for i in range(len(all_matches)):
-            hap_here = all_matches[i][0][s][0]
-            dict_finds = [(i,hap_here[0]),(i,hap_here[1])]
-            
-            totals = []
-            for item in dict_finds:
-                if item in assoc_dict.keys():
-                    totals.extend(assoc_dict[item])
-            hap_making.append(totals)
-        total_haps.append(hap_making)
-    
-    return total_haps
-
-
-#%%
 finals = generate_chained_block_haplotypes(my_haps,hax[0],scor,6,edge_usage_penalty=10,node_usage_penalty=10)
-    
-assocs = get_node_hap_associations(finals)
-    
-p = Pool(8)
-
-all_matches = p.starmap(hap_matching_from_haps,zip(my_haps))
-
-#%%
-smp = get_sample_associations(assocs,all_matches)
-#%%
-srt = combine_chained_blocks_to_single_hap(my_haps,finals[3])
 #%%
 sa = combine_all_blocks_to_long_haps(my_haps,finals)
 #%%
-ma = srt[1000:-1000]
+mark = combine_long_haplotypes(sa[1])
+#%%
+def recombination_fudge(start_probs,distance,recomb_rate=10**-8):
+    """
+    Function which takes in the genotype copying probabilities and 
+    updates them for a location "distance" number of sites downstream 
+    based on up to a single recombination event happening within this 
+    particular stretch of data
+    """
+    
+    num_rows = start_probs.shape[0]
+    num_cols = start_probs.shape[1]
+    
+    num_possible_switches = num_rows+num_cols-2
+    
+    total_non_switch_prob = (1-recomb_rate)**distance
+    
+    
+    each_switch_prob = (1-total_non_switch_prob)/num_possible_switches
+    
+    final_mats = []
+    
+    for i in range(num_rows):
+        for j in range(num_cols):
+            base = np.zeros((num_rows,num_cols))
+            base[i,:] = each_switch_prob*start_probs[i,j]*np.ones(num_cols)
+            base[:,j] = each_switch_prob*start_probs[i,j]*np.ones(num_rows)
+            base[i,j] = total_non_switch_prob*start_probs[i,j]
+            final_mats.append(base)
+    
+    combined_probability = np.sum(final_mats,axis=0)
+    
+    return combined_probability
 
-b = ma[ma[:,0] < 0.5]
-c = b[b[:,0] > 0.01]
+def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
+                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):
+    """
+    Function which takes in the full (square) array of combined 
+    genotypes from haplotypes and runs a HMM-esque process to match
+    the sample genotype to the best combination of haplotypes which 
+    make it up.
+    
+    This is so of like Li-Stephens but works on probabalistic genotypes
+    rather than fixed ones
+    
+    Only updates on those sites where keep_flag=1
+    """
+    
+    data_shape = full_combined_genotypes.shape
+    
+    if keep_flags is None:
+        keep_flags = np.array([1 for _ in range(data_shape[2])])
+    
+    if keep_flags.dtype != int:
+        keep_flags = np.array(keep_flags,dtype=int)
+        
+    #Matrix which records the probabilities of seeing one thing when the true value is another
+    #This is used for calculating posteriors later down the line,
+    #Moving across rows we see true baseline genotype and across columns we have observed sample genotype
+    eps = value_error_rate 
+    value_error_matrix = [[(1-eps)**2,2*eps*(1-eps),eps**2],
+                          [eps*(1-eps),eps**2+(1-eps)**2,eps*(1-eps)],
+                          [eps**2,2*eps*(1-eps),(1-eps)**2]]
+    
+        
 
-print(len(c))
+    num_haps = data_shape[0]
+    num_geno = data_shape[0]*data_shape[1]
+    
+    num_sites = data_shape[2]
+    
+    current_probabilities = (1/num_geno)*np.ones((num_haps,num_haps))
+
+    posterior_probabilities = []
+    
+    last_site_loc = None
+    
+    #Iterate backwards initially
+    for loc in range(num_sites-1,-1,-1):
+        if keep_flags[loc] != 1:
+            posterior_probabilities.append(copy.deepcopy(current_probabilities))
+        else:
+            if last_site_loc == None:
+                distance_since_last_site = 0
+            else:
+                distance_since_last_site = site_locations[loc+1]-site_locations[loc]
+                last_site_loc = site_locations[loc]
+                
+            #Fudge prior due to possible recombinations
+            updated_prior = recombination_fudge(current_probabilities,
+                                                distance_since_last_site,
+                                                recomb_rate=recomb_rate)
+            
+            site_sample_val = sample_probs[loc]
+            
+            genotype_vals = full_combined_genotypes[:,:,loc,:]
+
+            #Calculate for each genotype combination the probability it equals x and the true data equals y
+            all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
+            
+            #Calculate for each genotype combination the probability of seeing the data given the true underlying value
+            prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
+            
+            #Use Bayes's rule to calculate the probability of the combination given data using our prior
+            nonorm_prob_comb_given_data = np.einsum("ij,ij->ij",prob_data_given_comb,updated_prior)
+            
+            #Normalize
+            prob_comb_given_data = nonorm_prob_comb_given_data/np.sum(nonorm_prob_comb_given_data)
+            
+            posterior_probabilities.append(prob_comb_given_data)
+            current_probabilities = prob_comb_given_data
+    
+    #Repeat process going forward
+    posterior_probabilities = []
+    
+    last_site_loc = None
+    
+    for loc in range(num_sites):
+        if keep_flags[loc] != 1:
+            posterior_probabilities.append(copy.deepcopy(current_probabilities))
+        else:
+            if last_site_loc == None:
+                distance_since_last_site = 0
+            else:
+                distance_since_last_site = site_locations[loc]-site_locations[loc-1]
+                last_site_loc = site_locations[loc]
+                
+            #Fudge prior due to possible recombinations
+            updated_prior = recombination_fudge(current_probabilities,
+                                                distance_since_last_site,
+                                                recomb_rate=recomb_rate)
+            
+            site_sample_val = sample_probs[loc]
+            
+            genotype_vals = full_combined_genotypes[:,:,loc,:]
+
+            #Calculate for each genotype combination the probability it equals x and the true data equals y
+            all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
+            
+            #Calculate for each genotype combination the probability of seeing the data given the true underlying value
+            prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
+            
+            #Use Bayes's rule to calculate the probability of the combination given data using our prior
+            nonorm_prob_comb_given_data = np.einsum("ij,ij->ij",prob_data_given_comb,updated_prior)
+            
+            #Normalize
+            prob_comb_given_data = nonorm_prob_comb_given_data/np.sum(nonorm_prob_comb_given_data)
+            
+            posterior_probabilities.append(prob_comb_given_data)
+            current_probabilities = prob_comb_given_data
+            
+    #Convert to upper triangular matrix for easier visualization
+    upp_tri_post = []
+    for item in posterior_probabilities:
+        new = np.triu(item+np.transpose(item)-np.diag(np.diag(item)))
+        upp_tri_post.append(new)
+        
+    max_loc = []
+    
+    for i in range(len(upp_tri_post)):
+        max_loc.append(np.unravel_index(upp_tri_post[i].argmax(), upp_tri_post[i].shape))
+    
+    for i in range(len(upp_tri_post)):
+        if i % 500 == 0:
+            print(i)
+            print(upp_tri_post[i])
+            print(max_loc[i])
+            
+            
+            print()
+    
+    return max_loc
+        
+            
+            
+#%%
+s1 = full_probs_array[15]
+
+uses = get_match_probabilities(mark,s1,full_positions,keep_flags=full_keep_flags)
