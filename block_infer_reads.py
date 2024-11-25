@@ -1479,6 +1479,19 @@ def hap_matching_from_haps(haps_data):
     
     return matches
 
+def get_best_matches_all_blocks(haps_data):
+    """
+    Multithreaded function to calculate the best matches for 
+    each block in haps data
+    """
+    
+    processing_pool = Pool(8)
+    
+    processing_results = processing_pool.starmap(hap_matching_from_haps,
+                                                 zip(haps_data))
+    
+    return processing_results
+
 def hap_matching_comparison(haps_data,matches_data,first_block_index,second_block_index):
     """
     For each hap at the first_block_index block this fn. compares
@@ -2201,7 +2214,10 @@ def change_labeling(haplotype_data,relabeling_dict):
 def generate_graph_from_matches(matches_list,
                                 layer_dist = 4,
                                 vert_dist = 2,
-                                planarify=False):
+                                planarify=False,
+                                size_usage_based=False,
+                                hap_usages=None
+                                ):
     """
     Takes as input a list of two elements: a list of nodes
     and a list of edges between nodes.
@@ -2211,8 +2227,18 @@ def generate_graph_from_matches(matches_list,
     
     If planarify = True then function tries to create
     a graph that is as planar as possible
+    
+    If size_usage_based = True then the size of each node
+    is proportional to how many haps it gets used in.
+    
+    In such a case the additional parameter hap_usages must
+    be provided
     """
         
+    if size_usage_based == True:
+        if hap_usages == None:
+            assert False,"Block level haplotype usages not provided"
+    
     nodes = matches_list[0]
     edges = matches_list[1]
     
@@ -2220,6 +2246,7 @@ def generate_graph_from_matches(matches_list,
         pdr = planarify_graph(nodes,edges)
         nodes = pdr[0]
         edges = pdr[1]
+        rev_map = {v:k for k,v in pdr[2].items()}
     
     num_layers = len(nodes)
     max_haps_in_layer = 0
@@ -2228,23 +2255,55 @@ def generate_graph_from_matches(matches_list,
     
     nodes_pos = nodes_list_to_pos(nodes,layer_dist=layer_dist,vert_dist=vert_dist)
     
+    if size_usage_based:
+        node_sizes = []
+        for block in range(len(nodes)):
+            print("BK",block)
+            block_sizes = []
+            block_dict = {}
+            print(nodes[block])
+            for full_node in nodes[block]:
+                print(full_node)
+                node = full_node[1]
+                if not planarify:
+                    try:
+                        block_dict[node] = 1+hap_usages[block][1][node]
+                    except:
+                        block_dict[node] = 1
+                else:
+                    new_label = pdr[2][(block,node)][1]
+                    try:
+                        block_dict[new_label] = 1+hap_usages[block][1][node]
+                    except:
+                        block_dict[new_label] = 1
+            
+            for i in range(len(block_dict)):
+                block_sizes.append(block_dict[i])
+            node_sizes.append(block_sizes)
+        flattened_sizes = [4*x for xs in node_sizes for x in xs]
+        use_size = flattened_sizes
+    else:
+        use_size = 600
+    
+    
+    
     flattened_edges = [x for xs in edges for x in xs] #Flatten the edges list
     flattened_nodes = [x for xs in nodes for x in xs]
-    
     
     G = nx.Graph()
     G.add_nodes_from(flattened_nodes)
     G.add_edges_from(flattened_edges)
     
     fig,ax =plt.subplots()
-    nx.draw(G,pos=nodes_pos,node_size=60)
+    nx.draw(G,pos=nodes_pos,node_size=use_size)
     ax.set_xlim(left=0,right=layer_dist*num_layers)
     ax.set_ylim(bottom=-0.5*vert_dist*max_haps_in_layer,top=1+0.5*vert_dist*max_haps_in_layer)
     
-    for i in range(num_layers):
-        ax.text(x=layer_dist*(0.5+i),y=0.5+0.5*vert_dist*max_haps_in_layer,s=f"{i}",horizontalalignment="center")
-        if i != 0:
-            ax.axvline(x=layer_dist*i,color="k",linestyle="--")
+    # for i in range(num_layers):
+    #     ax.text(x=layer_dist*(0.5+i),y=0.5+0.5*vert_dist*max_haps_in_layer,s=f"{i}",horizontalalignment="center")
+    #     if i != 0:
+    #         ax.axvline(x=layer_dist*i,color="k",linestyle="--")
+    
     fig.set_facecolor("white")
     fig.set_size_inches((num_layers,8))
     plt.show()
@@ -2260,7 +2319,7 @@ chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
 #%%
 starting = 50
-ending = 101
+ending = 80
 #%%
 full_data = get_vcf_subset(bcf,"chr1",starting*shift_size,(ending+1)*shift_size)
 (full_positions,full_keep_flags,full_reads_array) = cleanup_block_reads(full_data,min_frequency=0)
@@ -2268,17 +2327,19 @@ full_data = get_vcf_subset(bcf,"chr1",starting*shift_size,(ending+1)*shift_size)
 #%%
 combi = [chr1[i] for i in range(starting,ending)]
 my_haps = generate_haplotypes_all(combi)
-
-
+#%%
+my_matches = get_best_matches_all_blocks(my_haps)
 #%%
 hat = match_haplotypes_by_overlap(my_haps)
 #%%
-ham = match_haplotypes_by_samples(my_haps[:30])
+ham = match_haplotypes_by_samples(my_haps)
 #%%
 hax = match_haplotypes_by_overlap_probabalistic(my_haps)
 has = match_haplotypes_by_samples_probabalistic(my_haps)
 #%%
 generate_graph_from_matches(ham[2],planarify=True)
+#%%
+plnr = planarify_graph(ham[2][0],ham[2][1])
 #%%
 scor = get_combined_hap_score(hax,has[2])
 #%%
@@ -2478,7 +2539,7 @@ for item in total_uses:
                 hap_usages[j] = 0
             hap_usages[j] += 1
 uses_dict = dict(sorted(uses_dict.items()))
-uses_dict = dict(sorted(uses_dict.items()))
+hap_usages = dict(sorted(hap_usages.items()))
 
 
 for k in uses_dict.keys():
