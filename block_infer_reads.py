@@ -1594,7 +1594,7 @@ def match_haplotypes_by_samples(full_haps_data):
             for second_hap in second_names:
                 sim_val = neighbouring_usages[x][0][(first_hap,second_hap)]
                 
-                if sim_val >= auto_add_val or sim_val/highest_score_found > max_reduction_include:
+                if sim_val >= auto_add_val or sim_val > highest_score_found*max_reduction_include:
                     forward_edges_add.append((first_hap,second_hap))
         
         forward_matches.append(forward_edges_add)
@@ -1610,7 +1610,7 @@ def match_haplotypes_by_samples(full_haps_data):
             for first_hap in first_names:
                 sim_val = neighbouring_usages[x][1][(first_hap,second_hap)]
                 
-                if sim_val >= auto_add_val or sim_val/highest_score_found > max_reduction_include:
+                if sim_val >= auto_add_val or sim_val > highest_score_found*max_reduction_include:
                     backward_edges_add.append((first_hap,second_hap))
         
         backward_matches.append(backward_edges_add)
@@ -2272,7 +2272,8 @@ my_haps = generate_haplotypes_all(combi)
 
 #%%
 hat = match_haplotypes_by_overlap(my_haps)
-ham = match_haplotypes_by_samples(my_haps)
+#%%
+ham = match_haplotypes_by_samples(my_haps[:30])
 #%%
 hax = match_haplotypes_by_overlap_probabalistic(my_haps)
 has = match_haplotypes_by_samples_probabalistic(my_haps)
@@ -2447,20 +2448,42 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
     for i in range(len(upp_tri_post)):
         max_loc.append(np.unravel_index(upp_tri_post[i].argmax(), upp_tri_post[i].shape))
     
-    for i in range(len(upp_tri_post)):
-        if i % 500 == 0:
-            print(i)
-            print(upp_tri_post[i])
-            print(max_loc[i])
-            
-            
-            print()
-    
     return max_loc
         
             
             
 #%%
-s1 = full_probs_array[15]
+total_uses = []
+for i in range(len(full_probs_array)):
+    print(i)
+    s1 = full_probs_array[i]
 
-uses = get_match_probabilities(mark,s1,full_positions,keep_flags=full_keep_flags)
+    uses = get_match_probabilities(mark,s1,full_positions,keep_flags=full_keep_flags)
+    
+    total_uses.append(uses)
+    
+    if len(set(uses)) > 1:
+        print(i,set(uses))
+#%%
+uses_dict = {}
+hap_usages = {}
+for item in total_uses:
+    s = set(item)
+    for thing in s:
+        if thing not in uses_dict.keys():
+            uses_dict[thing] = 0
+        uses_dict[thing] += 1
+        for j in thing:
+            if j not in hap_usages.keys():
+                hap_usages[j] = 0
+            hap_usages[j] += 1
+uses_dict = dict(sorted(uses_dict.items()))
+uses_dict = dict(sorted(uses_dict.items()))
+
+
+for k in uses_dict.keys():
+    print(f"{k}: {uses_dict[k]}")
+
+print()
+for k in hap_usages.keys():
+    print(f"{k}: {hap_usages[k]}")
