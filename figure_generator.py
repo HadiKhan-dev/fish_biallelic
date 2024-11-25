@@ -1,6 +1,8 @@
 import matplotlib.pyplot as plt
 import matplotlib
+import random
 
+#%%
 fig,ax = plt.subplots()
 fig.set_size_inches((18,12))
 
@@ -367,6 +369,7 @@ ax.text(0.357,0.269,s="0",fontsize=55)
 ax.plot((0.373,0.373),(0.265,0.295),color="k",linewidth=3)
 
 ax.text(0.38,0.284,s="0",fontsize=55)
+
 ax.text(0.375,0.269,s="11",fontsize=55)
 ax.plot((0.397,0.397),(0.265,0.295),color="k",linewidth=3)
 
@@ -488,3 +491,220 @@ ax.text(0.25,0.92,s="vs",fontsize=120)
 ax.set_axis_off()
 
 plt.show()
+
+#%%
+fig,ax = plt.subplots()
+fig.set_size_inches((18,12))
+
+ax.set_xlim((0,1))
+ax.set_ylim((0,1))
+
+ax.arrow(0.3,0.9,0,-0.7,width=0.005,linewidth=50,color="g")
+ax.text(0.05,0.5,s="Easy",fontsize=70,color="g")
+
+ax.arrow(0.7,0.15,0,0.7,width=0.005,linewidth=50,color="r")
+ax.text(0.8,0.5,s="Hard",fontsize=70,color="r")
+
+
+ax.set_axis_off()
+
+plt.show()
+
+#%%
+fig,ax = plt.subplots()
+fig.set_size_inches((14,18))
+
+ax.set_xlim((0.3,0.9))
+ax.set_ylim((-0.5,1))
+
+rect1 = matplotlib.patches.Rectangle((0.40,0.92),0.07,0.03,color="#337733")
+rect2 = matplotlib.patches.Rectangle((0.47,0.92),0.08,0.03,color="#396296")
+rect3 = matplotlib.patches.Rectangle((0.55,0.92),0.05,0.03,color="#1f3fcf")
+
+
+rect4 = matplotlib.patches.Rectangle((0.40,0.87),0.05,0.03,color="#7333bd")
+rect5 = matplotlib.patches.Rectangle((0.45,0.87),0.05,0.03,color="#ab05e8")
+rect6 = matplotlib.patches.Rectangle((0.50,0.87),0.02,0.03,color="#1f3fcf")
+rect7 = matplotlib.patches.Rectangle((0.52,0.87),0.08,0.03,color="#396296")
+
+
+ax.arrow(0.5,0.8,0.0,-0.1,linewidth=1,width=0.01,color="k")
+
+
+rect8 = matplotlib.patches.Rectangle((0.4,0.55),0.2,0.08,color="k",fill=False,linewidth=4)
+rect9 = matplotlib.patches.Rectangle((0.4,0.44),0.2,0.08,color="k",fill=False,linewidth=4)
+
+ax.plot((0.44,0.44),(0.55,0.63),color="k",linewidth=3)
+ax.plot((0.48,0.48),(0.55,0.63),color="k",linewidth=3)
+ax.plot((0.52,0.52),(0.55,0.63),color="k",linewidth=3)
+ax.plot((0.56,0.56),(0.55,0.63),color="k",linewidth=3)
+
+ax.plot((0.44,0.44),(0.44,0.52),color="k",linewidth=3)
+ax.plot((0.48,0.48),(0.44,0.52),color="k",linewidth=3)
+ax.plot((0.52,0.52),(0.44,0.52),color="k",linewidth=3)
+ax.plot((0.56,0.56),(0.44,0.52),color="k",linewidth=3)
+
+ax.text(0.325,0.535,s="...",fontsize=70)
+
+ax.text(0.635,0.535,s="...",fontsize=70)
+
+ax.text(0.409,0.564,s="0",fontsize=45)
+ax.text(0.449,0.564,s="1",fontsize=45)
+ax.text(0.489,0.564,s="0",fontsize=45)
+ax.text(0.529,0.564,s="0",fontsize=45)
+ax.text(0.569,0.564,s="1",fontsize=45)
+
+ax.text(0.409,0.454,s="1",fontsize=45)
+ax.text(0.449,0.454,s="0",fontsize=45)
+ax.text(0.489,0.454,s="1",fontsize=45)
+ax.text(0.529,0.454,s="0",fontsize=45)
+ax.text(0.569,0.454,s="1",fontsize=45)
+
+
+
+ax.arrow(0.5,0.4,0.0,-0.1,linewidth=1,width=0.01,color="k")
+
+rect10 = matplotlib.patches.Rectangle((0.4,0.08),0.2,0.08,color="k",fill=False,linewidth=4)
+
+ax.plot((0.44,0.44),(0.08,0.16),color="k",linewidth=3)
+ax.plot((0.48,0.48),(0.08,0.16),color="k",linewidth=3)
+ax.plot((0.52,0.52),(0.08,0.16),color="k",linewidth=3)
+ax.plot((0.56,0.56),(0.08,0.16),color="k",linewidth=3)
+
+ax.text(0.409,0.094,s="1",fontsize=45)
+ax.text(0.449,0.094,s="0",fontsize=45)
+ax.text(0.489,0.094,s="1",fontsize=45)
+ax.text(0.529,0.094,s="0",fontsize=45)
+ax.text(0.569,0.094,s="2",fontsize=45)
+
+ax.text(0.325,0.120,s="...",fontsize=70)
+
+ax.text(0.635,0.120,s="...",fontsize=70)
+
+
+ax.arrow(0.5,0.0,0.0,-0.1,linewidth=1,width=0.01,color="k")
+
+rect11 = matplotlib.patches.Rectangle((0.4,-0.35),0.2,0.16,color="k",fill=False,linewidth=4)
+
+ax.plot((0.4,0.6),(-0.27,-0.27),color="k",linewidth=3)
+
+ax.plot((0.44,0.44),(-0.35,-0.19),color="k",linewidth=3)
+ax.plot((0.48,0.48),(-0.35,-0.19),color="k",linewidth=3)
+ax.plot((0.52,0.52),(-0.35,-0.19),color="k",linewidth=3)
+ax.plot((0.56,0.56),(-0.35,-0.19),color="k",linewidth=3)
+
+ax.text(0.409,-0.255,s="2",fontsize=45)
+ax.text(0.449,-0.255,s="4",fontsize=45)
+ax.text(0.489,-0.255,s="3",fontsize=45)
+ax.text(0.529,-0.255,s="8",fontsize=45)
+ax.text(0.569,-0.255,s="1",fontsize=45)
+
+ax.text(0.409,-0.335,s="4",fontsize=45)
+ax.text(0.449,-0.335,s="6",fontsize=45)
+ax.text(0.489,-0.335,s="5",fontsize=45)
+ax.text(0.529,-0.335,s="0",fontsize=45)
+ax.text(0.569,-0.335,s="9",fontsize=45)
+
+ax.text(0.325,-0.28,s="...",fontsize=70)
+ax.text(0.635,-0.28,s="...",fontsize=70)
+
+arrowsty = matplotlib.patches.ArrowStyle(stylename="->",head_width=10,head_length=30,angleB=100)
+connectionsty = matplotlib.patches.ConnectionStyle("Arc3",rad=0.6)
+
+fancy_arrow = matplotlib.patches.FancyArrowPatch(color="r",
+    posA=(0.75,-0.25),posB=(0.65,0.8),
+    linewidth=10,arrowstyle=arrowsty,connectionstyle=connectionsty)
+
+ax.text(0.75,0.2,s="?",fontsize=100,color="r")
+
+ax.add_patch(rect1)
+ax.add_patch(rect2)
+ax.add_patch(rect3)
+ax.add_patch(rect4)
+ax.add_patch(rect5)
+ax.add_patch(rect6)
+ax.add_patch(rect7)
+ax.add_patch(rect8)
+ax.add_patch(rect9)
+ax.add_patch(rect10)
+ax.add_patch(rect11)
+
+ax.add_patch(fancy_arrow)
+
+ax.set_axis_off()
+
+plt.show()
+
+#%%
+fig,ax = plt.subplots()
+fig.set_size_inches((18*2.25,0.8*18))
+
+ax.set_xlim((0,2.25))
+ax.set_ylim((0.2,1))
+
+def draw_hmm_states(axis,x,y):
+    """
+    Draws a unit of HMM vertices for the markov chain as well as emission nodes
+    """
+    rect1 = matplotlib.patches.Rectangle((x,y+0.2),0.3,0.3,color="k",fill=False,linewidth=4)
+    
+    all_circs = []
+    
+    for i in range(6):
+        for j in range(5,4-i,-1):
+            new_circ = plt.Circle((x+0.05*i+0.025,y+0.05*j+0.225),0.025,color="#339e4d")
+            all_circs.append(new_circ)
+            
+    for cir in all_circs:
+        
+        axis.add_patch(cir)
+        
+
+    axis.add_patch(rect1)
+    
+    arr = plt.arrow(x+0.4,y+0.35,0.1,0,linewidth=50,width=0.005,color="#5f339e")
+    #arr = plt.arrow(x-0.23,y+0.35,0.1,0,linewidth=50,width=0.005,color="#5f339e")
+
+    circ1 = plt.Circle((x+0.15,y-0.1),0.05,fill=False,linewidth=5)
+    circ2 = plt.Circle((x+0.0,y-0.05),0.05,fill=False,linewidth=5)
+    circ3 = plt.Circle((x+0.3,y-0.05),0.05,fill=False,linewidth=5)
+    
+    ax.text(x-0.025,y-0.075,s="0",fontsize=80)
+    ax.text(x+0.125,y-0.125,s="1",fontsize=80)
+    ax.text(x+0.275,y-0.075,s="2",fontsize=80)
+    axis.add_patch(circ1)
+    axis.add_patch(circ2)
+    axis.add_patch(circ3)
+    
+    num_emissions = 10
+    
+    
+    rands_x = [random.uniform(0,1) for _ in range(num_emissions)]
+    rands_y = [random.uniform(0,1) for _ in range(num_emissions)]
+    
+    for i in range(len(rands_x)):
+        if rands_x[i]+rands_y[i] < 1:
+            xv = rands_x[i]
+            yv = rands_y[i]
+            
+            rands_x[i] = 1-yv
+            rands_y[i] = 1-xv
+    
+    for i in range(len(rands_x)):
+        xv = x+0.3*rands_x[i]
+        yv = y+0.2+0.3*rands_y[i]
+        
+        plt.arrow(xv,yv,0.9*(x+0.15-xv),0.9*(y-0.1-yv),linewidth=2,color="#b0091f")
+        plt.arrow(xv,yv,0.9*(x+0.0-xv),0.9*(y-0.05-yv),linewidth=2,color="#b0091f")
+        plt.arrow(xv,yv,0.9*(x+0.3-xv),0.9*(y-0.05-yv),linewidth=2,color="#b0091f")
+    
+    
+arr = plt.arrow(0.05,0.75,0.1,0,linewidth=50,width=0.005,color="#5f339e")
+
+draw_hmm_states(ax,0.3,0.4)
+draw_hmm_states(ax,0.95,0.4)
+draw_hmm_states(ax,1.6,0.4)
+ax.set_axis_off()
+
+plt.show()    
+
