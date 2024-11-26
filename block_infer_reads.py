@@ -11,6 +11,8 @@ from multiprocess import Pool
 import time
 import warnings
 import networkx as nx
+import pandas as pd
+import seaborn as sns
 warnings.filterwarnings("ignore")
 
 np.seterr(divide='ignore',invalid="ignore")
@@ -254,6 +256,14 @@ def calc_distance(first_row,second_row,calc_type="diploid"):
     ensd = ens * distances
     
     return np.sum(ensd,axis=None)
+
+def calc_perc_difference(first_row,second_row,calc_type="diploid"):
+    """
+    Calculate the probabalistic percentage difference between two rows
+    """
+    row_len = len(first_row)
+    
+    return 100*calc_distance(first_row,second_row,calc_type=calc_type)/row_len
 
 def calc_distance_row(row,data_matrix,start_point,calc_type="diploid"):
     """
@@ -2319,7 +2329,7 @@ chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
 #%%
 starting = 50
-ending = 80
+ending = 100
 #%%
 full_data = get_vcf_subset(bcf,"chr1",starting*shift_size,(ending+1)*shift_size)
 (full_positions,full_keep_flags,full_reads_array) = cleanup_block_reads(full_data,min_frequency=0)
@@ -2338,8 +2348,6 @@ hax = match_haplotypes_by_overlap_probabalistic(my_haps)
 has = match_haplotypes_by_samples_probabalistic(my_haps)
 #%%
 generate_graph_from_matches(ham[2],planarify=True)
-#%%
-plnr = planarify_graph(ham[2][0],ham[2][1])
 #%%
 scor = get_combined_hap_score(hax,has[2])
 #%%
@@ -2360,12 +2368,14 @@ def recombination_fudge(start_probs,distance,recomb_rate=10**-8):
     num_rows = start_probs.shape[0]
     num_cols = start_probs.shape[1]
     
-    num_possible_switches = num_rows+num_cols-2
+    num_possible_switches = num_rows+num_cols-1
     
-    total_non_switch_prob = (1-recomb_rate)**distance
+    non_switch_prob = (1-recomb_rate)**distance
     
+    each_switch_prob = (1-non_switch_prob)/num_possible_switches
     
-    each_switch_prob = (1-total_non_switch_prob)/num_possible_switches
+    #Account for the fact that we can recombine back to the haplotype pre recombination
+    total_non_switch_prob = non_switch_prob+each_switch_prob
     
     final_mats = []
     
@@ -2433,7 +2443,7 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
                 distance_since_last_site = 0
             else:
                 distance_since_last_site = site_locations[loc+1]-site_locations[loc]
-                last_site_loc = site_locations[loc]
+            last_site_loc = site_locations[loc]
                 
             #Fudge prior due to possible recombinations
             updated_prior = recombination_fudge(current_probabilities,
@@ -2472,13 +2482,13 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
                 distance_since_last_site = 0
             else:
                 distance_since_last_site = site_locations[loc]-site_locations[loc-1]
-                last_site_loc = site_locations[loc]
+            
+            last_site_loc = site_locations[loc]
                 
             #Fudge prior due to possible recombinations
             updated_prior = recombination_fudge(current_probabilities,
                                                 distance_since_last_site,
                                                 recomb_rate=recomb_rate)
-            
             site_sample_val = sample_probs[loc]
             
             genotype_vals = full_combined_genotypes[:,:,loc,:]
@@ -2509,26 +2519,82 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
     for i in range(len(upp_tri_post)):
         max_loc.append(np.unravel_index(upp_tri_post[i].argmax(), upp_tri_post[i].shape))
     
-    return max_loc
+    return (max_loc,upp_tri_post)
         
-            
-            
-#%%
-total_uses = []
-for i in range(len(full_probs_array)):
-    print(i)
-    s1 = full_probs_array[i]
+def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations,
+                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):         
+    """
+    Multithreaded version to match all samples to their haplotype combinations
+    """
+    processing_pool = Pool(8)
+    
+    results = processing_pool.starmap(lambda x: get_match_probabilities(full_combined_genotypes,x,site_locations,
+                                        keep_flags=keep_flags,recomb_rate=recomb_rate,value_error_rate=value_error_rate),
+                                      zip(all_sample_probs))
+    
+    return results
 
-    uses = get_match_probabilities(mark,s1,full_positions,keep_flags=full_keep_flags)
+def make_heatmap(probs_list):
+    """
+    Takes as input a list of matrices of probabilities for the hidden
+    states of a HMM and makes a heatmap for them
+    """
     
-    total_uses.append(uses)
+    def flattenutrm(matrix):
+        """
+        flatten an upper triangular matrix
+        """
+        num_rows = matrix.shape[0]
+        num_cols = matrix.shape[1]
+        
+        fltr = []
+        
+        for i in range(num_rows):
+            fltr.extend(matrix[i,i:])
+        
+        return fltr
     
-    if len(set(uses)) > 1:
-        print(i,set(uses))
+    flattened_list = []
+    
+
+    for i in range(len(probs_list)):
+        flattened_list.append(flattenutrm(probs_list[i]))
+    flattened_array = np.array(flattened_list).transpose()
+    
+    hap_names = []
+    
+    num_haps = len(probs_list[0])
+    
+    
+    for i in range(num_haps):
+        for j in range(i,num_haps):
+            hap_names.append(f"({i},{j})")
+
+    fig,ax = plt.subplots()
+    fig.set_size_inches(11,6)
+    sns.heatmap(flattened_array,yticklabels=hap_names)
+    plt.title(f"Recombination rate: {recomb_rate}")
+    plt.show()
+    
+#%%
+for i in range(20):
+    recomb_rate= 10**-i
+    man = get_match_probabilities(mark,full_probs_array[21],
+                full_positions,keep_flags=full_keep_flags,
+                recomb_rate=recomb_rate,value_error_rate=10**-3)
+    
+    print(f"Recomb rate: {recomb_rate}")
+    print(pd.value_counts(man[0]))
+    make_heatmap(man[1])
+#%%
+full_res = get_full_match_probs(mark,full_probs_array[:10],
+            full_positions,keep_flags=full_keep_flags,
+            recomb_rate=10**-1)
 #%%
 uses_dict = {}
 hap_usages = {}
-for item in total_uses:
+for val in full_res:
+    item = val[0]
     s = set(item)
     for thing in s:
         if thing not in uses_dict.keys():
@@ -2548,3 +2614,14 @@ for k in uses_dict.keys():
 print()
 for k in hap_usages.keys():
     print(f"{k}: {hap_usages[k]}")
+    
+#%%
+ma = np.array([[0.,  0.,  0.,  0.,  0.,  0. ],
+ [0.,  0.,  0.,  0.,  0.,  0., ],
+ [0.,  0.,  0.,  0.,  0.5, 0., ],
+ [0.,  0.,  0.,  0.,  0.,  0., ],
+ [0.,  0.,  0.5, 0.,  0.,  0., ],
+ [0.,  0.,  0.,  0.,  0.,  0., ]])
+
+#%%
+recombination_fudge(ma,10,recomb_rate=10**-1)
