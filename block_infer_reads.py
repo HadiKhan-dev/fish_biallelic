@@ -61,10 +61,12 @@ def break_contig(vcf_data,contig_name,block_size=100000,shift=50000):
         
         cur_start += shift
 
-def get_vcf_subset(vcf_data,contig_name,start_index,end_index):
+def get_vcf_subset(vcf_data,contig_name,start_index=0,end_index=None):
     """
     Simple function to extract records from a portion of a contig
     between two positions
+    
+    end_index=None means we iterate until the end of the data
     """
     
     data_list = []
@@ -75,8 +77,9 @@ def get_vcf_subset(vcf_data,contig_name,start_index,end_index):
         record = full_data[i]
         if record.pos < start_index:
             continue
-        if record.pos >= end_index:
-            break
+        if end_index != None:
+            if record.pos >= end_index:
+                break
         
         data_list.append(record)
     
@@ -1159,7 +1162,7 @@ def truncate_haps(candidate_haps,candidate_matches,genotype_array,
     
     return final_haps
 
-def generate_haplotypes_block(block_data,
+def generate_block_haps_from_reads(positions,reads_array,keep_flags=None,
                               error_reduction_cutoff = 0.98,
                               max_cutoff_error_increase = 1.02,
                               max_hapfind_iter=5,
@@ -1167,19 +1170,23 @@ def generate_haplotypes_block(block_data,
                               deeper_analysis_initial=False,
                               min_num_haps=0):
     """
-    Given a block of sample data generates the haplotypes that make up
-    the samples present
+    Given the read count array of our  sample data generates the
+    haplotypes that make up the samples present in our data
     
     min_num_haps is a (soft) minimum value for the number of haplotypes,
     if we have fewer than that many haps we iterate further to get more 
     haps.
     
-    
     """
     
+    if keep_flags is None:
+        keep_flags = np.array([1 for _ in range(reads_array.shape[1])])
     
-    (positions,keep_flags,reads_array) = cleanup_block_reads(block_data,min_frequency=0)
+    if keep_flags.dtype != int:
+        keep_flags = np.array(keep_flags,dtype=int)
     
+    
+
     #reads_array = resample_reads_array(reads_array,1)
     
     (site_priors,probs_array) = reads_to_probabilities(reads_array)
@@ -1242,18 +1249,63 @@ def generate_haplotypes_block(block_data,
         
     return (positions,keep_flags,reads_array,final_haps)
     
+def generate_haplotypes_block(block_data,
+                              error_reduction_cutoff = 0.98,
+                              max_cutoff_error_increase = 1.02,
+                              max_hapfind_iter=5,
+                              make_pca=False,
+                              deeper_analysis_initial=False,
+                              min_num_haps=0):
+    """
+    Given a block of sample data generates the haplotypes that make up
+    the samples present
     
+    min_num_haps is a (soft) minimum value for the number of haplotypes,
+    if we have fewer than that many haps we iterate further to get more 
+    haps.
+    
+    This function is mostly a wrapper around generate_block_haps_from_reads
+    to enable it to work with VCF data directly
+    
+    """
+    
+    (positions,reads_array,keep_flags) = cleanup_block_reads(block_data,min_frequency=0)
+    
+    return generate_block_haps_from_reads(
+        positions,keep_flags,reads_array,error_reduction_cutoff = error_reduction_cutoff,
+        max_cutoff_error_increase = max_cutoff_error_increase,
+        max_hapfind_iter=max_hapfind_iter,make_pca=make_pca,
+        deeper_analysis_initial=deeper_analysis_initial,min_num_haps=min_num_haps)
+
+
+def generate_haplotypes_all_from_reads(positions_data,reads_array_data,keep_flags_data=None):
+    """
+    Generate a list of block haplotypes which make up each element 
+    of the list of reads array data
+    """
+    
+    if keep_flags_data == None:
+        keep_flags_data = [None for i in range(len(positions_data))] 
+    
+    overall_haplotypes = []
+    
+    for i in range(len(positions_data)):
+        
+        this_pos_data = positions_data[i]
+        this_reads_data = reads_array_data[i]
+        this_keep_flags_data = keep_flags_data[i]
+        
+        overall_haplotypes.append(generate_block_haps_from_reads(
+            this_pos_data,this_reads_data,this_keep_flags_data))
+    
+    return overall_haplotypes
+
 
 def generate_haplotypes_all(chromosome_data):
     """
     Generate a list of block haplotypes which make up each element 
     of the list of blocks of VCF data
     """
-    
-    # total_positions = []
-    # total_keep_flags = []
-    # reads_arrays = []
-    # haps = []
     
     overall_haplotypes = []
     
@@ -2150,6 +2202,143 @@ def recombination_fudge(start_probs,distance,recomb_rate=10**-8):
     combined_probability = np.sum(final_mats,axis=0)
     
     return combined_probability
+
+def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
+                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):
+    """
+    Compute the likeliest path explaining the sample using a combination of
+    genotypes from full_combined_genotypes via the Viterbi algorithm
+    
+    We only update on sites which have keep_flags[i] = 1
+    """
+    
+    data_shape = full_combined_genotypes.shape
+    
+    if keep_flags is None:
+        keep_flags = np.array([1 for _ in range(data_shape[2])])
+    
+    if keep_flags.dtype != int:
+        keep_flags = np.array(keep_flags,dtype=int)
+        
+    #Matrix which records the probabilities of seeing one thing when the true value is another
+    #This is used for calculating posteriors later down the line,
+    #Moving across rows we see true baseline genotype and across columns we have observed sample genotype
+    eps = value_error_rate 
+    value_error_matrix = [[(1-eps)**2,2*eps*(1-eps),eps**2],
+                          [eps*(1-eps),eps**2+(1-eps)**2,eps*(1-eps)],
+                          [eps**2,2*eps*(1-eps),(1-eps)**2]]
+    
+        
+
+    num_haps = data_shape[0]
+    num_rows = data_shape[0]
+    num_cols = data_shape[1]
+    num_geno = data_shape[0]*data_shape[1]
+    
+    num_sites = data_shape[2]
+    
+    starting_probabilities = make_upper_triangular((1/num_geno)*np.ones((num_haps,num_haps)))
+    log_current_probabilities = np.log(starting_probabilities)
+    
+    prev_best = np.empty((data_shape[0],data_shape[1]),dtype=object)
+    prev_best[:] = [[(i,j) for j in range(data_shape[1])] for i in range(data_shape[0])]
+
+    log_probs_history = [copy.deepcopy(log_current_probabilities)]
+    prev_best_history = [copy.deepcopy(prev_best)]
+    
+    last_site_loc = None
+    
+    for loc in range(num_sites):
+        if keep_flags[loc] != 1:
+            log_probs_history.append(copy.deepcopy(log_current_probabilities))
+            prev_best_history.append(copy.deepcopy(prev_best))
+        else:
+            
+            if last_site_loc == None:
+                distance_since_last_site = 0
+            else:
+                distance_since_last_site = site_locations[loc]-last_site_loc
+            
+        
+            #Update last_site_loc
+            last_site_loc = site_locations[loc]
+            
+            #Create transition probability matrix            
+            num_possible_switches = num_rows+num_cols-1
+
+            non_switch_prob = (1-recomb_rate)**distance_since_last_site
+            
+            each_switch_prob= (1-non_switch_prob)/num_possible_switches
+
+            #Account for the fact that we can recombine back to the haplotype pre recombination
+            total_non_switch_prob = non_switch_prob+each_switch_prob
+            
+            transition_probs = np.zeros((num_rows,num_cols,num_rows,num_cols))
+            
+            for i in range(num_rows):
+                for j in range(i,num_cols):
+                    transition_probs[i,j,:,j] = each_switch_prob
+                    transition_probs[i,j,i,:] = each_switch_prob
+                    transition_probs[i,j,i,j] = total_non_switch_prob
+                    
+                    transition_probs[i,j,:,:] = make_upper_triangular(transition_probs[i,j,:,:])
+                    
+            
+            
+            site_sample_val = sample_probs[loc]
+            
+            genotype_vals = full_combined_genotypes[:,:,loc,:]
+
+            #Calculate for each genotype combination the probability it equals x and the true data equals y
+            all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
+            
+            #Calculate for each genotype combination the probability of seeing the data given the true underlying genotype 
+            prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
+            
+            #Calculate the probability of switching to state (k,l) and seeing our observed data given that we started in state (i,j)
+            prob_switch_seen = np.einsum("ijkl,kl->ijkl",transition_probs,prob_data_given_comb)
+            
+            log_prob_switch_seen = np.log(prob_switch_seen)
+            
+            extended_log_cur_probs = copy.deepcopy(log_current_probabilities)
+            extended_log_cur_probs = np.expand_dims(extended_log_cur_probs,2)
+            extended_log_cur_probs = np.expand_dims(extended_log_cur_probs,3)
+            extended_log_cur_probs = np.repeat(extended_log_cur_probs,num_rows,axis=2)
+            extended_log_cur_probs = np.repeat(extended_log_cur_probs,num_cols,axis=3)
+            
+            log_total_combined_probability = extended_log_cur_probs+log_prob_switch_seen
+            
+            best_matches = np.empty((data_shape[0],data_shape[1]),dtype=object)
+            best_log_probs = np.empty((data_shape[0],data_shape[1]),dtype=float)
+            
+            for k in range(num_rows):
+                for l in range(num_cols):
+                    comb_data = log_total_combined_probability[:,:,k,l]
+                    max_combination = np.unravel_index(np.argmax(comb_data), comb_data.shape)
+                    max_val = comb_data[max_combination]
+                    
+                    best_matches[k,l] = max_combination
+                    best_log_probs[k,l] = max_val
+            
+            log_current_probabilities = best_log_probs
+            prev_best = best_matches
+            
+            log_probs_history.append(copy.deepcopy(log_current_probabilities))
+            prev_best_history.append(copy.deepcopy(prev_best))
+    
+    #Now we can work backwards to figure out the most likely path for the sample
+    reversed_path = []
+    
+    cur_place = np.unravel_index(np.argmax(log_probs_history[-1]), log_probs_history[-1].shape)
+    
+    reversed_path.append(cur_place)
+    
+    for i in range(len(prev_best_history)-1,-1,-1):
+        cur_place = prev_best_history[i][cur_place[0],cur_place[1]]
+        reversed_path.append(cur_place)
+    
+    return (reversed_path,log_probs_history,prev_best_history)
+
 #%%
 
 def nodes_list_to_pos(nodes_list,layer_dist = 4,vert_dist=2):
@@ -2361,6 +2550,86 @@ def generate_graph_from_matches(matches_list,
     fig.set_facecolor("white")
     fig.set_size_inches((num_layers,8))
     plt.show()
+    
+def make_heatmap(probs_list):
+    """
+    Takes as input a list of matrices of probabilities for the hidden
+    states of a HMM and makes a heatmap for them
+    """
+    
+    def flattenutrm(matrix):
+        """
+        flatten an upper triangular matrix
+        """
+        num_rows = matrix.shape[0]
+        
+        fltr = []
+        
+        for i in range(num_rows):
+            fltr.extend(matrix[i,i:])
+        
+        return fltr
+    
+    flattened_list = []
+    
+
+    for i in range(len(probs_list)):
+        flattened_list.append(flattenutrm(probs_list[i]))
+    flattened_array = np.array(flattened_list).transpose()
+    
+    hap_names = []
+    
+    num_haps = len(probs_list[0])
+    
+    
+    for i in range(num_haps):
+        for j in range(i,num_haps):
+            hap_names.append(f"({i},{j})")
+
+    fig,ax = plt.subplots()
+    fig.set_size_inches(11,6)
+    sns.heatmap(flattened_array,yticklabels=hap_names)
+    plt.title(f"Recombination rate: {recomb_rate}")
+    plt.show()
+    
+def make_heatmap_path(best_path,num_haps):
+    """
+    Makes a heatmap based on max likelihood path
+    """
+    
+    def flattenutrm(matrix):
+        """
+        flatten an upper triangular matrix
+        """
+        num_rows = matrix.shape[0]
+        
+        fltr = []
+        
+        for i in range(num_rows):
+            fltr.extend(matrix[i,i:])
+        
+        return fltr
+    
+    flattened_list = []
+    
+    for i in range(len(best_path)):
+        make_matrix = np.zeros((num_haps,num_haps))
+        make_matrix[best_path[i][0],best_path[i][1]] = 1
+        flattened_list.append(flattenutrm(make_matrix))
+    
+    flattened_array = np.array(flattened_list).transpose()
+    
+    hap_names = []
+
+    for i in range(num_haps):
+        for j in range(i,num_haps):
+            hap_names.append(f"({i},{j})")
+
+    fig,ax = plt.subplots()
+    fig.set_size_inches(11,6)
+    sns.heatmap(flattened_array,yticklabels=hap_names)
+    plt.title(f"Recombination rate: {recomb_rate}")
+    plt.show()
 
 #%%
 bcf = read_bcf_file("./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz")
@@ -2369,11 +2638,29 @@ names = bcf.header.samples
 #%%
 block_size = 100000
 shift_size = 50000
-chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
-#%%
 starting = 50
 ending = 100
+
+
+chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
+#%%
+def generate_long_haplotypes(bcf_file,num_long_haps,contig_name,
+                             block_size=100000,shift_size=50000):
+    """
+    Takes as input a list of VCF Record data where each element represents 
+    full data for a single site for all the samples. Runs the full pipline 
+    and generates num_long_haps many full length haplotypes 
+    """
+    
+    contig_data = list(break_contig(bcf_file,contig_name,block_size=block_size,shift=shift_size))
+    
+    starting = 50 #Use 0 here for full array
+    ending = 100
+    
+    full_data = get_vcf_subset(bcf,"chr1",starting*shift_size,(ending+1)*shift_size)
+    (full_positions,full_keep_flags,full_reads_array) = cleanup_block_reads(full_data,min_frequency=0)
+    (full_site_priors,full_probs_array) = reads_to_probabilities(full_reads_array)
 #%%
 full_data = get_vcf_subset(bcf,"chr1",starting*shift_size,(ending+1)*shift_size)
 (full_positions,full_keep_flags,full_reads_array) = cleanup_block_reads(full_data,min_frequency=0)
@@ -2543,222 +2830,6 @@ def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations
                                       zip(all_sample_probs))
     
     return results
-
-def make_heatmap(probs_list):
-    """
-    Takes as input a list of matrices of probabilities for the hidden
-    states of a HMM and makes a heatmap for them
-    """
-    
-    def flattenutrm(matrix):
-        """
-        flatten an upper triangular matrix
-        """
-        num_rows = matrix.shape[0]
-        
-        fltr = []
-        
-        for i in range(num_rows):
-            fltr.extend(matrix[i,i:])
-        
-        return fltr
-    
-    flattened_list = []
-    
-
-    for i in range(len(probs_list)):
-        flattened_list.append(flattenutrm(probs_list[i]))
-    flattened_array = np.array(flattened_list).transpose()
-    
-    hap_names = []
-    
-    num_haps = len(probs_list[0])
-    
-    
-    for i in range(num_haps):
-        for j in range(i,num_haps):
-            hap_names.append(f"({i},{j})")
-
-    fig,ax = plt.subplots()
-    fig.set_size_inches(11,6)
-    sns.heatmap(flattened_array,yticklabels=hap_names)
-    plt.title(f"Recombination rate: {recomb_rate}")
-    plt.show()
-    
-def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
-                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):
-    """
-    Compute the likeliest path explaining the sample using a combination of
-    genotypes from full_combined_genotypes via the Viterbi algorithm
-    
-    We only update on sites which have keep_flags[i] = 1
-    """
-    
-    data_shape = full_combined_genotypes.shape
-    
-    if keep_flags is None:
-        keep_flags = np.array([1 for _ in range(data_shape[2])])
-    
-    if keep_flags.dtype != int:
-        keep_flags = np.array(keep_flags,dtype=int)
-        
-    #Matrix which records the probabilities of seeing one thing when the true value is another
-    #This is used for calculating posteriors later down the line,
-    #Moving across rows we see true baseline genotype and across columns we have observed sample genotype
-    eps = value_error_rate 
-    value_error_matrix = [[(1-eps)**2,2*eps*(1-eps),eps**2],
-                          [eps*(1-eps),eps**2+(1-eps)**2,eps*(1-eps)],
-                          [eps**2,2*eps*(1-eps),(1-eps)**2]]
-    
-        
-
-    num_haps = data_shape[0]
-    num_rows = data_shape[0]
-    num_cols = data_shape[1]
-    num_geno = data_shape[0]*data_shape[1]
-    
-    num_sites = data_shape[2]
-    
-    starting_probabilities = make_upper_triangular((1/num_geno)*np.ones((num_haps,num_haps)))
-    log_current_probabilities = np.log(starting_probabilities)
-    
-    prev_best = np.empty((data_shape[0],data_shape[1]),dtype=object)
-    prev_best[:] = [[(i,j) for j in range(data_shape[1])] for i in range(data_shape[0])]
-
-    log_probs_history = [copy.deepcopy(log_current_probabilities)]
-    prev_best_history = [copy.deepcopy(prev_best)]
-    
-    last_site_loc = None
-    
-    for loc in range(num_sites):
-        if keep_flags[loc] != 1:
-            log_probs_history.append(copy.deepcopy(log_current_probabilities))
-            prev_best_history.append(copy.deepcopy(prev_best))
-        else:
-            
-            if last_site_loc == None:
-                distance_since_last_site = 0
-            else:
-                distance_since_last_site = site_locations[loc]-last_site_loc
-            
-        
-            #Update last_site_loc
-            last_site_loc = site_locations[loc]
-            
-            #Create transition probability matrix            
-            num_possible_switches = num_rows+num_cols-1
-
-            non_switch_prob = (1-recomb_rate)**distance_since_last_site
-            
-            each_switch_prob= (1-non_switch_prob)/num_possible_switches
-
-            #Account for the fact that we can recombine back to the haplotype pre recombination
-            total_non_switch_prob = non_switch_prob+each_switch_prob
-            
-            transition_probs = np.zeros((num_rows,num_cols,num_rows,num_cols))
-            
-            for i in range(num_rows):
-                for j in range(i,num_cols):
-                    transition_probs[i,j,:,j] = each_switch_prob
-                    transition_probs[i,j,i,:] = each_switch_prob
-                    transition_probs[i,j,i,j] = total_non_switch_prob
-                    
-                    transition_probs[i,j,:,:] = make_upper_triangular(transition_probs[i,j,:,:])
-                    
-            
-            
-            site_sample_val = sample_probs[loc]
-            
-            genotype_vals = full_combined_genotypes[:,:,loc,:]
-
-            #Calculate for each genotype combination the probability it equals x and the true data equals y
-            all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
-            
-            #Calculate for each genotype combination the probability of seeing the data given the true underlying genotype 
-            prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
-            
-            #Calculate the probability of switching to state (k,l) and seeing our observed data given that we started in state (i,j)
-            prob_switch_seen = np.einsum("ijkl,kl->ijkl",transition_probs,prob_data_given_comb)
-            
-            log_prob_switch_seen = np.log(prob_switch_seen)
-            
-            extended_log_cur_probs = copy.deepcopy(log_current_probabilities)
-            extended_log_cur_probs = np.expand_dims(extended_log_cur_probs,2)
-            extended_log_cur_probs = np.expand_dims(extended_log_cur_probs,3)
-            extended_log_cur_probs = np.repeat(extended_log_cur_probs,num_rows,axis=2)
-            extended_log_cur_probs = np.repeat(extended_log_cur_probs,num_cols,axis=3)
-            
-            log_total_combined_probability = extended_log_cur_probs+log_prob_switch_seen
-            
-            best_matches = np.empty((data_shape[0],data_shape[1]),dtype=object)
-            best_log_probs = np.empty((data_shape[0],data_shape[1]),dtype=float)
-            
-            for k in range(num_rows):
-                for l in range(num_cols):
-                    comb_data = log_total_combined_probability[:,:,k,l]
-                    max_combination = np.unravel_index(np.argmax(comb_data), comb_data.shape)
-                    max_val = comb_data[max_combination]
-                    
-                    best_matches[k,l] = max_combination
-                    best_log_probs[k,l] = max_val
-            
-            log_current_probabilities = best_log_probs
-            prev_best = best_matches
-            
-            log_probs_history.append(copy.deepcopy(log_current_probabilities))
-            prev_best_history.append(copy.deepcopy(prev_best))
-    
-    #Now we can work backwards to figure out the most likely path for the sample
-    reversed_path = []
-    
-    cur_place = np.unravel_index(np.argmax(log_probs_history[-1]), log_probs_history[-1].shape)
-    
-    reversed_path.append(cur_place)
-    
-    for i in range(len(prev_best_history)-1,-1,-1):
-        cur_place = prev_best_history[i][cur_place[0],cur_place[1]]
-        reversed_path.append(cur_place)
-    
-    return (reversed_path,log_probs_history,prev_best_history)
-
-def make_heatmap_path(best_path,num_haps):
-    """
-    Makes a heatmap based on max likelihood path
-    """
-    
-    def flattenutrm(matrix):
-        """
-        flatten an upper triangular matrix
-        """
-        num_rows = matrix.shape[0]
-        
-        fltr = []
-        
-        for i in range(num_rows):
-            fltr.extend(matrix[i,i:])
-        
-        return fltr
-    
-    flattened_list = []
-    
-    for i in range(len(best_path)):
-        make_matrix = np.zeros((num_haps,num_haps))
-        make_matrix[best_path[i][0],best_path[i][1]] = 1
-        flattened_list.append(flattenutrm(make_matrix))
-    
-    flattened_array = np.array(flattened_list).transpose()
-    
-    hap_names = []
-
-    for i in range(num_haps):
-        for j in range(i,num_haps):
-            hap_names.append(f"({i},{j})")
-
-    fig,ax = plt.subplots()
-    fig.set_size_inches(11,6)
-    sns.heatmap(flattened_array,yticklabels=hap_names)
-    plt.title(f"Recombination rate: {recomb_rate}")
-    plt.show()
 
 
 #%%

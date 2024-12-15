@@ -1,96 +1,121 @@
-import itertools
 import matplotlib.pyplot as plt
-import networkx as nx
+import matplotlib.patches as patches
 import numpy as np
-
-subset_sizes = [5, 5, 4, 3, 2, 4, 4, 3]
-subset_color = [
-    "gold",
-    "violet",
-    "violet",
-    "violet",
-    "violet",
-    "limegreen",
-    "limegreen",
-    "darkorange",
-]
-
-def nodes_list_to_pos(nodes_list,layer_dist = 3,vert_dist=2):
-    """
-    Takes as input a list of nodes which are a 2-tuple with the
-    first element of the tuple signifying the layer and the second
-    the identifier within the layer. The second identifer must begin 
-    with 0 and count upwards from there for each layer
-    
-    Returns a list of positions for plotting the layers in networkx
-    """
-    
-    offset = layer_dist/2
-    
-    pos_dict = {}
-    
-    num_in_layer = {}
-    
-    for node in nodes_list:
-        if node[0] not in num_in_layer.keys():
-            num_in_layer[node[0]] = 0
-        num_in_layer[node[0]] += 1
-    
-    for node in nodes_list:
-        x_val = node[0]*layer_dist+offset
-        
-        total_vert_dist = (num_in_layer[node[0]]-1)*vert_dist
-        
-        
-        top_starting = total_vert_dist/2
-        
-        y_val = top_starting-node[1]*vert_dist
-        
-        pos_dict[node] = np.array([x_val,y_val])
-    
-    return pos_dict
-
-nodes = [(0,0),(0,1),(0,2),(0,3),(1,0),(1,1),(3,0),(3,1),(3,2)]
-
-nodes_pos = nodes_list_to_pos(nodes)
-G = nx.Graph()
-G.add_nodes_from(nodes)
-nx.draw(G,pos=nodes_pos)
-plt.show()
+import math
 #%%
-a = [0,1,2,3]
-b = []
-c = [4,5]
-d = [6,7,8]
-G = nx.Graph()
-G.add_nodes_from(a,layer=0)
-#G.add_nodes_from(b,layer=1)
-G.add_nodes_from(c,layer=2)
-G.add_nodes_from(d,layer=3)
-pos = nx.multipartite_layout(G, subset_key="layer")
-pos[7] = np.array([-2,-2])
-
-G.add_edges_from([(7,8)])
-print(pos)
-nx.draw(G,pos)
-plt.show()
+def plot_queue(x,y,queue_width,queue_sizes_list):
+    
+    
+    rect_big = patches.Rectangle((x,y),width=queue_width,
+                                 height=0.1,color="k",
+                                 fill=False)
+    
+    make_rects = []
+    cur_start = x
+    
+    tot_size_so_far = 0
+    
+    total_queue_size = sum(queue_sizes_list)
+    
+    queue_rels = np.array(queue_sizes_list)/total_queue_size
+    
+    ax.text(x-0.05,y+0.03,s="F",fontsize=30)
+    ax.text(x+queue_width+0.03,y+0.03,s="R",fontsize=30)
+    
+    ax.text(x-0.07,y-0.07,s="PIQ",fontsize=30)
+    ax.text(x-0.125,y-0.17,s="Rel PIQ",fontsize=30)
+    
+    for i in range(len(queue_rels)):
+        rect_width = queue_rels[i]*queue_width
+        make_rects.append(patches.Rectangle((cur_start,y),width=rect_width,
+                                     height=0.1,color="k",
+                                     fill=False))
+        
+        if queue_sizes_list[i] == 0:
+            num_digits_in_text = 1
+        else:
+            num_digits_in_text = 1+math.floor(math.log10(queue_sizes_list[i]))
+        ax.text(cur_start+rect_width/2-0.01*num_digits_in_text,y+0.03,s=f"{queue_sizes_list[i]}",fontsize=30)
+        
+        if tot_size_so_far == 0:
+            num_digits_in_piq = 1
+        else:
+            num_digits_in_piq = 1+math.floor(math.log10(tot_size_so_far))
+        ax.text(cur_start+rect_width/2-0.01*num_digits_in_piq,y-0.07,s=f"{tot_size_so_far}",fontsize=30)
+            
+        num_digits_in_rel_piq = 3.5
+        ax.text(cur_start+rect_width/2-0.01*num_digits_in_rel_piq,y-0.17,s=f"{tot_size_so_far/total_queue_size:.2f}",fontsize=30)
+            
+        
+        tot_size_so_far += queue_sizes_list[i]
+        
+        cur_start += rect_width
+        
+    for rect in make_rects:
+        ax.add_patch(rect)
+        
+    ax.add_patch(rect_big)
+    
 #%%
-def multilayered_graph(*subset_sizes):
-    extents = nx.utils.pairwise(itertools.accumulate((0,) + subset_sizes))
-    layers = [range(start, end) for start, end in extents]
-    print(layers)
-    G = nx.Graph()
-    for i, lay in enumerate(layers):
-        G.add_nodes_from(lay, layer=i**2)
-    # for layer1, layer2 in nx.utils.pairwise(layers):
-    #     G.add_edges_from(itertools.product(layer1, layer2))
-    return G
+fig,ax = plt.subplots()
+
+fig.set_facecolor("#f2e1d8")
+ax.set_facecolor("#f2e1d8")
+fig.set_size_inches(18,10)
+
+plot_queue(0.25,0.5,0.5,[5,8,10,3,20])
+
+ax.axis('off')
 
 
-G = multilayered_graph(*subset_sizes)
-#color = [subset_color[data["layer"]] for v, data in G.nodes(data=True)]
-pos = nx.multipartite_layout(G, subset_key="layer")
-plt.figure(figsize=(8, 8))
-nx.draw(G, pos, with_labels=False)
-plt.axis("equal")
+plt.show()
+
+#%%
+fig,ax = plt.subplots()
+
+fig.set_facecolor("#f2e1d8")
+ax.set_facecolor("#f2e1d8")
+ax.set_xbound(0,1)
+ax.set_ybound(0,1)
+fig.set_size_inches(8,10)
+
+rect_big = patches.Rectangle((0.3,0.4),width=0.4,
+                             height=0.1,color="k",
+                             fill=False)
+ax.text(0.34,0.43,s="Exchange",fontsize=30)
+
+p1 = patches.Rectangle((0.7,0.7),width=0.1,
+                       height=0.1,color="k",fill=False)
+p2 = patches.Rectangle((0.85,0.4),width=0.1,
+                       height=0.1,color="k",fill=False)
+p3 = patches.Rectangle((0.7,0.1),width=0.1,
+                       height=0.1,color="k",fill=False)
+us = patches.Rectangle((0.1,0.7),width=0.2,
+                       height=0.1,color="k",fill=False)
+
+ex_arrow = patches.Arrow(0.69,0.2,-0.18,0.18,
+                         width=0.1,color="#4a1000")
+
+us_arrow = patches.Arrow(0.69,0.2,-0.18,0.18,
+                         width=0.1,color="#4a1000")
+
+ax.text(0.34,0.43,s="Exchange",fontsize=30)
+ax.text(0.71,0.73,s="P1",fontsize=30)
+ax.text(0.86,0.43,s="P2",fontsize=30)
+ax.text(0.71,0.13,s="P3",fontsize=30)
+ax.text(0.16,0.73,s="Us",fontsize=30)
+
+
+ax.add_patch(rect_big)
+ax.add_patch(p1)
+ax.add_patch(p2)
+ax.add_patch(p3)
+ax.add_patch(us)
+
+ax.add_patch(ex_arrow)
+#ax.add_patch(us_arrow)
+
+ax.axis('off')
+
+
 plt.show()
