@@ -337,6 +337,7 @@ def generate_distance_matrix(probs_array,
     processing_pool = Pool(processes=8)    
     
     dist_matrix = []
+
     
     dist_matrix = processing_pool.starmap(
         lambda x,y : calc_distance_row(x,probs_copy,y,calc_type=calc_type),
@@ -955,10 +956,11 @@ def get_initial_haps(site_priors,
         homs_array[:,:,2] += 0.5*homs_array[:,:,1]
         
         homs_array = homs_array[:,:,[0,2]]
+        
     
         dist_submatrix = generate_distance_matrix(
             homs_array,keep_flags=keep_flags,
-            calc_type="haploid")
+            calc_type="haploid")        
         
         #First do clustering looking for at least 2 clusters, if that fails rerun allowing single clusters
         try:
@@ -1215,12 +1217,9 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
     
     (site_priors,probs_array) = reads_to_probabilities(reads_array)
     
-    print("Probabilities Obtained")
-    
     initial_haps = get_initial_haps(site_priors,probs_array,
         reads_array,keep_flags=keep_flags)
-    
-    print("Initial Haps Obtained")
+
     
     initial_matches = match_best(initial_haps,probs_array,keep_flags=keep_flags)
     initial_error = np.mean(initial_matches[2])
@@ -2332,7 +2331,7 @@ def generate_long_haplotypes(full_positions_data,full_reads_data,num_long_haps,
 
 
     all_haps = generate_haplotypes_all(full_positions_data,full_reads_data,full_keep_flags)
-    all_matches = get_best_matches_all_blocks(all_haps)
+    #all_matches = get_best_matches_all_blocks(all_haps)
     
     hap_matching_overlap = match_haplotypes_by_overlap_probabalistic(all_haps)
     hap_matching_samples = match_haplotypes_by_samples_probabalistic(all_haps)
