@@ -260,6 +260,14 @@ def chunk_up_data(positions_list,reads_array,
     
     return (chunked_positions[:-1],chunked_keep_flags[:-1],chunked_reads[:-1])
         
+def calc_distance_concrete(first_row,second_row):
+    """
+    Calculate the L1 distance between two rows
+    """
+    
+    diff = np.sum(np.abs(first_row-second_row))
+    
+    return diff
         
 #%%
 data = final_test[1]
@@ -273,8 +281,18 @@ f3 = create_new_generation(f2,final_test[0],200,recomb_rate=10**-6,mutate_rate=1
 
 all_offspring = [xs for x in [f1,f2,f3] for xs in x]
 #%%
-new_reads_array = read_sample_all_individuals(all_offspring,3)
+new_reads_array = read_sample_all_individuals(all_offspring,30)
 #%%
 (simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(final_test[0],new_reads_array,2500000,100000,50000)
 #%%
 simd_haps = generate_long_haplotypes(simd_pos,simd_reads,6,simd_keep_flags)
+#%%
+len(simd_haps)
+#%%
+simd_conc = concretify_haps(simd_haps[1])
+
+#%%
+for i in range(len(final_test[1])):
+    for j in range(len(simd_haps[1])):
+        print(i,j,f"{100*calc_distance_concrete(cm[i],simd_conc[j])/len(simd_haps[1][i]):.2f}%")
+    print()
