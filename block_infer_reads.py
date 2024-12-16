@@ -140,6 +140,25 @@ def cleanup_block_reads(block_list,min_frequency=0.0,
     
     return (cleaned_positions,np.array(keep_flags),reads_array)
 
+def cleanup_block_reads_list(full_list_of_blocks):
+    """
+    Function which applies cleanup_block_reads to the first
+    element of every single element of full_list_of_blocks
+    """
+    
+    cleaned_pos_list = []
+    cleaned_keep_flags = []
+    cleaned_reads_arrays = []
+    
+    for i in range(len(full_list_of_blocks)):
+        (a,b,c) = cleanup_block_reads(full_list_of_blocks[i][0])
+        
+        cleaned_pos_list.append(a)
+        cleaned_keep_flags.append(b)
+        cleaned_reads_arrays.append(c)
+    
+    return (cleaned_pos_list,cleaned_keep_flags,cleaned_reads_arrays)
+
 def resample_reads_array(reads_array,resample_depth):
     """
     Resample the reads array to a reduced read depth
@@ -162,6 +181,8 @@ def log_fac(x):
     Returns log(x!) exactly if x < 150, otherwise returns
     Stirling's approximation to it
     """
+    x = int(x)
+    
     if x < 150:
         return math.log(math.factorial(x))
     else:
@@ -171,6 +192,9 @@ def log_binomial(n,k):
     Returns log(nCk) exactly if n,k < 150, otherwise caclulates
     the consituent factorials through Stirling's approximation
     """
+    n = int(n)
+    k = int(k)
+    
     if n < 150:
         return math.log(math.comb(n,k))
     else:
@@ -1162,7 +1186,7 @@ def truncate_haps(candidate_haps,candidate_matches,genotype_array,
     
     return final_haps
 
-def generate_block_haps_from_reads(positions,reads_array,keep_flags=None,
+def generate_haplotypes_block(positions,reads_array,keep_flags=None,
                               error_reduction_cutoff = 0.98,
                               max_cutoff_error_increase = 1.02,
                               max_hapfind_iter=5,
@@ -1191,9 +1215,12 @@ def generate_block_haps_from_reads(positions,reads_array,keep_flags=None,
     
     (site_priors,probs_array) = reads_to_probabilities(reads_array)
     
+    print("Probabilities Obtained")
     
     initial_haps = get_initial_haps(site_priors,probs_array,
         reads_array,keep_flags=keep_flags)
+    
+    print("Initial Haps Obtained")
     
     initial_matches = match_best(initial_haps,probs_array,keep_flags=keep_flags)
     initial_error = np.mean(initial_matches[2])
@@ -1249,36 +1276,8 @@ def generate_block_haps_from_reads(positions,reads_array,keep_flags=None,
         
     return (positions,keep_flags,reads_array,final_haps)
     
-def generate_haplotypes_block(block_data,
-                              error_reduction_cutoff = 0.98,
-                              max_cutoff_error_increase = 1.02,
-                              max_hapfind_iter=5,
-                              make_pca=False,
-                              deeper_analysis_initial=False,
-                              min_num_haps=0):
-    """
-    Given a block of sample data generates the haplotypes that make up
-    the samples present
-    
-    min_num_haps is a (soft) minimum value for the number of haplotypes,
-    if we have fewer than that many haps we iterate further to get more 
-    haps.
-    
-    This function is mostly a wrapper around generate_block_haps_from_reads
-    to enable it to work with VCF data directly
-    
-    """
-    
-    (positions,reads_array,keep_flags) = cleanup_block_reads(block_data,min_frequency=0)
-    
-    return generate_block_haps_from_reads(
-        positions,keep_flags,reads_array,error_reduction_cutoff = error_reduction_cutoff,
-        max_cutoff_error_increase = max_cutoff_error_increase,
-        max_hapfind_iter=max_hapfind_iter,make_pca=make_pca,
-        deeper_analysis_initial=deeper_analysis_initial,min_num_haps=min_num_haps)
 
-
-def generate_haplotypes_all_from_reads(positions_data,reads_array_data,keep_flags_data=None):
+def generate_haplotypes_all(positions_data,reads_array_data,keep_flags_data=None):
     """
     Generate a list of block haplotypes which make up each element 
     of the list of reads array data
@@ -1291,31 +1290,14 @@ def generate_haplotypes_all_from_reads(positions_data,reads_array_data,keep_flag
     
     for i in range(len(positions_data)):
         
+        print(f"Doing {i}")
+        
         this_pos_data = positions_data[i]
         this_reads_data = reads_array_data[i]
         this_keep_flags_data = keep_flags_data[i]
         
-        overall_haplotypes.append(generate_block_haps_from_reads(
-            this_pos_data,this_reads_data,this_keep_flags_data))
-    
-    return overall_haplotypes
-
-
-def generate_haplotypes_all(chromosome_data):
-    """
-    Generate a list of block haplotypes which make up each element 
-    of the list of blocks of VCF data
-    """
-    
-    overall_haplotypes = []
-    
-    for i in range(len(chromosome_data)):
-        print(i,chromosome_data[i][1])
-        
-        
         overall_haplotypes.append(generate_haplotypes_block(
-            chromosome_data[i][0]))
-
+            this_pos_data,this_reads_data,this_keep_flags_data))
     
     return overall_haplotypes
 
@@ -2339,6 +2321,35 @@ def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
     
     return (reversed_path,log_probs_history,prev_best_history)
 
+def generate_long_haplotypes(full_positions_data,full_reads_data,num_long_haps,
+                             full_keep_flags=None,block_size=100000,shift_size=50000,
+                             node_usage_penalty=10,edge_usage_penalty=10):
+    """
+    Takes as input a list of VCF Record data where each element represents 
+    full data for a single site for all the samples. Runs the full pipline 
+    and generates num_long_haps many full length haplotypes 
+    """
+
+
+    all_haps = generate_haplotypes_all(full_positions_data,full_reads_data,full_keep_flags)
+    all_matches = get_best_matches_all_blocks(all_haps)
+    
+    hap_matching_overlap = match_haplotypes_by_overlap_probabalistic(all_haps)
+    hap_matching_samples = match_haplotypes_by_samples_probabalistic(all_haps)
+    
+    node_names = hap_matching_overlap[0]
+    
+    combined_scores = get_combined_hap_score(hap_matching_overlap,hap_matching_samples[2])
+    
+    chained_block_haps = generate_chained_block_haplotypes(all_haps,
+                        node_names,combined_scores,num_long_haps,
+                        node_usage_penalty=node_usage_penalty,
+                        edge_usage_penalty=edge_usage_penalty)
+    
+    final_long_haps = combine_all_blocks_to_long_haps(all_haps,chained_block_haps)
+
+    return final_long_haps    
+
 #%%
 
 def nodes_list_to_pos(nodes_list,layer_dist = 4,vert_dist=2):
@@ -2442,6 +2453,7 @@ def change_labeling(haplotype_data,relabeling_dict):
     new_labeling = []
     
     for i in range(len(haplotype_data)):
+        
         hap_dict = haplotype_data[i][3]
         new_hap_dict = {}
         
@@ -2644,48 +2656,26 @@ ending = 100
 
 
 chr1 = list(break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
+combi = [chr1[i] for i in range(starting,ending)]
+
+(pos_broken,keep_flags_broken,reads_array_broken) = cleanup_block_reads_list(combi)
+
 #%%
-def generate_long_haplotypes(bcf_file,num_long_haps,contig_name,
-                             block_size=100000,shift_size=50000):
-    """
-    Takes as input a list of VCF Record data where each element represents 
-    full data for a single site for all the samples. Runs the full pipline 
-    and generates num_long_haps many full length haplotypes 
-    """
-    
-    contig_data = list(break_contig(bcf_file,contig_name,block_size=block_size,shift=shift_size))
-    
-    starting = 50 #Use 0 here for full array
-    ending = 100
-    
-    full_data = get_vcf_subset(bcf,"chr1",starting*shift_size,(ending+1)*shift_size)
-    (full_positions,full_keep_flags,full_reads_array) = cleanup_block_reads(full_data,min_frequency=0)
-    (full_site_priors,full_probs_array) = reads_to_probabilities(full_reads_array)
+final_test = generate_long_haplotypes(pos_broken,reads_array_broken,6,keep_flags_broken)
 #%%
+mark = combine_long_haplotypes(final_test[1])
+
 full_data = get_vcf_subset(bcf,"chr1",starting*shift_size,(ending+1)*shift_size)
 (full_positions,full_keep_flags,full_reads_array) = cleanup_block_reads(full_data,min_frequency=0)
 (full_site_priors,full_probs_array) = reads_to_probabilities(full_reads_array)
-#%%
-combi = [chr1[i] for i in range(starting,ending)]
-my_haps = generate_haplotypes_all(combi)
-#%%
-my_matches = get_best_matches_all_blocks(my_haps)
-#%%
-hat = match_haplotypes_by_overlap(my_haps)
-ham = match_haplotypes_by_samples(my_haps)
-#%%
-hax = match_haplotypes_by_overlap_probabalistic(my_haps)
-has = match_haplotypes_by_samples_probabalistic(my_haps)
-#%%
-generate_graph_from_matches(ham[2],planarify=True)
-#%%
-scor = get_combined_hap_score(hax,has[2])
-#%%
-finals = generate_chained_block_haplotypes(my_haps,hax[0],scor,6,edge_usage_penalty=10,node_usage_penalty=10)
-#%%
-sa = combine_all_blocks_to_long_haps(my_haps,finals)
-#%%
-mark = combine_long_haplotypes(sa[1])
+
+recomb_rate = 10**-8
+resu = compute_likeliest_path(mark,full_probs_array[0],
+            full_positions,keep_flags=full_keep_flags,
+            recomb_rate=recomb_rate,value_error_rate=10**-3)    
+
+make_heatmap_path(resu[0],6)
+
 #%%
 
 def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
@@ -2831,16 +2821,3 @@ def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations
     
     return results
 
-
-#%%
-recomb_rate = 10**-8
-resu = compute_likeliest_path(mark,full_probs_array[0],
-            full_positions,keep_flags=full_keep_flags,
-            recomb_rate=recomb_rate,value_error_rate=10**-3)    
-
-make_heatmap_path(resu[0],6)
-
-#%%
-resu[0][8850:9000]
-#%%
-full_positions[8850:9000]
