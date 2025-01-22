@@ -6,8 +6,8 @@ progeny of founders made up of these haplotypes
 import random
 import numpy as np
 import pickle
-import ujson
 
+#%%
 def concretify_haps(haps_list):
     """
     Takes a list of probabalistic haps and turns each of them 
@@ -275,19 +275,18 @@ data = final_test[1]
 cm = concretify_haps(data)
 pa = pairup_haps(cm)
 #%%
-f1 = create_new_generation(pa,final_test[0],10,recomb_rate=10**-6,mutate_rate=10**-6)
-f2 = create_new_generation(f1,final_test[0],100,recomb_rate=10**-6,mutate_rate=10**-6)
-f3 = create_new_generation(f2,final_test[0],200,recomb_rate=10**-6,mutate_rate=10**-6)
+f1 = create_new_generation(pa,final_test[0],10,recomb_rate=10**-7,mutate_rate=10**-10)
+f2 = create_new_generation(f1,final_test[0],100,recomb_rate=10**-7,mutate_rate=10**-10)
+f3 = create_new_generation(f2,final_test[0],200,recomb_rate=10**-7,mutate_rate=10**-10)
 
 all_offspring = [xs for x in [f1,f2,f3] for xs in x]
 #%%
-new_reads_array = read_sample_all_individuals(all_offspring,30)
+new_reads_array = read_sample_all_individuals(all_offspring,2,error_rate=0.02)
 #%%
 (simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(final_test[0],new_reads_array,2500000,100000,50000)
+
 #%%
-simd_haps = generate_long_haplotypes(simd_pos,simd_reads,6,simd_keep_flags)
-#%%
-len(simd_haps)
+(simd_block_haps,simd_haps) = block_linking_naive.generate_long_haplotypes_naive(simd_pos,simd_reads,6,simd_keep_flags)
 #%%
 simd_conc = concretify_haps(simd_haps[1])
 
@@ -295,4 +294,17 @@ simd_conc = concretify_haps(simd_haps[1])
 for i in range(len(final_test[1])):
     for j in range(len(simd_haps[1])):
         print(i,j,f"{100*calc_distance_concrete(cm[i],simd_conc[j])/len(simd_haps[1][i]):.2f}%")
+    print()
+#%%
+base_idx = 31
+
+start_pos = 2500000+50000*base_idx
+start_index = np.where(final_test[0] > start_pos)[0][0]
+block_num_sites = len(simd_block_haps[base_idx][0])
+end_index = start_index + block_num_sites
+
+for i in range(len(final_test[1])):
+    hap = final_test[1][i][start_index:end_index]
+    for j in range(len(simd_block_haps[base_idx][3])):
+        print(i,j,f"{100*calc_distance(hap,simd_block_haps[base_idx][3][j],calc_type='haploid')/len(hap):.2f}%")
     print()
