@@ -7,6 +7,9 @@ import random
 import numpy as np
 import pickle
 
+import block_linking_naive
+import analysis_utils
+
 #%%
 def concretify_haps(haps_list):
     """
@@ -205,7 +208,30 @@ def read_sample_all_individuals(individual_list,read_depth,error_rate=0.02):
     
     np_array = np.array(sampled,dtype=int)
     
-    return np_array
+    return np_array        
+
+def combine_into_genotype(individual_list,sites_data):
+    """
+    Takes as input a list of pairs of haplotypes meant to represent 
+    an individual and turn them into a combined likelihood genotype
+    """
+    all_list = []
+    
+    for i in range(len(individual_list)):
+        indexing = individual_list[i][0]+individual_list[i][1]
+        num_sites = len(indexing)
+        
+        base_array = [np.array(range(num_sites)).reshape(1,-1),indexing.reshape(1,-1)]
+        
+        combined_indexing = np.concatenate(base_array,axis=0).T
+        
+        scaffold = np.zeros((num_sites,3))
+        
+        scaffold[combined_indexing[:,0],combined_indexing[:,1]] = 1
+        
+        all_list.append(scaffold)
+    
+    return [sites_data,all_list]
     
 def chunk_up_data(positions_list,reads_array,
                   starting_pos,block_size,shift_size,
@@ -270,20 +296,23 @@ def calc_distance_concrete(first_row,second_row):
     return diff
         
 #%%
-data = final_test[1]
+haplotype_sites = final_test[0]
+haplotype_data = final_test[1]
     
-cm = concretify_haps(data)
+cm = concretify_haps(haplotype_data)
 pa = pairup_haps(cm)
 #%%
-f1 = create_new_generation(pa,final_test[0],10,recomb_rate=10**-7,mutate_rate=10**-10)
-f2 = create_new_generation(f1,final_test[0],100,recomb_rate=10**-7,mutate_rate=10**-10)
-f3 = create_new_generation(f2,final_test[0],200,recomb_rate=10**-7,mutate_rate=10**-10)
+f1 = create_new_generation(pa,haplotype_sites,10,recomb_rate=10**-7,mutate_rate=10**-10)
+f2 = create_new_generation(f1,haplotype_sites,100,recomb_rate=10**-7,mutate_rate=10**-10)
+f3 = create_new_generation(f2,haplotype_sites,200,recomb_rate=10**-7,mutate_rate=10**-10)
 
+#%%
 all_offspring = [xs for x in [f1,f2,f3] for xs in x]
+offspring_genotype_likelihoods = combine_into_genotype(all_offspring,haplotype_sites)
 #%%
-new_reads_array = read_sample_all_individuals(all_offspring,2,error_rate=0.02)
+new_reads_array = read_sample_all_individuals(all_offspring,10,error_rate=0.02)
 #%%
-(simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(final_test[0],new_reads_array,2500000,100000,50000)
+(simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(haplotype_sites,new_reads_array,2500000,100000,50000)
 
 #%%
 (simd_block_haps,simd_haps) = block_linking_naive.generate_long_haplotypes_naive(simd_pos,simd_reads,6,simd_keep_flags)
@@ -291,20 +320,20 @@ new_reads_array = read_sample_all_individuals(all_offspring,2,error_rate=0.02)
 simd_conc = concretify_haps(simd_haps[1])
 
 #%%
-for i in range(len(final_test[1])):
+for i in range(len(haplotype_data)):
     for j in range(len(simd_haps[1])):
         print(i,j,f"{100*calc_distance_concrete(cm[i],simd_conc[j])/len(simd_haps[1][i]):.2f}%")
     print()
 #%%
-base_idx = 31
+base_idx = 17
 
 start_pos = 2500000+50000*base_idx
-start_index = np.where(final_test[0] > start_pos)[0][0]
+start_index = np.where(haplotype_sites > start_pos)[0][0]
 block_num_sites = len(simd_block_haps[base_idx][0])
 end_index = start_index + block_num_sites
 
-for i in range(len(final_test[1])):
-    hap = final_test[1][i][start_index:end_index]
+for i in range(len(haplotype_data)):
+    hap = haplotype_data[i][start_index:end_index]
     for j in range(len(simd_block_haps[base_idx][3])):
-        print(i,j,f"{100*calc_distance(hap,simd_block_haps[base_idx][3][j],calc_type='haploid')/len(hap):.2f}%")
+        print(i,j,f"{100*analysis_utils.calc_distance(hap,simd_block_haps[base_idx][3][j],calc_type='haploid')/len(hap):.2f}%")
     print()
