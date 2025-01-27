@@ -634,12 +634,22 @@ def generate_further_haps(site_priors,
     
     
     try:
-        initial_clusters = hdbscan_cluster(
-                            dist_submatrix,
-                            min_cluster_size=len(initial_haps)+1,
-                            min_samples=1,
-                            cluster_selection_method="eom",
-                            alpha=1.0)
+        print(f"Cand len {len(candidate_haps)}")
+        if len(candidate_haps) > 1:
+            initial_clusters = hdbscan_cluster(
+                                dist_submatrix,
+                                min_cluster_size=len(initial_haps)+1,
+                                min_samples=1,
+                                cluster_selection_method="eom",
+                                alpha=1.0)
+        else: #Here candidate haps will have length = 1
+            final_haps = add_distinct_haplotypes_smart(initial_haps,
+                        {0:candidate_haps[0]},probs_array,
+                        keep_flags=keep_flags)
+            
+            print("Down HERE")
+            print(final_haps)
+            return final_haps
     except:
         print(dist_submatrix)
         print(candidate_haps)

@@ -35,6 +35,21 @@ def log_binomial(n,k):
     else:
         return log_fac(n)-log_fac(k)-log_fac(n-k)
     
+def add_log_likelihoods(logli_list):
+    """
+    Takes as input a list of log likelihoods (in base e) and 
+    accurately approximates the log of the sum of 
+    the actual probabilities
+    """
+    logli = np.array(logli_list)
+    ma = max(logli)
+    logli = logli-ma
+    logli = logli[logli > -50]
+    probs = np.exp(logli)
+    sum_probs = np.sum(probs)
+    
+    return ma+math.log(sum_probs)
+
 def make_upper_triangular(matrix):
     """
     Make a matrix upper triangular by adding the value at 
@@ -128,6 +143,25 @@ def calc_distance(first_row,second_row,calc_type="diploid"):
     
     return np.sum(ensd,axis=None)
 
+def calc_distance_by_site(first_row,second_row,calc_type="diploid"):
+    """
+    Like calc_distance but instead of summing everything up at
+    the end this function gives the distance by site
+    """
+    if calc_type == "diploid":
+        distances = [[0,1,2],[1,0,1],[2,1,0]]
+    else:
+        distances = [[0,1],[1,0]]
+        
+    #print(first_row[:10],second_row[:10])
+    
+    #print(np.where(np.isnan(second_row)))
+        
+    ens = np.einsum("ij,ik->ijk",first_row,second_row)
+    ensd = ens * distances
+    
+    return np.sum(ensd,axis=(1,2))
+    
 def calc_perc_difference(first_row,second_row,calc_type="diploid"):
     """
     Calculate the probabalistic percentage difference between two rows
@@ -172,13 +206,10 @@ def generate_distance_matrix(probs_array,
     
     probs_copy = probs_array.copy()
 
-    
-    print("SP")
     processing_pool = Pool(processes=8)    
     
     dist_matrix = []
 
-    print("MT")
     dist_matrix = processing_pool.starmap(
         lambda x,y : calc_distance_row(x,probs_copy,y,calc_type=calc_type),
         zip(probs_array,range(num_samples)))
