@@ -231,7 +231,7 @@ def combine_into_genotype(individual_list,sites_data):
         
         all_list.append(scaffold)
     
-    return [sites_data,all_list]
+    return [sites_data,np.array(all_list)]
     
 def chunk_up_data(positions_list,reads_array,
                   starting_pos,block_size,shift_size,
@@ -313,7 +313,7 @@ offspring_genotype_likelihoods = combine_into_genotype(all_offspring,haplotype_s
 new_reads_array = read_sample_all_individuals(all_offspring,10,error_rate=0.02)
 #%%
 (simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(haplotype_sites,new_reads_array,2500000,100000,50000)
-
+simd_probabalistic_genotypes = analysis_utils.reads_to_probabilities(new_reads_array)
 #%%
 (simd_block_haps,simd_haps) = block_linking_naive.generate_long_haplotypes_naive(simd_pos,simd_reads,6,simd_keep_flags)
 #%%
@@ -325,7 +325,7 @@ for i in range(len(haplotype_data)):
         print(i,j,f"{100*calc_distance_concrete(cm[i],simd_conc[j])/len(simd_haps[1][i]):.2f}%")
     print()
 #%%
-base_idx = 17
+base_idx = 26
 
 start_pos = 2500000+50000*base_idx
 start_index = np.where(haplotype_sites > start_pos)[0][0]

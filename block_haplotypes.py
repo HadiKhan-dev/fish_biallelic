@@ -309,7 +309,8 @@ def add_distinct_haplotypes_smart(initial_haps,
                         new_candidate_haps,
                         probs_array,
                         keep_flags=None,
-                        loss_reduction_cutoff_ratio =0.98):
+                        loss_reduction_cutoff_ratio =0.98,
+                        use_multiprocessing=False):
     """
     Takes two lists of haplotypes and creates a new dictionary of
     haplotypes containing all the first ones as well as those
@@ -331,7 +332,8 @@ def add_distinct_haplotypes_smart(initial_haps,
 
     """
     
-    processing_pool = Pool(processes=8)
+    if use_multiprocessing:
+        processing_pool = Pool(processes=16)
     
     for x in initial_haps.keys():
         orig_hap_len = len(initial_haps[x])
@@ -404,7 +406,7 @@ def truncate_haps(candidate_haps,
     """
     Truncate a list of haplotypes so that only the necessary ones remain
     """
-    processing_pool = Pool(processes=8)
+    processing_pool = Pool(processes=16)
     
     cand_copy = candidate_haps.copy()
     cand_matches = candidate_matches
@@ -762,17 +764,26 @@ def generate_haplotypes_all(positions_data,reads_array_data,keep_flags_data=None
     if keep_flags_data == None:
         keep_flags_data = [None for i in range(len(positions_data))] 
     
-    overall_haplotypes = []
     
-    for i in range(len(positions_data)):
-        
-        print(f"Doing {i}")
-        
-        this_pos_data = positions_data[i]
-        this_reads_data = reads_array_data[i]
-        this_keep_flags_data = keep_flags_data[i]
-        
-        overall_haplotypes.append(generate_haplotypes_block(
-            this_pos_data,this_reads_data,this_keep_flags_data))
+    processing_pool = Pool(16)
     
+    overall_haplotypes = processing_pool.starmap(lambda x,y,z:
+                        generate_haplotypes_block(x,y,z),
+                        zip(positions_data,reads_array_data,keep_flags_data))
+
     return overall_haplotypes
+
+    # overall_haplotypes = []
+    
+    # for i in range(len(positions_data)):
+        
+    #     print(f"Doing {i}")
+        
+    #     this_pos_data = positions_data[i]
+    #     this_reads_data = reads_array_data[i]
+    #     this_keep_flags_data = keep_flags_data[i]
+        
+    #     overall_haplotypes.append(generate_haplotypes_block(
+    #         this_pos_data,this_reads_data,this_keep_flags_data))
+    
+    # return overall_haplotypes
