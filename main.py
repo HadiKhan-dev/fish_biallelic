@@ -37,7 +37,9 @@ combi = [chr1[i] for i in range(starting,ending)]
 (pos_broken,keep_flags_broken,reads_array_broken) = vcf_data_loader.cleanup_block_reads_list(combi)
 
 #%%
+start = time.time()
 (final_blocks,final_test) = block_linking_naive.generate_long_haplotypes_naive(pos_broken,reads_array_broken,6,keep_flags_broken)
+print(time.time()-start)
 #%%
 mark = get_dips_from_long_haps(final_test[1])
 

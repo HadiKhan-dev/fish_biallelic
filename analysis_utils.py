@@ -187,11 +187,15 @@ def calc_distance_row(row,data_matrix,start_point,calc_type="diploid"):
     
 def generate_distance_matrix(probs_array,
                              keep_flags=None,
-                             calc_type="diploid"):
+                             calc_type="diploid",
+                             use_multiprocessing=False):
     """
     Generates a distance matrix for the distance between two samples
     for an array where rows represent the probabalistic genotypes for 
     a single sample
+    
+    multiprocessing is a bool which controls whether we use multiple threads
+    for the task
     """
     
     if keep_flags is None:
@@ -206,19 +210,24 @@ def generate_distance_matrix(probs_array,
     
     probs_copy = probs_array.copy()
 
-    processing_pool = Pool(processes=8)    
+    if use_multiprocessing:
+        processing_pool = Pool(processes=16)    
     
-    dist_matrix = []
 
-    dist_matrix = processing_pool.starmap(
+        dist_matrix = processing_pool.starmap(
         lambda x,y : calc_distance_row(x,probs_copy,y,calc_type=calc_type),
         zip(probs_array,range(num_samples)))
+        
+        del(processing_pool)
+        
+    else:
+        dist_matrix = []
+        for i in range(num_samples):
+            dist_matrix.append(calc_distance_row(probs_array[i],probs_copy,i,calc_type=calc_type))
     
     #Convert to array and fill up lower diagonal
     dist_matrix = np.array(dist_matrix)
     dist_matrix = dist_matrix+dist_matrix.T-np.diag(dist_matrix.diagonal())
-
-    del(processing_pool)
     
     return dist_matrix
 
