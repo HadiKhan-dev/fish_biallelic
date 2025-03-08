@@ -28,7 +28,7 @@ block_size = 100000
 shift_size = 50000
 
 starting = 50
-ending = 100
+ending = 80
 
 
 chr1 = list(vcf_data_loader.break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
