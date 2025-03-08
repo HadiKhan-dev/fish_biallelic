@@ -365,11 +365,18 @@ def add_distinct_haplotypes_smart(initial_haps,
     
     while not addition_complete:
         cand_keys = list(candidate_haps.keys())
-        addition_indicators = processing_pool.starmap(lambda x:
+        
+        if use_multiprocessing:
+            addition_indicators = processing_pool.starmap(lambda x:
                             hap_statistics.get_addition_statistics(cur_haps,
                             candidate_haps,x,
                             probs_array,keep_flags=keep_flags),
                             zip(cand_keys))            
+        else:
+            addition_indicators = []
+            for i in range(len(cand_keys)):
+                addition_indicators.append(hap_statistics.get_addition_statistics(
+                    cur_haps,candidate_haps,cand_keys[i],probs_array,keep_flags=keep_flags))
         
         smallest_result = min(addition_indicators,key=lambda x:x[0])
         smallest_index = addition_indicators.index(smallest_result)
@@ -402,11 +409,14 @@ def add_distinct_haplotypes_smart(initial_haps,
 def truncate_haps(candidate_haps,
                   candidate_matches,
                   probs_array,
-                  max_cutoff_error_increase=1.1):
+                  max_cutoff_error_increase=1.1,
+                  use_multiprocessing=False):
     """
     Truncate a list of haplotypes so that only the necessary ones remain
     """
-    processing_pool = Pool(processes=16)
+    
+    if use_multiprocessing:
+        processing_pool = Pool(processes=16)
     
     cand_copy = candidate_haps.copy()
     cand_matches = candidate_matches
@@ -425,10 +435,18 @@ def truncate_haps(candidate_haps,
     truncation_complete = False
     
     while not truncation_complete:
-        removal_indicators = processing_pool.starmap(lambda x:
+        
+        if use_multiprocessing:
+            removal_indicators = processing_pool.starmap(lambda x:
                             hap_statistics.get_removal_statistics(cand_copy,
                             cand_matches,x,probs_array),
                             zip(haps_names))
+        else:
+            removal_indicators = []
+            
+            for i in range(len(haps_names)):
+                removal_indicators.append(hap_statistics.get_removal_statistics(
+                    cand_copy,cand_matches,haps_names[i],probs_array))
         
         smallest_value = min(removal_indicators,key=lambda x:x[0])
         smallest_index = removal_indicators.index(smallest_value)
@@ -755,10 +773,13 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
     return (positions,keep_flags,reads_array,final_haps)
     
 
-def generate_haplotypes_all(positions_data,reads_array_data,keep_flags_data=None):
+def generate_haplotypes_all(positions_data,reads_array_data,
+                            keep_flags_data=None):
     """
     Generate a list of block haplotypes which make up each element 
     of the list of reads array data
+    
+    This function uses multiprocessing
     """
     
     if keep_flags_data == None:
