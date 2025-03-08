@@ -457,7 +457,7 @@ def get_dips_from_long_haps(long_haps):
     num_haps = len(long_haps)
     all_combs = [(i,j) for i in range(num_haps) for j in range(num_haps)]
     
-    processing_pool = Pool(8)
+    processing_pool = Pool(16)
     
     all_combined = processing_pool.starmap(lambda x,y: extract_and_combine(long_haps,x,y),
                                            all_combs)

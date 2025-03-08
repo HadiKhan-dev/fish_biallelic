@@ -122,6 +122,23 @@ def get_block_likelihoods(sample_data,haps_data,
     
     return ll_dict
 
+def get_all_block_likelihoods(block_samples_data,block_haps):
+    """
+    Function which calculates the block likelihoods for each 
+    sample in block_samples_data
+    """
+    sample_likelihoods = []
+    
+    for i in range(len(block_samples_data)):
+        if i %100 == 0:
+            print(i)
+        sample_likelihoods.append(
+            get_block_likelihoods(block_samples_data[i],
+                                  block_haps))
+    
+    
+    return sample_likelihoods
+
 def get_sample_data_at_sites(sample_data,sample_sites,query_sites):
     """
     Helper function to extract a subset of the sample data which is
@@ -143,11 +160,14 @@ def get_sample_data_at_sites_multiple(sample_data,sample_sites,query_sites):
     This is like get_sample_data_at_sites but works for an array with data for multiple samples
     """
     indices = np.searchsorted(sample_sites,[query_sites[0],query_sites[-1]])
-    
+
     return sample_data[:,indices[0]:indices[1]+1,:]
 
     
-def get_full_probs_forward(sample_data,sample_sites,haps_data,
+def get_full_probs_forward(mist,sample_data,
+                           sample_sites,
+                           haps_data,
+                           full_blocks_likelihoods,
                            transition_probs,space_gap=1):
     """
     Compute the forward step in the forward-backward inference
@@ -161,14 +181,18 @@ def get_full_probs_forward(sample_data,sample_sites,haps_data,
     transition_probs are for
     """
     
+    print("MIST START",mist)
+    
     likelihood_numbers = {}
     
     for i in range(len(haps_data)):
         block_haps = haps_data[i]
         block_sites = block_haps[0]
         
-        block_sample_data = get_sample_data_at_sites(sample_data,sample_sites,block_sites)
-        block_likelihoods = get_block_likelihoods(block_sample_data,block_haps)
+        #block_sample_data = full_blocks_sample_data[i]
+        block_likelihoods = full_blocks_likelihoods[i]
+        #block_sample_data = get_sample_data_at_sites(sample_data,sample_sites,block_sites)
+        #block_likelihoods = get_block_likelihoods(block_sample_data,block_haps)
         
         likelihoods = {}
         
@@ -207,11 +231,16 @@ def get_full_probs_forward(sample_data,sample_sites,haps_data,
                 likelihoods[new_name] = combined_prob                            
         
         likelihood_numbers[i] = likelihoods
+        
+    print("MIST END",mist)
    
     return likelihood_numbers
 
-def get_full_probs_backward(sample_data,sample_sites,haps_data,
-                           transition_probs,space_gap=1):
+def get_full_probs_backward(sample_data,
+                            sample_sites,
+                            haps_data,
+                            full_blocks_likelihoods,
+                            transition_probs,space_gap=1):
     """
     Compute the backward step in the forward-backward inference
     algorithm for the HMM where we observe our data for a single
@@ -230,8 +259,12 @@ def get_full_probs_backward(sample_data,sample_sites,haps_data,
         block_haps = haps_data[i]
         block_sites = block_haps[0]
         
-        block_sample_data = get_sample_data_at_sites(sample_data,sample_sites,block_sites)
-        block_likelihoods = get_block_likelihoods(block_sample_data,block_haps)
+        
+        #block_sample_data = full_blocks_sample_data[i]
+        block_likelihoods = full_blocks_likelihoods[i]
+        
+        #block_sample_data = get_sample_data_at_sites(sample_data,sample_sites,block_sites)
+        #block_likelihoods = get_block_likelihoods(block_sample_data,block_haps)
         
         likelihoods = {}
         
@@ -277,6 +310,7 @@ def get_full_probs_backward(sample_data,sample_sites,haps_data,
 def get_updated_transition_probabilities(full_samples_data,
                                          sample_sites,
                                          haps_data,
+                                         full_blocks_likelihoods,
                                          current_transition_probs,
                                          space_gap=1,
                                          minimum_transition_log_likelihood=-15):
@@ -291,25 +325,33 @@ def get_updated_transition_probabilities(full_samples_data,
     avoid numerical errors caused by numbers rounding off to 0 in the EM-process
     """
     
-    processing_pool = Pool(8)
+    print("STARTING")
+    
+    processing_pool = Pool(16)
     
     samples_probs = []
     
     forward_nums = []
     backward_nums = []
     
+    print("HERE")
     forward_nums = processing_pool.starmap(
-        lambda x : get_full_probs_forward(x,
-                    sample_sites,haps_data,
+        lambda i : get_full_probs_forward(i,full_samples_data[i],
+                    sample_sites,
+                    haps_data,
+                    [full_blocks_likelihoods[x][i] for x in range(len(full_blocks_likelihoods))],
                     current_transition_probs,
                     space_gap=space_gap),
-        zip(full_samples_data))
+        zip(range(len(full_samples_data))))
+    print("THERE")
     backward_nums = processing_pool.starmap(
-        lambda x : get_full_probs_backward(x,
-                    sample_sites,haps_data,
+        lambda i : get_full_probs_backward(full_samples_data[i],
+                    sample_sites,
+                    haps_data,
+                    [full_blocks_likelihoods[x][i] for x in range(len(full_blocks_likelihoods))],
                     current_transition_probs,
                     space_gap=space_gap),
-        zip(full_samples_data))
+        zip(range(len(full_samples_data))))
     
     for i in range(len(forward_nums)):
         samples_probs.append((forward_nums[i],backward_nums[i]))
@@ -415,12 +457,46 @@ def calculate_hap_transition_probabilities(full_samples_data,
     
     probs_list = [start_probs]
     
-    block_sample_data = get_sample_data_at_sites(sample_data,sample_sites,block_sites)
-    block_likelihoods = get_block_likelihoods(block_sample_data,block_haps)
+    full_blocks_likelihoods = []
     
+    #Calculate site data and underlying likelihoods for each sample
+    #and possible pair making up that sample at each block
+    
+    print("ABOUT")
+    processing_pool = Pool(16)
+    print("AFTER")
+    
+    full_blocks_likelihoods = processing_pool.starmap(
+        lambda i: get_all_block_likelihoods(
+            get_sample_data_at_sites_multiple(full_samples_data,
+            sample_sites,haps_data[i][0]),
+            haps_data[i]),
+        zip(range(len(haps_data))))
+    
+    print("HAVE BLOCK LIKELIHOODS")
+    
+    # for i in range(len(haps_data)):
+        
+    #     if i % 2 == 0:
+    #         print(i)
+            
+    #     cur_sites = haps_data[i][0]
+        
+    #     cur_sample_data = get_sample_data_at_sites_multiple(
+    #         full_samples_data,sample_sites,cur_sites)
+    #     cur_likelihoods = get_all_block_likelihoods(
+    #         cur_sample_data,haps_data[i])
+        
+    #     full_blocks_likelihoods.append(cur_likelihoods)
+        
+    print("DONE INITIAL")
     for i in range(num_iterations):
-        new_probs = get_updated_transition_probabilities(full_samples_data,
-                sample_sites,haps_data,probs_list[-1],
+        new_probs = get_updated_transition_probabilities(
+            full_samples_data,
+                sample_sites,
+                haps_data,
+                full_blocks_likelihoods,
+                probs_list[-1],
                 space_gap=space_gap,
                 minimum_transition_log_likelihood=minimum_transition_log_likelihood)
         probs_list.append(new_probs)
@@ -483,24 +559,14 @@ def convert_mesh_to_haplotype(full_samples_data,full_sites,
             earlier = i-cur_subtract
             
         
-    
-#%%
-def get_all_block_likelihoods(block_samples_data,block_haps):
-    """
-    Function which calculates the block likelihoods for each 
-    sample in block_samples_data
-    """
-    sample_likelihoods = []
-    
-    for i in range(len(block_samples_data)):
-        sample_likelihoods.append(
-            get_block_likelihoods())
-    
-    
-    
-    
 #%%
 space_gap = 32
+
+start = time.time()
+final_probs = calculate_hap_transition_probabilities(offspring_genotype_likelihoods[1],
+        offspring_genotype_likelihoods[0],test_haps,num_iterations=20,space_gap=space_gap)
+print(time.time()-start)
+
 #%%
 start = time.time()
 
@@ -508,16 +574,33 @@ for i in range(1000):
     block_haps = test_haps[0]
     block_sites = block_haps[0]
     
-    #block_sample_data = get_sample_data_at_sites(all_likelihoods[0],all_sites,block_sites)
-    #block_likelihoods = get_block_likelihoods(block_sample_data,block_haps)
+    block_sample_data = get_sample_data_at_sites(all_likelihoods[0],all_sites,block_sites)
+    block_likelihoods = get_block_likelihoods(block_sample_data,block_haps)
 
 end = time.time()
 
 print(end-start)
 #%%
+full_blocks_likelihoods = []
+
+#Calculate site data and underlying likelihoods for each sample
+#and possible pair making up that sample at each block
+for i in range(len(test_haps)):
+    print(i)
+    cur_sites = test_haps[i][0]
+    
+    cur_sample_data = get_sample_data_at_sites_multiple(
+        all_likelihoods,
+        all_sites,
+        cur_sites)
+    cur_likelihoods = get_all_block_likelihoods(
+        cur_sample_data,test_haps[i])
+    
+    full_blocks_likelihoods.append(cur_likelihoods)
+#%%
 start = time.time()
-final_mesh = generate_transition_probability_mesh(offspring_genotype_likelihoods[1],
-        offspring_genotype_likelihoods[0],test_haps)
+final_mesh = generate_transition_probability_mesh(all_sites,
+        all_likelihoods,test_haps)
 print(time.time()-start)
 #%%
 start = time.time()
@@ -529,12 +612,7 @@ print(time.time()-start)
 #########################
 
 #%%
-start = time.time()
-final_probs = calculate_hap_transition_probabilities(offspring_genotype_likelihoods[1],
-        offspring_genotype_likelihoods[0],test_haps,num_iterations=20,space_gap=space_gap)
-print(time.time()-start)
-
-#%%
+starting_transition_probs = initial_transition_probabilities(test_haps,space_gap=space_gap)
 start = time.time()
 updated = get_updated_transition_probabilities(offspring_genotype_likelihoods[1],
         offspring_genotype_likelihoods[0],test_haps,starting_transition_probs,
