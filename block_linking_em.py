@@ -166,7 +166,7 @@ def get_sample_data_at_sites_multiple(sample_data,sample_sites,query_sites):
     return sample_data[:,indices[0]:indices[1]+1,:]
 
     
-def get_full_probs_forward(sample_data,
+def get_full_probs_forward(mist,sample_data,
                            sample_sites,
                            haps_data,
                            full_blocks_likelihoods,
@@ -183,6 +183,8 @@ def get_full_probs_forward(sample_data,
     transition_probs are for
     """
 
+    if mist == 91:
+        print(f"DOING {mist}")
     
     likelihood_numbers = {}
     
@@ -214,24 +216,57 @@ def get_full_probs_forward(sample_data,
                 
                 for earlier_first in earlier_haps[3].keys():
                     for earlier_second in earlier_haps[3].keys():
+                        
+                        #Flip around our naming scheme if we are putting a higher index hap before a lower index one
                         if earlier_second < earlier_first:
-                            continue
+                            dummy = earlier_second
+                            earlier_second = earlier_first
+                            earlier_first = dummy
+
                         earlier_dip_name = ((earlier_block,earlier_first),
                                             (earlier_block,earlier_second))
                         
-                        transition_prob = transition_probs[earlier_block][((earlier_block,earlier_first),(i,hap_pair[0]))]*transition_probs[earlier_block][((earlier_block,earlier_second),(i,hap_pair[1]))] \
-                                        + transition_probs[earlier_block][((earlier_block,earlier_first),(i,hap_pair[1]))]*transition_probs[earlier_block][((earlier_block,earlier_second),(i,hap_pair[0]))]                                                                                                            
+                        transition_prob = transition_probs[earlier_block][((earlier_block,earlier_first),(i,hap_pair[0]))]*transition_probs[earlier_block][((earlier_block,earlier_second),(i,hap_pair[1]))]                                                                                                       
+
+                        
+                        if transition_prob > 1:
+                            print("VERY BAD")
+                            print(transition_prob)
+                            print(earlier_dip_name)
+                            print(hap_pair)
+                            print(transition_probs[earlier_block][((earlier_block,earlier_first),(i,hap_pair[0]))])
+                            print(transition_probs[earlier_block][((earlier_block,earlier_first),(i,hap_pair[1]))])
+                        
                         earlier_log_likelihood = earlier_likelihoods[earlier_dip_name]
                         
-                        #print("T",new_name,transition_prob)
+                        # if mist == 299 and earlier_log_likelihood > 0:
+                        #     print("BAD VAL")
+                        #     print(earlier_dip_name)
+                        
                         combined_log_likelihood = earlier_log_likelihood+math.log(transition_prob)
                         
+                        if mist == 91 and combined_log_likelihood > 0:
+                            print("BAD VAL")
+                            print(earlier_dip_name)
+                            print(earlier_log_likelihood)
+                            print(transition_prob)
+                        
                         total_sum_probs.append(combined_log_likelihood)
+                
+                if mist == 91 and i == 3 and new_name == ((3, 0), (3, 0)):
+                    print("NOW VALS")
+                    print(earlier_likelihoods)
+
+                    print(total_sum_probs)
                 
                 combined_prob = analysis_utils.add_log_likelihoods(total_sum_probs)+direct_likelihood
                 likelihoods[new_name] = combined_prob                            
         
         likelihood_numbers[i] = likelihoods
+        
+    if mist == 91:
+        print("LIKE")
+        print(likelihood_numbers[27])
    
     return likelihood_numbers
 
@@ -284,14 +319,25 @@ def get_full_probs_backward(sample_data,
                 
                 for earlier_first in earlier_haps[3].keys():
                     for earlier_second in earlier_haps[3].keys():
+                        
+                        #Flip around our naming scheme if we are putting a higher index hap before a lower index one
                         if earlier_second < earlier_first:
-                            continue
+                            dummy = earlier_second
+                            earlier_second = earlier_first
+                            earlier_first = dummy
+                            
                         earlier_dip_name = ((earlier_block,earlier_first),
                                             (earlier_block,earlier_second))
 
                         transition_prob = transition_probs[i][((i,hap_pair[0]),(earlier_block,earlier_first))]*transition_probs[i][((i,hap_pair[1]),(earlier_block,earlier_second))] \
-                                        + transition_probs[i][((i,hap_pair[1]),(earlier_block,earlier_first))]*transition_probs[i][((i,hap_pair[0]),(earlier_block,earlier_second))]                                                                                                            
-                        
+                                        
+                        if transition_prob > 1:
+                            print("EXTREMELY VERY BAD REVERSE")
+                            print(transition_prob)
+                            print(earlier_dip_name)
+                            print(i,hap_pair)
+                            print(transition_probs[i][((i,hap_pair[0]),(earlier_block,earlier_first))])
+                            print(transition_probs[i][((i,hap_pair[1]),(earlier_block,earlier_first))])
                         
                         earlier_log_likelihood = earlier_likelihoods[earlier_dip_name]
                         
@@ -339,7 +385,7 @@ def get_updated_transition_probabilities(full_samples_data,
     
     
     forward_nums = list(itertools.starmap(
-        lambda i : get_full_probs_forward(full_samples_data[i],
+        lambda i : get_full_probs_forward(i,full_samples_data[i],
                     sample_sites,
                     haps_data,
                     all_block_likelihoods[i],
@@ -360,6 +406,10 @@ def get_updated_transition_probabilities(full_samples_data,
     
     new_transition_probs = {}
     
+    print("MAKING EARLY")
+    print(samples_probs[299][0][27][((27, 1), (27, 4))])
+    print()
+    
     #Calculate overall transition likelihoods
     for i in range(len(haps_data)-space_gap):
         #print(f"Down {i} {space_gap}")
@@ -373,13 +423,12 @@ def get_updated_transition_probabilities(full_samples_data,
         for first in first_haps.keys():
             for second in second_haps.keys():
                 tots_comb = []
-                
+                        
                 for s in range(len(samples_probs)):
                     data_here = samples_probs[s]
                     
-                    if first == (27,0) and second in [(29,0),(29,2)]:
-                        print(data_here)
                     lower_comb = []
+                                                                     
                     
                     for first_in_data in first_haps.keys():
                         if first <= first_in_data:
@@ -392,11 +441,32 @@ def get_updated_transition_probabilities(full_samples_data,
                                 next_key = ((next_bundle,second),(next_bundle,second_in_data))
                             else:
                                 next_key = ((next_bundle,second_in_data),(next_bundle,second))
-                                
-                            lower_comb.append(data_here[0][i][current_key]+data_here[1][next_bundle][next_key])
                             
+                            adding = data_here[0][i][current_key]+data_here[1][next_bundle][next_key]
                             
+                            if i == 27 and first == 4 and second in [3,4] and s == 299:
+                                if first_in_data == 1 and second_in_data == 3:
+                                    print("GOODNESS")
+                                    print(current_key)
+                                    print(data_here[0][i][current_key])
+                                    print(data_here[1][next_bundle][next_key])
+                            
+                            lower_comb.append(adding)
+                     
+                                                                   
+                    # if i == 27 and first == 4 and second in [3,4] and s == 299:
+                    #     print("SPECIAL")
+                    #     print(len(lower_comb))
+                    #     print(lower_comb)
+                        
                     tots_comb.append(analysis_utils.add_log_likelihoods(lower_comb))
+                
+                if i == 27 and first == 4 and second in [2,4]:
+                    print("Overall",second)
+                    print("MAX",sorted(tots_comb)[-10:])
+                    print("MAX INDEX",tots_comb.index(max(tots_comb)))
+                    print(analysis_utils.add_log_likelihoods(tots_comb))
+                
                 
                 sample_combined_likelihood = analysis_utils.add_log_likelihoods(tots_comb)
                 transitions_likelihoods[((i,first),(next_bundle,second))] = sample_combined_likelihood
@@ -428,10 +498,10 @@ def get_updated_transition_probabilities(full_samples_data,
         
         
         if i == 27:
-            print("Final (29,0):",final_non_norm_likelihoods[((27,2),(29,0))])
-            print("Final (29,2):",final_non_norm_likelihoods[((27,2),(29,2))])
-            print("Transition (29,0):",transitions_likelihoods[((27,2),(29,0))])
-            print("Transition (29,2):",transitions_likelihoods[((27,2),(29,2))])
+            print("Transition (29,2):",transitions_likelihoods[((27,4),(29,2))])
+            print("Transition (29,4):",transitions_likelihoods[((27,4),(29,4))])
+            print("Final (29,2):",final_non_norm_likelihoods[((27,4),(29,2))])
+            print("Final (29,4):",final_non_norm_likelihoods[((27,4),(29,4))])
             
         
         final_likelihoods = {}
@@ -470,7 +540,7 @@ def calculate_hap_transition_probabilities(full_samples_data,
     Returns the result of the final run of the algorithm
     """
     start_probs = initial_transition_probabilities(haps_data,space_gap=space_gap)
-    
+
     probs_list = [start_probs]
     
     #Calculate site data and underlying likelihoods for each sample
@@ -507,6 +577,7 @@ def calculate_hap_transition_probabilities(full_samples_data,
                     max_diff = diff
         
         print("Max diff:",i,max_diff)
+        print()
         if max_diff < min_cutoff_change:
             print(f"Exiting_early {len(probs_list)}")
             break
@@ -575,7 +646,7 @@ space_gap = 2
 
 start = time.time()
 final_probs2 = calculate_hap_transition_probabilities(all_likelihoods,
-        all_sites,test_haps,max_num_iterations=10,space_gap=space_gap)
+        all_sites,test_haps,max_num_iterations=4,space_gap=space_gap)
 print(time.time()-start)
 
 #%%
