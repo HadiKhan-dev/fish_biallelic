@@ -64,7 +64,7 @@ def get_addition_statistics(starting_haps,
                             probs_array,
                             keep_flags = None):
     """
-    Add one hap from our list of candidate haps and see how much worse
+    Add one hap from our list of candidate haps and see how much better
     of a total fit we get.
     """
     
@@ -153,7 +153,7 @@ def relative_haplotype_usage(first_hap,first_matches,second_matches):
             use_indices.append(sample)
         if first_matches[0][sample][0][1] == first_hap:
             use_indices.append(sample)
-    
+            
     second_usages = {}
     
     for sample in use_indices:
@@ -163,6 +163,35 @@ def relative_haplotype_usage(first_hap,first_matches,second_matches):
             if s not in second_usages.keys():
                 second_usages[s] = 0
             second_usages[s] += 1
+    
+    second_usages = {k: v for k, v in sorted(second_usages.items(), key=lambda item: item[1])}
+    
+    return second_usages
+
+def relative_haplotype_usage_indicator(first_hap,first_matches,second_matches):
+    """
+    Like relative_haplotype_usage but instead of giving a count gives
+    a list for each hap in second_matches which contains those sample
+    ids which use first_hap in first_matches and that hap in second_matches
+    """
+    use_indices = []
+    
+    for sample in range(len(first_matches[0])):
+        if first_matches[0][sample][0][0] == first_hap:
+            use_indices.append(sample)
+        if first_matches[0][sample][0][1] == first_hap:
+            use_indices.append(sample)
+    
+    second_usages = {}
+    
+    for sample in use_indices:
+        dat = second_matches[0][sample][0]
+        
+        for s in dat:
+            if s not in second_usages.keys():
+                second_usages[s] = []
+            second_usages[s].append(sample)
+    
     
     second_usages = {k: v for k, v in sorted(second_usages.items(), key=lambda item: item[1])}
     
