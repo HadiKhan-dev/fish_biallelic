@@ -407,7 +407,6 @@ def get_updated_transition_probabilities(full_samples_data,
             for second in second_haps.keys():
                 tots_comb = []
                 
-                
                 for s in range(len(samples_probs)):
                     data_here = samples_probs[s]
                     
@@ -426,14 +425,34 @@ def get_updated_transition_probabilities(full_samples_data,
                             else:
                                 next_key = ((next_bundle,second_in_data),(next_bundle,second))
                             
-                            adding = data_here[0][i][current_key]+data_here[1][next_bundle][next_key]
+                            transition_key = ((i,first_in_data),(next_bundle,second_in_data))
+                            transition_value = math.log(current_transition_probs[0][i][transition_key])
+                            
+                            # if i == 0 and first == 0 and second in [2,3] and s == 19:
+                                
+                            #     print("IDEN",i,s,second,current_key,next_key)
+                            #     print("S:",data_here[0][i][current_key])
+                            #     print("R:",data_here[1][next_bundle][next_key])
+                            #     print("Transition:",transition_value)
+                            #     print("Adding:",data_here[0][i][current_key]+data_here[1][next_bundle][next_key]+transition_value)
+                            #     print()
+                                
+                            
+                            adding = data_here[0][i][current_key]+data_here[1][next_bundle][next_key]+transition_value
                                 
                             lower_comb.append(adding)
+                    
 
                     sample_likelihood = analysis_utils.add_log_likelihoods(lower_comb)
                     
                     tots_comb.append(sample_likelihood)
+                    
                 
+                # if i == 0 and first == 0 and second in [2,3]:
+                #     print(i,first,second)
+                #     print(sorted(tots_comb)[-5:])
+                #     print("MAXIMUM HERE",tots_comb.index(max(tots_comb)))
+                #     print()
                 
                 all_sample_combined_likelihood = analysis_utils.add_log_likelihoods(tots_comb)
                 
@@ -699,7 +718,7 @@ first_matches = hap_statistics.match_best(first_block_haps,
 second_matches = hap_statistics.match_best(second_block_haps,
             samples_second_restricted,second_keep_flags)
 
-rel_usage = hap_statistics.relative_haplotype_usage(3,first_matches,second_matches)
+rel_usage = hap_statistics.relative_haplotype_usage(0,first_matches,second_matches)
 rel_usage_indicators = hap_statistics.relative_haplotype_usage_indicator(0,first_matches,second_matches)
 
 #rev_rel_usage0 = hap_statistics.relative_haplotype_usage(0,second_matches,first_matches)
@@ -707,7 +726,7 @@ rel_usage_indicators = hap_statistics.relative_haplotype_usage_indicator(0,first
 
 #%%
 
-space_gap = 1
+space_gap = 8
 initp = initial_transition_probabilities(test_haps,space_gap=space_gap)
 
 block_likes =  multiprocess_all_block_likelihoods(all_likelihoods,all_sites,test_haps)
@@ -715,7 +734,19 @@ block_likes =  multiprocess_all_block_likelihoods(all_likelihoods,all_sites,test
 #%%
 start = time.time()
 final_probs = calculate_hap_transition_probabilities(all_likelihoods,
-        all_sites,test_haps,max_num_iterations=10,space_gap=space_gap)
+        all_sites,test_haps,max_num_iterations=20,space_gap=space_gap)
+print(time.time()-start)
+
+#%%
+start = time.time()
+updated_probs = get_updated_transition_probabilities(
+    all_likelihoods,
+    all_sites,
+    test_haps,
+    block_likes,
+    final_probs,
+    space_gap=space_gap,
+    minimum_transition_log_likelihood=-10)
 print(time.time()-start)
 
 #%%
