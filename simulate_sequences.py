@@ -312,9 +312,10 @@ offspring_genotype_likelihoods = combine_into_genotype(all_offspring,haplotype_s
 #%%
 new_reads_array = read_sample_all_individuals(all_offspring,10,error_rate=0.02)
 #%%
-(simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(haplotype_sites,new_reads_array,2500000,100000,50000)
+(simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(haplotype_sites,new_reads_array,5000000,100000,100000)
 simd_probabalistic_genotypes = analysis_utils.reads_to_probabilities(new_reads_array)
 #%%
+##############################
 (simd_block_haps,simd_haps) = block_linking_naive.generate_long_haplotypes_naive(simd_pos,simd_reads,6,simd_keep_flags)
 #%%
 simd_conc = concretify_haps(simd_haps[1])
