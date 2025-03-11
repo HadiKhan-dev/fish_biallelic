@@ -689,9 +689,150 @@ def convert_mesh_to_haplotype(full_samples_data,full_sites,
         available_haps = haps_data[i][3]
         cur_subtract = 1
         
+        available_haps_probs = {k: [] for k in available_haps.keys()}
+        
         while cur_subtract <= i:
             earlier = i-cur_subtract
             
+            earlier_block_value = first_pass_hap[earlier]
+            
+            mesh_probs = full_mesh[cur_subtract][0][earlier]
+            
+            for k in available_haps.keys():
+                mesh_key = ((earlier,earlier_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob)
+        
+            cur_subtract *= 2
+        
+        for k in available_haps_probs.keys():
+            available_haps_probs[k] = analysis_utils.add_log_likelihoods(available_haps_probs[k])
+        
+        best_new_hap = max(available_haps_probs, key=available_haps_probs.get)
+        
+        first_pass_hap.append(best_new_hap)
+        
+    #This is the updated hap we are constructing in reverse order
+    second_pass_hap = [first_pass_hap[-1]]
+    
+    for i in range(len(haps_data)-2,-1,-1):
+        available_haps = haps_data[i][3]
+        cur_position = len(haps_data)-1-i
+        
+        available_haps_probs = {k: [] for k in available_haps.keys()}
+        
+        forward_subtract = 1
+        
+        while forward_subtract <= cur_position:
+            
+            #For indexing in our partially constructed second pass hap
+            earlier_index = cur_position-forward_subtract
+            
+            #For indexing throuugh our mesh dict which only goes from forward to end
+            later_index = i+forward_subtract
+            
+            earlier_block_value = second_pass_hap[earlier_index]
+            
+            mesh_probs = full_mesh[forward_subtract][1][later_index]
+            
+            for k in available_haps.keys():
+                mesh_key = ((later_index,earlier_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob)
+            
+            
+            forward_subtract *= 2
+        
+        backward_subtract = 1
+        
+        while backward_subtract <= i:
+
+            #For indexing through 
+            lookback_index = i-backward_subtract
+            
+            lookback_block_value = first_pass_hap[lookback_index]
+            
+            mesh_probs = full_mesh[backward_subtract][0][lookback_index]
+            
+            for k in available_haps.keys():
+                mesh_key = ((lookback_index,lookback_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob)
+            
+            backward_subtract *= 2
+        
+        for k in available_haps_probs.keys():
+            available_haps_probs[k] = analysis_utils.add_log_likelihoods(available_haps_probs[k])
+        
+        
+        best_new_hap = max(available_haps_probs, key=available_haps_probs.get)
+        
+        second_pass_hap.append(best_new_hap)
+        
+    #Since we build the second pass long haplotype in reverse, reverse the result to get the forward haplotype
+    second_pass_hap = second_pass_hap[::-1]
+    
+    #Finally build the haplotype we will return
+    third_pass_hap = [second_pass_hap[0]]
+    
+    for i in range(1,len(haps_data)):
+        available_haps = haps_data[i][3]
+        
+        available_haps_probs = {k: [] for k in available_haps.keys()}
+        
+        backward_subtract = 1
+        
+        while backward_subtract <= i:
+            
+            earlier_index = i-backward_subtract
+            
+            earlier_block_value = third_pass_hap[earlier_index]
+            
+            mesh_probs = full_mesh[backward_subtract][0][earlier_index]
+            
+            for k in available_haps.keys():
+                mesh_key = ((earlier_index,earlier_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob)            
+            
+            backward_subtract *= 2
+            
+        forward_subtract = 1
+        
+        while i+forward_subtract <= len(haps_data)-1:
+            
+            later_index = i+forward_subtract
+            
+            later_block_value = second_pass_hap[later_index]
+            
+            mesh_probs = full_mesh[forward_subtract][1][later_index]
+            
+            for k in available_haps.keys():
+                mesh_key = ((later_index,later_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob)
+            
+            forward_subtract *= 2
+            
+        for k in available_haps_probs.keys():
+            available_haps_probs[k] = analysis_utils.add_log_likelihoods(available_haps_probs[k])
+            
+            
+        best_new_hap = max(available_haps_probs, key=available_haps_probs.get)
+            
+        third_pass_hap.append(best_new_hap)
+        
+    combined_positions = []
+    combined_haplotype = []
+    
+    for i in range(len(haps_data)):
+        combined_positions.extend(haps_data[i][0])
+        combined_haplotype.extend(haps_data[i][3][third_pass_hap[i]])
+    
+    combined_positions = np.array(combined_positions)
+    combined_haplotype = np.array(combined_haplotype)
+        
+    return (combined_positions,combined_haplotype)        
         
 #%%
 first_block = test_haps[0]
@@ -756,6 +897,6 @@ final_mesh = generate_transition_probability_mesh(all_likelihoods,
 print(time.time()-start)
 #%%
 start = time.time()
-main_haplotype = convert_mesh_to_haplotype(all_sites,
-        all_likelihoods,test_haps,final_mesh)
+main_haplotype = convert_mesh_to_haplotype(all_likelihoods,
+        all_sites,test_haps,final_mesh)
 print(time.time()-start)
