@@ -528,15 +528,11 @@ def get_initial_haps(site_priors,
         homs_array[:,:,2] += 0.5*homs_array[:,:,1]
         
         homs_array = homs_array[:,:,[0,2]]
-        
-        print("MAKING")
-        
     
         dist_submatrix = analysis_utils.generate_distance_matrix(
             homs_array,keep_flags=keep_flags,
             calc_type="haploid")        
         
-        print("MADE")
         #First do clustering looking for at least 2 clusters, if that fails rerun allowing single clusters
         try:
             initial_clusters = hdbscan_cluster(
@@ -569,8 +565,6 @@ def get_initial_haps(site_priors,
             continue
         else:
             found_homs = True
-            
-    print("FOUND")
     
     representatives = get_representatives_reads(site_priors,
         corresp_reads_array,initial_clusters[0],
@@ -645,35 +639,28 @@ def generate_further_haps(site_priors,
     if len(candidate_haps) == 0:
         if verbose:
             print("Unable to find candidate haplotypes when generating further haps")
+        print("No extra haps found")
         return initial_haps
     
     
     dist_submatrix = analysis_utils.generate_distance_matrix(
         candidate_haps,keep_flags=keep_flags,
         calc_type="haploid")
-    
-    
-    try:
-        print(f"Cand len {len(candidate_haps)}")
-        if len(candidate_haps) > 1:
-            initial_clusters = hdbscan_cluster(
-                                dist_submatrix,
-                                min_cluster_size=len(initial_haps)+1,
-                                min_samples=1,
-                                cluster_selection_method="eom",
-                                alpha=1.0)
-        else: #Here candidate haps will have length = 1
-            final_haps = add_distinct_haplotypes_smart(initial_haps,
-                        {0:candidate_haps[0]},probs_array,
-                        keep_flags=keep_flags)
-            
-            print("Down HERE")
-            print(final_haps)
-            return final_haps
-    except:
-        print(dist_submatrix)
-        print(candidate_haps)
-        assert False
+
+    print(f"Cand len {len(candidate_haps)}")
+    if len(candidate_haps) > 1:
+        initial_clusters = hdbscan_cluster(
+                            dist_submatrix,
+                            min_cluster_size=len(initial_haps)+1,
+                            min_samples=1,
+                            cluster_selection_method="eom",
+                            alpha=1.0)
+    else: #Here candidate haps will have length = 1
+        final_haps = add_distinct_haplotypes_smart(initial_haps,
+                    {0:candidate_haps[0]},probs_array,
+                    keep_flags=keep_flags)
+
+        return final_haps
     
     
     representatives = get_representatives_probs(
@@ -793,18 +780,3 @@ def generate_haplotypes_all(positions_data,reads_array_data,
                         zip(positions_data,reads_array_data,keep_flags_data))
 
     return overall_haplotypes
-
-    # overall_haplotypes = []
-    
-    # for i in range(len(positions_data)):
-        
-    #     print(f"Doing {i}")
-        
-    #     this_pos_data = positions_data[i]
-    #     this_reads_data = reads_array_data[i]
-    #     this_keep_flags_data = keep_flags_data[i]
-        
-    #     overall_haplotypes.append(generate_haplotypes_block(
-    #         this_pos_data,this_reads_data,this_keep_flags_data))
-    
-    # return overall_haplotypes

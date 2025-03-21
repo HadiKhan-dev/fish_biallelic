@@ -24,18 +24,20 @@ bcf = vcf_data_loader.read_bcf_file("./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.
 contigs = bcf.header.contigs
 names = bcf.header.samples
 #%%
+start = time.time()
 block_size = 100000
 shift_size = 50000
 
-starting = 100
-ending = 130
-
-
 chr1 = list(vcf_data_loader.break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
+
+starting = 700
+ending = len(chr1)
+
+
 combi = [chr1[i] for i in range(starting,ending)]
 
 (pos_broken,keep_flags_broken,reads_array_broken) = vcf_data_loader.cleanup_block_reads_list(combi)
-
+print(time.time()-start)
 #%%
 start = time.time()
 (final_blocks,final_test) = block_linking_naive.generate_long_haplotypes_naive(pos_broken,reads_array_broken,6,keep_flags_broken)
