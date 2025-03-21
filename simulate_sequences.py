@@ -234,7 +234,8 @@ def combine_into_genotype(individual_list,sites_data):
     return [sites_data,np.array(all_list)]
     
 def chunk_up_data(positions_list,reads_array,
-                  starting_pos,block_size,shift_size,
+                  starting_pos,ending_pos,
+                  block_size,shift_size,
                   error_rate=0.02,
                   min_total_reads=5):
     """
@@ -257,7 +258,7 @@ def chunk_up_data(positions_list,reads_array,
     cur_index = 0
     last_site = positions_list[-1]
     
-    while cur_pos < last_site:
+    while cur_pos < ending_pos:
         block_start_index = cur_index
         
         block_end_pos = cur_pos+block_size
@@ -284,7 +285,7 @@ def chunk_up_data(positions_list,reads_array,
         while cur_index < len(positions_list) and positions_list[cur_index] < cur_pos:
             cur_index += 1
     
-    return (chunked_positions[:-1],chunked_keep_flags[:-1],chunked_reads[:-1])
+    return (chunked_positions,chunked_keep_flags,chunked_reads)
         
 def calc_distance_concrete(first_row,second_row):
     """
@@ -312,7 +313,10 @@ offspring_genotype_likelihoods = combine_into_genotype(all_offspring,haplotype_s
 #%%
 new_reads_array = read_sample_all_individuals(all_offspring,10,error_rate=0.02)
 #%%
-(simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(haplotype_sites,new_reads_array,5000000,100000,100000)
+print("Starting")
+(simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(
+    haplotype_sites,new_reads_array,
+    35000000,42700000,100000,100000)
 simd_probabalistic_genotypes = analysis_utils.reads_to_probabilities(new_reads_array)
 #%%
 ##############################
