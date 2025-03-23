@@ -416,8 +416,69 @@ def get_all_data_forward_probs(full_samples_data,sample_sites,
                     space_gap=space_gap),
         zip(range(len(full_samples_data)))))
     
-    return forward_nums
+    overall_likelihoods = []
     
+    num_vals = len(forward_nums[0])
+    
+    for i in range(len(forward_nums)):
+        sample_vals = forward_nums[i][num_vals-1]
+        
+        max_likelihood_pair = max(sample_vals,key=sample_vals.get)
+        
+        max_likelihood_val = sample_vals[max_likelihood_pair]
+        
+        overall_likelihoods.append(max_likelihood_val)
+    
+    return (overall_likelihoods,forward_nums)
+
+def get_all_data_backward_probs(full_samples_data,sample_sites,
+                               haps_data,
+                               bidirectional_transition_probs,
+                               full_blocks_likelihoods=None,
+                               space_gap=1):
+    
+    
+    if full_blocks_likelihoods == None:
+        #Calculate site data and underlying likelihoods for each sample
+        #and possible pair making up that sample at each block
+        processing_pool = Pool(8)
+    
+        full_blocks_likelihoods = processing_pool.starmap(
+            lambda i: get_all_block_likelihoods(
+                get_sample_data_at_sites_multiple(full_samples_data,
+                sample_sites,haps_data[i][0]),
+                haps_data[i]),
+            zip(range(len(haps_data))))
+        
+    all_block_likelihoods = []
+    
+    for i in range(len(full_samples_data)):
+        all_block_likelihoods.append(
+            [full_blocks_likelihoods[x][i] for x in range(len(full_blocks_likelihoods))])
+        
+    backward_nums = list(itertools.starmap(
+        lambda i : get_full_probs_backward(full_samples_data[i],
+                    sample_sites,
+                    haps_data,
+                    bidirectional_transition_probs,
+                    all_block_likelihoods[i],
+                    space_gap=space_gap),
+        zip(range(len(full_samples_data)))))
+    
+    overall_likelihoods = []
+    
+    num_vals = len(backward_nums[0])
+    
+    for i in range(len(backward_nums)):
+        sample_vals = backward_nums[i][0]
+        
+        max_likelihood_pair = max(sample_vals,key=sample_vals.get)
+        
+        max_likelihood_val = sample_vals[max_likelihood_pair]
+        
+        overall_likelihoods.append(max_likelihood_val)
+    
+    return (overall_likelihoods,backward_nums)
 def get_updated_transition_probabilities(full_samples_data,
                                          sample_sites,
                                          haps_data,
@@ -468,13 +529,14 @@ def get_updated_transition_probabilities(full_samples_data,
     for i in range(len(forward_nums)):
         samples_probs.append((forward_nums[i],backward_nums[i]))
     
-    full_transitions_likelihoods = {}
+    full_transitions_likelihoods_forwards = {}
+    full_transitions_likelihoods_backwards = {}
     
     new_transition_probs_forward = {}
     new_transition_probs_backwards = {}
     
     
-    #Calculate overall transition likelihoods
+    #Calculate overall transition likelihoods going forwards
     for i in range(len(haps_data)-space_gap):
         next_bundle = i+space_gap
         
@@ -483,13 +545,20 @@ def get_updated_transition_probabilities(full_samples_data,
         
         transitions_likelihoods = {}
         
+        likelihood_lists = {}
+        
         for first in first_haps.keys():
             for second in second_haps.keys():
-                tots_comb = []
+                likelihood_lists[(first,second)] = []
                 
-                for s in range(len(samples_probs)):
-                    data_here = samples_probs[s]
-                    
+        for s in range(len(samples_probs)):
+            data_here = samples_probs[s]
+            
+            sample_numbers = {}
+            
+            for first in first_haps.keys():
+                for second in second_haps.keys():
+                
                     lower_comb = []
                     
                     for first_in_data in first_haps.keys():
@@ -514,16 +583,162 @@ def get_updated_transition_probabilities(full_samples_data,
                             lower_comb.append(adding)
                     
 
-                    sample_likelihood = analysis_utils.add_log_likelihoods(lower_comb)
+                    pair_transition_likelihood = analysis_utils.add_log_likelihoods(lower_comb)
                     
-                    tots_comb.append(sample_likelihood)
+                    sample_numbers[(first,second)] = pair_transition_likelihood
                     
-                all_sample_combined_likelihood = analysis_utils.add_log_likelihoods(tots_comb)
+                      
+            total_sample_loglikeli = analysis_utils.add_log_likelihoods(list(sample_numbers.values()))
+            
+            normalized_sample_numbers = {}
+            for k in sample_numbers.keys():
+                normalized_sample_numbers[k] = sample_numbers[k]-total_sample_loglikeli
                 
-                
-                transitions_likelihoods[((i,first),(next_bundle,second))] = all_sample_combined_likelihood
+            for k in normalized_sample_numbers.keys():
+                likelihood_lists[k].append(normalized_sample_numbers[k])
+            
         
-        full_transitions_likelihoods[i] = transitions_likelihoods
+        for k in likelihood_lists.keys():
+            
+            #Get prior value for the transition (i,first)->(next_bundle,second)
+            transition_prior_key = ((i,first),(next_bundle,second))
+            transition_prior_value =  math.log(current_transition_probs[0][i][transition_prior_key])
+            transition_prior_value = 0 #Debugging value to zero out impact of this transiton
+        
+            transitions_likelihoods[((i,k[0]),(next_bundle,k[1]))] = analysis_utils.add_log_likelihoods(likelihood_lists[k])+transition_prior_value
+            
+        full_transitions_likelihoods_forwards[i] = transitions_likelihoods
+        
+    
+    #Now do the same thing going backwards
+    for i in range(len(haps_data)-1,space_gap-1,-1):
+        next_bundle = i-space_gap
+        
+        first_haps = haps_data[i][3]
+        second_haps = haps_data[next_bundle][3]
+        
+        transitions_likelihoods = {}
+        
+        likelihood_lists = {}
+        
+        for first in first_haps.keys():
+            for second in second_haps.keys():
+                likelihood_lists[(first,second)] = []
+                
+        for s in range(len(samples_probs)):
+            data_here = samples_probs[s]
+            
+            sample_numbers = {}
+            
+            for first in first_haps.keys():
+                for second in second_haps.keys():
+                
+                    lower_comb = []
+                    
+                    for first_in_data in first_haps.keys():
+                        if first <= first_in_data:
+                            current_key = ((i,first),(i,first_in_data))
+                        else:
+                            current_key = ((i,first_in_data),(i,first))
+    
+                            
+                        for second_in_data in second_haps.keys():
+                            if second <= second_in_data:
+                                next_key = ((next_bundle,second),(next_bundle,second_in_data))
+                            else:
+                                next_key = ((next_bundle,second_in_data),(next_bundle,second))
+                            
+                            transition_key = ((i,first_in_data),(next_bundle,second_in_data))
+                            transition_value = math.log(current_transition_probs[1][i][transition_key])
+                                
+                            
+                            adding = data_here[0][i][current_key]+data_here[1][next_bundle][next_key]+transition_value
+                                
+                            lower_comb.append(adding)
+                    
+
+                    pair_transition_likelihood = analysis_utils.add_log_likelihoods(lower_comb)
+                    
+                    sample_numbers[(first,second)] = pair_transition_likelihood
+                    
+                      
+            total_sample_loglikeli = analysis_utils.add_log_likelihoods(list(sample_numbers.values()))
+            
+            normalized_sample_numbers = {}
+            for k in sample_numbers.keys():
+                normalized_sample_numbers[k] = sample_numbers[k]-total_sample_loglikeli
+                
+            for k in normalized_sample_numbers.keys():
+                likelihood_lists[k].append(normalized_sample_numbers[k])
+            
+        
+        for k in likelihood_lists.keys():
+            
+            #Get prior value for the transition (i,first)->(next_bundle,second)
+            transition_prior_key = ((i,first),(next_bundle,second))
+            transition_prior_value =  math.log(current_transition_probs[1][i][transition_prior_key])
+            transition_prior_value = 0 #Debugging value to zero out impact of this transiton
+        
+            transitions_likelihoods[((i,k[0]),(next_bundle,k[1]))] = analysis_utils.add_log_likelihoods(likelihood_lists[k])+transition_prior_value
+            
+        full_transitions_likelihoods_backwards[i] = transitions_likelihoods
+    
+    
+    #Same likelihood calculation, but now going backwards
+    # for i in range(len(haps_data)-1,space_gap-1,-1):
+    #     next_bundle = i-space_gap
+        
+    #     first_haps = haps_data[i][3]
+    #     second_haps = haps_data[next_bundle][3]
+        
+    #     transitions_likelihoods = {}
+        
+    #     for first in first_haps.keys():
+    #         for second in second_haps.keys():
+    #             tots_comb = []
+                
+                
+    #             #Get prior value for the transition (i,first)->(next_bundle,second)
+    #             transition_prior_key = ((i,first),(next_bundle,second))
+    #             transition_prior_value =  math.log(current_transition_probs[1][i][transition_prior_key])
+    #             transition_prior_value = 0 #Debugging value to zero out impact of this transiton
+                
+    #             for s in range(len(samples_probs)):
+    #                 data_here = samples_probs[s]
+                    
+    #                 lower_comb = []
+                    
+    #                 for first_in_data in first_haps.keys():
+    #                     if first <= first_in_data:
+    #                         current_key = ((i,first),(i,first_in_data))
+    #                     else:
+    #                         current_key = ((i,first_in_data),(i,first))
+    
+                            
+    #                     for second_in_data in second_haps.keys():
+    #                         if second <= second_in_data:
+    #                             next_key = ((next_bundle,second),(next_bundle,second_in_data))
+    #                         else:
+    #                             next_key = ((next_bundle,second_in_data),(next_bundle,second))
+                            
+    #                         transition_key = ((i,first_in_data),(next_bundle,second_in_data))
+    #                         transition_value = math.log(current_transition_probs[1][i][transition_key])
+                                
+                            
+    #                         adding = data_here[0][next_bundle][next_key]+data_here[1][i][current_key]+transition_value
+                                
+    #                         lower_comb.append(adding)
+                    
+
+    #                 sample_likelihood = analysis_utils.add_log_likelihoods(lower_comb)
+                    
+    #                 tots_comb.append(sample_likelihood)
+                    
+    #             all_sample_combined_likelihood = analysis_utils.add_log_likelihoods(tots_comb)+transition_prior_value
+                
+    #             transitions_likelihoods[((i,first),(next_bundle,second))] = all_sample_combined_likelihood
+        
+    #     full_transitions_likelihoods_backwards[i] = transitions_likelihoods
 
     #Now we build our new transition probabilities going forwards
     for i in range(len(haps_data)-space_gap):
@@ -537,18 +752,18 @@ def get_updated_transition_probabilities(full_samples_data,
         for first in first_haps.keys():
             overall_likelihood_forward_dict[(i,first)] = []
         
-        for k in full_transitions_likelihoods[i].keys():
+        for k in full_transitions_likelihoods_forwards[i].keys():
             first_part = k[0]
-            overall_likelihood_forward_dict[first_part].append(full_transitions_likelihoods[i][k])
+            overall_likelihood_forward_dict[first_part].append(full_transitions_likelihoods_forwards[i][k])
         
         for first_part in overall_likelihood_forward_dict.keys():
             overall_likelihood_forward_dict[first_part] = analysis_utils.add_log_likelihoods(list(overall_likelihood_forward_dict[first_part]))
         
         final_non_norm_forward_likelihoods = {}
         
-        for k in full_transitions_likelihoods[i].keys():
+        for k in full_transitions_likelihoods_forwards[i].keys():
             first_part = k[0]
-            final_non_norm_forward_likelihoods[k] = math.exp(max(full_transitions_likelihoods[i][k]-overall_likelihood_forward_dict[first_part],minimum_transition_log_likelihood))
+            final_non_norm_forward_likelihoods[k] = math.exp(max(full_transitions_likelihoods_forwards[i][k]-overall_likelihood_forward_dict[first_part],minimum_transition_log_likelihood))
         
         final_forward_likelihoods = {}
         
@@ -562,10 +777,11 @@ def get_updated_transition_probabilities(full_samples_data,
                 final_forward_likelihoods[keyname] = final_non_norm_forward_likelihoods[keyname]/probs_sum
          
         new_transition_probs_forward[i] = final_forward_likelihoods
-        
+    
+    #breakpoint()
     #And then we build our new transition probabilities going backwards
     for i in range(len(haps_data)-1,space_gap-1,-1):
-        overall_likelihood_backward_dict = {}
+        overall_likelihood_backwards_dict = {}
         
         next_bundle = i-space_gap
         
@@ -573,35 +789,34 @@ def get_updated_transition_probabilities(full_samples_data,
         second_haps = haps_data[next_bundle][3]
         
         for first in first_haps.keys():
-            overall_likelihood_backward_dict[(i,first)] = []
+            overall_likelihood_backwards_dict[(i,first)] = []
         
-        for k in full_transitions_likelihoods[next_bundle].keys():
-            first_part = k[1]
-            overall_likelihood_backward_dict[first_part].append(full_transitions_likelihoods[next_bundle][k])
+        for k in full_transitions_likelihoods_backwards[i].keys():
+            first_part = k[0]
+            overall_likelihood_backwards_dict[first_part].append(full_transitions_likelihoods_backwards[i][k])
         
-        for first_part in overall_likelihood_backward_dict.keys():
-            overall_likelihood_backward_dict[first_part] = analysis_utils.add_log_likelihoods(list(overall_likelihood_backward_dict[first_part]))
+        for first_part in overall_likelihood_backwards_dict.keys():
+            overall_likelihood_backwards_dict[first_part] = analysis_utils.add_log_likelihoods(list(overall_likelihood_backwards_dict[first_part]))
         
-        final_non_norm_backward_likelihoods = {}
+        final_non_norm_backwards_likelihoods = {}
         
-        for k in full_transitions_likelihoods[next_bundle].keys():
-            first_part = k[1]
-            reversed_k = (k[1],k[0])
-            final_non_norm_backward_likelihoods[reversed_k] = math.exp(max(full_transitions_likelihoods[next_bundle][k]-overall_likelihood_backward_dict[first_part],minimum_transition_log_likelihood))
+        for k in full_transitions_likelihoods_backwards[i].keys():
+            first_part = k[0]
+            final_non_norm_backwards_likelihoods[k] = math.exp(max(full_transitions_likelihoods_backwards[i][k]-overall_likelihood_backwards_dict[first_part],minimum_transition_log_likelihood))
         
-        final_backward_likelihoods = {}
+        final_backwards_likelihoods = {}
         
         for first in first_haps.keys():
             probs_sum = 0
             for second in second_haps.keys():
                 keyname = ((i,first),(next_bundle,second))
-                probs_sum += final_non_norm_backward_likelihoods[keyname]
+                probs_sum += final_non_norm_backwards_likelihoods[keyname]
             for second in second_haps.keys():
                 keyname = ((i,first),(next_bundle,second))
-                final_backward_likelihoods[keyname] = final_non_norm_backward_likelihoods[keyname]/probs_sum
+                final_backwards_likelihoods[keyname] = final_non_norm_backwards_likelihoods[keyname]/probs_sum
          
-        new_transition_probs_backwards[i] = final_backward_likelihoods
-        
+        new_transition_probs_backwards[i] = final_backwards_likelihoods
+    
     return [new_transition_probs_forward,new_transition_probs_backwards]
 
 def calculate_hap_transition_probabilities(full_samples_data,
@@ -610,7 +825,7 @@ def calculate_hap_transition_probabilities(full_samples_data,
                                          full_blocks_likelihoods=None,
                                          max_num_iterations=10,
                                          space_gap=1,
-                                         min_cutoff_change=0.001,
+                                         min_cutoff_change=0.00000001,
                                          averaging_lookback=3,
                                          minimum_transition_log_likelihood=-10):
     """
@@ -654,8 +869,8 @@ def calculate_hap_transition_probabilities(full_samples_data,
             full_samples_data,
             sample_sites,
             haps_data,
-            full_blocks_likelihoods,
             probs_list[-1],
+            full_blocks_likelihoods,
             space_gap=space_gap,
             minimum_transition_log_likelihood=minimum_transition_log_likelihood)
         
@@ -938,15 +1153,52 @@ def get_other_hap_fragments(full_samples_data,
                 hap_matchings[j] = True
 #%%
 
-space_gap = 8
+space_gap = 1
 initp = initial_transition_probabilities(test_haps,space_gap=space_gap)
 
 block_likes =  multiprocess_all_block_likelihoods(all_likelihoods,all_sites,test_haps)
 
 #%%
+reduced_haps = [test_haps[-x] for x in range(4,1,-1)] #4,1 shows increasing loss
+reduced_locs = np.concatenate([x[0] for x in reduced_haps])
+reduced_data = get_sample_data_at_sites_multiple(all_likelihoods,
+                all_sites,reduced_locs)
+
+reduced_likes =  multiprocess_all_block_likelihoods(reduced_data,reduced_locs,reduced_haps)
+
+#%%
+start = time.time()
+reduced_probs = calculate_hap_transition_probabilities(reduced_data,
+        reduced_locs,reduced_haps,max_num_iterations=20,space_gap=space_gap,
+        minimum_transition_log_likelihood=-10000)
+print(time.time()-start)
+#%%
+start = time.time()
+ru_probs = get_updated_transition_probabilities(
+    reduced_data,
+    reduced_locs,
+    reduced_haps,
+    reduced_probs[18],
+    reduced_likes,
+    space_gap=space_gap,
+    minimum_transition_log_likelihood=-100000)
+print(time.time()-start)
+#%%
+
+fprobs = [get_all_data_forward_probs(reduced_data,reduced_locs,reduced_haps,
+                           reduced_probs[i]) for i in range(len(reduced_probs))]
+bprobs = [get_all_data_backward_probs(reduced_data,reduced_locs,reduced_haps,
+                           reduced_probs[i]) for i in range(len(reduced_probs))]
+
+print("Losses")
+for i in range(len(fprobs)):
+    print(i,np.sum(fprobs[i][0]))
+    print(i,np.sum(bprobs[i][0]))
+#%%
 start = time.time()
 final_probs = calculate_hap_transition_probabilities(all_likelihoods,
-        all_sites,test_haps,max_num_iterations=20,space_gap=space_gap)
+        all_sites,test_haps,max_num_iterations=20,space_gap=space_gap,
+        minimum_transition_log_likelihood=-100)
 print(time.time()-start)
 
 #%%
@@ -984,11 +1236,19 @@ for i in range(len(haplotype_data)):
 basic_good = get_full_probs_forward(all_likelihoods[0],all_sites,test_haps,
                            final_mesh[1][20])
 #%%
+earliest_good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
+                           final_probs[15])
+early_good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
+                           final_probs[16])
 good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
-                           final_mesh[1][20])
+                           final_probs[17])
+later_good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
+                           final_probs[18])
+latest_good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
+                           final_probs[19])
 #%%
-first_probs = final_mesh[1][16][0]
-second_probs = final_mesh[1][17][0]
+first_probs = final_probs[13][0]
+second_probs = final_probs[14][0]
 
 for loc in first_probs.keys():
     first_vals = first_probs[loc]
@@ -996,7 +1256,7 @@ for loc in first_probs.keys():
     for tag in first_vals.keys():
         diff = second_vals[tag]-first_vals[tag]
         
-        if abs(diff) > 0.2:
+        if abs(diff) > 0.1:
             print(loc,tag,f"{first_vals[tag] :.3f}",
                   f"{second_vals[tag] :.3f}",f"{diff : .3f}")
     
