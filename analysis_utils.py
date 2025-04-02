@@ -118,11 +118,13 @@ def reads_to_probabilities(reads_array,read_error_prob = 0.02,min_total_reads=5)
             posterior = nonnorm_post/sum(nonnorm_post)
             
             new_array[-1].append(posterior)
+    
+    ploidy = 2*np.ones((num_samples,num_sites))
             
     new_array = np.array(new_array)
     new_array = np.ascontiguousarray(new_array.swapaxes(0,1))
    
-    return (site_priors,new_array)
+    return (site_priors,(new_array,ploidy))
             
 def calc_distance(first_row,second_row,calc_type="diploid"):
     """
@@ -507,3 +509,56 @@ def recombination_fudge(start_probs,distance,recomb_rate=10**-8):
     combined_probability = np.sum(final_mats,axis=0)
     
     return combined_probability
+
+def get_sample_data_at_sites(sample_data,sample_sites,query_sites):
+    """
+    Helper function to extract a subset of the sample data which is
+    for sites at locations sample_sites in order. The function will
+    extract the sample data for sites at query_sites. query_sites 
+    must be a subarray of sample_sites
+    """
+    indices = np.searchsorted(sample_sites,[query_sites[0],query_sites[-1]])
+    
+    return sample_data[indices[0]:indices[1]+1,:]
+                       
+def get_sample_data_at_sites_multiple(sample_data,sample_sites,query_sites):
+    """
+    Helper function to extract a subset of the sample data which is
+    for sites at locations sample_sites in order. The function will
+    extract the sample data for sites at query_sites. query_sites 
+    must be a subarray of sample_sites
+    
+    This is like get_sample_data_at_sites but works for an array with data for multiple samples
+    """
+    indices = np.searchsorted(sample_sites,[query_sites[0],query_sites[-1]])
+
+    return sample_data[:,indices[0]:indices[1]+1,:]
+
+def get_best_block_haps_for_long_hap(long_hap,hap_sites,block_haps):
+    """
+    Takes as input a single long haplotype and returns a list of
+    the hap number for each block which best fits the long hap at that
+    block as well as a list containing the percentage difference
+    between the long hap and the best matching block hap for each block
+    """
+    best_haps = []
+    best_diffs = []
+    
+    for i in range(len(block_haps)):
+        block_sites = block_haps[i][0]
+        block_data = get_sample_data_at_sites(long_hap,hap_sites,block_sites)
+        
+        haps_diffs = {hap:calc_perc_difference(block_data,
+            block_haps[i][3][hap],calc_type="haploid") for hap in block_haps[i][3].keys()}
+        
+        best_hap = min(haps_diffs, key=haps_diffs.get)
+        best_diff = haps_diffs[best_hap]
+        
+        best_haps.append(best_hap)
+        best_diffs.append(best_diff)
+    
+    return (best_haps,best_diffs)
+
+def get_best_block_matches_for_data(samples_data,):
+    pass
+    

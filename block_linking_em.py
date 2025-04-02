@@ -3,6 +3,7 @@ import math
 import time
 from multiprocess import Pool
 import itertools
+import seaborn as sns
 
 import analysis_utils
 import block_haplotypes
@@ -153,36 +154,12 @@ def multiprocess_all_block_likelihoods(full_samples_data,
 
     full_blocks_likelihoods = processing_pool.starmap(
         lambda i: get_all_block_likelihoods(
-            get_sample_data_at_sites_multiple(full_samples_data,
+            analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
             sample_sites,haps_data[i][0]),
             haps_data[i]),
         zip(range(len(haps_data))))
     
     return full_blocks_likelihoods
-
-def get_sample_data_at_sites(sample_data,sample_sites,query_sites):
-    """
-    Helper function to extract a subset of the sample data which is
-    for sites at locations sample_sites in order. The function will
-    extract the sample data for sites at query_sites. query_sites 
-    must be a subarray of sample_sites
-    """
-    indices = np.searchsorted(sample_sites,[query_sites[0],query_sites[-1]])
-    
-    return sample_data[indices[0]:indices[1]+1,:]
-                       
-def get_sample_data_at_sites_multiple(sample_data,sample_sites,query_sites):
-    """
-    Helper function to extract a subset of the sample data which is
-    for sites at locations sample_sites in order. The function will
-    extract the sample data for sites at query_sites. query_sites 
-    must be a subarray of sample_sites
-    
-    This is like get_sample_data_at_sites but works for an array with data for multiple samples
-    """
-    indices = np.searchsorted(sample_sites,[query_sites[0],query_sites[-1]])
-
-    return sample_data[:,indices[0]:indices[1]+1,:]
     
 def get_full_probs_forward(sample_data,
                            sample_sites,
@@ -209,7 +186,7 @@ def get_full_probs_forward(sample_data,
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_block_likelihoods(
-                get_sample_data_at_sites(sample_data,
+                analysis_utils.get_sample_data_at_sites(sample_data,
                 sample_sites,haps_data[i][0]),
                 haps_data[i]),
             zip(range(len(haps_data))))
@@ -310,7 +287,7 @@ def get_full_probs_backward(sample_data,
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_block_likelihoods(
-                get_sample_data_at_sites(sample_data,
+                analysis_utils.get_sample_data_at_sites(sample_data,
                 sample_sites,haps_data[i][0]),
                 haps_data[i]),
             zip(range(len(haps_data))))
@@ -396,7 +373,7 @@ def get_all_data_forward_probs(full_samples_data,sample_sites,
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_all_block_likelihoods(
-                get_sample_data_at_sites_multiple(full_samples_data,
+                analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
                 sample_sites,haps_data[i][0]),
                 haps_data[i]),
             zip(range(len(haps_data))))
@@ -445,7 +422,7 @@ def get_all_data_backward_probs(full_samples_data,sample_sites,
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_all_block_likelihoods(
-                get_sample_data_at_sites_multiple(full_samples_data,
+                analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
                 sample_sites,haps_data[i][0]),
                 haps_data[i]),
             zip(range(len(haps_data))))
@@ -467,8 +444,6 @@ def get_all_data_backward_probs(full_samples_data,sample_sites,
     
     overall_likelihoods = []
     
-    num_vals = len(backward_nums[0])
-    
     for i in range(len(backward_nums)):
         sample_vals = backward_nums[i][0]
         
@@ -479,6 +454,7 @@ def get_all_data_backward_probs(full_samples_data,sample_sites,
         overall_likelihoods.append(max_likelihood_val)
     
     return (overall_likelihoods,backward_nums)
+
 def get_updated_transition_probabilities(full_samples_data,
                                          sample_sites,
                                          haps_data,
@@ -601,11 +577,11 @@ def get_updated_transition_probabilities(full_samples_data,
         for k in likelihood_lists.keys():
             
             #Get prior value for the transition (i,first)->(next_bundle,second)
-            transition_prior_key = ((i,first),(next_bundle,second))
-            transition_prior_value =  math.log(current_transition_probs[0][i][transition_prior_key])
-            transition_prior_value = 0 #Debugging value to zero out impact of this transiton
+            # transition_prior_key = ((i,k[0]),(next_bundle,k[1]))
+            # transition_prior_value =  math.log(current_transition_probs[0][i][transition_prior_key])
+            # transition_prior_value = 0 #Debugging value to zero out impact of this transiton
         
-            transitions_likelihoods[((i,k[0]),(next_bundle,k[1]))] = analysis_utils.add_log_likelihoods(likelihood_lists[k])+transition_prior_value
+            transitions_likelihoods[((i,k[0]),(next_bundle,k[1]))] = analysis_utils.add_log_likelihoods(likelihood_lists[k])
             
         full_transitions_likelihoods_forwards[i] = transitions_likelihoods
         
@@ -675,71 +651,15 @@ def get_updated_transition_probabilities(full_samples_data,
         for k in likelihood_lists.keys():
             
             #Get prior value for the transition (i,first)->(next_bundle,second)
-            transition_prior_key = ((i,first),(next_bundle,second))
-            transition_prior_value =  math.log(current_transition_probs[1][i][transition_prior_key])
-            transition_prior_value = 0 #Debugging value to zero out impact of this transiton
+            # transition_prior_key = ((i,k[0]),(next_bundle,k[1]))
+            # transition_prior_value =  math.log(current_transition_probs[1][i][transition_prior_key])
+            # transition_prior_value = 0 #Debugging value to zero out impact of this transiton
         
-            transitions_likelihoods[((i,k[0]),(next_bundle,k[1]))] = analysis_utils.add_log_likelihoods(likelihood_lists[k])+transition_prior_value
+            transitions_likelihoods[((i,k[0]),(next_bundle,k[1]))] = analysis_utils.add_log_likelihoods(likelihood_lists[k])
             
         full_transitions_likelihoods_backwards[i] = transitions_likelihoods
     
     
-    #Same likelihood calculation, but now going backwards
-    # for i in range(len(haps_data)-1,space_gap-1,-1):
-    #     next_bundle = i-space_gap
-        
-    #     first_haps = haps_data[i][3]
-    #     second_haps = haps_data[next_bundle][3]
-        
-    #     transitions_likelihoods = {}
-        
-    #     for first in first_haps.keys():
-    #         for second in second_haps.keys():
-    #             tots_comb = []
-                
-                
-    #             #Get prior value for the transition (i,first)->(next_bundle,second)
-    #             transition_prior_key = ((i,first),(next_bundle,second))
-    #             transition_prior_value =  math.log(current_transition_probs[1][i][transition_prior_key])
-    #             transition_prior_value = 0 #Debugging value to zero out impact of this transiton
-                
-    #             for s in range(len(samples_probs)):
-    #                 data_here = samples_probs[s]
-                    
-    #                 lower_comb = []
-                    
-    #                 for first_in_data in first_haps.keys():
-    #                     if first <= first_in_data:
-    #                         current_key = ((i,first),(i,first_in_data))
-    #                     else:
-    #                         current_key = ((i,first_in_data),(i,first))
-    
-                            
-    #                     for second_in_data in second_haps.keys():
-    #                         if second <= second_in_data:
-    #                             next_key = ((next_bundle,second),(next_bundle,second_in_data))
-    #                         else:
-    #                             next_key = ((next_bundle,second_in_data),(next_bundle,second))
-                            
-    #                         transition_key = ((i,first_in_data),(next_bundle,second_in_data))
-    #                         transition_value = math.log(current_transition_probs[1][i][transition_key])
-                                
-                            
-    #                         adding = data_here[0][next_bundle][next_key]+data_here[1][i][current_key]+transition_value
-                                
-    #                         lower_comb.append(adding)
-                    
-
-    #                 sample_likelihood = analysis_utils.add_log_likelihoods(lower_comb)
-                    
-    #                 tots_comb.append(sample_likelihood)
-                    
-    #             all_sample_combined_likelihood = analysis_utils.add_log_likelihoods(tots_comb)+transition_prior_value
-                
-    #             transitions_likelihoods[((i,first),(next_bundle,second))] = all_sample_combined_likelihood
-        
-    #     full_transitions_likelihoods_backwards[i] = transitions_likelihoods
-
     #Now we build our new transition probabilities going forwards
     for i in range(len(haps_data)-space_gap):
         overall_likelihood_forward_dict = {}
@@ -778,7 +698,6 @@ def get_updated_transition_probabilities(full_samples_data,
          
         new_transition_probs_forward[i] = final_forward_likelihoods
     
-    #breakpoint()
     #And then we build our new transition probabilities going backwards
     for i in range(len(haps_data)-1,space_gap-1,-1):
         overall_likelihood_backwards_dict = {}
@@ -819,15 +738,37 @@ def get_updated_transition_probabilities(full_samples_data,
     
     return [new_transition_probs_forward,new_transition_probs_backwards]
 
+def smoothen_probs(old_probs,new_probs,alpha):
+    """
+    Takes in two lists of transition probabilities and returns a 
+    new combined list of transition probabilities where the
+    combined probability for each transition is
+    (1-alpha)*old_probability+alpha*new_probability
+    """
+    combined_probs = [{},{}]
+    
+    for i in range(2):
+        for block in old_probs[i].keys():
+            combined_probs[i][block] = {}
+            
+            old_dict = old_probs[i][block]
+            new_dict = new_probs[i][block]
+            
+            for k in old_dict.keys():
+                combined_probs[i][block][k] = (1-alpha)*old_dict[k]+alpha*new_dict[k]
+    
+    return combined_probs
+            
+
 def calculate_hap_transition_probabilities(full_samples_data,
-                                         sample_sites,
-                                         haps_data,
-                                         full_blocks_likelihoods=None,
-                                         max_num_iterations=10,
-                                         space_gap=1,
-                                         min_cutoff_change=0.00000001,
-                                         averaging_lookback=3,
-                                         minimum_transition_log_likelihood=-10):
+                                          sample_sites,
+                                          haps_data,
+                                          full_blocks_likelihoods=None,
+                                          max_num_iterations=10,
+                                          space_gap=1,
+                                          min_cutoff_change=0.00000001,
+                                          learning_rate=1,
+                                          minimum_transition_log_likelihood=-10):
     """
     Starting out with an equal prior compute update transition probabilities
     for adjacent haps (where by adjacency we mean a gap of size space_gap) 
@@ -843,10 +784,9 @@ def calculate_hap_transition_probabilities(full_samples_data,
     make up the sample at that block) is not provided it is computed from the 
     other data
     
-    averaging_lookback is the number of previous steps the program averages
-    the probabilities over to come up with the latest final probabilities
-    at each step. Using a higher value for this will smoothen out the probability
-    changes per step more.
+    learning_rate is a parameter between [0,1] which controls how much we update
+    our probabilities at each step, 1 corresponds to a full EM update while 0
+    corresponds to no change.
     """
     start_probs = initial_transition_probabilities(haps_data,space_gap=space_gap)
 
@@ -859,30 +799,33 @@ def calculate_hap_transition_probabilities(full_samples_data,
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_all_block_likelihoods(
-                get_sample_data_at_sites_multiple(full_samples_data,
+                analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
                 sample_sites,haps_data[i][0]),
                 haps_data[i]),
             zip(range(len(haps_data))))
     
     for i in range(max_num_iterations):
+        
+        old_probs = probs_list[-1]
+        
         new_probs = get_updated_transition_probabilities(
             full_samples_data,
             sample_sites,
             haps_data,
-            probs_list[-1],
+           old_probs,
             full_blocks_likelihoods,
             space_gap=space_gap,
             minimum_transition_log_likelihood=minimum_transition_log_likelihood)
         
-        probs_list.append(new_probs)
+        combined_probs = smoothen_probs(old_probs,new_probs,learning_rate)
         
-        last_probs = probs_list[-2]
+        probs_list.append(combined_probs)
         
         max_diff = 0
         
         for j in [0,1]:
             testing_currently = new_probs[j]
-            testing_last = last_probs[j]
+            testing_last = old_probs[j]
 
             for k in testing_currently.keys():
                 for pair in testing_currently[k].keys():
@@ -897,13 +840,14 @@ def calculate_hap_transition_probabilities(full_samples_data,
             #print(f"Exiting_early {len(probs_list)}")
             break
     
-    return probs_list
+    return probs_list[-1]
 
 def generate_transition_probability_mesh(full_samples_data,
                                          sample_sites,
                                          haps_data,
                                          max_num_iterations=10,
-                                         minimum_transition_log_likelihood=-10):
+                                         minimum_transition_log_likelihood=-10,
+                                         learning_rate=1):
     """
     Generates a mesh of transition probabilities where we generate the transition
     probabilities for space_gap = 1,2,4,8,... all the way up to the largest
@@ -916,7 +860,7 @@ def generate_transition_probability_mesh(full_samples_data,
 
     full_blocks_likelihoods = processing_pool.starmap(
         lambda i: get_all_block_likelihoods(
-            get_sample_data_at_sites_multiple(full_samples_data,
+            analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
             sample_sites,haps_data[i][0]),
             haps_data[i]),
         zip(range(len(haps_data))))
@@ -924,9 +868,9 @@ def generate_transition_probability_mesh(full_samples_data,
     
     mesh_dict = {}
     
-    num_powers = math.floor(math.log(len(haps_data)-1,2))+1
+    num_sqrs = math.floor(math.sqrt(len(haps_data)-1))
     
-    powers = [2**i for i in range(num_powers)]
+    sqrs = [i**2 for i in range(1,num_sqrs+1)]
 
     mesh_list = processing_pool.starmap(lambda x: calculate_hap_transition_probabilities(full_samples_data,
     sample_sites,
@@ -934,13 +878,151 @@ def generate_transition_probability_mesh(full_samples_data,
     full_blocks_likelihoods=full_blocks_likelihoods,
     max_num_iterations=max_num_iterations,
     space_gap=x,
-    minimum_transition_log_likelihood=minimum_transition_log_likelihood),
-    zip(powers))
+    minimum_transition_log_likelihood=minimum_transition_log_likelihood,
+    learning_rate=learning_rate),
+    zip(sqrs))
     
-    for i in range(len(powers)):
-        mesh_dict[powers[i]] = mesh_list[i]
+    for i in range(len(sqrs)):
+        mesh_dict[sqrs[i]] = mesh_list[i]
     
     return mesh_dict
+
+def forward_hap_construction_update(current_full_hap,haps_data,full_mesh):
+    """
+    Given a full block haplotype computes an updated block haplotype by running a forward pass, 
+    choosing the hap at each step which is most likely present based on the input block
+    haplotype and the under construction block haplotype
+    """
+    return_hap = [current_full_hap[0]]
+    
+    for i in range(1,len(haps_data)):
+        available_haps = haps_data[i][3]
+        
+        available_haps_probs = {k: [] for k in available_haps.keys()}
+        
+        backward_base = 1
+        backward_subtract = 1
+        
+        while backward_subtract <= i:
+            
+            earlier_index = i-backward_subtract
+            
+            earlier_block_value = return_hap[earlier_index]
+            
+            mesh_probs = full_mesh[backward_subtract][0][earlier_index]
+            
+            subtract_scaling = math.sqrt(backward_subtract)
+            
+            for k in available_haps.keys():
+                mesh_key = ((earlier_index,earlier_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob*subtract_scaling)            
+            
+            backward_base += 1
+            backward_subtract = backward_base**2
+        
+        forward_base = 1
+        forward_subtract = 1
+        
+        while i+forward_subtract <= len(haps_data)-1:
+            
+            later_index = i+forward_subtract
+            
+            later_block_value = current_full_hap[later_index]
+            
+            mesh_probs = full_mesh[forward_subtract][1][later_index]
+            
+            subtract_scaling = math.sqrt(forward_subtract)
+            
+            for k in available_haps.keys():
+                mesh_key = ((later_index,later_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob*subtract_scaling)
+            
+            forward_base += 1
+            forward_subtract = forward_base**2
+            
+        for k in available_haps_probs.keys():
+            available_haps_probs[k] = sum(available_haps_probs[k])
+            
+        best_new_hap = max(available_haps_probs, key=available_haps_probs.get)
+            
+        return_hap.append(best_new_hap)
+    
+    return return_hap
+
+def backward_hap_construction_update(current_full_hap,haps_data,full_mesh):
+    """
+    Given a full block haplotype computes an updated block haplotype by running a backward pass, 
+    choosing the hap at each step which is most likely present based on the input block
+    haplotype and the under construction block haplotype
+    """
+    return_hap = [current_full_hap[-1]]
+    
+    for i in range(len(haps_data)-2,-1,-1):
+        available_haps = haps_data[i][3]
+        cur_position = len(haps_data)-1-i
+        
+        available_haps_probs = {k: [] for k in available_haps.keys()}
+        
+        forward_base = 1
+        forward_subtract = 1
+        
+        while forward_subtract <= cur_position:
+            
+            #For indexing in our partially constructed second pass hap
+            earlier_index = cur_position-forward_subtract
+            
+            #For indexing throuugh our mesh dict which only goes from forward to end
+            later_index = i+forward_subtract
+            
+            earlier_block_value = return_hap[earlier_index]
+            
+            mesh_probs = full_mesh[forward_subtract][1][later_index]
+            
+            subtract_scaling = math.sqrt(forward_subtract)
+            
+            for k in available_haps.keys():
+                mesh_key = ((later_index,earlier_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob*subtract_scaling)
+            
+            forward_base += 1
+            forward_subtract = forward_base**2
+        
+        backward_base = 1
+        backward_subtract = 1
+        
+        while backward_subtract <= i:
+
+            #For indexing through 
+            lookback_index = i-backward_subtract
+            
+            lookback_block_value = current_full_hap[lookback_index]
+            
+            mesh_probs = full_mesh[backward_subtract][0][lookback_index]
+            
+            subtract_scaling = math.sqrt(backward_subtract)
+            
+            for k in available_haps.keys():
+                mesh_key = ((lookback_index,lookback_block_value),(i,k))
+                log_prob = math.log(mesh_probs[mesh_key])
+                available_haps_probs[k].append(log_prob*subtract_scaling)
+            
+            backward_base += 1
+            backward_subtract = backward_base**2
+        
+        for k in available_haps_probs.keys():
+            available_haps_probs[k] = sum(available_haps_probs[k])
+        
+        best_new_hap = max(available_haps_probs, key=available_haps_probs.get)
+        
+        return_hap.append(best_new_hap)
+        
+    #Since we build the second pass long haplotype in reverse, reverse the result to get the forward haplotype
+    return_hap = return_hap[::-1]
+    
+    return return_hap
 
 def convert_mesh_to_haplotype(full_samples_data,full_sites,
                               haps_data,full_mesh):
@@ -955,7 +1037,7 @@ def convert_mesh_to_haplotype(full_samples_data,full_sites,
     first_block_sites = first_block[0]
     first_keep_flags = first_block[1]
     
-    samples_first_restricted = get_sample_data_at_sites_multiple(
+    samples_first_restricted = analysis_utils.get_sample_data_at_sites_multiple(
         full_samples_data,full_sites,first_block_sites)
     
     matches = hap_statistics.match_best(first_block_haps,
@@ -966,8 +1048,11 @@ def convert_mesh_to_haplotype(full_samples_data,full_sites,
     
     first_pass_hap = [best_first_match]
     
+    
     for i in range(1,len(haps_data)):
         available_haps = haps_data[i][3]
+        
+        base = 1
         cur_subtract = 1
         
         available_haps_probs = {k: [] for k in available_haps.keys()}
@@ -979,12 +1064,15 @@ def convert_mesh_to_haplotype(full_samples_data,full_sites,
             
             mesh_probs = full_mesh[cur_subtract][0][earlier]
             
+            subtract_scaling = math.sqrt(cur_subtract)
+            
             for k in available_haps.keys():
                 mesh_key = ((earlier,earlier_block_value),(i,k))
                 log_prob = math.log(mesh_probs[mesh_key])
-                available_haps_probs[k].append(log_prob)
+                available_haps_probs[k].append(log_prob*subtract_scaling)
         
-            cur_subtract *= 2
+            base += 1
+            cur_subtract = base**2
         
         for k in available_haps_probs.keys():
             available_haps_probs[k] = sum(available_haps_probs[k])
@@ -993,114 +1081,13 @@ def convert_mesh_to_haplotype(full_samples_data,full_sites,
         
         first_pass_hap.append(best_new_hap)
         
-    #This is the updated hap we are constructing in reverse order
-    second_pass_hap = [first_pass_hap[-1]]
+    second_pass_hap = backward_hap_construction_update(first_pass_hap, haps_data, full_mesh)
+    third_pass_hap = forward_hap_construction_update(second_pass_hap, haps_data, full_mesh)
+        
+    #fourth_pass_hap = backward_hap_construction_update(third_pass_hap, haps_data, full_mesh)
+    #fifth_pass_hap = forward_hap_construction_update(fourth_pass_hap, haps_data, full_mesh)
+        
     
-    for i in range(len(haps_data)-2,-1,-1):
-        available_haps = haps_data[i][3]
-        cur_position = len(haps_data)-1-i
-        
-        available_haps_probs = {k: [] for k in available_haps.keys()}
-        
-        forward_subtract = 1
-        
-        while forward_subtract <= cur_position:
-            
-            #For indexing in our partially constructed second pass hap
-            earlier_index = cur_position-forward_subtract
-            
-            #For indexing throuugh our mesh dict which only goes from forward to end
-            later_index = i+forward_subtract
-            
-            earlier_block_value = second_pass_hap[earlier_index]
-            
-            mesh_probs = full_mesh[forward_subtract][1][later_index]
-            
-            for k in available_haps.keys():
-                mesh_key = ((later_index,earlier_block_value),(i,k))
-                log_prob = math.log(mesh_probs[mesh_key])
-                available_haps_probs[k].append(log_prob)
-            
-            
-            forward_subtract *= 2
-        
-        backward_subtract = 1
-        
-        while backward_subtract <= i:
-
-            #For indexing through 
-            lookback_index = i-backward_subtract
-            
-            lookback_block_value = first_pass_hap[lookback_index]
-            
-            mesh_probs = full_mesh[backward_subtract][0][lookback_index]
-            
-            for k in available_haps.keys():
-                mesh_key = ((lookback_index,lookback_block_value),(i,k))
-                log_prob = math.log(mesh_probs[mesh_key])
-                available_haps_probs[k].append(log_prob)
-            
-            backward_subtract *= 2
-        
-        for k in available_haps_probs.keys():
-            available_haps_probs[k] = sum(available_haps_probs[k])
-        
-        best_new_hap = max(available_haps_probs, key=available_haps_probs.get)
-        
-        second_pass_hap.append(best_new_hap)
-        
-    #Since we build the second pass long haplotype in reverse, reverse the result to get the forward haplotype
-    second_pass_hap = second_pass_hap[::-1]
-    
-    #Finally build the haplotype we will return
-    third_pass_hap = [second_pass_hap[0]]
-    
-    for i in range(1,len(haps_data)):
-        available_haps = haps_data[i][3]
-        
-        available_haps_probs = {k: [] for k in available_haps.keys()}
-        
-        backward_subtract = 1
-        
-        while backward_subtract <= i:
-            
-            earlier_index = i-backward_subtract
-            
-            earlier_block_value = third_pass_hap[earlier_index]
-            
-            mesh_probs = full_mesh[backward_subtract][0][earlier_index]
-            
-            for k in available_haps.keys():
-                mesh_key = ((earlier_index,earlier_block_value),(i,k))
-                log_prob = math.log(mesh_probs[mesh_key])
-                available_haps_probs[k].append(log_prob)            
-            
-            backward_subtract *= 2
-            
-        forward_subtract = 1
-        
-        while i+forward_subtract <= len(haps_data)-1:
-            
-            later_index = i+forward_subtract
-            
-            later_block_value = second_pass_hap[later_index]
-            
-            mesh_probs = full_mesh[forward_subtract][1][later_index]
-            
-            for k in available_haps.keys():
-                mesh_key = ((later_index,later_block_value),(i,k))
-                log_prob = math.log(mesh_probs[mesh_key])
-                available_haps_probs[k].append(log_prob)
-            
-            forward_subtract *= 2
-            
-        for k in available_haps_probs.keys():
-            available_haps_probs[k] = sum(available_haps_probs[k])
-            
-        best_new_hap = max(available_haps_probs, key=available_haps_probs.get)
-            
-        third_pass_hap.append(best_new_hap)
-        
     combined_positions = []
     combined_haplotype = []
     
@@ -1110,8 +1097,14 @@ def convert_mesh_to_haplotype(full_samples_data,full_sites,
     
     combined_positions = np.array(combined_positions)
     combined_haplotype = np.array(combined_haplotype)
+    
+    print(first_pass_hap)
+    print(second_pass_hap)
+    print(third_pass_hap)
+    
+    print(np.where(np.array(third_pass_hap) != np.array(first_pass_hap)))
         
-    return (combined_positions,combined_haplotype)   
+    return (combined_positions,combined_haplotype,third_pass_hap)   
 
 def get_other_hap_fragments(full_samples_data,
                             full_sites,
@@ -1129,7 +1122,7 @@ def get_other_hap_fragments(full_samples_data,
     main_hap_at_blocks = []
     
     for j in range(len(haps_data)):
-        main_hap_value = get_sample_data_at_sites(main_haplotype[1],full_sites,haps_data[j][0])
+        main_hap_value = analysis_utils.get_sample_data_at_sites(main_haplotype[1],full_sites,haps_data[j][0])
         main_hap_at_blocks.append(main_hap_value)
         
     for i in range(len(full_samples_data)):
@@ -1141,7 +1134,7 @@ def get_other_hap_fragments(full_samples_data,
         hap_matchings = [False for _ in range(len(haps_data))]
         
         for j in range(len(haps_data)):
-            sample_block_data = get_sample_data_at_sites(sample_data,full_sites,haps_data[j][0])
+            sample_block_data = analysis_utils.get_sample_data_at_sites(sample_data,full_sites,haps_data[j][0])
             main_hap_at_block = main_hap_at_blocks[j]
             
             hap_difference = analysis_utils.get_diff_wrongness(sample_block_data,main_hap_at_block,haps_data[j][1])
@@ -1151,72 +1144,81 @@ def get_other_hap_fragments(full_samples_data,
             
             if hap_difference[1] < max_hap_wrongness_for_match:
                 hap_matchings[j] = True
+                
+def attempt_subtraction(usage_hap,haps_data,full_best_matches):
+    """    
+    This function tries to subtract off the haplotype given by usage_hap
+    from each sample making up haps_data
+    
+    usage_hap is a block haplotype level representation of a (partial)
+    haplotype, being a list of the block haplotype used for each block,
+    with -1 used at each block where we are unsure
+    
+    haps_data is the data for all the block haps in the standard format
+    of each element being (sites,keep_flags,read_counts_each_sample,haps)
+
+    full_best_matches is a list where each element contrains the best matches
+    for all samples for that particular index    
+    """
+    
+    sample_hits = []
+    num_samples = len(haps_data[0][2])
+    num_haps = len(haps_data)
+    
+    for i in range(num_samples):
+        matching = []
+        for j in range(num_haps):
+            haps_here = full_best_matches[j][0][i][0]
+            if usage_hap[j] == -1:
+                matching.append(-1)
+            elif usage_hap[j] in haps_here:
+                matching.append(1)
+            else:
+                matching.append(0)
+        sample_hits.append(matching)
+    sample_hits = np.array(sample_hits)
+    
+    sample_similars = np.zeros((num_haps,num_haps))
+    
+    start = time.time()
+    for i in range(num_haps):
+        for j in range(i,num_haps):
+            commonality_ratio = len(np.where(
+                (sample_hits[:,i] == 1) & (sample_hits[:,j] == 1))[0])/num_samples
+            sample_similars[i,j] = commonality_ratio
+            sample_similars[j,i] =  commonality_ratio
+    print(time.time()-start)
+    
+    sns.heatmap(sample_similars)
+    
+        
+    breakpoint()
+    
 #%%
 
-space_gap = 1
-initp = initial_transition_probabilities(test_haps,space_gap=space_gap)
+space_gap = 49
 
+initp = initial_transition_probabilities(test_haps,space_gap=space_gap)
 block_likes =  multiprocess_all_block_likelihoods(all_likelihoods,all_sites,test_haps)
 
-#%%
-reduced_haps = [test_haps[-x] for x in range(4,1,-1)] #4,1 shows increasing loss
-reduced_locs = np.concatenate([x[0] for x in reduced_haps])
-reduced_data = get_sample_data_at_sites_multiple(all_likelihoods,
-                all_sites,reduced_locs)
-
-reduced_likes =  multiprocess_all_block_likelihoods(reduced_data,reduced_locs,reduced_haps)
-
-#%%
-start = time.time()
-reduced_probs = calculate_hap_transition_probabilities(reduced_data,
-        reduced_locs,reduced_haps,max_num_iterations=20,space_gap=space_gap,
-        minimum_transition_log_likelihood=-10000)
-print(time.time()-start)
-#%%
-start = time.time()
-ru_probs = get_updated_transition_probabilities(
-    reduced_data,
-    reduced_locs,
-    reduced_haps,
-    reduced_probs[18],
-    reduced_likes,
-    space_gap=space_gap,
-    minimum_transition_log_likelihood=-100000)
-print(time.time()-start)
-#%%
-
-fprobs = [get_all_data_forward_probs(reduced_data,reduced_locs,reduced_haps,
-                           reduced_probs[i]) for i in range(len(reduced_probs))]
-bprobs = [get_all_data_backward_probs(reduced_data,reduced_locs,reduced_haps,
-                           reduced_probs[i]) for i in range(len(reduced_probs))]
-
-print("Losses")
-for i in range(len(fprobs)):
-    print(i,np.sum(fprobs[i][0]))
-    print(i,np.sum(bprobs[i][0]))
 #%%
 start = time.time()
 final_probs = calculate_hap_transition_probabilities(all_likelihoods,
         all_sites,test_haps,max_num_iterations=20,space_gap=space_gap,
-        minimum_transition_log_likelihood=-100)
+        minimum_transition_log_likelihood=-100,learning_rate=0.5)
 print(time.time()-start)
 
 #%%
 start = time.time()
 updated_probs = get_updated_transition_probabilities(
-    all_likelihoods,
-    all_sites,
-    test_haps,
-    final_probs,
-    block_likes,
-    space_gap=space_gap,
-    minimum_transition_log_likelihood=-10)
+    all_likelihoods,all_sites,test_haps,
+    initp,block_likes,space_gap=space_gap,
+    minimum_transition_log_likelihood=-100)
 print(time.time()-start)
-
 #%%
 start = time.time()
 final_mesh = generate_transition_probability_mesh(all_likelihoods,
-        all_sites,test_haps,max_num_iterations=30)
+        all_sites,test_haps,max_num_iterations=20,learning_rate=0.5)
 print(time.time()-start)
 #%%
 start = time.time()
@@ -1233,33 +1235,63 @@ for i in range(len(haplotype_data)):
     print(len(main_haplotype[1]))
     print()
 #%%
-basic_good = get_full_probs_forward(all_likelihoods[0],all_sites,test_haps,
-                           final_mesh[1][20])
-#%%
-earliest_good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
-                           final_probs[15])
-early_good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
-                           final_probs[16])
-good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
-                           final_probs[17])
-later_good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
-                           final_probs[18])
-latest_good = get_all_data_forward_probs(all_likelihoods,all_sites,test_haps,
-                           final_probs[19])
-#%%
-first_probs = final_probs[13][0]
-second_probs = final_probs[14][0]
-
-for loc in first_probs.keys():
-    first_vals = first_probs[loc]
-    second_vals = second_probs[loc]
-    for tag in first_vals.keys():
-        diff = second_vals[tag]-first_vals[tag]
-        
-        if abs(diff) > 0.1:
-            print(loc,tag,f"{first_vals[tag] :.3f}",
-                  f"{second_vals[tag] :.3f}",f"{diff : .3f}")
+for i in range(len(test_haps)):
+    sites_here = test_haps[i][0]
     
+    real_data_here = analysis_utils.get_sample_data_at_sites(
+        haplotype_data[5],all_sites,sites_here)
+    
+    block_used_here = test_haps[i][3][main_haplotype[2][i]]
+    
+    print(i,analysis_utils.calc_perc_difference(real_data_here,
+        block_used_here,calc_type="haploid"))
+
+#%%
+sites_test = test_haps[20][0]
+real_data_test = analysis_utils.get_sample_data_at_sites(haplotype_data[5],all_sites,sites_test)
+
+for hap in test_haps[20][3].keys():
+    print(hap,analysis_utils.calc_perc_difference(real_data_test,
+        test_haps[20][3][hap],calc_type="haploid"))
+
+#%%
+real_dat =  test_haps[21][2][306]
+real_probs = analysis_utils.reads_to_probabilities(np.array([real_dat]))[1]
+print(analysis_utils.get_diff_wrongness(
+    real_probs[0], test_haps[21][3][1]))
+
+comb_check = analysis_utils.combine_haploids(test_haps[21][3][0],test_haps[21][3][1])
+
+#%%
+comp0 = analysis_utils.get_best_block_haps_for_long_hap(
+    haplotype_data[2], all_sites, test_haps)
+comp1 = analysis_utils.get_best_block_haps_for_long_hap(
+    haplotype_data[1], all_sites, test_haps)
+comp5 = analysis_utils.get_best_block_haps_for_long_hap(
+    haplotype_data[5], all_sites, test_haps)
+#%%
+print(np.where(np.array(comp5[0]) != main_haplotype[2]))
+#%%
+t = 57
+mat = main_haplotype[2][t]
+mat = comp1[0][t]
+lpro = []
+for x in [1,4,9,16,25,36,49,64]:
+    v = t-x
+    
+    if v >= 0:    
+        ma = main_haplotype[2][v]
+        key = ((v,ma),(t,mat))
+        print(x,v,final_mesh[x][0][v][key])
+    
+#%%
+all_best_matches = hap_statistics.get_best_matches_all_blocks(test_haps)
+#%%
+sub = attempt_subtraction(comp0[0],test_haps,all_best_matches)
+#%%
+rel_usg = hap_statistics.relative_haplotype_usage(
+    2, all_best_matches[8], all_best_matches[57])
+print(rel_usg)
 #%%
 start = time.time()
 all_haps = get_other_hap_fragments(all_likelihoods,
