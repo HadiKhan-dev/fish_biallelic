@@ -216,6 +216,7 @@ def combine_into_genotype(individual_list,sites_data):
     an individual and turn them into a combined likelihood genotype
     """
     all_list = []
+    ploidy = []
     
     for i in range(len(individual_list)):
         indexing = individual_list[i][0]+individual_list[i][1]
@@ -230,8 +231,9 @@ def combine_into_genotype(individual_list,sites_data):
         scaffold[combined_indexing[:,0],combined_indexing[:,1]] = 1
         
         all_list.append(scaffold)
+        ploidy.append([2 for _ in range(num_sites)])
     
-    return [sites_data,np.array(all_list)]
+    return [sites_data,(np.array(all_list),np.array(ploidy))]
     
 def chunk_up_data(positions_list,reads_array,
                   starting_pos,ending_pos,
