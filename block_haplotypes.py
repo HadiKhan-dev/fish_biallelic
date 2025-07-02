@@ -700,7 +700,7 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
 
     #reads_array = resample_reads_array(reads_array,1)
     
-    (site_priors,probs_array) = analysis_utils.reads_to_probabilities(reads_array)
+    (site_priors,(probs_array,ploidy)) = analysis_utils.reads_to_probabilities(reads_array)
     
     initial_haps = get_initial_haps(site_priors,probs_array,
         reads_array,keep_flags=keep_flags)
@@ -771,7 +771,6 @@ def generate_haplotypes_all(positions_data,reads_array_data,
     
     if keep_flags_data == None:
         keep_flags_data = [None for i in range(len(positions_data))] 
-    
     
     processing_pool = Pool(16)
     

@@ -510,18 +510,27 @@ def recombination_fudge(start_probs,distance,recomb_rate=10**-8):
     
     return combined_probability
 
-def get_sample_data_at_sites(sample_data,sample_sites,query_sites):
+def get_sample_data_at_sites(sample_data,sample_sites,
+                             query_sites,ploidy_present = False):
     """
     Helper function to extract a subset of the sample data which is
     for sites at locations sample_sites in order. The function will
     extract the sample data for sites at query_sites. query_sites 
     must be a subarray of sample_sites
+    
+    If ploidy_present == True then sample_data must be a tuple, the first
+    element of which will be the likelihoods and the second the ploidies,
+    otherwise sample_data is just the likelihoods
     """
     indices = np.searchsorted(sample_sites,[query_sites[0],query_sites[-1]])
     
-    return sample_data[indices[0]:indices[1]+1,:]
+    if ploidy_present:
+        return (sample_data[0][indices[0]:indices[1]+1,:],sample_data[1][indices[0]:indices[1]+1])
+    else:
+        return sample_data[indices[0]:indices[1]+1,:]
                        
-def get_sample_data_at_sites_multiple(sample_data,sample_sites,query_sites):
+def get_sample_data_at_sites_multiple(sample_data,sample_sites,
+                                      query_sites,ploidy_present = False):
     """
     Helper function to extract a subset of the sample data which is
     for sites at locations sample_sites in order. The function will
@@ -529,10 +538,17 @@ def get_sample_data_at_sites_multiple(sample_data,sample_sites,query_sites):
     must be a subarray of sample_sites
     
     This is like get_sample_data_at_sites but works for an array with data for multiple samples
+    
+    If ploidy_present == True then sample_data must be a tuple, the first
+    element of which will be the likelihoods and the second the ploidies,
+    otherwise sample_data is just the likelihoods
     """
     indices = np.searchsorted(sample_sites,[query_sites[0],query_sites[-1]])
-
-    return sample_data[:,indices[0]:indices[1]+1,:]
+    
+    if ploidy_present:
+        return (sample_data[0][:,indices[0]:indices[1]+1,:],sample_data[1][:,indices[0]:indices[1]+1])
+    else:
+        return sample_data[:,indices[0]:indices[1]+1,:]
 
 def get_best_block_haps_for_long_hap(long_hap,hap_sites,block_haps):
     """
