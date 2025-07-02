@@ -8,6 +8,8 @@ from multiprocess import Pool
 import time
 import warnings
 import networkx as nx
+import os
+import platform
 
 import vcf_data_loader
 import analysis_utils
@@ -17,7 +19,11 @@ import block_linking_naive
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
-pass
+
+if platform.system() != "Windows":
+    os.nice(15)
+    print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
+
 
 #%%
 bcf = vcf_data_loader.read_bcf_file("./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz")
@@ -30,7 +36,7 @@ shift_size = 50000
 
 chr1 = list(vcf_data_loader.break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
-starting = 700
+starting = 800
 ending = len(chr1)
 
 

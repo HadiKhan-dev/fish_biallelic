@@ -23,6 +23,7 @@ def match_best(haps_dict,diploids,keep_flags=None):
         keep_flags = np.array(keep_flags,dtype=bool)
         
     haps_dict = {x:haps_dict[x][keep_flags] for x in haps_dict.keys()}
+
     diploids = diploids[:,keep_flags]
     
     dips_matches = []
@@ -119,7 +120,12 @@ def combined_best_hap_matches(haps_data_block):
     haps = haps_data_block[3]
     (site_priors,probs_array) = analysis_utils.reads_to_probabilities(reads_array)
     
-    matches = match_best(haps,probs_array,keep_flags=keep_flags)
+    actual_probs = probs_array[0]
+    
+    print(actual_probs)
+    #ploidy_array = probs_array[1]
+    
+    matches = match_best(haps,actual_probs,keep_flags=keep_flags)
     
     return matches
 
