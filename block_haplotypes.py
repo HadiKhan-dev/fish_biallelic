@@ -696,14 +696,18 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
     if keep_flags.dtype != int:
         keep_flags = np.array(keep_flags,dtype=int)
     
-    
-
     #reads_array = resample_reads_array(reads_array,1)
+    
+    #print("Earlier")
     
     (site_priors,(probs_array,ploidy)) = analysis_utils.reads_to_probabilities(reads_array)
     
+    
+    #print("Reached")
     initial_haps = get_initial_haps(site_priors,probs_array,
         reads_array,keep_flags=keep_flags)
+    
+    
     
     initial_matches = hap_statistics.match_best(initial_haps,probs_array,keep_flags=keep_flags)
     initial_error = np.mean(initial_matches[2])
@@ -771,8 +775,12 @@ def generate_haplotypes_all(positions_data,reads_array_data,
     
     if keep_flags_data == None:
         keep_flags_data = [None for i in range(len(positions_data))] 
+        
+    print("FIRST")
     
     processing_pool = Pool(16)
+    
+    print("Starting")
     
     overall_haplotypes = processing_pool.starmap(lambda x,y,z:
                         generate_haplotypes_block(x,y,z),

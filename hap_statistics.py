@@ -122,9 +122,6 @@ def combined_best_hap_matches(haps_data_block):
     
     actual_probs = probs_array[0]
     
-    print(actual_probs)
-    #ploidy_array = probs_array[1]
-    
     matches = match_best(haps,actual_probs,keep_flags=keep_flags)
     
     return matches

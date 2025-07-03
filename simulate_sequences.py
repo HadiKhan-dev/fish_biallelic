@@ -318,7 +318,7 @@ new_reads_array = read_sample_all_individuals(all_offspring,10,error_rate=0.02)
 print("Starting")
 (simd_pos,simd_keep_flags,simd_reads) = chunk_up_data(
     haplotype_sites,new_reads_array,
-    40000000,42700000,100000,100000)
+    10000000,15000000,100000,100000)
 simd_probabalistic_genotypes = analysis_utils.reads_to_probabilities(new_reads_array)
 #%%
 ##############################
