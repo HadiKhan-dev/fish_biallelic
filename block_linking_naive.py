@@ -177,7 +177,6 @@ def match_haplotypes_by_overlap_probabalistic(block_level_haps):
                 else:
                     similarity = 2*(50-haps_dist)
                 
-                #print(first_name,second_name,haps_dist,similarity)
                 similarities[((i,first_name),(i+1,second_name))] = similarity
             
         #Scale and transform the similarities into a score

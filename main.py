@@ -36,8 +36,8 @@ shift_size = 50000
 
 chr1 = list(vcf_data_loader.break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
-starting = 800
-ending = len(chr1)
+starting = 200
+ending = 300
 
 
 combi = [chr1[i] for i in range(starting,ending)]

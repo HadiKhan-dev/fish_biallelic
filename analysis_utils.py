@@ -98,6 +98,9 @@ def reads_to_probabilities(reads_array,read_error_prob = 0.02,min_total_reads=5)
         prior_vals = site_priors[i]
         log_priors = np.array(np.log(prior_vals))
         new_array.append([])
+        
+        # if i %100 == 0:
+        #     print(i)
         for j in range(num_samples):
             
             zeros = reads_array[j][i][0]
@@ -471,8 +474,6 @@ def get_dips_from_long_haps(long_haps):
         total_combined.append(subset)
     
     total_combined = np.array(total_combined)
-    
-    print(total_combined.shape)
     
     return total_combined
 
