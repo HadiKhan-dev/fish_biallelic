@@ -43,6 +43,7 @@ def hdbscan_cluster(dist_matrix,
     
     all_clusters = set(initial_labels)
     all_clusters.discard(-1)
+
     
     return [initial_labels,initial_probabilities,base_clustering]
 
@@ -585,7 +586,6 @@ def generate_further_haps(site_priors,
                           wrongness_cutoff=10,
                           uniqueness_threshold=5,
                           max_hap_add = 1000,
-                          make_pca = False,
                           verbose=False):
     """
     Given a genotype array and a set of initial haplotypes
@@ -677,7 +677,6 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
                               error_reduction_cutoff = 0.98,
                               max_cutoff_error_increase = 1.02,
                               max_hapfind_iter=5,
-                              make_pca=False,
                               deeper_analysis_initial=False,
                               min_num_haps=0):
     """
@@ -698,16 +697,10 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
     
     #reads_array = resample_reads_array(reads_array,1)
     
-    #print("Earlier")
-    
     (site_priors,(probs_array,ploidy)) = analysis_utils.reads_to_probabilities(reads_array)
     
-    
-    #print("Reached")
     initial_haps = get_initial_haps(site_priors,probs_array,
         reads_array,keep_flags=keep_flags)
-    
-    
     
     initial_matches = hap_statistics.match_best(initial_haps,probs_array,keep_flags=keep_flags)
     initial_error = np.mean(initial_matches[2])
@@ -731,6 +724,7 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
                     wrongness_cutoff=wrongness_cutoff)
         cur_matches = hap_statistics.match_best(cur_haps,probs_array)
         cur_error = np.mean(cur_matches[2])
+        
         
         # matches_history.append(cur_matches)
         # errors_history.append(cur_error)
@@ -776,14 +770,48 @@ def generate_haplotypes_all(positions_data,reads_array_data,
     if keep_flags_data == None:
         keep_flags_data = [None for i in range(len(positions_data))] 
         
-    print("FIRST")
     
     processing_pool = Pool(16)
-    
-    print("Starting")
     
     overall_haplotypes = processing_pool.starmap(lambda x,y,z:
                         generate_haplotypes_block(x,y,z),
                         zip(positions_data,reads_array_data,keep_flags_data))
 
     return overall_haplotypes
+
+#%%
+def match_long_hap_to_blocks(long_hap,long_hap_sites,block_haps_data):
+    """
+    Function which takes a full long hap and the full block level haps
+    data and computes which block haps matches best to the long hap
+    at each block
+    """
+    best_matches = []
+    lowest_diffs = []
+    
+    for i in range(len(block_haps_data)):
+        current_sites = block_haps_data[i][0]
+
+        current_data = analysis_utils.get_sample_data_at_sites(long_hap, long_hap_sites, current_sites)
+    
+        best_hap = -1
+        lowest_diff = 100
+        
+        for j in range(len(block_haps_data[i][3])):
+            diff = analysis_utils.calc_perc_difference(
+                block_haps_data[i][3][j],
+                current_data,calc_type="haploid")
+            if diff < lowest_diff:
+                lowest_diff = diff
+                best_hap = j
+        best_matches.append(best_hap)
+        lowest_diffs.append(lowest_diff)
+        
+    return [best_matches,lowest_diffs]
+#%%
+# for i in range(6):
+#     matches = match_long_hap_to_blocks(haplotype_data[i][:18341],
+#                                    all_sites[:18341],test_haps)
+
+#     print(matches[0])
+# print(check[2])
