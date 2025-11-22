@@ -287,8 +287,8 @@ def convert_mesh_to_haplotype(full_samples_data,full_sites,
         new_cands = sorted(new_cands,key=lambda x:-x[1])
         kept_haps = copy.deepcopy(new_cands)[:num_candidates]
         
-        print(i)
-        breakpoint()
+        # print(i)
+        # breakpoint()
 
     #At this point we have our list of num_candidate candidate haplotypes following the first pass through
     #We now do a second pass in reverse to see if changing things helps us anywhere
@@ -429,7 +429,7 @@ def explain_sample_viterbi(sample_data,sample_sites,haps_data,
     if full_blocks_likelihoods == None:
         #Calculate site data and underlying likelihoods for each sample
         #and possible pair making up that sample at each block
-        processing_pool = Pool(8)
+        processing_pool = Pool(32)
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: block_linking_em.get_block_likelihoods(

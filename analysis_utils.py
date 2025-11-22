@@ -15,25 +15,30 @@ def log_fac(x):
     """
     x = int(x)
     
-    if x < 4:
-        return math.log(math.factorial(x))
-    else:
-        return (x+0.5)*math.log(x)-x+0.918938+(1/(12*x)) #0.918938 is ln(sqrt(2*pi))
+    return math.lgamma(x+1)
+    
+    # if x < 4:
+    #     return math.log(math.factorial(x))
+    # else:
+    #     return (x+0.5)*math.log(x)-x+0.918938+(1/(12*x)) #0.918938 is ln(sqrt(2*pi))
     
 def log_binomial(n,k):
     """
     Returns log(nCk) exactly if n,k < 10, otherwise caclulates
     the consituent factorials through Stirling's approximation
     """
-    n = int(n)
-    k = int(k)
     
-    if n < 35:
-        return math.log(math.comb(n,k))
-    elif k < 17 and n < 40:
-        return math.log(math.comb(n,k))
-    else:
-        return log_fac(n)-log_fac(k)-log_fac(n-k)
+    return log_fac(n)-log_fac(k)-log_fac(n-k)
+
+    # n = int(n)
+    # k = int(k)
+    
+    # if n < 35:
+    #     return math.log(math.comb(n,k))
+    # elif k < 17 and n < 40:
+    #     return math.log(math.comb(n,k))
+    # else:
+    #     return log_fac(n)-log_fac(k)-log_fac(n-k)
     
 def add_log_likelihoods(logli_list):
     """
@@ -68,12 +73,20 @@ def reads_to_probabilities(reads_array,read_error_prob = 0.02,min_total_reads=5)
     min_total_reads is a minimum number of reads each site must have for it to be considered
     a valid alternate site (this is to reduce the chance of us considering something which is a variant site only because of errors as a real site)
     """
+    
+    
     reads_sum = np.sum(reads_array,axis=0)
     
-    num_samples = len(reads_array)
+    num_samples = reads_array.shape[0]
+    num_sites = reads_array.shape[1]
+    
+    ploidy = 2*np.ones((num_samples,num_sites))
+    
+    if num_sites == 0:
+        return (np.empty((num_sites,3)),(np.empty((num_samples,num_sites,3)),ploidy))
     
     site_ratios = []
-    for i in range(len(reads_sum)):
+    for i in range(num_sites):
         
         if sum(reads_sum[i]) >= max(min_total_reads,read_error_prob*num_samples):
             site_ratios.append((1+reads_sum[i][1])/(2+reads_sum[i][0]+reads_sum[i][1]))
@@ -86,15 +99,14 @@ def reads_to_probabilities(reads_array,read_error_prob = 0.02,min_total_reads=5)
         site_priors.append([(1-singleton)**2,2*singleton*(1-singleton),singleton**2])
     site_priors = np.array(site_priors)
     
-    num_samples = reads_array.shape[0]
-    num_sites = reads_array.shape[1]
-    
     new_array = []
     
     log_half = math.log(1/2)
     log_read_error = math.log(read_error_prob)
     log_read_nonerror = math.log(1-read_error_prob)
+    
     for i in range(num_sites):
+        
         prior_vals = site_priors[i]
         log_priors = np.array(np.log(prior_vals))
         new_array.append([])
@@ -121,12 +133,14 @@ def reads_to_probabilities(reads_array,read_error_prob = 0.02,min_total_reads=5)
             posterior = nonnorm_post/sum(nonnorm_post)
             
             new_array[-1].append(posterior)
-    
-    ploidy = 2*np.ones((num_samples,num_sites))
+        
+        # if i % 1000 == 0: 
+        #     print(new_array)
             
     new_array = np.array(new_array)
+    
     new_array = np.ascontiguousarray(new_array.swapaxes(0,1))
-   
+        
     return (site_priors,(new_array,ploidy))
             
 def calc_distance(first_row,second_row,calc_type="diploid"):
@@ -216,7 +230,7 @@ def generate_distance_matrix(probs_array,
     probs_copy = probs_array.copy()
 
     if use_multiprocessing:
-        processing_pool = Pool(processes=16)    
+        processing_pool = Pool(processes=32)    
     
 
         dist_matrix = processing_pool.starmap(
@@ -316,6 +330,7 @@ def combine_haploids(hap_one,hap_two):
     """
         
     ens = np.einsum("ij,ik->ijk",hap_one,hap_two)
+
     vals_00 = ens[:,0,0]
     vals_01 = ens[:,0,1]+ens[:,1,0]
     vals_11 = ens[:,1,1]
@@ -462,7 +477,7 @@ def get_dips_from_long_haps(long_haps):
     num_haps = len(long_haps)
     all_combs = [(i,j) for i in range(num_haps) for j in range(num_haps)]
     
-    processing_pool = Pool(16)
+    processing_pool = Pool(32)
     
     all_combined = processing_pool.starmap(lambda x,y: extract_and_combine(long_haps,x,y),
                                            all_combs)

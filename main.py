@@ -27,6 +27,8 @@ if platform.system() != "Windows":
     os.nice(15)
     print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
+importlib.reload(analysis_utils)
+importlib.reload(block_haplotypes)
 
 #%%
 bcf = vcf_data_loader.read_bcf_file("./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz")
@@ -39,8 +41,8 @@ shift_size = 50000
 
 chr1 = list(vcf_data_loader.break_contig(bcf,"chr1",block_size=block_size,shift=shift_size))
 
-starting = 200
-ending = 250
+starting = 0
+ending = 300
 
 
 combi = [chr1[i] for i in range(starting,ending)]
@@ -67,14 +69,18 @@ f3 = simulate_sequences.create_new_generation(f2,haplotype_sites,200,recomb_rate
 all_offspring = [xs for x in [f1,f2,f3] for xs in x]
 offspring_genotype_likelihoods = simulate_sequences.combine_into_genotype(all_offspring,haplotype_sites)
 #%%
-new_reads_array = simulate_sequences.read_sample_all_individuals(all_offspring,10,error_rate=0.02)
+read_depth = 2000
+new_reads_array = simulate_sequences.read_sample_all_individuals(all_offspring,read_depth,error_rate=0.02)
 #%%
 print("Starting")
+print(read_depth)
 (simd_pos,simd_keep_flags,simd_reads) = simulate_sequences.chunk_up_data(
     haplotype_sites,new_reads_array,
-    10000000,12500000,100000,100000)
+    0,15000000,100000,100000)
+print("Reached HERE")
+start = time.time()
 simd_probabalistic_genotypes = analysis_utils.reads_to_probabilities(new_reads_array)
-
+print("Reads to probs time:",time.time()-start)
 #%%
 start = time.time()
 test_haps = block_haplotypes.generate_haplotypes_all(

@@ -11,6 +11,8 @@ warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
 pass
 
+
+
 #%%
 def hdbscan_cluster(dist_matrix,
                     min_cluster_size=2,
@@ -75,12 +77,14 @@ def get_representatives_reads(site_priors,
                         read_error_prob=0.02):
     """
     Get representatives for each of the clusters we have,
-    cluster_labels must be a list of length len(reads_array) showing
-    which cluster each sample maps to
+    cluster_labels must be a list of length len(reads_array)
+    showing which cluster each sample maps to
     
     This version works by taking as input an array of read counts
     for each sample for each site
     """
+    
+    num_sites = len(site_priors)
     
     singleton_priors = np.array([np.sqrt(site_priors[:,0]),np.sqrt(site_priors[:,2])]).T
     reads_array = np.array(reads_array)
@@ -93,7 +97,6 @@ def get_representatives_reads(site_priors,
     
     #Remove the outliers
     cluster_names.discard(-1)
-    
     
     
     for cluster in cluster_names:
@@ -113,8 +116,7 @@ def get_representatives_reads(site_priors,
         log_read_error = math.log(read_error_prob)
         log_read_nonerror = math.log(1-read_error_prob)
         
-        for i in range(len(site_sum)):
-            
+        for i in range(num_sites):
             
             priors = singleton_priors[i]
             log_priors = np.log(priors)
@@ -126,7 +128,6 @@ def get_representatives_reads(site_priors,
             log_likelihood_0 = analysis_utils.log_binomial(total,ones)+zeros*log_read_nonerror+ones*log_read_error
             log_likelihood_1 = analysis_utils.log_binomial(total,zeros)+zeros*log_read_error+ones*log_read_nonerror
             
-            
             log_likli = np.array([log_likelihood_0,log_likelihood_1])
             
             nonnorm_log_postri = log_priors + log_likli
@@ -135,7 +136,6 @@ def get_representatives_reads(site_priors,
             #Numerical correction when we have a very wide range in loglikihoods to prevent np.inf
             while np.max(nonnorm_log_postri) > 200:
                 nonnorm_log_postri -= 100
-            
             
             nonnorm_post = np.exp(nonnorm_log_postri)
             posterior = nonnorm_post/sum(nonnorm_post)
@@ -334,7 +334,7 @@ def add_distinct_haplotypes_smart(initial_haps,
     """
     
     if use_multiprocessing:
-        processing_pool = Pool(processes=16)
+        processing_pool = Pool(processes=32)
     
     for x in initial_haps.keys():
         orig_hap_len = len(initial_haps[x])
@@ -417,7 +417,7 @@ def truncate_haps(candidate_haps,
     """
     
     if use_multiprocessing:
-        processing_pool = Pool(processes=16)
+        processing_pool = Pool(processes=32)
     
     cand_copy = candidate_haps.copy()
     cand_matches = candidate_matches
@@ -473,9 +473,9 @@ def get_initial_haps(site_priors,
                      probs_array,
                      reads_array,
                      keep_flags=None,
-                     het_cutoff_start=10,
+                     het_cutoff_start_percentage=10,
                      het_excess_add=2,
-                     het_max_cutoff=20,
+                     het_max_cutoff_percentage=20,
                      deeper_analysis=False,
                      uniqueness_tolerance=5,
                      read_error_prob = 0.02,
@@ -492,17 +492,20 @@ def get_initial_haps(site_priors,
     
     if keep_flags.dtype != bool:
         keep_flags = np.array(keep_flags,dtype=bool)
+        
+        
 
     het_vals = np.array([analysis_utils.get_heterozygosity(probs_array[i],keep_flags) for i in range(len(probs_array))])
-    
+
     found_homs = False
-    cur_het_cutoff = het_cutoff_start
+    cur_het_cutoff = het_cutoff_start_percentage
     
-    accept_singleton = (het_cutoff_start+het_max_cutoff)/2
+    accept_singleton = (het_cutoff_start_percentage+het_max_cutoff_percentage)/2
     
     while not found_homs:
+        print("Cycling")
         
-        if cur_het_cutoff > het_max_cutoff:
+        if cur_het_cutoff > het_max_cutoff_percentage:
             if verbose:
                 print("Unable to find samples with high homozygosity in region")
             
@@ -515,10 +518,15 @@ def get_initial_haps(site_priors,
             
             return {0:base_probs}
         
+        #print("HV",het_vals)
+        
         homs_where = np.where(het_vals <= cur_het_cutoff)[0]
     
         homs_array = probs_array[homs_where]
         corresp_reads_array = reads_array[homs_where]
+        
+        #print(homs_array)
+        #print(corresp_reads_array)
         
         if len(homs_array) < 5:
             cur_het_cutoff += het_excess_add
@@ -572,8 +580,7 @@ def get_initial_haps(site_priors,
         read_error_prob=read_error_prob)
     
     #Hacky way to remove any haps that are too close to each other
-    (representatives,
-      label_mappings) = add_distinct_haplotypes(
+    (representatives,label_mappings) = add_distinct_haplotypes(
               {},representatives,keep_flags=keep_flags,
               unique_cutoff=uniqueness_tolerance)
         
@@ -699,8 +706,16 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
     
     (site_priors,(probs_array,ploidy)) = analysis_utils.reads_to_probabilities(reads_array)
     
+    print("PROB ARRAY VALUE",reads_array)
+    
     initial_haps = get_initial_haps(site_priors,probs_array,
         reads_array,keep_flags=keep_flags)
+    
+    print("IN",len(initial_haps))
+    
+    
+    if len(positions) == 0:
+        return (np.array([]),np.array([]),np.array([]),initial_haps)
     
     initial_matches = hap_statistics.match_best(initial_haps,probs_array,keep_flags=keep_flags)
     initial_error = np.mean(initial_matches[2])
@@ -771,7 +786,7 @@ def generate_haplotypes_all(positions_data,reads_array_data,
         keep_flags_data = [None for i in range(len(positions_data))] 
         
     
-    processing_pool = Pool(16)
+    processing_pool = Pool(32)
     
     overall_haplotypes = processing_pool.starmap(lambda x,y,z:
                         generate_haplotypes_block(x,y,z),
