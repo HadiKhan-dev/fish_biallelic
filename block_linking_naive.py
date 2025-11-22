@@ -221,7 +221,7 @@ def match_haplotypes_by_samples(full_haps_data):
     
     match_best_results = []
     
-    processing_pool = Pool(8)
+    processing_pool = Pool(32)
     
     match_best_results = processing_pool.starmap(hap_statistics.combined_best_hap_matches,
                                                  zip(full_haps_data))
@@ -304,7 +304,7 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
     
     match_best_results = []
     
-    processing_pool = Pool(8)
+    processing_pool = Pool(32)
     
     match_best_results = processing_pool.starmap(hap_statistics.combined_best_hap_matches,
                                                  zip(full_haps_data))
@@ -437,7 +437,7 @@ def generate_chained_block_haplotypes(haplotype_data,nodes_list,combined_scores,
     
     num_layers = len(nodes_list)
     
-    processing_pool = Pool(8)
+    processing_pool = Pool(32)
     
     similarity_matrices = processing_pool.starmap(hap_statistics.get_block_hap_similarities,
                                        zip(haplotype_data))#Similarity matrices for calculating the associated penalty when we use a node
@@ -568,7 +568,7 @@ def combine_all_blocks_to_long_haps(all_haps,
     which processes all of our haps at once
     """
         
-    processing_pool = Pool(8)
+    processing_pool = Pool(32)
     
     processing_results = processing_pool.starmap(lambda x: combine_chained_blocks_to_single_hap(
                                         all_haps,x,read_error_prob=read_error_prob,
@@ -884,7 +884,7 @@ def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations
     """
     Multithreaded version to match all samples to their haplotype combinations
     """
-    processing_pool = Pool(8)
+    processing_pool = Pool(32)
     
     results = processing_pool.starmap(lambda x: get_match_probabilities(full_combined_genotypes,x,site_locations,
                                         keep_flags=keep_flags,recomb_rate=recomb_rate,value_error_rate=value_error_rate),

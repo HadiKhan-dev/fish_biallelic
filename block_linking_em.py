@@ -254,7 +254,7 @@ def multiprocess_all_block_likelihoods(full_samples_data,
                                        sample_sites,
                                        haps_data):
     
-    processing_pool = Pool(8)
+    processing_pool = Pool(32)
 
     full_blocks_likelihoods = processing_pool.starmap(
         lambda i: get_all_block_likelihoods(
@@ -286,7 +286,7 @@ def get_full_probs_forward(sample_data,
     if full_blocks_likelihoods == None:
         #Calculate site data and underlying likelihoods for each sample
         #and possible pair making up that sample at each block
-        processing_pool = Pool(8)
+        processing_pool = Pool(32)
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_block_likelihoods(
@@ -389,7 +389,7 @@ def get_full_probs_backward(sample_data,
     if full_blocks_likelihoods == None:
         #Calculate site data and underlying likelihoods for each sample
         #and possible pair making up that sample at each block
-        processing_pool = Pool(8)
+        processing_pool = Pool(32)
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_block_likelihoods(
@@ -478,7 +478,7 @@ def get_all_data_forward_probs(full_samples_data,sample_sites,
     if full_blocks_likelihoods == None:
         #Calculate site data and underlying likelihoods for each sample
         #and possible pair making up that sample at each block
-        processing_pool = Pool(8)
+        processing_pool = Pool(32)
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_all_block_likelihoods(
@@ -527,7 +527,7 @@ def get_all_data_backward_probs(full_samples_data,sample_sites,
     if full_blocks_likelihoods == None:
         #Calculate site data and underlying likelihoods for each sample
         #and possible pair making up that sample at each block
-        processing_pool = Pool(8)
+        processing_pool = Pool(32)
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_all_block_likelihoods(
@@ -943,7 +943,7 @@ def calculate_hap_transition_probabilities(full_samples_data,
         #Calculate site data and underlying likelihoods for each sample
         #and possible pair making up that sample at each block
         
-        processing_pool = Pool(8)
+        processing_pool = Pool(32)
     
         full_blocks_likelihoods = processing_pool.starmap(
             lambda i: get_all_block_likelihoods(
@@ -1008,7 +1008,7 @@ def generate_transition_probability_mesh(full_samples_data,
     
     #Calculate site data and underlying likelihoods for each sample
     #and possible pair making up that sample at each block
-    processing_pool = Pool(8)
+    processing_pool = Pool(32)
 
     full_blocks_likelihoods = processing_pool.starmap(
         lambda i: get_all_block_likelihoods(
