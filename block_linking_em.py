@@ -5,6 +5,7 @@ from multiprocess import Pool
 import itertools
 import copy
 import seaborn as sns
+from scipy.special import logsumexp
 
 import analysis_utils
 import block_haplotypes
@@ -141,11 +142,12 @@ def initial_transition_probabilities(hap_data,
 def get_block_likelihoods(sample_data,
                           haps_data,
                           log_likelihood_base=math.e**2,
-                          min_per_site_log_likelihood=-100,
+                          min_per_site_log_likelihood=-10,
                           normalize=True,                          
                           ):
     """
-    Get the log-likelihoods for each combination of haps matching the sample
+    Get the log-likelihoods for each combination of haps in how closely
+    they are matching the sample
     
     sample_ploidy is a list of length the number of sites in the block
     which indicates whether this particular block is made of two, one or zero haplotypes
@@ -223,7 +225,7 @@ def get_block_likelihoods(sample_data,
         ll_list.append(0)
             
     if normalize:
-        combined_ll = analysis_utils.add_log_likelihoods(ll_list)
+        combined_ll = logsumexp(ll_list)
         
         for k in ll_dict.keys():
             ll_dict[k] = ll_dict[k]-combined_ll
@@ -250,223 +252,353 @@ def get_all_block_likelihoods(block_samples_data,block_haps):
     
     return (sample_likelihoods,sample_ploidies)
 
+def get_all_block_likelihoods_vectorised(block_samples_data, block_haps, 
+    log_likelihood_base=math.e,       
+    min_per_site_log_likelihood=-0.5, 
+    uniform_error_floor_per_site=-0.6, 
+    min_absolute_block_log_likelihood=-200.0):
+    
+    # 1. UNPACK DATA
+    raw_samples = block_samples_data[0]
+    ploidies = np.array(block_samples_data[1])
+    
+    if len(raw_samples) == 0:
+        return ([], ploidies)
+
+    samples_matrix = np.stack(raw_samples)
+    num_samples, num_sites, _ = samples_matrix.shape
+
+    hap_dict = block_haps[3]
+    keep_flags = block_haps[1].astype(bool)
+    hap_keys = sorted(list(hap_dict.keys()))
+    num_haps = len(hap_keys)
+    
+    if num_haps == 0:
+        return ([{0: 0.0}] * num_samples, ploidies)
+
+    # 2. ROBUST TENSOR CREATION
+    hap_list = [hap_dict[k] for k in hap_keys]
+    if len(hap_list) > 0 and (hap_list[0].size == 0):
+        haps_tensor = np.zeros((num_haps, 0, 2))
+    else:
+        haps_tensor = np.array(hap_list)
+    
+    # 3. MASKING
+    samples_masked = samples_matrix[:, keep_flags, :] 
+    haps_masked = haps_tensor[:, keep_flags, :]       
+    
+    # --- FIX START ---
+    # Check if we have any sites left to process
+    num_active_sites = samples_masked.shape[1]
+    
+    if num_active_sites > 0:
+        # 4. GENERATE DIPLOID COMBINATIONS
+        h0 = haps_masked[:, :, 0]
+        h1 = haps_masked[:, :, 1]
+        
+        c00 = h0[:, None, :] * h0[None, :, :]
+        c11 = h1[:, None, :] * h1[None, :, :]
+        c01 = (h0[:, None, :] * h1[None, :, :]) + (h1[:, None, :] * h0[None, :, :])
+        
+        combos_4d = np.stack([c00, c01, c11], axis=-1)
+        
+        # Flatten HxH -> (H^2, Sites, 3)
+        # This works because Sites > 0, so NumPy can solve for -1
+        combos_flat = combos_4d.reshape(-1, combos_4d.shape[2], 3)
+        
+        # 5. WEIGHTED DISTANCE CALCULATION
+        dist_weights = np.array([[0, 1, 2], 
+                                 [1, 0, 1], 
+                                 [2, 1, 0]])
+        
+        combos_weighted = combos_flat @ dist_weights
+        
+        dist_per_site = np.sum(
+            samples_masked[:, np.newaxis, :, :] * combos_weighted[np.newaxis, :, :, :], 
+            axis=3
+        )
+        
+        # 6. LOG LIKELIHOOD (TUNED)
+        log_penalty = math.log(log_likelihood_base)
+        ll_per_site = -(dist_per_site) * log_penalty
+        ll_per_site = np.maximum(ll_per_site, min_per_site_log_likelihood)
+        
+        # Sum over sites
+        total_ll_matrix = np.sum(ll_per_site, axis=2)
+        
+    else:
+        # Handle 0 sites case
+        # If there are no sites, the distance is 0, penalty is 0.
+        # All pairs are equally likely (Uniform).
+        # We explicitly create the zero matrix because reshape(-1) would crash.
+        total_ll_matrix = np.zeros((num_samples, num_haps**2))
+    # --- FIX END ---
+
+    # 7. APPLY GLOBAL FLOORS
+    if num_active_sites > 0:
+        site_based_floor = num_active_sites * uniform_error_floor_per_site
+        total_ll_matrix = np.maximum(total_ll_matrix, site_based_floor)
+        
+    total_ll_matrix = np.maximum(total_ll_matrix, min_absolute_block_log_likelihood)
+        
+    # 8. NORMALIZATION
+    idx_i, idx_j = np.unravel_index(np.arange(num_haps**2), (num_haps, num_haps))
+    valid_mask = idx_j >= idx_i
+    unique_ll_matrix = total_ll_matrix[:, valid_mask]
+    
+    norm_factors = logsumexp(unique_ll_matrix, axis=1, keepdims=True)
+    final_normalized_matrix = unique_ll_matrix - norm_factors
+    
+    # 9. FORMAT OUTPUT
+    results = []
+    keys = [(hap_keys[i], hap_keys[j]) for i, j in zip(idx_i[valid_mask], idx_j[valid_mask])]
+    
+    for s in range(num_samples):
+        results.append(dict(zip(keys, final_normalized_matrix[s])))
+            
+    return (results, ploidies)
+
 def multiprocess_all_block_likelihoods(full_samples_data,
                                        sample_sites,
                                        haps_data):
-    
-    processing_pool = Pool(32)
-
-    full_blocks_likelihoods = processing_pool.starmap(
-        lambda i: get_all_block_likelihoods(
-            analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
-            sample_sites,haps_data[i][0],ploidy_present=True),
-            haps_data[i]),
-        zip(range(len(haps_data))))
-    
-    return full_blocks_likelihoods
-    
-def get_full_probs_forward(sample_data,
-                           sample_sites,
-                           haps_data,
-                           bidirectional_transition_probs,
-                           full_blocks_likelihoods = None,
-                           space_gap=1):
     """
-    Compute the forward step in the forward-backward inference
-    algorithm for the HMM where we observe our data for a single
-    sample given underlying transition probabilities
-    
-    space_gap is the number of blocks we jump over to get 
-    consecutive transitions from, by default this is equal to 1
-    
-    The value of space_gap must correspond to the same space gap the
-    transition_probs are for
+    Wrapper with updated defaults hardcoded.
     """
-    
-    if full_blocks_likelihoods == None:
-        #Calculate site data and underlying likelihoods for each sample
-        #and possible pair making up that sample at each block
-        processing_pool = Pool(32)
-    
-        full_blocks_likelihoods = processing_pool.starmap(
-            lambda i: get_block_likelihoods(
-                analysis_utils.get_sample_data_at_sites(sample_data,
-                sample_sites,haps_data[i][0],ploidy_present=True),
-                haps_data[i]),
-            zip(range(len(haps_data))))
-
-    transition_probs = bidirectional_transition_probs[0]
-    
-    likelihood_numbers = {}
-    
-    #Iterate over the blocks
+    tasks = []
     for i in range(len(haps_data)):
+        block_samples = analysis_utils.get_sample_data_at_sites_multiple(
+            full_samples_data, sample_sites, haps_data[i][0], ploidy_present=True
+        )
+        tasks.append((block_samples, haps_data[i]))
 
-        (block_likelihoods,ploidy_list) = full_blocks_likelihoods[i]
-        
-        ploidy_here = ploidy_list[0]
+    with Pool(16) as pool:
+        full_blocks_likelihoods = pool.starmap(
+            get_all_block_likelihoods_vectorised, 
+            tasks
+        )
 
-        likelihoods = {}
+    return full_blocks_likelihoods
+
+
+# --- 2. FORWARD PASS (FIXED) ---
+def get_full_probs_forward(sample_data, sample_sites, haps_data,
+                           bidirectional_transition_probs,
+                           full_blocks_likelihoods=None,
+                           space_gap=1):
+    
+    # --- HANDLING MISSING LIKELIHOODS ---
+    if full_blocks_likelihoods is None:
+        tasks = []
+        for i in range(len(haps_data)):
+            block_samples = analysis_utils.get_sample_data_at_sites_multiple(
+                sample_data, sample_sites, haps_data[i][0], ploidy_present=True
+            )
+            tasks.append((block_samples, haps_data[i]))
+
+        # Calculate serially or use a pool if not nested
+        with Pool(16) as pool:
+            full_blocks_likelihoods = pool.starmap(
+                get_all_block_likelihoods_vectorised, 
+                tasks
+            )
+
+    transition_probs_dict = bidirectional_transition_probs[0]
+    
+    # OUTPUT: Dictionary of dictionaries (Unordered pairs)
+    likelihood_numbers = {} 
+    
+    # CACHE: Stores the matrices needed for recursion (Ordered)
+    shadow_cache = {} 
+    
+    ln_2 = math.log(2)
+
+    for i in range(len(haps_data)):
         
+        # 1. Get Current Observation Likelihoods
+        (block_lik_dict, _) = full_blocks_likelihoods[i]
+        
+        # Handle list-wrapper if present
+        if isinstance(block_lik_dict, list):
+            block_lik_dict = block_lik_dict[0] 
+
+        hap_keys = sorted(list(haps_data[i][3].keys()))
+        n_haps = len(hap_keys)
+        key_to_idx = {k: idx for idx, k in enumerate(hap_keys)}
+        
+        # Create Emission Matrix E
+        E = np.full((n_haps, n_haps), -np.inf)
+        for (u, v), val in block_lik_dict.items():
+            u_idx, v_idx = key_to_idx[u], key_to_idx[v]
+            E[u_idx, v_idx] = val
+            E[v_idx, u_idx] = val
+        
+        # 2. Compute Forward Probabilities
         if i < space_gap:
-            for hap_pair in block_likelihoods.keys():
-                new_name = ((i,hap_pair[0]),(i,hap_pair[1]))
-                likelihoods[new_name] = block_likelihoods[hap_pair]
-        else:
-            earlier_block = i-space_gap
-            earlier_likelihoods = likelihood_numbers[earlier_block]
-            earlier_haps = haps_data[earlier_block]
+            # Base Case: Just Emission, adjusted for Ordered space
+            # Matrix Entry = DictEntry - log(2) for heterozygotes
+            corrections = np.full((n_haps, n_haps), -ln_2)
+            np.fill_diagonal(corrections, 0.0)
+            current_matrix = E + corrections
             
-            for hap_pair in block_likelihoods.keys():
-                new_name = ((i,hap_pair[0]),(i,hap_pair[1]))
-                
-                #Account for the fact that we need to halve all probabilities if both haps
-                #are the same at our location of interest
-                if hap_pair[0] == hap_pair[1]:
-                    dividing_val = 2
-                else:
-                    dividing_val = 1
-                    
-                direct_likelihood = block_likelihoods[hap_pair]
-                
-                total_sum_probs = [] #List which will contain the likelihoods for each possible earlier pair (a,b) which could transition to our hap at this step
-                
-                for earlier_first in earlier_haps[3].keys():
-                    for earlier_second in earlier_haps[3].keys():
-                        
-                        if earlier_first == earlier_second:
-                            doubling_correction = 2
-                        else:
-                            doubling_correction = 1 
-                            
-                        #Flip around our naming scheme for lookups if we are putting a higher index hap before a lower index one
-                        if earlier_second < earlier_first:
-                            lookup_first = earlier_second
-                            lookup_second = earlier_first
-                        else:
-                            lookup_first = earlier_first
-                            lookup_second = earlier_second
+        else:
+            # Recursive Step
+            earlier_block = i - space_gap
+            
+            # --- FIX: READ FROM SHADOW CACHE ---
+            prev_matrix = shadow_cache[earlier_block]['matrix']
+            prev_keys = shadow_cache[earlier_block]['keys']
+            
+            n_prev = len(prev_keys)
+            T = np.full((n_prev, n_haps), -np.inf)
+            
+            t_probs_block = transition_probs_dict[earlier_block]
+            
+            # Fill Transition Matrix T (O(H^2))
+            for r, p_key in enumerate(prev_keys):
+                for c, u_key in enumerate(hap_keys):
+                    lookup = ((earlier_block, p_key), (i, u_key))
+                    if lookup in t_probs_block:
+                        T[r, c] = math.log(t_probs_block[lookup])
+            
+            # Matrix Update (O(H^3))
+            # Curr = T.T @ Prev @ T
+            Z = analysis_utils.log_matmul(prev_matrix, T)
+            pred_matrix = analysis_utils.log_matmul(T.T, Z)
+            current_matrix = pred_matrix + E
 
-                        earlier_dip_name = ((earlier_block,lookup_first),
-                                            (earlier_block,lookup_second))
-                        
-                        transition_prob = transition_probs[earlier_block][((earlier_block,earlier_first),(i,hap_pair[0]))]* \
-                        transition_probs[earlier_block][((earlier_block,earlier_second),(i,hap_pair[1]))]                                                                                                       
-
-                        transition_prob = transition_prob*doubling_correction/dividing_val
-
-                        earlier_log_likelihood = earlier_likelihoods[earlier_dip_name]
-                        
-                        combined_log_likelihood = earlier_log_likelihood+math.log(transition_prob)
-                        
-                        total_sum_probs.append(combined_log_likelihood)
-                
-                combined_prob = analysis_utils.add_log_likelihoods(total_sum_probs)+direct_likelihood
-                likelihoods[new_name] = combined_prob                            
+        # 3. Store Results
         
-        likelihood_numbers[i] = likelihoods
+        # A. Save Matrix to Shadow Cache for future iterations
+        shadow_cache[i] = {'matrix': current_matrix, 'keys': hap_keys}
+        
+        # B. Convert Matrix to Dictionary for Output
+        # Dict(u, v) = Matrix(u, v) + log(2) (if u != v)
+        corrections = np.full((n_haps, n_haps), ln_2)
+        np.fill_diagonal(corrections, 0.0)
+        final_dict_vals = current_matrix + corrections
+        
+        result_dict = {}
+        for r in range(n_haps):
+            for c in range(r, n_haps): # Upper triangle
+                key = ((i, hap_keys[r]), (i, hap_keys[c]))
+                result_dict[key] = final_dict_vals[r, c]
+
+        likelihood_numbers[i] = result_dict
 
     return likelihood_numbers
 
-def get_full_probs_backward(sample_data,
-                            sample_sites,
-                            haps_data,
-                            bidirectional_transition_probs,
-                            full_blocks_likelihoods = None,
-                            space_gap=1):
-    """
-    Compute the backward step in the forward-backward inference
-    algorithm for the HMM where we observe our data for a single
-    sample given underlying transition probabilities
+# --- 3. BACKWARD PASS (FIXED KEYS) ---
+def get_full_probs_backward(sample_data, sample_sites, haps_data,
+                           bidirectional_transition_probs,
+                           full_blocks_likelihoods=None,
+                           space_gap=1):
     
-    space_gap is the number of blocks we jump over to get 
-    consecutive transitions from, by default this is equal to 1
-    
-    The value of space_gap must correspond to the same space gap the
-    transition_probs are for
-    """
-    
-    if full_blocks_likelihoods == None:
-        #Calculate site data and underlying likelihoods for each sample
-        #and possible pair making up that sample at each block
-        processing_pool = Pool(32)
-    
-        full_blocks_likelihoods = processing_pool.starmap(
-            lambda i: get_block_likelihoods(
-                analysis_utils.get_sample_data_at_sites(sample_data,
-                sample_sites,haps_data[i][0]),
-                haps_data[i]),
-            zip(range(len(haps_data))))
-    
-    transition_probs = bidirectional_transition_probs[1]
-    
-    likelihood_numbers = {}
-    
-    for i in range(len(haps_data)-1,-1,-1):
-        
-        (block_likelihoods,ploidy_list) = full_blocks_likelihoods[i]
-        
-        ploidy_here = ploidy_list[0]
+    # --- HANDLING MISSING LIKELIHOODS ---
+    if full_blocks_likelihoods is None:
+        tasks = []
+        for i in range(len(haps_data)):
+            block_samples = analysis_utils.get_sample_data_at_sites_multiple(
+                sample_data, sample_sites, haps_data[i][0], ploidy_present=True
+            )
+            tasks.append((block_samples, haps_data[i]))
+        with Pool(16) as pool:
+            full_blocks_likelihoods = pool.starmap(get_all_block_likelihoods_vectorised, tasks)
 
-        likelihoods = {}
+    # Use Backward Dictionary (Index 1)
+    transition_probs_dict = bidirectional_transition_probs[1]
+    
+    likelihood_numbers = {} 
+    shadow_cache = {} 
+    
+    ln_2 = math.log(2)
+
+    # Iterate Backwards (N-1 -> 0)
+    for i in range(len(haps_data)-1, -1, -1):
         
-        if i >= len(haps_data)-space_gap:
-            for hap_pair in block_likelihoods.keys():
-                new_name = ((i,hap_pair[0]),(i,hap_pair[1]))
-                likelihoods[new_name] = block_likelihoods[hap_pair]
-        else:
-            earlier_block = i+space_gap
-            earlier_likelihoods = likelihood_numbers[earlier_block]
-            earlier_haps = haps_data[earlier_block]
+        # 1. Get Current Observation Likelihoods
+        (block_lik_dict, _) = full_blocks_likelihoods[i]
+        if isinstance(block_lik_dict, list): block_lik_dict = block_lik_dict[0]
+
+        hap_keys = sorted(list(haps_data[i][3].keys()))
+        n_haps = len(hap_keys)
+        key_to_idx = {k: idx for idx, k in enumerate(hap_keys)}
+        
+        # Emission Matrix E
+        E = np.full((n_haps, n_haps), -np.inf)
+        for (u, v), val in block_lik_dict.items():
+            u_idx, v_idx = key_to_idx[u], key_to_idx[v]
+            E[u_idx, v_idx] = val
+            E[v_idx, u_idx] = val
+        
+        # 2. Compute Backward Probabilities
+        if i >= len(haps_data) - space_gap:
+            # Base Case (End of chain)
+            corrections = np.full((n_haps, n_haps), -ln_2)
+            np.fill_diagonal(corrections, 0.0)
+            current_matrix = E + corrections
             
-            for hap_pair in block_likelihoods.keys():
-                new_name = ((i,hap_pair[0]),(i,hap_pair[1]))
-                
-                #Account for the fact that we need to halve all probabilities if both haps
-                #are the same at our location of interest
-                if hap_pair[0] == hap_pair[1]:
-                    dividing_val = 2
-                else:
-                    dividing_val = 1
+        else:
+            # Recursive Step
+            # We look at the "Future" block (physically higher index)
+            future_block = i + space_gap
+            
+            future_matrix = shadow_cache[future_block]['matrix']
+            future_keys = shadow_cache[future_block]['keys']
+            n_fut = len(future_keys)
+            
+            # --- FIX: Access Correct Dictionary Key ---
+            # The backward dict is indexed by the START of the backward transition
+            # which is 'future_block' (i + gap).
+            t_probs_block = transition_probs_dict[future_block]
+            
+            # Build Transition Matrix T (Curr_Haps x Future_Haps)
+            # We want to sum over Future states p.
+            # L_curr(u) = Sum_p ( L_future(p) * P(p -> u) )
+            # T[u, p] = P(Future=p -> Curr=u)
+            T = np.full((n_haps, n_fut), -np.inf)
+            
+            for r, u_key in enumerate(hap_keys): # u (Current)
+                for c, p_key in enumerate(future_keys): # p (Future)
+                    # --- FIX: Key Order ---
+                    # Backward Dict keys are: ((Start_Block, Start_Hap), (End_Block, End_Hap))
+                    # Here Start is Future (i+gap), End is Current (i)
+                    lookup = ((future_block, p_key), (i, u_key))
                     
-                direct_likelihood = block_likelihoods[hap_pair]
-                
-                total_sum_probs = [] #List which will contain the likelihoods for each possible earlier pair (a,b) which could transition to our hap at this step
-                
-                for earlier_first in earlier_haps[3].keys():
-                    for earlier_second in earlier_haps[3].keys():
-                        
-                        if earlier_first == earlier_second:
-                            doubling_correction = 2
-                        else:
-                            doubling_correction = 1 
-                        #Flip around our naming scheme for lookups if we are putting a higher index hap before a lower index one
-                        if earlier_second < earlier_first:
-                            lookup_first = earlier_second
-                            lookup_second = earlier_first
-                        else:
-                            lookup_first = earlier_first
-                            lookup_second = earlier_second
+                    if lookup in t_probs_block:
+                        T[r, c] = math.log(t_probs_block[lookup])
+            
+            # Matrix Update
+            # We want: Curr[u, v] = Sum_{p,q} ( T[u,p] + T[v,q] + Future[p,q] )
+            # Matrix Algebra: Curr = T @ Future @ T.T
+            
+            # 1. Z = Future @ T.T (Dimensions: n_fut x n_curr)
+            # Future (n_fut, n_fut) @ T.T (n_fut, n_curr)
+            Z = analysis_utils.log_matmul(future_matrix, T.T)
+            
+            # 2. Res = T @ Z (Dimensions: n_curr x n_curr)
+            # T (n_curr, n_fut) @ Z (n_fut, n_curr)
+            pred_matrix = analysis_utils.log_matmul(T, Z)
+            
+            # 3. Add Current Emission
+            current_matrix = pred_matrix + E
 
-                        earlier_dip_name = ((earlier_block,lookup_first),
-                                            (earlier_block,lookup_second))
-
-                        transition_prob = transition_probs[earlier_block][((earlier_block,earlier_first),(i,hap_pair[0]))]*transition_probs[earlier_block][((earlier_block,earlier_second),(i,hap_pair[1]))]                                                                                                       
-
-                        transition_prob = transition_prob*doubling_correction/dividing_val
-
-                        earlier_log_likelihood = earlier_likelihoods[earlier_dip_name]
-                        
-                        combined_log_likelihood = earlier_log_likelihood+math.log(transition_prob)
-                        
-                        total_sum_probs.append(combined_log_likelihood)
-                
-                combined_prob = analysis_utils.add_log_likelihoods(total_sum_probs)+direct_likelihood
-                likelihoods[new_name] = combined_prob                            
+        # Store Results
+        shadow_cache[i] = {'matrix': current_matrix, 'keys': hap_keys}
         
-        likelihood_numbers[i] = likelihoods
-   
+        corrections = np.full((n_haps, n_haps), ln_2)
+        np.fill_diagonal(corrections, 0.0)
+        final_dict_vals = current_matrix + corrections
+        
+        result_dict = {}
+        for r in range(n_haps):
+            for c in range(r, n_haps):
+                key = ((i, hap_keys[r]), (i, hap_keys[c]))
+                result_dict[key] = final_dict_vals[r, c]
+
+        likelihood_numbers[i] = result_dict
+
     return likelihood_numbers
+
 
 def get_all_data_forward_probs(full_samples_data,sample_sites,
                                haps_data,
@@ -476,17 +608,23 @@ def get_all_data_forward_probs(full_samples_data,sample_sites,
     
     
     if full_blocks_likelihoods == None:
-        #Calculate site data and underlying likelihoods for each sample
-        #and possible pair making up that sample at each block
-        processing_pool = Pool(32)
-    
-        full_blocks_likelihoods = processing_pool.starmap(
-            lambda i: get_all_block_likelihoods(
-                analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
-                sample_sites,haps_data[i][0],ploidy_present=True),
-                haps_data[i]),
-            zip(range(len(haps_data))))
         
+        tasks = []
+        for i in range(len(haps_data)):
+            # Extract data for block i
+            # This slicing part can be optimized if full_samples_data is massive,
+            # but the worker optimization is the main gain.
+            block_samples = analysis_utils.get_sample_data_at_sites_multiple(
+                full_samples_data, sample_sites, haps_data[i][0], ploidy_present=True
+            )
+            tasks.append((block_samples, haps_data[i]))
+
+        with Pool(16) as pool:
+            full_blocks_likelihoods = pool.starmap(
+                get_all_block_likelihoods_vectorised, 
+                tasks
+            )
+
     all_block_likelihoods = []
     
     for i in range(len(full_samples_data)):
@@ -525,17 +663,23 @@ def get_all_data_backward_probs(full_samples_data,sample_sites,
     
     
     if full_blocks_likelihoods == None:
-        #Calculate site data and underlying likelihoods for each sample
-        #and possible pair making up that sample at each block
-        processing_pool = Pool(32)
-    
-        full_blocks_likelihoods = processing_pool.starmap(
-            lambda i: get_all_block_likelihoods(
-                analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
-                sample_sites,haps_data[i][0],ploidy_present=True),
-                haps_data[i]),
-            zip(range(len(haps_data))))
         
+        tasks = []
+        for i in range(len(haps_data)):
+            # Extract data for block i
+            # This slicing part can be optimized if full_samples_data is massive,
+            # but the worker optimization is the main gain.
+            block_samples = analysis_utils.get_sample_data_at_sites_multiple(
+                full_samples_data, sample_sites, haps_data[i][0], ploidy_present=True
+            )
+            tasks.append((block_samples, haps_data[i]))
+
+        with Pool(16) as pool:
+            full_blocks_likelihoods = pool.starmap(
+                get_all_block_likelihoods_vectorised, 
+                tasks
+            )
+
     all_block_likelihoods = []
     
     for i in range(len(full_samples_data)):
@@ -564,433 +708,478 @@ def get_all_data_backward_probs(full_samples_data,sample_sites,
     
     return (overall_likelihoods,backward_nums)
 
-def get_updated_transition_probabilities(full_samples_data,
-                                         sample_sites,
-                                         haps_data,
-                                         current_transition_probs,
-                                         full_blocks_likelihoods,
-                                         currently_found_long_haps=[],
-                                         found_transition_penalty=0.1,
-                                         space_gap=1,
-                                         minimum_transition_log_likelihood=-10):
+
+def get_updated_transition_probabilities(
+        full_samples_data,
+        sample_sites,
+        haps_data,
+        current_transition_probs,
+        full_blocks_likelihoods,
+        currently_found_long_haps=[],
+        found_transition_penalty=0.1,
+        space_gap=1,
+        minimum_transition_log_likelihood=-10,
+        BATCH_SIZE=100): # Batch size to control RAM usage
     """
-    Uses an EM algorithm to come up with updated transition probabilities 
-    for haps between blocks given data for a bunch of samples
-    as well as haps_data for each block
-    
-    minimum_transition_log_likelihood is a parameter which gives the log of the 
-    smallest possible transition probability between two adjact block haps. This
-    is set to -15 (giving e**-15 = 3*10^-7 as the probability) as is done to
-    avoid numerical errors caused by numbers rounding off to 0 in the EM-process
-    
-    currently_found_long_haps is an optional input used for MAP-EM rather than pure EM,
-    it adds the posterior to the likelihoods at the M step, putting a found_transition_penalty
-    at each step where the transition is one found in some hap present in currently_found_long_haps
+    Calculates updated transition probabilities using Vectorized Forward-Backward
+    and Batched Memory-Safe Tensor aggregation.
     """
-    
-    prior_a_posteriori = initial_transition_probabilities(haps_data,space_gap=space_gap,
-                        found_haps=currently_found_long_haps,found_penalty=found_transition_penalty)
+
+    # 1. SETUP & HELPER DATA GATHERING
+    prior_a_posteriori = initial_transition_probabilities(haps_data, space_gap=space_gap,
+                        found_haps=currently_found_long_haps, found_penalty=found_transition_penalty)
 
     full_samples_likelihoods = full_samples_data[0]
-    full_samples_ploidies = full_samples_data[1]
     
+    # Restructure block likelihoods
     all_block_likelihoods = []
-    
     for i in range(len(full_samples_likelihoods)):
         all_block_likelihoods.append(
-            [(full_blocks_likelihoods[x][0][i],
-              full_blocks_likelihoods[x][1][i])
+            [(full_blocks_likelihoods[x][0][i], full_blocks_likelihoods[x][1][i])
              for x in range(len(full_blocks_likelihoods))])
-    
-    samples_probs = []
-    
-    forward_nums = []
-    backward_nums = []
-    
-    #Log Likelihoods going forwards for each of the samples
-    forward_nums = list(itertools.starmap(
-        lambda i : get_full_probs_forward((full_samples_data[0][i],full_samples_data[1][i]),
-                    sample_sites,
-                    haps_data,
-                    current_transition_probs,
-                    all_block_likelihoods[i],
-                    space_gap=space_gap),
-        zip(range(len(full_samples_likelihoods)))))
-    
-    #Log Likelihoods going backwards for each of the samples
-    backward_nums = list(itertools.starmap(
-        lambda i : get_full_probs_backward((full_samples_data[0][i],full_samples_data[1][i]),
-                    sample_sites,
-                    haps_data,
-                    current_transition_probs,
-                    all_block_likelihoods[i],
-                    space_gap=space_gap),
-        zip(range(len(full_samples_likelihoods)))))
-    
-    #breakpoint()
-    
-    for i in range(len(forward_nums)):
-        samples_probs.append((forward_nums[i],backward_nums[i]))
-    
-    full_transitions_likelihoods_forwards = {}
-    full_transitions_likelihoods_backwards = {}
-    
-    new_transition_probs_forward = {}
-    new_transition_probs_backwards = {}
-    
-    
-    #Calculate overall transition likelihoods going forwards
-    for i in range(len(haps_data)-space_gap):
-        next_bundle = i+space_gap
-        
-        first_haps = haps_data[i][3]
-        second_haps = haps_data[next_bundle][3]
-        
-        transitions_likelihoods = {}
-        
-        likelihood_lists = {}
-        
-        for first in first_haps.keys():
-            for second in second_haps.keys():
-                likelihood_lists[(first,second)] = []
-                
-        for s in range(len(samples_probs)):
-            data_here = samples_probs[s]
-            
-            sample_numbers = {}
-            
-            for first in first_haps.keys():
-                for second in second_haps.keys():
-                
-                    lower_comb = []
-                    
-                    for first_in_data in first_haps.keys():
-                        if first <= first_in_data:
-                            current_key = ((i,first),(i,first_in_data))
-                        else:
-                            current_key = ((i,first_in_data),(i,first))
-    
-                            
-                        for second_in_data in second_haps.keys():
-                            if second <= second_in_data:
-                                next_key = ((next_bundle,second),(next_bundle,second_in_data))
-                            else:
-                                next_key = ((next_bundle,second_in_data),(next_bundle,second))
-                            
-                            transition_key = ((i,first_in_data),(next_bundle,second_in_data))
-                            transition_value = math.log(current_transition_probs[0][i][transition_key])
-                                
-                            
-                            adding = data_here[0][i][current_key]+data_here[1][next_bundle][next_key]+transition_value
-                                
-                            lower_comb.append(adding)
-                    
+             
+    # Calculate Forward and Backward probabilities using VECTORIZED functions
+    # No starmap/lambda overhead here, just direct calls
+    forward_nums = [get_full_probs_forward(
+                        (full_samples_data[0][i], full_samples_data[1][i]),
+                        sample_sites, haps_data, current_transition_probs, 
+                        all_block_likelihoods[i], space_gap=space_gap
+                    ) for i in range(len(full_samples_likelihoods))]
 
-                    pair_transition_likelihood = analysis_utils.add_log_likelihoods(lower_comb)
-                    
-                    sample_numbers[(first,second)] = pair_transition_likelihood
-                    
-                      
-            total_sample_loglikeli = analysis_utils.add_log_likelihoods(list(sample_numbers.values()))
+    backward_nums = [get_full_probs_backward(
+                        (full_samples_data[0][i], full_samples_data[1][i]),
+                        sample_sites, haps_data, current_transition_probs, 
+                        all_block_likelihoods[i], space_gap=space_gap
+                    ) for i in range(len(full_samples_likelihoods))]
+    
+    samples_probs = list(zip(forward_nums, backward_nums))
+    num_samples = len(samples_probs)
+
+    # 2. CORE VECTORIZATION LOGIC (Batched)
+    def _run_batched_pass(indices, is_forward):
+        new_transition_probs = {}
+        dir_idx = 0 if is_forward else 1
+        
+        for i in indices:
+            next_bundle = i + space_gap if is_forward else i - space_gap
             
-            normalized_sample_numbers = {}
-            for k in sample_numbers.keys():
-                normalized_sample_numbers[k] = sample_numbers[k]-total_sample_loglikeli
+            hap_keys_current = sorted(list(haps_data[i][3].keys()))
+            hap_keys_next    = sorted(list(haps_data[next_bundle][3].keys()))
+            n_curr = len(hap_keys_current)
+            n_next = len(hap_keys_next)
+            
+            # Build Static Tensors (Small enough for memory)
+            T_matrix = np.full((n_curr, n_next), -np.inf)
+            P_matrix = np.full((n_curr, n_next), -np.inf)
+
+            for u_idx, u in enumerate(hap_keys_current):
+                for v_idx, v in enumerate(hap_keys_next):
+                    trans_key = ((i, u), (next_bundle, v))
+                    if trans_key in current_transition_probs[dir_idx][i]:
+                        T_matrix[u_idx, v_idx] = math.log(current_transition_probs[dir_idx][i][trans_key])
+                    if trans_key in prior_a_posteriori[dir_idx][i]:
+                        P_matrix[u_idx, v_idx] = math.log(prior_a_posteriori[dir_idx][i][trans_key])
+
+            # Build Sample Tensors (F & B)
+            # Allocation (Samples * 20 * 20 * 8 bytes) is generally safe
+            F_tensor = np.full((num_samples, n_curr, n_curr), -np.inf)
+            B_tensor = np.full((num_samples, n_next, n_next), -np.inf)
+
+            # Fill Tensors from Dictionaries
+            for s in range(num_samples):
+                fwd_dict = samples_probs[s][0][i]
+                bwd_dict = samples_probs[s][1][next_bundle]
                 
-            for k in normalized_sample_numbers.keys():
-                likelihood_lists[k].append(normalized_sample_numbers[k])
+                # Fill F
+                for u_out_idx, u_out in enumerate(hap_keys_current):
+                    for u_in_idx, u_in in enumerate(hap_keys_current):
+                        key = ((i, u_out), (i, u_in)) if u_out <= u_in else ((i, u_in), (i, u_out))
+                        if key in fwd_dict: F_tensor[s, u_out_idx, u_in_idx] = fwd_dict[key]
+
+                # Fill B
+                for v_out_idx, v_out in enumerate(hap_keys_next):
+                    for v_in_idx, v_in in enumerate(hap_keys_next):
+                        key = ((next_bundle, v_out), (next_bundle, v_in)) if v_out <= v_in else ((next_bundle, v_in), (next_bundle, v_out))
+                        if key in bwd_dict: B_tensor[s, v_out_idx, v_in_idx] = bwd_dict[key]
+
+            # BATCHED CALCULATION
+            batch_results = []
             
-        
-        for k in likelihood_lists.keys():
-        
-            transitions_likelihoods[((i,k[0]),(next_bundle,k[1]))] = analysis_utils.add_log_likelihoods(likelihood_lists[k])
-            
-        full_transitions_likelihoods_forwards[i] = transitions_likelihoods
-        
-    
-    #Now do the same thing going backwards
-    for i in range(len(haps_data)-1,space_gap-1,-1):
-        next_bundle = i-space_gap
-        
-        first_haps = haps_data[i][3]
-        second_haps = haps_data[next_bundle][3]
-        
-        transitions_likelihoods = {}
-        
-        likelihood_lists = {}
-        
-        for first in first_haps.keys():
-            for second in second_haps.keys():
-                likelihood_lists[(first,second)] = []
+            for start_idx in range(0, num_samples, BATCH_SIZE):
+                end_idx = min(start_idx + BATCH_SIZE, num_samples)
                 
-        for s in range(len(samples_probs)):
-            data_here = samples_probs[s]
-            
-            sample_numbers = {}
-            
-            for first in first_haps.keys():
-                for second in second_haps.keys():
+                F_batch = F_tensor[start_idx:end_idx]
+                B_batch = B_tensor[start_idx:end_idx]
                 
-                    lower_comb = []
-                    
-                    for first_in_data in first_haps.keys():
-                        if first <= first_in_data:
-                            current_key = ((i,first),(i,first_in_data))
-                        else:
-                            current_key = ((i,first_in_data),(i,first))
-    
-                            
-                        for second_in_data in second_haps.keys():
-                            if second <= second_in_data:
-                                next_key = ((next_bundle,second),(next_bundle,second_in_data))
-                            else:
-                                next_key = ((next_bundle,second_in_data),(next_bundle,second))
-                            
-                            transition_key = ((i,first_in_data),(next_bundle,second_in_data))
-                            transition_value = math.log(current_transition_probs[1][i][transition_key])
-                                
-                            
-                            adding = data_here[0][i][current_key]+data_here[1][next_bundle][next_key]+transition_value
-                                
-                            lower_comb.append(adding)
-                    
-
-                    pair_transition_likelihood = analysis_utils.add_log_likelihoods(lower_comb)
-                    
-                    sample_numbers[(first,second)] = pair_transition_likelihood
-                    
-                      
-            total_sample_loglikeli = analysis_utils.add_log_likelihoods(list(sample_numbers.values()))
-            
-            normalized_sample_numbers = {}
-            for k in sample_numbers.keys():
-                normalized_sample_numbers[k] = sample_numbers[k]-total_sample_loglikeli
+                # 5D Broadcasting: (Batch, u_out, v_out, u_in, v_in)
+                combined = (F_batch[:, :, np.newaxis, :, np.newaxis] + 
+                            B_batch[:, np.newaxis, :, np.newaxis, :] + 
+                            T_matrix[np.newaxis, np.newaxis, np.newaxis, :, :])
                 
-            for k in normalized_sample_numbers.keys():
-                likelihood_lists[k].append(normalized_sample_numbers[k])
+                # Marginalize Inner States & Normalize
+                sample_lik_batch = logsumexp(combined, axis=(-2, -1))
+                total_per_sample = logsumexp(sample_lik_batch, axis=(1, 2), keepdims=True)
+                batch_aggregated = logsumexp(sample_lik_batch - total_per_sample, axis=0)
+                batch_results.append(batch_aggregated)
+                del combined # Free RAM
             
-        
-        for k in likelihood_lists.keys():
-
-            transitions_likelihoods[((i,k[0]),(next_bundle,k[1]))] = analysis_utils.add_log_likelihoods(likelihood_lists[k])
+            # Merge & Finalize
+            if len(batch_results) > 0:
+                final_aggregated = logsumexp(batch_results, axis=0)
+            else:
+                final_aggregated = np.full((n_curr, n_next), -np.inf)
             
-        full_transitions_likelihoods_backwards[i] = transitions_likelihoods
-    
-    
-    #Now we build our new transition probabilities going forwards
-    for i in range(len(haps_data)-space_gap):
-        overall_posterior_forward_dict = {}
-        
-        next_bundle = i+space_gap
-        
-        first_haps = haps_data[i][3]
-        second_haps = haps_data[next_bundle][3]
-        
-        transition_likelihoods_forwards_here = full_transitions_likelihoods_forwards[i]
-        
-        transition_posterior_forwards_here = {}
-        
-        for k in transition_likelihoods_forwards_here.keys():
-            transition_posterior_forwards_here[k] = transition_likelihoods_forwards_here[k]+math.log(prior_a_posteriori[0][i][k])
-        
-        for first in first_haps.keys():
-            overall_posterior_forward_dict[(i,first)] = []
-        
-        for k in transition_posterior_forwards_here.keys():
-            first_part = k[0]
-            overall_posterior_forward_dict[first_part].append(transition_posterior_forwards_here[k])
-        
-        for first_part in overall_posterior_forward_dict.keys():
-            overall_posterior_forward_dict[first_part] = analysis_utils.add_log_likelihoods(list(overall_posterior_forward_dict[first_part]))
-        
-        final_non_norm_forward_posteriors = {}
-        
-        for k in transition_posterior_forwards_here.keys():
-            first_part = k[0]
-            final_non_norm_forward_posteriors[k] = math.exp(max(transition_posterior_forwards_here[k]-overall_posterior_forward_dict[first_part],minimum_transition_log_likelihood))
-        
-        
-        #And now normalize
-        final_forward_posteriors = {}
-        
-        for first in first_haps.keys():
-            probs_sum = 0
-            for second in second_haps.keys():
-                keyname = ((i,first),(next_bundle,second))
-                probs_sum += final_non_norm_forward_posteriors[keyname]
-            for second in second_haps.keys():
-                keyname = ((i,first),(next_bundle,second))
-                final_forward_posteriors[keyname] = final_non_norm_forward_posteriors[keyname]/probs_sum
-         
-        
-        #Now we account for any priors we may have had
-        # final_forward_posteriors = {}
-        
-        # for first in first_haps.keys():
-        #     probs_sum = 0
-        #     for second in second_haps.keys():
-        #         keyname = ((i,first),(next_bundle,second))
-        #         probs_sum += final_non_norm_forward_likelihoods[keyname]*prior_a_posteriori[0][i][keyname]
+            posterior_with_prior = final_aggregated + P_matrix
+            row_sums = logsumexp(posterior_with_prior, axis=1, keepdims=True)
+            log_probs = posterior_with_prior - row_sums
+            log_probs_clipped = np.maximum(log_probs, minimum_transition_log_likelihood)
+            
+            probs_nonnorm = np.exp(log_probs_clipped)
+            row_sums_final = np.sum(probs_nonnorm, axis=1, keepdims=True)
+            row_sums_final[row_sums_final == 0] = 1.0 
+            final_probs_matrix = probs_nonnorm / row_sums_final
+            
+            block_dict = {}
+            for u_idx, u in enumerate(hap_keys_current):
+                for v_idx, v in enumerate(hap_keys_next):
+                    key = ((i, u), (next_bundle, v))
+                    block_dict[key] = final_probs_matrix[u_idx, v_idx]
+            
+            new_transition_probs[i] = block_dict
+            
+        return new_transition_probs
 
-        new_transition_probs_forward[i] = final_forward_posteriors
-        
-        
+    forward_indices = range(len(haps_data) - space_gap)
+    new_transition_probs_forward = _run_batched_pass(forward_indices, is_forward=True)
     
-    #And then we build our new transition probabilities going backwards
-    for i in range(len(haps_data)-1,space_gap-1,-1):
-        overall_posterior_backwards_dict = {}
-        
-        next_bundle = i-space_gap
-        
-        first_haps = haps_data[i][3]
-        second_haps = haps_data[next_bundle][3]
-        
-        transition_likelihoods_backwards_here = full_transitions_likelihoods_backwards[i]
-        
-        transition_posterior_backwards_here = {}
-
-        for k in transition_likelihoods_backwards_here.keys():
-            transition_posterior_backwards_here[k] = transition_likelihoods_backwards_here[k]+math.log(prior_a_posteriori[1][i][k])
-        
-        for first in first_haps.keys():
-            overall_posterior_backwards_dict[(i,first)] = []
-        
-        for k in transition_posterior_backwards_here.keys():
-            first_part = k[0]
-            overall_posterior_backwards_dict[first_part].append(transition_posterior_backwards_here[k])
-        
-        for first_part in overall_posterior_backwards_dict.keys():
-            overall_posterior_backwards_dict[first_part] = analysis_utils.add_log_likelihoods(list(overall_posterior_backwards_dict[first_part]))
-        
-        final_non_norm_backwards_posteriors = {}
-        
-        for k in transition_posterior_backwards_here.keys():
-            first_part = k[0]
-            final_non_norm_backwards_posteriors[k] = math.exp(max(transition_posterior_backwards_here[k]-overall_posterior_backwards_dict[first_part],minimum_transition_log_likelihood))
-        
-        final_backwards_posteriors = {}
-        
-        for first in first_haps.keys():
-            probs_sum = 0
-            for second in second_haps.keys():
-                keyname = ((i,first),(next_bundle,second))
-                probs_sum += final_non_norm_backwards_posteriors[keyname]
-            for second in second_haps.keys():
-                keyname = ((i,first),(next_bundle,second))
-                final_backwards_posteriors[keyname] = final_non_norm_backwards_posteriors[keyname]/probs_sum
-         
-        new_transition_probs_backwards[i] = final_backwards_posteriors
+    backward_indices = range(len(haps_data) - 1, space_gap - 1, -1)
+    new_transition_probs_backwards = _run_batched_pass(backward_indices, is_forward=False)
     
-    return [new_transition_probs_forward,new_transition_probs_backwards]
+    return [new_transition_probs_forward, new_transition_probs_backwards]
 
-def smoothen_probs(old_probs,new_probs,alpha):
+def standard_get_updated_transition_probabilities(
+        full_samples_data,
+        sample_sites,
+        haps_data,
+        current_transition_probs,
+        full_blocks_likelihoods,
+        currently_found_long_haps=[],
+        found_transition_penalty=0.1,
+        space_gap=1,
+        minimum_transition_log_likelihood=-10,
+        BATCH_SIZE=100):
     """
-    Takes in two lists of transition probabilities and returns a 
-    new combined list of transition probabilities where the
-    combined probability for each transition is
-    (1-alpha)*old_probability+alpha*new_probability
+    Like get_updated_transition_probabilities but using 
+    standard Baum-Welch where we use the full prior for 
+    update purposes instead of only the part of the prior
+    corresponding to the other haplotype.
     """
-    combined_probs = [{},{}]
+
+    # ... [Setup code remains exactly the same] ...
+    prior_a_posteriori = initial_transition_probabilities(haps_data, space_gap=space_gap,
+                        found_haps=currently_found_long_haps, found_penalty=found_transition_penalty)
+
+    full_samples_likelihoods = full_samples_data[0]
+    all_block_likelihoods = []
+    for i in range(len(full_samples_likelihoods)):
+        all_block_likelihoods.append(
+            [(full_blocks_likelihoods[x][0][i], full_blocks_likelihoods[x][1][i])
+             for x in range(len(full_blocks_likelihoods))])
+             
+    forward_nums = [get_full_probs_forward(
+                        (full_samples_data[0][i], full_samples_data[1][i]),
+                        sample_sites, haps_data, current_transition_probs, 
+                        all_block_likelihoods[i], space_gap=space_gap
+                    ) for i in range(len(full_samples_likelihoods))]
+
+    backward_nums = [get_full_probs_backward(
+                        (full_samples_data[0][i], full_samples_data[1][i]),
+                        sample_sites, haps_data, current_transition_probs, 
+                        all_block_likelihoods[i], space_gap=space_gap
+                    ) for i in range(len(full_samples_likelihoods))]
     
-    for i in range(2):
-        for block in old_probs[i].keys():
-            combined_probs[i][block] = {}
+    samples_probs = list(zip(forward_nums, backward_nums))
+    num_samples = len(samples_probs)
+
+    def _run_batched_pass(indices, is_forward):
+        new_transition_probs = {}
+        dir_idx = 0 if is_forward else 1
+        
+        for i in indices:
+            next_bundle = i + space_gap if is_forward else i - space_gap
             
-            old_dict = old_probs[i][block]
-            new_dict = new_probs[i][block]
+            hap_keys_current = sorted(list(haps_data[i][3].keys()))
+            hap_keys_next    = sorted(list(haps_data[next_bundle][3].keys()))
+            n_curr = len(hap_keys_current)
+            n_next = len(hap_keys_next)
             
-            for k in old_dict.keys():
-                combined_probs[i][block][k] = (1-alpha)*old_dict[k]+alpha*new_dict[k]
+            # Static Tensors
+            T_matrix = np.full((n_curr, n_next), -np.inf)
+            P_matrix = np.full((n_curr, n_next), -np.inf)
+
+            for u_idx, u in enumerate(hap_keys_current):
+                for v_idx, v in enumerate(hap_keys_next):
+                    trans_key = ((i, u), (next_bundle, v))
+                    if trans_key in current_transition_probs[dir_idx][i]:
+                        T_matrix[u_idx, v_idx] = math.log(current_transition_probs[dir_idx][i][trans_key])
+                    if trans_key in prior_a_posteriori[dir_idx][i]:
+                        P_matrix[u_idx, v_idx] = math.log(prior_a_posteriori[dir_idx][i][trans_key])
+
+            # Sample Tensors
+            F_tensor = np.full((num_samples, n_curr, n_curr), -np.inf)
+            B_tensor = np.full((num_samples, n_next, n_next), -np.inf)
+
+            for s in range(num_samples):
+                fwd_dict = samples_probs[s][0][i]
+                bwd_dict = samples_probs[s][1][next_bundle]
+                
+                # Fill F (Current)
+                # Matches image S(i, c, d)
+                for u_out_idx, u_out in enumerate(hap_keys_current):
+                    for u_in_idx, u_in in enumerate(hap_keys_current):
+                        key = ((i, u_out), (i, u_in)) if u_out <= u_in else ((i, u_in), (i, u_out))
+                        if key in fwd_dict: F_tensor[s, u_out_idx, u_in_idx] = fwd_dict[key]
+
+                # Fill B (Next/Future)
+                # Matches image R(i+1, a, b)
+                for v_out_idx, v_out in enumerate(hap_keys_next):
+                    for v_in_idx, v_in in enumerate(hap_keys_next):
+                        key = ((next_bundle, v_out), (next_bundle, v_in)) if v_out <= v_in else ((next_bundle, v_in), (next_bundle, v_out))
+                        if key in bwd_dict: B_tensor[s, v_out_idx, v_in_idx] = bwd_dict[key]
+
+            # BATCHED CALCULATION
+            batch_results = []
+            
+            for start_idx in range(0, num_samples, BATCH_SIZE):
+                end_idx = min(start_idx + BATCH_SIZE, num_samples)
+                
+                F_batch = F_tensor[start_idx:end_idx] # (Batch, c, d)
+                B_batch = B_tensor[start_idx:end_idx] # (Batch, a, b)
+                
+                # We want to broadcast to shape: (Batch, c, a, d, b)
+                # c = u_out (Current Main Hap) -> Dim 1
+                # a = v_out (Next Main Hap)    -> Dim 2
+                # d = u_in  (Current Partner)  -> Dim 3
+                # b = v_in  (Next Partner)     -> Dim 4
+                
+                # F(Batch, c, d) -> (Batch, c, 1, d, 1)
+                F_broad = F_batch[:, :, np.newaxis, :, np.newaxis]
+                
+                # B(Batch, a, b) -> (Batch, 1, a, 1, b)
+                B_broad = B_batch[:, np.newaxis, :, np.newaxis, :]
+                
+                # T_main(c, a) -> (1, c, a, 1, 1)
+                # This corresponds to t^f(a, c) in your writeup (The one being updated)
+                T_main_broad = T_matrix[np.newaxis, :, :, np.newaxis, np.newaxis]
+                
+                # --- THE FIX: T_partner(d, b) ---
+                # This corresponds to t^f(b, d) in your writeup (The partner transition)
+                # Shape: (1, 1, 1, d, b)
+                T_partner_broad = T_matrix[np.newaxis, np.newaxis, np.newaxis, :, :]
+                
+                # Combined Sum (Log Space)
+                combined = F_broad + B_broad + T_main_broad + T_partner_broad
+                
+                # Marginalize Inner States (d, b)
+                sample_lik_batch = logsumexp(combined, axis=(-2, -1))
+                
+                # Normalize & Aggregate
+                total_per_sample = logsumexp(sample_lik_batch, axis=(1, 2), keepdims=True)
+                batch_aggregated = logsumexp(sample_lik_batch - total_per_sample, axis=0)
+                batch_results.append(batch_aggregated)
+                del combined 
+            
+            # Merge & Finalize (Same as before)
+            if len(batch_results) > 0:
+                final_aggregated = logsumexp(batch_results, axis=0)
+            else:
+                final_aggregated = np.full((n_curr, n_next), -np.inf)
+            
+            posterior_with_prior = final_aggregated + P_matrix
+            row_sums = logsumexp(posterior_with_prior, axis=1, keepdims=True)
+            log_probs = posterior_with_prior - row_sums
+            log_probs_clipped = np.maximum(log_probs, minimum_transition_log_likelihood)
+            
+            probs_nonnorm = np.exp(log_probs_clipped)
+            row_sums_final = np.sum(probs_nonnorm, axis=1, keepdims=True)
+            row_sums_final[row_sums_final == 0] = 1.0 
+            final_probs_matrix = probs_nonnorm / row_sums_final
+            
+            block_dict = {}
+            for u_idx, u in enumerate(hap_keys_current):
+                for v_idx, v in enumerate(hap_keys_next):
+                    key = ((i, u), (next_bundle, v))
+                    block_dict[key] = final_probs_matrix[u_idx, v_idx]
+            
+            new_transition_probs[i] = block_dict
+            
+        return new_transition_probs
+
+    forward_indices = range(len(haps_data) - space_gap)
+    new_transition_probs_forward = _run_batched_pass(forward_indices, is_forward=True)
     
-    return combined_probs
+    backward_indices = range(len(haps_data) - 1, space_gap - 1, -1)
+    new_transition_probs_backwards = _run_batched_pass(backward_indices, is_forward=False)
+    
+    return [new_transition_probs_forward, new_transition_probs_backwards]
+
+def smoothen_probs_vectorized(old_probs, new_probs, learning_rate):
+    """
+    Vectorized smoothing: Result = (old * (1-lr)) + (new * lr)
+    Operates on dictionary values directly using numpy.
+    """
+    if learning_rate == 1:
+        return new_probs
+    if learning_rate == 0:
+        return old_probs
+
+    smoothed_result = {}
+    
+    # Iterate [Forward, Backward]
+    for i in [0, 1]:
+        smoothed_result[i] = {}
+        for block_idx in new_probs[i]:
+            old_block = old_probs[i][block_idx]
+            new_block = new_probs[i][block_idx]
             
+            # We trust key order is preserved (Python 3.7+)
+            # Extract values to numpy arrays
+            keys = list(new_block.keys())
+            v_old = np.array(list(old_block.values()))
+            v_new = np.array(list(new_block.values()))
+            
+            # Vectorized Math
+            v_smooth = (v_old * (1.0 - learning_rate)) + (v_new * learning_rate)
+            
+            # Zip back to dictionary
+            smoothed_result[i][block_idx] = dict(zip(keys, v_smooth))
+            
+    return smoothed_result
+
 def calculate_hap_transition_probabilities(full_samples_data,
-                                          sample_sites,
-                                          haps_data,
-                                          full_blocks_likelihoods=None,
-                                          max_num_iterations=10,
-                                          space_gap=1,
-                                          currently_found_long_haps=[],
-                                          found_transition_penalty=0.1,
-                                          min_cutoff_change=0.00000001,
-                                          learning_rate=1,
-                                          minimum_transition_log_likelihood=-10):
-    """
-    Starting out with an equal prior compute update transition probabilities
-    for adjacent haps (where by adjacency we mean a gap of size space_gap) 
-    by applying an EM algorithm num_iteration times.
+            sample_sites,
+            haps_data,
+            full_blocks_likelihoods=None,
+            max_num_iterations=10,
+            space_gap=1,
+            currently_found_long_haps=[],
+            found_transition_penalty=0.1,
+            min_cutoff_change=0.001, # Relaxed from 1e-8
+            learning_rate=1.0,       # Start high
+            minimum_transition_log_likelihood=-10):
     
-    Cuts off early if we have two successive iterations and no single transition
-    probability changes by at least min_cutoff_change
+    # 1. INITIALIZATION
+    start_probs = initial_transition_probabilities(haps_data, space_gap=space_gap)
     
-    Returns the result of the final run of the algorithm
-    
-    If full_blocks_likelihoods (which contains the likelihood of seeing each 
-    block for each sample given the underlying ground truth of which haplotypes
-    make up the sample at that block) is not provided it is computed from the 
-    other data
-    
-    learning_rate is a parameter between [0,1] which controls how much we update
-    our probabilities at each step, 1 corresponds to a full EM update while 0
-    corresponds to no change.
-    """
-    
-    start_probs = initial_transition_probabilities(haps_data,space_gap=space_gap)
+    # Check/Calc Likelihoods
+    if full_blocks_likelihoods is None:
+        print("Warning: full_blocks_likelihoods not provided. Calculating serially.")
+        full_blocks_likelihoods = []
+        for i in range(len(haps_data)):
+            block_samples = analysis_utils.get_sample_data_at_sites_multiple(
+                full_samples_data, sample_sites, haps_data[i][0], ploidy_present=True
+            )
+            full_blocks_likelihoods.append(
+                get_all_block_likelihoods_vectorised((block_samples, haps_data[i]))
+            )
 
-    probs_list = [start_probs]
+    current_probs = start_probs
     
-    if full_blocks_likelihoods == None:
-        #Calculate site data and underlying likelihoods for each sample
-        #and possible pair making up that sample at each block
-        
-        processing_pool = Pool(32)
-    
-        full_blocks_likelihoods = processing_pool.starmap(
-            lambda i: get_all_block_likelihoods(
-                analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
-                sample_sites,haps_data[i][0],ploidy_present=True),
-                haps_data[i]),
-            zip(range(len(haps_data))))
-    
+    # 2. EM LOOP
     for i in range(max_num_iterations):
         
-        old_probs = probs_list[-1]
+        # --- ADAPTIVE LEARNING RATE ---
+        # Decay the learning rate as iterations progress.
+        # Iter 0: 1.0
+        # Iter 5: 0.59
+        # Iter 10: 0.34
+        # This allows fast movement early on, but forces stability later.
+        effective_lr = learning_rate * (0.9 ** i)
         
-        new_probs = get_updated_transition_probabilities(
+        # Lower bound to ensure we don't stop updating completely
+        effective_lr = max(effective_lr, 0.1)
+        
+        # A. M-STEP
+        new_probs_raw = standard_get_updated_transition_probabilities(
             full_samples_data,
             sample_sites,
             haps_data,
-            old_probs,
+            current_probs, 
             full_blocks_likelihoods,
-            space_gap=space_gap,
             currently_found_long_haps=currently_found_long_haps,
             found_transition_penalty=found_transition_penalty,
-            minimum_transition_log_likelihood=minimum_transition_log_likelihood)
+            space_gap=space_gap,
+            minimum_transition_log_likelihood=minimum_transition_log_likelihood,
+            BATCH_SIZE=100
+        )
         
-        combined_probs = smoothen_probs(old_probs,new_probs,learning_rate)
-        
-        probs_list.append(combined_probs)
-        
-        max_diff = 0
-        
-        for j in [0,1]:
-            testing_currently = new_probs[j]
-            testing_last = old_probs[j]
+        # B. SMOOTHING (With Effective LR)
+        current_probs_new = smoothen_probs_vectorized(current_probs, new_probs_raw, effective_lr)
 
-            for k in testing_currently.keys():
-                for pair in testing_currently[k].keys():
-                    diff = abs(testing_currently[k][pair]-testing_last[k][pair])
-                    
-                    if diff > max_diff:
-                        max_diff = diff
+        # C. CONVERGENCE CHECK
+        global_max_diff = 0.0
         
-        print("Max diff:",space_gap,i,f"{max_diff :.3f}")
-        print()
-        if max_diff < min_cutoff_change:
-            #print(f"Exiting_early {len(probs_list)}")
+        for direction in [0, 1]:
+            for block_idx in current_probs_new[direction]:
+                d_new = current_probs_new[direction][block_idx]
+                d_old = current_probs[direction][block_idx]
+                
+                v_new = np.fromiter(d_new.values(), dtype=float)
+                v_old = np.fromiter(d_old.values(), dtype=float)
+                
+                block_max = np.max(np.abs(v_new - v_old))
+                if block_max > global_max_diff:
+                    global_max_diff = block_max
+        
+        # Debugging Output
+        print(f"Gap {space_gap} | Iter {i} | LR {effective_lr:.2f} | Max Diff: {global_max_diff:.6f}")
+        
+        current_probs = current_probs_new
+        
+        if global_max_diff < min_cutoff_change:
             break
+            
+    return current_probs
+
+# --- 1. GLOBAL STORAGE FOR WORKERS ---
+# This dictionary will live in the memory of the worker processes
+_worker_data = {}
+
+def _init_worker_transition(samples_data, sites, haps, block_likes, 
+                            found_haps, penalty, min_log_lik, lr, max_iter):
+    """
+    This runs once per process when the pool starts.
+    It saves the heavy read-only data into the worker's global scope.
+    """
+    _worker_data['full_samples_data'] = samples_data
+    _worker_data['sample_sites'] = sites
+    _worker_data['haps_data'] = haps
+    _worker_data['full_blocks_likelihoods'] = block_likes
+    _worker_data['currently_found_long_haps'] = found_haps
+    _worker_data['found_transition_penalty'] = penalty
+    _worker_data['minimum_transition_log_likelihood'] = min_log_lik
+    _worker_data['learning_rate'] = lr
+    _worker_data['max_num_iterations'] = max_iter
+
+def _worker_calculate_gap_wrapper(space_gap):
+    """
+    The lightweight wrapper that calls your actual logic using the cached global data.
+    """
+    # Import your logic function here if it's in another module
+    # form analysis_utils import calculate_hap_transition_probabilities 
     
-    return probs_list[-1]
+    return calculate_hap_transition_probabilities(
+        _worker_data['full_samples_data'],
+        _worker_data['sample_sites'],
+        _worker_data['haps_data'],
+        full_blocks_likelihoods=_worker_data['full_blocks_likelihoods'],
+        max_num_iterations=_worker_data['max_num_iterations'],
+        space_gap=space_gap,
+        currently_found_long_haps=_worker_data['currently_found_long_haps'],
+        found_transition_penalty=_worker_data['found_transition_penalty'],
+        minimum_transition_log_likelihood=_worker_data['minimum_transition_log_likelihood'],
+        learning_rate=_worker_data['learning_rate']
+    )
 
 def generate_transition_probability_mesh(full_samples_data,
                                          sample_sites,
@@ -1001,42 +1190,51 @@ def generate_transition_probability_mesh(full_samples_data,
                                          minimum_transition_log_likelihood=-10,
                                          learning_rate=1):
     """
-    Generates a mesh of transition probabilities where we generate the transition
-    probabilities for space_gap = 1,2,4,8,... all the way up to the largest
-    power of two less than the number of blocks we have
+    Optimized version using Initializers to avoid copying heavy data repeatedly.
     """
     
-    #Calculate site data and underlying likelihoods for each sample
-    #and possible pair making up that sample at each block
-    processing_pool = Pool(32)
+    # --- PHASE 1: GENERATE BLOCK LIKELIHOODS ---
+    
+    # Use your existing vectorized function here
+    tasks = []
+    for i in range(len(haps_data)):
+        # Note: If full_samples_data is HUGE, slicing it here might still be slow.
+        # Ideally, get_sample_data... happens inside the worker too, but
+        # keeping your logic for now:
+        block_samples = analysis_utils.get_sample_data_at_sites_multiple(
+            full_samples_data, sample_sites, haps_data[i][0], ploidy_present=True
+        )
+        tasks.append((block_samples, haps_data[i]))
 
-    full_blocks_likelihoods = processing_pool.starmap(
-        lambda i: get_all_block_likelihoods(
-            analysis_utils.get_sample_data_at_sites_multiple(full_samples_data,
-            sample_sites,haps_data[i][0],ploidy_present=True),
-            haps_data[i]),
-        zip(range(len(haps_data))))
+    # Use a smaller pool for the first step if RAM is tight
+    # Ensure OMP_NUM_THREADS=1 is set in your main script!
+    print("Calculating block likelihoods...")
+    with Pool(16) as pool:
+        full_blocks_likelihoods = pool.starmap(
+            get_all_block_likelihoods_vectorised, 
+            tasks
+        )
     
-    
-    mesh_dict = {}
+    # --- PHASE 2: CALCULATE TRANSITION MESH ---
     
     num_sqrs = math.floor(math.sqrt(len(haps_data)-1))
+    sqrs = [i**2 for i in range(1, num_sqrs+1)]
     
-    sqrs = [i**2 for i in range(1,num_sqrs+1)]
+    print(f"Calculating transitions for {len(sqrs)} different gaps...")
 
-    mesh_list = processing_pool.starmap(lambda x: calculate_hap_transition_probabilities(full_samples_data,
-    sample_sites,
-    haps_data,
-    full_blocks_likelihoods=full_blocks_likelihoods,
-    max_num_iterations=max_num_iterations,
-    space_gap=x,
-    currently_found_long_haps=currently_found_long_haps,
-    found_transition_penalty=found_transition_penalty,
-    minimum_transition_log_likelihood=minimum_transition_log_likelihood,
-    learning_rate=learning_rate),
-    zip(sqrs))
+    # We pack all the heavy/static arguments into a tuple for the initializer
+    init_args = (full_samples_data, sample_sites, haps_data, full_blocks_likelihoods,
+                 currently_found_long_haps, found_transition_penalty, 
+                 minimum_transition_log_likelihood, learning_rate, max_num_iterations)
+
+    # We use the initializer to send data ONCE per process
+    with Pool(16, initializer=_init_worker_transition, initargs=init_args) as pool:
+        
+        # We only pass the changing variable 'x' (the gap size)
+        # map/imap is cleaner than starmap for single arguments
+        results = pool.map(_worker_calculate_gap_wrapper, sqrs)
     
-    for i in range(len(sqrs)):
-        mesh_dict[sqrs[i]] = mesh_list[i]
+    # Construct dictionary
+    mesh_dict = dict(zip(sqrs, results))
     
     return mesh_dict
