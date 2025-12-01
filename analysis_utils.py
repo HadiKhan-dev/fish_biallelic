@@ -1,6 +1,7 @@
 import numpy as np
 import math
 from multiprocess import Pool
+from scipy.special import softmax, gammaln, logsumexp
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -10,50 +11,34 @@ pass
 #%%
 def log_fac(x):
     """
-    Returns log(x!) exactly if x < 10, otherwise returns
-    Stirling's approximation to it
+    Returns log(x!)
     """
     x = int(x)
     
     return math.lgamma(x+1)
     
-    # if x < 4:
-    #     return math.log(math.factorial(x))
-    # else:
-    #     return (x+0.5)*math.log(x)-x+0.918938+(1/(12*x)) #0.918938 is ln(sqrt(2*pi))
-    
 def log_binomial(n,k):
     """
-    Returns log(nCk) exactly if n,k < 10, otherwise caclulates
-    the consituent factorials through Stirling's approximation
+    Returns log(nCk)
     """
     
     return log_fac(n)-log_fac(k)-log_fac(n-k)
 
-    # n = int(n)
-    # k = int(k)
-    
-    # if n < 35:
-    #     return math.log(math.comb(n,k))
-    # elif k < 17 and n < 40:
-    #     return math.log(math.comb(n,k))
-    # else:
-    #     return log_fac(n)-log_fac(k)-log_fac(n-k)
-    
-def add_log_likelihoods(logli_list):
+def log_fac_vectorized(x):
     """
-    Takes as input a list of log likelihoods (in base e) and 
-    accurately approximates the log of the sum of 
-    the actual probabilities
+    Vectorized version of log(x!).
+    scipy.special.gammaln is the array-equivalent of math.lgamma
     """
-    logli = np.array(logli_list)
-    ma = max(logli)
-    logli = logli-ma
-    logli = logli[logli > -50]
-    probs = np.exp(logli)
-    sum_probs = np.sum(probs)
     
-    return ma+math.log(sum_probs)
+    return gammaln(x + 1)
+
+def log_binomial_vectorized(n, k):
+    """
+    Calculates log(nCk) for entire arrays at once.
+    """
+    
+    return log_fac_vectorized(n) - log_fac_vectorized(k) - log_fac_vectorized(n - k)
+
 
 def make_upper_triangular(matrix):
     """
@@ -65,83 +50,110 @@ def make_upper_triangular(matrix):
     
     return np.triu(matrix+matrix.T-np.diag(matrix.diagonal()))
 
-def reads_to_probabilities(reads_array,read_error_prob = 0.02,min_total_reads=5):
+def log_matmul(A, B):
+    """
+    Performs Matrix Multiplication in Log-Space.
+    Equivalent to C = A @ B, but for log-probabilities.
+    C[i, j] = logsumexp(A[i, :] + B[:, j])
+    """
+    # A: (N, K) -> (N, K, 1)
+    # B: (K, M) -> (1, K, M)
+    # Broadcasting sum: (N, K, M)
+    # Logsumexp over K (axis 1)
+    return logsumexp(A[:, :, np.newaxis] + B[np.newaxis, :, :], axis=1)
+
+
+def reads_to_probabilities(reads_array, read_error_prob=0.02, min_total_reads=5):
     """
     Convert a reads array to a probability of the underlying
     genotype being 0, 1 or 2
     
     min_total_reads is a minimum number of reads each site must have for it to be considered
     a valid alternate site (this is to reduce the chance of us considering something which is a variant site only because of errors as a real site)
+    
+    Fully vectorized conversion of reads to genotype probabilities.
     """
+    num_samples, num_sites, _ = reads_array.shape
     
-    
-    reads_sum = np.sum(reads_array,axis=0)
-    
-    num_samples = reads_array.shape[0]
-    num_sites = reads_array.shape[1]
-    
-    ploidy = 2*np.ones((num_samples,num_sites))
-    
+    # 0. Handle empty case
     if num_sites == 0:
-        return (np.empty((num_sites,3)),(np.empty((num_samples,num_sites,3)),ploidy))
+        ploidy = 2 * np.ones((num_samples, num_sites))
+        return (np.empty((num_sites, 3)), (np.empty((num_samples, num_sites, 3)), ploidy))
+
+    # --- PART 1: Calculate Site Priors (Vectorized) ---
     
-    site_ratios = []
-    for i in range(num_sites):
-        
-        if sum(reads_sum[i]) >= max(min_total_reads,read_error_prob*num_samples):
-            site_ratios.append((1+reads_sum[i][1])/(2+reads_sum[i][0]+reads_sum[i][1]))
-        else:
-            site_ratios.append(read_error_prob)
+    # Sum reads across samples: Shape (num_sites, 2)
+    reads_sum = np.sum(reads_array, axis=0)
+    total_reads_per_site = np.sum(reads_sum, axis=1)
     
-    site_priors = []
-    for i in range(len(site_ratios)):
-        singleton = site_ratios[i]
-        site_priors.append([(1-singleton)**2,2*singleton*(1-singleton),singleton**2])
-    site_priors = np.array(site_priors)
+    # Create a mask for the threshold condition
+    # condition: total reads >= max(min_total, error_prob * samples)
+    threshold = max(min_total_reads, read_error_prob * num_samples)
+    valid_mask = total_reads_per_site >= threshold
     
-    new_array = []
+    # Calculate ratios for ALL sites at once using np.where
+    # If valid: (1 + ones) / (2 + total)
+    # If not valid: read_error_prob
+    # Note: We compute the math for all, but only use it where valid_mask is True
+    # to avoid division by zero errors, we can add a tiny epsilon or just ignore the invalid math
+    # since np.where selects the result afterwards.
     
-    log_half = math.log(1/2)
+    numerator = 1 + reads_sum[:, 1]
+    denominator = 2 + total_reads_per_site
+    calculated_ratios = numerator / denominator
+    
+    # Apply the condition
+    singleton = np.where(valid_mask, calculated_ratios, read_error_prob)
+    
+    # Calculate priors: Shape (num_sites, 3)
+    priors_00 = (1 - singleton) ** 2
+    priors_01 = 2 * singleton * (1 - singleton)
+    priors_11 = singleton ** 2
+    
+    # Stack them: Shape (num_sites, 3)
+    site_priors = np.stack([priors_00, priors_01, priors_11], axis=1)
+    
+    # --- PART 2: Calculate Likelihoods (Vectorized across Samples AND Sites) ---
+    
+    log_half = math.log(0.5)
     log_read_error = math.log(read_error_prob)
-    log_read_nonerror = math.log(1-read_error_prob)
+    log_read_nonerror = math.log(1 - read_error_prob)
     
-    for i in range(num_sites):
-        
-        prior_vals = site_priors[i]
-        log_priors = np.array(np.log(prior_vals))
-        new_array.append([])
-        
-        # if i %100 == 0:
-        #     print(i)
-        for j in range(num_samples):
-            
-            zeros = reads_array[j][i][0]
-            ones = reads_array[j][i][1]
-            total = zeros+ones
-            
-            log_likelihood_00 = log_binomial(total,ones)+zeros*log_read_nonerror+ones*log_read_error
-            log_likelihood_11 = log_binomial(total,zeros)+zeros*log_read_error+ones*log_read_nonerror
-            log_likelihood_01 = log_binomial(total,ones)+total*log_half
-            
-            log_likli = np.array([log_likelihood_00,log_likelihood_01,log_likelihood_11])
-            
-            nonnorm_log_postri = log_priors + log_likli
-            
-            nonnorm_log_postri -= np.mean(nonnorm_log_postri)
-            
-            nonnorm_post = np.exp(nonnorm_log_postri)
-            posterior = nonnorm_post/sum(nonnorm_post)
-            
-            new_array[-1].append(posterior)
-        
-        # if i % 1000 == 0: 
-        #     print(new_array)
-            
-    new_array = np.array(new_array)
+    # Extract columns: Shapes are (num_samples, num_sites)
+    zeros = reads_array[..., 0] 
+    ones = reads_array[..., 1]
+    total = zeros + ones
     
-    new_array = np.ascontiguousarray(new_array.swapaxes(0,1))
-        
-    return (site_priors,(new_array,ploidy))
+    # Compute log binomials on the 2D matrices directly
+    lb_total_ones = log_binomial_vectorized(total, ones)
+    lb_total_zeros = log_binomial_vectorized(total, zeros)
+    
+    # Calculate Likelihoods: Shape (num_samples, num_sites)
+    ll_00 = lb_total_ones + zeros * log_read_nonerror + ones * log_read_error
+    ll_11 = lb_total_zeros + zeros * log_read_error + ones * log_read_nonerror
+    ll_01 = lb_total_ones + total * log_half
+    
+    # Stack into a 3D tensor: Shape (num_samples, num_sites, 3)
+    # We use dstack to stack along the last depth dimension
+    log_likli_matrix = np.stack([ll_00, ll_01, ll_11], axis=-1)
+    
+    # --- PART 3: Combine and Normalize ---
+    
+    # log_priors is (num_sites, 3). log_likli is (num_samples, num_sites, 3).
+    # We need to broadcast log_priors.
+    # Expand dims of log_priors to (1, num_sites, 3) so it adds to every sample row.
+    log_site_priors = np.log(site_priors)
+    nonnorm_log_posterior = log_likli_matrix + log_site_priors[np.newaxis, :, :]
+    
+    # Apply Softmax on the last axis (the 3 classes)
+    # This handles the overflow/underflow (max subtraction) automatically.
+    posterior_probs = softmax(nonnorm_log_posterior, axis=-1)
+    
+    # Create ploidy array
+    ploidy = 2 * np.ones((num_samples, num_sites))
+    
+    # posterior_probs is already (num_samples, num_sites, 3) and contiguous
+    return (site_priors, (posterior_probs, ploidy))
             
 def calc_distance(first_row,second_row,calc_type="diploid"):
     """
@@ -152,10 +164,6 @@ def calc_distance(first_row,second_row,calc_type="diploid"):
         distances = [[0,1,2],[1,0,1],[2,1,0]]
     else:
         distances = [[0,1],[1,0]]
-        
-    #print(first_row[:10],second_row[:10])
-    
-    #print(np.where(np.isnan(second_row)))
         
     ens = np.einsum("ij,ik->ijk",first_row,second_row)
     ensd = ens * distances
@@ -171,10 +179,6 @@ def calc_distance_by_site(first_row,second_row,calc_type="diploid"):
         distances = [[0,1,2],[1,0,1],[2,1,0]]
     else:
         distances = [[0,1],[1,0]]
-        
-    #print(first_row[:10],second_row[:10])
-    
-    #print(np.where(np.isnan(second_row)))
         
     ens = np.einsum("ij,ik->ijk",first_row,second_row)
     ensd = ens * distances
@@ -361,8 +365,6 @@ def get_diff_wrongness(diploid,haploid,keep_flags=None):
     
     wrong = wrong[keep_flags]
     
-    
-    
     difference = np.ascontiguousarray(np.array([zeros,ones]).T)
     
     
@@ -448,9 +450,6 @@ def combine_probabilities(first_prob,second_prob,prior_prob,
         midpoint = (search_space[0]+search_space[1])/2
         test_val = probability_to_information([1-midpoint,midpoint])
         
-        # print("VALUE",test_val,full_combined_information,search_space)
-        # print(search_space[1]-search_space[0])
-        # print()
         if test_val < full_combined_information:
             search_space = [midpoint,search_space[1]]
         else:
@@ -491,6 +490,180 @@ def get_dips_from_long_haps(long_haps):
     total_combined = np.array(total_combined)
     
     return total_combined
+
+def map_haplotype_to_blocks(target_haplotype, haps_data):
+    """
+    Maps a continuous long haplotype (from simulation/ground truth) 
+    to the discrete block indices used in the HMM/Beam Search.
+    
+    Args:
+        target_haplotype: (Total_Sites, 2) numpy array of probabilities.
+        haps_data: The standard list of blocks used in your pipeline.
+        
+    Returns:
+        A list of indices (e.g. [0, 5, 12, ...]) representing the best 
+        matching local haplotype for each block.
+    """
+    best_path_indices = []
+    current_site_idx = 0
+    total_target_len = len(target_haplotype)
+    
+    for i, block in enumerate(haps_data):
+        # block[3] contains the dictionary of {index: hap_array}
+        block_haps_dict = block[3]
+        
+        if not block_haps_dict:
+            # Handle empty blocks (if any)
+            best_path_indices.append(None)
+            continue
+            
+        # Get the length of this block (number of sites)
+        # We grab the first hap to check shape
+        any_key = next(iter(block_haps_dict))
+        block_len = len(block_haps_dict[any_key])
+        
+        # Ensure we don't go out of bounds
+        if current_site_idx + block_len > total_target_len:
+            print(f"Warning: Target haplotype shorter than data. Stopped at block {i}.")
+            break
+            
+        # Slice the target haplotype to get the segment for this block
+        target_slice = target_haplotype[current_site_idx : current_site_idx + block_len]
+        
+        # Find best match
+        best_key = None
+        min_dist = float('inf')
+        
+        for key, candidate_hap in block_haps_dict.items():
+            # Calculate L1 Distance (Sum of absolute differences)
+            # This is robust and fast for probabilities
+            dist = np.sum(np.abs(target_slice - candidate_hap))
+            
+            if dist < min_dist:
+                min_dist = dist
+                best_key = key
+        
+        best_path_indices.append(best_key)
+        
+        # Advance the pointer
+        current_site_idx += block_len
+        
+    return best_path_indices
+
+def get_path_log_likelihood(path_indices, full_mesh, verbose=False):
+    """
+    Calculates the total log-likelihood of a specific sequence of block haplotypes
+    based on the transition probabilities in full_mesh.
+    
+    Args:
+        path_indices: List of integer indices representing the haplotype at each block.
+                      e.g. [0, 5, 2, 2, 1, ...]
+        full_mesh: The dictionary containing transition probabilities.
+        verbose: If True, prints exactly where the path breaks (probability 0).
+        
+    Returns:
+        float: Total Log Likelihood. Returns -inf if the path contains 
+               an impossible transition (prob=0 or missing from mesh).
+    """
+    total_log_likelihood = 0.0
+    gap = 1 # We measure likelihood based on immediate neighbors
+    
+    # Check if gap 1 exists in mesh (it should)
+    if gap not in full_mesh:
+        raise ValueError("Full mesh does not contain gap size 1 transitions.")
+    
+    # Iterate through the path
+    for i in range(len(path_indices) - 1):
+        curr_block_idx = i
+        next_block_idx = i + 1
+        
+        curr_hap_val = path_indices[curr_block_idx]
+        next_hap_val = path_indices[next_block_idx]
+        
+        # Construct the key used in the mesh dictionary
+        # Structure: ((block_i, hap_val), (block_i+1, hap_val))
+        transition_key = ((curr_block_idx, curr_hap_val), 
+                          (next_block_idx, next_hap_val))
+        
+        # Access the forward probability dict (Direction 0)
+        try:
+            prob_dict = full_mesh[gap][0][curr_block_idx]
+            
+            if transition_key in prob_dict:
+                prob = prob_dict[transition_key]
+                
+                if prob > 0:
+                    step_log_lik = math.log(prob)
+                    total_log_likelihood += step_log_lik
+                else:
+                    if verbose:
+                        print(f"Path broken at Block {i}->{i+1}: Probability is 0.0")
+                    return float('-inf')
+            else:
+                # Key missing usually means probability 0 or filtering removed it
+                if verbose:
+                    print(f"Path broken at Block {i}->{i+1}: Transition {transition_key} not found in mesh.")
+                return float('-inf')
+                
+        except KeyError:
+            if verbose:
+                print(f"Block {i} missing from mesh entirely.")
+            return float('-inf')
+
+    return total_log_likelihood
+
+def get_path_score_beam_view(path_indices, full_mesh, verbose=False):
+    """
+    Calculates the 'Score' of a path exactly as the Beam Search calculates it.
+    It sums evidence from ALL gap sizes (1, 4, 9...) available in the mesh.
+    
+    This is useful for understanding why the Beam Search preferred Path A over Path B.
+    """
+    total_score = 0.0
+    num_blocks = len(path_indices)
+    
+    # Iterate through every block
+    for i in range(num_blocks):
+        
+        # The beam search calculates a score for node 'i' based on incoming connections
+        # from the PAST (Left-to-Right pass).
+        
+        # Check all valid gaps looking backwards
+        for gap in full_mesh.keys():
+            earlier_index = i - gap
+            
+            if earlier_index >= 0:
+                # Get the values
+                curr_val = path_indices[i]
+                prev_val = path_indices[earlier_index]
+                
+                # Construct key: ((prev_idx, prev_val), (curr_idx, curr_val))
+                transition_key = ((earlier_index, prev_val), (i, curr_val))
+                
+                try:
+                    # Get Forward Probability (Direction 0)
+                    prob_dict = full_mesh[gap][0][earlier_index]
+                    
+                    if transition_key in prob_dict:
+                        prob = prob_dict[transition_key]
+                        
+                        # Apply the same scaling used in Beam Search
+                        # score += log(prob) * sqrt(gap)
+                        if prob > 0:
+                            log_prob = math.log(prob)
+                            scaled_score = log_prob * math.sqrt(1/gap)
+                            total_score += scaled_score
+                        else:
+                            if verbose: print(f"Zero prob at {earlier_index}->{i} (Gap {gap})")
+                            return float('-inf')
+                    else:
+                        if verbose: print(f"Missing key at {earlier_index}->{i} (Gap {gap})")
+                        return float('-inf')
+                        
+                except KeyError:
+                    pass # Gap/Block combination might not exist, skip
+                    
+    return total_score
 
 def recombination_fudge(start_probs,distance,recomb_rate=10**-8):
     """
@@ -545,8 +718,8 @@ def get_sample_data_at_sites(sample_data,sample_sites,
     else:
         return sample_data[indices[0]:indices[1]+1,:]
                        
-def get_sample_data_at_sites_multiple(sample_data,sample_sites,
-                                      query_sites,ploidy_present = False):
+def get_sample_data_at_sites_multiple(sample_data, sample_sites,
+                                      query_sites, ploidy_present=False):
     """
     Helper function to extract a subset of the sample data which is
     for sites at locations sample_sites in order. The function will
@@ -559,12 +732,28 @@ def get_sample_data_at_sites_multiple(sample_data,sample_sites,
     element of which will be the likelihoods and the second the ploidies,
     otherwise sample_data is just the likelihoods
     """
-    indices = np.searchsorted(sample_sites,[query_sites[0],query_sites[-1]])
+    
+    # Handle the empty case
+    if len(query_sites) == 0:
+        if ploidy_present:
+            # sample_data[0] is (Samples, Sites, 3) -> Return (Samples, 0, 3)
+            empty_lik = sample_data[0][:, :0, :]
+            # sample_data[1] is (Samples, Sites) -> Return (Samples, 0)
+            empty_ploidy = sample_data[1][:, :0]
+            return (empty_lik, empty_ploidy)
+        else:
+            # sample_data is (Samples, Sites, 3) -> Return (Samples, 0, 3)
+            return sample_data[:, :0, :]
+    
+    # Original logic for non-empty case
+    # Find start and end indices in sample_sites
+    indices = np.searchsorted(sample_sites, [query_sites[0], query_sites[-1]])
     
     if ploidy_present:
-        return (sample_data[0][:,indices[0]:indices[1]+1,:],sample_data[1][:,indices[0]:indices[1]+1])
+        return (sample_data[0][:, indices[0]:indices[1]+1, :],
+                sample_data[1][:, indices[0]:indices[1]+1])
     else:
-        return sample_data[:,indices[0]:indices[1]+1,:]
+        return sample_data[:, indices[0]:indices[1]+1, :]
 
 def get_best_block_haps_for_long_hap(long_hap,hap_sites,block_haps):
     """

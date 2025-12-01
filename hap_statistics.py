@@ -9,6 +9,107 @@ np.seterr(divide='ignore',invalid="ignore")
 pass
 
 #%%
+
+def match_best_vectorised(haps_dict, diploids, keep_flags=None):
+    """
+    Vectorized matching.
+    Uses Matrix Multiplication instead of loops.
+    """
+    
+    # 1. SETUP DATA & MASKS
+    diploids = np.array(diploids) 
+    num_samples, total_sites, _ = diploids.shape
+    
+    if keep_flags is None:
+        keep_flags = slice(None)
+    elif keep_flags.dtype != bool:
+        keep_flags = np.array(keep_flags, dtype=bool)
+        
+    # Slice and Flatten Diploids
+    # Input: (Num_Samples, Masked_Sites, 3)
+    diploids_masked = diploids[:, keep_flags, :]
+    masked_sites = diploids_masked.shape[1]
+    
+    # Flatten to 2D for Matrix Mult: (Num_Samples, Masked_Sites * 3)
+    diploids_flat = diploids_masked.reshape(num_samples, -1)
+
+    # 2. PREPARE HAPLOTYPES
+    hap_keys = list(haps_dict.keys())
+    num_haps = len(hap_keys)
+    
+    # Stack haps: (Num_Haps, Masked_Sites, 2)
+    hap_tensor = np.array([haps_dict[k][keep_flags] for k in hap_keys])
+
+    # 3. COMBINE HAPLOTYPES (Vectorized)
+    # Calculate P(00), P(01), P(11) for all pairs
+    p0 = hap_tensor[:, :, 0] 
+    p1 = hap_tensor[:, :, 1]
+
+    # Broadcasting: (Num_Haps, Num_Haps, Masked_Sites)
+    prob_00 = p0[:, None, :] * p0[None, :, :]
+    prob_11 = p1[:, None, :] * p1[None, :, :]
+    prob_01 = (p0[:, None, :] * p1[None, :, :]) + (p1[:, None, :] * p0[None, :, :])
+
+    # Stack: (Num_Haps, Num_Haps, Masked_Sites, 3)
+    combinations_4d = np.stack([prob_00, prob_01, prob_11], axis=-1)
+
+    # Flatten to list of combinations: (Num_Haps^2, Masked_Sites, 3)
+    combinations_list = combinations_4d.reshape(-1, masked_sites, 3)
+
+    # 4. APPLY CUSTOM DISTANCE WEIGHTS
+    # Your distance matrix defined in calc_distance
+    # 0 vs 0 = 0 cost, 0 vs 2 = 2 cost, etc.
+    dist_weights = np.array([[0, 1, 2],
+                             [1, 0, 1],
+                             [2, 1, 0]])
+
+    # Transform the combinations by the weights
+    # We multiply the prob vector (size 3) by the weight matrix (3x3)
+    # Shape: (Num_Combinations, Masked_Sites, 3)
+    combinations_weighted = combinations_list @ dist_weights
+
+    # Flatten for final dot product: (Num_Combinations, Masked_Sites * 3)
+    combinations_weighted_flat = combinations_weighted.reshape(-1, masked_sites * 3)
+
+    # 5. CALCULATE SCORES (Matrix Multiplication)
+    # We want sum(Diploid * Weighted_Combination)
+    # Matrix Mult: (Samples, Features) @ (Combinations, Features).T
+    # Result: (Num_Samples, Num_Combinations)
+    dists = diploids_flat @ combinations_weighted_flat.T
+
+    # Normalize: (dist * 100) / original_length
+    # Note: You used dip_length in your original code, which corresponds to total_sites
+    dists *= (100.0 / total_sites)
+
+    # 6. FIND BEST MATCHES
+    # argmin finds the index with the lowest distance cost
+    best_indices_flat = np.argmin(dists, axis=1)
+    best_errors = dists[np.arange(num_samples), best_indices_flat]
+
+    # 7. RECONSTRUCT KEYS (Same as previous answer)
+    idx_grid_i, idx_grid_j = np.indices((num_haps, num_haps))
+    idx_grid_i = idx_grid_i.flatten()
+    idx_grid_j = idx_grid_j.flatten()
+
+    best_parents_i = idx_grid_i[best_indices_flat]
+    best_parents_j = idx_grid_j[best_indices_flat]
+
+    # Usage Counts
+    all_used = np.concatenate([best_parents_i, best_parents_j])
+    unique_idx, counts = np.unique(all_used, return_counts=True)
+    
+    haps_usage = {k: 0 for k in hap_keys}
+    for idx, count in zip(unique_idx, counts):
+        haps_usage[hap_keys[idx]] = count
+
+    # Format Output
+    dips_matches = [
+        ((hap_keys[p1], hap_keys[p2]), err)
+        for p1, p2, err in zip(best_parents_i, best_parents_j, best_errors)
+    ]
+
+    return (dips_matches, haps_usage, best_errors)
+
 def match_best(haps_dict,diploids,keep_flags=None):
     """
     Find the best matches of a pair of haploids for each diploid in the diploid list
