@@ -7,6 +7,7 @@ from multiprocess import Pool
 import warnings
 import time
 from scipy.spatial.distance import cdist
+from functools import partial
 
 import analysis_utils
 import hap_statistics
@@ -15,11 +16,22 @@ warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
 pass
 
+try:
+    from numba import njit, prange
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    print("WARNING: Numba not found. Model selection will be extremely slow.")
+    # Dummy decorators
+    def njit(*args, **kwargs):
+        def decorator(func): return func
+        return decorator
+    prange = range
 
 
 #%%
 def hdbscan_cluster(dist_matrix,
-                    min_cluster_size=2,
+                    min_cluster_size=3,
                     min_samples=1,
                     cluster_selection_method="eom",
                     alpha=1,
@@ -232,10 +244,347 @@ def get_representatives_probs(site_priors,
     #Return the results
     return cluster_representatives
 
+def consolidate_similar_candidates(candidates, diff_threshold=0.02):
+    """
+    Greedily merges candidates that are nearly identical (e.g. < 2% difference).
+    This prevents the Viterbi selection from selecting multiple noise variations 
+    of the same founder to explain specific outlier samples.
+    
+    Args:
+        candidates: Dictionary {index: hap_array} or List of hap_arrays
+    Returns:
+        dict: {new_index: hap_array} containing only distinct haplotypes
+    """
+    if not candidates: return {}
+    
+    # Normalize input to list of arrays
+    if isinstance(candidates, dict):
+        candidate_list = list(candidates.values())
+    else:
+        candidate_list = candidates
+
+    unique_haps = []
+    
+    for hap in candidate_list:
+        is_duplicate = False
+        for existing in unique_haps:
+            # Calculate Hamming distance (percentage of sites that differ)
+            diff = np.mean(hap != existing)
+            
+            if diff < diff_threshold:
+                # It's a duplicate (or noise variant)
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            unique_haps.append(hap)
+            
+    # Rebuild dictionary with sequential keys
+    return {i: h for i, h in enumerate(unique_haps)}
+
+@njit(parallel=True, fastmath=True)
+def viterbi_score_selection(ll_tensor, penalty):
+    """
+    Calculates the BEST Viterbi path score for each sample given a set of active pairs.
+    Used for Model Selection (BIC).
+    
+    ll_tensor: (n_samples, K_active_pairs, n_sites)
+    penalty:   Cost per switch (positive float).
+    
+    Returns: (n_samples,) array of best log-likelihoods.
+    """
+    n_samples, K, n_sites = ll_tensor.shape
+    best_scores = np.empty(n_samples, dtype=np.float64)
+    
+    for s in prange(n_samples):
+        # Buffer for current scores (faster than allocation in loop)
+        current_scores = np.empty(K, dtype=np.float64)
+        for k in range(K):
+            current_scores[k] = ll_tensor[s, k, 0]
+            
+        for i in range(1, n_sites):
+            # 1. Find best previous score globally
+            best_prev = -np.inf
+            for k in range(K):
+                if current_scores[k] > best_prev:
+                    best_prev = current_scores[k]
+            
+            # The baseline score if we switch INTO a state
+            switch_base = best_prev - penalty
+            
+            # 2. Update states
+            for k in range(K):
+                emission = ll_tensor[s, k, i]
+                stay = current_scores[k]
+                
+                # Max(Stay, Switch)
+                if stay > switch_base:
+                    current_scores[k] = stay + emission
+                else:
+                    current_scores[k] = switch_base + emission
+        
+        # Final max
+        final_max = -np.inf
+        for k in range(K):
+            if current_scores[k] > final_max:
+                final_max = current_scores[k]
+        best_scores[s] = final_max
+        
+    return best_scores
+
+def prune_chimeras(hap_dict, probs_array=None, recomb_penalty=10.0, error_tolerance_sites=10):
+    """
+    Identifies and removes haplotypes that can be explained as 
+    recombinations of OTHER haplotypes.
+    
+    TOPOLOGY-AWARE VERSION WITH FREQUENCY TIE-BREAKER:
+    1. Iteratively finds the haplotype most easily explained by the others (Highest Score).
+    2. If scores are tied (symmetric redundancy), it protects the haplotype with higher usage.
+    """
+    if len(hap_dict) < 3:
+        return hap_dict
+        
+    kept_keys = sorted(list(hap_dict.keys()))
+    
+    # Calculate usage counts if data is available (for tie-breaking)
+    usage_map = {}
+    if probs_array is not None:
+        matches = hap_statistics.match_best_vectorised(hap_dict, probs_array)
+        usage_map = matches[1]
+    
+    # Mismatch penalty matching your error floor
+    mismatch_penalty = 0.5 
+    
+    # We loop until we can no longer explain ANY haplotype using the others
+    # or until we hit the minimum of 2 haplotypes
+    while len(kept_keys) >= 3:
+        
+        candidate_scores = []
+        
+        # Convert all kept haps to a tensor for fast comparison
+        H_stack = np.array([hap_dict[k] for k in kept_keys])
+        n_haps, n_sites, _ = H_stack.shape
+        
+        for i, target_key in enumerate(kept_keys):
+            target_hap = H_stack[i]
+            
+            # Basis = Everyone except i
+            other_indices = [idx for idx in range(n_haps) if idx != i]
+            other_haps = H_stack[other_indices]
+            
+            # 1. Calculate Likelihoods (Target vs Basis)
+            # Distance 0 -> Score 0. Distance > 0 -> Score -0.5
+            mismatches = np.sum(np.abs(target_hap[None, :, :] - other_haps), axis=2)
+            ll_tensor = np.where(mismatches < 0.5, 0.0, -mismatch_penalty)
+            
+            # Add dimension: (1_Sample, N-1_States, Sites)
+            ll_tensor = ll_tensor[np.newaxis, :, :]
+            
+            # 2. Run Viterbi
+            # "How well can I construct Target using the Others?"
+            best_score = viterbi_score_selection(
+                ll_tensor, float(recomb_penalty)
+            )[0]
+            
+            # 3. Apply Tie-Breaker
+            # We want to remove High Scores (Easy to explain).
+            # If scores are equal, we want to remove Low Usage first.
+            # So we SUBTRACT a tiny epsilon based on usage.
+            # High Usage -> Lower Score -> Harder to remove.
+            usage = usage_map.get(target_key, 0)
+            adjusted_score = best_score - (usage * 1e-9)
+            
+            candidate_scores.append((target_key, adjusted_score, best_score))
+            
+        # Sort candidates by Adjusted Score Descending
+        # The top element is the "Most Redundant" (Best fit by others + Lowest usage)
+        candidate_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        worst_key, _, raw_score = candidate_scores[0]
+        
+        # 4. Decision Logic
+        # Allow 2 switches (A->B->A) + tolerance
+        allowed_switches = 2
+        threshold = -((recomb_penalty * allowed_switches) + 
+                      (mismatch_penalty * error_tolerance_sites))
+        
+        if raw_score > threshold:
+            kept_keys.remove(worst_key)
+            print(f"  Pruned Chimera {worst_key} (Score {raw_score:.1f}). Explained by others.")
+        else:
+            # The "easiest" haplotype to explain is still impossible to explain.
+            # We have reached the irreducible Founders.
+            break
+            
+    return {k: hap_dict[k] for k in kept_keys}
+
+def select_optimal_haplotype_set_viterbi(candidate_haps, probs_array, 
+                                         recomb_penalty=10.0,
+                                         penalty_strength=1.0,
+                                         read_error_prob=0.02,
+                                         max_sites_for_selection=2000):
+    """
+    Selects the smallest set of haplotypes that explains the data best,
+    ALLOWING for recombinations within the block via Viterbi.
+    
+    Features:
+    1. Downsamples sites if block is massive to save RAM.
+    2. Scales likelihoods to account for downsampling.
+    3. Batches pair creation to prevent memory explosion.
+    4. Rejects 'Chimera' haplotypes that are just mixes of existing ones.
+    """
+    
+    # --- 1. SETUP DATA ---
+    if isinstance(candidate_haps, dict):
+        hap_keys = list(candidate_haps.keys())
+        H = np.array([candidate_haps[k] for k in hap_keys])
+    else:
+        hap_keys = list(range(len(candidate_haps)))
+        H = np.array(candidate_haps)
+        
+    num_candidates = len(H)
+    num_samples, total_sites, _ = probs_array.shape
+    
+    if num_candidates == 0: return []
+
+    # --- 2. DOWNSAMPLING STRATEGY ---
+    # If we have too many sites, we downsample to save RAM/CPU.
+    # We multiply the resulting scores by 'stride' to estimate the full block likelihood.
+    
+    if total_sites > max_sites_for_selection:
+        stride = math.ceil(total_sites / max_sites_for_selection)
+        # Slice the data
+        probs_active = probs_array[:, ::stride, :]
+        H_active = H[:, ::stride, :]
+        # print(f"Downsampling sites from {total_sites} to {probs_active.shape[1]} (Stride {stride}) for selection.")
+    else:
+        stride = 1
+        probs_active = probs_array
+        H_active = H
+
+    num_active_sites = probs_active.shape[1]
+
+    # --- 3. PRE-CALCULATE ALL PAIR LIKELIHOODS (MEMORY SAFE) ---
+    # Tensor Target: (Samples, Total_Pairs, Active_Sites)
+    
+    idx_i, idx_j = np.triu_indices(num_candidates)
+    num_pairs = len(idx_i)
+    
+    # Pre-allocate the final tensor (Destination)
+    # Size example: 300 samples * 465 pairs * 2000 sites * 4 bytes ~= 1.1 GB (Safe)
+    ll_tensor = np.empty((num_samples, num_pairs, num_active_sites), dtype=np.float32)
+    
+    # Weights matrix for distance (00=0, 01=1, 11=2)
+    W = np.array([[0, 1, 2], [1, 0, 1], [2, 1, 0]], dtype=np.float32)
+    
+    # Process pairs in batches to avoid intermediate broadcasting explosion
+    batch_size = 50
+    
+    for start_p in range(0, num_pairs, batch_size):
+        end_p = min(start_p + batch_size, num_pairs)
+        
+        # Get indices for this batch
+        batch_idx_i = idx_i[start_p:end_p]
+        batch_idx_j = idx_j[start_p:end_p]
+        
+        # Extract Haps: (Batch, Sites)
+        h0 = H_active[batch_idx_i, :, 0]
+        h1 = H_active[batch_idx_i, :, 1]
+        h2_0 = H_active[batch_idx_j, :, 0]
+        h2_1 = H_active[batch_idx_j, :, 1]
+        
+        # Generate Genotypes: (Batch, Sites, 3)
+        g00 = h0 * h2_0
+        g11 = h1 * h2_1
+        g01 = (h0 * h2_1) + (h1 * h2_0)
+        
+        batch_pairs = np.stack([g00, g01, g11], axis=-1)
+        
+        # Apply Weights: (Batch, Sites, 3)
+        weighted_pairs = batch_pairs @ W
+        
+        # Calc Distance: (N, Batch, Sites)
+        # Sum over alleles axis (3)
+        batch_dist = np.sum(
+            probs_active[:, np.newaxis, :, :] * weighted_pairs[np.newaxis, :, :, :],
+            axis=3
+        )
+        
+        # Store into main tensor
+        # Convert to Log Likelihood (-Dist)
+        # SCALE UP by stride to approximate full block signal so Penalty matches magnitude
+        ll_tensor[:, start_p:end_p, :] = (-batch_dist * stride)
+
+    # Cap floor to prevent -inf issues
+    ll_tensor = np.maximum(ll_tensor, -2.0 * stride)
+    
+    # Ensure contiguous for Numba (float64 preferred for accumulation accuracy)
+    ll_tensor = np.ascontiguousarray(ll_tensor, dtype=np.float64)
+
+    # --- 4. SELECTION LOOP ---
+    
+    selected_indices = []
+    current_best_bic = float('inf')
+    
+    # BIC Constants
+    # Complexity must be > Recomb Penalty to prevent adding 'chimera' haps
+    min_complexity = recomb_penalty * 1.5
+    calculated_complexity = math.log(num_samples) * total_sites * penalty_strength * 0.01
+    complexity_cost = max(calculated_complexity, min_complexity)
+    
+    # print(f"Selection Parameters: Recomb Cost={recomb_penalty}, New Hap Cost={complexity_cost:.1f}")
+
+    while len(selected_indices) < num_candidates:
+        
+        best_new_index = -1
+        best_new_bic = float('inf')
+        
+        remaining = [x for x in range(num_candidates) if x not in selected_indices]
+        
+        for cand_idx in remaining:
+            trial_set = selected_indices + [cand_idx]
+            
+            # Create mask for valid pairs in this trial set
+            # A pair (i, j) is valid only if both i and j are in trial_set
+            subset_mask = np.zeros(num_candidates, dtype=bool)
+            subset_mask[trial_set] = True
+            
+            # Vectorized lookup using pre-calc indices
+            valid_pairs_mask = subset_mask[idx_i] & subset_mask[idx_j]
+            
+            if not np.any(valid_pairs_mask):
+                continue
+            
+            # Slice Tensor: (N, Active_Pairs, L)
+            active_ll_tensor = ll_tensor[:, valid_pairs_mask, :]
+            
+            # RUN VITERBI
+            # This returns the best score per sample allowing switches between Active Pairs
+            best_scores = viterbi_score_selection(active_ll_tensor, float(recomb_penalty))
+            
+            total_log_likelihood = np.sum(best_scores)
+            
+            # BIC Calculation
+            k = len(trial_set)
+            bic = (k * complexity_cost) - (2 * total_log_likelihood)
+            
+            if bic < best_new_bic:
+                best_new_bic = bic
+                best_new_index = cand_idx
+        
+        if best_new_bic < current_best_bic:
+            selected_indices.append(best_new_index)
+            current_best_bic = best_new_bic
+        else:
+            # Diminishing returns reached
+            break
+            
+    return [hap_keys[i] for i in selected_indices]
+
 def add_distinct_haplotypes(initial_haps,
                        new_candidate_haps,
                        keep_flags=None,
-                       unique_cutoff=5,
+                       unique_cutoff=10,
                        max_hap_add=1000):
     """
     Takes two dictionaries of haplotypes and a list of new potential
@@ -309,7 +658,6 @@ def add_distinct_haplotypes(initial_haps,
     
     return (cur_haps,new_haps_mapping)
 
-
 def add_distinct_haplotypes_smart(initial_haps,
                         new_candidate_haps,
                         probs_array,
@@ -359,7 +707,7 @@ def add_distinct_haplotypes_smart(initial_haps,
         cur_haps[i] = initial_haps[idx]
         i += 1
         
-    cur_matches = hap_statistics.match_best(cur_haps,probs_array,keep_flags=keep_flags)
+    cur_matches = hap_statistics.match_best_vectorised(cur_haps,probs_array,keep_flags=keep_flags)
     cur_error = np.mean(cur_matches[2])
     
     
@@ -393,7 +741,7 @@ def add_distinct_haplotypes_smart(initial_haps,
             cur_haps[new_index] = candidate_haps[smallest_name]
             candidate_haps.pop(smallest_name)
             
-            cur_matches = hap_statistics.match_best(cur_haps,probs_array,keep_flags=keep_flags)
+            cur_matches = hap_statistics.match_best_vectorised(cur_haps,probs_array,keep_flags=keep_flags)
             cur_error = np.mean(cur_matches[2])
             
             
@@ -640,7 +988,6 @@ def add_distinct_haplotypes_smart_vectorised(initial_haps,
         )
 
     return cur_haps_dict
-
 
 def truncate_haps(candidate_haps,
                   candidate_matches,
@@ -909,7 +1256,6 @@ def generate_further_haps(site_priors,
     
     return final_haps
 
-
 def generate_further_haps_vectorised(site_priors,
                           probs_array,
                           initial_haps,
@@ -1066,40 +1412,62 @@ def generate_further_haps_vectorised(site_priors,
     
     return final_haps
 
-def generate_haplotypes_block(positions,reads_array,keep_flags=None,
-                              error_reduction_cutoff = 0.98,
-                              max_cutoff_error_increase = 1.02,
+def generate_haplotypes_block(positions, reads_array, keep_flags=None,
+                              error_reduction_cutoff=0.98,
+                              max_cutoff_error_increase=1.02,
                               max_hapfind_iter=5,
                               deeper_analysis_initial=False,
-                              min_num_haps=0):
+                              min_num_haps=0,
+                              penalty_strength=5.0,
+                              max_intermediate_haps=25,
+                              known_haplotypes=None): # NEW ARGUMENT
     """
     Given the read count array of our sample data for a single block
-    generates the haplotypes that make up the samples present in our data
+    generates the haplotypes that make up the samples present in our data.
     
-    min_num_haps is a (soft) minimum value for the number of haplotypes,
-    if we have fewer than that many haps we iterate further to get more 
-    haps.
-    
+    known_haplotypes: Optional list or dict of haplotypes (arrays) that 
+                      must be included in the starting search pool.
+                      Useful for injecting missing founders found via residual analysis.
     """
+    
+    # --- 1. SETUP & INITIALIZATION ---
     if keep_flags is None:
         keep_flags = np.array([1 for _ in range(reads_array.shape[1])])
     
     if keep_flags.dtype != int:
-        keep_flags = np.array(keep_flags,dtype=int)
+        keep_flags = np.array(keep_flags, dtype=int)
     
-    #reads_array = resample_reads_array(reads_array,1)
+    # Calculate probabilities from reads
+    (site_priors, (probs_array, ploidy)) = analysis_utils.reads_to_probabilities(reads_array)
     
-    (site_priors,(probs_array,ploidy)) = analysis_utils.reads_to_probabilities(reads_array)
-    
-    
-    initial_haps = get_initial_haps(site_priors,probs_array,
-        keep_flags=keep_flags)
+    # Get seed haplotypes from homozygotes
+    initial_haps = get_initial_haps(site_priors, probs_array, keep_flags=keep_flags)
     
     if len(positions) == 0:
-        return (np.array([]),np.array([]),np.array([]),initial_haps)
-    
-    
-    initial_matches = hap_statistics.match_best(initial_haps,probs_array,keep_flags=keep_flags)
+        return (np.array([]), np.array([]), np.array([]), initial_haps)
+
+    # --- 2. INJECT KNOWN HAPLOTYPES (NEW LOGIC) ---
+    if known_haplotypes is not None:
+        # Normalize input to list of arrays
+        if isinstance(known_haplotypes, dict):
+            known_list = list(known_haplotypes.values())
+        elif isinstance(known_haplotypes, list):
+            known_list = known_haplotypes
+        else:
+            known_list = []
+            
+        if len(known_list) > 0:
+            # Combine Auto-Detected seeds with Injected seeds
+            combined_list = list(initial_haps.values()) + known_list
+            
+            # Consolidate to remove duplicates (e.g. if Injected == Auto-Detected)
+            # This ensures we start with a clean, unique set
+            initial_haps = consolidate_similar_candidates(combined_list, diff_threshold=0.01)
+            
+            # print(f"  Injected {len(known_list)} known haplotypes. Starting set size: {len(initial_haps)}")
+
+    # --- 3. INITIAL STATISTICS ---
+    initial_matches = hap_statistics.match_best_vectorised(initial_haps, probs_array, keep_flags=keep_flags)
     initial_error = np.mean(initial_matches[2])
     
     matches_history = [initial_matches]
@@ -1109,26 +1477,44 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
     all_found = False
     cur_haps = initial_haps
     
-    minimum_strikes = 0 #Counter that increases every time we get fewer than the required minimum number of haplotypes, if it hits 3 we break out of our loop to find further haps
+    minimum_strikes = 0 
     striking_up = False
-    
     uniqueness_threshold = 5
     wrongness_cutoff = 10
     
-    print(positions[0])
+    print(f"Processing Block {positions[0]} (Size: {len(positions)} sites)...")
     
+    # --- 4. ITERATIVE DISCOVERY LOOP ---
     while not all_found:
-        cur_haps = generate_further_haps_vectorised(site_priors,probs_array,
-                    cur_haps,keep_flags=keep_flags,uniqueness_threshold=uniqueness_threshold,
-                    wrongness_cutoff=wrongness_cutoff)
-        cur_matches = hap_statistics.match_best(cur_haps,probs_array)
+        
+        # A. Generate new candidates based on residuals
+        cur_haps = generate_further_haps_vectorised(
+            site_priors, 
+            probs_array,
+            cur_haps,
+            keep_flags=keep_flags,
+            uniqueness_threshold=uniqueness_threshold,
+            wrongness_cutoff=wrongness_cutoff
+        )
+        
+        # B. INTERMEDIATE PRUNING
+        if len(cur_haps) > max_intermediate_haps:
+            keep_keys = select_optimal_haplotype_set_viterbi(
+                cur_haps, 
+                probs_array, 
+                recomb_penalty=10.0,
+                penalty_strength=0.5 
+            )
+            pruned_haps = {i: cur_haps[k] for i, k in enumerate(keep_keys)}
+            
+            if len(pruned_haps) < len(cur_haps):
+                cur_haps = pruned_haps
+
+        # C. Evaluate Improvement
+        cur_matches = hap_statistics.match_best_vectorised(cur_haps, probs_array)
         cur_error = np.mean(cur_matches[2])
         
-        
-        # matches_history.append(cur_matches)
-        # errors_history.append(cur_error)
-        # haps_history.append(cur_haps)
-        
+        # D. Convergence Checks
         if cur_error/errors_history[-1] >= error_reduction_cutoff and len(errors_history) >= 2:
             if len(cur_haps) >= min_num_haps or minimum_strikes >= 3:
                 all_found = True
@@ -1139,49 +1525,270 @@ def generate_haplotypes_block(positions,reads_array,keep_flags=None,
                 wrongness_cutoff += 2
                 striking_up = True
                 
-        if len(cur_haps) == len(haps_history[-1]) and not striking_up: #Break if in the last iteration we didn't find a single new hap
+        if len(cur_haps) == len(haps_history[-1]) and not striking_up: 
             all_found = True
             break
             
-        if len(errors_history) > max_hapfind_iter+1:
+        if len(errors_history) > max_hapfind_iter + 1:
             all_found = True
             
         matches_history.append(cur_matches)
         errors_history.append(cur_error)
         haps_history.append(cur_haps)
-        
         striking_up = False
     
-    print(f"Completed {positions[0]}")
-    final_haps = haps_history[-1]
-        
-    return (positions,keep_flags,reads_array,final_haps)
+    # --- 5. FINAL CLEANUP STEPS ---
     
+    candidates_to_filter = haps_history[-1]
+    
+    if len(candidates_to_filter) > 1:
+        
+        # Step A: Pre-Merge
+        merged_haps = consolidate_similar_candidates(candidates_to_filter, diff_threshold=0.02)
+        
+        # Step B: Viterbi-BIC Selection
+        best_keys = select_optimal_haplotype_set_viterbi(
+            merged_haps,
+            probs_array,
+            recomb_penalty=10.0,
+            penalty_strength=penalty_strength 
+        )
+        
+        selected_haps_dict = {i: merged_haps[k] for i, k in enumerate(best_keys)}
+        
+        # Step C: Post-Usage Pruning
+        final_matches = hap_statistics.match_best_vectorised(selected_haps_dict, probs_array)
+        usage_counts = final_matches[1] 
+        min_samples = max(2, int(probs_array.shape[0] * 0.01))
+        
+        used_haps = {}
+        new_idx = 0
+        for h_idx, count in usage_counts.items():
+            if count >= min_samples:
+                used_haps[new_idx] = selected_haps_dict[h_idx]
+                new_idx += 1
+        
+        # Step D: Chimera Pruning
+        final_haps = prune_chimeras(
+            used_haps, 
+            probs_array, 
+            recomb_penalty=10.0, 
+            error_tolerance_sites=10
+        )
+        
+        final_haps = {i: v for i, v in enumerate(final_haps.values())}
+        
+        print(f"Block {positions[0]}: Candidates {len(candidates_to_filter)} -> Merged {len(merged_haps)} -> Selected {len(selected_haps_dict)} -> Used {len(used_haps)} -> Final {len(final_haps)}")
+        
+    else:
+        final_haps = candidates_to_filter
 
-def generate_haplotypes_all(positions_data, reads_array_data, keep_flags_data=None):
+    return (positions, keep_flags, reads_array, final_haps)
+
+def find_missing_haplotypes_iterative(positions, reads_array, current_haps, 
+                                      keep_flags=None,
+                                      error_threshold_percent=2.0, 
+                                      min_bad_samples=5):
+    """
+    Analyzes the fit of the current haplotypes to the data.
+    Identifies samples with high error rates, isolates them, and runs
+    a targeted haplotype generation on that subset to find missing founders.
+    
+    Args:
+        current_haps: Dict of currently found haplotypes.
+        error_threshold_percent: Samples with error > this are considered "unexplained".
+        min_bad_samples: Need at least this many unexplained samples to trigger a search.
+        
+    Returns:
+        dict: A dictionary of NEW, DISTINCT haplotypes found in the residuals.
+              (Returns empty dict if no new haplotypes found).
+    """
+    
+    if len(current_haps) == 0:
+        return {}
+
+    # 1. Setup Data
+    if keep_flags is None:
+        keep_flags = np.array([1 for _ in range(reads_array.shape[1])])
+    
+    # Calculate probabilities for the full set
+    (_, (probs_array, _)) = analysis_utils.reads_to_probabilities(reads_array)
+    
+    # 2. Check Fit using K-Limited (Allowing recombinations)
+    # We use k-limited because if a sample is a recombinant of known haps, 
+    # it is NOT missing a founder. We only want samples that truly don't fit.
+    match_results = hap_statistics.match_best_k_limited(
+        current_haps, 
+        probs_array, 
+        keep_flags=keep_flags,
+        max_recombinations=2
+    )
+    
+    # Extract error scores (Index 2 of return tuple)
+    error_scores = match_results[2]
+    
+    # 3. Identify Outliers
+    bad_fit_indices = np.where(error_scores > error_threshold_percent)[0]
+    num_bad = len(bad_fit_indices)
+    
+    print(f"Residual Analysis: {num_bad} samples ({num_bad/len(reads_array)*100:.1f}%) have >{error_threshold_percent}% error.")
+    
+    if num_bad < min_bad_samples:
+        print("  -> Too few outliers to constitute a missing founder. Skipping.")
+        return {}
+        
+    # 4. Run Targeted Generation
+    print("  -> Running targeted search on outlier subset...")
+    
+    subset_reads = reads_array[bad_fit_indices]
+    
+    # We use LENIENT settings here. We want to pick up *any* signal in this noise.
+    # penalty_strength=0.5 (Lenient)
+    # error_tolerance=10 (Forgiving of noise)
+    
+    _, _, _, sub_result_haps = generate_haplotypes_block(
+        positions,
+        subset_reads,
+        keep_flags=keep_flags,
+        penalty_strength=0.5, # Very lenient
+        min_num_haps=1,       # Just find what's there
+        max_intermediate_haps=100 # Allow exploration
+    )
+    
+    # 5. Filter Redundancy
+    # The sub-search might just rediscover 'Hap 0' but with some noise.
+    # We only want to return haps that are significantly different from what we already have.
+    
+    existing_matrix = np.array(list(current_haps.values()))
+    newly_found_unique = {}
+    new_idx = 0
+    
+    for k, sub_hap in sub_result_haps.items():
+        # Check against EXISTING founders
+        diffs = np.mean(existing_matrix != sub_hap, axis=1)
+        min_diff = np.min(diffs)
+        
+        # Threshold: Must be at least 2% different from any existing founder
+        if min_diff > 0.02:
+            newly_found_unique[new_idx] = sub_hap
+            new_idx += 1
+            # print(f"  -> Found NEW distinct haplotype (Diff: {min_diff*100:.1f}%)")
+        # else:
+            # print(f"  -> Rediscovered existing haplotype (Diff: {min_diff*100:.1f}%). Ignoring.")
+            
+    print(f"  -> Residual Analysis yielded {len(newly_found_unique)} new valid haplotypes.")
+    
+    return newly_found_unique
+
+def generate_haplotypes_block_robust(positions, reads_array, keep_flags=None, 
+                                     max_robust_passes=3, # Safety limit
+                                     **kwargs):
+    """
+    Wrapper that runs the standard generation, checks for missing data (residuals),
+    and re-runs iteratively until all distinct founders are found.
+    """
+    
+    # Track known haplotypes across iterations
+    # We start with whatever was passed in kwargs, or empty list
+    current_known_haps = kwargs.get('known_haplotypes', [])
+    if isinstance(current_known_haps, dict):
+        current_known_haps = list(current_known_haps.values())
+    
+    # Store the final result variables
+    final_res_pos = positions
+    final_res_flags = keep_flags
+    final_res_reads = reads_array
+    final_haps_dict = {}
+    
+    for pass_num in range(1, max_robust_passes + 1):
+        print(f"\n--- Robust Pass {pass_num}: Generating with {len(current_known_haps)} known injected haps ---")
+        
+        # 1. Run Generation (passing the accumulated known list)
+        # We update kwargs to include the current known list
+        run_kwargs = kwargs.copy()
+        run_kwargs['known_haplotypes'] = current_known_haps
+        
+        (res_pos, res_flags, res_reads, generated_haps) = generate_haplotypes_block(
+            positions, reads_array, keep_flags=keep_flags, **run_kwargs
+        )
+        
+        # Update our current best result
+        final_res_pos = res_pos
+        final_res_flags = res_flags
+        final_res_reads = res_reads
+        final_haps_dict = generated_haps
+        
+        # 2. Residual Analysis
+        # Check if there are still samples that fit poorly
+        missing_haps_dict = find_missing_haplotypes_iterative(
+            positions, 
+            reads_array, 
+            final_haps_dict, 
+            keep_flags=keep_flags,
+            error_threshold_percent=2.0,
+            min_bad_samples=5 # Don't re-run for < 5 samples (likely just noise)
+        )
+        
+        # 3. Decision
+        if len(missing_haps_dict) == 0:
+            print("--- Convergence reached: No significant missing haplotypes found in residuals. ---")
+            break
+        else:
+            print(f"--- Detected {len(missing_haps_dict)} missing haplotypes in residuals. Preparing next pass... ---")
+            
+            # Add new findings to our known list for the next pass
+            # We convert dict values to a list and extend
+            new_haps_list = list(missing_haps_dict.values())
+            
+            # Consolidate to ensure we don't just add duplicates
+            # (Combine current known + newly found)
+            combined_pool = current_known_haps + new_haps_list
+            consolidated_dict = consolidate_similar_candidates(combined_pool, diff_threshold=0.01)
+            current_known_haps = list(consolidated_dict.values())
+            
+            if pass_num == max_robust_passes:
+                print("--- Max passes reached. Returning best effort. ---")
+
+    return (final_res_pos, final_res_flags, final_res_reads, final_haps_dict)
+
+def generate_haplotypes_all(positions_data, reads_array_data, keep_flags_data=None, 
+                            penalty_strength=1.0, 
+                            max_intermediate_haps=100):
     """
     Generate a list of block haplotypes using multiprocessing.
+    
+    Args:
+        penalty_strength: Controls strictness of final Viterbi selection (1.0 = standard).
+        max_intermediate_haps: Trigger for intermediate pruning during the loop.
+    
     Assumes OMP_NUM_THREADS=1 is set in the main script.
     """
     
     if keep_flags_data is None:
         keep_flags_data = [None] * len(positions_data)
 
-    # Combine arguments into a single iterable of tuples
-    # This is cleaner than using starmap with a lambda
+    # Combine the varying arguments (Position, Reads, Flags) into tuples
     tasks = zip(positions_data, reads_array_data, keep_flags_data)
     
-    # 32 processes is extremely high if using large vectorized arrays.
-    # If this still hangs or crashes (Out of Memory), reduce this number (e.g., to 8 or 16).
+    # 16 processes is usually safe given the new memory optimizations
+    # (Viterbi selection reduces the output size significantly, lowering memory pressure during gather)
     num_processes = 16
+    
+    # Create a partial function with the fixed configuration arguments
+    # When starmap unpacks the 'tasks', it will append these fixed args automatically
+    worker_func = partial(
+        generate_haplotypes_block_robust, 
+        penalty_strength=penalty_strength, 
+        max_intermediate_haps=max_intermediate_haps
+    )
     
     # Use a context manager ('with') to ensure processes are cleaned up
     with Pool(processes=num_processes) as processing_pool:
         
-        # starmap automatically unpacks the tuples from 'tasks'
-        # generate_haplotypes_block(x, y, z)
+        # starmap calls: worker_func(pos, reads, flags)
+        # which internally becomes: generate_haplotypes_block(pos, reads, flags, penalty_strength=..., max=...)
         overall_haplotypes = processing_pool.starmap(
-            generate_haplotypes_block, 
+            worker_func, 
             tasks
         )
 
@@ -1216,10 +1823,3 @@ def match_long_hap_to_blocks(long_hap,long_hap_sites,block_haps_data):
         lowest_diffs.append(lowest_diff)
         
     return [best_matches,lowest_diffs]
-#%%
-# for i in range(6):
-#     matches = match_long_hap_to_blocks(haplotype_data[i][:18341],
-#                                    all_sites[:18341],test_haps)
-
-#     print(matches[0])
-# print(check[2])

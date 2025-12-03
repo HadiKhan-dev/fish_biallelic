@@ -44,7 +44,7 @@ def find_runs(data, min_length):
 def initial_transition_probabilities(hap_data,
                                      space_gap=1,
                                      found_haps=[],
-                                     found_penalty=0.1):
+                                     ):
     """
     Creates a dict of initial equal transition probabilities
     for a list where each element of the list contains info about
@@ -53,11 +53,6 @@ def initial_transition_probabilities(hap_data,
     space_gap is the number of blocks we jump over at each step
     for calculating the transition probabilities. By default this
     is equal to 1.
-    
-    found_haps is a list of block level haplotypes which correspond
-    to already found haplotypes, if a transition is one which is 
-    already present in one of the found haplotypes, its weighting
-    is deflated by a factor of found_penalty
 
     """
     transition_dict_forward = {}
@@ -84,7 +79,7 @@ def initial_transition_probabilities(hap_data,
                 if not present:
                     transition_dict_forward[i][(first_hap_name,second_hap_name)] = 1
                 else:
-                    transition_dict_forward[i][(first_hap_name,second_hap_name)] = found_penalty
+                    transition_dict_forward[i][(first_hap_name,second_hap_name)] = 1
                 
     for i in range(len(hap_data)-1,space_gap-1,-1):
         transition_dict_reverse[i] = {}
@@ -107,7 +102,7 @@ def initial_transition_probabilities(hap_data,
                 if not present:
                     transition_dict_reverse[i][(first_hap_name,second_hap_name)] = 1
                 else:
-                    transition_dict_reverse[i][(first_hap_name,second_hap_name)] = found_penalty
+                    transition_dict_reverse[i][(first_hap_name,second_hap_name)] = 1
     
     #At this point we have the unscaled transition probabilities, we now scale them
     scaled_dict_forward = {}
@@ -716,7 +711,6 @@ def get_updated_transition_probabilities(
         current_transition_probs,
         full_blocks_likelihoods,
         currently_found_long_haps=[],
-        found_transition_penalty=0.1,
         space_gap=1,
         minimum_transition_log_likelihood=-10,
         BATCH_SIZE=100): # Batch size to control RAM usage
@@ -727,7 +721,7 @@ def get_updated_transition_probabilities(
 
     # 1. SETUP & HELPER DATA GATHERING
     prior_a_posteriori = initial_transition_probabilities(haps_data, space_gap=space_gap,
-                        found_haps=currently_found_long_haps, found_penalty=found_transition_penalty)
+                        found_haps=currently_found_long_haps)
 
     full_samples_likelihoods = full_samples_data[0]
     
@@ -864,7 +858,6 @@ def standard_get_updated_transition_probabilities(
         current_transition_probs,
         full_blocks_likelihoods,
         currently_found_long_haps=[],
-        found_transition_penalty=0.1,
         space_gap=1,
         minimum_transition_log_likelihood=-10,
         BATCH_SIZE=100):
@@ -877,7 +870,7 @@ def standard_get_updated_transition_probabilities(
 
     # ... [Setup code remains exactly the same] ...
     prior_a_posteriori = initial_transition_probabilities(haps_data, space_gap=space_gap,
-                        found_haps=currently_found_long_haps, found_penalty=found_transition_penalty)
+                        found_haps=currently_found_long_haps)
 
     full_samples_likelihoods = full_samples_data[0]
     all_block_likelihoods = []
@@ -1023,39 +1016,6 @@ def standard_get_updated_transition_probabilities(
     
     return [new_transition_probs_forward, new_transition_probs_backwards]
 
-def smoothen_probs_vectorized(old_probs, new_probs, learning_rate):
-    """
-    Vectorized smoothing: Result = (old * (1-lr)) + (new * lr)
-    Operates on dictionary values directly using numpy.
-    """
-    if learning_rate == 1:
-        return new_probs
-    if learning_rate == 0:
-        return old_probs
-
-    smoothed_result = {}
-    
-    # Iterate [Forward, Backward]
-    for i in [0, 1]:
-        smoothed_result[i] = {}
-        for block_idx in new_probs[i]:
-            old_block = old_probs[i][block_idx]
-            new_block = new_probs[i][block_idx]
-            
-            # We trust key order is preserved (Python 3.7+)
-            # Extract values to numpy arrays
-            keys = list(new_block.keys())
-            v_old = np.array(list(old_block.values()))
-            v_new = np.array(list(new_block.values()))
-            
-            # Vectorized Math
-            v_smooth = (v_old * (1.0 - learning_rate)) + (v_new * learning_rate)
-            
-            # Zip back to dictionary
-            smoothed_result[i][block_idx] = dict(zip(keys, v_smooth))
-            
-    return smoothed_result
-
 def calculate_hap_transition_probabilities(full_samples_data,
             sample_sites,
             haps_data,
@@ -1063,7 +1023,6 @@ def calculate_hap_transition_probabilities(full_samples_data,
             max_num_iterations=10,
             space_gap=1,
             currently_found_long_haps=[],
-            found_transition_penalty=0.1,
             min_cutoff_change=0.001, # Relaxed from 1e-8
             learning_rate=1.0,       # Start high
             minimum_transition_log_likelihood=-10):
@@ -1107,14 +1066,13 @@ def calculate_hap_transition_probabilities(full_samples_data,
             current_probs, 
             full_blocks_likelihoods,
             currently_found_long_haps=currently_found_long_haps,
-            found_transition_penalty=found_transition_penalty,
             space_gap=space_gap,
             minimum_transition_log_likelihood=minimum_transition_log_likelihood,
             BATCH_SIZE=100
         )
         
         # B. SMOOTHING (With Effective LR)
-        current_probs_new = smoothen_probs_vectorized(current_probs, new_probs_raw, effective_lr)
+        current_probs_new = analysis_utils.smoothen_probs_vectorized(current_probs, new_probs_raw, effective_lr)
 
         # C. CONVERGENCE CHECK
         global_max_diff = 0.0
@@ -1146,7 +1104,7 @@ def calculate_hap_transition_probabilities(full_samples_data,
 _worker_data = {}
 
 def _init_worker_transition(samples_data, sites, haps, block_likes, 
-                            found_haps, penalty, min_log_lik, lr, max_iter):
+                            found_haps, min_log_lik, lr, max_iter):
     """
     This runs once per process when the pool starts.
     It saves the heavy read-only data into the worker's global scope.
@@ -1156,7 +1114,6 @@ def _init_worker_transition(samples_data, sites, haps, block_likes,
     _worker_data['haps_data'] = haps
     _worker_data['full_blocks_likelihoods'] = block_likes
     _worker_data['currently_found_long_haps'] = found_haps
-    _worker_data['found_transition_penalty'] = penalty
     _worker_data['minimum_transition_log_likelihood'] = min_log_lik
     _worker_data['learning_rate'] = lr
     _worker_data['max_num_iterations'] = max_iter
@@ -1176,7 +1133,6 @@ def _worker_calculate_gap_wrapper(space_gap):
         max_num_iterations=_worker_data['max_num_iterations'],
         space_gap=space_gap,
         currently_found_long_haps=_worker_data['currently_found_long_haps'],
-        found_transition_penalty=_worker_data['found_transition_penalty'],
         minimum_transition_log_likelihood=_worker_data['minimum_transition_log_likelihood'],
         learning_rate=_worker_data['learning_rate']
     )
@@ -1186,7 +1142,6 @@ def generate_transition_probability_mesh(full_samples_data,
                                          haps_data,
                                          max_num_iterations=10,
                                          currently_found_long_haps=[],
-                                         found_transition_penalty=0.1,
                                          minimum_transition_log_likelihood=-10,
                                          learning_rate=1):
     """
@@ -1224,7 +1179,7 @@ def generate_transition_probability_mesh(full_samples_data,
 
     # We pack all the heavy/static arguments into a tuple for the initializer
     init_args = (full_samples_data, sample_sites, haps_data, full_blocks_likelihoods,
-                 currently_found_long_haps, found_transition_penalty, 
+                 currently_found_long_haps,
                  minimum_transition_log_likelihood, learning_rate, max_num_iterations)
 
     # We use the initializer to send data ONCE per process
