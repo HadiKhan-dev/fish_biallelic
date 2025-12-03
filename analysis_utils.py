@@ -491,6 +491,40 @@ def get_dips_from_long_haps(long_haps):
     
     return total_combined
 
+def smoothen_probs_vectorized(old_probs, new_probs, learning_rate):
+    """
+    Vectorized smoothing: Result = (old * (1-lr)) + (new * lr)
+    Operates on dictionary values directly using numpy.
+    """
+    if learning_rate == 1:
+        return new_probs
+    if learning_rate == 0:
+        return old_probs
+
+    smoothed_result = {}
+    
+    # Iterate [Forward, Backward]
+    for i in [0, 1]:
+        smoothed_result[i] = {}
+        for block_idx in new_probs[i]:
+            old_block = old_probs[i][block_idx]
+            new_block = new_probs[i][block_idx]
+            
+            # We trust key order is preserved (Python 3.7+)
+            # Extract values to numpy arrays
+            keys = list(new_block.keys())
+            v_old = np.array(list(old_block.values()))
+            v_new = np.array(list(new_block.values()))
+            
+            # Vectorized Math
+            v_smooth = (v_old * (1.0 - learning_rate)) + (v_new * learning_rate)
+            
+            # Zip back to dictionary
+            smoothed_result[i][block_idx] = dict(zip(keys, v_smooth))
+            
+    return smoothed_result
+
+
 def map_haplotype_to_blocks(target_haplotype, haps_data):
     """
     Maps a continuous long haplotype (from simulation/ground truth) 

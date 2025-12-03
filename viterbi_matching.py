@@ -10,6 +10,7 @@ from scipy.spatial.distance import pdist, squareform
 
 # Import your existing utilities
 import analysis_utils 
+import block_linking_em
 
 # =============================================================================
 # 0. NUMBA SETUP (Robust Fallback)
@@ -379,7 +380,7 @@ def viterbi_multiprocess_all_block_likelihoods(full_samples_data,
 #%%
 
 # =============================================================================
-# 3. VECTORIZED FORWARD-BACKWARD (HMM)
+# 3. VECTORIZED FORWARD-BACKWARD (HMM) AND UPDATES
 # =============================================================================
 def viterbi_get_full_probs_forward_vectorized(sample_data, sample_sites, haps_data,
                                       bidirectional_transition_probs,
@@ -560,6 +561,294 @@ def viterbi_get_full_probs_backward_vectorized(sample_data, sample_sites, haps_d
 
     return likelihood_numbers
 
+def viterbi_get_updated_transition_probabilities(
+        full_samples_data,
+        sample_sites,
+        haps_data,
+        current_transition_probs,
+        full_blocks_likelihoods,
+        currently_found_long_haps=[],
+        space_gap=1,
+        minimum_transition_log_likelihood=-10,
+        BATCH_SIZE=100): 
+    """
+    Update step using Viterbi Forward/Backward functions.
+    """
+    
+    # 1. SETUP
+    prior_a_posteriori = block_linking_em.initial_transition_probabilities(haps_data, space_gap=space_gap,
+                        found_haps=currently_found_long_haps)
+
+    full_samples_likelihoods = full_samples_data[0]
+    
+    # Restructure block likelihoods
+    all_block_likelihoods = []
+    for i in range(len(full_samples_likelihoods)):
+        # Note: full_blocks_likelihoods[x] is now ((Start, End), Ploidy)
+        # We extract the specific sample's dictionary from the list inside
+        all_block_likelihoods.append(
+            [(full_blocks_likelihoods[x][0][0][i], # Start Dict
+              full_blocks_likelihoods[x][0][1][i]) # End Dict
+             for x in range(len(full_blocks_likelihoods))])
+             
+    # 2. CALCULATE FORWARD / BACKWARD (Using Viterbi Versions)
+    forward_nums = [viterbi_get_full_probs_forward_vectorized(
+                        (full_samples_data[0][i], full_samples_data[1][i]),
+                        sample_sites, haps_data, current_transition_probs, 
+                        all_block_likelihoods[i], space_gap=space_gap
+                    ) for i in range(len(full_samples_likelihoods))]
+
+    backward_nums = [viterbi_get_full_probs_backward_vectorized(
+                        (full_samples_data[0][i], full_samples_data[1][i]),
+                        sample_sites, haps_data, current_transition_probs, 
+                        all_block_likelihoods[i], space_gap=space_gap
+                    ) for i in range(len(full_samples_likelihoods))]
+    
+    samples_probs = list(zip(forward_nums, backward_nums))
+    num_samples = len(samples_probs)
+
+    # 3. BATICHED AGGREGATION
+    def _run_batched_pass(indices, is_forward):
+        new_transition_probs = {}
+        dir_idx = 0 if is_forward else 1
+        
+        for i in indices:
+            next_bundle = i + space_gap if is_forward else i - space_gap
+            
+            hap_keys_current = sorted(list(haps_data[i][3].keys()))
+            hap_keys_next    = sorted(list(haps_data[next_bundle][3].keys()))
+            n_curr = len(hap_keys_current)
+            n_next = len(hap_keys_next)
+            
+            # Pre-calculate Index Mappings
+            f_mapping = []
+            for u_out_idx, u_out in enumerate(hap_keys_current):
+                for u_in_idx, u_in in enumerate(hap_keys_current):
+                    # Standard key sort for HMM dictionary lookup
+                    key = ((i, u_out), (i, u_in)) if u_out <= u_in else ((i, u_in), (i, u_out))
+                    f_mapping.append((u_out_idx, u_in_idx, key))
+            
+            b_mapping = []
+            for v_out_idx, v_out in enumerate(hap_keys_next):
+                for v_in_idx, v_in in enumerate(hap_keys_next):
+                    key = ((next_bundle, v_out), (next_bundle, v_in)) if v_out <= v_in else ((next_bundle, v_in), (next_bundle, v_out))
+                    b_mapping.append((v_out_idx, v_in_idx, key))
+
+            # Build Static Tensors
+            T_matrix = np.full((n_curr, n_next), -np.inf)
+            P_matrix = np.full((n_curr, n_next), -np.inf)
+
+            for u_idx, u in enumerate(hap_keys_current):
+                for v_idx, v in enumerate(hap_keys_next):
+                    trans_key = ((i, u), (next_bundle, v))
+                    if trans_key in current_transition_probs[dir_idx][i]:
+                        T_matrix[u_idx, v_idx] = math.log(current_transition_probs[dir_idx][i][trans_key])
+                    if trans_key in prior_a_posteriori[dir_idx][i]:
+                        P_matrix[u_idx, v_idx] = math.log(prior_a_posteriori[dir_idx][i][trans_key])
+
+            # Build Sample Tensors
+            F_tensor = np.full((num_samples, n_curr, n_curr), -np.inf)
+            B_tensor = np.full((num_samples, n_next, n_next), -np.inf)
+
+            for s in range(num_samples):
+                if is_forward:
+                    fwd_source = samples_probs[s][0][i]           
+                    bwd_source = samples_probs[s][1][next_bundle] 
+                else:
+                    fwd_source = samples_probs[s][1][i]           
+                    bwd_source = samples_probs[s][0][next_bundle] 
+
+                for u_out_idx, u_in_idx, key in f_mapping:
+                    if key in fwd_source: F_tensor[s, u_out_idx, u_in_idx] = fwd_source[key]
+                for v_out_idx, v_in_idx, key in b_mapping:
+                    if key in bwd_source: B_tensor[s, v_out_idx, v_in_idx] = bwd_source[key]
+
+            # Batched Summation
+            batch_results = []
+            for start_idx in range(0, num_samples, BATCH_SIZE):
+                end_idx = min(start_idx + BATCH_SIZE, num_samples)
+                F_batch = F_tensor[start_idx:end_idx]
+                B_batch = B_tensor[start_idx:end_idx]
+                
+                # F(u,u') + B(v,v') + T(u',v')
+                combined = (F_batch[:, :, np.newaxis, :, np.newaxis] + 
+                            B_batch[:, np.newaxis, :, np.newaxis, :] + 
+                            T_matrix[np.newaxis, np.newaxis, np.newaxis, :, :])
+                
+                sample_lik_batch = logsumexp(combined, axis=(-2, -1))
+                total_per_sample = logsumexp(sample_lik_batch, axis=(1, 2), keepdims=True)
+                batch_aggregated = logsumexp(sample_lik_batch - total_per_sample, axis=0)
+                batch_results.append(batch_aggregated)
+                del combined
+            
+            # Finalize
+            if len(batch_results) > 0:
+                final_aggregated = logsumexp(batch_results, axis=0)
+            else:
+                final_aggregated = np.full((n_curr, n_next), -np.inf)
+            
+            posterior_with_prior = final_aggregated + P_matrix
+            row_sums = logsumexp(posterior_with_prior, axis=1, keepdims=True)
+            log_probs = posterior_with_prior - row_sums
+            log_probs_clipped = np.maximum(log_probs, minimum_transition_log_likelihood)
+            
+            probs_nonnorm = np.exp(log_probs_clipped)
+            row_sums_final = np.sum(probs_nonnorm, axis=1, keepdims=True)
+            row_sums_final[row_sums_final == 0] = 1.0 
+            final_probs_matrix = probs_nonnorm / row_sums_final
+            
+            block_dict = {}
+            for u_idx, u in enumerate(hap_keys_current):
+                for v_idx, v in enumerate(hap_keys_next):
+                    key = ((i, u), (next_bundle, v))
+                    block_dict[key] = final_probs_matrix[u_idx, v_idx]
+            
+            new_transition_probs[i] = block_dict
+            
+        return new_transition_probs
+
+    forward_indices = range(len(haps_data) - space_gap)
+    new_transition_probs_forward = _run_batched_pass(forward_indices, is_forward=True)
+    
+    backward_indices = range(len(haps_data) - 1, space_gap - 1, -1)
+    new_transition_probs_backwards = _run_batched_pass(backward_indices, is_forward=False)
+    
+    return [new_transition_probs_forward, new_transition_probs_backwards]
+
+def viterbi_calculate_hap_transition_probabilities(full_samples_data,
+            sample_sites,
+            haps_data,
+            full_blocks_likelihoods=None,
+            max_num_iterations=10,
+            space_gap=1,
+            currently_found_long_haps=[],
+            min_cutoff_change=0.001,
+            learning_rate=1,
+            minimum_transition_log_likelihood=-10):
+    
+    # Initialize
+    start_probs = block_linking_em.initial_transition_probabilities(haps_data, space_gap=space_gap)
+    
+    # Check Likelihoods (Should be pre-calculated)
+    if full_blocks_likelihoods is None:
+        print("Warning: Calculating Viterbi likelihoods locally...")
+        full_blocks_likelihoods = viterbi_get_all_block_likelihoods_vectorised(
+            full_samples_data, sample_sites, haps_data
+        )
+
+    current_probs = start_probs
+    
+    for i in range(max_num_iterations):
+        
+        # Call Viterbi Update
+        new_probs_raw = viterbi_get_updated_transition_probabilities(
+            full_samples_data,
+            sample_sites,
+            haps_data,
+            current_probs, 
+            full_blocks_likelihoods,
+            currently_found_long_haps=currently_found_long_haps,
+            space_gap=space_gap,
+            minimum_transition_log_likelihood=minimum_transition_log_likelihood,
+            BATCH_SIZE=100
+        )
+        
+        # Smoothing (Decaying LR)
+        decay_lr = max(0.1, learning_rate / (1 + 0.1 * i))
+        current_probs_new = analysis_utils.smoothen_probs_vectorized(current_probs, new_probs_raw, decay_lr)
+
+        # Convergence Check
+        global_max_diff = 0.0
+        for direction in [0, 1]:
+            for block_idx in current_probs_new[direction]:
+                d_new = current_probs_new[direction][block_idx]
+                d_old = current_probs[direction][block_idx]
+                v_new = np.fromiter(d_new.values(), dtype=float)
+                v_old = np.fromiter(d_old.values(), dtype=float)
+                block_max = np.max(np.abs(v_new - v_old))
+                if block_max > global_max_diff:
+                    global_max_diff = block_max
+        
+        print(f"Gap {space_gap} Iter {i} | Max Diff: {global_max_diff:.6f}")
+        current_probs = current_probs_new
+        
+        if global_max_diff < min_cutoff_change:
+            break
+            
+    return current_probs
+
+# --- 1. GLOBAL STORAGE FOR WORKERS ---
+_worker_data = {}
+
+def _viterbi_init_worker_transition(samples_data, sites, haps, block_likes, 
+                            found_haps, min_log_lik, lr, max_iter):
+    """
+    Initializer: Runs once per process.
+    """
+    _worker_data['full_samples_data'] = samples_data
+    _worker_data['sample_sites'] = sites
+    _worker_data['haps_data'] = haps
+    _worker_data['full_blocks_likelihoods'] = block_likes
+    _worker_data['currently_found_long_haps'] = found_haps
+    _worker_data['minimum_transition_log_likelihood'] = min_log_lik
+    _worker_data['learning_rate'] = lr
+    _worker_data['max_num_iterations'] = max_iter
+
+def _viterbi_worker_calculate_gap_wrapper(space_gap):
+    """
+    Wrapper calling the VITERBI calculation function.
+    """
+    return viterbi_calculate_hap_transition_probabilities(
+        _worker_data['full_samples_data'],
+        _worker_data['sample_sites'],
+        _worker_data['haps_data'],
+        full_blocks_likelihoods=_worker_data['full_blocks_likelihoods'],
+        max_num_iterations=_worker_data['max_num_iterations'],
+        space_gap=space_gap,
+        currently_found_long_haps=_worker_data['currently_found_long_haps'],
+        minimum_transition_log_likelihood=_worker_data['minimum_transition_log_likelihood'],
+        learning_rate=_worker_data['learning_rate']
+    )
+
+def viterbi_generate_transition_probability_mesh(full_samples_data,
+                                         sample_sites,
+                                         haps_data,
+                                         max_num_iterations=10,
+                                         currently_found_long_haps=[],
+                                         minimum_transition_log_likelihood=-10,
+                                         learning_rate=1):
+    
+    # 1. Phase 1: Generate Viterbi Block Likelihoods
+    tasks = []
+    for i in range(len(haps_data)):
+        block_samples = analysis_utils.get_sample_data_at_sites_multiple(
+            full_samples_data, sample_sites, haps_data[i][0], ploidy_present=True
+        )
+        tasks.append((block_samples, haps_data[i]))
+
+    print("Calculating Viterbi block likelihoods...")
+    with Pool(16) as pool:
+        # Calls the function from hierarchical_haplotype_assembly (or import it here)
+        full_blocks_likelihoods = pool.starmap(
+            viterbi_get_all_block_likelihoods_vectorised, 
+            tasks
+        )
+    
+    # 2. Phase 2: Calculate Mesh
+    num_sqrs = math.floor(math.sqrt(len(haps_data)-1))
+    sqrs = [i**2 for i in range(1, num_sqrs+1)]
+    
+    print(f"Calculating transitions for {len(sqrs)} different gaps...")
+
+    init_args = (full_samples_data, sample_sites, haps_data, full_blocks_likelihoods,
+                 currently_found_long_haps,
+                 minimum_transition_log_likelihood, learning_rate, max_num_iterations)
+
+    with Pool(16, initializer=_viterbi_init_worker_transition, initargs=init_args) as pool:
+        results = pool.map(_viterbi_worker_calculate_gap_wrapper, sqrs)
+    
+    mesh_dict = dict(zip(sqrs, results))
+    return mesh_dict
 
 #%%
 
