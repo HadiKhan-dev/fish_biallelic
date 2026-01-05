@@ -9,6 +9,7 @@ import pickle
 
 import block_linking_naive
 import analysis_utils
+from vcf_data_loader import GenomicData
 
 #%%
 def concretify_haps(haps_list):
@@ -210,13 +211,14 @@ def read_sample_all_individuals(individual_list,read_depth,error_rate=0.02):
     
     return np_array        
 
-def combine_into_genotype(individual_list,sites_data):
+def combine_into_genotype(individual_list):
     """
     Takes as input a list of pairs of haplotypes meant to represent 
-    an individual and turn them into a combined likelihood genotype
+    an individual and turn them into a combined likelihood genotype.
+    
+    Returns likelihoods_array.
     """
     all_list = []
-    ploidy = []
     
     for i in range(len(individual_list)):
         indexing = individual_list[i][0]+individual_list[i][1]
@@ -231,9 +233,8 @@ def combine_into_genotype(individual_list,sites_data):
         scaffold[combined_indexing[:,0],combined_indexing[:,1]] = 1
         
         all_list.append(scaffold)
-        ploidy.append([2 for _ in range(num_sites)])
     
-    return [sites_data,(np.array(all_list),np.array(ploidy))]
+    return np.array(all_list)
     
 def chunk_up_data(positions_list,reads_array,
                   starting_pos,ending_pos,
@@ -246,9 +247,7 @@ def chunk_up_data(positions_list,reads_array,
     of size block_size where consecutive chunks differ by shift_size in their starting
     location
     
-    If we have fewer than min_total_reads or error_rate*num_samples (whichever is higher)
-    at a site then we mark it as a 0 to indicate it is low quality and not to be considered
-    for our founder inference algorithm
+    Returns a GenomicData object.
     """
     chunked_positions = []
     chunked_reads = []
@@ -258,10 +257,8 @@ def chunk_up_data(positions_list,reads_array,
     
     cur_pos = starting_pos
     cur_index = 0
-    last_site = positions_list[-1]
     
     while cur_pos < ending_pos:
-        block_start_index = cur_index
         
         block_end_pos = cur_pos+block_size
         
@@ -270,31 +267,24 @@ def chunk_up_data(positions_list,reads_array,
             end_index += 1
         
         block_positions = positions_list[cur_index:end_index]
-        extract_indices = list(range(cur_index,end_index))
         
-        block_reads_array = reads_array[:,extract_indices,:]
-        
-        total_read_pos = np.sum(block_reads_array,axis=(0,2))
-        
-        block_keep_flags = (total_read_pos >= max(min_total_reads,error_rate*num_samples)).astype(int)
-        
-        chunked_positions.append(block_positions)
-        chunked_reads.append(block_reads_array)
-        chunked_keep_flags.append(block_keep_flags)
+        # If block is empty, handle gracefully or skip
+        if len(block_positions) > 0:
+            extract_indices = list(range(cur_index,end_index))
+            block_reads_array = reads_array[:,extract_indices,:]
+            
+            total_read_pos = np.sum(block_reads_array,axis=(0,2))
+            
+            block_keep_flags = (total_read_pos >= max(min_total_reads,error_rate*num_samples)).astype(int)
+            
+            chunked_positions.append(np.array(block_positions))
+            chunked_reads.append(block_reads_array)
+            chunked_keep_flags.append(block_keep_flags)
         
         cur_pos = cur_pos + shift_size
         
         while cur_index < len(positions_list) and positions_list[cur_index] < cur_pos:
             cur_index += 1
     
-    return (chunked_positions,chunked_keep_flags,chunked_reads)
-        
-def calc_distance_concrete(first_row,second_row):
-    """
-    Calculate the L1 distance between two rows
-    """
-    
-    diff = np.sum(np.abs(first_row-second_row))
-    
-    return diff
-        
+    # Return as GenomicData container
+    return GenomicData(chunked_positions, chunked_keep_flags, chunked_reads)
