@@ -10,24 +10,14 @@ import block_haplotypes
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
-pass
 
 #%%
 def match_haplotypes_by_overlap(block_level_haps,
                      hap_cutoff_autoinclude=2,
                      hap_cutoff_noninclude=5):
     """
-    Takes as input a list of positions and block level haplotypes and
-    finds which haps from which block 
-    
-    hap_cutoff_autoinclude is an upper bound for how different two 
-    overlapping portions from neighbouring haps can be for
-    us to always have a link between them
-    
-    hap_cutoff_noninclude is an lower bound such that whenever two
-    overlapping portions are at least this different we never have 
-    a link between them
-    
+    Takes as input a list of BlockResult objects and finds matching haps 
+    based on overlapping suffix/prefix similarity.
     """        
     
     next_starting = []
@@ -38,33 +28,46 @@ def match_haplotypes_by_overlap(block_level_haps,
     
     #Find overlap starting points
     for i in range(1,len(block_level_haps)):
-        start_position = block_level_haps[i][0][0]
-        insertion_point = np.searchsorted(block_level_haps[i-1][0],start_position)
+        start_position = block_level_haps[i].positions[0]
+        insertion_point = np.searchsorted(block_level_haps[i-1].positions, start_position)
         next_starting.append(insertion_point)
         
     #Create list of unique names for the haps in each of the blocks    
     for i in range(len(block_level_haps)):
         block_haps_names.append([])
-        block_counts[i] = len(block_level_haps[i][3])
-        for name in block_level_haps[i][3].keys():
+        block_counts[i] = len(block_level_haps[i].haplotypes)
+        for name in block_level_haps[i].haplotypes.keys():
             block_haps_names[-1].append((i,name))
 
     #Iterate over all the blocks
     for i in range(len(block_level_haps)-1):
         start_point = next_starting[i]
-        overlap_length = len(block_level_haps[i][0])-start_point   
+        overlap_length = len(block_level_haps[i].positions) - start_point   
         
-        cur_ends = {k:block_level_haps[i][3][k][start_point:] for k in block_level_haps[i][3].keys()}
-        next_ends = {k:block_level_haps[i+1][3][k][:overlap_length] for k in block_level_haps[i+1][3].keys()}
+        curr_haps = block_level_haps[i].haplotypes
+        next_haps = block_level_haps[i+1].haplotypes
+        
+        cur_ends = {k: curr_haps[k][start_point:] for k in curr_haps.keys()}
+        next_ends = {k: next_haps[k][:overlap_length] for k in next_haps.keys()}
 
-        cur_keep_flags = np.array(block_level_haps[i][1][start_point:],dtype=bool)
-        next_keep_flags = np.array(block_level_haps[i+1][1][:overlap_length],dtype=bool)
+        # Flags
+        if block_level_haps[i].keep_flags is not None:
+            cur_keep_flags = np.array(block_level_haps[i].keep_flags[start_point:], dtype=bool)
+        else:
+            cur_keep_flags = np.ones(len(cur_ends[list(cur_ends.keys())[0]]), dtype=bool)
+
+        if block_level_haps[i+1].keep_flags is not None:
+            next_keep_flags = np.array(block_level_haps[i+1].keep_flags[:overlap_length], dtype=bool)
+        else:
+            next_keep_flags = np.ones(overlap_length, dtype=bool)
         
-        assert (cur_keep_flags == next_keep_flags).all(),"Keep flags don't match up"
+        min_len = min(len(cur_keep_flags), len(next_keep_flags))
+        cur_keep_flags = cur_keep_flags[:min_len]
+        next_keep_flags = next_keep_flags[:min_len]
         
         matches.append([])
         
-        min_expected_connections = max(block_counts[i],block_counts[i+1])
+        min_expected_connections = max(block_counts[i], block_counts[i+1])
         if block_counts[i] == 0 or block_counts[i+1] == 0:
             min_expected_connections = 0
             
@@ -76,15 +79,17 @@ def match_haplotypes_by_overlap(block_level_haps,
 
             for second_name in next_ends.keys():
                 
-                first_new_hap = cur_ends[first_name][cur_keep_flags]
-                second_new_hap = next_ends[second_name][next_keep_flags]
+                first_new_hap = cur_ends[first_name][:min_len][cur_keep_flags]
+                second_new_hap = next_ends[second_name][:min_len][next_keep_flags]
                 
                 common_size = len(first_new_hap)
                 
                 if common_size > 0:
-                    haps_dist = 100*analysis_utils.calc_distance(first_new_hap,
-                                      second_new_hap,
-                                      calc_type="haploid")/common_size
+                    haps_dist = 100 * analysis_utils.calc_distance(
+                        first_new_hap,
+                        second_new_hap,
+                        calc_type="haploid"
+                    ) / common_size
                 else:
                     haps_dist = 0
                     
@@ -104,7 +109,6 @@ def match_haplotypes_by_overlap(block_level_haps,
             all_edges_consideration.update(dist_values)
         
         all_edges_consideration = {k:v for k, v in sorted(all_edges_consideration.items(), key=lambda item: item[1])}
-        removals = []
         
         for key in all_edges_consideration:
             if amount_added < min_expected_connections:
@@ -116,12 +120,8 @@ def match_haplotypes_by_overlap(block_level_haps,
 
 def match_haplotypes_by_overlap_probabalistic(block_level_haps):
     """
-    Probabalistic version of match_haplotypes_by_overlap which
-    instead of returning a list of edges it returns a likelihood of 
-    an edge for each pair of nodes in neighbouring layers
-    
-    Takes as input a list of positions and block level haplotypes and
-    finds which haps from which block 
+    Probabilistic version of match_haplotypes_by_overlap.
+    Returns likelihood scores for edges.
     """
     next_starting = []
     matches = []
@@ -131,51 +131,66 @@ def match_haplotypes_by_overlap_probabalistic(block_level_haps):
     
     #Find overlap starting points
     for i in range(1,len(block_level_haps)):
-        start_position = block_level_haps[i][0][0]
-        insertion_point = np.searchsorted(block_level_haps[i-1][0],start_position)
+        start_position = block_level_haps[i].positions[0]
+        insertion_point = np.searchsorted(block_level_haps[i-1].positions, start_position)
         next_starting.append(insertion_point)
         
     #Create list of unique names for the haps in each of the blocks    
     for i in range(len(block_level_haps)):
         block_haps_names.append([])
-        block_counts[i] = len(block_level_haps[i][3])
-        for name in block_level_haps[i][3].keys():
+        block_counts[i] = len(block_level_haps[i].haplotypes)
+        for name in block_level_haps[i].haplotypes.keys():
             block_haps_names[-1].append((i,name))
 
     #Iterate over all the blocks
     for i in range(len(block_level_haps)-1):
         start_point = next_starting[i]
-        overlap_length = len(block_level_haps[i][0])-start_point   
+        overlap_length = len(block_level_haps[i].positions) - start_point   
         
-        cur_ends = {k:block_level_haps[i][3][k][start_point:] for k in block_level_haps[i][3].keys()}
-        next_ends = {k:block_level_haps[i+1][3][k][:overlap_length] for k in block_level_haps[i+1][3].keys()}
+        curr_haps = block_level_haps[i].haplotypes
+        next_haps = block_level_haps[i+1].haplotypes
+        
+        cur_ends = {k: curr_haps[k][start_point:] for k in curr_haps.keys()}
+        next_ends = {k: next_haps[k][:overlap_length] for k in next_haps.keys()}
            
-        cur_keep_flags = np.array(block_level_haps[i][1][start_point:],dtype=bool)
-        next_keep_flags = np.array(block_level_haps[i+1][1][:overlap_length],dtype=bool)
+        # Handle Flags
+        if block_level_haps[i].keep_flags is not None:
+            cur_keep_flags = np.array(block_level_haps[i].keep_flags[start_point:], dtype=bool)
+        else:
+            cur_keep_flags = np.ones(len(cur_ends[list(cur_ends.keys())[0]]), dtype=bool)
+
+        if block_level_haps[i+1].keep_flags is not None:
+            next_keep_flags = np.array(block_level_haps[i+1].keep_flags[:overlap_length], dtype=bool)
+        else:
+            next_keep_flags = np.ones(overlap_length, dtype=bool)
         
-        assert (cur_keep_flags == next_keep_flags).all(),"Keep flags don't match up"
+        min_len = min(len(cur_keep_flags), len(next_keep_flags))
+        cur_keep_flags = cur_keep_flags[:min_len]
+        next_keep_flags = next_keep_flags[:min_len]
         
         similarities = {}
         for first_name in cur_ends.keys(): 
 
             for second_name in next_ends.keys():
                 
-                first_new_hap = cur_ends[first_name][cur_keep_flags]
-                second_new_hap = next_ends[second_name][next_keep_flags]
+                first_new_hap = cur_ends[first_name][:min_len][cur_keep_flags]
+                second_new_hap = next_ends[second_name][:min_len][next_keep_flags]
                 
                 common_size = len(first_new_hap)
                 
                 if common_size > 0:
-                    haps_dist = 100*analysis_utils.calc_distance(first_new_hap,
-                                      second_new_hap,
-                                      calc_type="haploid")/common_size
+                    haps_dist = 100 * analysis_utils.calc_distance(
+                        first_new_hap,
+                        second_new_hap,
+                        calc_type="haploid"
+                    ) / common_size
                 else:
                     haps_dist = 0
                 
                 if haps_dist > 50:
                     similarity = 0
                 else:
-                    similarity = 2*(50-haps_dist)
+                    similarity = 2 * (50 - haps_dist)
                 
                 similarities[((i,first_name),(i+1,second_name))] = similarity
             
@@ -184,7 +199,6 @@ def match_haplotypes_by_overlap_probabalistic(block_level_haps):
             
         for item in similarities.keys():
             val = similarities[item]/100
-                
             transformed = 100*(val**2)
             transform_similarities[item] = transformed
             
@@ -192,45 +206,38 @@ def match_haplotypes_by_overlap_probabalistic(block_level_haps):
             
     return (block_haps_names,matches)
 
-def match_haplotypes_by_samples(full_haps_data):
+def match_haplotypes_by_samples(full_haps_data, num_processes=16):
     """
-    Alternate method of matching haplotypes in nearby blocks together
-    by matching hap A with hap B if the samples which use hap A at its location
-    disproportionately use hap B at its location
-    
-    full_haps_data is the return from a run of generate_haplotypes_all,
-    containing info about the positions, read count array and haplotypes
-    for each block.
+    Match haplotypes based on sample usage (best matches).
+    full_haps_data should be a BlockResults object.
     """
     
-    
-    #Controls the threshold for which a score higher than results in an edge and how low other scores relative to the highest can be for an edge to be added
+    #Controls the threshold
     auto_add_val = 70
     max_reduction_include = 0.8
     
     num_blocks = len(full_haps_data)
-    
     all_matches = []
     
     block_haps_names = []
     for i in range(len(full_haps_data)):
         block_haps_names.append([])
-        
-        for nm in full_haps_data[i][3].keys():
+        for nm in full_haps_data[i].haplotypes.keys():
             block_haps_names[-1].append((i,nm))
     
-    match_best_results = []
-    
-    processing_pool = Pool(32)
-    
-    match_best_results = processing_pool.starmap(hap_statistics.combined_best_hap_matches,
-                                                 zip(full_haps_data))
-    
-    neighbouring_usages = processing_pool.starmap(lambda x,y:
-                        hap_statistics.hap_matching_comparison(full_haps_data,match_best_results,x,y),
-                        zip(list(range(num_blocks-1)),list(range(1,num_blocks))))
-    
+    # Parallel processing with Context Manager
+    with Pool(num_processes) as processing_pool:
+        # 1. Get best sample matches for each block
+        match_best_results = processing_pool.starmap(
+            hap_statistics.combined_best_hap_matches,
+            zip(full_haps_data) # BlockResults is iterable
+        )
         
+        # 2. Compare usages between neighbors
+        neighbouring_usages = processing_pool.starmap(lambda x,y:
+                            hap_statistics.hap_matching_comparison(full_haps_data, match_best_results, x, y),
+                            zip(list(range(num_blocks-1)), list(range(1,num_blocks))))
+    
     forward_matches = []
     backward_matches = []
     
@@ -279,18 +286,9 @@ def match_haplotypes_by_samples(full_haps_data):
         
     return [(block_haps_names,forward_matches),(block_haps_names,backward_matches),(block_haps_names,all_matches)]
         
-def match_haplotypes_by_samples_probabalistic(full_haps_data):
+def match_haplotypes_by_samples_probabalistic(full_haps_data, num_processes=16):
     """
-    Probabalistic version of match_haplotypes_by_samples that gives 
-    a likelihood for each possible edge between neighbouring layers
-    
-    full_haps_data is the return from a run of generate_haplotypes_all,
-    containing info about the positions, read count array and haplotypes
-    for each block.
-    
-    Returns a list of node labels and a list of dictionaries with scaled
-    scores for how strong of an edge there is between the first element and the 
-    second element of the key for each key in each dictionary
+    Probabilistic version of match_haplotypes_by_samples.
     """
         
     num_blocks = len(full_haps_data)
@@ -298,27 +296,24 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
     block_haps_names = []
     for i in range(len(full_haps_data)):
         block_haps_names.append([])
-        
-        for nm in full_haps_data[i][3].keys():
+        for nm in full_haps_data[i].haplotypes.keys():
             block_haps_names[-1].append((i,nm))
     
-    match_best_results = []
-    
-    processing_pool = Pool(32)
-    
-    match_best_results = processing_pool.starmap(hap_statistics.combined_best_hap_matches,
-                                                 zip(full_haps_data))
-    
-    neighbouring_usages = processing_pool.starmap(lambda x,y:
-                        hap_statistics.hap_matching_comparison(full_haps_data,match_best_results,x,y),
-                        zip(list(range(num_blocks-1)),list(range(1,num_blocks))))
+    with Pool(num_processes) as processing_pool:
+        match_best_results = processing_pool.starmap(
+            hap_statistics.combined_best_hap_matches,
+            zip(full_haps_data)
+        )
+        
+        neighbouring_usages = processing_pool.starmap(lambda x,y:
+                            hap_statistics.hap_matching_comparison(full_haps_data,match_best_results,x,y),
+                            zip(list(range(num_blocks-1)),list(range(1,num_blocks))))
     
     forward_match_scores = [neighbouring_usages[x][0] for x in range(num_blocks-1)]
     backward_match_scores = [neighbouring_usages[x][1] for x in range(num_blocks-1)]
     
     combined_scores = []
     
-
     for i in range(len(forward_match_scores)):
         commons = {}
         for x in forward_match_scores[i].keys():
@@ -333,17 +328,7 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data):
 def get_combined_hap_score(hap_overlap_scores,hap_sample_scores,
                            overlap_importance=1):
     """
-    Combines the results from match_haplotypes_by_overlap_probabalistic
-    and match_haplotypes_by_samples_probabalistic (just the combined output
-    of this function and not the forward/backward ones) to get one single
-    likelihood score for each edge which is normalised to a maximum value
-    of 100. 
-    
-    overlap_importance is a measure of how much we weight the overlap score vs
-    the sample scores (individually). A value of 1 here means we weight the
-    combined sample score twice as much as the overlap score (because sample
-    score is combined version of both forward and backward sample scores).
-    
+    Combines overlap and sample matching scores.
     """
     ovr = hap_overlap_scores[1]
     samps = hap_sample_scores[1]
@@ -362,14 +347,10 @@ def get_combined_hap_score(hap_overlap_scores,hap_sample_scores,
 #%%
 def calc_best_scoring(padded_nodes_list,node_scores,edge_scores):
     """
-    Uses Breadth First Search going backwards to calculate the best scoring possible for each starting 
-    node assuming we get to the end. This uses "I" as a dummy initial starting node
-    and "S" as the final sink node
+    Reverse BFS to find optimal path scoring.
     """
     
     num_layers = len(padded_nodes_list)
-
-    
     scorings = [{"S":0}]
     
     for layer in range(num_layers-2,-1,-1):
@@ -381,11 +362,12 @@ def calc_best_scoring(padded_nodes_list,node_scores,edge_scores):
         for node in this_nodes:
             best_score = -np.inf
             for other in next_nodes:
-                new_score = node_scores[node]+edge_scores[(node,other)]+scorings[-1][other]
-                
-                if new_score > best_score:
-                    best_score = new_score
-                
+                if (node,other) in edge_scores:
+                    new_score = node_scores[node]+edge_scores[(node,other)]+scorings[-1][other]
+                    if new_score > best_score:
+                        best_score = new_score
+            
+            # If dead end, keep -inf
             layer_scores[node] = best_score
             
         scorings.append(layer_scores)
@@ -394,8 +376,7 @@ def calc_best_scoring(padded_nodes_list,node_scores,edge_scores):
     
 def scorings_to_optimal_path(scorings,padded_nodes_list,node_scores,edge_scores):
     """
-    Takes a list of dictionaries of optimal scorings from each node to the end and
-    calculates the optimal path starting at I and ending at S
+    Reconstructs path from scoring dictionaries.
     """
     cur_path = ["I"]
     cur_node = "I"
@@ -403,44 +384,39 @@ def scorings_to_optimal_path(scorings,padded_nodes_list,node_scores,edge_scores)
     for i in range(len(padded_nodes_list)-1):
 
         cur_score = scorings[i][cur_node]
+        if cur_score == -np.inf:
+            break # Path broken
         
         next_nodes = padded_nodes_list[i+1]
         for new_node in next_nodes:
-            score_removal = node_scores[cur_node]+edge_scores[(cur_node,new_node)]
-            remaining_score = cur_score-score_removal
-            
-            if abs(remaining_score-scorings[i+1][new_node]) < 10**-10:
-                cur_path.append(new_node)
-                cur_node = new_node
-                break
+            if (cur_node,new_node) in edge_scores:
+                score_removal = node_scores[cur_node]+edge_scores[(cur_node,new_node)]
+                remaining_score = cur_score-score_removal
+                
+                # Check approximate equality for float
+                if abs(remaining_score - scorings[i+1][new_node]) < 1e-9:
+                    cur_path.append(new_node)
+                    cur_node = new_node
+                    break
     
     return cur_path     
 
-def generate_chained_block_haplotypes(haplotype_data,nodes_list,combined_scores,num_haplotypes,
-                             node_usage_penalty=10,edge_usage_penalty=10):
+def generate_chained_block_haplotypes(haplotype_data, nodes_list, combined_scores, num_haplotypes,
+                             node_usage_penalty=10, edge_usage_penalty=10, similarity_matrices=None):
     """
-    Generates num_haplotypes many chromosome length haplotypes given
-    a layered list of the nodes and a dictionary containing the combined likelihood
-    scores for each possible edge between layers.
+    Generates chromosome length haplotypes by finding best paths through the graph
+    and penalizing used nodes/edges iteratively.
     
-    Returns the haplotypes as a list of nodes, one from each layer from the start to 
-    the end.
-    
-    This function works through a reverse Breadth First Search algorithm trying to maximize
-    the score between the start and the end. The first haplotype is just the maximal path.
-    
-    For future haplotypes we apply a penalty to each node/edge already on a discovered 
-    haplotype with a penalty also applied to other similar nodes to used nodes in the same
-    layer and run the Breadth First search again. We repeat this process until we generate
-    num_haplotypes many haplotypes.
+    Args:
+        similarity_matrices: Optional pre-computed matrices. If None, computes sequentially.
+        (Avoids nested Pool creation).
     """
     
     num_layers = len(nodes_list)
     
-    processing_pool = Pool(32)
-    
-    similarity_matrices = processing_pool.starmap(hap_statistics.get_block_hap_similarities,
-                                       zip(haplotype_data))#Similarity matrices for calculating the associated penalty when we use a node
+    if similarity_matrices is None:
+        # Compute sequentially if not provided to avoid nested pool issues
+        similarity_matrices = [hap_statistics.get_block_hap_similarities(block) for block in haplotype_data]
     
     current_edge_scores = combined_scores.copy()
     current_node_scores = {"I":0,"S":0}
@@ -465,17 +441,30 @@ def generate_chained_block_haplotypes(haplotype_data,nodes_list,combined_scores,
         
         found_hap = scorings_to_optimal_path(best_scores,nodes_copy,current_node_scores,current_edge_scores)
         
+        # Check if valid path found (length should cover all layers + I + S)
+        if len(found_hap) < len(nodes_copy):
+            print(f"Warning: Only partial path found for haplotype {ite}. Stopping early.")
+            break
+
         #Now that we have our hap apply node penalties
         for i in range(1,len(found_hap)-1):
             layer = found_hap[i][0]
             used_hap = found_hap[i][1]
+            
+            # Apply penalty to the node used, AND nodes similar to it in that block
             reductions = (node_usage_penalty)*similarity_matrices[layer][used_hap,:]
+            
+            # Iterate through all haps in that block to apply similarity penalty
             for nm in range(len(reductions)):
-                current_node_scores[(layer,nm)] -= reductions[nm]
+                node_key = (layer, nm)
+                if node_key in current_node_scores:
+                    current_node_scores[node_key] -= reductions[nm]
         
         #And apply edge penalties
         for i in range(1,len(found_hap)-2):
-            current_edge_scores[(found_hap[i],found_hap[i+1])] -= edge_usage_penalty
+            edge = (found_hap[i],found_hap[i+1])
+            if edge in current_edge_scores:
+                current_edge_scores[edge] -= edge_usage_penalty
         
         found_haps.append(found_hap[1:-1])
 
@@ -486,29 +475,19 @@ def combine_chained_blocks_to_single_hap(all_haps,
                                          read_error_prob = 0.02,
                                          min_total_reads=5):
     """
-    Takes in as input the block level haplotypes (such as generated by
-    by generate_haplotypes_all) as well as a list giving the blocks which
-    make up a haplotype and then converts this into a single long 
-    chromosome length haplotype
-    
-    read_error_prob and min_total_reads are used to calculate the haplotype
-    level priors for each site from the read counts in all_haps
-    
-    This function assumes that everything except for the very end of the 
-    starting/finishing block ends up in exactly two blocks, i.e. the shift size
-    is exactly half of the block size!!!
-    
+    Stitches blocks together into a single long haplotype.
+    all_haps: BlockResults object.
+    hap_blocks: List of tuples (layer, hap_index) for the path.
     """
     
     next_starting = []
     
     #Find overlap starting points
     for i in range(1,len(all_haps)):
-        start_position = all_haps[i][0][0]
-        insertion_point = np.searchsorted(all_haps[i-1][0],start_position)
+        start_position = all_haps[i].positions[0]
+        insertion_point = np.searchsorted(all_haps[i-1].positions, start_position)
         next_starting.append(insertion_point)
         
-    
     final_haplotype = []
     final_locations = []
     
@@ -516,65 +495,72 @@ def combine_chained_blocks_to_single_hap(all_haps,
         hap_here = hap_blocks[i][1]
         hap_next = hap_blocks[i+1][1]
         start_point = next_starting[i]
-        overlap_length = len(all_haps[i][0])-start_point  
+        overlap_length = len(all_haps[i].positions) - start_point  
 
-        
+        # Append non-overlapping start of first block
         if i == 0:
-            start_data = all_haps[i][3][hap_here][:start_point]
+            start_data = all_haps[i].haplotypes[hap_here][:start_point]
             final_haplotype.extend(start_data)
-            final_locations.extend(all_haps[i][0][:start_point])
+            final_locations.extend(all_haps[i].positions[:start_point])
         
+        cur_overlap_data = all_haps[i].haplotypes[hap_here][start_point:]
+        next_overlap_data = all_haps[i+1].haplotypes[hap_next][:overlap_length]
         
-        cur_overlap_data = all_haps[i][3][hap_here][start_point:]
-        next_overlap_data = all_haps[i+1][3][hap_next][:overlap_length]
-        
-        reads_sum = np.sum(all_haps[i][2][:,start_point:,:],axis=0)
-
-        num_samples = len(all_haps[i][2])
+        # Get read counts to weight the merger
+        reads_sum = np.sum(all_haps[i].reads_count_matrix[:,start_point:,:], axis=0)
+        num_samples = all_haps[i].reads_count_matrix.shape[0]
     
         hap_priors = []
         for j in range(len(reads_sum)):
-        
-            if sum(reads_sum[j]) >= max(min_total_reads,read_error_prob*num_samples):
+            # Calculate weight based on coverage
+            if sum(reads_sum[j]) >= max(min_total_reads, read_error_prob*num_samples):
                 rat_val = (1+reads_sum[j][1])/(2+reads_sum[j][0]+reads_sum[j][1])
             else:
                 rat_val = read_error_prob
-            hap_priors.append([rat_val,1-rat_val])
+            hap_priors.append([rat_val, 1-rat_val])
         hap_priors = np.array(hap_priors)
         
+        # Merge overlapping probabilities
         new_probs = []
-        for j in range(len(hap_priors)):
-            new_val = analysis_utils.combine_probabilities(cur_overlap_data[j],next_overlap_data[j],hap_priors[j])
-
+        
+        # Ensure lengths match before looping (handle edge case of truncated overlap)
+        process_len = min(len(hap_priors), len(cur_overlap_data), len(next_overlap_data))
+        
+        for j in range(process_len):
+            new_val = analysis_utils.combine_probabilities(
+                cur_overlap_data[j],
+                next_overlap_data[j],
+                hap_priors[j]
+            )
             new_probs.append(new_val)
         new_probs = np.array(new_probs)
         
         final_haplotype.extend(new_probs)
-        final_locations.extend(all_haps[i+1][0][:overlap_length])
+        final_locations.extend(all_haps[i+1].positions[:overlap_length])
         
+        # If this is the last intersection, append the rest of the last block
         if i == len(all_haps)-2:
-            end_data = all_haps[i+1][3][hap_next][overlap_length:]
+            end_data = all_haps[i+1].haplotypes[hap_next][overlap_length:]
             final_haplotype.extend(end_data)
-            final_locations.extend(all_haps[i+1][0][overlap_length:])
+            final_locations.extend(all_haps[i+1].positions[overlap_length:])
     
-    return [np.array(final_locations),np.array(final_haplotype)]
+    return [np.array(final_locations), np.array(final_haplotype)]
 
 def combine_all_blocks_to_long_haps(all_haps,
                                     hap_blocks_list,
                                     read_error_prob = 0.02,
-                                    min_total_reads=5):
+                                    min_total_reads=5,
+                                    num_processes=16):
     """
-    Multithreaded version of combine_chained_blocks_to_single_hap
-    which processes all of our haps at once
+    Multithreaded stitching of all long haplotypes.
     """
-        
-    processing_pool = Pool(32)
+    with Pool(num_processes) as processing_pool:
+        processing_results = processing_pool.starmap(lambda x: combine_chained_blocks_to_single_hap(
+                                            all_haps,x,read_error_prob=read_error_prob,
+                                            min_total_reads=min_total_reads),
+                                            zip(hap_blocks_list))
     
-    processing_results = processing_pool.starmap(lambda x: combine_chained_blocks_to_single_hap(
-                                        all_haps,x,read_error_prob=read_error_prob,
-                                        min_total_reads=min_total_reads),
-                                        zip(hap_blocks_list))
-    
+    # All paths share the same locations (approximately), so take the first one's locs
     sites_loc = processing_results[0][0]
     long_haps = [processing_results[x][1] for x in range(len(processing_results))]
     
@@ -584,9 +570,7 @@ def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
                             keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):
     """
     Compute the likeliest path explaining the sample using a combination of
-    genotypes from full_combined_genotypes via the Viterbi algorithm
-    
-    We only update on sites which have keep_flags[i] = 1
+    genotypes from full_combined_genotypes via the Viterbi algorithm.
     """
     
     data_shape = full_combined_genotypes.shape
@@ -597,16 +581,11 @@ def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
     if keep_flags.dtype != int:
         keep_flags = np.array(keep_flags,dtype=int)
         
-    #Matrix which records the probabilities of seeing one thing when the true value is another
-    #This is used for calculating posteriors later down the line,
-    #Moving across rows we see true baseline genotype and across columns we have observed sample genotype
     eps = value_error_rate 
     value_error_matrix = [[(1-eps)**2,2*eps*(1-eps),eps**2],
                           [eps*(1-eps),eps**2+(1-eps)**2,eps*(1-eps)],
                           [eps**2,2*eps*(1-eps),(1-eps)**2]]
     
-        
-
     num_haps = data_shape[0]
     num_rows = data_shape[0]
     num_cols = data_shape[1]
@@ -636,18 +615,11 @@ def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
             else:
                 distance_since_last_site = site_locations[loc]-last_site_loc
             
-        
-            #Update last_site_loc
             last_site_loc = site_locations[loc]
             
-            #Create transition probability matrix            
             num_possible_switches = num_rows+num_cols-1
-
             non_switch_prob = (1-recomb_rate)**distance_since_last_site
-            
             each_switch_prob= (1-non_switch_prob)/num_possible_switches
-
-            #Account for the fact that we can recombine back to the haplotype pre recombination
             total_non_switch_prob = non_switch_prob+each_switch_prob
             
             transition_probs = np.zeros((num_rows,num_cols,num_rows,num_cols))
@@ -657,22 +629,13 @@ def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
                     transition_probs[i,j,:,j] = each_switch_prob
                     transition_probs[i,j,i,:] = each_switch_prob
                     transition_probs[i,j,i,j] = total_non_switch_prob
-                    
                     transition_probs[i,j,:,:] = analysis_utils.make_upper_triangular(transition_probs[i,j,:,:])
                     
-            
-            
             site_sample_val = sample_probs[loc]
-            
             genotype_vals = full_combined_genotypes[:,:,loc,:]
 
-            #Calculate for each genotype combination the probability it equals x and the true data equals y
             all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
-            
-            #Calculate for each genotype combination the probability of seeing the data given the true underlying genotype 
             prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
-            
-            #Calculate the probability of switching to state (k,l) and seeing our observed data given that we started in state (i,j)
             prob_switch_seen = np.einsum("ijkl,kl->ijkl",transition_probs,prob_data_given_comb)
             
             log_prob_switch_seen = math.log(prob_switch_seen)
@@ -703,11 +666,8 @@ def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
             log_probs_history.append(copy.deepcopy(log_current_probabilities))
             prev_best_history.append(copy.deepcopy(prev_best))
     
-    #Now we can work backwards to figure out the most likely path for the sample
     reversed_path = []
-    
     cur_place = np.unravel_index(np.argmax(log_probs_history[-1]), log_probs_history[-1].shape)
-    
     reversed_path.append(cur_place)
     
     for i in range(len(prev_best_history)-1,-1,-1):
@@ -716,51 +676,55 @@ def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
     
     return (reversed_path,log_probs_history,prev_best_history)
 
-def generate_long_haplotypes_naive(full_positions_data,full_reads_data,num_long_haps,
-                             full_keep_flags=None,block_size=100000,shift_size=50000,
-                             node_usage_penalty=10,edge_usage_penalty=10):
+def generate_long_haplotypes_naive(block_results, num_long_haps,
+                             node_usage_penalty=10, edge_usage_penalty=10, num_processes=16):
     """
-    Takes as input a list of VCF Record data where each element represents 
-    full data for a single site for all the samples. Runs the full pipline 
-    and generates num_long_haps many full length haplotypes 
+    Takes the already calculated BlockResults and chains them together
+    to form num_long_haps full chromosome haplotypes.
     
-    This version uses the naive function (no EM-algorithm) to generate
-    the hapotypes
+    Args:
+        block_results: Instance of BlockResults class containing all block data.
+        num_long_haps: Number of global haplotypes to reconstruct.
     """
 
-
-    all_haps = block_haplotypes.generate_haplotypes_all(full_positions_data,full_reads_data,full_keep_flags)
-    #all_matches = get_best_matches_all_blocks(all_haps)
+    # 1. Match haplotypes between neighboring blocks (Overlap & Samples)
+    hap_matching_overlap = match_haplotypes_by_overlap_probabalistic(block_results)
+    hap_matching_samples = match_haplotypes_by_samples_probabalistic(block_results, num_processes=num_processes)
     
-    hap_matching_overlap = match_haplotypes_by_overlap_probabalistic(all_haps)
-    hap_matching_samples = match_haplotypes_by_samples_probabalistic(all_haps)
-    
+    # node_names is a list of lists: [[(0,0), (0,1)...], [(1,0)...]]
     node_names = hap_matching_overlap[0]
     
-    combined_scores = get_combined_hap_score(hap_matching_overlap,hap_matching_samples[2])
-    
-    chained_block_haps = generate_chained_block_haplotypes(all_haps,
-                        node_names,combined_scores,num_long_haps,
-                        node_usage_penalty=node_usage_penalty,
-                        edge_usage_penalty=edge_usage_penalty)
-    
-    final_long_haps = combine_all_blocks_to_long_haps(all_haps,chained_block_haps)
+    # 2. Combine scores
+    combined_scores = get_combined_hap_score(hap_matching_overlap, hap_matching_samples[2])
 
-    return (all_haps,final_long_haps)   
+    # Pre-calculate similarity matrices in parallel HERE to avoid nesting in the loop
+    with Pool(num_processes) as p:
+        similarity_matrices = p.starmap(
+            hap_statistics.get_block_hap_similarities,
+            zip(block_results)
+        )
+    
+    # 3. Find optimal paths (Chaining)
+    chained_block_haps = generate_chained_block_haplotypes(
+        block_results,
+        node_names,
+        combined_scores,
+        num_long_haps,
+        node_usage_penalty=node_usage_penalty,
+        edge_usage_penalty=edge_usage_penalty,
+        similarity_matrices=similarity_matrices # Pass pre-computed matrices
+    )
+    
+    # 4. Stitch blocks together
+    final_long_haps = combine_all_blocks_to_long_haps(block_results, chained_block_haps, num_processes=num_processes)
+
+    return (block_results, final_long_haps)   
 
 #%%
 def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
                             keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):
     """
-    Function which takes in the full (square) array of combined 
-    genotypes from haplotypes and runs a HMM-esque process to match
-    the sample genotype to the best combination of haplotypes which 
-    make it up.
-    
-    This is so of like Li-Stephens but works on probabalistic genotypes
-    rather than fixed ones
-    
-    Only updates on those sites where keep_flag=1
+    HMM to match sample genotype to best combination of haplotypes.
     """
     
     data_shape = full_combined_genotypes.shape
@@ -771,16 +735,11 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
     if keep_flags.dtype != int:
         keep_flags = np.array(keep_flags,dtype=int)
         
-    #Matrix which records the probabilities of seeing one thing when the true value is another
-    #This is used for calculating posteriors later down the line,
-    #Moving across rows we see true baseline genotype and across columns we have observed sample genotype
     eps = value_error_rate 
     value_error_matrix = [[(1-eps)**2,2*eps*(1-eps),eps**2],
                           [eps*(1-eps),eps**2+(1-eps)**2,eps*(1-eps)],
                           [eps**2,2*eps*(1-eps),(1-eps)**2]]
     
-        
-
     num_haps = data_shape[0]
     num_geno = data_shape[0]*data_shape[1]
     
@@ -792,7 +751,7 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
     
     last_site_loc = None
     
-    #Iterate backwards initially
+    #Iterate backwards
     for loc in range(num_sites-1,-1,-1):
         if keep_flags[loc] != 1:
             posterior_probabilities.append(copy.deepcopy(current_probabilities))
@@ -803,33 +762,23 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
                 distance_since_last_site = last_site_loc-site_locations[loc]
             last_site_loc = site_locations[loc]
                 
-            #Fudge prior due to possible recombinations
             updated_prior = analysis_utils.recombination_fudge(current_probabilities,
                                                 distance_since_last_site,
                                                 recomb_rate=recomb_rate)
             
             site_sample_val = sample_probs[loc]
-            
             genotype_vals = full_combined_genotypes[:,:,loc,:]
 
-            #Calculate for each genotype combination the probability it equals x and the true data equals y
             all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
-            
-            #Calculate for each genotype combination the probability of seeing the data given the true underlying value
             prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
-            
-            #Use Bayes's rule to calculate the probability of the combination given data using our prior
             nonorm_prob_comb_given_data = np.einsum("ij,ij->ij",prob_data_given_comb,updated_prior)
-            
-            #Normalize
             prob_comb_given_data = nonorm_prob_comb_given_data/np.sum(nonorm_prob_comb_given_data)
             
             posterior_probabilities.append(copy.deepcopy(prob_comb_given_data))
             current_probabilities = prob_comb_given_data
     
-    #Repeat process going forward
+    #Iterate forward
     posterior_probabilities = []
-    
     last_site_loc = None
     
     for loc in range(num_sites):
@@ -843,51 +792,39 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
             
             last_site_loc = site_locations[loc]
                 
-            #Fudge prior due to possible recombinations
             updated_prior = analysis_utils.recombination_fudge(current_probabilities,
                                                 distance_since_last_site,
                                                 recomb_rate=recomb_rate)
             site_sample_val = sample_probs[loc]
-            
             genotype_vals = full_combined_genotypes[:,:,loc,:]
 
-            #Calculate for each genotype combination the probability it equals x and the true data equals y
             all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
-            
-            #Calculate for each genotype combination the probability of seeing the data given the true underlying value
             prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
-            
-            #Use Bayes's rule to calculate the probability of the combination given data using our prior
             nonorm_prob_comb_given_data = np.einsum("ij,ij->ij",prob_data_given_comb,updated_prior)
-            
-            #Normalize
             prob_comb_given_data = nonorm_prob_comb_given_data/np.sum(nonorm_prob_comb_given_data)
             
             posterior_probabilities.append(prob_comb_given_data)
             current_probabilities = prob_comb_given_data
             
-    #Convert to upper triangular matrix for easier visualization
     upp_tri_post = []
     for item in posterior_probabilities:
         new = np.triu(item+np.transpose(item)-np.diag(np.diag(item)))
         upp_tri_post.append(new)
         
     max_loc = []
-    
     for i in range(len(upp_tri_post)):
         max_loc.append(np.unravel_index(upp_tri_post[i].argmax(), upp_tri_post[i].shape))
     
     return (max_loc,upp_tri_post)
         
 def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations,
-                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):         
+                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3, num_processes=16):         
     """
     Multithreaded version to match all samples to their haplotype combinations
     """
-    processing_pool = Pool(32)
-    
-    results = processing_pool.starmap(lambda x: get_match_probabilities(full_combined_genotypes,x,site_locations,
-                                        keep_flags=keep_flags,recomb_rate=recomb_rate,value_error_rate=value_error_rate),
-                                      zip(all_sample_probs))
+    with Pool(num_processes) as processing_pool:
+        results = processing_pool.starmap(lambda x: get_match_probabilities(full_combined_genotypes,x,site_locations,
+                                            keep_flags=keep_flags,recomb_rate=recomb_rate,value_error_rate=value_error_rate),
+                                          zip(all_sample_probs))
     
     return results
