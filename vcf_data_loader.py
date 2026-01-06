@@ -40,8 +40,8 @@ class GenomicData:
 def generate_block_coordinates(vcf_file_path, contig,
                                block_size=100000, shift=50000):
     """
-    Generator that calculates coordinates for blocks.
-    Instead of reading the data, it yields (chrom, start, end) tuples.
+    Generator that calculates coordinates for blocks based on PHYSICAL DISTANCE.
+    Yields (vcf_file_path, contig, start, end) tuples.
     """
     vcf = VCF(vcf_file_path)
     
@@ -58,6 +58,48 @@ def generate_block_coordinates(vcf_file_path, contig,
         cur_end = cur_start + block_size
         yield (vcf_file_path, contig, cur_start, cur_end)
         cur_start += shift
+
+def generate_snp_count_coordinates(vcf_file_path, contig, 
+                                   snps_per_block=200, snp_shift=100):
+    """
+    Generator that calculates coordinates for blocks based on SNP COUNT.
+    Scans the VCF to find boundaries such that each block contains 'snps_per_block' variants.
+    
+    Yields (vcf_file_path, contig, start, end) tuples.
+    """
+    vcf = VCF(vcf_file_path)
+    
+    # 1. Pre-scan positions to define boundaries
+    # This is fast because we only access the POS attribute
+    positions = []
+    try:
+        for v in vcf(contig):
+            positions.append(v.POS)
+    except Exception:
+        pass # Handle empty contigs or read errors gracefully
+        
+    vcf.close()
+    
+    total_snps = len(positions)
+    if total_snps == 0:
+        return
+
+    curr_idx = 0
+    while curr_idx < total_snps:
+        # Determine the slice of SNPs
+        end_idx = min(curr_idx + snps_per_block, total_snps)
+        
+        # Determine physical coordinates
+        # Start: Position of the first SNP in the block
+        phys_start = positions[curr_idx]
+        
+        # End: Position of the last SNP + 1 (because region queries are usually [start, end))
+        phys_end = positions[end_idx - 1] + 1
+        
+        yield (vcf_file_path, contig, phys_start, phys_end)
+        
+        # Move by the SNP shift
+        curr_idx += snp_shift
 
 def process_single_block(vcf_path, chrom, start, end, 
                                 min_frequency=0.0, 
@@ -143,6 +185,7 @@ def process_single_block(vcf_path, chrom, start, end,
 def cleanup_block_reads_list(vcf_file_path, contig, 
                                     start_block_idx=0, end_block_idx=None,
                                     block_size=100000, shift_size=50000,
+                                    use_snp_count=False, snps_per_block=200, snp_shift=100,
                                     num_processes=16,
                                     min_frequency=0.0, 
                                     read_error_prob=0.02, 
@@ -150,11 +193,23 @@ def cleanup_block_reads_list(vcf_file_path, contig,
     """
     Multiprocessing driver.
     Returns a GenomicData object containing lists of results.
+    
+    Args:
+        use_snp_count (bool): If True, ignores block_size/shift_size and uses SNP counts.
+        snps_per_block (int): Number of SNPs per block (if use_snp_count=True).
+        snp_shift (int): Number of SNPs to shift for overlap (if use_snp_count=True).
     """
     
-    # 1. Generate ALL coordinates
-    all_coords = list(generate_block_coordinates(vcf_file_path, contig, 
-                                                 block_size=block_size, shift=shift_size))
+    # 1. Generate ALL coordinates (Logic Switch)
+    if use_snp_count:
+        print(f"Generating coordinates by SNP Count ({snps_per_block} per block)...")
+        all_coords = list(generate_snp_count_coordinates(vcf_file_path, contig, 
+                                                         snps_per_block=snps_per_block, 
+                                                         snp_shift=snp_shift))
+    else:
+        # Standard physical distance blocking
+        all_coords = list(generate_block_coordinates(vcf_file_path, contig, 
+                                                     block_size=block_size, shift=shift_size))
     
     # 2. Slice the coordinates
     if end_block_idx is None:

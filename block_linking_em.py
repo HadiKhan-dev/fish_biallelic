@@ -897,9 +897,7 @@ def calculate_hap_transition_probabilities(full_samples_data,
     for i in range(max_num_iterations):
         effective_lr = learning_rate * (0.9 ** i)
         effective_lr = max(effective_lr, 0.1)
-        
-        print(f"Iteration {i} for space gap {space_gap}")
-        
+
         new_probs_raw, current_ll = get_updated_transition_probabilities_unified(
             full_samples_data,
             sample_sites,

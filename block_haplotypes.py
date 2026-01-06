@@ -194,9 +194,13 @@ def get_representatives_probs(site_priors,
     #Return the results
     return cluster_representatives
 
-def consolidate_similar_candidates(candidates, diff_threshold=0.02):
+def consolidate_similar_candidates(candidates, diff_threshold_percent=1.0):
     """
-    Greedily merges candidates that are nearly identical (e.g. < 2% difference).
+    Greedily merges candidates that are nearly identical.
+    
+    Args:
+        candidates: dict or list of haplotype arrays.
+        diff_threshold_percent: Percentage difference (0-100) below which to merge.
     """
     if not candidates: return {}
     
@@ -212,9 +216,9 @@ def consolidate_similar_candidates(candidates, diff_threshold=0.02):
         is_duplicate = False
         for existing in unique_haps:
             # Calculate Hamming distance (percentage of sites that differ)
-            diff = np.mean(hap != existing)
+            diff = np.mean(hap != existing) * 100.0
             
-            if diff < diff_threshold:
+            if diff < diff_threshold_percent:
                 # It's a duplicate (or noise variant)
                 is_duplicate = True
                 break
@@ -273,6 +277,11 @@ def prune_chimeras(hap_dict, probs_array=None, recomb_penalty=10.0, error_tolera
     """
     Identifies and removes haplotypes that can be explained as 
     recombinations of OTHER haplotypes.
+    
+    Args:
+        recomb_penalty: Cost to switch haplotypes in the Viterbi model.
+        error_tolerance_sites: Number of sites of mismatch allowed before deletion.
+                               (Each mismatch penalizes the score by 0.5)
     """
     if len(hap_dict) < 3:
         return hap_dict
@@ -335,6 +344,8 @@ def prune_chimeras(hap_dict, probs_array=None, recomb_penalty=10.0, error_tolera
         threshold = -((recomb_penalty * allowed_switches) + 
                       (mismatch_penalty * error_tolerance_sites))
         
+        # If score is BETTER (less negative) than threshold, it means 
+        # we found a good way to mimic this haplotype using others. Delete it.
         if raw_score > threshold:
             kept_keys.remove(worst_key)
         else:
@@ -467,7 +478,7 @@ def select_optimal_haplotype_set_viterbi(candidate_haps, probs_array,
 def add_distinct_haplotypes(initial_haps,
                        new_candidate_haps,
                        keep_flags=None,
-                       unique_cutoff=10,
+                       uniqueness_threshold_percent=2.0,
                        max_hap_add=1000):
     """
     Helper to add distinct haplotypes.
@@ -489,7 +500,7 @@ def add_distinct_haplotypes(initial_haps,
     
     new_haps_mapping = {-1:-1}
 
-    cutoff = math.ceil(unique_cutoff*keep_length/100)
+    cutoff = math.ceil(uniqueness_threshold_percent*keep_length/100.0)
     
     i = 0
     j = 0
@@ -685,7 +696,7 @@ def get_initial_haps(site_priors,
                      het_excess_add=2,
                      het_max_cutoff_percentage=20,
                      deeper_analysis=False,
-                     uniqueness_tolerance=5,
+                     uniqueness_threshold_percent=2.0, # Renamed for clarity
                      read_error_prob = 0.02,
                      verbose=False):
     """
@@ -779,7 +790,7 @@ def get_initial_haps(site_priors,
     
     (representatives,label_mappings) = add_distinct_haplotypes(
               {},representatives,keep_flags=keep_flags,
-              unique_cutoff=uniqueness_tolerance)
+              uniqueness_threshold_percent=uniqueness_threshold_percent)
         
     return representatives
 
@@ -788,7 +799,7 @@ def generate_further_haps(site_priors,
                           initial_haps,
                           keep_flags=None,
                           wrongness_cutoff=10,
-                          uniqueness_threshold=5,
+                          uniqueness_threshold_percent=2.0,
                           max_hap_add=1000,
                           verbose=False):
     """
@@ -850,7 +861,7 @@ def generate_further_haps(site_priors,
     
     min_dist_to_existing = np.min(perc_dists, axis=1)
     
-    is_unique = min_dist_to_existing >= uniqueness_threshold
+    is_unique = min_dist_to_existing >= uniqueness_threshold_percent
     
     unique_candidates = candidate_haps_masked[is_unique]
     
@@ -914,7 +925,12 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                               min_num_haps=0,
                               penalty_strength=5.0,
                               max_intermediate_haps=25,
-                              known_haplotypes=None):
+                              known_haplotypes=None,
+                              uniqueness_threshold_percent=2.0, # PARAM
+                              diff_threshold_percent=1.0,       # PARAM
+                              wrongness_threshold=10.0,         # PARAM
+                              chimera_switch_cost=10.0,         # PARAM
+                              chimera_mismatch_tol=1):          # PARAM (Default 1 site)
     """
     Given the read count array of our sample data for a single block
     generates the haplotypes that make up the samples present in our data.
@@ -933,7 +949,8 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     (site_priors, probs_array) = analysis_utils.reads_to_probabilities(reads_array)
     
     # Get seed haplotypes from homozygotes
-    initial_haps = get_initial_haps(site_priors, probs_array, keep_flags=keep_flags)
+    initial_haps = get_initial_haps(site_priors, probs_array, keep_flags=keep_flags,
+                                    uniqueness_threshold_percent=uniqueness_threshold_percent)
     
     if len(positions) == 0:
         return BlockResult(np.array([]), initial_haps, np.array([]), keep_flags=keep_flags, probs_array=probs_array)
@@ -949,7 +966,7 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
             
         if len(known_list) > 0:
             combined_list = list(initial_haps.values()) + known_list
-            initial_haps = consolidate_similar_candidates(combined_list, diff_threshold=0.01)
+            initial_haps = consolidate_similar_candidates(combined_list, diff_threshold_percent=diff_threshold_percent)
 
     # --- 3. INITIAL STATISTICS ---
     initial_matches = hap_statistics.match_best_vectorised(initial_haps, probs_array, keep_flags=keep_flags)
@@ -964,8 +981,12 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     
     minimum_strikes = 0 
     striking_up = False
-    uniqueness_threshold = 5
-    wrongness_cutoff = 10
+    
+    # Use variable threshold starting at passed arg
+    current_unique_thresh = uniqueness_threshold_percent
+    
+    # Use the passed wrongness threshold as the starting point
+    current_wrongness = wrongness_threshold
     
     # --- 4. ITERATIVE DISCOVERY LOOP ---
     while not all_found:
@@ -976,8 +997,8 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
             probs_array,
             cur_haps,
             keep_flags=keep_flags,
-            uniqueness_threshold=uniqueness_threshold,
-            wrongness_cutoff=wrongness_cutoff
+            uniqueness_threshold_percent=current_unique_thresh,
+            wrongness_cutoff=current_wrongness
         )
         
         # B. INTERMEDIATE PRUNING
@@ -1004,8 +1025,9 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                 break
             else:
                 minimum_strikes += 1
-                uniqueness_threshold -= 1
-                wrongness_cutoff += 2
+                current_unique_thresh = max(1.0, current_unique_thresh - 1.0)
+                # Relax wrongness if stuck
+                current_wrongness += 2.0 
                 striking_up = True
                 
         if len(cur_haps) == len(haps_history[-1]) and not striking_up: 
@@ -1026,7 +1048,7 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     if len(candidates_to_filter) > 1:
         
         # Step A: Pre-Merge
-        merged_haps = consolidate_similar_candidates(candidates_to_filter, diff_threshold=0.02)
+        merged_haps = consolidate_similar_candidates(candidates_to_filter, diff_threshold_percent=diff_threshold_percent)
         
         # Step B: Viterbi-BIC Selection
         best_keys = select_optimal_haplotype_set_viterbi(
@@ -1051,14 +1073,15 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                 new_idx += 1
         
         # Step D: Chimera Pruning
-        final_haps = prune_chimeras(
-            used_haps, 
-            probs_array, 
-            recomb_penalty=10.0, 
-            error_tolerance_sites=10
-        )
+        # DISABLED per biological reasoning (Inbreeding indistinguishable from Chimerism in small blocks)
+        # final_haps = prune_chimeras(
+        #     used_haps, 
+        #     probs_array, 
+        #     recomb_penalty=chimera_switch_cost, 
+        #     error_tolerance_sites=chimera_mismatch_tol
+        # )
         
-        final_haps = {i: v for i, v in enumerate(final_haps.values())}
+        final_haps = {i: v for i, v in enumerate(used_haps.values())}
         
     else:
         final_haps = candidates_to_filter
@@ -1122,10 +1145,10 @@ def find_missing_haplotypes_iterative(positions, reads_array, current_haps,
     new_idx = 0
     
     for k, sub_hap in sub_result_haps.items():
-        diffs = np.mean(existing_matrix != sub_hap, axis=1)
+        diffs = np.mean(existing_matrix != sub_hap, axis=1) * 100.0
         min_diff = np.min(diffs)
         
-        if min_diff > 0.02:
+        if min_diff > 2.0: # Compare using Percentage
             newly_found_unique[new_idx] = sub_hap
             new_idx += 1
             
@@ -1176,7 +1199,7 @@ def generate_haplotypes_block_robust(positions, reads_array, keep_flags=None,
             new_haps_list = list(missing_haps_dict.values())
             
             combined_pool = current_known_haps + new_haps_list
-            consolidated_dict = consolidate_similar_candidates(combined_pool, diff_threshold=0.01)
+            consolidated_dict = consolidate_similar_candidates(combined_pool, diff_threshold_percent=0.01)
             current_known_haps = list(consolidated_dict.values())
             
     return final_result
@@ -1184,6 +1207,11 @@ def generate_haplotypes_block_robust(positions, reads_array, keep_flags=None,
 def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
                             penalty_strength=1.0, 
                             max_intermediate_haps=100,
+                            uniqueness_threshold_percent=2.0, # NEW PARAM
+                            diff_threshold_percent=1.0,       # NEW PARAM
+                            wrongness_threshold=10.0,         # NEW PARAM
+                            chimera_switch_cost=10.0,         # NEW PARAM
+                            chimera_mismatch_tol=1,           # NEW PARAM
                             num_processes=16):
     """
     Generate a list of block haplotypes using multiprocessing.
@@ -1201,10 +1229,14 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
     worker_func = partial(
         generate_haplotypes_block_robust, 
         penalty_strength=penalty_strength, 
-        max_intermediate_haps=max_intermediate_haps
+        max_intermediate_haps=max_intermediate_haps,
+        uniqueness_threshold_percent=uniqueness_threshold_percent,
+        diff_threshold_percent=diff_threshold_percent,
+        wrongness_threshold=wrongness_threshold,
+        chimera_switch_cost=chimera_switch_cost,
+        chimera_mismatch_tol=chimera_mismatch_tol
     )
-    
-    # Use a context manager ('with') to ensure processes are cleaned up
+
     with Pool(processes=num_processes) as processing_pool:
         
         # GenomicData is iterable yielding (pos, reads, flags)

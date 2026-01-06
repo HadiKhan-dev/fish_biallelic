@@ -575,9 +575,6 @@ def global_forward_backward_pass(raw_blocks, block_results, transition_probs, sp
             
             priors = analysis_utils.log_matmul(next_R_internal, T)
         
-        # if i == 7:
-        #     breakpoint()
-        
         # 2. Run Backward Scan
         R_raw = scan_distance_aware_backward(
             block.tensor, block.positions, float(recomb_rate), block.state_defs, priors, block.num_haps
@@ -614,9 +611,6 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         next_idx = i + space_gap
         S_earlier = S_results[i]
         R_later = R_results[next_idx]
-        
-        if i == 6:
-            breakpoint()
         
         curr_keys = sorted(list(block_results[i].haplotypes.keys()))
         next_keys = sorted(list(block_results[next_idx].haplotypes.keys()))
@@ -860,7 +854,6 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
     """
     current_trans = block_linking_em.initial_transition_probabilities(haps_data, space_gap)
     
-    print(f"  - Pre-calculating raw HMM emissions (Gap {space_gap})...")
     raw_blocks = generate_viterbi_block_emissions(full_samples_data, sample_sites, haps_data, num_processes=num_processes)
     
     prev_ll = -np.inf

@@ -7,8 +7,9 @@ import random
 import numpy as np
 import pickle
 
-import block_linking_naive
-import analysis_utils
+# Removed unused imports to keep it clean
+# import block_linking_naive
+# import analysis_utils
 from vcf_data_loader import GenomicData
 
 #%%
@@ -57,8 +58,8 @@ def recombine_haps(hap_pair,site_locs,
     an exponential distribution
     """
     
-    recomb_scale = 1/recomb_rate
-    mutate_scale = 1/mutate_rate
+    recomb_scale = 1.0/recomb_rate
+    mutate_scale = 1.0/mutate_rate
     
     assert len(hap_pair[0]) == len(hap_pair[1]), "Length of two haplotypes is different"
     assert len(hap_pair[0]) == len(site_locs), "Different length of hap and of list of site locations"
@@ -76,11 +77,11 @@ def recombine_haps(hap_pair,site_locs,
     while cur_loc <= site_locs[-1]:
         next_break_distance = np.random.exponential(recomb_scale)
         
-        
         new_loc = cur_loc+np.ceil(next_break_distance)
             
         new_loc_index = np.searchsorted(site_locs,new_loc)
         
+        # Slicing is safe even if new_loc_index > len
         adding = hap_pair[using_hap][cur_loc_index:new_loc_index]
         
         final_hap_list.append(adding)
@@ -90,9 +91,19 @@ def recombine_haps(hap_pair,site_locs,
         
         cur_loc = new_loc
         cur_loc_index = new_loc_index
+        
+        if cur_loc_index >= len(site_locs):
+            break
     
     return_value = np.concatenate(final_hap_list)
     
+    # Truncate if we overshot (due to exponential jump past end)
+    if len(return_value) > len(site_locs):
+        return_value = return_value[:len(site_locs)]
+    elif len(return_value) < len(site_locs):
+        # Should ideally not happen if loop logic is correct, but safe guard:
+        pass 
+
     #Add in mutations
     mutation_points = []
     
@@ -101,7 +112,6 @@ def recombine_haps(hap_pair,site_locs,
     
     while cur_loc <= site_locs[-1]:
         next_mutation_distance = np.random.exponential(mutate_scale)
-        
         
         new_loc = cur_loc+np.floor(next_mutation_distance)
             
@@ -112,12 +122,15 @@ def recombine_haps(hap_pair,site_locs,
         
         cur_loc = new_loc
         cur_loc_index = new_loc_index
+        
+        if cur_loc_index >= len(site_locs):
+            break
     
-    base_vals = return_value[mutation_points]
-    
-    mutated_vals = 1-base_vals
-    
-    return_value[mutation_points] = mutated_vals
+    # Apply mutations (flip 0->1, 1->0)
+    if len(mutation_points) > 0:
+        base_vals = return_value[mutation_points]
+        mutated_vals = 1-base_vals
+        return_value[mutation_points] = mutated_vals
     
     return return_value
 
@@ -130,8 +143,8 @@ def create_offspring(first_pair,second_pair,
     each of the pairs and then returning the combined result
     """
     
-    first_hap = recombine_haps(first_pair,site_locs,recomb_rate=recomb_rate)
-    second_hap = recombine_haps(second_pair,site_locs,recomb_rate=recomb_rate)
+    first_hap = recombine_haps(first_pair,site_locs,recomb_rate=recomb_rate, mutate_rate=mutate_rate)
+    second_hap = recombine_haps(second_pair,site_locs,recomb_rate=recomb_rate, mutate_rate=mutate_rate)
     
     return [first_hap,second_hap]
 
@@ -139,8 +152,7 @@ def create_new_generation(parent_haps,site_locs,num_offspring,
                           recomb_rate=10**-8,mutate_rate=10**-8):
     """
     Create a new generation of num_offspring offspring given a list
-    of pairs of parental haplotypes. Each offspring is made by randomly
-    choosing 
+    of pairs of parental haplotypes.
     """
     new_pairs = []
     
@@ -169,7 +181,6 @@ def get_reads_from_sample(hap_pair,read_depth,error_rate=0.02):
     
     zeros = np.where(site_sum == 0)[0]
     ones = np.where(site_sum == 1)[0]
-    
     twos = np.where(site_sum == 2)[0]
     
     zero_read_counts = num_reads_at_site[zeros]
@@ -184,11 +195,11 @@ def get_reads_from_sample(hap_pair,read_depth,error_rate=0.02):
     one_basics = one_read_counts-one_draws
     two_basics = two_read_counts-two_draws
     
-    zero_concated = np.concatenate([np.reshape(zero_basics,(-1,1)),np.reshape(zero_draws,(-1,1))],axis=1)
-    one_concated = np.concatenate([np.reshape(one_basics,(-1,1)),np.reshape(one_draws,(-1,1))],axis=1)
-    two_concated = np.concatenate([np.reshape(two_basics,(-1,1)),np.reshape(two_draws,(-1,1))],axis=1)
+    zero_concated = np.column_stack((zero_basics, zero_draws))
+    one_concated = np.column_stack((one_basics, one_draws))
+    two_concated = np.column_stack((two_basics, two_draws))
     
-    full_scaffold = np.zeros((num_sites,2))
+    full_scaffold = np.zeros((num_sites,2), dtype=int)
     
     full_scaffold[zeros,:] = zero_concated
     full_scaffold[ones,:] = one_concated
@@ -224,13 +235,12 @@ def combine_into_genotype(individual_list):
         indexing = individual_list[i][0]+individual_list[i][1]
         num_sites = len(indexing)
         
-        base_array = [np.array(range(num_sites)).reshape(1,-1),indexing.reshape(1,-1)]
+        base_array = [np.array(range(num_sites)), indexing]
         
-        combined_indexing = np.concatenate(base_array,axis=0).T
-        
+        # Advanced indexing instead of concatenation
+        # scaffold[site_idx, genotype_val] = 1
         scaffold = np.zeros((num_sites,3))
-        
-        scaffold[combined_indexing[:,0],combined_indexing[:,1]] = 1
+        scaffold[base_array[0], base_array[1]] = 1
         
         all_list.append(scaffold)
     
@@ -239,13 +249,15 @@ def combine_into_genotype(individual_list):
 def chunk_up_data(positions_list,reads_array,
                   starting_pos,ending_pos,
                   block_size,shift_size,
+                  use_snp_count=False, snps_per_block=200, snp_shift=100,
                   error_rate=0.02,
                   min_total_reads=5):
     """
-    Breaks up the positions_list and reads_array (where elements of the positions_list 
-    correspond to the location of the site at that index in reads_array) into chunks
-    of size block_size where consecutive chunks differ by shift_size in their starting
-    location
+    Breaks up the positions_list and reads_array into blocks.
+    
+    Modes:
+    1. Physical Distance: Uses block_size and shift_size (bp).
+    2. SNP Count: Uses snps_per_block and snp_shift (count).
     
     Returns a GenomicData object.
     """
@@ -254,37 +266,78 @@ def chunk_up_data(positions_list,reads_array,
     chunked_keep_flags = []
     
     num_samples = reads_array.shape[0]
+    total_sites = len(positions_list)
     
-    cur_pos = starting_pos
-    cur_index = 0
+    # Restrict to requested physical range first
+    # Find indices corresponding to [starting_pos, ending_pos)
+    # Using searchsorted for speed
+    range_start_idx = np.searchsorted(positions_list, starting_pos)
+    range_end_idx = np.searchsorted(positions_list, ending_pos)
     
-    while cur_pos < ending_pos:
-        
-        block_end_pos = cur_pos+block_size
-        
-        end_index = cur_index
-        while end_index < len(positions_list) and positions_list[end_index] < block_end_pos:
-            end_index += 1
-        
-        block_positions = positions_list[cur_index:end_index]
-        
-        # If block is empty, handle gracefully or skip
-        if len(block_positions) > 0:
-            extract_indices = list(range(cur_index,end_index))
-            block_reads_array = reads_array[:,extract_indices,:]
+    # Work on the slice
+    positions_slice = positions_list[range_start_idx:range_end_idx]
+    reads_slice = reads_array[:, range_start_idx:range_end_idx, :]
+    
+    slice_len = len(positions_slice)
+    
+    if slice_len == 0:
+        return GenomicData([], [], [])
+
+    if use_snp_count:
+        # --- SNP COUNT LOGIC ---
+        curr_idx = 0
+        while curr_idx < slice_len:
+            end_idx = min(curr_idx + snps_per_block, slice_len)
             
-            total_read_pos = np.sum(block_reads_array,axis=(0,2))
+            # If block is too small (end of chromosome), keep it? 
+            # Usually yes, unless < min_snps required.
+            if end_idx == curr_idx: break
             
-            block_keep_flags = (total_read_pos >= max(min_total_reads,error_rate*num_samples)).astype(int)
+            block_positions = positions_slice[curr_idx:end_idx]
+            block_reads_array = reads_slice[:, curr_idx:end_idx, :]
+            
+            total_read_pos = np.sum(block_reads_array, axis=(0,2))
+            block_keep_flags = (total_read_pos >= max(min_total_reads, error_rate*num_samples)).astype(int)
             
             chunked_positions.append(np.array(block_positions))
             chunked_reads.append(block_reads_array)
             chunked_keep_flags.append(block_keep_flags)
+            
+            curr_idx += snp_shift
+            
+    else:
+        # --- PHYSICAL DISTANCE LOGIC ---
+        cur_pos = positions_slice[0]
+        # We need to track index relative to the slice
+        cur_idx_in_slice = 0
         
-        cur_pos = cur_pos + shift_size
+        max_phys_pos = positions_slice[-1]
         
-        while cur_index < len(positions_list) and positions_list[cur_index] < cur_pos:
-            cur_index += 1
-    
-    # Return as GenomicData container
+        while cur_pos < max_phys_pos:
+            block_end_pos = cur_pos + block_size
+            
+            # Find end index in slice
+            # We search starting from cur_idx_in_slice for efficiency
+            end_idx_in_slice = cur_idx_in_slice
+            while end_idx_in_slice < slice_len and positions_slice[end_idx_in_slice] < block_end_pos:
+                end_idx_in_slice += 1
+            
+            block_positions = positions_slice[cur_idx_in_slice:end_idx_in_slice]
+            
+            if len(block_positions) > 0:
+                block_reads_array = reads_slice[:, cur_idx_in_slice:end_idx_in_slice, :]
+                
+                total_read_pos = np.sum(block_reads_array, axis=(0,2))
+                block_keep_flags = (total_read_pos >= max(min_total_reads, error_rate*num_samples)).astype(int)
+                
+                chunked_positions.append(np.array(block_positions))
+                chunked_reads.append(block_reads_array)
+                chunked_keep_flags.append(block_keep_flags)
+            
+            cur_pos = cur_pos + shift_size
+            
+            # Advance start index
+            while cur_idx_in_slice < slice_len and positions_slice[cur_idx_in_slice] < cur_pos:
+                cur_idx_in_slice += 1
+                
     return GenomicData(chunked_positions, chunked_keep_flags, chunked_reads)

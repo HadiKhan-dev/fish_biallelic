@@ -1,126 +1,175 @@
 import numpy as np
 import math
-from multiprocess import Pool
+import time
+from tqdm import tqdm
 
-# Import your pipeline modules
-import analysis_utils
+# Import your specific modules
+# Assuming these are the filenames where the working logic resides
 import block_haplotypes
+import block_linking_em
 import hmm_matching
-import beam_search_linking
+import beam_search_core
 
-class HierarchicalAssembler:
+def convert_reconstruction_to_superblock(reconstructed_data, original_blocks):
     """
-    Manages the recursive stitching of genomic blocks into larger contigs.
+    Helper function to package the reconstruction results into a BlockResult object.
+    
+    Args:
+        reconstructed_data: List of dicts from beam_search_core.reconstruct_haplotypes_from_beam.
+        original_blocks: The list of BlockResult objects that were stitched.
+        
+    Returns:
+        A single BlockResult object representing the consolidated Super-Block.
     """
-    def __init__(self, samples_matrix, sample_sites, initial_blocks, 
-                 recomb_rate=5e-7, num_processes=16):
-        """
-        Args:
-            samples_matrix: (Samples x Sites x 3) Genotype probabilities.
-            sample_sites: Array of genomic positions corresponding to the matrix.
-            initial_blocks: List of BlockResult objects (Level 0).
-            recomb_rate: Recombination rate per base pair (for Viterbi).
-        """
-        self.samples_matrix = samples_matrix
-        self.sample_sites = sample_sites
-        self.current_blocks = initial_blocks
-        self.recomb_rate = recomb_rate
-        self.num_processes = num_processes
+    if not reconstructed_data:
+        return None
 
-    def run_assembly_step(self, batch_size=10, 
-                          num_founders_to_keep=12, 
-                          em_iterations=20, 
-                          beam_width=200):
-        """
-        Performs one level of assembly (e.g., stitching groups of 10 blocks).
-        
-        Args:
-            batch_size: Number of blocks to group together (e.g., 10).
-            num_founders_to_keep: Number of diverse paths to retain in the new Super-Block.
-            em_iterations: Max iterations for Viterbi-EM training.
-            beam_width: Number of candidates in Beam Search.
-            
-        Returns:
-            list: A list of new, larger BlockResult objects.
-        """
-        new_super_blocks = []
-        num_batches = math.ceil(len(self.current_blocks) / batch_size)
-        
-        print(f"\n=== Starting Assembly Step ===")
-        print(f"Input Blocks: {len(self.current_blocks)} | Target Batch Size: {batch_size}")
-        
-        for batch_idx in range(num_batches):
-            # 1. Slice Batch
-            start_i = batch_idx * batch_size
-            end_i = min((batch_idx + 1) * batch_size, len(self.current_blocks))
-            
-            # Skip if single block left (cannot stitch) - just pass it through
-            if end_i - start_i < 2:
-                new_super_blocks.extend(self.current_blocks[start_i:end_i])
-                continue
+    # 1. Consolidate Haplotypes
+    # We assign simple integer IDs (0, 1, 2...) based on their selection rank
+    super_haplotypes = {}
+    for i, data in enumerate(reconstructed_data):
+        super_haplotypes[i] = data['haplotype'] 
 
-            batch_blocks = self.current_blocks[start_i:end_i]
-            print(f"Processing Batch {batch_idx+1}/{num_batches} (Blocks {start_i}-{end_i})...")
-            
-            # 2. Generate Dense Transition Mesh (All-to-All within batch)
-            # specific_gaps=None defaults to range(1, len(batch)), i.e., all gaps.
-            mesh = viterbi_matching.viterbi_generate_transition_probability_mesh(
-                self.samples_matrix,
-                self.sample_sites,
-                batch_blocks,
-                max_num_iterations=em_iterations,
-                learning_rate=1.0,
-                recomb_rate=self.recomb_rate,
-                num_processes=self.num_processes,
-                specific_gaps=None # Creates dense mesh (1, 2, ... 9)
-            )
-            
-            breakpoint()
-            
-            # 3. Beam Search Stitching
-            # Find the best N diverse paths through this batch
-            beam_results, fast_mesh = beam_search_linking.convert_mesh_to_haplotype_diverse(
-                batch_blocks, 
-                mesh, 
-                num_candidates=beam_width,
-                diversity_diff_percent=0.01,
-                min_diff_blocks=1
-            )
-            
-            # 4. Select Founders & Flatten
-            # reconstructed_data is list of (positions, hap_array, path_indices)
-            reconstructed_data = beam_search_linking.select_diverse_founders(
-                beam_results, fast_mesh, batch_blocks,
-                num_founders=num_founders_to_keep,
-                min_total_diff_percent=0.01,
-                min_contiguous_diff=1
-            )
-            
-            # 5. Create Super-Block Object
-            if not reconstructed_data:
-                print(f"Warning: Batch {batch_idx} failed to reconstruct. Passing original blocks.")
-                new_super_blocks.extend(batch_blocks)
-                continue
+    # 2. Consolidate Positions
+    # All reconstructed paths share the same positions structure
+    super_positions = reconstructed_data[0]['positions']
 
-            # Convert list of arrays back into a dictionary {0: hap0, 1: hap1...}
-            super_hap_dict = {}
-            for idx, (_, hap, _) in enumerate(reconstructed_data):
-                super_hap_dict[idx] = hap
-                
-            # Positions are consistent across all founders in the stitch
-            super_positions = reconstructed_data[0][0]
-            
-            # Create new BlockResult
-            # We assume all sites in the stitched block are valid (mask=1)
-            # because they come from previously filtered blocks.
-            super_block = block_haplotypes.BlockResult(
-                super_positions,
-                super_hap_dict,
-                keep_flags=np.ones(len(super_positions), dtype=int)
+    # 3. Consolidate Flags
+    # We concatenate the flags from the original blocks to maintain site metadata
+    super_flags = []
+    for b in original_blocks:
+        if b.keep_flags is not None:
+            super_flags.extend(b.keep_flags)
+        else:
+            super_flags.extend(np.ones(len(b.positions), dtype=int))
+    super_flags = np.array(super_flags)
+
+    # 4. Create the Object
+    # Note: We do NOT store reads_count_matrix or probs_array here to save memory.
+    # They will be re-extracted from the global arrays if this Super-Block 
+    # is used in a subsequent hierarchy level.
+    super_block = block_haplotypes.BlockResult(
+        positions=super_positions,
+        haplotypes=super_haplotypes,
+        keep_flags=super_flags,
+        reads_count_matrix=None,
+        probs_array=None 
+    )
+    
+    return super_block
+
+def run_hierarchical_step(input_blocks, global_probs, global_sites,
+                          batch_size=10,
+                          use_hmm_linking=True,
+                          recomb_rate=5e-7,
+                          beam_width=200,
+                          max_founders=16,
+                          penalty_strength=1.0,
+                          recomb_penalty=15.0):
+    """
+    Performs one level of Hierarchical Assembly.
+    
+    Takes a list of N blocks, groups them into batches of 'batch_size',
+    and consolidates each batch into a single 'Super-Block'.
+    
+    Args:
+        input_blocks: List (or BlockResults) of BlockResult objects.
+        global_probs: (Samples x Sites x 3) Probability Matrix.
+        global_sites: (Sites,) Position Array.
+        batch_size: Number of blocks to group together (e.g. 10).
+        use_hmm_linking: If True, uses Deep HMM. If False, uses Standard/Naive.
+        recomb_rate: Per-site recombination rate for the HMM Mesh.
+        beam_width: Candidates to keep during Beam Search.
+        max_founders: Maximum number of haplotypes to keep in the Super-Block.
+        penalty_strength: BIC penalty multiplier for selection (Higher = fewer haps).
+        recomb_penalty: Fixed log-penalty for switching founders during Selection.
+        
+    Returns:
+        BlockResults: A new container with approx N/batch_size Super-Blocks.
+    """
+    
+    total_blocks = len(input_blocks)
+    num_batches = math.ceil(total_blocks / batch_size)
+    
+    output_super_blocks = []
+    
+    print(f"\n--- Starting Hierarchical Step ---")
+    print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
+    print(f"Batch Size: {batch_size} | Beam Width: {beam_width} | HMM: {use_hmm_linking}")
+    
+    # Iterate through batches
+    for b_idx in tqdm(range(num_batches), desc="Processing Batches"):
+        start_i = b_idx * batch_size
+        end_i = min(start_i + batch_size, total_blocks)
+        
+        # 1. Slice the Batch
+        # We wrap it in BlockResults to ensure it behaves like a container
+        portion = block_haplotypes.BlockResults(input_blocks[start_i:end_i])
+        
+        # Handle Edge Case: Single Block (Tail)
+        if len(portion) < 2:
+            # Cannot link a single block. 
+            # We just pass it through as a Super-Block (identity transformation)
+            # or we could try to append it to the previous super-block, but passing through is safer.
+            print(f"\n[Batch {b_idx}] Single block tail. Passing through.")
+            output_super_blocks.append(portion[0])
+            continue
+
+        # 2. Calculate Emissions (Required for both Linking and Selection)
+        # We calculate P(Data | Local_Hap) for every block in the batch
+        portion_emissions = block_linking_em.generate_all_block_likelihoods(
+            global_probs, global_sites, portion, num_processes=16
+        )
+        
+        # 3. Generate Transition Mesh
+        if use_hmm_linking:
+            # Deep HMM (Viterbi EM) - High Precision
+            mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
+                global_probs, global_sites, portion,
+                recomb_rate=recomb_rate,
+                use_standard_baum_welch=False # Use Viterbi EM for sharpness
+            )
+        else:
+            # Standard Linker - Faster, Robust for very small blocks
+            mesh = block_linking_em.generate_transition_probability_mesh(
+                global_probs, global_sites, portion,
+                use_standard_baum_welch=False
             )
             
-            new_super_blocks.append(super_block)
+        # 4. Beam Search (Pathfinding)
+        beam_results = beam_search_core.run_full_mesh_beam_search(
+            portion, mesh, beam_width=beam_width
+        )
+        
+        if not beam_results:
+            print(f"\n[Batch {b_idx}] Beam Search failed (no valid paths). Skipping.")
+            continue
             
-        self.current_blocks = new_super_blocks
-        print(f"=== Step Complete. New Block Count: {len(self.current_blocks)} ===\n")
-        return self.current_blocks
+        # 5. Founder Selection (Model Selection)
+        # Initialize FastMesh helper for the selection logic
+        fast_mesh = beam_search_core.FastMesh(portion, mesh)
+        
+        selected_founders = beam_search_core.select_founders_likelihood(
+            beam_results, 
+            portion_emissions, 
+            fast_mesh,
+            max_founders=max_founders,
+            recomb_penalty=recomb_penalty,
+            penalty_strength=penalty_strength,
+            do_refinement=True
+        )
+        
+        # 6. Reconstruction
+        reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
+            selected_founders, fast_mesh, portion
+        )
+        
+        # 7. Package into Super-Block
+        super_block = convert_reconstruction_to_superblock(reconstructed_data, portion)
+        
+        if super_block:
+            output_super_blocks.append(super_block)
+            
+    print(f"Hierarchical Step Complete. Produced {len(output_super_blocks)} Super-Blocks.")
+    
+    return block_haplotypes.BlockResults(output_super_blocks)
