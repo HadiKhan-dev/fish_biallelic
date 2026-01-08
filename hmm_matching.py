@@ -26,21 +26,14 @@ except ImportError:
     prange = range
 
 # =============================================================================
-# 1. NUMBA KERNELS (LOG-SPACE SCANS)
+# 1. OPTIMIZED NUMBA KERNELS (O(N^2) Single-Switch)
 # =============================================================================
 
-@njit(fastmath=False)
+@njit(fastmath=True)
 def log_add_exp(a, b):
     """
     Numerically stable log-add-exp helper for scalars.
     Calculates log(exp(a) + exp(b)).
-    
-    Args:
-        a (float): First log probability.
-        b (float): Second log probability.
-        
-    Returns:
-        float: The result of log(exp(a) + exp(b)).
     """
     if a == -np.inf: return b
     if b == -np.inf: return a
@@ -50,14 +43,17 @@ def log_add_exp(a, b):
     else:
         return b + math.log(1.0 + math.exp(a - b))
 
-@njit(parallel=True, fastmath=False)
+@njit(parallel=True, fastmath=True)
 def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definitions, incoming_priors, n_haps):
     """
     Performs the 'Micro-HMM' Forward Scan (Log-Sum-Exp) inside a single block.
     
+    OPTIMIZATION:
+    Uses the Single-Switch Assumption (at most one chromosome recombines per site).
+    This reduces complexity from O(Sites * Haps^4) to O(Sites * Haps^2).
+    
     Includes BURST LOGIC:
-    Maintains parallel 'Normal' and 'Burst' states to handle gene conversions/errors
-    without geometric likelihood decay.
+    Maintains parallel 'Normal' and 'Burst' states to handle gene conversions/errors.
     
     Args:
         ll_tensor (np.ndarray): Shape (Samples, K, Sites). Log-likelihood of data given state.
@@ -65,28 +61,22 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
         recomb_rate (float): Probability of recombination per base pair.
         state_definitions (np.ndarray): Shape (K, 2). Maps state index to (Hap1, Hap2).
         incoming_priors (np.ndarray): Shape (Samples, K). The accumulated probability 
-                                      mass arriving at the *start* of this block from previous blocks.
+                                      mass arriving at the *start* of this block.
         n_haps (int): Number of haplotypes in this block.
         
     Returns:
-        np.ndarray: End probabilities (Samples, K) representing the likelihood of the 
-                    entire path ending in specific states at the last site of the block.
+        np.ndarray: End probabilities (Samples, K).
     """
     n_samples, K, n_sites = ll_tensor.shape
     end_probs = np.full((n_samples, K), -np.inf, dtype=np.float64)
     min_prob = 1e-15 
     
     # --- BURST PARAMETERS ---
-    # Cost to start ignoring data. -8.0 ~= 1/3000 chance.
     GAP_OPEN = -10.0 
-    # Cost to continue ignoring data. 0.0 means decay is just uniform prob.
     GAP_EXTEND = 0.0 
-    # Log likelihood of random match (ln(1/3))
     UNIFORM_LOG_PROB = -1.0986 
-    
     BURST_STEP = UNIFORM_LOG_PROB + GAP_EXTEND
     
-    # Pre-calculate log terms for recombination penalty
     if n_haps > 1:
         log_N_minus_1 = math.log(float(n_haps - 1))
     else:
@@ -98,94 +88,77 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
         current_burst = np.empty(K, dtype=np.float64)
         
         for k in range(K):
-            # Prior flows into Normal state
             prior = incoming_priors[s, k]
             emission = ll_tensor[s, k, 0]
-            
-            # Start Normal: Prior + Emission
             current_normal[k] = prior + emission
-            # Start Burst: Prior + Open + Uniform
             current_burst[k] = prior + GAP_OPEN + UNIFORM_LOG_PROB
             
         # 2. SCAN: Propagate from Site 1 to N (Micro-Transition)
         for i in range(1, n_sites):
+            next_normal = np.empty(K, dtype=np.float64)
+            next_burst = np.empty(K, dtype=np.float64)
             
-            next_normal = np.full(K, -np.inf, dtype=np.float64)
-            next_burst = np.full(K, -np.inf, dtype=np.float64)
-            
-            # Calculate distance-dependent transition probs
+            # Costs
             dist_bp = positions[i] - positions[i-1]
             if dist_bp < 1: dist_bp = 1
             theta = float(dist_bp) * recomb_rate
             if theta > 0.5: theta = 0.5 
             
             if theta < min_prob:
-                log_switch = -np.inf
+                log_switch = -1e20
                 log_stay = 0.0
             else:
                 log_switch = math.log(theta)
                 log_stay = math.log(1.0 - theta)
             
-            # Transition Costs
-            cost_0 = 2.0 * log_stay # Stay in both lineages
+            cost_0 = 2.0 * log_stay
+            cost_1 = log_switch + log_stay - log_N_minus_1
+            # Cost 2 (Double Switch) is banned (-inf) under this assumption
             
-            if log_switch == -np.inf:
-                cost_1 = -np.inf
-                cost_2 = -np.inf
-            else:
-                # Switch in one lineage (normalized by choices)
-                cost_1 = log_switch + log_stay - log_N_minus_1
-                # Switch in both lineages
-                cost_2 = 2.0 * log_switch - 2.0 * log_N_minus_1
-
-            # Inner Loop: Transition from prev_site (k_prev) to curr_site (k_curr)
+            # --- OPTIMIZATION: PRE-CALCULATE ROW/COL AGGREGATES ---
+            # row_sums[h1] = Sum over h2 of P(h1, h2) -> Mass where Chr1 is h1
+            # col_sums[h2] = Sum over h1 of P(h1, h2) -> Mass where Chr2 is h2
+            
+            row_sums = np.full(n_haps, -np.inf, dtype=np.float64)
+            col_sums = np.full(n_haps, -np.inf, dtype=np.float64)
+            
+            for h1 in range(n_haps):
+                for h2 in range(n_haps):
+                    k = h1 * n_haps + h2
+                    val = current_normal[k]
+                    row_sums[h1] = log_add_exp(row_sums[h1], val)
+                    col_sums[h2] = log_add_exp(col_sums[h2], val)
+            
+            # 3. Update States
             for k_curr in range(K):
-                h1_curr = state_definitions[k_curr, 0]
-                h2_curr = state_definitions[k_curr, 1]
+                h1_curr = k_curr // n_haps
+                h2_curr = k_curr % n_haps
                 
-                # A. Calculate Incoming Mass from Recombination (Normal -> Normal)
-                # We use LOG_ADD_EXP (Sum-Product) for Haplotype Recombination 
-                # to preserve the "Forward Variable" definition.
-                total_incoming_recomb = -np.inf
+                # Incoming Mass Logic:
                 
-                for k_prev in range(K):
-                    h1_prev = state_definitions[k_prev, 0]
-                    h2_prev = state_definitions[k_prev, 1]
-                    
-                    dist = 0
-                    if h1_curr != h1_prev: dist += 1
-                    if h2_curr != h2_prev: dist += 1
-                    
-                    # Select Transition Cost
-                    trans_log_prob = cost_2
-                    if dist == 0: trans_log_prob = cost_0
-                    elif dist == 1: trans_log_prob = cost_1
-                    
-                    # Sum-Product from Previous Normal
-                    path_prob = current_normal[k_prev] + trans_log_prob
-                    total_incoming_recomb = log_add_exp(total_incoming_recomb, path_prob)
+                # 1. Stay: (h1, h2) -> (h1, h2)
+                term_stay = current_normal[k_curr] + cost_0
                 
-                # B. Update BURST State
-                # We use MAX (Viterbi) for Burst switching to match Standard Code behavior
-                # and avoid diluting the likelihood with the "Error" hypothesis.
+                # 2. Switch Chr 2: (h1, *) -> (h1, h2)
+                term_switch1_a = row_sums[h1_curr] + cost_1
                 
-                # 1. Extend previous burst (Burst -> Burst)
-                extend_path = current_burst[k_curr] + BURST_STEP
-                # 2. Open new burst from Recombined Normal (Normal -> Burst)
-                open_path = total_incoming_recomb + GAP_OPEN + BURST_STEP
+                # 3. Switch Chr 1: (*, h2) -> (h1, h2)
+                term_switch1_b = col_sums[h2_curr] + cost_1
                 
-                next_burst[k_curr] = max(extend_path, open_path)
+                # Combine (Sum-Product)
+                total_incoming = log_add_exp(term_stay, term_switch1_a)
+                total_incoming = log_add_exp(total_incoming, term_switch1_b)
                 
-                # C. Update NORMAL State
-                # 1. Continue from Recombined Normal (Normal -> Normal)
-                continue_path = total_incoming_recomb
-                # 2. Close previous Burst (Burst -> Normal)
+                # Burst Update (Viterbi/Max style)
+                extend = current_burst[k_curr] + BURST_STEP
+                open_path = total_incoming + GAP_OPEN + BURST_STEP
+                next_burst[k_curr] = max(extend, open_path)
+                
+                # Normal Update
                 close_path = current_burst[k_curr]
+                combined = max(total_incoming, close_path)
                 
-                combined_incoming = max(continue_path, close_path)
-                
-                # Add Emission
-                next_normal[k_curr] = combined_incoming + ll_tensor[s, k_curr, i]
+                next_normal[k_curr] = combined + ll_tensor[s, k_curr, i]
             
             # Swap buffers
             for k in range(K):
@@ -193,36 +166,21 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
                 current_burst[k] = next_burst[k]
         
         # Save final state at last site
-        # Use MAX to select the best explanation (Burst vs Normal)
         for k in range(K):
             end_probs[s, k] = max(current_normal[k], current_burst[k])
             
     return end_probs
 
-@njit(parallel=True, fastmath=False)
+@njit(parallel=True, fastmath=True)
 def scan_distance_aware_backward(ll_tensor, positions, recomb_rate, state_definitions, incoming_priors, n_haps):
     """
-    Performs the 'Micro-HMM' Backward Scan (Log-Sum-Exp) inside a single block.
-    
-    Includes BURST LOGIC symmetric to the Forward scan.
-    
-    Args:
-        ll_tensor (np.ndarray): Shape (Samples, K, Sites).
-        positions (np.ndarray): Genomic positions.
-        recomb_rate (float): Recombination rate.
-        state_definitions (np.ndarray): State mapping.
-        incoming_priors (np.ndarray): Shape (Samples, K). Probabilities from the *next* block.
-        n_haps (int): Number of haplotypes.
-        
-    Returns:
-        np.ndarray: Start probabilities (Samples, K) representing the likelihood of 
-                    all future data given the state at Site 0.
+    Optimized Backward Scan (O(Sites * Haps^2)).
+    Assumes Single-Switch Only.
     """
     n_samples, K, n_sites = ll_tensor.shape
     start_probs = np.full((n_samples, K), -np.inf, dtype=np.float64)
     min_prob = 1e-15
     
-    # --- BURST PARAMETERS ---
     GAP_OPEN = -10.0 
     GAP_EXTEND = 0.0 
     UNIFORM_LOG_PROB = -1.0986 
@@ -234,92 +192,75 @@ def scan_distance_aware_backward(ll_tensor, positions, recomb_rate, state_defini
         log_N_minus_1 = 0.0
     
     for s in prange(n_samples):
-        # 1. INJECTION: Site N gets Emission + Incoming Prior (from Next Block)
-        # We assume the "Next Block" expects a valid state, so we close any bursts here.
+        # 1. Init (Site N)
         next_normal = np.empty(K, dtype=np.float64)
         next_burst = np.empty(K, dtype=np.float64)
         
         for k in range(K):
-            total_future = ll_tensor[s, k, n_sites - 1] + incoming_priors[s, k]
-            next_normal[k] = total_future
-            # In backward pass, "Burst" at N means we emit Uniform at N and go to Future.
+            val = ll_tensor[s, k, n_sites - 1] + incoming_priors[s, k]
+            next_normal[k] = val
             next_burst[k] = UNIFORM_LOG_PROB + incoming_priors[s, k]
             
-        # 2. SCAN: Propagate from Site N-1 down to 0
+        # 2. Scan Backwards
         for i in range(n_sites - 2, -1, -1):
-            current_normal_scratch = np.full(K, -np.inf, dtype=np.float64)
-            current_burst_scratch = np.full(K, -np.inf, dtype=np.float64)
+            curr_norm_scratch = np.empty(K, dtype=np.float64)
+            curr_burst_scratch = np.empty(K, dtype=np.float64)
             
-            # Distance logic (using distance to i+1)
             dist_bp = positions[i+1] - positions[i]
             if dist_bp < 1: dist_bp = 1
             theta = float(dist_bp) * recomb_rate
             if theta > 0.5: theta = 0.5
             
             if theta < min_prob:
-                log_switch = -np.inf
+                log_switch = -1e20
                 log_stay = 0.0
             else:
                 log_switch = math.log(theta)
                 log_stay = math.log(1.0 - theta)
             
             cost_0 = 2.0 * log_stay
-            if log_switch == -np.inf:
-                cost_1 = -np.inf
-                cost_2 = -np.inf
-            else:
-                cost_1 = log_switch + log_stay - log_N_minus_1
-                cost_2 = 2.0 * log_switch - 2.0 * log_N_minus_1
+            cost_1 = log_switch + log_stay - log_N_minus_1
+            # Double switch forbidden
             
-            # Transition: From Current(i) to Next(i+1)
-            for k_curr in range(K): 
-                h1_curr = state_definitions[k_curr, 0]
-                h2_curr = state_definitions[k_curr, 1]
+            # --- AGGREGATES (Future States) ---
+            row_sums = np.full(n_haps, -np.inf, dtype=np.float64)
+            col_sums = np.full(n_haps, -np.inf, dtype=np.float64)
+            
+            for h1 in range(n_haps):
+                for h2 in range(n_haps):
+                    k = h1 * n_haps + h2
+                    val = next_normal[k]
+                    row_sums[h1] = log_add_exp(row_sums[h1], val)
+                    col_sums[h2] = log_add_exp(col_sums[h2], val)
+            
+            for k_curr in range(K):
+                h1_curr = k_curr // n_haps
+                h2_curr = k_curr % n_haps
                 
-                # A. Calculate Flow to Future Normal (Recombination allowed)
-                total_to_future_normal = -np.inf
+                # Flow FROM Current TO Future
+                term_stay = next_normal[k_curr] + cost_0
+                term_switch1_a = row_sums[h1_curr] + cost_1
+                term_switch1_b = col_sums[h2_curr] + cost_1
                 
-                for k_next in range(K):
-                    h1_next = state_definitions[k_next, 0]
-                    h2_next = state_definitions[k_next, 1]
-                    
-                    dist = 0
-                    if h1_curr != h1_next: dist += 1
-                    if h2_curr != h2_next: dist += 1
-                    
-                    trans_log_prob = cost_2
-                    if dist == 0: trans_log_prob = cost_0
-                    elif dist == 1: trans_log_prob = cost_1
-                    
-                    path_prob = next_normal[k_next] + trans_log_prob
-                    total_to_future_normal = log_add_exp(total_to_future_normal, path_prob)
+                total_to_future = log_add_exp(term_stay, term_switch1_a)
+                total_to_future = log_add_exp(total_to_future, term_switch1_b)
                 
-                # B. Update BURST State (at i)
-                # Use MAX (Viterbi)
-                
-                # 1. Extend to Future Burst (Burst i -> Burst i+1)
-                extend_path = next_burst[k_curr] + BURST_STEP 
-                # 2. Close to Future Normal (Burst i -> Normal i+1)
+                # Burst Logic
+                extend = next_burst[k_curr] + BURST_STEP 
                 close_path = next_normal[k_curr]
+                curr_burst_scratch[k_curr] = max(extend, close_path)
                 
-                current_burst_scratch[k_curr] = max(extend_path, close_path)
-                
-                # C. Update NORMAL State (at i)
-                # 1. Recombine to Future Normal (Normal i -> Normal i+1)
-                recomb_path = total_to_future_normal 
-                # 2. Open to Future Burst (Normal i -> Burst i+1)
+                # Normal Logic
+                recomb_path = total_to_future 
                 open_path = next_burst[k_curr] + GAP_OPEN + BURST_STEP
+                combined = max(recomb_path, open_path)
                 
-                combined_future = max(recomb_path, open_path)
-                
-                # Add Emission at current site i
-                current_normal_scratch[k_curr] = combined_future + ll_tensor[s, k_curr, i]
+                curr_norm_scratch[k_curr] = combined + ll_tensor[s, k_curr, i]
             
             for k in range(K):
-                next_normal[k] = current_normal_scratch[k]
-                next_burst[k] = current_burst_scratch[k]
+                next_normal[k] = curr_norm_scratch[k]
+                next_burst[k] = curr_burst_scratch[k]
         
-        # Save state at Site 0
         for k in range(K):
             start_probs[s, k] = max(next_normal[k], next_burst[k])
             
