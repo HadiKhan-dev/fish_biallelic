@@ -272,7 +272,12 @@ def run_backward_pass_guided(fast_mesh, forward_history, beam_width=100, weight_
         for path_indices, path_bwd_score, _ in beam:
             
             # The node we are immediately connecting to is the last one added to the path list
+            # which corresponds to block (curr_block + 1)
             prev_node_idx = path_indices[-1] 
+            
+            # We want to calculate the 'Transition Cost' of adding node 'u' to this path.
+            # This includes the immediate link (u -> prev_node)
+            # AND all long-range links (u -> node_at_curr+2, u -> node_at_curr+3...)
             
             # Vectorized calculation for all 'u' in curr_block
             transition_total = np.zeros(n_curr, dtype=np.float32)
@@ -294,12 +299,14 @@ def run_backward_pass_guided(fast_mesh, forward_history, beam_width=100, weight_
                     transition_total += (mat[:, future_node] * weight)
 
             # 3. Total Score for Ranking
+            # Total = Forward_History(u) + Path_Backward_Accumulated + New_Transitions
             rank_scores = fwd_scores_loc + path_bwd_score + transition_total
             
             # 4. Filter & Add Candidates
             valid_u = np.where(rank_scores > -1e20)[0]
             
             # Optimization: Only take top K extensions for this specific path 
+            # to avoid explosion before the diversity filter
             if len(valid_u) > 20:
                 top_local = valid_u[np.argpartition(rank_scores[valid_u], -20)[-20:]]
                 valid_u = top_local
@@ -356,6 +363,11 @@ def reconstruct_haplotypes_from_beam(beam_results, fast_mesh, haps_data):
     Converts the dense indices from the beam search back into 
     full genomic data arrays.
     
+    Args:
+        beam_results: Output from run_full_mesh_beam_search.
+        fast_mesh: FastMesh object used during search.
+        haps_data: Original BlockResults list.
+        
     Returns:
         List of dicts with keys 'score', 'positions', 'haplotype', 'path_indices'.
     """
@@ -384,7 +396,7 @@ def reconstruct_haplotypes_from_beam(beam_results, fast_mesh, haps_data):
     return reconstructed
 
 # =============================================================================
-# 4. FOUNDER SELECTION LOGIC (Merged)
+# 4. FOUNDER SELECTION LOGIC (Overshoot & Prune)
 # =============================================================================
 
 def precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh):
@@ -462,7 +474,6 @@ def refine_selection_by_swapping(selected_indices, full_tensor, num_total_candid
         best_swap = None
         best_swap_gain = 0.0
         
-        # Try removing each current founder
         for i, remove_idx in enumerate(current_indices):
             temp_set = current_indices[:i] + current_indices[i+1:]
             
@@ -487,29 +498,35 @@ def refine_selection_by_swapping(selected_indices, full_tensor, num_total_candid
             
     return current_indices, current_score
 
-def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty, complexity_cost_per_founder):
+def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty, 
+                              complexity_cost_per_founder, force_prune_to=None):
     """
     Backward Elimination: Iteratively tries to remove the least useful founder
     from the set to improve the BIC score.
+    
+    Args:
+        force_prune_to (int): If set, forces deletion of least useful founders
+                              until this count is reached, ignoring BIC score.
     """
     current_indices = list(selected_indices)
     
-    # Calculate initial state
+    # Init Scores
     current_ll = calculate_score_for_subset(current_indices, full_tensor, recomb_penalty)
     k = len(current_indices)
     current_bic = (k * complexity_cost_per_founder) - (2 * current_ll)
     
-    improved = True
-    iteration = 0
-    
     print("\n--- Starting Pruning Refinement (Backward Elimination) ---")
     
-    while improved and len(current_indices) > 1:
-        improved = False
-        iteration += 1
+    while True:
+        k = len(current_indices)
+        if k <= 1: break
+        
+        # Determine Mode: "Forced Pruning" or "BIC Optimization"
+        forced_mode = (force_prune_to is not None) and (k > force_prune_to)
         
         best_removal_idx = -1
         best_new_bic = float('inf')
+        min_ll_loss = float('inf') # For forced mode
         
         # Try removing each founder
         for i, idx_to_remove in enumerate(current_indices):
@@ -520,46 +537,59 @@ def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty, c
             trial_ll = calculate_score_for_subset(trial_set, full_tensor, recomb_penalty)
             
             # Calculate BIC (k is now k-1)
-            new_penalty = (len(current_indices) - 1) * complexity_cost_per_founder
+            new_penalty = (k - 1) * complexity_cost_per_founder
             trial_bic = new_penalty - (2 * trial_ll)
             
-            if trial_bic < current_bic:
-                if trial_bic < best_new_bic:
-                    best_new_bic = trial_bic
-                    best_removal_idx = idx_to_remove
-        
-        if best_new_bic < current_bic:
-            diff = current_bic - best_new_bic
-            print(f"  Iter {iteration}: Removed Founder {best_removal_idx} (BIC Improved by {diff:.2f})")
+            # Track best BIC
+            if trial_bic < best_new_bic:
+                best_new_bic = trial_bic
+                if not forced_mode: best_removal_idx = idx_to_remove
             
+            # Track minimum Loss (for forced mode)
+            ll_loss = current_ll - trial_ll
+            if ll_loss < min_ll_loss:
+                min_ll_loss = ll_loss
+                if forced_mode: best_removal_idx = idx_to_remove
+
+        # Decision Logic
+        should_prune = False
+        reason = ""
+        
+        if forced_mode:
+            should_prune = True
+            reason = f"Forced (Count {k} > {force_prune_to})"
+        elif best_new_bic < current_bic:
+            should_prune = True
+            reason = f"BIC Improved ({current_bic:.1f} -> {best_new_bic:.1f})"
+            
+        if should_prune:
+            print(f"  Removed Founder {best_removal_idx} [{reason}]")
             current_indices.remove(best_removal_idx)
-            current_bic = best_new_bic
-            improved = True
+            
+            # Update current state vars for next loop
+            new_ll = calculate_score_for_subset(current_indices, full_tensor, recomb_penalty)
+            current_ll = new_ll
+            current_bic = ((k-1) * complexity_cost_per_founder) - (2 * new_ll)
         else:
             print("  Converged. No deletions improve the BIC.")
+            break
             
     return current_indices
 
 def select_founders_likelihood(beam_results, block_emissions, fast_mesh, 
-                             max_founders=16, 
+                             max_founders=12, 
                              recomb_penalty=10.0, 
-                             penalty_strength=1.0,
-                             do_refinement=True):
+                             complexity_penalty_scale=0.1, # RENAMED
+                             do_refinement=True,
+                             overshoot_limit=30,
+                             use_standard_bic=False): # NEW FLAG
     """
-    Selects the optimal set of founders using Forward Selection (Greedy + BIC),
-    Swap Refinement, and Backward Pruning.
+    Overshoot & Prune Strategy with Configurable Penalty Scaling.
     
     Args:
-        beam_results: Output of run_full_mesh_beam_search.
-        block_emissions: The StandardBlockLikelihoods object used in the HMM.
-        fast_mesh: FastMesh object for index mapping.
-        max_founders: Maximum K to try.
-        recomb_penalty: Cost for samples to switch between founders (global).
-        penalty_strength: Scaling factor for BIC complexity (controls sparsity).
-        do_refinement: Whether to run the swap and prune steps.
-    
-    Returns:
-        List of selected (path, score) tuples.
+        complexity_penalty_scale: Multiplier for the complexity term.
+                                  For Linear (Default): Min LogLik gain per sample.
+        use_standard_bic: If True, uses log(N) scaling. If False, uses Linear N scaling.
     """
     
     full_tensor = precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh)
@@ -567,20 +597,31 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
     num_candidates = len(beam_results)
     num_samples, _, num_blocks = full_tensor.shape
     
-    log_n = math.log(num_samples * num_blocks)
-    complexity_cost_per_founder = log_n * penalty_strength * num_blocks
+    # --- COST FORMULA ---
+    if use_standard_bic:
+        # Standard BIC: k * log(n) * scale
+        log_n = math.log(num_samples * num_blocks)
+        complexity_cost_per_founder = log_n * complexity_penalty_scale * num_blocks
+        cost_type = "Standard BIC (Log)"
+    else:
+        # Linear Loss: k * n * scale
+        # Prevents founder explosion with large sample counts
+        complexity_cost_per_founder = complexity_penalty_scale * num_samples * num_blocks
+        cost_type = "Linear Loss (N)"
+        
+    print(f"Selection Cost per Founder: {complexity_cost_per_founder:.1f} [{cost_type}, Scale={complexity_penalty_scale}]")
     
     selected_indices = []
     current_best_bic = float('inf')
     
-    print("\n--- Starting Forward Selection (Greedy) ---")
+    print(f"\n--- Starting Forward Selection (Attempting up to {overshoot_limit}) ---")
     
-    for k in range(max_founders):
-        
+    for k in range(overshoot_limit):
         best_new_idx = -1
         best_new_score = -np.inf
         
         remaining = [x for x in range(num_candidates) if x not in selected_indices]
+        if not remaining: break
         
         for cand_idx in remaining:
             trial_set = selected_indices + [cand_idx]
@@ -594,31 +635,28 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
         penalty = num_params * complexity_cost_per_founder
         new_bic = penalty - (2 * best_new_score)
         
-        print(f"Round {k+1}: Adding Cand {best_new_idx} -> LL {best_new_score:.1f}, BIC {new_bic:.1f}")
+        print(f"  Round {k+1}: Cand {best_new_idx} -> BIC {new_bic:.1f} (Current Best: {current_best_bic:.1f})")
         
+        # Stop if BIC stops improving
         if new_bic < current_best_bic:
             current_best_bic = new_bic
             selected_indices.append(best_new_idx)
-            print(f"  >> ACCEPTED. (Founder {len(selected_indices)})")
+            print(f"    >> ACCEPTED.")
         else:
-            print(f"  >> REJECTED. Improvement didn't justify complexity.")
+            print(f"    >> REJECTED. BIC did not improve.")
             break
     
+    # 2. SWAP
     if do_refinement and len(selected_indices) > 1:
-        # Phase 1: Swap
         selected_indices, final_score = refine_selection_by_swapping(
             selected_indices, full_tensor, num_candidates, recomb_penalty
         )
         
-        # Phase 2: Prune
+        # 3. FORCE PRUNE & BIC PRUNE
         selected_indices = refine_selection_by_pruning(
-            selected_indices, full_tensor, recomb_penalty, complexity_cost_per_founder
+            selected_indices, full_tensor, recomb_penalty, complexity_cost_per_founder,
+            force_prune_to=max_founders
         )
-        
-        final_score = calculate_score_for_subset(selected_indices, full_tensor, recomb_penalty)
-        final_penalty = len(selected_indices) * complexity_cost_per_founder
-        final_bic = final_penalty - (2 * final_score)
-        print(f"Final Refined BIC: {final_bic:.1f}")
 
     selected_founders = []
     for idx in selected_indices:

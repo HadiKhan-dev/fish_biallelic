@@ -154,10 +154,7 @@ all_paths = []
 
 for long_hap in haplotype_data:
     path = analysis_utils.map_haplotype_to_blocks(long_hap, test_haps) 
-    all_paths.append(path)    
-
-for i in range(len(all_paths)):
-    all_paths[i] = all_paths[i][40:50]       
+    all_paths.append(path)          
 #%%
 start = time.time()
 final_mesh = block_linking_em.generate_transition_probability_mesh(
@@ -233,111 +230,49 @@ portion_hmm_mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
 print("Deep HMM Time:",time.time()-start)
 
 #%%
-# 1. Configuration
-BEAM_WIDTH = 100
-
-# Optional: Decay function to trust recent blocks more than distant ones
-# e.g., weight = 1.0 / sqrt(gap)
-def gap_weight_decay(gap):
-    return 1.0 / math.sqrt(gap)
-
-beam_results_hmm = beam_search_core.run_full_mesh_beam_search(
-    portion, 
-    portion_hmm_mesh, 
-    beam_width=BEAM_WIDTH,
-    weight_decay_func=gap_weight_decay)
-
-beam_results_std = beam_search_core.run_full_mesh_beam_search(
-    portion, 
-    portion_standard_mesh, 
-    beam_width=BEAM_WIDTH,
-    weight_decay_func=gap_weight_decay)
-
-# 1. Select the Best Set of Founders
-# We use the function merged into beam_search_core
-# 'all_block_emissions_testing' was calculated earlier in main.py
-selected_founders_bic = beam_search_core.select_founders_likelihood(
-    beam_results_hmm,                # The 100 candidate paths from Beam Search
-    portion_emissions,     # The raw data likelihoods (StandardBlockLikelihoods)
-    beam_search_core.FastMesh(portion, portion_hmm_mesh), # Helper for index mapping
-    max_founders=10,                 # Max number of haplotypes to keep
-    recomb_penalty=15.0,             # Global recombination penalty
-    penalty_strength=1.0,            # Tuning param: Higher = fewer founders selected
-    do_refinement=True               # Run swap refinement
-)
-
-print(f"\nSelected {len(selected_founders_bic)} Optimal Founders.")
-#%%
-# =============================================================================
-# FINAL RECONSTRUCTION & SUPER-BLOCK CREATION
-# =============================================================================
-
-print("\n=== Reconstructing Final Long Haplotypes ===")
-
-# 2. Re-initialize FastMesh (needed for Index -> Key mapping during reconstruction)
-reconstruction_mesh = beam_search_core.FastMesh(portion, portion_hmm_mesh)
-
-# 3. Reconstruct the Data Arrays
-# This creates a list of dicts: {'haplotype': array, 'positions': array, ...}
-final_reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
-    selected_founders_bic, 
-    reconstruction_mesh, 
-    portion
-)
-
-print(f"Successfully reconstructed {len(final_reconstructed_data)} full-length haplotypes.")
-
-# 4. Create the 'Super Block' (For the next stage of hierarchy)
-# We consolidate these long haplotypes into a single BlockResult object.
-
-# A. Consolidate Haplotypes into a Dict
-super_haplotypes = {}
-for i, data in enumerate(final_reconstructed_data):
-    # Key is just an integer ID (0, 1, 2...)
-    super_haplotypes[i] = data['haplotype'] 
-
-# B. Consolidate Positions
-# All reconstructed paths share the same positions structure
-super_positions = final_reconstructed_data[0]['positions']
-
-# C. Consolidate Flags
-# Concatenate flags from original blocks
-super_flags = []
-for b in portion:
-    if b.keep_flags is not None:
-        super_flags.extend(b.keep_flags)
-    else:
-        super_flags.extend(np.ones(len(b.positions), dtype=int))
-super_flags = np.array(super_flags)
-
-# D. Create the Object
-super_block = block_haplotypes.BlockResult(
-    positions=super_positions,
-    haplotypes=super_haplotypes,
-    reads_count_matrix=None, # We don't store raw reads at the super-level
-    keep_flags=super_flags,
-    probs_array=None 
-)
-
-print("\n=== Super-Block Created ===")
-print(f"Range: {super_positions[0]} - {super_positions[-1]}")
-print(f"Total Sites: {len(super_positions)}")
-print(f"Haplotypes: {len(super_haplotypes)}")
-
-#%%
 start = time.time()
 super_blocks_level_1 = hierarchical_assembly.run_hierarchical_step(
     initial_block_results,
     global_probs,
     global_sites,
     batch_size=10,
-    recomb_rate=5e-7,
-    penalty_strength=1.0 # Lower penalty for micro-assembly
+    recomb_rate=5e-8,
+    max_founders=16,
+    complexity_penalty_scale=0.25 # Lower penalty for micro-assembly
 )
 print(f"Time for 12.5% of Chr1: {time.time()-start}")
 #%%
+start = time.time()
+super_blocks_level_2 = hierarchical_assembly.run_hierarchical_step(
+    super_blocks_level_1,
+    global_probs,
+    global_sites,
+    batch_size=10,
+    use_hmm_linking=True,
+    recomb_rate=5e-8,          # KEEP CONSTANT (Biologically accurate)
+    beam_width=200,
+    max_founders=16,
+    recomb_penalty=15.0,       
+    complexity_penalty_scale=0.1      
+)
+print(f"Time for 12.5% of Chr1, 2nd round: {time.time()-start}")
 
-
+#%%
+start = time.time()
+super_blocks_level_3 = hierarchical_assembly.run_hierarchical_step(
+    super_blocks_level_2,
+    global_probs,
+    global_sites,
+    batch_size=10,
+    use_hmm_linking=True,
+    recomb_rate=5e-8,          # KEEP CONSTANT (Biologically accurate)
+    beam_width=100,
+    max_founders=16,
+    recomb_penalty=20.0,       
+    complexity_penalty_scale=0.1       
+)
+print(f"Time for 12.5% of Chr1, 3rd round: {time.time()-start}")
+#%%
 
 
 
