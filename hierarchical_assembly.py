@@ -2,23 +2,23 @@ import numpy as np
 import math
 import time
 from tqdm import tqdm
-from multiprocess import Pool
 
 # Import your specific modules
 import block_haplotypes
-import block_linking_em
+import block_linking_em as block_linking
 import hmm_matching
 import beam_search_core
-import analysis_utils
 
 # =============================================================================
-# 1. PROXY MANAGEMENT
+# DATA HELPERS
 # =============================================================================
 
-def create_downsampled_proxy(block, max_sites=5000):
+def create_downsampled_proxy(block, max_sites=1000):
     """
     Creates a lightweight 'Proxy' of a BlockResult.
-    Downsamples sites to ensure HMM tensors fit in RAM.
+    Returns the original block if it's small enough.
+    
+    Correctly slices internal arrays to maintain consistency.
     """
     total_sites = len(block.positions)
     
@@ -27,7 +27,7 @@ def create_downsampled_proxy(block, max_sites=5000):
         
     stride = math.ceil(total_sites / max_sites)
     
-    # Slice Data
+    # Force copy and contiguous to avoid view issues
     new_pos = np.ascontiguousarray(block.positions[::stride])
     
     new_haps = {}
@@ -41,25 +41,31 @@ def create_downsampled_proxy(block, max_sites=5000):
         new_flags = np.ascontiguousarray(block.keep_flags[::stride])
     else:
         new_flags = None
-        
-    # Check consistency
-    if new_flags is not None:
-        assert len(new_pos) == len(new_flags)
 
-    # Note: We do NOT store reads/probs here to save memory. 
-    # They are re-extracted using the sparse positions in the local generators below.
+    # Optional: Slice reads/probs if they exist on the block object
+    # (Though usually we fetch from global arrays in the pipeline)
+    new_reads = None
+    if block.reads_count_matrix is not None:
+        new_reads = np.ascontiguousarray(block.reads_count_matrix[:, ::stride, :])
+        
+    new_probs = None
+    if block.probs_array is not None:
+        new_probs = np.ascontiguousarray(block.probs_array[:, ::stride, :])
+
     proxy = block_haplotypes.BlockResult(
         positions=new_pos,
         haplotypes=new_haps,
         keep_flags=new_flags,
-        reads_count_matrix=None,
-        probs_array=None
+        reads_count_matrix=new_reads,
+        probs_array=new_probs
     )
     
     return proxy
 
 def convert_reconstruction_to_superblock(reconstructed_data, original_blocks):
-    """Packages beam search result into a new BlockResult."""
+    """
+    Packages reconstruction results into a BlockResult (Super-Block).
+    """
     if not reconstructed_data:
         return None
 
@@ -88,130 +94,7 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks):
     return super_block
 
 # =============================================================================
-# 2. LOCAL GENERATORS (Fixing the Index Error)
-# =============================================================================
-
-def extract_sparse_data(global_probs, global_sites, block_positions):
-    """
-    Correctly extracts non-contiguous (strided) data from global arrays.
-    Replaces analysis_utils.get_sample_data_at_sites_multiple for proxies.
-    """
-    # Find indices of the block's positions in the global site array
-    # Assumes both are sorted
-    indices = np.searchsorted(global_sites, block_positions)
-    
-    # Safety check: ensure we didn't go out of bounds (if block_pos not in global)
-    # In a clean pipeline, this shouldn't happen, but good to clamp
-    indices = np.clip(indices, 0, len(global_sites) - 1)
-    
-    # Fancy Indexing to get specific columns
-    # Shape: (Samples, Len_Block_Pos, 3)
-    return global_probs[:, indices, :]
-
-def calculate_proxy_emissions(global_probs, global_sites, proxies, num_processes=16):
-    """
-    Generates StandardBlockLikelihoods for proxies using correct sparse extraction.
-    """
-    tasks = []
-    params = {
-        'log_likelihood_base': math.e, 
-        'robustness_epsilon': 1e-2
-    }
-    
-    for block in proxies:
-        # Extract data correctly for strided positions
-        block_samples = extract_sparse_data(global_probs, global_sites, block.positions)
-        tasks.append((block_samples, block, params))
-        
-    if num_processes > 1 and len(tasks) > 1:
-        with Pool(num_processes) as pool:
-            # Call the worker from the imported module
-            results = pool.map(block_linking_em._worker_calculate_single_block_likelihood, tasks)
-    else:
-        results = list(map(block_linking_em._worker_calculate_single_block_likelihood, tasks))
-        
-    return block_linking_em.StandardBlockLikelihoods(results)
-
-def calculate_proxy_mesh(global_probs, global_sites, proxies, recomb_rate, num_processes=16):
-    """
-    Generates Transition Mesh for proxies using correct sparse extraction.
-    Re-implements the HMM driver loop to handle pre-calculated sparse data.
-    """
-    # 1. Pre-calculate Viterbi Emissions (P(Data|State))
-    # We use the worker from hmm_matching
-    tasks = []
-    params = {'robustness_epsilon': 1e-2}
-    
-    for block in proxies:
-        block_samples = extract_sparse_data(global_probs, global_sites, block.positions)
-        tasks.append((block_samples, block, params))
-        
-    if num_processes > 1 and len(tasks) > 1:
-        with Pool(num_processes) as pool:
-            viterbi_emissions_list = pool.map(hmm_matching._worker_generate_viterbi_emissions, tasks)
-    else:
-        viterbi_emissions_list = list(map(hmm_matching._worker_generate_viterbi_emissions, tasks))
-    
-    # 2. Run Mesh Generation (Gap Workers)
-    # We need to calculate transitions for all gaps.
-    max_gap = len(proxies) - 1
-    gaps = list(range(1, max_gap + 1))
-    
-    # We define a local worker to run the HMM loop on pre-calculated data
-    # to avoid pickling huge global arrays
-    
-    results_map = {}
-    
-    # Prepare data for all gaps (shared)
-    # We run the loop serially or parallel over gaps
-    # Since we already have emissions, the HMM is fast.
-    
-    # Initialize transitions (Uniform)
-    # Note: We calculate this once, but it changes per gap inside the loop? 
-    # No, initial_transition_probabilities generates for specific gap.
-    
-    def _local_gap_worker(gap):
-        # 2a. Initial Trans
-        current_trans = block_linking_em.initial_transition_probabilities(proxies, gap)
-        
-        # 2b. EM Loop
-        # We reuse the logic from hmm_matching but pass our pre-calculated emissions
-        prev_ll = -np.inf
-        for it in range(10): # Max Iter
-            lr = max(1.0 * (0.9**it), 0.1)
-            
-            # E-Step
-            S_res, R_res, curr_ll = hmm_matching.global_forward_backward_pass(
-                viterbi_emissions_list, proxies, current_trans, gap, recomb_rate
-            )
-            
-            # M-Step
-            new_trans = hmm_matching.update_transitions_layered_hmm(
-                S_res, R_res, proxies, current_trans, gap, use_standard_baum_welch=False
-            )
-            
-            # Smooth
-            current_trans = analysis_utils.smoothen_probs_vectorized(current_trans, new_trans, lr)
-            
-            # Converge
-            if prev_ll != -np.inf and abs(curr_ll - prev_ll) / abs(prev_ll) < 1e-4:
-                break
-            prev_ll = curr_ll
-            
-        return current_trans
-
-    # Run gaps in parallel
-    if num_processes > 1:
-        with Pool(num_processes) as pool:
-            results = pool.map(_local_gap_worker, gaps)
-    else:
-        results = list(map(_local_gap_worker, gaps))
-        
-    mesh_dict = dict(zip(gaps, results))
-    return block_linking_em.TransitionMesh(mesh_dict)
-
-# =============================================================================
-# 3. MAIN RUNNER
+# MAIN DRIVER
 # =============================================================================
 
 def run_hierarchical_step(input_blocks, global_probs, global_sites,
@@ -223,19 +106,29 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           beam_width=200,
                           # Selection Parameters
                           max_founders=12,
-                          complexity_penalty_scale=0.1,
-                          recomb_penalty=15.0,
+                          complexity_penalty_scale=0.1, 
+                          recomb_penalty=None,        # Fixed value OR...
+                          switch_cost_scale=0.075,    # ...Scaling Factor
                           use_standard_bic=False,
                           # Memory Safety
-                          max_sites_for_linking=5000): 
+                          max_sites_for_linking=1000): 
+    """
+    Performs one level of Hierarchical Assembly.
+    Includes Proxy Logic and Pre-Calculated Emissions to prevent OOM.
+    
+    Args:
+        input_blocks: List of BlockResult objects.
+        global_probs: (Samples x Sites x 3) Global Data.
+        global_sites: (Sites,) Global Positions.
+    """
     
     total_blocks = len(input_blocks)
     num_batches = math.ceil(total_blocks / batch_size)
+    
     output_super_blocks = []
     
     print(f"\n--- Starting Hierarchical Step ---")
     print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
-    print(f"Params: Batch={batch_size} | HMM={use_hmm_linking} | Scale={complexity_penalty_scale}")
     
     for b_idx in tqdm(range(num_batches), desc="Processing Batches"):
         start_i = b_idx * batch_size
@@ -248,32 +141,45 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             output_super_blocks.append(original_portion[0])
             continue
 
+        # --- DYNAMIC PENALTY ---
+        avg_snps = np.mean([len(b.positions) for b in original_portion])
+        if switch_cost_scale is not None:
+            current_recomb_penalty = avg_snps * switch_cost_scale
+        else:
+            current_recomb_penalty = recomb_penalty if recomb_penalty is not None else 15.0
+
         # 1. Create Proxies
+        # (Downsamples only if block is large, otherwise returns original)
         proxy_list = []
         for b in original_portion:
             proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
         portion_proxy = block_haplotypes.BlockResults(proxy_list)
 
-        # 2. Emissions on Proxy (Using LOCAL extractor)
-        portion_emissions = calculate_proxy_emissions(
-            global_probs, global_sites, portion_proxy, num_processes=16
-        )
-        
-        # 3. Mesh on Proxy (Using LOCAL extractor/loop)
+        # 2. Generate Mesh
         if use_hmm_linking:
-            mesh = calculate_proxy_mesh(
-                global_probs, global_sites, portion_proxy, recomb_rate, num_processes=16
+            # OOM FIX: Pre-calculate Viterbi Emissions in the main process
+            # This prevents passing the massive 'global_probs' to the 16 worker processes.
+            # hmm_matching.generate_viterbi_block_emissions now handles sparse proxies natively.
+            viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
+                global_probs, global_sites, portion_proxy, num_processes=16
+            )
+            print("Mesh Stage")
+            # Generate Mesh using pre-calculated emissions
+            # We pass None for raw data to ensure no pickling happens
+            mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
+                None, None, portion_proxy, 
+                recomb_rate=recomb_rate, 
+                use_standard_baum_welch=False,
+                precalculated_viterbi_emissions=viterbi_emissions
             )
         else:
-            # Standard linking handles proxies poorly if not updated, 
-            # but usually we use HMM. If standard needed, implement similar local wrapper.
-            # Fallback to HMM logic or raise warning.
-            print("Warning: Standard Linking not optimized for proxies. Using HMM.")
-            mesh = calculate_proxy_mesh(
-                global_probs, global_sites, portion_proxy, recomb_rate, num_processes=16
+            # Standard Linker
+            mesh = block_linking.generate_transition_probability_mesh(
+                global_probs, global_sites, portion_proxy,
+                use_standard_baum_welch=True
             )
             
-        # 4. Beam on Proxy
+        # 3. Beam Search on Proxy
         beam_results = beam_search_core.run_full_mesh_beam_search(
             portion_proxy, mesh, beam_width=beam_width
         )
@@ -282,26 +188,33 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             print(f"\n[Batch {b_idx}] Beam Search failed. Skipping.")
             continue
             
-        # 5. Selection on Proxy
+        # 4. Selection on Proxy
+        # Calculate Standard Emissions (Block-level) for Selection
+        # block_linking now handles sparse proxies natively
+        portion_emissions_standard = block_linking.generate_all_block_likelihoods(
+            global_probs, global_sites, portion_proxy, num_processes=16
+        )
+        
         fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
         
         selected_founders = beam_search_core.select_founders_likelihood(
             beam_results, 
-            portion_emissions, 
+            portion_emissions_standard, 
             fast_mesh,
             max_founders=max_founders,
-            recomb_penalty=recomb_penalty,
+            recomb_penalty=current_recomb_penalty,
             complexity_penalty_scale=complexity_penalty_scale,
             do_refinement=True,
             use_standard_bic=use_standard_bic
         )
         
-        # 6. Reconstruction on Originals (Using FastMesh map from Proxy)
-        # Key Mapping is identical between Proxy and Original
+        # 5. Reconstruction on Originals
+        # Map indices (calculated on Proxy) back to Full Resolution data
         reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
             selected_founders, fast_mesh, original_portion
         )
         
+        # 6. Package
         super_block = convert_reconstruction_to_superblock(reconstructed_data, original_portion)
         
         if super_block:

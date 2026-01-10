@@ -23,7 +23,6 @@ import block_linking_naive
 import block_linking_em
 import simulate_sequences
 import hmm_matching
-import hmm_matching_testing
 import viterbi_likelihood_calculator
 import beam_search_core
 import paint_samples
@@ -50,7 +49,7 @@ contig_name = "chr1"
 block_size = 100000
 shift_size = 50000
 starting = 0
-ending = 100
+ending = 860
 
 start = time.time()
 
@@ -65,8 +64,6 @@ genomic_data = vcf_data_loader.cleanup_block_reads_list(
     num_processes=16
 )
 print("Time taken:", time.time() - start)
-
-print(genomic_data.positions[-1][-1])
 #%%
 start = time.time()
 
@@ -111,7 +108,7 @@ new_reads_array = simulate_sequences.read_sample_all_individuals(all_offspring, 
 simd_genomic_data = simulate_sequences.chunk_up_data(
     haplotype_sites, 
     new_reads_array,
-    0, 5000000, 
+    0, 50000000, 
     0, 0, # Block Size / Shift ignored
     use_snp_count=True,
     snps_per_block=200,
@@ -155,29 +152,6 @@ all_paths = []
 for long_hap in haplotype_data:
     path = analysis_utils.map_haplotype_to_blocks(long_hap, test_haps) 
     all_paths.append(path)          
-#%%
-start = time.time()
-final_mesh = block_linking_em.generate_transition_probability_mesh(
-    simd_probabalistic_genotypes,
-    all_sites,
-    test_haps,
-    max_num_iterations=20,
-    learning_rate=1)
-print(time.time()-start)
-#%%
-start = time.time()
-
-# Using the new Viterbi-enhanced function
-final_mesh_viterbi = hmm_matching.generate_transition_probability_mesh_double_hmm(
-    simd_probabalistic_genotypes,
-    all_sites,
-    test_haps,
-    max_num_iterations=20,
-    learning_rate=1,
-)
-
-print(f"Viterbi Mesh Generation Time: {time.time() - start:.2f}s")
-
 #%%
 min_pos = simd_genomic_data.positions[0][0]
 max_pos = simd_genomic_data.positions[-1][-1]
@@ -236,11 +210,12 @@ super_blocks_level_1 = hierarchical_assembly.run_hierarchical_step(
     global_probs,
     global_sites,
     batch_size=10,
+    use_hmm_linking=False,
     recomb_rate=5e-8,
     max_founders=16,
     complexity_penalty_scale=0.25 # Lower penalty for micro-assembly
 )
-print(f"Time for 12.5% of Chr1: {time.time()-start}")
+print(f"Time for 100% of Chr1: {time.time()-start}")
 #%%
 start = time.time()
 super_blocks_level_2 = hierarchical_assembly.run_hierarchical_step(
@@ -253,11 +228,13 @@ super_blocks_level_2 = hierarchical_assembly.run_hierarchical_step(
     beam_width=200,
     max_founders=16,
     recomb_penalty=15.0,       
-    complexity_penalty_scale=0.1      
+    complexity_penalty_scale=0.5      
 )
-print(f"Time for 12.5% of Chr1, 2nd round: {time.time()-start}")
+print(f"Time for 100% of Chr1, 2nd round: {time.time()-start}")
 
 #%%
+importlib.reload(hierarchical_assembly)
+
 start = time.time()
 super_blocks_level_3 = hierarchical_assembly.run_hierarchical_step(
     super_blocks_level_2,
@@ -266,13 +243,29 @@ super_blocks_level_3 = hierarchical_assembly.run_hierarchical_step(
     batch_size=10,
     use_hmm_linking=True,
     recomb_rate=5e-8,          # KEEP CONSTANT (Biologically accurate)
-    beam_width=100,
+    beam_width=200,
     max_founders=16,
     recomb_penalty=20.0,       
-    complexity_penalty_scale=0.1       
+    complexity_penalty_scale=0.5       
 )
-print(f"Time for 12.5% of Chr1, 3rd round: {time.time()-start}")
+print(f"Time for 100% of Chr1, 3rd round: {time.time()-start}")
 #%%
+importlib.reload(hierarchical_assembly)
+
+start = time.time()
+super_blocks_level_4 = hierarchical_assembly.run_hierarchical_step(
+    super_blocks_level_3,
+    global_probs,
+    global_sites,
+    batch_size=10,
+    use_hmm_linking=True,
+    recomb_rate=5e-8,          # KEEP CONSTANT (Biologically accurate)
+    beam_width=200,
+    max_founders=16,
+    recomb_penalty=20.0,       
+    complexity_penalty_scale=0.5       
+)
+print(f"Time for 100% of Chr1, 4th round: {time.time()-start}")
 
 
 

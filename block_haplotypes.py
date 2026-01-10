@@ -25,6 +25,30 @@ except ImportError:
         return decorator
     prange = range
 
+# --- SHARED MEMORY MANAGEMENT ---
+# Holds the GenomicData object in worker process memory to avoid serialization overhead
+_SHARED_DATA = {}
+
+def _init_shared_data(data_dict):
+    global _SHARED_DATA
+    _SHARED_DATA.clear()
+    _SHARED_DATA.update(data_dict)
+
+def _worker_generate_block(block_idx, **kwargs):
+    """
+    Worker function that retrieves data from shared memory by index
+    and calls the heavy logic function.
+    """
+    # GenomicData.__getitem__ returns (positions, reads, keep_flags)
+    positions, reads, flags = _SHARED_DATA['genomic_data'][block_idx]
+    
+    return generate_haplotypes_block_robust(
+        positions, 
+        reads, 
+        keep_flags=flags, 
+        **kwargs
+    )
+
 class BlockResult:
     """
     Container for the reconstructed haplotypes of a single genomic block.
@@ -1221,13 +1245,12 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
         penalty_strength: Controls strictness of final Viterbi selection (1.0 = standard).
         max_intermediate_haps: Trigger for intermediate pruning during the loop.
     
-    Assumes OMP_NUM_THREADS=1 is set in the main script.
+    Optimized: Uses shared memory for genomic_data to avoid massive serialization overhead.
     """
     
-    # Create a partial function with the fixed configuration arguments
-    # When starmap unpacks the 'tasks' (GenomicData yield), it will append these fixed args as keyword args
-    worker_func = partial(
-        generate_haplotypes_block_robust, 
+    # Create partial with the fixed arguments
+    worker_partial = partial(
+        _worker_generate_block, 
         penalty_strength=penalty_strength, 
         max_intermediate_haps=max_intermediate_haps,
         uniqueness_threshold_percent=uniqueness_threshold_percent,
@@ -1237,14 +1260,16 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
         chimera_mismatch_tol=chimera_mismatch_tol
     )
 
-    with Pool(processes=num_processes) as processing_pool:
-        
-        # GenomicData is iterable yielding (pos, reads, flags)
-        # starmap will call: worker_func(pos, reads, flags)
-        # worker_func (partial) adds: penalty_strength=..., max_intermediate_haps=...
-        overall_haplotypes = processing_pool.starmap(
-            worker_func, 
-            genomic_data
+    # Setup Shared Memory with GenomicData
+    # Note: GenomicData is just a container of lists. It is efficient to reference.
+    shared_context = {'genomic_data': genomic_data}
+
+    with Pool(processes=num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
+        # We map over indices [0, 1, ... N]
+        # The worker fetches the data from shared memory using the index.
+        overall_haplotypes = processing_pool.map(
+            worker_partial, 
+            range(len(genomic_data))
         )
 
     return BlockResults(overall_haplotypes)

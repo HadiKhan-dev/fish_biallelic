@@ -3,6 +3,7 @@ import math
 import warnings
 from multiprocess import Pool
 from scipy.special import logsumexp
+from functools import partial
 
 import analysis_utils 
 import block_linking_em
@@ -24,6 +25,21 @@ except ImportError:
         def decorator(func): return func
         return decorator
     prange = range
+
+# =============================================================================
+# SHARED MEMORY MANAGEMENT
+# =============================================================================
+
+_SHARED_DATA = {}
+
+def _init_shared_data(data_dict):
+    """
+    Initializer for the worker pool.
+    Updates the global _SHARED_DATA dict in the worker process.
+    """
+    global _SHARED_DATA
+    _SHARED_DATA.clear()
+    _SHARED_DATA.update(data_dict)
 
 # =============================================================================
 # 1. OPTIMIZED NUMBA KERNELS (O(N^2) Single-Switch)
@@ -369,18 +385,36 @@ def _worker_generate_viterbi_emissions(args):
 def generate_viterbi_block_emissions(samples_matrix, sample_sites, block_results, num_processes=16):
     """
     Parallel generator for ViterbiBlockLikelihood objects used in the scan.
+    
+    Updated to support both contiguous blocks and sparse (proxy) blocks by using 
+    exact index mapping rather than slicing.
+    
+    Args:
+        samples_matrix: (Samples x Global_Sites x 3) probability matrix.
+        sample_sites: (Global_Sites,) array of positions.
+        block_results: List of BlockResult objects (contiguous or proxy).
+        num_processes: Parallel workers.
+        
+    Returns:
+        ViterbiBlockList containing site-specific likelihood tensors.
     """
     tasks = []
     # Params dict allows passing configs easily
     params = {'robustness_epsilon': DEFAULT_ROBUSTNESS_EPSILON}
     
     for block in block_results:
-        block_samples = analysis_utils.get_sample_data_at_sites_multiple(
-            samples_matrix, sample_sites, block.positions
-        )
+        # ROBUST DATA FETCHING:
+        # We find the exact indices of the block's positions in the global array.
+        # This handles both contiguous ranges (0,1,2) and sparse proxies (0,10,20) correctly.
+        indices = np.searchsorted(sample_sites, block.positions)
+        
+        # Fancy indexing returns a copy containing only the requested sites.
+        # This guarantees the dimensions of block_samples match block.positions exactly.
+        block_samples = samples_matrix[:, indices, :]
+        
         tasks.append((block_samples, block, params))
 
-    if num_processes > 1:
+    if num_processes > 1 and len(tasks) > 1:
         with Pool(num_processes) as pool:
             results = pool.map(_worker_generate_viterbi_emissions, tasks)
     else:
@@ -789,13 +823,22 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
                                            recomb_rate=5e-7, learning_rate=1.0,
                                            num_processes=16,
                                            ll_improvement_cutoff=1e-4,
-                                           use_standard_baum_welch=True): # Default True, but set False for Viterbi Fix
+                                           use_standard_baum_welch=True,
+                                           precalculated_viterbi_emissions=None): # NEW ARGUMENT
     """
     Main driver for HMM-EM transition calculation.
+    Supports pre-calculated emissions to avoid passing massive raw data to workers.
     """
     current_trans = block_linking_em.initial_transition_probabilities(haps_data, space_gap)
     
-    raw_blocks = generate_viterbi_block_emissions(full_samples_data, sample_sites, haps_data, num_processes=num_processes)
+    # Use pre-calculated emissions if provided, otherwise calculate them here
+    if precalculated_viterbi_emissions is not None:
+        raw_blocks = precalculated_viterbi_emissions
+    else:
+        # Fallback to internal calculation (High Memory usage if data is large)
+        raw_blocks = generate_viterbi_block_emissions(
+            full_samples_data, sample_sites, haps_data, num_processes=num_processes
+        )
     
     prev_ll = -np.inf
     
@@ -809,7 +852,7 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
             raw_blocks, haps_data, current_trans, space_gap, recomb_rate
         )
         
-        # M-Step (With Flag)
+        # M-Step
         new_trans = update_transitions_layered_hmm(
             S_res, R_res, haps_data, current_trans, space_gap, 
             use_standard_baum_welch=use_standard_baum_welch
@@ -831,7 +874,6 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
             rel_improvement = float('inf') 
             
         if it > 0 and 0 <= rel_improvement < ll_improvement_cutoff:
-            print(f"  - Viterbi EM converged at iteration {it} (Improvement {rel_improvement:.2e})")
             break
             
         prev_ll = current_ll
@@ -840,48 +882,75 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
 
 def _gap_worker(args):
     """Worker for multiprocessing gap calculations"""
-    # Unpack the new flag from the arguments tuple
-    gap, samples, sites, haps, max_iter, rate, use_std_bw = args
+    # Unpack the new flag from the arguments tuple (now includes emissions)
+    gap, samples, sites, haps, max_iter, rate, use_std_bw, use_shared_emissions = args
     
+    if use_shared_emissions:
+        # Retrieve the massive emissions object from Shared Memory
+        precalc_ems = _SHARED_DATA['viterbi_emissions']
+    else:
+        # If not using shared memory, this argument would have been passed directly (or None)
+        # But in our new architecture, we aim to rely on shared memory for the large object.
+        precalc_ems = None
+
     return calculate_hap_transition_probabilities(
         samples, sites, haps, 
         max_num_iterations=max_iter, 
         space_gap=gap, 
         recomb_rate=rate, 
-        num_processes=1,
-        use_standard_baum_welch=use_std_bw  # Pass flag to calculator
+        num_processes=1, # No nested pool
+        use_standard_baum_welch=use_std_bw,
+        precalculated_viterbi_emissions=precalc_ems
     )
 
 def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_sites, haps_data, 
                                                  max_num_iterations=5, recomb_rate=5e-7,
-                                                 use_standard_baum_welch=True):
+                                                 use_standard_baum_welch=True,
+                                                 precalculated_viterbi_emissions=None): # NEW ARGUMENT
     """
     Generates a full mesh of transition probabilities for all gap sizes using Viterbi-EM.
     
     Args:
-        use_standard_baum_welch (bool): 
-            If True: Uses standard update (sensitive to initialization/priors).
-            If False: Uses Reset update (recommended for Viterbi to prevent path death).
+        precalculated_viterbi_emissions: Optional ViterbiBlockList. If provided, 
+        full_samples_data and sample_sites are IGNORED to prevent memory pickling overhead.
     """
     max_gap = len(haps_data) - 1
     gaps = list(range(1, max_gap + 1))
     
+    use_shared_emissions = False
+    
+    # CRITICAL MEMORY FIX:
+    # If using pre-calculated emissions, we MUST put them in Shared Memory
+    # rather than passing them as arguments to the worker.
+    # Passing as args duplicates the object (pickles) for every worker task.
+    shared_context = {}
+    
+    if precalculated_viterbi_emissions is not None:
+        data_arg = None
+        sites_arg = None
+        use_shared_emissions = True
+        shared_context['viterbi_emissions'] = precalculated_viterbi_emissions
+    else:
+        data_arg = full_samples_data
+        sites_arg = sample_sites
+    
     worker_args = []
     for gap in gaps:
-        # Append the boolean flag to the arguments tuple
         worker_args.append((
             gap, 
-            full_samples_data, 
-            sample_sites, 
+            data_arg, 
+            sites_arg, 
             haps_data, 
             max_num_iterations, 
             recomb_rate, 
-            use_standard_baum_welch
+            use_standard_baum_welch,
+            use_shared_emissions # Flag to tell worker to check shared memory
         ))
     
     print(f"Calculating HMM-based transitions for {len(gaps)} gaps (StandardBW={use_standard_baum_welch})...")
     
-    with Pool(16) as pool:
+    # Initialize Pool with Shared Data
+    with Pool(16, initializer=_init_shared_data, initargs=(shared_context,)) as pool:
         results = pool.map(_gap_worker, worker_args)
     
     mesh_dict = dict(zip(gaps, results))
