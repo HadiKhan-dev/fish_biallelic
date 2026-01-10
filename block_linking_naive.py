@@ -3,6 +3,7 @@ import math
 import copy
 from multiprocess import Pool
 import warnings
+from functools import partial
 
 import analysis_utils
 import hap_statistics
@@ -11,6 +12,145 @@ import block_haplotypes
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
 
+# --- SHARED MEMORY MANAGEMENT ---
+
+_SHARED_DATA = {}
+
+def _init_shared_data(data_dict):
+    """
+    Initializer for the worker pool.
+    Updates the global _SHARED_DATA dict in the worker process.
+    """
+    global _SHARED_DATA
+    _SHARED_DATA.clear()
+    _SHARED_DATA.update(data_dict)
+
+# --- WORKER WRAPPERS ---
+
+def _worker_match_overlap(i):
+    """
+    Worker function to calculate overlap similarity between block[i] and block[i+1].
+    Accesses data from _SHARED_DATA to avoid serialization.
+    """
+    blocks = _SHARED_DATA['blocks']
+    
+    # Get the two blocks
+    curr_block = blocks[i]
+    next_block = blocks[i+1]
+    
+    # 1. Determine Overlap Region
+    start_position_next = next_block.positions[0]
+    
+    # Assuming positions are sorted, find where next starts in current
+    overlap_start_idx = np.searchsorted(curr_block.positions, start_position_next)
+    
+    overlap_length = len(curr_block.positions) - overlap_start_idx
+    
+    if overlap_length <= 0:
+        return {}
+
+    # 2. Extract Haplotype Slices
+    curr_haps = curr_block.haplotypes
+    next_haps = next_block.haplotypes
+    
+    cur_ends = {k: curr_haps[k][overlap_start_idx:] for k in curr_haps.keys()}
+    next_ends = {k: next_haps[k][:overlap_length] for k in next_haps.keys()}
+    
+    # 3. Handle Keep Flags
+    if curr_block.keep_flags is not None:
+        cur_keep_flags = np.array(curr_block.keep_flags[overlap_start_idx:], dtype=bool)
+    else:
+        if len(cur_ends) > 0:
+            cur_keep_flags = np.ones(len(list(cur_ends.values())[0]), dtype=bool)
+        else:
+            cur_keep_flags = np.array([], dtype=bool)
+
+    if next_block.keep_flags is not None:
+        next_keep_flags = np.array(next_block.keep_flags[:overlap_length], dtype=bool)
+    else:
+        next_keep_flags = np.ones(overlap_length, dtype=bool)
+    
+    # Align lengths
+    min_len = min(len(cur_keep_flags), len(next_keep_flags))
+    cur_keep_flags = cur_keep_flags[:min_len]
+    next_keep_flags = next_keep_flags[:min_len]
+    
+    # 4. Calculate Pairwise Similarities
+    similarities = {}
+    
+    for first_name in cur_ends.keys():
+        first_new_hap = cur_ends[first_name][:min_len][cur_keep_flags]
+        
+        for second_name in next_ends.keys():
+            second_new_hap = next_ends[second_name][:min_len][next_keep_flags]
+            
+            common_size = len(first_new_hap)
+            
+            if common_size > 0:
+                haps_dist = 100 * analysis_utils.calc_distance(
+                    first_new_hap,
+                    second_new_hap,
+                    calc_type="haploid"
+                ) / common_size
+            else:
+                haps_dist = 0
+            
+            # Convert distance to similarity score
+            if haps_dist > 50:
+                similarity = 0
+            else:
+                similarity = 2 * (50 - haps_dist)
+            
+            similarities[((i, first_name), (i+1, second_name))] = similarity
+            
+    # 5. Transform to final score (Squared)
+    transform_similarities = {}
+    for item, sim_val in similarities.items():
+        val = sim_val / 100.0
+        transformed = 100 * (val**2)
+        transform_similarities[item] = transformed
+        
+    return transform_similarities
+
+def _worker_combined_best_hap_matches(block_idx):
+    return hap_statistics.combined_best_hap_matches(_SHARED_DATA['blocks'][block_idx])
+
+def _worker_hap_matching_comparison(block_idx_1, block_idx_2):
+    """
+    UPDATED WORKER: Looks up match_results from _SHARED_DATA
+    instead of accepting it as a pickled argument.
+    """
+    return hap_statistics.hap_matching_comparison(
+        _SHARED_DATA['blocks'], 
+        _SHARED_DATA['match_results'], 
+        block_idx_1, 
+        block_idx_2
+    )
+
+def _worker_get_similarities(block_idx):
+    return hap_statistics.get_block_hap_similarities(_SHARED_DATA['blocks'][block_idx])
+
+def _worker_combine_chained_blocks(chain_data, read_error_prob, min_total_reads):
+    return combine_chained_blocks_to_single_hap(
+        _SHARED_DATA['blocks'], chain_data, 
+        read_error_prob=read_error_prob, 
+        min_total_reads=min_total_reads
+    )
+
+def _worker_get_match_probabilities(sample_idx, recomb_rate, value_error_rate):
+    """
+    Worker for get_full_match_probs.
+    Fetches specific sample probability matrix and full genotypes from shared memory.
+    """
+    return get_match_probabilities(
+        _SHARED_DATA['genotypes'],
+        _SHARED_DATA['sample_probs'][sample_idx], # Access specific sample by index
+        _SHARED_DATA['locations'],
+        keep_flags=_SHARED_DATA.get('keep_flags'),
+        recomb_rate=recomb_rate,
+        value_error_rate=value_error_rate
+    )
+
 #%%
 def match_haplotypes_by_overlap(block_level_haps,
                      hap_cutoff_autoinclude=2,
@@ -18,6 +158,7 @@ def match_haplotypes_by_overlap(block_level_haps,
     """
     Takes as input a list of BlockResult objects and finds matching haps 
     based on overlapping suffix/prefix similarity.
+    (Sequential legacy version)
     """        
     
     next_starting = []
@@ -54,16 +195,21 @@ def match_haplotypes_by_overlap(block_level_haps,
         if block_level_haps[i].keep_flags is not None:
             cur_keep_flags = np.array(block_level_haps[i].keep_flags[start_point:], dtype=bool)
         else:
-            cur_keep_flags = np.ones(len(cur_ends[list(cur_ends.keys())[0]]), dtype=bool)
+            if len(cur_ends) > 0:
+                cur_keep_flags = np.ones(len(list(cur_ends.values())[0]), dtype=bool)
+            else:
+                cur_keep_flags = np.array([], dtype=bool)
 
         if block_level_haps[i+1].keep_flags is not None:
             next_keep_flags = np.array(block_level_haps[i+1].keep_flags[:overlap_length], dtype=bool)
         else:
             next_keep_flags = np.ones(overlap_length, dtype=bool)
         
+        # --- FIX: Define min_len and slice flags ---
         min_len = min(len(cur_keep_flags), len(next_keep_flags))
         cur_keep_flags = cur_keep_flags[:min_len]
         next_keep_flags = next_keep_flags[:min_len]
+        # -------------------------------------------
         
         matches.append([])
         
@@ -118,98 +264,40 @@ def match_haplotypes_by_overlap(block_level_haps,
             
     return (block_haps_names,matches)
 
-def match_haplotypes_by_overlap_probabalistic(block_level_haps):
+def match_haplotypes_by_overlap_probabalistic(block_level_haps, num_processes=16):
     """
     Probabilistic version of match_haplotypes_by_overlap.
     Returns likelihood scores for edges.
+    
+    Optimized: Parallelized using shared memory.
     """
-    next_starting = []
-    matches = []
     
+    # 1. Metadata Setup (Fast, sequential)
     block_haps_names = []
-    block_counts = {}
-    
-    #Find overlap starting points
-    for i in range(1,len(block_level_haps)):
-        start_position = block_level_haps[i].positions[0]
-        insertion_point = np.searchsorted(block_level_haps[i-1].positions, start_position)
-        next_starting.append(insertion_point)
-        
-    #Create list of unique names for the haps in each of the blocks    
     for i in range(len(block_level_haps)):
         block_haps_names.append([])
-        block_counts[i] = len(block_level_haps[i].haplotypes)
         for name in block_level_haps[i].haplotypes.keys():
             block_haps_names[-1].append((i,name))
+            
+    num_junctions = len(block_level_haps) - 1
+    if num_junctions < 1:
+        return (block_haps_names, [])
 
-    #Iterate over all the blocks
-    for i in range(len(block_level_haps)-1):
-        start_point = next_starting[i]
-        overlap_length = len(block_level_haps[i].positions) - start_point   
-        
-        curr_haps = block_level_haps[i].haplotypes
-        next_haps = block_level_haps[i+1].haplotypes
-        
-        cur_ends = {k: curr_haps[k][start_point:] for k in curr_haps.keys()}
-        next_ends = {k: next_haps[k][:overlap_length] for k in next_haps.keys()}
-           
-        # Handle Flags
-        if block_level_haps[i].keep_flags is not None:
-            cur_keep_flags = np.array(block_level_haps[i].keep_flags[start_point:], dtype=bool)
-        else:
-            cur_keep_flags = np.ones(len(cur_ends[list(cur_ends.keys())[0]]), dtype=bool)
-
-        if block_level_haps[i+1].keep_flags is not None:
-            next_keep_flags = np.array(block_level_haps[i+1].keep_flags[:overlap_length], dtype=bool)
-        else:
-            next_keep_flags = np.ones(overlap_length, dtype=bool)
-        
-        min_len = min(len(cur_keep_flags), len(next_keep_flags))
-        cur_keep_flags = cur_keep_flags[:min_len]
-        next_keep_flags = next_keep_flags[:min_len]
-        
-        similarities = {}
-        for first_name in cur_ends.keys(): 
-
-            for second_name in next_ends.keys():
-                
-                first_new_hap = cur_ends[first_name][:min_len][cur_keep_flags]
-                second_new_hap = next_ends[second_name][:min_len][next_keep_flags]
-                
-                common_size = len(first_new_hap)
-                
-                if common_size > 0:
-                    haps_dist = 100 * analysis_utils.calc_distance(
-                        first_new_hap,
-                        second_new_hap,
-                        calc_type="haploid"
-                    ) / common_size
-                else:
-                    haps_dist = 0
-                
-                if haps_dist > 50:
-                    similarity = 0
-                else:
-                    similarity = 2 * (50 - haps_dist)
-                
-                similarities[((i,first_name),(i+1,second_name))] = similarity
+    # 2. Parallel Processing
+    shared_context = {'blocks': block_level_haps}
+    
+    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
+        # We process every junction i -> i+1
+        matches = processing_pool.map(_worker_match_overlap, range(num_junctions))
             
-        #Scale and transform the similarities into a score
-        transform_similarities = {}
-            
-        for item in similarities.keys():
-            val = similarities[item]/100
-            transformed = 100*(val**2)
-            transform_similarities[item] = transformed
-            
-        matches.append(transform_similarities)
-            
-    return (block_haps_names,matches)
+    return (block_haps_names, matches)
 
 def match_haplotypes_by_samples(full_haps_data, num_processes=16):
     """
     Match haplotypes based on sample usage (best matches).
     full_haps_data should be a BlockResults object.
+    
+    Optimized: Uses shared memory for full_haps_data and split pools.
     """
     
     #Controls the threshold
@@ -225,18 +313,27 @@ def match_haplotypes_by_samples(full_haps_data, num_processes=16):
         for nm in full_haps_data[i].haplotypes.keys():
             block_haps_names[-1].append((i,nm))
     
-    # Parallel processing with Context Manager
-    with Pool(num_processes) as processing_pool:
-        # 1. Get best sample matches for each block
-        match_best_results = processing_pool.starmap(
-            hap_statistics.combined_best_hap_matches,
-            zip(full_haps_data) # BlockResults is iterable
+    # --- PHASE 1: Get Best Matches ---
+    # Init Shared Data with blocks only
+    shared_context_1 = {'blocks': full_haps_data}
+
+    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_1,)) as processing_pool:
+        match_best_results = processing_pool.map(
+            _worker_combined_best_hap_matches,
+            range(num_blocks)
         )
         
-        # 2. Compare usages between neighbors
-        neighbouring_usages = processing_pool.starmap(lambda x,y:
-                            hap_statistics.hap_matching_comparison(full_haps_data, match_best_results, x, y),
-                            zip(list(range(num_blocks-1)), list(range(1,num_blocks))))
+    # --- PHASE 2: Compare Neighboring Blocks ---
+    # Init Shared Data with blocks AND the results from Phase 1
+    shared_context_2 = {'blocks': full_haps_data, 'match_results': match_best_results}
+    
+    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_2,)) as processing_pool:
+        # Pass indices to worker
+        args_list = [(i, i+1) for i in range(num_blocks - 1)]
+        neighbouring_usages = processing_pool.starmap(
+            _worker_hap_matching_comparison,
+            args_list
+        )
     
     forward_matches = []
     backward_matches = []
@@ -289,6 +386,7 @@ def match_haplotypes_by_samples(full_haps_data, num_processes=16):
 def match_haplotypes_by_samples_probabalistic(full_haps_data, num_processes=16):
     """
     Probabilistic version of match_haplotypes_by_samples.
+    Optimized: Uses shared memory and split pools.
     """
         
     num_blocks = len(full_haps_data)
@@ -299,15 +397,24 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data, num_processes=16):
         for nm in full_haps_data[i].haplotypes.keys():
             block_haps_names[-1].append((i,nm))
     
-    with Pool(num_processes) as processing_pool:
-        match_best_results = processing_pool.starmap(
-            hap_statistics.combined_best_hap_matches,
-            zip(full_haps_data)
+    # --- PHASE 1 ---
+    shared_context_1 = {'blocks': full_haps_data}
+
+    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_1,)) as processing_pool:
+        match_best_results = processing_pool.map(
+            _worker_combined_best_hap_matches,
+            range(num_blocks)
         )
         
-        neighbouring_usages = processing_pool.starmap(lambda x,y:
-                            hap_statistics.hap_matching_comparison(full_haps_data,match_best_results,x,y),
-                            zip(list(range(num_blocks-1)),list(range(1,num_blocks))))
+    # --- PHASE 2 ---
+    shared_context_2 = {'blocks': full_haps_data, 'match_results': match_best_results}
+    
+    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_2,)) as processing_pool:
+        args_list = [(i, i+1) for i in range(num_blocks - 1)]
+        neighbouring_usages = processing_pool.starmap(
+            _worker_hap_matching_comparison,
+            args_list
+        )
     
     forward_match_scores = [neighbouring_usages[x][0] for x in range(num_blocks-1)]
     backward_match_scores = [neighbouring_usages[x][1] for x in range(num_blocks-1)]
@@ -406,10 +513,6 @@ def generate_chained_block_haplotypes(haplotype_data, nodes_list, combined_score
     """
     Generates chromosome length haplotypes by finding best paths through the graph
     and penalizing used nodes/edges iteratively.
-    
-    Args:
-        similarity_matrices: Optional pre-computed matrices. If None, computes sequentially.
-        (Avoids nested Pool creation).
     """
     
     num_layers = len(nodes_list)
@@ -553,12 +656,18 @@ def combine_all_blocks_to_long_haps(all_haps,
                                     num_processes=16):
     """
     Multithreaded stitching of all long haplotypes.
+    Optimized: Uses shared memory for all_haps.
     """
-    with Pool(num_processes) as processing_pool:
-        processing_results = processing_pool.starmap(lambda x: combine_chained_blocks_to_single_hap(
-                                            all_haps,x,read_error_prob=read_error_prob,
-                                            min_total_reads=min_total_reads),
-                                            zip(hap_blocks_list))
+    
+    shared_context = {'blocks': all_haps}
+    
+    worker = partial(_worker_combine_chained_blocks, 
+                     read_error_prob=read_error_prob, 
+                     min_total_reads=min_total_reads)
+
+    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
+        # Map over the list of haplotype paths (small)
+        processing_results = processing_pool.map(worker, hap_blocks_list)
     
     # All paths share the same locations (approximately), so take the first one's locs
     sites_loc = processing_results[0][0]
@@ -682,29 +791,30 @@ def generate_long_haplotypes_naive(block_results, num_long_haps,
     Takes the already calculated BlockResults and chains them together
     to form num_long_haps full chromosome haplotypes.
     
-    Args:
-        block_results: Instance of BlockResults class containing all block data.
-        num_long_haps: Number of global haplotypes to reconstruct.
+    Optimized: Uses shared memory for parallel steps to prevent massive serialization overhead.
     """
 
     # 1. Match haplotypes between neighboring blocks (Overlap & Samples)
-    hap_matching_overlap = match_haplotypes_by_overlap_probabalistic(block_results)
+    # Passed num_processes to enable parallel, shared-memory overlap matching
+    hap_matching_overlap = match_haplotypes_by_overlap_probabalistic(block_results, num_processes=num_processes)
+    
+    # Run Shared Memory Optimized Sample Matching
     hap_matching_samples = match_haplotypes_by_samples_probabalistic(block_results, num_processes=num_processes)
     
-    # node_names is a list of lists: [[(0,0), (0,1)...], [(1,0)...]]
     node_names = hap_matching_overlap[0]
     
     # 2. Combine scores
     combined_scores = get_combined_hap_score(hap_matching_overlap, hap_matching_samples[2])
 
-    # Pre-calculate similarity matrices in parallel HERE to avoid nesting in the loop
-    with Pool(num_processes) as p:
-        similarity_matrices = p.starmap(
-            hap_statistics.get_block_hap_similarities,
-            zip(block_results)
+    # 3. Pre-calculate similarity matrices in parallel (Shared Memory Optimized)
+    shared_context = {'blocks': block_results}
+    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as p:
+        similarity_matrices = p.map(
+            _worker_get_similarities,
+            range(len(block_results))
         )
     
-    # 3. Find optimal paths (Chaining)
+    # 4. Find optimal paths (Chaining) - Sequential logic, fast
     chained_block_haps = generate_chained_block_haplotypes(
         block_results,
         node_names,
@@ -712,10 +822,10 @@ def generate_long_haplotypes_naive(block_results, num_long_haps,
         num_long_haps,
         node_usage_penalty=node_usage_penalty,
         edge_usage_penalty=edge_usage_penalty,
-        similarity_matrices=similarity_matrices # Pass pre-computed matrices
+        similarity_matrices=similarity_matrices
     )
     
-    # 4. Stitch blocks together
+    # 5. Stitch blocks together (Shared Memory Optimized)
     final_long_haps = combine_all_blocks_to_long_haps(block_results, chained_block_haps, num_processes=num_processes)
 
     return (block_results, final_long_haps)   
@@ -820,11 +930,26 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
 def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations,
                             keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3, num_processes=16):         
     """
-    Multithreaded version to match all samples to their haplotype combinations
+    Multithreaded version to match all samples to their haplotype combinations.
+    Optimized: Uses shared memory to avoid pickling the massive genotype tensor and sample probabilities.
     """
-    with Pool(num_processes) as processing_pool:
-        results = processing_pool.starmap(lambda x: get_match_probabilities(full_combined_genotypes,x,site_locations,
-                                            keep_flags=keep_flags,recomb_rate=recomb_rate,value_error_rate=value_error_rate),
-                                          zip(all_sample_probs))
+    
+    # Prepare shared context
+    shared_context = {
+        'genotypes': full_combined_genotypes,
+        'sample_probs': all_sample_probs,
+        'locations': site_locations,
+        'keep_flags': keep_flags
+    }
+    
+    worker = partial(_worker_get_match_probabilities, 
+                     recomb_rate=recomb_rate, 
+                     value_error_rate=value_error_rate)
+
+    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
+        # Pass the indices of samples (0 to N-1)
+        # Workers look up specific sample_probs[i] from shared memory
+        num_samples = len(all_sample_probs)
+        results = processing_pool.map(worker, range(num_samples))
     
     return results

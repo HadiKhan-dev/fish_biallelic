@@ -358,20 +358,21 @@ def generate_all_block_likelihoods(
     haplotype_data,
     num_processes=16,
     log_likelihood_base=math.e,
-    robustness_epsilon=DEFAULT_ROBUSTNESS_EPSILON
-):
+    robustness_epsilon=DEFAULT_ROBUSTNESS_EPSILON):
     """
     Calculates diploid genotype log-likelihoods for all blocks against all samples.
     This generates the "Emission Matrix" for the HMM.
+    
+    Updated to support both contiguous blocks and sparse (proxy) blocks by using 
+    exact index mapping rather than slicing.
     
     Args:
         sample_probs_matrix (np.ndarray): (N_Samples x Total_Sites x 3) probability matrix.
         global_site_locations (np.ndarray): Array of genomic positions.
         haplotype_data (list or BlockResults): List of BlockResult objects or a single object.
         num_processes (int): Number of parallel processes to use.
-        log_likelihood_base (float): Base for the log calculation (unused in new model, kept for compat).
+        log_likelihood_base (float): Base for the log calculation.
         robustness_epsilon (float): The mixture weight for the uniform error model.
-                                    Prevents single-site outliers from dominating scores.
 
     Returns:
         StandardBlockLikelihoods: A container with symmetric likelihood matrices for all blocks.
@@ -396,9 +397,16 @@ def generate_all_block_likelihoods(
         if not hasattr(block, 'positions'):
              raise ValueError(f"Encountered invalid block object in list. Type: {type(block)}")
 
-        block_samples = analysis_utils.get_sample_data_at_sites_multiple(
-            sample_probs_matrix, global_site_locations, block.positions
-        )
+        # ROBUST DATA FETCHING:
+        # Instead of slicing (start:end) which fails for sparse/downsampled blocks,
+        # we find the exact indices of the block's positions in the global array.
+        indices = np.searchsorted(global_site_locations, block.positions)
+        
+        # Fancy indexing returns a copy containing only the requested sites.
+        # This works correctly for contiguous blocks (0, 1, 2...) 
+        # AND sparse proxies (0, 10, 20...), ensuring dimension alignment.
+        block_samples = sample_probs_matrix[:, indices, :]
+        
         tasks.append((block_samples, block, params))
 
     if num_processes > 1 and len(tasks) > 1:
@@ -411,7 +419,6 @@ def generate_all_block_likelihoods(
         return results[0]
         
     return StandardBlockLikelihoods(results)
-
 # %% --- EM HELPERS ---
 
 def initial_transition_probabilities(haps_data, space_gap=1):
