@@ -108,8 +108,6 @@ def viterbi_constrained_k(dist_tensor, max_k, state_defs):
     budget_size = max_k + 1
     
     final_costs = np.empty(n_samples, dtype=np.float64)
-    # CRITICAL FIX: Changed int16 to int32. 
-    # int16 overflows if n_pairs > 32767 (approx >256 haplotypes).
     backpointers = np.empty((n_samples, n_sites, n_pairs, budget_size), dtype=np.int32)
     
     for s in prange(n_samples):
@@ -287,6 +285,9 @@ def combined_best_hap_matches(block_result):
         reads_array = block_result[2]
         haps = block_result[3]
         
+    # Handle Empty Block Case
+    if reads_array is None or reads_array.size == 0 or len(haps) == 0:
+        return ([], {}, [])
 
     (site_priors, actual_probs) = analysis_utils.reads_to_probabilities(reads_array)
     
@@ -301,21 +302,43 @@ def get_best_matches_all_blocks(block_results, num_processes=16):
 #%% --- MATCHING COMPARISON & STITCHING HELPERS ---
 
 def relative_haplotype_usage(first_hap, first_matches, second_matches):
-    use_indices = []
-    match_list_1 = first_matches[0]
+    """
+    Calculates usages of haplotypes in the second block for samples that
+    used 'first_hap' in the first block.
     
-    for sample_idx, (parents, _) in enumerate(match_list_1):
-        if first_hap in parents:
-            use_indices.append(sample_idx)
-            
-    second_usages = {}
+    Includes bounds checking to handle cases where one block is empty/invalid.
+    """
+    use_indices = []
+    
+    # 1. Validate Inputs
+    if not first_matches or len(first_matches) < 1: return {}
+    if not second_matches or len(second_matches) < 1: return {}
+    
+    match_list_1 = first_matches[0]
     match_list_2 = second_matches[0]
     
+    if not match_list_1 or not match_list_2: return {}
+    
+    len_1 = len(match_list_1)
+    len_2 = len(match_list_2)
+    
+    # 2. Collect Indices from First Block
+    for sample_idx, (parents, _) in enumerate(match_list_1):
+        if first_hap in parents:
+            # Only add if this sample ALSO exists in the second block
+            if sample_idx < len_2:
+                use_indices.append(sample_idx)
+            
+    second_usages = {}
+    
+    # 3. Aggregate Usage in Second Block
     for sample_idx in use_indices:
-        parents_2, _ = match_list_2[sample_idx]
-        
-        for parent in parents_2:
-            second_usages[parent] = second_usages.get(parent, 0) + 1
+        # Tuple unpacking safety
+        entry = match_list_2[sample_idx]
+        if entry:
+            parents_2, _ = entry
+            for parent in parents_2:
+                second_usages[parent] = second_usages.get(parent, 0) + 1
     
     return dict(sorted(second_usages.items(), key=lambda item: item[1]))
 
@@ -328,9 +351,17 @@ def hap_matching_comparison(haps_data, matches_data, first_block_index, second_b
     
     first_haps_dict = b1.haplotypes if hasattr(b1, 'haplotypes') else b1[3]
     second_haps_dict = b2.haplotypes if hasattr(b2, 'haplotypes') else b2[3]
+    
+    # Handle empty blocks
+    if not first_haps_dict or not second_haps_dict:
+        return ({}, {})
         
     first_matches = matches_data[first_block_index]
     second_matches = matches_data[second_block_index]
+    
+    # Validate match data structure
+    if not first_matches or not second_matches:
+        return ({}, {})
         
     for hap in first_haps_dict.keys():
         hap_usages = relative_haplotype_usage(hap, first_matches, second_matches)
@@ -370,6 +401,9 @@ def get_block_hap_similarities(block_result):
         hap_vals = block_result[3]
         flags = block_result[1]
         
+    if not hap_vals:
+        return np.array([])
+
     if flags is None:
         any_key = next(iter(hap_vals))
         flags = np.ones(len(hap_vals[any_key]), dtype=bool)

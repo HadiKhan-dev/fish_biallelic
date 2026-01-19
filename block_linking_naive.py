@@ -38,6 +38,10 @@ def _worker_match_overlap(i):
     curr_block = blocks[i]
     next_block = blocks[i+1]
     
+    # Check for empty blocks (Redundant if filtered upstream, but safe)
+    if len(curr_block.positions) == 0 or len(next_block.positions) == 0:
+        return {}
+
     # 1. Determine Overlap Region
     start_position_next = next_block.positions[0]
     
@@ -158,7 +162,6 @@ def match_haplotypes_by_overlap(block_level_haps,
     """
     Takes as input a list of BlockResult objects and finds matching haps 
     based on overlapping suffix/prefix similarity.
-    (Sequential legacy version)
     """        
     
     next_starting = []
@@ -169,6 +172,10 @@ def match_haplotypes_by_overlap(block_level_haps,
     
     #Find overlap starting points
     for i in range(1,len(block_level_haps)):
+        if len(block_level_haps[i].positions) == 0 or len(block_level_haps[i-1].positions) == 0:
+            next_starting.append(0)
+            continue
+            
         start_position = block_level_haps[i].positions[0]
         insertion_point = np.searchsorted(block_level_haps[i-1].positions, start_position)
         next_starting.append(insertion_point)
@@ -182,6 +189,11 @@ def match_haplotypes_by_overlap(block_level_haps,
 
     #Iterate over all the blocks
     for i in range(len(block_level_haps)-1):
+        # Empty block check
+        if len(block_level_haps[i].positions) == 0 or len(block_level_haps[i+1].positions) == 0:
+            matches.append([])
+            continue
+
         start_point = next_starting[i]
         overlap_length = len(block_level_haps[i].positions) - start_point   
         
@@ -205,11 +217,9 @@ def match_haplotypes_by_overlap(block_level_haps,
         else:
             next_keep_flags = np.ones(overlap_length, dtype=bool)
         
-        # --- FIX: Define min_len and slice flags ---
         min_len = min(len(cur_keep_flags), len(next_keep_flags))
         cur_keep_flags = cur_keep_flags[:min_len]
         next_keep_flags = next_keep_flags[:min_len]
-        # -------------------------------------------
         
         matches.append([])
         
@@ -241,7 +251,6 @@ def match_haplotypes_by_overlap(block_level_haps,
                     
                 dist_values[(first_name,second_name)] = haps_dist
 
-            #Add autoinclude edges and remove from consideration those which are too different to ever be added
             removals = []
             for k in dist_values.keys():
                 if dist_values[k] <= hap_cutoff_autoinclude:
@@ -300,7 +309,6 @@ def match_haplotypes_by_samples(full_haps_data, num_processes=16):
     Optimized: Uses shared memory for full_haps_data and split pools.
     """
     
-    #Controls the threshold
     auto_add_val = 70
     max_reduction_include = 0.8
     
@@ -314,7 +322,6 @@ def match_haplotypes_by_samples(full_haps_data, num_processes=16):
             block_haps_names[-1].append((i,nm))
     
     # --- PHASE 1: Get Best Matches ---
-    # Init Shared Data with blocks only
     shared_context_1 = {'blocks': full_haps_data}
 
     with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_1,)) as processing_pool:
@@ -324,11 +331,9 @@ def match_haplotypes_by_samples(full_haps_data, num_processes=16):
         )
         
     # --- PHASE 2: Compare Neighboring Blocks ---
-    # Init Shared Data with blocks AND the results from Phase 1
     shared_context_2 = {'blocks': full_haps_data, 'match_results': match_best_results}
     
     with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_2,)) as processing_pool:
-        # Pass indices to worker
         args_list = [(i, i+1) for i in range(num_blocks - 1)]
         neighbouring_usages = processing_pool.starmap(
             _worker_hap_matching_comparison,
@@ -346,12 +351,12 @@ def match_haplotypes_by_samples(full_haps_data, num_processes=16):
         for first_hap in first_names:
             highest_score_found = -1
             for second_hap in second_names:
-                sim_val = neighbouring_usages[x][0][(first_hap,second_hap)]
+                sim_val = neighbouring_usages[x][0].get((first_hap,second_hap), 0)
                 if sim_val > highest_score_found:
                     highest_score_found = sim_val
 
             for second_hap in second_names:
-                sim_val = neighbouring_usages[x][0][(first_hap,second_hap)]
+                sim_val = neighbouring_usages[x][0].get((first_hap,second_hap), 0)
                 
                 if sim_val >= auto_add_val or sim_val > highest_score_found*max_reduction_include:
                     forward_edges_add.append((first_hap,second_hap))
@@ -362,12 +367,12 @@ def match_haplotypes_by_samples(full_haps_data, num_processes=16):
         for second_hap in second_names:
             highest_score_found = -1
             for first_hap in first_names:
-                sim_val = neighbouring_usages[x][1][(first_hap,second_hap)]
+                sim_val = neighbouring_usages[x][1].get((first_hap,second_hap), 0)
                 if sim_val > highest_score_found:
                     highest_score_found = sim_val
                     
             for first_hap in first_names:
-                sim_val = neighbouring_usages[x][1][(first_hap,second_hap)]
+                sim_val = neighbouring_usages[x][1].get((first_hap,second_hap), 0)
                 
                 if sim_val >= auto_add_val or sim_val > highest_score_found*max_reduction_include:
                     backward_edges_add.append((first_hap,second_hap))
@@ -423,8 +428,13 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data, num_processes=16):
     
     for i in range(len(forward_match_scores)):
         commons = {}
-        for x in forward_match_scores[i].keys():
-            commons[x] = (forward_match_scores[i][x]+backward_match_scores[i][x])/2
+        # Union of keys to handle cases where one direction is empty
+        all_keys = set(forward_match_scores[i].keys()) | set(backward_match_scores[i].keys())
+        
+        for x in all_keys:
+            f_score = forward_match_scores[i].get(x, 0.0)
+            b_score = backward_match_scores[i].get(x, 0.0)
+            commons[x] = (f_score + b_score) / 2.0
             
         combined_scores.append(commons)
         
@@ -432,22 +442,36 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data, num_processes=16):
         
 #%%
 
-def get_combined_hap_score(hap_overlap_scores,hap_sample_scores,
-                           overlap_importance=1):
+def get_combined_hap_score(hap_overlap_scores, hap_sample_scores, overlap_importance=1):
     """
     Combines overlap and sample matching scores.
+    Robust to missing keys in either dictionary.
     """
     ovr = hap_overlap_scores[1]
     samps = hap_sample_scores[1]
     
-    total_weight = overlap_importance+2
+    total_weight = overlap_importance + 2
     
     combined_dict = {}
     
     for i in range(len(ovr)):
+        # 1. Process keys in Overlap (checking Sample)
         for d in ovr[i].keys():
-            comb = (overlap_importance*ovr[i][d]+2*samps[i][d])/total_weight      
+            ovr_val = ovr[i][d]
+            samp_val = samps[i].get(d, 0.0) # Handle missing sample score
+            
+            comb = (overlap_importance * ovr_val + 2 * samp_val) / total_weight      
             combined_dict[d] = comb
+            
+        # 2. Process keys in Sample (checking Overlap)
+        # Include edges found by Samples but not Overlap
+        for d in samps[i].keys():
+            if d not in combined_dict:
+                ovr_val = 0.0
+                samp_val = samps[i][d]
+                
+                comb = (overlap_importance * ovr_val + 2 * samp_val) / total_weight
+                combined_dict[d] = comb
     
     return combined_dict
 
@@ -546,7 +570,7 @@ def generate_chained_block_haplotypes(haplotype_data, nodes_list, combined_score
         
         # Check if valid path found (length should cover all layers + I + S)
         if len(found_hap) < len(nodes_copy):
-            print(f"Warning: Only partial path found for haplotype {ite}. Stopping early.")
+            # print(f"Warning: Only partial path found for haplotype {ite}. Stopping early.")
             break
 
         #Now that we have our hap apply node penalties
@@ -579,73 +603,119 @@ def combine_chained_blocks_to_single_hap(all_haps,
                                          min_total_reads=5):
     """
     Stitches blocks together into a single long haplotype.
-    all_haps: BlockResults object.
-    hap_blocks: List of tuples (layer, hap_index) for the path.
+    Handles gaps between blocks correctly by skipping empty regions
+    and only appending valid data from subsequent blocks.
     """
     
-    next_starting = []
-    
-    #Find overlap starting points
-    for i in range(1,len(all_haps)):
-        start_position = all_haps[i].positions[0]
-        insertion_point = np.searchsorted(all_haps[i-1].positions, start_position)
-        next_starting.append(insertion_point)
-        
     final_haplotype = []
     final_locations = []
     
-    for i in range(len(all_haps)-1):
-        hap_here = hap_blocks[i][1]
-        hap_next = hap_blocks[i+1][1]
-        start_point = next_starting[i]
-        overlap_length = len(all_haps[i].positions) - start_point  
-
-        # Append non-overlapping start of first block
-        if i == 0:
-            start_data = all_haps[i].haplotypes[hap_here][:start_point]
-            final_haplotype.extend(start_data)
-            final_locations.extend(all_haps[i].positions[:start_point])
-        
-        cur_overlap_data = all_haps[i].haplotypes[hap_here][start_point:]
-        next_overlap_data = all_haps[i+1].haplotypes[hap_next][:overlap_length]
-        
-        # Get read counts to weight the merger
-        reads_sum = np.sum(all_haps[i].reads_count_matrix[:,start_point:,:], axis=0)
-        num_samples = all_haps[i].reads_count_matrix.shape[0]
+    num_blocks = len(all_haps)
     
-        hap_priors = []
-        for j in range(len(reads_sum)):
-            # Calculate weight based on coverage
-            if sum(reads_sum[j]) >= max(min_total_reads, read_error_prob*num_samples):
-                rat_val = (1+reads_sum[j][1])/(2+reads_sum[j][0]+reads_sum[j][1])
+    # Pre-calculate where next block starts inside current (if overlap exists)
+    # If no overlap (gap), index is len(current)
+    next_starting = []
+    
+    for i in range(num_blocks - 1):
+        if len(all_haps[i].positions) == 0 or len(all_haps[i+1].positions) == 0:
+            next_starting.append(0) # Dummy
+            continue
+            
+        start_position_next = all_haps[i+1].positions[0]
+        # Find where next block starts in current block's coordinates
+        insertion_point = np.searchsorted(all_haps[i].positions, start_position_next)
+        next_starting.append(insertion_point)
+
+    # Process blocks
+    for i in range(num_blocks):
+        # Determine the range of the current block to include
+        # Start: Overlap with Previous (or 0 if first)
+        # End: Overlap with Next (or len if last/gap)
+        
+        current_hap_idx = hap_blocks[i][1]
+        current_data = all_haps[i].haplotypes[current_hap_idx]
+        current_pos = all_haps[i].positions
+        
+        # 1. Determine trim_start (Overlap from previous iteration)
+        if i == 0:
+            trim_start = 0
+        else:
+            # Look back: Where did this block start inside the previous one?
+            # We want to start AFTER the merged region.
+            # But the 'Merge' happened at the *end* of the previous block.
+            # So for *this* block, we start at the beginning of the merge?
+            # Actually, `next_overlap_data` in prev iteration covered `[:overlap_len]`.
+            
+            # Recalculate overlap with previous
+            prev_pos_start_next = current_pos[0]
+            idx_in_prev = np.searchsorted(all_haps[i-1].positions, prev_pos_start_next)
+            overlap_len = len(all_haps[i-1].positions) - idx_in_prev
+            
+            if overlap_len > 0:
+                trim_start = overlap_len
             else:
-                rat_val = read_error_prob
-            hap_priors.append([rat_val, 1-rat_val])
-        hap_priors = np.array(hap_priors)
+                trim_start = 0
+                
+        # 2. Determine trim_end (Where to start merging with next)
+        if i == num_blocks - 1:
+            trim_end = len(current_data)
+        else:
+            # Check overlap with next
+            idx_start_next = next_starting[i]
+            overlap_len_next = len(current_pos) - idx_start_next
+            
+            if overlap_len_next > 0:
+                trim_end = idx_start_next
+            else:
+                trim_end = len(current_data)
         
-        # Merge overlapping probabilities
-        new_probs = []
-        
-        # Ensure lengths match before looping (handle edge case of truncated overlap)
-        process_len = min(len(hap_priors), len(cur_overlap_data), len(next_overlap_data))
-        
-        for j in range(process_len):
-            new_val = analysis_utils.combine_probabilities(
-                cur_overlap_data[j],
-                next_overlap_data[j],
-                hap_priors[j]
-            )
-            new_probs.append(new_val)
-        new_probs = np.array(new_probs)
-        
-        final_haplotype.extend(new_probs)
-        final_locations.extend(all_haps[i+1].positions[:overlap_length])
-        
-        # If this is the last intersection, append the rest of the last block
-        if i == len(all_haps)-2:
-            end_data = all_haps[i+1].haplotypes[hap_next][overlap_length:]
-            final_haplotype.extend(end_data)
-            final_locations.extend(all_haps[i+1].positions[overlap_length:])
+        # 3. Append the "Middle" (Unique) part of the current block
+        # Safety clamp
+        if trim_start < len(current_data):
+            # Append unique part
+            # If gap (trim_end == len), we append until end.
+            final_haplotype.extend(current_data[trim_start : trim_end])
+            final_locations.extend(current_pos[trim_start : trim_end])
+            
+        # 4. Perform Merge (only if not last block AND overlap exists)
+        if i < num_blocks - 1:
+            idx_start_next = next_starting[i]
+            overlap_len_next = len(current_pos) - idx_start_next
+            
+            if overlap_len_next > 0:
+                # We have overlap. Merge the tail of curr with head of next.
+                hap_next_idx = hap_blocks[i+1][1]
+                
+                curr_overlap_data = current_data[trim_end:] # Should be len = overlap_len_next
+                next_overlap_data = all_haps[i+1].haplotypes[hap_next_idx][:overlap_len_next]
+                
+                # Read counts for weighting
+                if all_haps[i].reads_count_matrix is not None and all_haps[i].reads_count_matrix.size > 0:
+                    reads_sum = np.sum(all_haps[i].reads_count_matrix[:, trim_end:, :], axis=0)
+                    num_samples = all_haps[i].reads_count_matrix.shape[0]
+                    hap_priors = []
+                    for k in range(len(reads_sum)):
+                        if sum(reads_sum[k]) >= max(min_total_reads, read_error_prob*num_samples):
+                            rat_val = (1+reads_sum[k][1])/(2+reads_sum[k][0]+reads_sum[k][1])
+                        else:
+                            rat_val = read_error_prob
+                        hap_priors.append([rat_val, 1-rat_val])
+                    hap_priors = np.array(hap_priors)
+                else:
+                    hap_priors = np.full((len(curr_overlap_data), 2), 0.5)
+                
+                # Merge
+                merged_probs = []
+                process_len = min(len(curr_overlap_data), len(next_overlap_data), len(hap_priors))
+                
+                for k in range(process_len):
+                    new_val = analysis_utils.combine_probabilities(
+                        curr_overlap_data[k], next_overlap_data[k], hap_priors[k]
+                    )
+                    merged_probs.append(new_val)
+                
+                final_haplotype.extend(merged_probs)
+                final_locations.extend(current_pos[trim_end : trim_end+process_len])
     
     return [np.array(final_locations), np.array(final_haplotype)]
 
@@ -658,7 +728,9 @@ def combine_all_blocks_to_long_haps(all_haps,
     Multithreaded stitching of all long haplotypes.
     Optimized: Uses shared memory for all_haps.
     """
-    
+    if not hap_blocks_list:
+        return [[], []]
+
     shared_context = {'blocks': all_haps}
     
     worker = partial(_worker_combine_chained_blocks, 
@@ -666,12 +738,19 @@ def combine_all_blocks_to_long_haps(all_haps,
                      min_total_reads=min_total_reads)
 
     with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
-        # Map over the list of haplotype paths (small)
         processing_results = processing_pool.map(worker, hap_blocks_list)
     
-    # All paths share the same locations (approximately), so take the first one's locs
-    sites_loc = processing_results[0][0]
-    long_haps = [processing_results[x][1] for x in range(len(processing_results))]
+    # Filter empty results if any path failed completely
+    valid_results = [r for r in processing_results if len(r[0]) > 0]
+    
+    if not valid_results:
+        return [[], []]
+    
+    # Use result with max length to set sites
+    longest_idx = np.argmax([len(r[0]) for r in valid_results])
+    sites_loc = valid_results[longest_idx][0]
+    
+    long_haps = [r[1] for r in valid_results]
     
     return [sites_loc,long_haps]
 
@@ -793,13 +872,25 @@ def generate_long_haplotypes_naive(block_results, num_long_haps,
     
     Optimized: Uses shared memory for parallel steps to prevent massive serialization overhead.
     """
+    
+    # --- CRITICAL FIX: Filter out empty blocks to prevent graph disconnection ---
+    valid_blocks = []
+    for b in block_results:
+        # Check Positions, Haplotypes, AND Active Flags
+        if len(b.positions) == 0: continue
+        if len(b.haplotypes) == 0: continue
+        if b.keep_flags is not None and np.sum(b.keep_flags) == 0: continue
+        valid_blocks.append(b)
+        
+    if len(valid_blocks) < 2:
+        return (block_results, [[], []])
 
     # 1. Match haplotypes between neighboring blocks (Overlap & Samples)
     # Passed num_processes to enable parallel, shared-memory overlap matching
-    hap_matching_overlap = match_haplotypes_by_overlap_probabalistic(block_results, num_processes=num_processes)
+    hap_matching_overlap = match_haplotypes_by_overlap_probabalistic(valid_blocks, num_processes=num_processes)
     
     # Run Shared Memory Optimized Sample Matching
-    hap_matching_samples = match_haplotypes_by_samples_probabalistic(block_results, num_processes=num_processes)
+    hap_matching_samples = match_haplotypes_by_samples_probabalistic(valid_blocks, num_processes=num_processes)
     
     node_names = hap_matching_overlap[0]
     
@@ -807,16 +898,16 @@ def generate_long_haplotypes_naive(block_results, num_long_haps,
     combined_scores = get_combined_hap_score(hap_matching_overlap, hap_matching_samples[2])
 
     # 3. Pre-calculate similarity matrices in parallel (Shared Memory Optimized)
-    shared_context = {'blocks': block_results}
+    shared_context = {'blocks': valid_blocks}
     with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as p:
         similarity_matrices = p.map(
             _worker_get_similarities,
-            range(len(block_results))
+            range(len(valid_blocks))
         )
     
     # 4. Find optimal paths (Chaining) - Sequential logic, fast
     chained_block_haps = generate_chained_block_haplotypes(
-        block_results,
+        valid_blocks,
         node_names,
         combined_scores,
         num_long_haps,
@@ -826,9 +917,9 @@ def generate_long_haplotypes_naive(block_results, num_long_haps,
     )
     
     # 5. Stitch blocks together (Shared Memory Optimized)
-    final_long_haps = combine_all_blocks_to_long_haps(block_results, chained_block_haps, num_processes=num_processes)
+    final_long_haps = combine_all_blocks_to_long_haps(valid_blocks, chained_block_haps, num_processes=num_processes)
 
-    return (block_results, final_long_haps)   
+    return (valid_blocks, final_long_haps)   
 
 #%%
 def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
@@ -885,35 +976,6 @@ def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
             prob_comb_given_data = nonorm_prob_comb_given_data/np.sum(nonorm_prob_comb_given_data)
             
             posterior_probabilities.append(copy.deepcopy(prob_comb_given_data))
-            current_probabilities = prob_comb_given_data
-    
-    #Iterate forward
-    posterior_probabilities = []
-    last_site_loc = None
-    
-    for loc in range(num_sites):
-        if keep_flags[loc] != 1:
-            posterior_probabilities.append(copy.deepcopy(current_probabilities))
-        else:
-            if last_site_loc == None:
-                distance_since_last_site = 0
-            else:
-                distance_since_last_site = site_locations[loc]-last_site_loc
-            
-            last_site_loc = site_locations[loc]
-                
-            updated_prior = analysis_utils.recombination_fudge(current_probabilities,
-                                                distance_since_last_site,
-                                                recomb_rate=recomb_rate)
-            site_sample_val = sample_probs[loc]
-            genotype_vals = full_combined_genotypes[:,:,loc,:]
-
-            all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
-            prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
-            nonorm_prob_comb_given_data = np.einsum("ij,ij->ij",prob_data_given_comb,updated_prior)
-            prob_comb_given_data = nonorm_prob_comb_given_data/np.sum(nonorm_prob_comb_given_data)
-            
-            posterior_probabilities.append(prob_comb_given_data)
             current_probabilities = prob_comb_given_data
             
     upp_tri_post = []
