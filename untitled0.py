@@ -1,104 +1,121 @@
 import numpy as np
 
-def evaluate_superblocks_against_truth(super_blocks, true_haps_list, global_sites):
+def evaluate_reconstruction_robust(super_blocks, true_haps_list, global_sites, error_threshold=1.0):
     """
-    Evaluates how well the reconstructed super-blocks match the ground truth.
+    Evaluates reconstruction accuracy against the 'Concrete' reality of the simulation.
+    
+    Fixes the 'Fuzzy Truth' artifact by thresholding the probabilistic input 
+    (Truth > 0.5) before comparison. This matches how the simulation generates 
+    discrete individuals from fuzzy priors.
     """
+    print(f"\n{'Block':<5} | {'Range':<20} | {'True':<5} | {'Found':<5} | {'Recov':<5} | {'AvgErr%':<8} | {'Status'}")
+    print("-" * 95)
     
-    print(f"\n{'Block':<5} | {'Range':<20} | {'True':<5} | {'Found':<5} | {'Recovered':<10} | {'Avg Error %':<12} | {'Status'}")
-    print("-" * 90)
-    
-    total_true_haps = len(true_haps_list)
+    total_true = 0
     total_recovered = 0
-    total_checks = 0
     
-    # Convert truth to numpy array
-    true_matrix = []
+    # 1. Flatten Truth to Matrix (Sites x Haps)
+    true_matrix_full = []
     for h in true_haps_list:
-        if h.ndim > 1: true_matrix.append(h[:, 1])
-        else: true_matrix.append(h)
-    true_matrix = np.array(true_matrix)
-    
+        if h.ndim > 1: true_matrix_full.append(h[:, 1])
+        else: true_matrix_full.append(h)
+    true_matrix_full = np.array(true_matrix_full) # (Num_Founders, Global_Sites)
+
     for b_idx, block in enumerate(super_blocks):
-        # 1. Align Coordinates
+        # 2. Align Data
         start_pos = block.positions[0]
         end_pos = block.positions[-1]
         
-        # Binary search for global indices
-        start_global_idx = np.searchsorted(global_sites, start_pos)
-        end_global_idx = np.searchsorted(global_sites, end_pos, side='right')
+        start_g = np.searchsorted(global_sites, start_pos)
+        end_g = np.searchsorted(global_sites, end_pos, side='right')
         
-        # Intersection to be safe
-        common_sites, block_indices, global_indices = np.intersect1d(
-            block.positions, global_sites[start_global_idx:end_global_idx], return_indices=True
+        # Intersect to handle downsampling/proxies safely
+        # matching_sites -> sites present in BOTH block and global truth
+        common, block_idxs, global_idxs = np.intersect1d(
+            block.positions, global_sites[start_g:end_g], return_indices=True
         )
         
-        # 2. Slice Ground Truth for this Super-Region
-        true_slice = true_matrix[:, start_global_idx:end_global_idx][:, global_indices]
+        if len(common) == 0:
+            print(f"{b_idx:<5} | {start_pos}-{end_pos} | 0     | 0     | 0     | N/A      | EMPTY")
+            continue
+
+        # 3. Get Concrete Truth
+        # Slice global truth to the specific sites active in this block
+        prob_slice = true_matrix_full[:, start_g:end_g][:, global_idxs]
         
-        # 3. Get Unique True Haplotypes
-        unique_true_rows, true_ids = np.unique(true_slice, axis=0, return_index=True)
-        num_true_unique = len(unique_true_rows)
+        # *** CRITICAL FIX: CONCRETIZATION ***
+        # Convert probabilistic input (e.g. 0.6) to concrete reality (1.0)
+        concrete_slice = (prob_slice > 0.5).astype(np.float64)
         
-        # 4. Get Reconstructed Haplotypes
-        rec_matrix = []
-        # Sort keys to ensure deterministic order
+        # Find unique rows (Founders active in this region)
+        unique_true_rows = np.unique(concrete_slice, axis=0)
+        n_true = len(unique_true_rows)
+        
+        # 4. Get Found Haplotypes
+        found_rows = []
         for k in sorted(block.haplotypes.keys()):
             h = block.haplotypes[k]
             if h.ndim > 1: h = h[:, 1]
-            rec_matrix.append(h[block_indices])
-        rec_matrix = np.array(rec_matrix)
-        num_found = len(rec_matrix)
-        
-        # 5. Distance Matrix
-        if num_found == 0:
-            print(f"{b_idx:<5} | {start_pos}-{end_pos} | {num_true_unique:<5} | 0     | 0          | N/A          | FAIL")
-            continue
             
-        distances = np.zeros((num_true_unique, num_found))
-        for t in range(num_true_unique):
-            for r in range(num_found):
-                d = np.mean(np.abs(unique_true_rows[t] - rec_matrix[r]))
-                distances[t, r] = d * 100 # Percentage
+            # Extract only the intersecting sites
+            found_rows.append(h[block_idxs])
         
-        # 6. Scoring
-        recovered_count = 0
+        found_rows = np.array(found_rows)
+        n_found = len(found_rows)
+        
+        if n_found == 0:
+            print(f"{b_idx:<5} | {start_pos:<9}-{end_pos:<9} | {n_true:<5} | 0     | 0     | N/A      | MISSING")
+            total_true += n_true
+            continue
+
+        # 5. Compare (Greedy Matching)
+        # We want to know: For every True Hap, is there a Found Hap close enough?
+        
+        recovered_this_block = 0
         errors = []
         
-        for t in range(num_true_unique):
-            best_match_idx = np.argmin(distances[t])
-            best_error = distances[t, best_match_idx]
-            errors.append(best_error)
+        for t_idx in range(n_true):
+            target = unique_true_rows[t_idx]
             
-            # Threshold: < 1% difference = Recovered
-            if best_error < 1.0:
-                recovered_count += 1
+            # Calculate distance to ALL found haps
+            # Dist = % of sites that disagree
+            dists = np.mean(np.abs(found_rows - target), axis=1) * 100
+            
+            best_err = np.min(dists)
+            errors.append(best_err)
+            
+            if best_err < error_threshold:
+                recovered_this_block += 1
         
-        mean_error = np.mean(errors)
-        status = "OK"
-        if recovered_count < num_true_unique:
+        avg_err = np.mean(errors)
+        
+        # Status
+        if recovered_this_block == n_true:
+            if n_found > n_true + 2:
+                status = "OK (Noisy)"
+            else:
+                status = "OK"
+        else:
             status = "MISSING"
-        elif num_found > num_true_unique + 2: 
-            status = "NOISY"
             
-        print(f"{b_idx:<5} | {start_pos:<9}-{end_pos:<9} | {num_true_unique:<5} | {num_found:<5} | {recovered_count:<10} | {mean_error:<12.4f} | {status}")
+        print(f"{b_idx:<5} | {start_pos:<9}-{end_pos:<9} | {n_true:<5} | {n_found:<5} | {recovered_this_block:<5} | {avg_err:<8.3f} | {status}")
         
-        total_recovered += recovered_count
-        total_checks += num_true_unique
+        total_true += n_true
+        total_recovered += recovered_this_block
+        
+    print("-" * 95)
+    print(f"Total True Haplotypes: {total_true}")
+    print(f"Total Recovered:       {total_recovered}")
+    if total_true > 0:
+        print(f"Global Recovery Rate:  {total_recovered/total_true*100:.2f}%")
 
-    print("-" * 90)
-    print(f"Total Unique True Haplotypes across all blocks: {total_checks}")
-    print(f"Total Successfully Recovered: {total_recovered}")
-    if total_checks > 0:
-        print(f"Global Recovery Rate: {total_recovered / total_checks * 100:.2f}%")
+# =======================================================
+# RUN EVALUATION
+# =======================================================
 
-# =============================================================================
-# RUN TEST
-# =============================================================================
-
-# Replace 's_level_2' with your actual variable name if different
-evaluate_superblocks_against_truth(
-    super_blocks_level_2, 
-    haplotype_data, 
-    haplotype_sites
+evaluate_reconstruction_robust(
+    super_blocks_level_1,  # Your reconstruction variable
+    haplotype_data,        # Your probabilistic ground truth list
+    haplotype_sites,       # Global site positions
+    error_threshold=1.0    # 1% error tolerance
 )
