@@ -505,6 +505,8 @@ def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty,
     from the set to improve the BIC score.
     
     Args:
+        recomb_penalty: This should be passed as the LOWER pruning_recomb_penalty
+                        when collapsing chimeras.
         force_prune_to (int): If set, forces deletion of least useful founders
                               until this count is reached, ignoring BIC score.
     """
@@ -579,19 +581,25 @@ def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty,
 def select_founders_likelihood(beam_results, block_emissions, fast_mesh, 
                              max_founders=12, 
                              recomb_penalty=10.0, 
-                             complexity_penalty_scale=0.1, # RENAMED
+                             pruning_recomb_penalty=None, # NEW ARGUMENT
+                             complexity_penalty_scale=0.1, 
                              do_refinement=True,
                              overshoot_limit=30,
-                             use_standard_bic=False): # NEW FLAG
+                             use_standard_bic=False): 
     """
     Overshoot & Prune Strategy with Configurable Penalty Scaling.
     
     Args:
+        recomb_penalty: Cost to switch used during Addition/Swapping (Should be HIGH).
+        pruning_recomb_penalty: Cost to switch used during Pruning (Should be LOW).
         complexity_penalty_scale: Multiplier for the complexity term.
-                                  For Linear (Default): Min LogLik gain per sample.
         use_standard_bic: If True, uses log(N) scaling. If False, uses Linear N scaling.
     """
     
+    # Default to symmetric penalty if not specified
+    if pruning_recomb_penalty is None:
+        pruning_recomb_penalty = recomb_penalty
+
     full_tensor = precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh)
     
     num_candidates = len(beam_results)
@@ -610,12 +618,14 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
         cost_type = "Linear Loss (N)"
         
     print(f"Selection Cost per Founder: {complexity_cost_per_founder:.1f} [{cost_type}, Scale={complexity_penalty_scale}]")
-    
+    print(f"Penalties -> Add/Swap: {recomb_penalty:.1f}, Prune: {pruning_recomb_penalty:.1f}")
+
     selected_indices = []
     current_best_bic = float('inf')
     
     print(f"\n--- Starting Forward Selection (Attempting up to {overshoot_limit}) ---")
     
+    # 1. FORWARD SELECTION (Use strict/high recomb_penalty)
     for k in range(overshoot_limit):
         best_new_idx = -1
         best_new_score = -np.inf
@@ -625,6 +635,7 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
         
         for cand_idx in remaining:
             trial_set = selected_indices + [cand_idx]
+            # Use HIGH penalty here to ensure we pick data that fits well without assuming switching
             total_ll = calculate_score_for_subset(trial_set, full_tensor, recomb_penalty)
             
             if total_ll > best_new_score:
@@ -646,15 +657,21 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
             print(f"    >> REJECTED. BIC did not improve.")
             break
     
-    # 2. SWAP
+    # 2. SWAP (Use strict/high recomb_penalty)
     if do_refinement and len(selected_indices) > 1:
         selected_indices, final_score = refine_selection_by_swapping(
             selected_indices, full_tensor, num_candidates, recomb_penalty
         )
         
-        # 3. FORCE PRUNE & BIC PRUNE
+        # 3. FORCE PRUNE & BIC PRUNE (Use LOOSE/LOW pruning_recomb_penalty)
+        # By lowering the penalty, the Viterbi path becomes willing to switch. 
+        # If a founder is just a chimera of two others, the likelihood loss of removing it 
+        # becomes small (because we can just switch), but the BIC gain (complexity reward) 
+        # remains high. Thus, it gets pruned.
         selected_indices = refine_selection_by_pruning(
-            selected_indices, full_tensor, recomb_penalty, complexity_cost_per_founder,
+            selected_indices, full_tensor, 
+            pruning_recomb_penalty, # <--- Uses low penalty
+            complexity_cost_per_founder,
             force_prune_to=max_founders
         )
 

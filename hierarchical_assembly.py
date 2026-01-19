@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 # Import your specific modules
 import block_haplotypes
-import block_linking_em as block_linking
+import block_linking_em
 import hmm_matching
 import beam_search_core
 
@@ -13,7 +13,7 @@ import beam_search_core
 # DATA HELPERS
 # =============================================================================
 
-def create_downsampled_proxy(block, max_sites=1000):
+def create_downsampled_proxy(block, max_sites=2000):
     """
     Creates a lightweight 'Proxy' of a BlockResult.
     Returns the original block if it's small enough.
@@ -107,19 +107,21 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           # Selection Parameters
                           max_founders=12,
                           complexity_penalty_scale=0.1, 
-                          recomb_penalty=None,        # Fixed value OR...
-                          switch_cost_scale=0.075,    # ...Scaling Factor
+                          recomb_penalty=None,          # Raw High penalty (if scale not used)
+                          pruning_recomb_penalty=None,  # Raw Low penalty (if scale not used)
+                          switch_cost_scale=0.075,      # Scaling factor for High Penalty
+                          pruning_switch_cost_scale=None, # Scaling factor for Low Penalty
                           use_standard_bic=False,
                           # Memory Safety
-                          max_sites_for_linking=1000): 
+                          max_sites_for_linking=2000): 
     """
     Performs one level of Hierarchical Assembly.
     Includes Proxy Logic and Pre-Calculated Emissions to prevent OOM.
     
     Args:
-        input_blocks: List of BlockResult objects.
-        global_probs: (Samples x Sites x 3) Global Data.
-        global_sites: (Sites,) Global Positions.
+        switch_cost_scale: Factor to calculate High Penalty from block size (e.g. 0.075).
+        pruning_switch_cost_scale: Factor to calculate Low Penalty from block size (e.g. 0.001).
+                                   If None, falls back to raw pruning_recomb_penalty or defaults to High.
     """
     
     total_blocks = len(input_blocks)
@@ -141,31 +143,48 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             output_super_blocks.append(original_portion[0])
             continue
 
-        # --- DYNAMIC PENALTY ---
-        avg_snps = np.mean([len(b.positions) for b in original_portion])
-        if switch_cost_scale is not None:
-            current_recomb_penalty = avg_snps * switch_cost_scale
-        else:
-            current_recomb_penalty = recomb_penalty if recomb_penalty is not None else 15.0
-
-        # 1. Create Proxies
-        # (Downsamples only if block is large, otherwise returns original)
+        # 1. Create Proxies (Downsample first so stats match the data used for likelihoods)
         proxy_list = []
         for b in original_portion:
             proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
         portion_proxy = block_haplotypes.BlockResults(proxy_list)
 
+        # --- DYNAMIC PENALTY LOGIC (Calculated on PROXY size) ---
+        avg_snps = np.mean([len(b.positions) for b in portion_proxy])
+        
+        # 1. Determine Add/Swap Penalty (High)
+        if switch_cost_scale is not None:
+            current_recomb_penalty = avg_snps * switch_cost_scale
+        else:
+            current_recomb_penalty = recomb_penalty if recomb_penalty is not None else 15.0
+
+        # 2. Determine Pruning Penalty (Low)
+        if pruning_switch_cost_scale is not None:
+            # Scaled Low Penalty
+            current_pruning_penalty = avg_snps * pruning_switch_cost_scale
+        elif pruning_recomb_penalty is not None:
+            # Fixed Low Penalty (User provided raw number)
+            current_pruning_penalty = pruning_recomb_penalty
+        else:
+            # Fallback: Same as High (Legacy behavior)
+            current_pruning_penalty = current_recomb_penalty
+            
+        # 3. AUTO-SCALE COMPLEXITY PENALTY
+        # Normalize against a baseline of 200 SNPs (Level 1 size).
+        # Since we are using Proxy size now, this will usually be near 1.0 or capped at 10.0 (2000/200).
+        # This prevents the penalty from exploding when the "real" block size is 20k.
+        snp_growth_factor = avg_snps / 200.0
+        effective_complexity_scale = complexity_penalty_scale * snp_growth_factor
+
         # 2. Generate Mesh
         if use_hmm_linking:
             # OOM FIX: Pre-calculate Viterbi Emissions in the main process
-            # This prevents passing the massive 'global_probs' to the 16 worker processes.
-            # hmm_matching.generate_viterbi_block_emissions now handles sparse proxies natively.
+            # block_linking now handles sparse proxies natively
             viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
                 global_probs, global_sites, portion_proxy, num_processes=16
             )
             print("Mesh Stage")
             # Generate Mesh using pre-calculated emissions
-            # We pass None for raw data to ensure no pickling happens
             mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
                 None, None, portion_proxy, 
                 recomb_rate=recomb_rate, 
@@ -174,7 +193,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             )
         else:
             # Standard Linker
-            mesh = block_linking.generate_transition_probability_mesh(
+            mesh = block_linking_em.generate_transition_probability_mesh(
                 global_probs, global_sites, portion_proxy,
                 use_standard_baum_welch=True
             )
@@ -190,20 +209,24 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             
         # 4. Selection on Proxy
         # Calculate Standard Emissions (Block-level) for Selection
-        # block_linking now handles sparse proxies natively
-        portion_emissions_standard = block_linking.generate_all_block_likelihoods(
+        portion_emissions_standard = block_linking_em.generate_all_block_likelihoods(
             global_probs, global_sites, portion_proxy, num_processes=16
         )
         
         fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
         
+        # Pass both penalties to the selection core
         selected_founders = beam_search_core.select_founders_likelihood(
             beam_results, 
             portion_emissions_standard, 
             fast_mesh,
             max_founders=max_founders,
-            recomb_penalty=current_recomb_penalty,
-            complexity_penalty_scale=complexity_penalty_scale,
+            recomb_penalty=current_recomb_penalty,       # HIGH: Strict Entry
+            pruning_recomb_penalty=current_pruning_penalty, # LOW: Easy Exit (Chimera Cleanup)
+            
+            # Use the AUTO-SCALED complexity penalty
+            complexity_penalty_scale=effective_complexity_scale,
+            
             do_refinement=True,
             use_standard_bic=use_standard_bic
         )
