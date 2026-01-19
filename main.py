@@ -28,6 +28,7 @@ import beam_search_core
 import paint_samples
 import hierarchical_assembly
 import pedigree_inference
+import pedigree_inference_testing
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
@@ -50,7 +51,12 @@ regions_config = [
     {"contig": "chr2", "start": 0, "end": 400},
     {"contig": "chr3", "start": 0, "end": 400},
     {"contig": "chr4", "start": 0, "end": 400},
-    {"contig": "chr5", "start": 0, "end": 400}]
+    {"contig": "chr5", "start": 0, "end": 400},
+    {"contig": "chr6", "start": 0, "end": 400},
+    {"contig": "chr7", "start": 0, "end": 400},
+    {"contig": "chr8", "start": 0, "end": 400},
+    {"contig": "chr9", "start": 0, "end": 400},
+    {"contig": "chr10", "start": 0, "end": 400}]
 
 block_size = 100000
 shift_size = 50000
@@ -82,8 +88,12 @@ for region in regions_config:
     # 2. Run Haplotype Discovery
     start = time.time()
     block_results = block_haplotypes.generate_all_block_haplotypes(genomic_data)
-    print(f"  [Discovery] Haplotypes generated in {time.time() - start:.2f}s")
 
+    # Remove empty blocks (no SNPs found) to prevent linker crashes
+    valid_blocks = [b for b in block_results if len(b.positions) > 0]
+    block_results = block_haplotypes.BlockResults(valid_blocks)
+    
+    print(f"  [Discovery] Haplotypes generated in {time.time() - start:.2f}s")
     # 3. Run Naive Linker (to get long templates for simulation)
     start = time.time()
     (naive_blocks, naive_long_haps) = block_linking_naive.generate_long_haplotypes_naive(
@@ -333,7 +343,174 @@ parent_acc = control_validation_df[descendant_mask]['Parents_Match'].mean() * 10
 
 print(f"Generation Accuracy: {gen_acc:.2f}%")
 print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
+#%%
+import numpy as np
+import pandas as pd
+import math
+from pedigree_inference import discretize_paintings, convert_id_grid_to_allele_grid, run_inheritance_hmm_dynamic
 
+# =============================================================================
+# DEBUG CONFIGURATION
+# =============================================================================
+target_kid = "F3_22"
+true_parents = ["F2_65", "F2_84"]
+inferred_parents = ["F1_6", "F2_84"] # The wrong set
+
+print(f"\n=== DEBUGGING TRIO: {target_kid} ===")
+print(f"Comparing True: {true_parents}")
+print(f"vs Inferred:    {inferred_parents}")
+
+# Check if indices exist
+try:
+    k_idx = sample_names.index(target_kid)
+    tp_indices = [sample_names.index(p) for p in true_parents]
+    ip_indices = [sample_names.index(p) for p in inferred_parents]
+except ValueError as e:
+    print(f"Error: Sample not found in sample_names list. {e}")
+    # Stop execution if names don't match
+    raise e
+
+# =============================================================================
+# METRIC ACCUMULATORS
+# =============================================================================
+# We need to track the global sums across all contigs
+global_scores = {
+    "True_Pair": 0.0,
+    "Inferred_Pair": 0.0
+}
+
+global_switches = {
+    target_kid: 0,
+    true_parents[0]: 0,
+    true_parents[1]: 0,
+    inferred_parents[0]: 0, 
+    # Note: inferred_parents[1] is usually same as true_parents[1] in your case (F1_4)
+}
+if inferred_parents[1] not in global_switches:
+    global_switches[inferred_parents[1]] = 0
+
+# =============================================================================
+# PER-CONTIG ANALYSIS
+# =============================================================================
+
+for r_name in region_keys:
+    print(f"\n--- Analyzing Region: {r_name} ---")
+    
+    # 1. Get Data
+    painting = multi_contig_results[r_name]['control_painting']
+    founder_block = multi_contig_results[r_name]['control_founder_block']
+    
+    # 2. Re-Discretize
+    id_grid, bin_edges, bin_centers = discretize_paintings(painting, snps_per_bin=150)
+    allele_grid = convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block)
+    
+    # 3. Setup HMM Costs locally
+    recomb_rate = 5e-8
+    robustness = 1e-2
+    error_penalty = -math.log(robustness)
+    
+    dists = np.zeros(len(bin_centers))
+    dists[1:] = np.diff(bin_centers)
+    theta = 1.0 - np.exp(-dists * recomb_rate)
+    theta = np.clip(theta, 1e-15, 0.5)
+    switch_costs = np.log(theta)
+    stay_costs = np.log(1.0 - theta)
+    
+    # 4. Count Switches (Directionality Check)
+    def get_switches(idx):
+        row = id_grid[idx]
+        sw = (row[:-1, :] != row[1:, :]) & (row[:-1, :] != -1) & (row[1:, :] != -1)
+        return np.sum(sw)
+
+    # Accumulate Switches
+    k_sw = get_switches(k_idx)
+    global_switches[target_kid] += k_sw
+    
+    for p_name in set(true_parents + inferred_parents):
+        pidx = sample_names.index(p_name)
+        global_switches[p_name] += get_switches(pidx)
+
+    # 5. Score The Pairs (HMM)
+    def get_pair_score(p1_idx, p2_idx):
+        kid_h0 = allele_grid[k_idx, :, 0]
+        kid_h1 = allele_grid[k_idx, :, 1]
+        
+        par1_dip = allele_grid[p1_idx]
+        par2_dip = allele_grid[p2_idx]
+        
+        # Calculate raw likelihoods for all combinations
+        # Score(Kid_H0 | Parent1), Score(Kid_H0 | Parent2), etc.
+        s_k0_p1 = run_inheritance_hmm_dynamic(kid_h0, par1_dip, switch_costs, stay_costs, error_penalty)
+        s_k1_p1 = run_inheritance_hmm_dynamic(kid_h1, par1_dip, switch_costs, stay_costs, error_penalty)
+        
+        s_k0_p2 = run_inheritance_hmm_dynamic(kid_h0, par2_dip, switch_costs, stay_costs, error_penalty)
+        s_k1_p2 = run_inheritance_hmm_dynamic(kid_h1, par2_dip, switch_costs, stay_costs, error_penalty)
+        
+        # Option A: P1 -> H0, P2 -> H1
+        score_a = s_k0_p1 + s_k1_p2
+        
+        # Option B: P1 -> H1, P2 -> H0
+        score_b = s_k1_p1 + s_k0_p2
+        
+        # In multi-contig inference, we take the MAX phase configuration per contig
+        return max(score_a, score_b)
+
+    score_true = get_pair_score(tp_indices[0], tp_indices[1])
+    score_inf = get_pair_score(ip_indices[0], ip_indices[1])
+    
+    print(f"  True Pair Score:     {score_true:.2f}")
+    print(f"  Inferred Pair Score: {score_inf:.2f}")
+    
+    global_scores["True_Pair"] += score_true
+    global_scores["Inferred_Pair"] += score_inf
+
+# =============================================================================
+# FINAL REPORT
+# =============================================================================
+
+print("\n" + "="*40)
+print("FINAL DIAGNOSTIC REPORT")
+print("="*40)
+
+print("\n1. GLOBAL HMM SCORES (Higher is Better)")
+print(f"  True Pair ({true_parents}):     {global_scores['True_Pair']:.2f}")
+print(f"  Inferred Pair ({inferred_parents}): {global_scores['Inferred_Pair']:.2f}")
+
+diff = global_scores['Inferred_Pair'] - global_scores['True_Pair']
+if diff > 0:
+    print(f"  -> RESULT: Inferred pair fits genetic data BETTER by {diff:.2f} log-units.")
+    print("     (The F3 actually looks more like a parent than the F1 on these contigs)")
+else:
+    print(f"  -> RESULT: True pair fits genetic data BETTER by {abs(diff):.2f} log-units.")
+    print("     (Logic error: Why was True Pair rejected?)")
+
+print("\n2. DIRECTIONALITY FILTER (Switch Counts)")
+print("  Parents must have FEWER switches than the child.")
+print(f"  Target Child ({target_kid}): {global_switches[target_kid]}")
+
+print("\n  Candidate Comparisons:")
+for p_name in set(true_parents + inferred_parents):
+    sw = global_switches[p_name]
+    diff = global_switches[target_kid] - sw
+    # In `infer_pedigree_multi_contig`, we use a margin (e.g., 5 * num_contigs)
+    # Filter: Parent_Switches <= Child_Switches + Margin
+    # So if Parent_Switches is massively higher, it fails.
+    
+    status = "VALID" if sw <= (global_switches[target_kid] + 25) else "FILTERED" # Assuming margin=25 (5*5)
+    print(f"    {p_name}: {sw} switches. (Child - Parent = {diff}). Status: {status}")
+
+# SPECIFIC CHECK FOR THE FAILURE CASE
+fp_name = "F3_5"
+if fp_name in global_switches:
+    kid_sw = global_switches[target_kid]
+    fp_sw = global_switches[fp_name]
+    
+    if fp_sw < kid_sw:
+        print(f"\n[DIAGNOSIS] {fp_name} (F3) has FEWER switches ({fp_sw}) than {target_kid} (F2) ({kid_sw}).")
+        print("The algorithm correctly interprets this as F3 being 'older/purer' than F2.")
+        print("Root Cause: Painting noise or short contigs allowed F3 to look like a founder.")
+    else:
+        print(f"\n[DIAGNOSIS] {fp_name} has MORE switches. It should have been filtered.")
 
 
 

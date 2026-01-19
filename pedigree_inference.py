@@ -322,7 +322,7 @@ def infer_pedigree_multi_contig(contig_data_list, sample_ids, top_k=20):
     # A parent must have fewer recombinations than the child (globally).
     # We allow a margin of error (e.g. 5 switches per contig)
     cand_mask = np.zeros((num_samples, num_samples), dtype=bool)
-    margin = 5 * num_contigs
+    margin = 10
     
     for i in range(num_samples):
         # Candidates must have fewer switches than Child i
