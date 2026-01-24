@@ -28,7 +28,7 @@ import beam_search_core
 import paint_samples
 import hierarchical_assembly
 import pedigree_inference
-import pedigree_inference_testing
+import phase_correction
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
@@ -56,7 +56,9 @@ regions_config = [
     {"contig": "chr7", "start": 0, "end": 400},
     {"contig": "chr8", "start": 0, "end": 400},
     {"contig": "chr9", "start": 0, "end": 400},
-    {"contig": "chr10", "start": 0, "end": 400}]
+    {"contig": "chr10", "start": 0, "end": 400},
+    {"contig": "chr11", "start": 0, "end": 400},
+    {"contig": "chr12", "start": 0, "end": 400}]
 
 block_size = 100000
 shift_size = 50000
@@ -218,26 +220,19 @@ print("\n" + "="*60)
 print("CONTROL EXPERIMENT: Multi-Contig Painting using GROUND TRUTH Haplotypes")
 print("="*60)
 
+# 1. Generate Control Paintings (Unphased / Arbitrary Phase)
 for r_name in region_keys:
     print(f"\n[Control Painting] Processing Region: {r_name}")
     
-    # 1. Retrieve Data
-    # 'naive_long_haps' contains the exact sites and haplotypes used to start the simulation
+    # Retrieve Data
     sites, haps_list = multi_contig_results[r_name]['naive_long_haps']
-    
-    # 'simulated_reads' are the raw reads generated from the simulation
     reads_matrix = multi_contig_results[r_name]['simulated_reads']
     
-    # 2. Calculate Genotype Probabilities for the FULL contig
-    # (We do this here because previous steps might have only calculated probs for chunks)
-    # This gives us (Samples, Sites, 3) for the whole chromosome
+    # Calculate Probabilities
     _, global_probs = analysis_utils.reads_to_probabilities(reads_matrix)
     
-    # 3. Package Ground Truth Haplotypes into a BlockResult
-    # The simulation output 'haps_list' is a list of arrays. We need a dict {id: array}
+    # Package Ground Truth Haplotypes
     gt_haps_dict = {i: h_arr for i, h_arr in enumerate(haps_list)}
-    
-    # Create valid flags (all true)
     gt_flags = np.ones(len(sites), dtype=int)
     
     gt_block_result = block_haplotypes.BlockResult(
@@ -246,7 +241,7 @@ for r_name in region_keys:
         keep_flags=gt_flags
     )
     
-    # 4. Paint samples using these PERFECT haplotypes
+    # Paint samples
     print(f"  Painting {len(sample_names)} samples...")
     gt_painting_result = paint_samples.paint_samples_in_block(
         gt_block_result,
@@ -256,7 +251,7 @@ for r_name in region_keys:
         switch_penalty=15.0 
     )
     
-    # 5. Visualize Ground Truth Painting
+    # --- VISUALIZE GROUND TRUTH PAINTING (UNCORRECTED) ---
     plot_filename = os.path.join(output_dir, f"{r_name}_control_painting.png")
     print(f"  Generating Plot: {plot_filename}")
     
@@ -269,7 +264,7 @@ for r_name in region_keys:
         row_height_per_sample=0.25
     )
     
-    # 6. Store results for the Multi-Contig Pedigree Inference step
+    # Store results
     multi_contig_results[r_name]['control_painting'] = gt_painting_result
     multi_contig_results[r_name]['control_founder_block'] = gt_block_result
 
@@ -287,7 +282,6 @@ print("="*60)
 contig_inputs = []
 
 for r_name in region_keys:
-    # We need the Painting and the Founder Block for every region
     if 'control_painting' in multi_contig_results[r_name]:
         entry = {
             'painting': multi_contig_results[r_name]['control_painting'],
@@ -297,15 +291,19 @@ for r_name in region_keys:
     else:
         print(f"Warning: Control painting missing for {r_name}")
 
-# 2. Run Inference
-# Note: sample_names is defined earlier in your script from the truth csv
+# 2. Run Inference (16-State HMM)
+# We call the core function directly to handle the multi-contig list
 pedigree_result = pedigree_inference.infer_pedigree_multi_contig(
     contig_inputs, 
     sample_ids=sample_names,
     top_k=20
 )
 
-# 3. Save & Visualize
+# 3. Apply Auto-Cutoff (Crucial for F1 identification)
+# This uses K-Means on the HMM scores to identify samples with no valid parents
+pedigree_result.perform_automatic_cutoff()
+
+# 4. Save & Visualize
 ped_df = pedigree_result.relationships
 output_csv = os.path.join(output_dir, "multi_contig_pedigree_control.csv")
 ped_df.to_csv(output_csv, index=False)
@@ -314,7 +312,7 @@ print(f"Multi-Contig Pedigree saved to: {output_csv}")
 output_tree = os.path.join(output_dir, "multi_contig_tree_control.png")
 pedigree_inference.draw_pedigree_tree(ped_df, output_file=output_tree)
 
-# 4. Validate
+# 5. Validate against Truth
 print("\n--- Multi-Contig Validation ---")
 control_validation_df = pd.merge(
     truth_pedigree[['Sample', 'Generation', 'Parent1', 'Parent2']],
@@ -329,7 +327,7 @@ def check_parent_match(row):
     inf_p = {row['Parent1_Inf'], row['Parent2_Inf']}
     inf_p = {x for x in inf_p if pd.notna(x)}
     
-    # F1 check
+    # F1 check (Truth has Founders, Inf has None)
     if any("Founder" in str(x) for x in true_p):
         return len(inf_p) == 0
     return true_p == inf_p
@@ -343,174 +341,44 @@ parent_acc = control_validation_df[descendant_mask]['Parents_Match'].mean() * 10
 
 print(f"Generation Accuracy: {gen_acc:.2f}%")
 print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
+
 #%%
-import numpy as np
-import pandas as pd
-import math
-from pedigree_inference import discretize_paintings, convert_id_grid_to_allele_grid, run_inheritance_hmm_dynamic
-
 # =============================================================================
-# DEBUG CONFIGURATION
+# PHASE CORRECTION (ALIGN TRACKS TO PARENTS)
 # =============================================================================
-target_kid = "F3_22"
-true_parents = ["F2_65", "F2_84"]
-inferred_parents = ["F1_6", "F2_84"] # The wrong set
 
-print(f"\n=== DEBUGGING TRIO: {target_kid} ===")
-print(f"Comparing True: {true_parents}")
-print(f"vs Inferred:    {inferred_parents}")
+print("\n" + "="*60)
+print("RUNNING: Phase Correction based on Inferred Pedigree")
+print("="*60)
 
-# Check if indices exist
-try:
-    k_idx = sample_names.index(target_kid)
-    tp_indices = [sample_names.index(p) for p in true_parents]
-    ip_indices = [sample_names.index(p) for p in inferred_parents]
-except ValueError as e:
-    print(f"Error: Sample not found in sample_names list. {e}")
-    # Stop execution if names don't match
-    raise e
+# 1. Run Correction
+# This uses the inferred trios to force Track 0 -> Parent 1 and Track 1 -> Parent 2
+# It handles the 'control_painting' inside the function automatically.
+multi_contig_results = phase_correction.correct_phase_all_contigs(
+    multi_contig_results,
+    pedigree_result.relationships,
+    sample_names
+)
 
-# =============================================================================
-# METRIC ACCUMULATORS
-# =============================================================================
-# We need to track the global sums across all contigs
-global_scores = {
-    "True_Pair": 0.0,
-    "Inferred_Pair": 0.0
-}
-
-global_switches = {
-    target_kid: 0,
-    true_parents[0]: 0,
-    true_parents[1]: 0,
-    inferred_parents[0]: 0, 
-    # Note: inferred_parents[1] is usually same as true_parents[1] in your case (F1_4)
-}
-if inferred_parents[1] not in global_switches:
-    global_switches[inferred_parents[1]] = 0
-
-# =============================================================================
-# PER-CONTIG ANALYSIS
-# =============================================================================
+# 2. Visualize Corrected Paintings
+# We plot the same sample names as before to compare
+print("\nGenerating Corrected Plots...")
 
 for r_name in region_keys:
-    print(f"\n--- Analyzing Region: {r_name} ---")
-    
-    # 1. Get Data
-    painting = multi_contig_results[r_name]['control_painting']
-    founder_block = multi_contig_results[r_name]['control_founder_block']
-    
-    # 2. Re-Discretize
-    id_grid, bin_edges, bin_centers = discretize_paintings(painting, snps_per_bin=150)
-    allele_grid = convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block)
-    
-    # 3. Setup HMM Costs locally
-    recomb_rate = 5e-8
-    robustness = 1e-2
-    error_penalty = -math.log(robustness)
-    
-    dists = np.zeros(len(bin_centers))
-    dists[1:] = np.diff(bin_centers)
-    theta = 1.0 - np.exp(-dists * recomb_rate)
-    theta = np.clip(theta, 1e-15, 0.5)
-    switch_costs = np.log(theta)
-    stay_costs = np.log(1.0 - theta)
-    
-    # 4. Count Switches (Directionality Check)
-    def get_switches(idx):
-        row = id_grid[idx]
-        sw = (row[:-1, :] != row[1:, :]) & (row[:-1, :] != -1) & (row[1:, :] != -1)
-        return np.sum(sw)
-
-    # Accumulate Switches
-    k_sw = get_switches(k_idx)
-    global_switches[target_kid] += k_sw
-    
-    for p_name in set(true_parents + inferred_parents):
-        pidx = sample_names.index(p_name)
-        global_switches[p_name] += get_switches(pidx)
-
-    # 5. Score The Pairs (HMM)
-    def get_pair_score(p1_idx, p2_idx):
-        kid_h0 = allele_grid[k_idx, :, 0]
-        kid_h1 = allele_grid[k_idx, :, 1]
+    if 'corrected_painting' in multi_contig_results[r_name]:
+        plot_filename = os.path.join(output_dir, f"{r_name}_CORRECTED_painting.png")
         
-        par1_dip = allele_grid[p1_idx]
-        par2_dip = allele_grid[p2_idx]
-        
-        # Calculate raw likelihoods for all combinations
-        # Score(Kid_H0 | Parent1), Score(Kid_H0 | Parent2), etc.
-        s_k0_p1 = run_inheritance_hmm_dynamic(kid_h0, par1_dip, switch_costs, stay_costs, error_penalty)
-        s_k1_p1 = run_inheritance_hmm_dynamic(kid_h1, par1_dip, switch_costs, stay_costs, error_penalty)
-        
-        s_k0_p2 = run_inheritance_hmm_dynamic(kid_h0, par2_dip, switch_costs, stay_costs, error_penalty)
-        s_k1_p2 = run_inheritance_hmm_dynamic(kid_h1, par2_dip, switch_costs, stay_costs, error_penalty)
-        
-        # Option A: P1 -> H0, P2 -> H1
-        score_a = s_k0_p1 + s_k1_p2
-        
-        # Option B: P1 -> H1, P2 -> H0
-        score_b = s_k1_p1 + s_k0_p2
-        
-        # In multi-contig inference, we take the MAX phase configuration per contig
-        return max(score_a, score_b)
+        paint_samples.plot_painting(
+            multi_contig_results[r_name]['corrected_painting'],
+            output_file=plot_filename,
+            title=f"Corrected Phase Painting (Track 0=P1, Track 1=P2) - {r_name}",
+            sample_names=sample_names,
+            figsize_width=20,
+            row_height_per_sample=0.25
+        )
+        print(f"  Saved: {plot_filename}")
 
-    score_true = get_pair_score(tp_indices[0], tp_indices[1])
-    score_inf = get_pair_score(ip_indices[0], ip_indices[1])
-    
-    print(f"  True Pair Score:     {score_true:.2f}")
-    print(f"  Inferred Pair Score: {score_inf:.2f}")
-    
-    global_scores["True_Pair"] += score_true
-    global_scores["Inferred_Pair"] += score_inf
-
-# =============================================================================
-# FINAL REPORT
-# =============================================================================
-
-print("\n" + "="*40)
-print("FINAL DIAGNOSTIC REPORT")
-print("="*40)
-
-print("\n1. GLOBAL HMM SCORES (Higher is Better)")
-print(f"  True Pair ({true_parents}):     {global_scores['True_Pair']:.2f}")
-print(f"  Inferred Pair ({inferred_parents}): {global_scores['Inferred_Pair']:.2f}")
-
-diff = global_scores['Inferred_Pair'] - global_scores['True_Pair']
-if diff > 0:
-    print(f"  -> RESULT: Inferred pair fits genetic data BETTER by {diff:.2f} log-units.")
-    print("     (The F3 actually looks more like a parent than the F1 on these contigs)")
-else:
-    print(f"  -> RESULT: True pair fits genetic data BETTER by {abs(diff):.2f} log-units.")
-    print("     (Logic error: Why was True Pair rejected?)")
-
-print("\n2. DIRECTIONALITY FILTER (Switch Counts)")
-print("  Parents must have FEWER switches than the child.")
-print(f"  Target Child ({target_kid}): {global_switches[target_kid]}")
-
-print("\n  Candidate Comparisons:")
-for p_name in set(true_parents + inferred_parents):
-    sw = global_switches[p_name]
-    diff = global_switches[target_kid] - sw
-    # In `infer_pedigree_multi_contig`, we use a margin (e.g., 5 * num_contigs)
-    # Filter: Parent_Switches <= Child_Switches + Margin
-    # So if Parent_Switches is massively higher, it fails.
-    
-    status = "VALID" if sw <= (global_switches[target_kid] + 25) else "FILTERED" # Assuming margin=25 (5*5)
-    print(f"    {p_name}: {sw} switches. (Child - Parent = {diff}). Status: {status}")
-
-# SPECIFIC CHECK FOR THE FAILURE CASE
-fp_name = "F3_5"
-if fp_name in global_switches:
-    kid_sw = global_switches[target_kid]
-    fp_sw = global_switches[fp_name]
-    
-    if fp_sw < kid_sw:
-        print(f"\n[DIAGNOSIS] {fp_name} (F3) has FEWER switches ({fp_sw}) than {target_kid} (F2) ({kid_sw}).")
-        print("The algorithm correctly interprets this as F3 being 'older/purer' than F2.")
-        print("Root Cause: Painting noise or short contigs allowed F3 to look like a founder.")
-    else:
-        print(f"\n[DIAGNOSIS] {fp_name} has MORE switches. It should have been filtered.")
+print("\nPipeline Complete. Check the 'CORRECTED' plots to verify clean phasing.")
 
 
 

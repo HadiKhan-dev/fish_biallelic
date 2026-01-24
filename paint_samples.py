@@ -19,9 +19,6 @@ except ImportError:
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid='ignore')
 
-# Constants
-DEFAULT_ROBUSTNESS_EPSILON = 1e-2
-
 try:
     from numba import njit, prange
     HAS_NUMBA = True
@@ -53,7 +50,6 @@ class PhasedSegment(NamedTuple):
 class SamplePainting:
     """
     Holds the painting results for a single sample.
-    Includes both the raw chunks and the fully consolidated phased haplotypes.
     """
     def __init__(self, sample_index: int, chunks: List[PaintedChunk]):
         self.sample_index = sample_index
@@ -65,12 +61,10 @@ class SamplePainting:
         self.hap2_phased = self._extract_phased_track(chunks, track_idx=1)
 
     def _extract_phased_track(self, chunks, track_idx) -> List[PhasedSegment]:
-        """Merges adjacent chunks if the founder ID on this track doesn't change."""
         segments = []
         if not chunks: 
             return segments
         
-        # Get initial state
         curr_start = chunks[0].start
         curr_end = chunks[0].end
         # track_idx 0 is hap1, 1 is hap2
@@ -120,10 +114,6 @@ class SamplePainting:
         return rows
 
 class BlockPainting:
-    """
-    The main container returned by paint_samples_in_block.
-    Holds the painting results for ALL samples in a specific genomic block.
-    """
     def __init__(self, block_position_range: Tuple[int, int], samples: List[SamplePainting]):
         self.start_pos = block_position_range[0]
         self.end_pos = block_position_range[1]
@@ -134,7 +124,6 @@ class BlockPainting:
         return self.num_samples
 
     def __getitem__(self, idx):
-        """Access a specific SamplePainting by index."""
         return self.samples[idx]
 
     def __iter__(self):
@@ -144,9 +133,6 @@ class BlockPainting:
         return f"<BlockPainting: {self.num_samples} samples, Range {self.start_pos}-{self.end_pos}>"
 
     def to_dataframe(self, sample_names=None) -> pd.DataFrame:
-        """
-        Converts the entire block painting to a Pandas DataFrame.
-        """
         all_rows = []
         for i, sample in enumerate(self.samples):
             name = sample_names[i] if sample_names else None
@@ -154,61 +140,284 @@ class BlockPainting:
         return pd.DataFrame(all_rows)
 
 # =============================================================================
-# 2. VECTORIZED VITERBI KERNEL (STRICT PAINTING)
+# 2. HELPER: DENSE MATRIX CONVERSION (For Cleanup)
+# =============================================================================
+
+def founder_block_to_dense(block_result):
+    """
+    Converts a BlockResult object (dictionary of haps) into a dense matrix
+    for fast lookup during cleanup.
+    Returns: (hap_matrix, positions)
+    """
+    positions = block_result.positions
+    hap_dict = block_result.haplotypes
+    
+    if not hap_dict:
+        return np.zeros((0, 0), dtype=np.int8), positions
+
+    # Determine max ID
+    max_id = max(hap_dict.keys())
+    n_sites = len(positions)
+    
+    # Init with -1 (Missing)
+    # Shape: (MaxID+1, Sites)
+    dense_haps = np.full((max_id + 1, n_sites), -1, dtype=np.int8)
+    
+    for fid, hap_arr in hap_dict.items():
+        # Handle probabilistic (N,2) vs concrete (N,)
+        if hap_arr.ndim == 2:
+            concrete = np.argmax(hap_arr, axis=1)
+        else:
+            concrete = hap_arr
+        dense_haps[fid, :] = concrete
+        
+    return dense_haps, positions
+
+# =============================================================================
+# 3. CLEANUP KERNELS (INDEPENDENT TRACK RESOLUTION)
+# =============================================================================
+
+@njit(fastmath=True)
+def find_equivalent_founders_for_chunk(
+    hap_matrix,      # (MaxID, Sites)
+    snp_positions,   # (Sites,)
+    chunk_start,
+    chunk_end,
+    current_id,
+    tolerance=0.01   # 1% difference allowed to be considered "Equal"
+):
+    """
+    Checks all founders to see which ones match the 'current_id' haplotype
+    in the specific region [chunk_start, chunk_end).
+    
+    Returns a boolean mask of valid candidates.
+    """
+    n_founders, n_sites = hap_matrix.shape
+    candidates = np.zeros(n_founders, dtype=np.bool_)
+    
+    # Find SNP range
+    start_idx = -1
+    end_idx = -1
+    
+    for i in range(n_sites):
+        if snp_positions[i] >= chunk_start:
+            start_idx = i
+            break
+            
+    if start_idx == -1: return candidates # No SNPs
+    
+    for i in range(start_idx, n_sites):
+        if snp_positions[i] >= chunk_end:
+            break
+        end_idx = i
+    
+    # If region is empty or 1 SNP, difficult to judge, but we proceed
+    if end_idx < start_idx:
+        candidates[current_id] = True
+        return candidates
+        
+    # Extract reference sequence (what we assigned)
+    ref_seq = hap_matrix[current_id, start_idx:end_idx+1]
+    
+    valid_sites_count = 0
+    for x in ref_seq:
+        if x != -1: valid_sites_count += 1
+        
+    if valid_sites_count == 0:
+        candidates[current_id] = True
+        return candidates
+
+    # Compare against all other founders
+    for f_id in range(n_founders):
+        if f_id == current_id:
+            candidates[f_id] = True
+            continue
+            
+        test_seq = hap_matrix[f_id, start_idx:end_idx+1]
+        
+        matches = 0
+        total_comp = 0
+        
+        for k in range(len(ref_seq)):
+            r = ref_seq[k]
+            t = test_seq[k]
+            if r != -1 and t != -1:
+                total_comp += 1
+                if r == t:
+                    matches += 1
+        
+        if total_comp > 0:
+            diff = 1.0 - (matches / total_comp)
+            if diff <= tolerance:
+                candidates[f_id] = True
+        
+    return candidates
+
+def resolve_single_track(segments: List[PhasedSegment], hap_matrix, snp_positions) -> List[PhasedSegment]:
+    """
+    Resolves ambiguous IDs on a single haploid track by checking neighbors.
+    Merges adjacent segments if they resolve to the same ID.
+    """
+    if not segments: return []
+    
+    # 1. Calculate Options for every segment
+    # Store: (original_segment, valid_ids_set, resolved_id)
+    seg_meta = []
+    
+    for seg in segments:
+        cands = find_equivalent_founders_for_chunk(
+            hap_matrix, snp_positions, seg.start, seg.end, seg.founder_id
+        )
+        valid_set = set(np.where(cands)[0])
+        
+        seg_meta.append({
+            'seg': seg,
+            'opts': valid_set,
+            'final_id': seg.founder_id
+        })
+        
+    n_segs = len(seg_meta)
+    
+    # 2. Resolve Ambiguities
+    for i in range(n_segs):
+        opts = seg_meta[i]['opts']
+        curr_id = seg_meta[i]['final_id']
+        
+        if len(opts) > 1:
+            # Ambiguous! Search neighbors.
+            best_choice = curr_id
+            min_dist = float('inf')
+            
+            # Search Left
+            for j in range(i-1, -1, -1):
+                neighbor_id = seg_meta[j]['final_id'] # Use resolved neighbor
+                if neighbor_id in opts:
+                    dist = i - j
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_choice = neighbor_id
+                    break 
+            
+            # Search Right
+            for j in range(i+1, n_segs):
+                neighbor_id = seg_meta[j]['seg'].founder_id # Use original neighbor (future)
+                if neighbor_id in opts:
+                    dist = j - i
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_choice = neighbor_id
+                    break
+            
+            seg_meta[i]['final_id'] = best_choice
+            
+    # 3. Merge Adjacent Segments
+    new_segments = []
+    
+    curr = seg_meta[0]
+    curr_start = curr['seg'].start
+    curr_end = curr['seg'].end
+    curr_id = curr['final_id']
+    
+    for i in range(1, n_segs):
+        next_s = seg_meta[i]
+        next_id = next_s['final_id']
+        
+        # Continuity check + ID check
+        if (curr_end == next_s['seg'].start) and (curr_id == next_id):
+            curr_end = next_s['seg'].end
+        else:
+            new_segments.append(PhasedSegment(curr_start, curr_end, curr_id))
+            curr_start = next_s['seg'].start
+            curr_end = next_s['seg'].end
+            curr_id = next_id
+            
+    new_segments.append(PhasedSegment(curr_start, curr_end, curr_id))
+    return new_segments
+
+def zip_tracks_to_chunks(track1: List[PhasedSegment], track2: List[PhasedSegment]) -> List[PaintedChunk]:
+    """
+    Combines two independent haploid tracks back into diploid chunks.
+    Takes the Union of breakpoints from both tracks.
+    """
+    breakpoints = set()
+    for s in track1:
+        breakpoints.add(s.start)
+        breakpoints.add(s.end)
+    for s in track2:
+        breakpoints.add(s.start)
+        breakpoints.add(s.end)
+        
+    sorted_bp = sorted(list(breakpoints))
+    chunks = []
+    
+    # Cursors
+    t1_idx = 0
+    t2_idx = 0
+    n1 = len(track1)
+    n2 = len(track2)
+    
+    for k in range(len(sorted_bp) - 1):
+        start = sorted_bp[k]
+        end = sorted_bp[k+1]
+        
+        # Find active segment for Track 1
+        # Since sorted_bp are derived from track1, we are guaranteed exact alignment or containment
+        while t1_idx < n1 and track1[t1_idx].end <= start:
+            t1_idx += 1
+        
+        h1 = track1[t1_idx].founder_id if t1_idx < n1 else -1
+        
+        # Find active segment for Track 2
+        while t2_idx < n2 and track2[t2_idx].end <= start:
+            t2_idx += 1
+            
+        h2 = track2[t2_idx].founder_id if t2_idx < n2 else -1
+        
+        chunks.append(PaintedChunk(start, end, h1, h2))
+        
+    return chunks
+
+# =============================================================================
+# 4. VECTORIZED VITERBI KERNEL (STRICT PAINTING)
 # =============================================================================
 
 @njit(parallel=True, fastmath=True)
 def viterbi_painting_solver(ll_tensor, positions, recomb_rate, state_definitions, n_haps, switch_penalty):
     """
     Solves the Viterbi path for N samples simultaneously.
-    
-    Optimized for 'Strict Painting':
-    - No Burst/Gap states (forces assignment to a founder pair).
-    - Includes 'switch_penalty' to suppress noise-induced flickering.
     """
     n_samples, K, n_sites = ll_tensor.shape
     final_paths = np.zeros((n_samples, n_sites), dtype=np.int32)
     
-    # Pre-calculate transition cost constants
     if n_haps > 1:
         log_N_minus_1 = math.log(float(n_haps - 1))
     else:
         log_N_minus_1 = 0.0
 
-    # Parallel Loop over Samples
     for s in prange(n_samples):
-        # Local DP Tables
         backpointers = np.zeros((n_sites, K), dtype=np.int32)
         current_scores = np.empty(K, dtype=np.float64)
         prev_scores = np.empty(K, dtype=np.float64)
 
-        # Initialization
         for k in range(K):
             current_scores[k] = ll_tensor[s, k, 0]
 
-        # Forward Pass
         for i in range(1, n_sites):
-            # Swap buffers
             prev_scores[:] = current_scores[:]
-            
-            # Distance based transition prob
             dist_bp = positions[i] - positions[i-1]
             if dist_bp < 1: dist_bp = 1
             theta = float(dist_bp) * recomb_rate
             
-            # Cap theta to reasonable bounds
             if theta > 0.5: theta = 0.5
             if theta < 1e-15: theta = 1e-15
             
-            log_switch = math.log(theta) - switch_penalty # Apply stickiness
+            log_switch = math.log(theta) - switch_penalty
             log_stay = math.log(1.0 - theta)
             
-            # Transition Costs
             cost_0 = 2.0 * log_stay
             cost_1 = log_switch + log_stay - log_N_minus_1
             cost_2 = 2.0 * log_switch - 2.0 * log_N_minus_1
             
-            # Finding best predecessor
             for k_curr in range(K):
                 h1_curr = state_definitions[k_curr, 0]
                 h2_curr = state_definitions[k_curr, 1]
@@ -224,15 +433,11 @@ def viterbi_painting_solver(ll_tensor, positions, recomb_rate, state_definitions
                     if h1_curr != h1_prev: dist += 1
                     if h2_curr != h2_prev: dist += 1
                     
-                    if dist == 0:
-                        trans_cost = cost_0
-                    elif dist == 1:
-                        trans_cost = cost_1
-                    else:
-                        trans_cost = cost_2
+                    if dist == 0: trans_cost = cost_0
+                    elif dist == 1: trans_cost = cost_1
+                    else: trans_cost = cost_2
                     
                     score = prev_scores[k_prev] + trans_cost
-                    
                     if score > best_score:
                         best_score = score
                         best_prev_k = k_prev
@@ -240,7 +445,6 @@ def viterbi_painting_solver(ll_tensor, positions, recomb_rate, state_definitions
                 backpointers[i, k_curr] = best_prev_k
                 current_scores[k_curr] = best_score + ll_tensor[s, k_curr, i]
 
-        # Backward Pass (Traceback)
         best_end_k = -1
         best_end_score = -np.inf
         for k in range(K):
@@ -257,20 +461,11 @@ def viterbi_painting_solver(ll_tensor, positions, recomb_rate, state_definitions
             
     return final_paths
 
-# =============================================================================
-# 3. VECTORIZED EMISSION CALCULATOR
-# =============================================================================
-
 def calculate_batch_emissions(sample_probs_matrix, hap_dict, robustness_epsilon=1e-3):
-    """
-    Calculates the log-likelihood tensor for ALL samples against ALL haplotype pairs.
-    Includes robustness mixing to prevent -inf.
-    """
     hap_keys = sorted(list(hap_dict.keys()))
     num_haps = len(hap_keys)
     num_samples, num_sites, _ = sample_probs_matrix.shape
     
-    # Generate all pairs indices (N^2)
     idx_i, idx_j = np.unravel_index(np.arange(num_haps**2), (num_haps, num_haps))
     state_defs = np.stack([idx_i, idx_j], axis=1).astype(np.int32)
     
@@ -278,40 +473,30 @@ def calculate_batch_emissions(sample_probs_matrix, hap_dict, robustness_epsilon=
     if not hap_list:
         return np.zeros((num_samples, 0, num_sites)), state_defs, hap_keys
         
-    haps_tensor = np.array(hap_list) # (Num_Haps, Sites, 2)
-    
-    # Extract prob of allele 0 and 1 from haps (Probabilistic Haplotypes)
+    haps_tensor = np.array(hap_list)
     h0 = haps_tensor[:, :, 0]
     h1 = haps_tensor[:, :, 1]
     
-    # Precompute Genotype Probabilities for every Pair
     c00 = h0[:, None, :] * h0[None, :, :]
     c11 = h1[:, None, :] * h1[None, :, :]
     c01 = (h0[:, None, :] * h1[None, :, :]) + (h1[:, None, :] * h0[None, :, :])
     
-    # Flatten to list of pairs
     combos_0 = c00.reshape(num_haps**2, -1)
     combos_1 = c01.reshape(num_haps**2, -1)
     combos_2 = c11.reshape(num_haps**2, -1)
     
-    # Sample Probs: (Samples, Sites, 1) to broadcast against Pairs
     s0 = sample_probs_matrix[:, :, 0][:, np.newaxis, :]
     s1 = sample_probs_matrix[:, :, 1][:, np.newaxis, :]
     s2 = sample_probs_matrix[:, :, 2][:, np.newaxis, :]
     
-    # Pair Probs: (1, Pairs, Sites)
     c0 = combos_0[np.newaxis, :, :]
     c1 = combos_1[np.newaxis, :, :]
     c2 = combos_2[np.newaxis, :, :]
     
-    # Dot Product logic via broadcasting
     model_probs = (s0 * c0) + (s1 * c1) + (s2 * c2)
-    
-    # Robustness: Mix with Uniform
     uniform_prob = 1.0 / 3.0
     final_probs = (model_probs * (1.0 - robustness_epsilon)) + (robustness_epsilon * uniform_prob)
     
-    # Log conversion with safety
     min_prob = 1e-300
     final_probs[final_probs < min_prob] = min_prob
     ll_matrix = np.log(final_probs)
@@ -319,38 +504,23 @@ def calculate_batch_emissions(sample_probs_matrix, hap_dict, robustness_epsilon=
     
     return ll_matrix, state_defs, hap_keys
 
-# =============================================================================
-# 4. DATA CONVERSION & DRIVER
-# =============================================================================
-
 def compress_path_to_chunks(path_indices, positions, state_defs, hap_keys):
-    """
-    Converts site-by-site path to RLE Chunk objects.
-    Uses PHASE SMOOTHING to reduce flickering.
-    Uses MIDPOINT EXTENSION to fill gap artifacts (white slivers).
-    """
     chunks = []
     if len(path_indices) == 0: return chunks
 
-    # Initialize first site
     h1_idx, h2_idx = state_defs[path_indices[0]]
     curr_t1 = hap_keys[h1_idx]
     curr_t2 = hap_keys[h2_idx]
     
-    # Optional: deterministic sort for the very first chunk only
-    if curr_t1 > curr_t2:
-        curr_t1, curr_t2 = curr_t2, curr_t1
+    if curr_t1 > curr_t2: curr_t1, curr_t2 = curr_t2, curr_t1
         
     start_pos = positions[0]
     
     for i in range(1, len(path_indices)):
-        # Decode next state
         h1_idx_next, h2_idx_next = state_defs[path_indices[i]]
         cand_a = hap_keys[h1_idx_next]
         cand_b = hap_keys[h2_idx_next]
         
-        # --- PHASE SMOOTHING LOGIC ---
-        # Match new candidates to current tracks to minimize changes
         score_1 = (1 if cand_a == curr_t1 else 0) + (1 if cand_b == curr_t2 else 0)
         score_2 = (1 if cand_b == curr_t1 else 0) + (1 if cand_a == curr_t2 else 0)
         
@@ -359,53 +529,35 @@ def compress_path_to_chunks(path_indices, positions, state_defs, hap_keys):
         else:
             next_t1, next_t2 = cand_b, cand_a
             
-        # Check if the state actually changed content
         if (next_t1 != curr_t1) or (next_t2 != curr_t2):
-            
-            # --- GAP FILLING LOGIC ---
-            # Extend both chunks to the midpoint to eliminate the white gap.
             midpoint = (positions[i-1] + positions[i]) // 2
-            
-            # Seal current chunk at midpoint
-            chunks.append(PaintedChunk(
-                start=int(start_pos),
-                end=int(midpoint),
-                hap1=curr_t1,
-                hap2=curr_t2
-            ))
-            
-            # Start new chunk at midpoint
+            chunks.append(PaintedChunk(int(start_pos), int(midpoint), curr_t1, curr_t2))
             curr_t1, curr_t2 = next_t1, next_t2
             start_pos = midpoint
             
-    # Final chunk
     end_pos = positions[-1]
-    chunks.append(PaintedChunk(
-        start=int(start_pos),
-        end=int(end_pos),
-        hap1=curr_t1,
-        hap2=curr_t2
-    ))
-    
+    chunks.append(PaintedChunk(int(start_pos), int(end_pos), curr_t1, curr_t2))
     return chunks
+
+# =============================================================================
+# 5. MAIN DRIVER
+# =============================================================================
 
 def paint_samples_in_block(block_result, sample_probs_matrix, sample_sites, 
                            recomb_rate=1e-8,
                            switch_penalty=10.0,
-                           robustness_epsilon=1e-3, # Tunable param
+                           robustness_epsilon=1e-3, 
                            batch_size=10):
     """
-    Paints all samples in a block using Vectorized Viterbi.
-    
-    Args:
-        robustness_epsilon: Lower values (1e-12) enforce stricter matching.
+    Paints all samples using Viterbi, then applies INDEPENDENT TRACK CLEANUP.
     """
     
-    # 1. Extract Data
     positions = block_result.positions
     hap_dict = block_result.haplotypes
     
-    # Subset sample data to match the block's positions
+    # 1. Prepare for Cleanup (Dense Matrix)
+    hap_matrix, snp_positions = founder_block_to_dense(block_result)
+    
     block_samples_data = analysis_utils.get_sample_data_at_sites_multiple(
         sample_probs_matrix, sample_sites, positions
     )
@@ -413,43 +565,49 @@ def paint_samples_in_block(block_result, sample_probs_matrix, sample_sites,
     num_samples = block_samples_data.shape[0]
     all_sample_paintings = []
     
-    # 2. Iterate in batches to save memory
     print(f"Painting {num_samples} samples in batches of {batch_size} (eps={robustness_epsilon:.1e})...")
     
     for start_idx in range(0, num_samples, batch_size):
         end_idx = min(start_idx + batch_size, num_samples)
         
-        # Batch data
         batch_data = block_samples_data[start_idx:end_idx]
         
-        # Calculate Emissions for batch (Passing user-defined epsilon)
         ll_tensor, state_defs, hap_keys = calculate_batch_emissions(
             batch_data, hap_dict, robustness_epsilon=robustness_epsilon
         )
         
-        # Run Viterbi for batch
         num_haps = len(hap_keys)
         raw_paths = viterbi_painting_solver(
-            ll_tensor, 
-            positions, 
-            recomb_rate, 
-            state_defs, 
-            num_haps,
-            float(switch_penalty)
+            ll_tensor, positions, recomb_rate, state_defs, num_haps, float(switch_penalty)
         )
         
-        # Post-Process
         batch_count = raw_paths.shape[0]
         for i in range(batch_count):
             global_sample_idx = start_idx + i
+            
+            # A. Get Raw Diplotype Chunks
             chunks = compress_path_to_chunks(raw_paths[i], positions, state_defs, hap_keys)
-            all_sample_paintings.append(SamplePainting(global_sample_idx, chunks))
+            
+            # B. Split into Independent Tracks
+            # We reuse the logic from SamplePainting init
+            temp_obj = SamplePainting(global_sample_idx, chunks)
+            track1_segs = temp_obj.hap1_phased
+            track2_segs = temp_obj.hap2_phased
+            
+            # C. Clean Independently (Resolves IBS flickering using long-range neighbors)
+            clean_t1 = resolve_single_track(track1_segs, hap_matrix, snp_positions)
+            clean_t2 = resolve_single_track(track2_segs, hap_matrix, snp_positions)
+            
+            # D. Stitch back together
+            final_chunks = zip_tracks_to_chunks(clean_t1, clean_t2)
+            
+            all_sample_paintings.append(SamplePainting(global_sample_idx, final_chunks))
             
     range_tuple = (int(positions[0]), int(positions[-1]))
     return BlockPainting(range_tuple, all_sample_paintings)
 
 # =============================================================================
-# 5. VISUALIZATION
+# 6. VISUALIZATION
 # =============================================================================
 
 def plot_painting(block_painting, output_file=None, 
@@ -458,14 +616,11 @@ def plot_painting(block_painting, output_file=None,
                   row_height_per_sample=0.25,
                   show_labels=True,
                   sample_names=None):
-    """
-    Plots the painted haplotypes for all samples using DYNAMIC SIZING.
-    """
+    
     if not HAS_PLOTTING:
         print("Error: Matplotlib/Seaborn not installed.")
         return
 
-    # 1. Identify all unique haplotypes for coloring
     unique_haps = set()
     for sample in block_painting:
         for chunk in sample:
@@ -475,7 +630,6 @@ def plot_painting(block_painting, output_file=None,
     sorted_haps = sorted(list(unique_haps))
     hap_to_idx = {h: i for i, h in enumerate(sorted_haps)}
     
-    # 2. Generate Color Palette
     if len(sorted_haps) <= 10:
         palette = sns.color_palette("tab10", len(sorted_haps))
     elif len(sorted_haps) <= 20:
@@ -483,32 +637,24 @@ def plot_painting(block_painting, output_file=None,
     else:
         palette = sns.color_palette("husl", len(sorted_haps))
         
-    # 3. Dynamic Figure Sizing
     num_samples = len(block_painting)
     header_space = 2.0 
     calc_height = (num_samples * row_height_per_sample) + header_space
     
-    # Ensure reasonable limits
     if calc_height < 6: calc_height = 6
-    if calc_height > 300: 
-        print(f"Warning: Plot height ({calc_height:.1f} in) is very large.")
+    if calc_height > 300: calc_height = 300
     
     figsize = (figsize_width, calc_height)
     fig, ax = plt.subplots(figsize=figsize)
     
-    y_height = 0.8  # Leave 0.1 margin top/bottom within the row
+    y_height = 0.8 
     
-    # Loop over samples (Y-axis)
-    # Reverse index so Sample 0 is at the top
     for i, sample in enumerate(block_painting):
         y_base = i 
-        
-        # Loop over chunks (X-axis)
         for chunk in sample:
             width = chunk.end - chunk.start
             if width <= 0: continue
             
-            # Hap 1 Rectangle (Bottom half of the row)
             color1 = palette[hap_to_idx[chunk.hap1]]
             rect1 = mpatches.Rectangle(
                 (chunk.start, y_base), width, y_height/2,
@@ -516,7 +662,6 @@ def plot_painting(block_painting, output_file=None,
             )
             ax.add_patch(rect1)
             
-            # Hap 2 Rectangle (Top half of the row)
             color2 = palette[hap_to_idx[chunk.hap2]]
             rect2 = mpatches.Rectangle(
                 (chunk.start, y_base + y_height/2), width, y_height/2,
@@ -524,7 +669,6 @@ def plot_painting(block_painting, output_file=None,
             )
             ax.add_patch(rect2)
             
-    # 4. Formatting
     ax.set_xlim(block_painting.start_pos, block_painting.end_pos)
     ax.set_ylim(-0.5, len(block_painting) + 0.5)
     
@@ -532,19 +676,16 @@ def plot_painting(block_painting, output_file=None,
     ax.set_ylabel("Samples")
     ax.set_title(title)
     
-    # Y-Ticks
     if show_labels:
         if sample_names and len(sample_names) == len(block_painting):
             labels = sample_names
         else:
             labels = [f"S{s.sample_index}" for s in block_painting]
-        
         ax.set_yticks(np.arange(len(block_painting)) + y_height/2)
         ax.set_yticklabels(labels, fontsize=8)
     else:
         ax.set_yticks([])
 
-    # Legend
     legend_patches = []
     for h_key in sorted_haps:
         c = palette[hap_to_idx[h_key]]
@@ -557,7 +698,6 @@ def plot_painting(block_painting, output_file=None,
     if output_file:
         dpi = 100 if calc_height > 100 else 150
         plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
-        print(f"Painting saved to {output_file} (Height: {calc_height:.1f} in)")
     else:
         plt.show()
     plt.close()

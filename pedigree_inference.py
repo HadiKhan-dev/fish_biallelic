@@ -4,6 +4,7 @@ import warnings
 import math
 from itertools import combinations
 from tqdm import tqdm
+from sklearn.cluster import KMeans
 
 # Visualization Imports
 try:
@@ -32,7 +33,9 @@ except ImportError:
 # =============================================================================
 
 class PedigreeResult:
-    def __init__(self, samples, relationships, parent_candidates, recombination_map, systematic_errors, kinship_matrix, ibd0_matrix):
+    def __init__(self, samples, relationships, parent_candidates, 
+                 recombination_map, systematic_errors, kinship_matrix, ibd0_matrix,
+                 trio_scores=None, total_bins=0):
         self.samples = samples
         self.relationships = relationships 
         self.parent_candidates = parent_candidates 
@@ -40,6 +43,118 @@ class PedigreeResult:
         self.systematic_errors = systematic_errors 
         self.kinship_matrix = kinship_matrix
         self.ibd0_matrix = ibd0_matrix
+        self.trio_scores = trio_scores if trio_scores is not None else {}
+        self.total_bins = total_bins
+
+    def _recalculate_generations(self):
+        """
+        Internal helper to propagate generation labels (F1 -> F2 -> F3)
+        down the tree after the pedigree structure has been modified.
+        """
+        # 1. Reset all to 'Unknown'
+        self.relationships['Generation'] = 'Unknown'
+        
+        # 2. Identify Roots (F1) - Samples with No Parents
+        is_root = self.relationships['Parent1'].isna()
+        self.relationships.loc[is_root, 'Generation'] = 'F1'
+        
+        # 3. Create Lookup
+        name_to_gen = dict(zip(self.relationships['Sample'], self.relationships['Generation']))
+        
+        # 4. Propagate
+        for _ in range(10):
+            updates = 0
+            for idx, row in self.relationships.iterrows():
+                if row['Generation'] != 'Unknown': continue
+                
+                p1 = row['Parent1']
+                p2 = row['Parent2']
+                
+                if p1 in name_to_gen and p2 in name_to_gen:
+                    g1_str = name_to_gen[p1]
+                    g2_str = name_to_gen[p2]
+                    
+                    if g1_str != 'Unknown' and g2_str != 'Unknown':
+                        try:
+                            g1 = int(g1_str[1:])
+                            g2 = int(g2_str[1:])
+                            new_gen_num = max(g1, g2) + 1
+                            new_gen_str = f"F{new_gen_num}"
+                            
+                            self.relationships.at[idx, 'Generation'] = new_gen_str
+                            name_to_gen[row['Sample']] = new_gen_str
+                            updates += 1
+                        except:
+                            pass
+            if updates == 0:
+                break
+
+    def perform_automatic_cutoff(self, force_clusters=2, sigma_threshold=3.0):
+        """
+        Uses Sigma Clipping on Score-Per-Bin to distinguish True Trios (F2/F3) from
+        False Trios (F1s). 
+        Calculates stats of the "Good" cluster and rejects outliers.
+        """
+        if self.total_bins == 0: return
+        
+        scores = []
+        indices = []
+        
+        for i, s in enumerate(self.samples):
+            raw = self.trio_scores.get(s, -1e9)
+            norm_score = raw / self.total_bins
+            scores.append(norm_score)
+            indices.append(i)
+            
+        scores_arr = np.array(scores).reshape(-1, 1)
+        
+        try:
+            # 1. Initial Split with K-Means
+            kmeans = KMeans(n_clusters=force_clusters, random_state=42, n_init=10)
+            labels = kmeans.fit_predict(scores_arr)
+            centers = kmeans.cluster_centers_.flatten()
+            
+            # Identify the "Good" cluster (Higher score, closer to 0)
+            good_cluster_idx = np.argmax(centers)
+            
+            # 2. Refine using Statistics of the Good Cluster
+            good_scores = scores_arr[labels == good_cluster_idx]
+            
+            if len(good_scores) < 2:
+                cutoff = np.mean(centers)
+                print(f"[Auto-Cutoff] Not enough good samples for stats. Using midpoint: {cutoff:.4f}")
+            else:
+                mean_good = np.mean(good_scores)
+                std_good = np.std(good_scores)
+                
+                # Define cutoff as X standard deviations below the mean
+                cutoff = mean_good - (sigma_threshold * std_good)
+                
+                # Safety Check: cutoff shouldn't be lower than the bad center
+                bad_center = centers[1-good_cluster_idx]
+                if cutoff < bad_center:
+                    cutoff = (mean_good + bad_center) / 2
+                    print("[Auto-Cutoff] Sigma cutoff too wide, reverting to midpoint.")
+            
+            print(f"\n[Auto-Cutoff] Centers: {centers}")
+            print(f"[Auto-Cutoff] Good Cluster Stats: Mean={np.mean(good_scores):.4f}, Std={np.std(good_scores):.4f}")
+            print(f"[Auto-Cutoff] Calculated Threshold (Mean - {sigma_threshold}*Std): {cutoff:.4f}")
+            
+            updates = 0
+            for i, score in zip(indices, scores):
+                # 3. Apply Threshold
+                if score < cutoff:
+                    self.relationships.at[i, 'Parent1'] = None
+                    self.relationships.at[i, 'Parent2'] = None
+                    updates += 1
+                    
+            print(f"[Auto-Cutoff] Reclassified {updates} samples as Founders/F1 (Score < {cutoff:.4f}).")
+            
+            # 4. Fix Generation Labels
+            self._recalculate_generations()
+            
+        except Exception as e:
+            print(f"[Auto-Cutoff] Failed: {e}")
 
 # =============================================================================
 # 2. DISCRETIZATION & ALLELE CONVERSION
@@ -63,8 +178,6 @@ def discretize_paintings(block_painting, snps_per_bin=50):
     num_samples = len(block_painting)
     grid = np.zeros((num_samples, num_bins, 2), dtype=np.int32) - 1 
     
-    # print(f"Discretizing genome into {num_bins} bins...")
-    
     for i, sample in enumerate(block_painting):
         chunks = sample.chunks
         if not chunks: continue
@@ -82,13 +195,33 @@ def discretize_paintings(block_painting, snps_per_bin=50):
             
     return grid, bin_edges, bin_centers
 
-def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block):
-    """Translates Founder IDs to Alleles (0/1/missing)."""
-    # print("Translating Founder IDs to Alleles...")
+def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_width_bp=None):
+    """
+    Translates Founder IDs to Alleles (0/1/missing).
+    Strictly handles empty bins by setting alleles to -1 if no SNP is nearby.
+    """
     num_samples, num_bins, _ = id_grid.shape
+    
+    # 1. Find nearest SNP for every bin
     bin_indices = np.searchsorted(founder_block.positions, bin_centers)
     bin_indices = np.clip(bin_indices, 0, len(founder_block.positions) - 1)
     
+    # 2. Check if the SNP found is actually CLOSE to the bin center
+    if bin_width_bp is None:
+        if len(bin_centers) > 1:
+            bin_width_bp = bin_centers[1] - bin_centers[0]
+        else:
+            bin_width_bp = 10000 
+            
+    # Get positions of the found SNPs
+    found_snps_pos = founder_block.positions[bin_indices]
+    
+    # A bin is valid if the SNP is within the bin's radius (half width)
+    # Strictly: abs(SNP - Center) <= Width/2
+    dist_to_center = np.abs(found_snps_pos - bin_centers)
+    valid_snp_mask = dist_to_center <= (bin_width_bp / 2.0)
+    
+    # 3. Lookup Alleles
     hap_keys = sorted(list(founder_block.haplotypes.keys()))
     max_id = max(hap_keys) if hap_keys else 0
     allele_lookup = np.full((max_id + 1, num_bins), -1, dtype=np.int8)
@@ -96,18 +229,32 @@ def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block):
     for fid, h_arr in founder_block.haplotypes.items():
         if h_arr.ndim == 2: raw_alleles = np.argmax(h_arr, axis=1)
         else: raw_alleles = h_arr
-        allele_lookup[fid, :] = raw_alleles[bin_indices]
         
+        # Get alleles for the selected indices
+        extracted = raw_alleles[bin_indices]
+        
+        # MASK OUT bins where the SNP was too far away (Empty Bin)
+        extracted[~valid_snp_mask] = -1
+        
+        allele_lookup[fid, :] = extracted
+        
+    # 4. Fill Grid
     allele_grid = np.full_like(id_grid, -1, dtype=np.int8)
     b_indices = np.arange(num_bins)
     
     for chrom in [0, 1]:
         ids = id_grid[:, :, chrom]
         valid_mask = (ids != -1)
+        
         safe_ids = ids.copy()
         safe_ids[~valid_mask] = 0
+        
+        # Look up
         alleles = allele_lookup[safe_ids, b_indices[np.newaxis, :]]
+        
+        # Restore missing IDs
         alleles[~valid_mask] = -1
+        
         allele_grid[:, :, chrom] = alleles
         
     return allele_grid
@@ -156,79 +303,221 @@ def analyze_recombinations(grid, bin_edges, gen_map, systematic_thresh=0.25):
     return pd.DataFrame(events), bad_bin_indices
 
 # =============================================================================
-# 4. HMM KERNEL (DISTANCE AWARE)
+# 4. HMM KERNELS (8-STATE FILTER & 16-STATE VERIFIER)
 # =============================================================================
 
 @njit(fastmath=True)
-def run_inheritance_hmm_dynamic(target_hap, source_dip, switch_costs, stay_costs, error_penalty):
+def run_phase_agnostic_hmm(child_dip_alleles, child_dip_ids, parent_dip_alleles, switch_costs, stay_costs, error_penalty, phase_penalty):
     """
-    Calculates the Viterbi Score of generating 'target_hap' from 'source_dip'
-    using distance-dependent transition probabilities.
+    Calculates the Viterbi Score of Parent -> Child inheritance allowing for
+    phase switching in the Child AND Split-Burst error handling.
     """
-    n_sites = len(target_hap)
-    scores = np.zeros(3) 
+    n_sites = len(child_dip_alleles)
     
-    BURST_EMISSION = -0.693 
+    # Init Scores (8 states) [Norm0..3, Burst0..3]
+    scores = np.zeros(8)
     
-    scores[0] = 0.0
-    scores[1] = 0.0
-    scores[2] = -error_penalty 
+    # Burst Emission: log(0.5)
+    BURST_EMISSION = -0.693147 
+    
+    # Initialize Bursts as valid starting points (entering with penalty)
+    for k in range(4, 8):
+        scores[k] = -error_penalty
     
     for i in range(n_sites):
-        obs = target_hap[i]
-        if obs == -1: 
-            # Simplified: Apply transition cost, 0 emission.
-            e0 = 0.0
-            e1 = 0.0
-            e2 = 0.0
-        else:
-            s0_allele = source_dip[i, 0]
-            s1_allele = source_dip[i, 1]
-            e0 = 0.0 if (s0_allele == -1 or s0_allele == obs) else -1e9
-            e1 = 0.0 if (s1_allele == -1 or s1_allele == obs) else -1e9
-            e2 = BURST_EMISSION
+        # Alleles for Emissions
+        c0_a, c1_a = child_dip_alleles[i, 0], child_dip_alleles[i, 1]
+        p0_a, p1_a = parent_dip_alleles[i, 0], parent_dip_alleles[i, 1]
         
-        # Get dynamic costs for this step
-        c_switch = switch_costs[i]
+        # IDs for Phase Logic
+        c0_id, c1_id = child_dip_ids[i, 0], child_dip_ids[i, 1]
+        
+        # 1. Normal Emissions (Based on Alleles)
+        # -1 (Missing) is treated as a wildcard match (0 cost)
+        e0 = 0.0 if (c0_a == -1 or p0_a == -1 or c0_a == p0_a) else -1e9
+        e1 = 0.0 if (c1_a == -1 or p0_a == -1 or c1_a == p0_a) else -1e9
+        e2 = 0.0 if (c0_a == -1 or p1_a == -1 or c0_a == p1_a) else -1e9
+        e3 = 0.0 if (c1_a == -1 or p1_a == -1 or c1_a == p1_a) else -1e9
+        
+        emissions = np.array([e0, e1, e2, e3])
+        
+        # 2. Transition Costs
+        c_recomb = switch_costs[i]
         c_stay = stay_costs[i]
         
+        # Child Phase Switch Cost (Based on Founder IDs)
+        is_ibd_ambiguous = (c0_id == c1_id) or (c0_id == -1) or (c1_id == -1)
+        c_phase = 0.0 if is_ibd_ambiguous else -phase_penalty
+        
         prev = scores.copy()
+        new_scores = np.zeros(8)
         
-        # 0: From 0(Stay), 1(Switch), 2(Recovery)
-        v0 = max(prev[0] + c_stay, prev[1] + c_switch, prev[2]) + e0
+        # --- A. UPDATE BURST STATES (4-7) ---
+        for k in range(4):
+            burst_idx = k + 4
+            from_burst = prev[burst_idx] 
+            from_normal = prev[k] - error_penalty
+            new_scores[burst_idx] = max(from_burst, from_normal) + BURST_EMISSION
+
+        # --- B. UPDATE NORMAL STATES (0-3) ---
+        prev_b0 = prev[4]; prev_b1 = prev[5]; prev_b2 = prev[6]; prev_b3 = prev[7]
         
-        # 1: From 1(Stay), 0(Switch), 2(Recovery)
-        v1 = max(prev[1] + c_stay, prev[0] + c_switch, prev[2]) + e1
+        # State 0 (P0, C0): From 0(Stay), 1(Phase), 2(Recomb), Burst0(Recov)
+        src0 = prev[0] + c_stay
+        src1 = prev[1] + c_stay + c_phase
+        src2 = prev[2] + c_recomb
+        new_scores[0] = max(src0, src1, src2, prev_b0) + emissions[0]
         
-        # 2: Burst (From 0/1 pay penalty, From 2 free)
-        v2 = max(prev[0] - error_penalty, prev[1] - error_penalty, prev[2]) + e2
+        # State 1 (P0, C1): From 1, 0, 3, Burst1
+        src1 = prev[1] + c_stay
+        src0 = prev[0] + c_stay + c_phase
+        src3 = prev[3] + c_recomb
+        new_scores[1] = max(src1, src0, src3, prev_b1) + emissions[1]
         
-        scores[0] = v0
-        scores[1] = v1
-        scores[2] = v2
+        # State 2 (P1, C0): From 2, 3, 0, Burst2
+        src2 = prev[2] + c_stay
+        src3 = prev[3] + c_stay + c_phase
+        src0 = prev[0] + c_recomb
+        new_scores[2] = max(src2, src3, src0, prev_b2) + emissions[2]
         
-    return max(scores[0], scores[1], scores[2])
+        # State 3 (P1, C1): From 3, 2, 1, Burst3
+        src3 = prev[3] + c_stay
+        src2 = prev[2] + c_stay + c_phase
+        src1 = prev[1] + c_recomb
+        new_scores[3] = max(src3, src2, src1, prev_b3) + emissions[3]
+        
+        scores = new_scores
+        
+    # Return max over all 8 states
+    best_final = -np.inf
+    for k in range(8):
+        if scores[k] > best_final:
+            best_final = scores[k]
+    return best_final
 
 @njit(parallel=True)
-def batch_calculate_parent_scores(allele_grid, candidates_mask, switch_costs, stay_costs, error_penalty):
+def batch_calculate_parent_scores(allele_grid, id_grid, candidates_mask, switch_costs, stay_costs, error_penalty, phase_penalty):
     n_samples, n_bins, _ = allele_grid.shape
-    scores = np.full((n_samples, 2, n_samples), -np.inf)
+    # Returns (N, N) matrix of single best scores
+    scores = np.full((n_samples, n_samples), -np.inf)
     
     for i in prange(n_samples): 
-        child_h0 = allele_grid[i, :, 0]
-        child_h1 = allele_grid[i, :, 1]
+        child_alleles = allele_grid[i]
+        child_ids = id_grid[i]
         
         for j in range(n_samples): 
             if i == j: continue
             if not candidates_mask[i, j]: continue
             
-            parent_dip = allele_grid[j]
-            s0 = run_inheritance_hmm_dynamic(child_h0, parent_dip, switch_costs, stay_costs, error_penalty)
-            scores[i, 0, j] = s0
-            s1 = run_inheritance_hmm_dynamic(child_h1, parent_dip, switch_costs, stay_costs, error_penalty)
-            scores[i, 1, j] = s1
+            parent_alleles = allele_grid[j]
+            s = run_phase_agnostic_hmm(child_alleles, child_ids, parent_alleles, switch_costs, stay_costs, error_penalty, phase_penalty)
+            scores[i, j] = s
             
     return scores
+
+@njit(fastmath=True)
+def run_trio_phase_aware_hmm(child_dip_alleles, child_dip_ids, p1_dip_alleles, p2_dip_alleles, 
+                             switch_costs, stay_costs, error_penalty, phase_penalty):
+    """
+    Calculates the Joint Likelihood of P1 and P2 explaining the Child.
+    Includes 16-State Split-Burst Logic to handle redundant coverage and genotyping errors.
+    """
+    n_sites = len(child_dip_alleles)
+    BURST_EMISSION = -1.386 # ln(0.25)
+    
+    # Init Scores (16 states)
+    scores = np.zeros(16)
+    for k in range(8, 16): scores[k] = -error_penalty
+    
+    for i in range(n_sites):
+        # 1. Data Fetch
+        c0, c1 = child_dip_alleles[i, 0], child_dip_alleles[i, 1]
+        p1_h0, p1_h1 = p1_dip_alleles[i, 0], p1_dip_alleles[i, 1]
+        p2_h0, p2_h1 = p2_dip_alleles[i, 0], p2_dip_alleles[i, 1]
+        cid0, cid1 = child_dip_ids[i, 0], child_dip_ids[i, 1]
+        
+        # 2. Emissions
+        def match(a, b): return 0.0 if (a == -1 or b == -1 or a == b) else -1e9
+        
+        m_p1h0_c0 = match(p1_h0, c0); m_p1h1_c0 = match(p1_h1, c0)
+        m_p1h0_c1 = match(p1_h0, c1); m_p1h1_c1 = match(p1_h1, c1)
+        m_p2h0_c0 = match(p2_h0, c0); m_p2h1_c0 = match(p2_h1, c0)
+        m_p2h0_c1 = match(p2_h0, c1); m_p2h1_c1 = match(p2_h1, c1)
+        
+        # Group A (P1->C0, P2->C1)
+        e = np.zeros(8)
+        e[0] = m_p1h0_c0 + m_p2h0_c1
+        e[1] = m_p1h0_c0 + m_p2h1_c1
+        e[2] = m_p1h1_c0 + m_p2h0_c1
+        e[3] = m_p1h1_c0 + m_p2h1_c1
+        
+        # Group B (P1->C1, P2->C0)
+        e[4] = m_p1h0_c1 + m_p2h0_c0
+        e[5] = m_p1h0_c1 + m_p2h1_c0
+        e[6] = m_p1h1_c1 + m_p2h0_c0
+        e[7] = m_p1h1_c1 + m_p2h1_c0
+        
+        # 3. Transitions
+        c_recomb = switch_costs[i]
+        c_stay = stay_costs[i]
+        
+        is_hom = (cid0 == cid1) or (cid0 == -1) or (cid1 == -1)
+        c_phase = 0.0 if is_hom else -phase_penalty
+        
+        prev = scores.copy()
+        new_scores = np.zeros(16)
+        
+        # --- A. UPDATE BURST STATES (8-15) ---
+        for k in range(8):
+            burst_idx = k + 8
+            from_burst = prev[burst_idx]
+            from_normal = prev[k] - error_penalty
+            new_scores[burst_idx] = max(from_burst, from_normal) + BURST_EMISSION
+
+        # --- B. UPDATE NORMAL STATES (0-7) ---
+        cc_0 = 2 * c_stay
+        cc_1 = c_recomb + c_stay
+        cc_2 = 2 * c_recomb
+        
+        # Helper: Max over previous 4 states in a group (Parent moves)
+        def get_best_incoming_groupA(prev_arr):
+            p0, p1, p2, p3 = prev_arr[0], prev_arr[1], prev_arr[2], prev_arr[3]
+            t0 = max(p0+cc_0, p1+cc_1, p2+cc_1, p3+cc_2)
+            t1 = max(p0+cc_1, p1+cc_0, p2+cc_2, p3+cc_1)
+            t2 = max(p0+cc_1, p1+cc_2, p2+cc_0, p3+cc_1)
+            t3 = max(p0+cc_2, p1+cc_1, p2+cc_1, p3+cc_0)
+            return t0, t1, t2, t3
+
+        def get_best_incoming_groupB(prev_arr):
+            p4, p5, p6, p7 = prev_arr[4], prev_arr[5], prev_arr[6], prev_arr[7]
+            t4 = max(p4+cc_0, p5+cc_1, p6+cc_1, p7+cc_2)
+            t5 = max(p4+cc_1, p5+cc_0, p6+cc_2, p7+cc_1)
+            t6 = max(p4+cc_1, p5+cc_2, p6+cc_0, p7+cc_1)
+            t7 = max(p4+cc_2, p5+cc_1, p6+cc_1, p7+cc_0)
+            return t4, t5, t6, t7
+
+        a0, a1, a2, a3 = get_best_incoming_groupA(prev)
+        b4, b5, b6, b7 = get_best_incoming_groupB(prev)
+        
+        # Previous Bursts
+        pb = prev[8:16]
+        
+        new_scores[0] = max(a0 + c_stay, b4 + c_stay + c_phase, pb[0]) + e[0]
+        new_scores[1] = max(a1 + c_stay, b5 + c_stay + c_phase, pb[1]) + e[1]
+        new_scores[2] = max(a2 + c_stay, b6 + c_stay + c_phase, pb[2]) + e[2]
+        new_scores[3] = max(a3 + c_stay, b7 + c_stay + c_phase, pb[3]) + e[3]
+            
+        new_scores[4] = max(b4 + c_stay, a0 + c_stay + c_phase, pb[4]) + e[4]
+        new_scores[5] = max(b5 + c_stay, a1 + c_stay + c_phase, pb[5]) + e[5]
+        new_scores[6] = max(b6 + c_stay, a2 + c_stay + c_phase, pb[6]) + e[6]
+        new_scores[7] = max(b7 + c_stay, a3 + c_stay + c_phase, pb[7]) + e[7]
+            
+        scores = new_scores
+        
+    best_final = -np.inf
+    for k in range(16):
+        if scores[k] > best_final: best_final = scores[k]
+    return best_final
 
 # =============================================================================
 # 5. MULTI-CONTIG INFERENCE LOGIC
@@ -238,181 +527,176 @@ def score_contig_raw(block_painting, founder_block, sample_ids,
                      snps_per_bin=150, recomb_rate=5e-8, robustness=1e-2):
     """
     Step 1: Calculates raw Parent-Offspring HMM scores for a single contig.
-    Returns:
-        scores_matrix: (N_Samples x 2 x N_Samples) float array.
-                       scores[i, 0, j] = Score of Child i (Hap 0) coming from Parent j.
-        recomb_counts: (N_Samples,) int array of switch counts for this contig.
     """
-    # 1. Discretize
     id_grid, bin_edges, bin_centers = discretize_paintings(block_painting, snps_per_bin=snps_per_bin)
     
-    # 2. Convert to Alleles
-    allele_grid = convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block)
+    # NEW: Calculate Bin Width for safe allele conversion
+    bin_width = 10000.0
+    if len(bin_centers) > 1:
+        bin_width = bin_centers[1] - bin_centers[0]
+        
+    allele_grid = convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_width_bp=bin_width)
     
     num_samples = len(sample_ids)
     num_bins = len(bin_centers)
     
-    # 3. Calculate HMM Costs
-    dists = np.zeros(num_bins)
-    dists[1:] = np.diff(bin_centers)
-    
-    theta = 1.0 - np.exp(-dists * recomb_rate)
-    theta = np.clip(theta, 1e-15, 0.5)
-    
+    dists = np.zeros(num_bins); dists[1:] = np.diff(bin_centers)
+    theta = np.clip(1.0 - np.exp(-dists * recomb_rate), 1e-15, 0.5)
     switch_costs = np.log(theta)
     stay_costs = np.log(1.0 - theta)
     
-    # Convert Robustness epsilon to Log Penalty
-    # e.g. 1e-2 -> -ln(0.01) ~= 4.6
     error_penalty = -math.log(robustness)
+    phase_penalty = 50.0 
     
-    # 4. Count Switches (for Directionality Filter later)
     switches = (id_grid[:, :-1, :] != id_grid[:, 1:, :]) & \
                (id_grid[:, :-1, :] != -1) & (id_grid[:, 1:, :] != -1)
     recomb_counts = np.sum(switches, axis=(1, 2))
     
-    # 5. Run HMM Scoring (No filtering yet, we filter globally later)
-    # We pass a "True" mask to score ALL pairs
+    # Run Single HMM
     full_mask = np.ones((num_samples, num_samples), dtype=bool)
-    np.fill_diagonal(full_mask, False) # Don't score self-parentage
+    np.fill_diagonal(full_mask, False) 
     
-    # print(f"  Scoring {num_samples} samples (HMM penalty={error_penalty:.2f})...")
     scores = batch_calculate_parent_scores(
-        allele_grid, full_mask, switch_costs, stay_costs, error_penalty
+        allele_grid, id_grid, full_mask, switch_costs, stay_costs, error_penalty, phase_penalty
     )
     
     return scores, recomb_counts
 
 def infer_pedigree_multi_contig(contig_data_list, sample_ids, top_k=20):
     """
-    Step 2: Aggregates scores across multiple contigs to infer trios.
-    
-    Args:
-        contig_data_list: List of dicts, each containing:
-                          {'painting': ..., 'founder_block': ...}
+    Step 2: Aggregates scores across multiple contigs.
     """
     num_samples = len(sample_ids)
     num_contigs = len(contig_data_list)
     
-    # Accumulators
+    # 1. Pre-Calc & Filter
+    contig_caches = []
+    total_scores = np.zeros((num_samples, num_samples))
     total_switches = np.zeros(num_samples)
+    global_total_bins = 0
     
-    # Temporary storage for trio scoring
-    # We need to store (N, 2, N) for each contig to handle Trio Phasing
-    all_contig_scores = [] 
-    
-    print(f"\n--- Aggregating Scores across {num_contigs} Contigs ---")
+    print(f"\n--- Phase 1: Filtering Candidates ({num_contigs} Contigs) ---")
     
     for c_idx, data in enumerate(contig_data_list):
-        print(f"Processing Contig {c_idx+1}/{num_contigs}...")
+        id_grid, bin_edges, bin_centers = discretize_paintings(data['painting'], snps_per_bin=150)
         
-        # Calculate Raw Scores
-        scores, switches = score_contig_raw(
-            data['painting'], 
-            data['founder_block'], 
-            sample_ids,
-            snps_per_bin=150,
-            robustness=1e-2
-        )
+        bin_width = 10000.0
+        if len(bin_centers) > 1: bin_width = bin_centers[1] - bin_centers[0]
+            
+        allele_grid = convert_id_grid_to_allele_grid(id_grid, bin_centers, data['founder_block'], bin_width_bp=bin_width)
         
-        all_contig_scores.append(scores)
-        total_switches += switches
+        global_total_bins += len(bin_centers)
         
-    # --- 1. Global Directionality Filter ---
-    # A parent must have fewer recombinations than the child (globally).
-    # We allow a margin of error (e.g. 5 switches per contig)
+        dists = np.zeros(len(bin_centers)); dists[1:] = np.diff(bin_centers)
+        theta = np.clip(1.0 - np.exp(-dists * 5e-8), 1e-15, 0.5)
+        sw_costs = np.log(theta); st_costs = np.log(1.0 - theta)
+        
+        contig_caches.append({
+            'allele_grid': allele_grid,
+            'id_grid': id_grid,
+            'sw_costs': sw_costs,
+            'st_costs': st_costs
+        })
+        
+        # Score Singles
+        error_pen = -math.log(1e-2)
+        full_mask = np.ones((num_samples, num_samples), dtype=bool); np.fill_diagonal(full_mask, False)
+        
+        scores = batch_calculate_parent_scores(allele_grid, id_grid, full_mask, sw_costs, st_costs, error_pen, 50.0)
+        
+        row_switches = (id_grid[:, :-1, :] != id_grid[:, 1:, :]) & (id_grid[:, :-1, :] != -1) & (id_grid[:, 1:, :] != -1)
+        recomb_counts = np.sum(row_switches, axis=(1, 2))
+        
+        scores[scores == -np.inf] = -1e9
+        total_scores += scores
+        total_switches += recomb_counts
+
     cand_mask = np.zeros((num_samples, num_samples), dtype=bool)
-    margin = 10
-    
+    margin = 5
     for i in range(num_samples):
-        # Candidates must have fewer switches than Child i
         valid_gen = total_switches <= (total_switches[i] + margin)
         cand_mask[i, :] = valid_gen
-        cand_mask[i, i] = False # No self-parenting
+        cand_mask[i, i] = False
 
-    # --- 2. Trio Formation (Phase-Aware Aggregation) ---
+    # --- 2. Trio Verification ---
     relationships = []
     parent_candidates = {}
+    trio_scores_map = {}
+    COMPLEXITY_PENALTY = 5.0
+    
+    print(f"\n--- Phase 2: Trio Verification (Top {top_k} Pairs) ---")
     
     for i in tqdm(range(num_samples), desc="Inferring Trios"):
         
-        # A. Pre-select Top Candidates (to avoid N^2 loop)
-        # We sum the Max likelihoods across contigs to find "Good Individual Parents"
-        agg_single_scores = np.zeros(num_samples)
+        # Get Top Candidates
+        valid_scores = total_scores[i].copy()
+        valid_scores[~cand_mask[i, :]] = -np.inf
+        # Apply Penalty for ranking
         for j in range(num_samples):
-            if not cand_mask[i, j]: 
-                agg_single_scores[j] = -np.inf
-                continue
+            if valid_scores[j] > -1e9: valid_scores[j] -= (total_switches[j] * COMPLEXITY_PENALTY)
             
-            sum_score = 0
-            for c in range(num_contigs):
-                # Max of matching H0 or matching H1 on this contig
-                s_mat = all_contig_scores[c]
-                best_fit = max(s_mat[i, 0, j], s_mat[i, 1, j])
-                sum_score += best_fit
-            agg_single_scores[j] = sum_score
-            
-        # Select Top K candidates
-        top_candidates = np.argsort(agg_single_scores)[-top_k:][::-1]
-        top_candidates = [x for x in top_candidates if agg_single_scores[x] > -1e10]
+        top_indices = np.argsort(valid_scores)[-top_k:][::-1]
+        top_indices = [x for x in top_indices if valid_scores[x] > -1e10]
         
-        parent_candidates[sample_ids[i]] = [(sample_ids[x], agg_single_scores[x]) for x in top_candidates]
-
-        if len(top_candidates) < 1:
-            relationships.append({'Sample': sample_ids[i], 'Generation': 'F1', 
-                                  'Parent1': None, 'Parent2': None})
+        parent_candidates[sample_ids[i]] = [(sample_ids[x], valid_scores[x]) for x in top_indices]
+        
+        if len(top_indices) < 1:
+            relationships.append({'Sample': sample_ids[i], 'Generation': 'F1', 'Parent1': None, 'Parent2': None})
+            trio_scores_map[sample_ids[i]] = -1e9
             continue
-
-        # B. Score Trios (Phase-Correct Summation)
+            
+        # Form Trios
+        pairs = [(p1, p2) for p1 in top_indices for p2 in top_indices if p1 != p2]
+        if not pairs: pairs = [(top_indices[0], top_indices[0])]
+        
         best_trio = None
         best_trio_score = -np.inf
         
-        # Try all pairs of top candidates
-        combinations_list = [(p1, p2) for p1 in top_candidates for p2 in top_candidates if p1 != p2]
-        
-        if not combinations_list:
-             # Fallback if only 1 candidate exists
-             combinations_list = [(top_candidates[0], top_candidates[0])]
-
-        for p1, p2 in combinations_list:
+        # Child Data per contig
+        child_data_per_contig = []
+        for c in range(num_contigs):
+            child_data_per_contig.append({
+                'alleles': contig_caches[c]['allele_grid'][i],
+                'ids': contig_caches[c]['id_grid'][i],
+                'sw': contig_caches[c]['sw_costs'],
+                'st': contig_caches[c]['st_costs']
+            })
             
-            trio_total_log_lik = 0.0
+        # Score Pairs
+        for p1, p2 in pairs:
+            trio_ll = 0.0
+            error_pen = -math.log(1e-2)
             
             for c in range(num_contigs):
-                s_mat = all_contig_scores[c]
+                p1_all = contig_caches[c]['allele_grid'][p1]
+                p2_all = contig_caches[c]['allele_grid'][p2]
+                dat = child_data_per_contig[c]
                 
-                # Option A: P1->H0, P2->H1
-                lik_a = s_mat[i, 0, p1] + s_mat[i, 1, p2]
+                score = run_trio_phase_aware_hmm(
+                    dat['alleles'], dat['ids'], p1_all, p2_all,
+                    dat['sw'], dat['st'], error_pen, 50.0
+                )
+                trio_ll += score
                 
-                # Option B: P1->H1, P2->H0
-                lik_b = s_mat[i, 1, p1] + s_mat[i, 0, p2]
-                
-                # We don't know phase, so we take the configuration that fits best for this contig
-                trio_total_log_lik += max(lik_a, lik_b)
+            final = trio_ll - (total_switches[p1] + total_switches[p2]) * COMPLEXITY_PENALTY
             
-            # Tie-Breaker: Complexity (Total Genome Switches)
-            complexity = (total_switches[p1] + total_switches[p2]) * 0.1
-            final_score = trio_total_log_lik - complexity
-            
-            if final_score > best_trio_score:
-                best_trio_score = final_score
+            if final > best_trio_score:
+                best_trio_score = final
                 best_trio = (p1, p2)
         
-        # Result
+        trio_scores_map[sample_ids[i]] = best_trio_score
+        
         if best_trio:
-            p1_name, p2_name = sample_ids[best_trio[0]], sample_ids[best_trio[1]]
-            relationships.append({'Sample': sample_ids[i], 'Generation': 'Unknown', 
-                                  'Parent1': p1_name, 'Parent2': p2_name})
+            p1n, p2n = sample_ids[best_trio[0]], sample_ids[best_trio[1]]
+            relationships.append({'Sample': sample_ids[i], 'Generation': 'Unknown', 'Parent1': p1n, 'Parent2': p2n})
         else:
-            relationships.append({'Sample': sample_ids[i], 'Generation': 'F1', 
-                                  'Parent1': None, 'Parent2': None})
-            
-    # --- 3. Final Formatting ---
+            relationships.append({'Sample': sample_ids[i], 'Generation': 'F1', 'Parent1': None, 'Parent2': None})
+
     rel_df = pd.DataFrame(relationships)
     
-    # Infer Generations labels (iterative)
+    # Generation Logic
     name_to_gen = {row['Sample']: 'F1' for _, row in rel_df.iterrows() if pd.isna(row['Parent1'])}
-    for _ in range(10): # Depth of tree
+    for _ in range(10): 
         for idx, row in rel_df.iterrows():
             if row['Generation'] != 'Unknown': continue
             p1, p2 = row['Parent1'], row['Parent2']
@@ -425,8 +709,13 @@ def infer_pedigree_multi_contig(contig_data_list, sample_ids, top_k=20):
                     name_to_gen[row['Sample']] = gen
                 except: pass
 
-    # Return Result Object (Empty maps/stats since they are per-contig specific)
-    return PedigreeResult(sample_ids, rel_df, parent_candidates, None, [], None, None)
+    # Return object with cutoff method
+    res = PedigreeResult(sample_ids, rel_df, parent_candidates, None, [], None, None, trio_scores_map, global_total_bins)
+    
+    # Run automatic cutoff internally
+    res.perform_automatic_cutoff()
+    
+    return res
 
 # =============================================================================
 # 6. VISUALIZATION & WRAPPER
@@ -473,23 +762,10 @@ def draw_pedigree_tree(relationships_df, output_file="pedigree_tree.png"):
 def run_pedigree_inference(block_painting, sample_ids=None, snps_per_bin=150, 
                            founder_block=None, recomb_rate=5e-8,
                            output_prefix="pedigree"):
-    """
-    Legacy wrapper for single-contig inference.
-    Packages the single input into the list format required by infer_pedigree_multi_contig.
-    """
-    
-    if founder_block is None:
-        raise ValueError("Founder Block is now required for allele-based inference.")
+    if founder_block is None: raise ValueError("Founder Block is now required.")
+    if sample_ids is None: sample_ids = [f"S_{i}" for i in range(len(block_painting))]
 
-    if sample_ids is None:
-        sample_ids = [f"S_{i}" for i in range(len(block_painting))]
-
-    # Package as list of dicts
-    contig_input = [{
-        'painting': block_painting,
-        'founder_block': founder_block
-    }]
-    
+    contig_input = [{'painting': block_painting, 'founder_block': founder_block}]
     result = infer_pedigree_multi_contig(contig_input, sample_ids, top_k=20)
     
     result.relationships.to_csv(f"{output_prefix}.ped", index=False)
