@@ -1,8 +1,21 @@
+"""
+pedigree_inference.py
+
+Pedigree inference using tolerance paintings from paint_samples.py.
+
+- Uses SampleTolerancePainting/SampleConsensusPainting from paint_samples.py
+- When scoring parent-child relationships, considers ALL consensus paintings
+- Score = max over all (parent_consensus, child_consensus) combinations
+- This handles uncertainty in founder assignment properly
+
+The 16-state HMM and free switches in homozygous regions are preserved.
+"""
+
 import numpy as np
 import pandas as pd
 import warnings
 import math
-from itertools import combinations
+from itertools import combinations, product
 from tqdm import tqdm
 from sklearn.cluster import KMeans
 
@@ -89,7 +102,7 @@ class PedigreeResult:
             if updates == 0:
                 break
 
-    def perform_automatic_cutoff(self, force_clusters=2, sigma_threshold=3.0):
+    def perform_automatic_cutoff(self, force_clusters=2, sigma_threshold=4.0):
         """
         Uses Sigma Clipping on Score-Per-Bin to distinguish True Trios (F2/F3) from
         False Trios (F1s). 
@@ -156,17 +169,138 @@ class PedigreeResult:
         except Exception as e:
             print(f"[Auto-Cutoff] Failed: {e}")
 
+    def resolve_cycles(self, verbose=True):
+        """
+        Detect and resolve cycles in the pedigree.
+        
+        Strategy: Samples that have many children but also have parents assigned
+        are likely mis-classified. We remove parent assignments from the sample
+        with the most children and worst trio score.
+        
+        Args:
+            verbose: Print progress information
+        """
+        # Build directed graph (parent -> child)
+        G = nx.DiGraph()
+        for _, row in self.relationships.iterrows():
+            child = row['Sample']
+            G.add_node(child)
+            if pd.notna(row['Parent1']):
+                G.add_edge(row['Parent1'], child)
+            if pd.notna(row['Parent2']):
+                G.add_edge(row['Parent2'], child)
+        
+        # Check if already valid
+        if nx.is_directed_acyclic_graph(G):
+            if verbose:
+                print("[Cycle Resolution] Pedigree is already acyclic.")
+            return
+        
+        # Get normalized trio scores
+        trio_scores_norm = {}
+        if self.total_bins > 0:
+            for s in self.samples:
+                raw = self.trio_scores.get(s, 0)
+                trio_scores_norm[s] = raw / self.total_bins
+        
+        iteration = 0
+        max_iterations = 20
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            # Rebuild graph
+            G = nx.DiGraph()
+            for _, row in self.relationships.iterrows():
+                child = row['Sample']
+                G.add_node(child)
+                if pd.notna(row['Parent1']):
+                    G.add_edge(row['Parent1'], child)
+                if pd.notna(row['Parent2']):
+                    G.add_edge(row['Parent2'], child)
+            
+            if nx.is_directed_acyclic_graph(G):
+                if verbose:
+                    print(f"[Cycle Resolution] Pedigree is acyclic after {iteration-1} fix(es).")
+                break
+            
+            # Find cycles
+            cycles = list(nx.simple_cycles(G))
+            if verbose:
+                print(f"[Cycle Resolution] Iteration {iteration}: Found {len(cycles)} cycle(s)")
+            
+            # Collect all samples involved in cycles
+            samples_in_cycles = set()
+            for cycle in cycles:
+                samples_in_cycles.update(cycle)
+            
+            # Find candidates: samples that are both parent AND child
+            candidates_to_fix = []
+            for sample in samples_in_cycles:
+                row = self.relationships[self.relationships['Sample'] == sample]
+                if len(row) == 0:
+                    continue
+                row = row.iloc[0]
+                
+                has_parents = pd.notna(row['Parent1']) or pd.notna(row['Parent2'])
+                n_children = G.out_degree(sample)
+                
+                if has_parents and n_children > 0:
+                    score = trio_scores_norm.get(sample, 0.0)
+                    candidates_to_fix.append({
+                        'sample': sample,
+                        'score': score,
+                        'n_children': n_children,
+                        'parents': (row['Parent1'], row['Parent2'])
+                    })
+            
+            if not candidates_to_fix:
+                if verbose:
+                    print(f"[Cycle Resolution] No candidates found to fix")
+                break
+            
+            # Sort by: most children, then worst score
+            candidates_to_fix.sort(key=lambda x: (-x['n_children'], x['score']))
+            
+            # Fix the top candidate
+            to_fix = candidates_to_fix[0]
+            sample_to_fix = to_fix['sample']
+            
+            if verbose:
+                print(f"[Cycle Resolution] Fixing {sample_to_fix}: "
+                      f"n_children={to_fix['n_children']}, score={to_fix['score']:.4f}, "
+                      f"removing parents {to_fix['parents']}")
+            
+            idx = self.relationships[self.relationships['Sample'] == sample_to_fix].index[0]
+            self.relationships.at[idx, 'Parent1'] = None
+            self.relationships.at[idx, 'Parent2'] = None
+            self.relationships.at[idx, 'Generation'] = 'F1'
+        
+        # Re-propagate generations
+        self._recalculate_generations()
+
 # =============================================================================
-# 2. DISCRETIZATION & ALLELE CONVERSION
+# 2. DISCRETIZATION & ALLELE CONVERSION FOR TOLERANCE PAINTINGS
 # =============================================================================
 
-def discretize_paintings(block_painting, snps_per_bin=50):
+def discretize_consensus_with_uncertainty(consensus_painting, start_pos, end_pos, snps_per_bin=50):
     """
-    Converts RLE paintings into a fixed-grid NumPy array of IDs.
-    Returns grid, bin_edges, and bin_centers.
+    Discretize a SampleConsensusPainting, preserving uncertainty information.
+    
+    Computes a potential_hom_mask based on whether the intersection of
+    possible_hap1 and possible_hap2 is non-empty at each bin.
+    
+    Args:
+        consensus_painting: SampleConsensusPainting with chunks containing uncertainty sets
+        start_pos: Start position of the region
+        end_pos: End position of the region
+        snps_per_bin: Approximate SNPs per bin for grid resolution
+    
+    Returns:
+        id_grid: (num_bins, 2) array of representative founder IDs
+        potential_hom_mask: (num_bins,) boolean array - True if homozygosity is possible
+        bin_centers: array of bin center positions
     """
-    start_pos = block_painting.start_pos
-    end_pos = block_painting.end_pos
     total_len = end_pos - start_pos
     approx_bp_per_bin = snps_per_bin * 100 
     num_bins = int(total_len / approx_bp_per_bin)
@@ -175,32 +309,188 @@ def discretize_paintings(block_painting, snps_per_bin=50):
     bin_edges = np.linspace(start_pos, end_pos, num_bins + 1)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     
-    num_samples = len(block_painting)
-    grid = np.zeros((num_samples, num_bins, 2), dtype=np.int32) - 1 
+    id_grid = np.zeros((num_bins, 2), dtype=np.int32) - 1
+    potential_hom_mask = np.ones(num_bins, dtype=np.bool_)  # Default: assume potentially hom (conservative)
     
-    for i, sample in enumerate(block_painting):
-        chunks = sample.chunks
-        if not chunks: continue
-        c_ends = np.array([c.end for c in chunks])
-        c_h1 = np.array([c.hap1 for c in chunks])
-        c_h2 = np.array([c.hap2 for c in chunks])
-        c_starts = np.array([c.start for c in chunks])
+    # Get the consensus chunks (with uncertainty sets)
+    cons_chunks = consensus_painting.chunks
+    if not cons_chunks:
+        return id_grid, potential_hom_mask, bin_centers
+    
+    # Get representative path for concrete IDs
+    if consensus_painting.representative_path is not None:
+        rep_chunks = consensus_painting.representative_path.chunks
+    else:
+        rep_chunks = None
+    
+    # Build lookup for consensus chunks (uncertainty sets)
+    c_ends = np.array([c.end for c in cons_chunks])
+    c_starts = np.array([c.start for c in cons_chunks])
+    
+    # For each bin, find the covering consensus chunk
+    chunk_indices = np.searchsorted(c_ends, bin_centers)
+    chunk_indices = np.clip(chunk_indices, 0, len(cons_chunks) - 1)
+    
+    for b in range(num_bins):
+        cidx = chunk_indices[b]
+        chunk = cons_chunks[cidx]
         
-        indices = np.searchsorted(c_ends, bin_centers)
-        indices = np.clip(indices, 0, len(chunks) - 1)
-        valid_mask = bin_centers >= c_starts[indices]
+        # Check if bin is actually within this chunk
+        if bin_centers[b] < chunk.start or bin_centers[b] >= chunk.end:
+            # Bin not covered - treat as uncertain (potentially hom)
+            potential_hom_mask[b] = True
+            continue
         
-        grid[i, :, 0] = np.where(valid_mask, c_h1[indices], -1)
-        grid[i, :, 1] = np.where(valid_mask, c_h2[indices], -1)
-            
-    return grid, bin_edges, bin_centers
+        # Check if intersection of possible founders is non-empty
+        # possible_hap1 and possible_hap2 are frozensets
+        intersection = chunk.possible_hap1 & chunk.possible_hap2
+        potential_hom_mask[b] = len(intersection) > 0
+    
+    # Fill in concrete IDs from representative path
+    if rep_chunks:
+        rep_ends = np.array([c.end for c in rep_chunks])
+        rep_h1 = np.array([c.hap1 for c in rep_chunks])
+        rep_h2 = np.array([c.hap2 for c in rep_chunks])
+        rep_starts = np.array([c.start for c in rep_chunks])
+        
+        rep_indices = np.searchsorted(rep_ends, bin_centers)
+        rep_indices = np.clip(rep_indices, 0, len(rep_chunks) - 1)
+        valid_mask = bin_centers >= rep_starts[rep_indices]
+        
+        id_grid[:, 0] = np.where(valid_mask, rep_h1[rep_indices], -1)
+        id_grid[:, 1] = np.where(valid_mask, rep_h2[rep_indices], -1)
+    
+    return id_grid, potential_hom_mask, bin_centers
+
+
+def discretize_sample_painting_with_hom_mask(sample_painting, start_pos, end_pos, snps_per_bin=50):
+    """
+    Discretize a SamplePainting (no uncertainty info).
+    
+    For a concrete painting without uncertainty sets, homozygosity is determined
+    by whether the two founder IDs are identical.
+    
+    Args:
+        sample_painting: SamplePainting object with chunks
+        start_pos: Start position of the region
+        end_pos: End position of the region
+        snps_per_bin: Approximate SNPs per bin for grid resolution
+    
+    Returns:
+        id_grid: (num_bins, 2) array of founder IDs
+        potential_hom_mask: (num_bins,) boolean array - True if hap1 == hap2 or either is -1
+        bin_centers: array of bin center positions
+    """
+    total_len = end_pos - start_pos
+    approx_bp_per_bin = snps_per_bin * 100 
+    num_bins = int(total_len / approx_bp_per_bin)
+    if num_bins < 100: num_bins = 100 
+    
+    bin_edges = np.linspace(start_pos, end_pos, num_bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    
+    id_grid = np.zeros((num_bins, 2), dtype=np.int32) - 1
+    
+    chunks = sample_painting.chunks
+    if not chunks:
+        potential_hom_mask = np.ones(num_bins, dtype=np.bool_)
+        return id_grid, potential_hom_mask, bin_centers
+    
+    c_ends = np.array([c.end for c in chunks])
+    c_h1 = np.array([c.hap1 for c in chunks])
+    c_h2 = np.array([c.hap2 for c in chunks])
+    c_starts = np.array([c.start for c in chunks])
+    
+    indices = np.searchsorted(c_ends, bin_centers)
+    indices = np.clip(indices, 0, len(chunks) - 1)
+    valid_mask = bin_centers >= c_starts[indices]
+    
+    id_grid[:, 0] = np.where(valid_mask, c_h1[indices], -1)
+    id_grid[:, 1] = np.where(valid_mask, c_h2[indices], -1)
+    
+    # For concrete paintings: hom if IDs match or either is -1
+    potential_hom_mask = (id_grid[:, 0] == id_grid[:, 1]) | (id_grid[:, 0] == -1) | (id_grid[:, 1] == -1)
+    
+    return id_grid, potential_hom_mask, bin_centers
+
+
+def discretize_tolerance_paintings(block_tolerance_painting, snps_per_bin=50):
+    """
+    Converts BlockTolerancePainting into discretized grids for ALL consensus paintings.
+    
+    For each sample, returns a list of (id_grid, potential_hom_mask, weight) tuples,
+    one per consensus. The potential_hom_mask is computed from set intersection
+    of possible founders.
+    
+    Args:
+        block_tolerance_painting: BlockTolerancePainting from paint_samples
+        snps_per_bin: Grid resolution
+        
+    Returns:
+        sample_grids: List of lists, sample_grids[i] = [(id_grid, potential_hom_mask, weight), ...]
+        bin_centers: Array of bin center positions (same for all)
+    """
+    start_pos = block_tolerance_painting.start_pos
+    end_pos = block_tolerance_painting.end_pos
+    
+    total_len = end_pos - start_pos
+    approx_bp_per_bin = snps_per_bin * 100 
+    num_bins = int(total_len / approx_bp_per_bin)
+    if num_bins < 100: num_bins = 100 
+    
+    bin_edges = np.linspace(start_pos, end_pos, num_bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    
+    num_samples = len(block_tolerance_painting)
+    sample_grids = []
+    
+    for i in range(num_samples):
+        sample_obj = block_tolerance_painting[i]
+        grids_for_sample = []
+        
+        # Get consensus paintings
+        consensus_list = sample_obj.consensus_list
+        
+        if consensus_list:
+            for cons in consensus_list:
+                id_grid, potential_hom_mask, _ = discretize_consensus_with_uncertainty(
+                    cons, start_pos, end_pos, snps_per_bin
+                )
+                grids_for_sample.append((id_grid, potential_hom_mask, cons.weight))
+        
+        # Fallback: if no consensus, use the best path
+        if not grids_for_sample and sample_obj.paths:
+            id_grid, potential_hom_mask, _ = discretize_sample_painting_with_hom_mask(
+                sample_obj.paths[0], start_pos, end_pos, snps_per_bin
+            )
+            grids_for_sample.append((id_grid, potential_hom_mask, 1.0))
+        
+        # Ultimate fallback: empty grid (all potentially hom)
+        if not grids_for_sample:
+            id_grid = np.zeros((num_bins, 2), dtype=np.int32) - 1
+            potential_hom_mask = np.ones(num_bins, dtype=np.bool_)
+            grids_for_sample.append((id_grid, potential_hom_mask, 1.0))
+        
+        sample_grids.append(grids_for_sample)
+    
+    return sample_grids, bin_centers
+
 
 def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_width_bp=None):
     """
     Translates Founder IDs to Alleles (0/1/missing).
     Strictly handles empty bins by setting alleles to -1 if no SNP is nearby.
+    
+    Args:
+        id_grid: (num_bins, 2) array of founder IDs
+        bin_centers: array of bin center positions
+        founder_block: BlockResult with positions and haplotypes
+        bin_width_bp: Width of each bin in bp
+        
+    Returns:
+        allele_grid: (num_bins, 2) array of alleles (0, 1, or -1)
     """
-    num_samples, num_bins, _ = id_grid.shape
+    num_bins = id_grid.shape[0]
     
     # 1. Find nearest SNP for every bin
     bin_indices = np.searchsorted(founder_block.positions, bin_centers)
@@ -217,7 +507,6 @@ def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_widt
     found_snps_pos = founder_block.positions[bin_indices]
     
     # A bin is valid if the SNP is within the bin's radius (half width)
-    # Strictly: abs(SNP - Center) <= Width/2
     dist_to_center = np.abs(found_snps_pos - bin_centers)
     valid_snp_mask = dist_to_center <= (bin_width_bp / 2.0)
     
@@ -243,19 +532,19 @@ def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_widt
     b_indices = np.arange(num_bins)
     
     for chrom in [0, 1]:
-        ids = id_grid[:, :, chrom]
+        ids = id_grid[:, chrom]
         valid_mask = (ids != -1)
         
         safe_ids = ids.copy()
         safe_ids[~valid_mask] = 0
         
         # Look up
-        alleles = allele_lookup[safe_ids, b_indices[np.newaxis, :]]
+        alleles = allele_lookup[safe_ids, b_indices]
         
         # Restore missing IDs
         alleles[~valid_mask] = -1
         
-        allele_grid[:, :, chrom] = alleles
+        allele_grid[:, chrom] = alleles
         
     return allele_grid
 
@@ -264,6 +553,7 @@ def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_widt
 # =============================================================================
 
 def calculate_ibd_matrices(grid):
+    """Calculate IBD matrices from a standard grid (not used in tolerance version)."""
     num_samples, num_bins, _ = grid.shape
     kinship_sum = np.zeros((num_samples, num_samples))
     ibd0_sum = np.zeros((num_samples, num_samples))
@@ -288,36 +578,37 @@ def calculate_ibd_matrices(grid):
     valid_counts[valid_counts == 0] = 1.0
     return kinship_sum / valid_counts, ibd0_sum / valid_counts
 
-def analyze_recombinations(grid, bin_edges, gen_map, systematic_thresh=0.25):
-    num_samples, num_bins, _ = grid.shape
-    switches = (grid[:, :-1, :] != grid[:, 1:, :]) & (grid[:, :-1, :] != -1)
-    any_switch = np.any(switches, axis=2).astype(int)
-    global_freq = np.mean(any_switch, axis=0)
-    bad_bin_indices = np.where(global_freq > systematic_thresh)[0]
-    events = []
-    for i in range(num_samples):
-        my_switches = np.where(any_switch[i, :] == 1)[0]
-        for bin_idx in my_switches:
-            if not any(abs(bad - bin_idx) <= 1 for bad in bad_bin_indices):
-                events.append({'Sample_Index': i, 'Generation': gen_map.get(i, 'Unknown'), 'Approx_Position': bin_edges[bin_idx+1]})
-    return pd.DataFrame(events), bad_bin_indices
-
 # =============================================================================
 # 4. HMM KERNELS (8-STATE FILTER & 16-STATE VERIFIER)
 # =============================================================================
 
 @njit(fastmath=True)
-def run_phase_agnostic_hmm(child_dip_alleles, child_dip_ids, parent_dip_alleles, switch_costs, stay_costs, error_penalty, phase_penalty):
+def run_phase_agnostic_hmm(child_dip_alleles, child_potential_hom_mask, parent_dip_alleles, 
+                           switch_costs, stay_costs, error_penalty, phase_penalty,
+                           mismatch_penalty=-4.6):
     """
     Calculates the Viterbi Score of Parent -> Child inheritance allowing for
     phase switching in the Child AND Split-Burst error handling.
+    
+    Uses SOFT EMISSIONS: mismatches incur a penalty (default log(0.01) ≈ -4.6)
+    rather than being impossible (-1e9). Burst states are retained for handling
+    runs of errors (e.g., coverage dropout).
+    
+    Args:
+        child_dip_alleles: (n_sites, 2) allele array for child
+        child_potential_hom_mask: (n_sites,) boolean array - True where homozygosity is possible
+        parent_dip_alleles: (n_sites, 2) allele array for parent
+        switch_costs, stay_costs: Transition cost arrays
+        error_penalty: Cost to enter burst state
+        phase_penalty: Cost for phase switch in non-homozygous regions
+        mismatch_penalty: Log-probability of a single allele mismatch (default log(0.01))
     """
     n_sites = len(child_dip_alleles)
     
     # Init Scores (8 states) [Norm0..3, Burst0..3]
     scores = np.zeros(8)
     
-    # Burst Emission: log(0.5)
+    # Burst Emission: log(0.5) - random coin flip
     BURST_EMISSION = -0.693147 
     
     # Initialize Bursts as valid starting points (entering with penalty)
@@ -329,15 +620,20 @@ def run_phase_agnostic_hmm(child_dip_alleles, child_dip_ids, parent_dip_alleles,
         c0_a, c1_a = child_dip_alleles[i, 0], child_dip_alleles[i, 1]
         p0_a, p1_a = parent_dip_alleles[i, 0], parent_dip_alleles[i, 1]
         
-        # IDs for Phase Logic
-        c0_id, c1_id = child_dip_ids[i, 0], child_dip_ids[i, 1]
-        
-        # 1. Normal Emissions (Based on Alleles)
+        # SOFT EMISSIONS: mismatch incurs penalty, not impossible
         # -1 (Missing) is treated as a wildcard match (0 cost)
-        e0 = 0.0 if (c0_a == -1 or p0_a == -1 or c0_a == p0_a) else -1e9
-        e1 = 0.0 if (c1_a == -1 or p0_a == -1 or c1_a == p0_a) else -1e9
-        e2 = 0.0 if (c0_a == -1 or p1_a == -1 or c0_a == p1_a) else -1e9
-        e3 = 0.0 if (c1_a == -1 or p1_a == -1 or c1_a == p1_a) else -1e9
+        def soft_match(child_allele, parent_allele):
+            if child_allele == -1 or parent_allele == -1:
+                return 0.0  # Missing = wildcard
+            elif child_allele == parent_allele:
+                return 0.0  # Match
+            else:
+                return mismatch_penalty  # Soft mismatch
+        
+        e0 = soft_match(c0_a, p0_a)
+        e1 = soft_match(c1_a, p0_a)
+        e2 = soft_match(c0_a, p1_a)
+        e3 = soft_match(c1_a, p1_a)
         
         emissions = np.array([e0, e1, e2, e3])
         
@@ -345,9 +641,9 @@ def run_phase_agnostic_hmm(child_dip_alleles, child_dip_ids, parent_dip_alleles,
         c_recomb = switch_costs[i]
         c_stay = stay_costs[i]
         
-        # Child Phase Switch Cost (Based on Founder IDs)
-        is_ibd_ambiguous = (c0_id == c1_id) or (c0_id == -1) or (c1_id == -1)
-        c_phase = 0.0 if is_ibd_ambiguous else -phase_penalty
+        # Child Phase Switch Cost
+        # FREE SWITCH if potentially homozygous (set intersection non-empty)
+        c_phase = 0.0 if child_potential_hom_mask[i] else -phase_penalty
         
         prev = scores.copy()
         new_scores = np.zeros(8)
@@ -395,35 +691,35 @@ def run_phase_agnostic_hmm(child_dip_alleles, child_dip_ids, parent_dip_alleles,
             best_final = scores[k]
     return best_final
 
-@njit(parallel=True)
-def batch_calculate_parent_scores(allele_grid, id_grid, candidates_mask, switch_costs, stay_costs, error_penalty, phase_penalty):
-    n_samples, n_bins, _ = allele_grid.shape
-    # Returns (N, N) matrix of single best scores
-    scores = np.full((n_samples, n_samples), -np.inf)
-    
-    for i in prange(n_samples): 
-        child_alleles = allele_grid[i]
-        child_ids = id_grid[i]
-        
-        for j in range(n_samples): 
-            if i == j: continue
-            if not candidates_mask[i, j]: continue
-            
-            parent_alleles = allele_grid[j]
-            s = run_phase_agnostic_hmm(child_alleles, child_ids, parent_alleles, switch_costs, stay_costs, error_penalty, phase_penalty)
-            scores[i, j] = s
-            
-    return scores
 
 @njit(fastmath=True)
-def run_trio_phase_aware_hmm(child_dip_alleles, child_dip_ids, p1_dip_alleles, p2_dip_alleles, 
-                             switch_costs, stay_costs, error_penalty, phase_penalty):
+def run_trio_phase_aware_hmm(child_dip_alleles, child_potential_hom_mask, 
+                             p1_dip_alleles, p2_dip_alleles, 
+                             switch_costs, stay_costs, error_penalty, phase_penalty,
+                             mismatch_penalty=-4.6):
     """
     Calculates the Joint Likelihood of P1 and P2 explaining the Child.
     Includes 16-State Split-Burst Logic to handle redundant coverage and genotyping errors.
+    
+    Uses SOFT EMISSIONS: mismatches incur a penalty (default log(0.01) ≈ -4.6)
+    rather than being impossible. Both parent contributions must match for full
+    score; each mismatch adds the penalty.
+    
+    FREE SWITCHES in potentially homozygous regions (where possible_hap1 ∩ possible_hap2 ≠ ∅).
+    
+    Args:
+        child_dip_alleles: (n_sites, 2) allele array for child
+        child_potential_hom_mask: (n_sites,) boolean array - True where homozygosity is possible
+        p1_dip_alleles, p2_dip_alleles: (n_sites, 2) allele arrays for parents
+        switch_costs, stay_costs: Transition cost arrays
+        error_penalty: Cost to enter burst state
+        phase_penalty: Cost for phase switch in non-homozygous regions
+        mismatch_penalty: Log-probability of a single allele mismatch (default log(0.01))
     """
     n_sites = len(child_dip_alleles)
-    BURST_EMISSION = -1.386 # ln(0.25)
+    
+    # Burst Emission: log(0.25) - two independent coin flips
+    BURST_EMISSION = -1.386
     
     # Init Scores (16 states)
     scores = np.zeros(16)
@@ -434,17 +730,24 @@ def run_trio_phase_aware_hmm(child_dip_alleles, child_dip_ids, p1_dip_alleles, p
         c0, c1 = child_dip_alleles[i, 0], child_dip_alleles[i, 1]
         p1_h0, p1_h1 = p1_dip_alleles[i, 0], p1_dip_alleles[i, 1]
         p2_h0, p2_h1 = p2_dip_alleles[i, 0], p2_dip_alleles[i, 1]
-        cid0, cid1 = child_dip_ids[i, 0], child_dip_ids[i, 1]
         
-        # 2. Emissions
-        def match(a, b): return 0.0 if (a == -1 or b == -1 or a == b) else -1e9
+        # 2. SOFT EMISSIONS
+        # Each match contributes 0.0, each mismatch contributes mismatch_penalty
+        # Missing (-1) is wildcard (0.0 cost)
+        def soft_match(parent_allele, child_allele):
+            if parent_allele == -1 or child_allele == -1:
+                return 0.0  # Missing = wildcard
+            elif parent_allele == child_allele:
+                return 0.0  # Match
+            else:
+                return mismatch_penalty  # Soft mismatch
         
-        m_p1h0_c0 = match(p1_h0, c0); m_p1h1_c0 = match(p1_h1, c0)
-        m_p1h0_c1 = match(p1_h0, c1); m_p1h1_c1 = match(p1_h1, c1)
-        m_p2h0_c0 = match(p2_h0, c0); m_p2h1_c0 = match(p2_h1, c0)
-        m_p2h0_c1 = match(p2_h0, c1); m_p2h1_c1 = match(p2_h1, c1)
+        m_p1h0_c0 = soft_match(p1_h0, c0); m_p1h1_c0 = soft_match(p1_h1, c0)
+        m_p1h0_c1 = soft_match(p1_h0, c1); m_p1h1_c1 = soft_match(p1_h1, c1)
+        m_p2h0_c0 = soft_match(p2_h0, c0); m_p2h1_c0 = soft_match(p2_h1, c0)
+        m_p2h0_c1 = soft_match(p2_h0, c1); m_p2h1_c1 = soft_match(p2_h1, c1)
         
-        # Group A (P1->C0, P2->C1)
+        # Group A (P1->C0, P2->C1): sum of both contributions
         e = np.zeros(8)
         e[0] = m_p1h0_c0 + m_p2h0_c1
         e[1] = m_p1h0_c0 + m_p2h1_c1
@@ -461,8 +764,8 @@ def run_trio_phase_aware_hmm(child_dip_alleles, child_dip_ids, p1_dip_alleles, p
         c_recomb = switch_costs[i]
         c_stay = stay_costs[i]
         
-        is_hom = (cid0 == cid1) or (cid0 == -1) or (cid1 == -1)
-        c_phase = 0.0 if is_hom else -phase_penalty
+        # FREE SWITCH if potentially homozygous
+        c_phase = 0.0 if child_potential_hom_mask[i] else -phase_penalty
         
         prev = scores.copy()
         new_scores = np.zeros(16)
@@ -520,97 +823,308 @@ def run_trio_phase_aware_hmm(child_dip_alleles, child_dip_ids, p1_dip_alleles, p
     return best_final
 
 # =============================================================================
-# 5. MULTI-CONTIG INFERENCE LOGIC
+# 5. TOLERANCE-AWARE SCORING FUNCTIONS
 # =============================================================================
 
-def score_contig_raw(block_painting, founder_block, sample_ids, 
-                     snps_per_bin=150, recomb_rate=5e-8, robustness=1e-2):
-    """
-    Step 1: Calculates raw Parent-Offspring HMM scores for a single contig.
-    """
-    id_grid, bin_edges, bin_centers = discretize_paintings(block_painting, snps_per_bin=snps_per_bin)
-    
-    # NEW: Calculate Bin Width for safe allele conversion
-    bin_width = 10000.0
-    if len(bin_centers) > 1:
-        bin_width = bin_centers[1] - bin_centers[0]
-        
-    allele_grid = convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_width_bp=bin_width)
-    
-    num_samples = len(sample_ids)
-    num_bins = len(bin_centers)
-    
-    dists = np.zeros(num_bins); dists[1:] = np.diff(bin_centers)
-    theta = np.clip(1.0 - np.exp(-dists * recomb_rate), 1e-15, 0.5)
-    switch_costs = np.log(theta)
-    stay_costs = np.log(1.0 - theta)
-    
-    error_penalty = -math.log(robustness)
-    phase_penalty = 50.0 
-    
-    switches = (id_grid[:, :-1, :] != id_grid[:, 1:, :]) & \
-               (id_grid[:, :-1, :] != -1) & (id_grid[:, 1:, :] != -1)
-    recomb_counts = np.sum(switches, axis=(1, 2))
-    
-    # Run Single HMM
-    full_mask = np.ones((num_samples, num_samples), dtype=bool)
-    np.fill_diagonal(full_mask, False) 
-    
-    scores = batch_calculate_parent_scores(
-        allele_grid, id_grid, full_mask, switch_costs, stay_costs, error_penalty, phase_penalty
-    )
-    
-    return scores, recomb_counts
+# Default mismatch penalty: log(0.01) ≈ -4.6
+DEFAULT_MISMATCH_PENALTY = -4.605170  # math.log(0.01)
 
-def infer_pedigree_multi_contig(contig_data_list, sample_ids, top_k=20):
+def score_parent_child_all_consensus(child_grids, parent_grids, 
+                                     switch_costs, stay_costs, 
+                                     error_penalty, phase_penalty,
+                                     founder_block, bin_centers, bin_width,
+                                     mismatch_penalty=DEFAULT_MISMATCH_PENALTY):
     """
-    Step 2: Aggregates scores across multiple contigs.
+    Score a parent-child pair considering ALL consensus paintings.
+    NOTE: This version converts grids on-the-fly. Use score_parent_child_all_consensus_precomputed
+    for better performance when scoring many pairs.
     """
+    best_score = -np.inf
+    
+    for child_id_grid, child_hom_mask, child_weight in child_grids:
+        child_allele_grid = convert_id_grid_to_allele_grid(
+            child_id_grid, bin_centers, founder_block, bin_width
+        )
+        
+        for parent_id_grid, parent_hom_mask, parent_weight in parent_grids:
+            parent_allele_grid = convert_id_grid_to_allele_grid(
+                parent_id_grid, bin_centers, founder_block, bin_width
+            )
+            
+            score = run_phase_agnostic_hmm(
+                child_allele_grid, child_hom_mask,
+                parent_allele_grid,
+                switch_costs, stay_costs,
+                error_penalty, phase_penalty,
+                mismatch_penalty
+            )
+            
+            if score > best_score:
+                best_score = score
+    
+    return best_score
+
+
+def score_parent_child_all_consensus_precomputed(child_grids, parent_grids, 
+                                                  switch_costs, stay_costs, 
+                                                  error_penalty, phase_penalty,
+                                                  mismatch_penalty=DEFAULT_MISMATCH_PENALTY):
+    """
+    Score a parent-child pair considering ALL consensus paintings.
+    Uses PRE-COMPUTED allele grids for efficiency.
+    
+    Args:
+        child_grids: List of (allele_grid, potential_hom_mask, weight) tuples
+        parent_grids: List of (allele_grid, potential_hom_mask, weight) tuples
+        switch_costs, stay_costs: Transition cost arrays
+        error_penalty, phase_penalty: HMM parameters
+        mismatch_penalty: Log-probability of single allele mismatch
+        
+    Returns:
+        best_score: Maximum HMM score over all consensus combinations
+    """
+    best_score = -np.inf
+    
+    for child_allele_grid, child_hom_mask, child_weight in child_grids:
+        for parent_allele_grid, parent_hom_mask, parent_weight in parent_grids:
+            score = run_phase_agnostic_hmm(
+                child_allele_grid, child_hom_mask,
+                parent_allele_grid,
+                switch_costs, stay_costs,
+                error_penalty, phase_penalty,
+                mismatch_penalty
+            )
+            
+            if score > best_score:
+                best_score = score
+    
+    return best_score
+
+
+def score_trio_all_consensus(child_grids, p1_grids, p2_grids,
+                             switch_costs, stay_costs,
+                             error_penalty, phase_penalty,
+                             founder_block, bin_centers, bin_width,
+                             mismatch_penalty=DEFAULT_MISMATCH_PENALTY):
+    """
+    Score a trio (child, parent1, parent2) considering ALL consensus paintings.
+    NOTE: This version converts grids on-the-fly. Use score_trio_all_consensus_precomputed
+    for better performance.
+    """
+    best_score = -np.inf
+    
+    for child_id_grid, child_hom_mask, child_weight in child_grids:
+        child_allele_grid = convert_id_grid_to_allele_grid(
+            child_id_grid, bin_centers, founder_block, bin_width
+        )
+        
+        for p1_id_grid, p1_hom_mask, p1_weight in p1_grids:
+            p1_allele_grid = convert_id_grid_to_allele_grid(
+                p1_id_grid, bin_centers, founder_block, bin_width
+            )
+            
+            for p2_id_grid, p2_hom_mask, p2_weight in p2_grids:
+                p2_allele_grid = convert_id_grid_to_allele_grid(
+                    p2_id_grid, bin_centers, founder_block, bin_width
+                )
+                
+                score = run_trio_phase_aware_hmm(
+                    child_allele_grid, child_hom_mask,
+                    p1_allele_grid, p2_allele_grid,
+                    switch_costs, stay_costs,
+                    error_penalty, phase_penalty,
+                    mismatch_penalty
+                )
+                
+                if score > best_score:
+                    best_score = score
+    
+    return best_score
+
+
+def score_trio_all_consensus_precomputed(child_grids, p1_grids, p2_grids,
+                                          switch_costs, stay_costs,
+                                          error_penalty, phase_penalty,
+                                          mismatch_penalty=DEFAULT_MISMATCH_PENALTY):
+    """
+    Score a trio (child, parent1, parent2) considering ALL consensus paintings.
+    Uses PRE-COMPUTED allele grids for efficiency.
+    
+    Args:
+        child_grids, p1_grids, p2_grids: Lists of (allele_grid, hom_mask, weight) tuples
+        switch_costs, stay_costs: Transition cost arrays
+        error_penalty, phase_penalty: HMM parameters
+        mismatch_penalty: Log-probability of single allele mismatch
+    
+    Returns:
+        best_score: Maximum HMM score over all consensus combinations
+    """
+    best_score = -np.inf
+    
+    for child_allele_grid, child_hom_mask, child_weight in child_grids:
+        for p1_allele_grid, p1_hom_mask, p1_weight in p1_grids:
+            for p2_allele_grid, p2_hom_mask, p2_weight in p2_grids:
+                score = run_trio_phase_aware_hmm(
+                    child_allele_grid, child_hom_mask,
+                    p1_allele_grid, p2_allele_grid,
+                    switch_costs, stay_costs,
+                    error_penalty, phase_penalty,
+                    mismatch_penalty
+                )
+                
+                if score > best_score:
+                    best_score = score
+    
+    return best_score
+
+# =============================================================================
+# 6. MULTI-CONTIG INFERENCE LOGIC (TOLERANCE VERSION)
+# =============================================================================
+
+def _score_contig_pairs(args):
+    """
+    Worker function to score all parent-child pairs for a single contig.
+    Returns a (num_samples, num_samples) score matrix.
+    """
+    sample_allele_grids, sw_costs, st_costs, error_pen, phase_pen, mismatch_penalty, num_samples = args
+    
+    scores = np.zeros((num_samples, num_samples))
+    
+    for i in range(num_samples):
+        for j in range(num_samples):
+            if i == j:
+                continue
+            
+            score = score_parent_child_all_consensus_precomputed(
+                sample_allele_grids[i],
+                sample_allele_grids[j],
+                sw_costs, st_costs,
+                error_pen, phase_pen,
+                mismatch_penalty
+            )
+            scores[i, j] = score
+    
+    return scores
+
+
+def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20,
+                                          snps_per_bin=150, recomb_rate=5e-8,
+                                          mismatch_penalty=DEFAULT_MISMATCH_PENALTY,
+                                          n_workers=None):
+    """
+    Multi-contig pedigree inference using tolerance paintings.
+    
+    Args:
+        contig_data_list: List of dicts with:
+            - 'tolerance_painting': BlockTolerancePainting from paint_samples
+            - 'founder_block': BlockResult with positions and haplotypes
+        sample_ids: List of sample names
+        top_k: Number of top parent candidates to consider for trio verification
+        snps_per_bin: Grid resolution
+        recomb_rate: Per-bp recombination rate
+        mismatch_penalty: Log-probability of single allele mismatch (default log(0.01) ≈ -4.6)
+        n_workers: Number of parallel workers for contig scoring (default: number of contigs)
+        
+    Returns:
+        PedigreeResult object
+    """
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+    import os
+    
     num_samples = len(sample_ids)
     num_contigs = len(contig_data_list)
     
-    # 1. Pre-Calc & Filter
+    if n_workers is None:
+        n_workers = min(num_contigs, os.cpu_count() or 4)
+    
+    # Phase 1: Pre-calculate and discretize all paintings
+    print(f"\n--- Phase 1: Processing {num_contigs} Contigs ---")
+    
     contig_caches = []
-    total_scores = np.zeros((num_samples, num_samples))
     total_switches = np.zeros(num_samples)
     global_total_bins = 0
     
-    print(f"\n--- Phase 1: Filtering Candidates ({num_contigs} Contigs) ---")
+    error_pen = -math.log(1e-2)
+    phase_pen = 50.0
     
-    for c_idx, data in enumerate(contig_data_list):
-        id_grid, bin_edges, bin_centers = discretize_paintings(data['painting'], snps_per_bin=150)
+    for c_idx, data in enumerate(tqdm(contig_data_list, desc="Processing contigs")):
+        tol_painting = data['tolerance_painting']
+        founder_block = data['founder_block']
         
+        # Discretize all consensus paintings (returns id_grid, potential_hom_mask, weight)
+        sample_grids, bin_centers = discretize_tolerance_paintings(
+            tol_painting, snps_per_bin=snps_per_bin
+        )
+        
+        num_bins = len(bin_centers)
+        global_total_bins += num_bins
+        
+        # Calculate bin width
         bin_width = 10000.0
-        if len(bin_centers) > 1: bin_width = bin_centers[1] - bin_centers[0]
-            
-        allele_grid = convert_id_grid_to_allele_grid(id_grid, bin_centers, data['founder_block'], bin_width_bp=bin_width)
+        if num_bins > 1:
+            bin_width = bin_centers[1] - bin_centers[0]
         
-        global_total_bins += len(bin_centers)
+        # PRE-COMPUTE ALLELE GRIDS FOR ALL SAMPLES
+        sample_allele_grids = []
+        for i in range(num_samples):
+            allele_grids_for_sample = []
+            for id_grid, hom_mask, weight in sample_grids[i]:
+                allele_grid = convert_id_grid_to_allele_grid(
+                    id_grid, bin_centers, founder_block, bin_width
+                )
+                allele_grids_for_sample.append((allele_grid, hom_mask, weight))
+            sample_allele_grids.append(allele_grids_for_sample)
         
-        dists = np.zeros(len(bin_centers)); dists[1:] = np.diff(bin_centers)
-        theta = np.clip(1.0 - np.exp(-dists * 5e-8), 1e-15, 0.5)
-        sw_costs = np.log(theta); st_costs = np.log(1.0 - theta)
+        # Transition costs
+        dists = np.zeros(num_bins)
+        dists[1:] = np.diff(bin_centers)
+        theta = np.clip(1.0 - np.exp(-dists * recomb_rate), 1e-15, 0.5)
+        sw_costs = np.log(theta)
+        st_costs = np.log(1.0 - theta)
+        
+        # Count switches (use first consensus for complexity estimate)
+        for i in range(num_samples):
+            if sample_grids[i]:
+                id_grid = sample_grids[i][0][0]
+                switches = (id_grid[:-1, :] != id_grid[1:, :]) & \
+                          (id_grid[:-1, :] != -1) & (id_grid[1:, :] != -1)
+                total_switches[i] += np.sum(switches)
         
         contig_caches.append({
-            'allele_grid': allele_grid,
-            'id_grid': id_grid,
+            'sample_allele_grids': sample_allele_grids,
             'sw_costs': sw_costs,
             'st_costs': st_costs
         })
-        
-        # Score Singles
-        error_pen = -math.log(1e-2)
-        full_mask = np.ones((num_samples, num_samples), dtype=bool); np.fill_diagonal(full_mask, False)
-        
-        scores = batch_calculate_parent_scores(allele_grid, id_grid, full_mask, sw_costs, st_costs, error_pen, 50.0)
-        
-        row_switches = (id_grid[:, :-1, :] != id_grid[:, 1:, :]) & (id_grid[:, :-1, :] != -1) & (id_grid[:, 1:, :] != -1)
-        recomb_counts = np.sum(row_switches, axis=(1, 2))
-        
-        scores[scores == -np.inf] = -1e9
-        total_scores += scores
-        total_switches += recomb_counts
-
+    
+    # Phase 1b: Score all pairs in PARALLEL across contigs
+    print(f"\n--- Phase 1b: Scoring Parent-Child Pairs ({n_workers} workers) ---")
+    
+    # Prepare arguments for parallel workers
+    worker_args = [
+        (cache['sample_allele_grids'], cache['sw_costs'], cache['st_costs'],
+         error_pen, phase_pen, mismatch_penalty, num_samples)
+        for cache in contig_caches
+    ]
+    
+    # Use ThreadPoolExecutor since Numba releases GIL
+    # (ProcessPoolExecutor would require pickling large arrays)
+    total_scores = np.zeros((num_samples, num_samples))
+    
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        score_matrices = list(tqdm(
+            executor.map(_score_contig_pairs, worker_args),
+            total=num_contigs,
+            desc="Scoring contigs in parallel"
+        ))
+    
+    # Sum score matrices from all contigs
+    for score_matrix in score_matrices:
+        total_scores += score_matrix
+    
+    # Handle -inf scores
+    total_scores[total_scores == -np.inf] = -1e9
+    
+    # Build candidate mask based on complexity
     cand_mask = np.zeros((num_samples, num_samples), dtype=bool)
     margin = 5
     for i in range(num_samples):
@@ -618,23 +1132,24 @@ def infer_pedigree_multi_contig(contig_data_list, sample_ids, top_k=20):
         cand_mask[i, :] = valid_gen
         cand_mask[i, i] = False
 
-    # --- 2. Trio Verification ---
+    # Phase 2: Trio Verification
+    print(f"\n--- Phase 2: Trio Verification (Top {top_k} Pairs) ---")
+    
     relationships = []
     parent_candidates = {}
     trio_scores_map = {}
-    COMPLEXITY_PENALTY = 5.0
-    
-    print(f"\n--- Phase 2: Trio Verification (Top {top_k} Pairs) ---")
+    COMPLEXITY_PENALTY = 0.0
     
     for i in tqdm(range(num_samples), desc="Inferring Trios"):
-        
         # Get Top Candidates
         valid_scores = total_scores[i].copy()
         valid_scores[~cand_mask[i, :]] = -np.inf
+        
         # Apply Penalty for ranking
         for j in range(num_samples):
-            if valid_scores[j] > -1e9: valid_scores[j] -= (total_switches[j] * COMPLEXITY_PENALTY)
-            
+            if valid_scores[j] > -1e9:
+                valid_scores[j] -= (total_switches[j] * COMPLEXITY_PENALTY)
+        
         top_indices = np.argsort(valid_scores)[-top_k:][::-1]
         top_indices = [x for x in top_indices if valid_scores[x] > -1e10]
         
@@ -644,40 +1159,35 @@ def infer_pedigree_multi_contig(contig_data_list, sample_ids, top_k=20):
             relationships.append({'Sample': sample_ids[i], 'Generation': 'F1', 'Parent1': None, 'Parent2': None})
             trio_scores_map[sample_ids[i]] = -1e9
             continue
-            
+        
         # Form Trios
         pairs = [(p1, p2) for p1 in top_indices for p2 in top_indices if p1 != p2]
-        if not pairs: pairs = [(top_indices[0], top_indices[0])]
+        if not pairs:
+            pairs = [(top_indices[0], top_indices[0])]
         
         best_trio = None
         best_trio_score = -np.inf
         
-        # Child Data per contig
-        child_data_per_contig = []
-        for c in range(num_contigs):
-            child_data_per_contig.append({
-                'alleles': contig_caches[c]['allele_grid'][i],
-                'ids': contig_caches[c]['id_grid'][i],
-                'sw': contig_caches[c]['sw_costs'],
-                'st': contig_caches[c]['st_costs']
-            })
-            
-        # Score Pairs
+        # Score Pairs across all contigs
         for p1, p2 in pairs:
             trio_ll = 0.0
-            error_pen = -math.log(1e-2)
             
-            for c in range(num_contigs):
-                p1_all = contig_caches[c]['allele_grid'][p1]
-                p2_all = contig_caches[c]['allele_grid'][p2]
-                dat = child_data_per_contig[c]
+            for cache in contig_caches:
+                sample_allele_grids = cache['sample_allele_grids']
+                sw_costs = cache['sw_costs']
+                st_costs = cache['st_costs']
                 
-                score = run_trio_phase_aware_hmm(
-                    dat['alleles'], dat['ids'], p1_all, p2_all,
-                    dat['sw'], dat['st'], error_pen, 50.0
+                score = score_trio_all_consensus_precomputed(
+                    sample_allele_grids[i],   # child
+                    sample_allele_grids[p1],  # parent 1
+                    sample_allele_grids[p2],  # parent 2
+                    sw_costs, st_costs,
+                    error_pen, phase_pen,
+                    mismatch_penalty
                 )
-                trio_ll += score
                 
+                trio_ll += score
+            
             final = trio_ll - (total_switches[p1] + total_switches[p2]) * COMPLEXITY_PENALTY
             
             if final > best_trio_score:
@@ -710,18 +1220,211 @@ def infer_pedigree_multi_contig(contig_data_list, sample_ids, top_k=20):
                 except: pass
 
     # Return object with cutoff method
-    res = PedigreeResult(sample_ids, rel_df, parent_candidates, None, [], None, None, trio_scores_map, global_total_bins)
+    res = PedigreeResult(sample_ids, rel_df, parent_candidates, None, [], None, None, 
+                         trio_scores_map, global_total_bins)
     
     # Run automatic cutoff internally
     res.perform_automatic_cutoff()
     
+    # Resolve any cycles introduced by incorrect parent assignments
+    res.resolve_cycles()
+    
     return res
 
 # =============================================================================
-# 6. VISUALIZATION & WRAPPER
+# 7. CYCLE DETECTION AND RESOLUTION
+# =============================================================================
+
+def build_pedigree_graph(relationships_df):
+    """
+    Build a directed graph from pedigree relationships.
+    Edges go from parent -> child.
+    """
+    G = nx.DiGraph()
+    
+    for _, row in relationships_df.iterrows():
+        child = row['Sample']
+        G.add_node(child)
+        
+        p1 = row.get('Parent1')
+        p2 = row.get('Parent2')
+        
+        if pd.notna(p1):
+            G.add_edge(p1, child)
+        if pd.notna(p2):
+            G.add_edge(p2, child)
+    
+    return G
+
+
+def detect_cycles(relationships_df):
+    """
+    Detect cycles in a pedigree.
+    
+    Returns:
+        List of cycles, where each cycle is a list of sample names.
+        Empty list if pedigree is a valid DAG.
+    """
+    G = build_pedigree_graph(relationships_df)
+    
+    if nx.is_directed_acyclic_graph(G):
+        return []
+    
+    return list(nx.simple_cycles(G))
+
+
+def resolve_pedigree_cycles(relationships_df, trio_scores=None, verbose=True):
+    """
+    Detect and resolve cycles in a pedigree by identifying samples that
+    appear in cycles and removing their parent assignments.
+    
+    Strategy: Samples that have many children but also have parents assigned
+    are likely mis-classified. We remove parent assignments from the sample
+    with the most children (they're clearly a parent, not a child) and 
+    worst trio score (their parent assignment is least confident).
+    
+    Args:
+        relationships_df: DataFrame with Sample, Generation, Parent1, Parent2
+        trio_scores: Dict mapping sample -> trio score (more negative = worse fit)
+        verbose: Print progress information
+    
+    Returns:
+        Fixed DataFrame with cycles broken
+    """
+    fixed_df = relationships_df.copy()
+    
+    # Default trio scores to 0 if not provided
+    if trio_scores is None:
+        trio_scores = {}
+    
+    iteration = 0
+    max_iterations = 20  # Safety limit
+    
+    while iteration < max_iterations:
+        iteration += 1
+        
+        # Build graph
+        G = build_pedigree_graph(fixed_df)
+        
+        # Check if already valid
+        if nx.is_directed_acyclic_graph(G):
+            if verbose and iteration > 1:
+                print(f"[Cycle Resolution] Pedigree is acyclic after {iteration-1} fix(es).")
+            break
+        
+        # Find cycles
+        cycles = list(nx.simple_cycles(G))
+        
+        if verbose:
+            print(f"[Cycle Resolution] Iteration {iteration}: Found {len(cycles)} cycle(s)")
+        
+        # Collect all samples involved in cycles
+        samples_in_cycles = set()
+        for cycle in cycles:
+            samples_in_cycles.update(cycle)
+        
+        # For each sample in a cycle, check if it's both a parent AND a child
+        candidates_to_fix = []
+        
+        for sample in samples_in_cycles:
+            row = fixed_df[fixed_df['Sample'] == sample]
+            if len(row) == 0:
+                continue
+            row = row.iloc[0]
+            
+            has_parents = pd.notna(row['Parent1']) or pd.notna(row['Parent2'])
+            n_children = G.out_degree(sample)
+            
+            if has_parents and n_children > 0:
+                # This sample is in the middle of a cycle - both parent and child
+                score = trio_scores.get(sample, 0.0)
+                candidates_to_fix.append({
+                    'sample': sample,
+                    'score': score,
+                    'n_children': n_children,
+                    'parents': (row['Parent1'], row['Parent2'])
+                })
+        
+        if not candidates_to_fix:
+            if verbose:
+                print(f"[Cycle Resolution] No candidates found to fix - breaking")
+            break
+        
+        # Sort by: 1) Most children (likely a true parent), 2) Worst trio score
+        candidates_to_fix.sort(key=lambda x: (-x['n_children'], x['score']))
+        
+        # Fix the top candidate
+        to_fix = candidates_to_fix[0]
+        sample_to_fix = to_fix['sample']
+        
+        if verbose:
+            print(f"[Cycle Resolution] Fixing {sample_to_fix}: "
+                  f"n_children={to_fix['n_children']}, score={to_fix['score']:.4f}, "
+                  f"removing parents {to_fix['parents']}")
+        
+        idx = fixed_df[fixed_df['Sample'] == sample_to_fix].index[0]
+        fixed_df.at[idx, 'Parent1'] = None
+        fixed_df.at[idx, 'Parent2'] = None
+        fixed_df.at[idx, 'Generation'] = 'F1'
+    
+    # Final verification
+    G_final = build_pedigree_graph(fixed_df)
+    if not nx.is_directed_acyclic_graph(G_final):
+        remaining = list(nx.simple_cycles(G_final))
+        if verbose:
+            print(f"[Cycle Resolution] WARNING: {len(remaining)} cycles remain after max iterations")
+    
+    return fixed_df
+
+
+def propagate_generations(relationships_df):
+    """
+    Re-propagate generation labels after cycle resolution.
+    F1s have no parents, F2s have F1 parents, F3s have F2 parents, etc.
+    """
+    fixed_df = relationships_df.copy()
+    
+    # Start fresh: samples with no parents are F1
+    name_to_gen = {}
+    for idx, row in fixed_df.iterrows():
+        if pd.isna(row['Parent1']) and pd.isna(row['Parent2']):
+            fixed_df.at[idx, 'Generation'] = 'F1'
+            name_to_gen[row['Sample']] = 'F1'
+        else:
+            fixed_df.at[idx, 'Generation'] = 'Unknown'
+    
+    # Propagate generations iteratively
+    for _ in range(10):
+        changed = False
+        for idx, row in fixed_df.iterrows():
+            if row['Generation'] != 'Unknown':
+                continue
+            p1, p2 = row['Parent1'], row['Parent2']
+            p1_gen = name_to_gen.get(p1)
+            p2_gen = name_to_gen.get(p2)
+            
+            if p1_gen and p2_gen:
+                try:
+                    g1 = int(p1_gen[1:])
+                    g2 = int(p2_gen[1:])
+                    gen = f"F{max(g1, g2) + 1}"
+                    fixed_df.at[idx, 'Generation'] = gen
+                    name_to_gen[row['Sample']] = gen
+                    changed = True
+                except:
+                    pass
+        if not changed:
+            break
+    
+    return fixed_df
+
+
+# =============================================================================
+# 8. VISUALIZATION & WRAPPER
 # =============================================================================
 
 def draw_pedigree_tree(relationships_df, output_file="pedigree_tree.png"):
+    """Draw pedigree tree visualization."""
     if not HAS_VIS: return
     G = nx.DiGraph()
     gen_nodes = {'F1':[], 'F2':[], 'F3':[], 'Unknown':[]}
@@ -759,14 +1462,38 @@ def draw_pedigree_tree(relationships_df, output_file="pedigree_tree.png"):
     nx.draw_networkx_labels(G, pos, labels=labels, font_size=8)
     plt.axis('off'); plt.tight_layout(); plt.savefig(output_file, dpi=150); plt.close()
 
-def run_pedigree_inference(block_painting, sample_ids=None, snps_per_bin=150, 
-                           founder_block=None, recomb_rate=5e-8,
-                           output_prefix="pedigree"):
-    if founder_block is None: raise ValueError("Founder Block is now required.")
-    if sample_ids is None: sample_ids = [f"S_{i}" for i in range(len(block_painting))]
 
-    contig_input = [{'painting': block_painting, 'founder_block': founder_block}]
-    result = infer_pedigree_multi_contig(contig_input, sample_ids, top_k=20)
+def run_pedigree_inference_tolerance(tolerance_painting, sample_ids=None, snps_per_bin=150, 
+                                     founder_block=None, recomb_rate=5e-8,
+                                     output_prefix="pedigree",
+                                     mismatch_penalty=DEFAULT_MISMATCH_PENALTY,
+                                     n_workers=None):
+    """
+    Convenience wrapper for single-contig pedigree inference with tolerance paintings.
+    
+    Args:
+        tolerance_painting: BlockTolerancePainting from paint_samples.py
+        sample_ids: List of sample names
+        snps_per_bin: Grid resolution
+        founder_block: BlockResult with founder haplotypes
+        recomb_rate: Per-bp recombination rate
+        output_prefix: Prefix for output files
+        mismatch_penalty: Log-probability of single allele mismatch (default log(0.01))
+        n_workers: Number of parallel workers (default: auto)
+        
+    Returns:
+        PedigreeResult object
+    """
+    if founder_block is None: 
+        raise ValueError("Founder Block is required.")
+    if sample_ids is None: 
+        sample_ids = [f"S_{i}" for i in range(len(tolerance_painting))]
+
+    contig_input = [{'tolerance_painting': tolerance_painting, 'founder_block': founder_block}]
+    result = infer_pedigree_multi_contig_tolerance(contig_input, sample_ids, top_k=20,
+                                                    snps_per_bin=snps_per_bin, recomb_rate=recomb_rate,
+                                                    mismatch_penalty=mismatch_penalty,
+                                                    n_workers=n_workers)
     
     result.relationships.to_csv(f"{output_prefix}.ped", index=False)
     draw_pedigree_tree(result.relationships, output_file=f"{output_prefix}_tree.png")
