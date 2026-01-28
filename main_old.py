@@ -15,9 +15,6 @@ import platform
 import importlib
 import math
 from tqdm import tqdm
-from dataclasses import dataclass
-from typing import Dict
-
 
 import vcf_data_loader
 import analysis_utils
@@ -33,9 +30,9 @@ import hierarchical_assembly
 import paint_samples
 import pedigree_inference
 import phase_correction
-#import paint_samples_testing 
-#import pedigree_inference_testing
-#import phase_correction_testing
+import paint_samples_testing 
+import pedigree_inference_testing
+import phase_correction_testing
 
 
 warnings.filterwarnings("ignore")
@@ -55,12 +52,12 @@ vcf_path = "./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz"
 # Define the regions you want to use for inference.
 # Each entry requires a unique name, the VCF contig name, and the block range.
 regions_config = [
-    {"contig": "chr1", "start": 0, "end": 2000},
-    {"contig": "chr2", "start": 0, "end": 2000},
-    {"contig": "chr3", "start": 0, "end": 2000},
-    {"contig": "chr4", "start": 0, "end": 2000},
-    {"contig": "chr5", "start": 0, "end": 2000},
-    {"contig": "chr6", "start": 0, "end": 2000}]
+    {"contig": "chr1", "start": 0, "end": 500},
+    {"contig": "chr2", "start": 0, "end": 500},
+    {"contig": "chr3", "start": 0, "end": 500},
+    {"contig": "chr4", "start": 0, "end": 500},
+    {"contig": "chr5", "start": 0, "end": 500},
+    {"contig": "chr6", "start": 0, "end": 500}]
 
 block_size = 100000
 shift_size = 50000
@@ -173,7 +170,7 @@ for i, r_name in enumerate(region_keys):
     # A. Visualize Truth
     true_biological_painting = simulate_sequences.convert_truth_to_painting_objects(paintings_raw)
     
-    paint_samples.plot_population_painting(
+    paint_samples.plot_painting(
         true_biological_painting,
         output_file=os.path.join(output_dir, f"{r_name}_biological_truth.png"),
         title=f"Biological Truth - {r_name}",
@@ -217,42 +214,6 @@ for i, r_name in enumerate(region_keys):
     multi_contig_results[r_name]['truth_painting'] = true_biological_painting
 
 print("\nSimulation, Sequencing, and Chunking complete for all regions.")
-
-@dataclass
-class FounderBlock:
-    """Simple container for founder haplotype data."""
-    positions: np.ndarray
-    haplotypes: Dict[int, np.ndarray]
-
-for r_name in region_keys:
-    print(f"  Creating founder block for {r_name}...")
-    
-    # Get the naive long haplotypes (sites, haps_list)
-    sites, haps_list = multi_contig_results[r_name]['naive_long_haps']
-    
-    # Convert to the format expected by paint_samples
-    # haps_list is a list of probabilistic haplotypes, one per founder
-    haplotypes_dict = {}
-    for fid, hap_arr in enumerate(haps_list):
-        # hap_arr should be (n_sites, 2) with probabilities for allele 0 and 1
-        haplotypes_dict[fid] = np.array(hap_arr)
-    
-    # Create the founder block
-    founder_block = FounderBlock(
-        positions=np.array(sites, dtype=np.int64),
-        haplotypes=haplotypes_dict
-    )
-    
-    # Store it
-    multi_contig_results[r_name]['control_founder_block'] = founder_block
-    
-    print(f"    {r_name}: {len(sites)} sites, {len(haplotypes_dict)} founders")
-
-print("\nFounder blocks created for all regions.")
-
-
-
-
 #%%
 print("\n" + "="*60)
 print("CONTROL EXPERIMENT: Multi-Contig Painting using GROUND TRUTH Haplotypes")
@@ -429,11 +390,11 @@ print("\nPipeline Complete. Check the 'CORRECTED' plots to verify clean phasing.
 
 #%%
 # =============================================================================
-# TOLERANCE PAINTING
+# EXPERIMENT: ROBUST TOLERANCE PAINTING (FUZZY VITERBI)
 # =============================================================================
 
 print("\n" + "="*60)
-print("RUNNING: Tolerance Painting")
+print("TESTING EXPERIMENT: Robust Tolerance Painting")
 print("="*60)
 
 for r_name in region_keys:
@@ -445,7 +406,7 @@ for r_name in region_keys:
     sites, _ = multi_contig_results[r_name]['naive_long_haps']
 
     # 2. Run Tolerance Painting
-    tol_painting_result = paint_samples.paint_samples_tolerance(
+    tol_painting_result = paint_samples_testing.paint_samples_tolerance(
         gt_block_result,
         global_probs,
         sites,
@@ -462,16 +423,16 @@ for r_name in region_keys:
     for i in range(3):
         if i < len(sample_names):
             detail_filename = os.path.join(output_dir, f"{r_name}_tolerance_detail_S{i}.png")
-            paint_samples.plot_viable_paintings(
+            paint_samples_testing.plot_viable_paintings(
                 tol_painting_result,
                 sample_idx=i,
                 output_file=detail_filename
             )
 
-    # 4. Visualization B: Population Consensus
+    # 4. Visualization B: Population Consensus (Using New Plotting Function)
     print(f"  Generating Population Consensus Plot...")
 
-    dense_haps, dense_pos = paint_samples.founder_block_to_dense(gt_block_result)
+    dense_haps, dense_pos = paint_samples_testing.founder_block_to_dense(gt_block_result)
     founder_data = (dense_haps, dense_pos)
 
     consensus_samples = []
@@ -479,14 +440,16 @@ for r_name in region_keys:
         best_rep = tol_painting_result[i].get_best_representative_path(founder_data=founder_data)
         consensus_samples.append(best_rep)
 
-    consensus_block = paint_samples.BlockPainting(
+    # Use the new container class in the testing module
+    consensus_block = paint_samples_testing.BlockPainting(
         (int(sites[0]), int(sites[-1])), 
         consensus_samples
     )
 
     cons_filename = os.path.join(output_dir, f"{r_name}_tolerance_consensus_population.png")
     
-    paint_samples.plot_population_painting(
+    # Use the new plotting function in the testing module
+    paint_samples_testing.plot_population_painting(
         consensus_block,
         output_file=cons_filename,
         title=f"Tolerance Consensus (Uncertainty Masked) - {r_name}",
@@ -495,85 +458,93 @@ for r_name in region_keys:
         row_height_per_sample=0.25
     )
 
-print("\nTolerance Painting complete.")
-
+print("\nTolerance Painting experiments complete.")
 #%%
 # =============================================================================
-# MULTI-CONTIG PEDIGREE INFERENCE
+# MULTI-CONTIG PEDIGREE INFERENCE (TOLERANCE VERSION)
 # =============================================================================
 print("\n" + "="*60)
-print("RUNNING: Multi-Contig Pedigree Inference")
+print("RUNNING: Multi-Contig Pedigree Inference (Tolerance)")
 print("="*60)
 
 # 1. Gather Data from all regions
-contig_inputs = []
+contig_inputs_tolerance = []
 for r_name in region_keys:
     if 'tolerance_result' in multi_contig_results[r_name]:
         entry = {
             'tolerance_painting': multi_contig_results[r_name]['tolerance_result'],
             'founder_block': multi_contig_results[r_name]['control_founder_block']
         }
-        contig_inputs.append(entry)
+        contig_inputs_tolerance.append(entry)
     else:
         print(f"Warning: Tolerance painting missing for {r_name}")
 
 # 2. Run Inference (16-State HMM with tolerance-aware scoring)
-pedigree_result = pedigree_inference.infer_pedigree_multi_contig_tolerance(
-    contig_inputs, 
+pedigree_result_tolerance = pedigree_inference_testing.infer_pedigree_multi_contig_tolerance(
+    contig_inputs_tolerance, 
     sample_ids=sample_names,
     top_k=20
 )
 
 # 3. Apply Auto-Cutoff (Crucial for F1 identification)
-pedigree_result.perform_automatic_cutoff()
+pedigree_result_tolerance.perform_automatic_cutoff()
 
 # 4. Save & Visualize
-pedigree_df = pedigree_result.relationships
-output_csv = os.path.join(output_dir, "pedigree_inference.csv")
-pedigree_df.to_csv(output_csv, index=False)
-print(f"Pedigree saved to: {output_csv}")
+ped_df_tolerance = pedigree_result_tolerance.relationships
+output_csv_tolerance = os.path.join(output_dir, "multi_contig_pedigree_tolerance.csv")
+ped_df_tolerance.to_csv(output_csv_tolerance, index=False)
+print(f"Multi-Contig Tolerance Pedigree saved to: {output_csv_tolerance}")
 
-output_tree = os.path.join(output_dir, "pedigree_tree.png")
-pedigree_inference.draw_pedigree_tree(pedigree_df, output_file=output_tree)
+output_tree_tolerance = os.path.join(output_dir, "multi_contig_tree_tolerance.png")
+pedigree_inference_testing.draw_pedigree_tree(ped_df_tolerance, output_file=output_tree_tolerance)
 
-# 5. Validate against Truth (if available)
-if 'truth_pedigree' in dir():
-    print("\n--- Pedigree Validation ---")
-    validation_df = pd.merge(
-        truth_pedigree[['Sample', 'Generation', 'Parent1', 'Parent2']],
-        pedigree_df[['Sample', 'Generation', 'Parent1', 'Parent2']],
-        on='Sample',
-        suffixes=('_True', '_Inf')
-    )
+# 5. Validate against Truth
+print("\n--- Multi-Contig Tolerance Validation ---")
+tolerance_validation_df = pd.merge(
+    truth_pedigree[['Sample', 'Generation', 'Parent1', 'Parent2']],
+    ped_df_tolerance[['Sample', 'Generation', 'Parent1', 'Parent2']],
+    on='Sample',
+    suffixes=('_True', '_Inf')
+)
 
-    def check_parent_match(row):
-        true_p = {row['Parent1_True'], row['Parent2_True']}
-        true_p = {x for x in true_p if pd.notna(x)}
-        inf_p = {row['Parent1_Inf'], row['Parent2_Inf']}
-        inf_p = {x for x in inf_p if pd.notna(x)}
-        
-        # F1 check (Truth has Founders, Inf has None)
-        if any("Founder" in str(x) for x in true_p):
-            return len(inf_p) == 0
-        return true_p == inf_p
+def check_parent_match(row):
+    true_p = {row['Parent1_True'], row['Parent2_True']}
+    true_p = {x for x in true_p if pd.notna(x)}
+    inf_p = {row['Parent1_Inf'], row['Parent2_Inf']}
+    inf_p = {x for x in inf_p if pd.notna(x)}
+    
+    # F1 check (Truth has Founders, Inf has None)
+    if any("Founder" in str(x) for x in true_p):
+        return len(inf_p) == 0
+    return true_p == inf_p
 
-    validation_df['Gen_Match'] = validation_df['Generation_True'] == validation_df['Generation_Inf']
-    validation_df['Parents_Match'] = validation_df.apply(check_parent_match, axis=1)
+tolerance_validation_df['Gen_Match'] = tolerance_validation_df['Generation_True'] == tolerance_validation_df['Generation_Inf']
+tolerance_validation_df['Parents_Match'] = tolerance_validation_df.apply(check_parent_match, axis=1)
 
-    gen_acc = validation_df['Gen_Match'].mean() * 100
-    descendant_mask = validation_df['Generation_True'].isin(['F2', 'F3'])
-    parent_acc = validation_df[descendant_mask]['Parents_Match'].mean() * 100
+gen_acc_tolerance = tolerance_validation_df['Gen_Match'].mean() * 100
+descendant_mask_tolerance = tolerance_validation_df['Generation_True'].isin(['F2', 'F3'])
+parent_acc_tolerance = tolerance_validation_df[descendant_mask_tolerance]['Parents_Match'].mean() * 100
 
-    print(f"Generation Accuracy: {gen_acc:.2f}%")
-    print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
+print(f"Generation Accuracy (Tolerance): {gen_acc_tolerance:.2f}%")
+print(f"Parentage Accuracy (F2+F3, Tolerance): {parent_acc_tolerance:.2f}%")
+
+# 6. Compare with Control Results
+print("\n--- Comparison: Control vs Tolerance ---")
+print(f"{'Metric':<35} {'Control':>12} {'Tolerance':>12}")
+print("-" * 60)
+print(f"{'Generation Accuracy':<35} {gen_acc:>11.2f}% {gen_acc_tolerance:>11.2f}%")
+print(f"{'Parentage Accuracy (F2+F3)':<35} {parent_acc:>11.2f}% {parent_acc_tolerance:>11.2f}%")
 
 #%%
 # =============================================================================
-# PHASE CORRECTION
+# PHASE CORRECTION USING TOLERANCE PAINTINGS
 # =============================================================================
 print("\n" + "="*60)
 print("RUNNING: Phase Correction (Parent + Children)")
 print("="*60)
+
+# Use the inferred pedigree from tolerance version
+pedigree_df = pedigree_result_tolerance.relationships
 
 # Copy founder_block reference so phase correction can find it
 for r_name in multi_contig_results:
@@ -582,7 +553,7 @@ for r_name in multi_contig_results:
 
 start = time.time()
 # Run phase correction on all contigs
-multi_contig_results = phase_correction.correct_phase_all_contigs(
+multi_contig_results = phase_correction_testing.correct_phase_all_contigs(
     multi_contig_results,
     pedigree_df,
     sample_names,
@@ -599,7 +570,7 @@ print("RUNNING: Greedy Phase Refinement (HOM→HET boundary flips)")
 print("="*60)
 
 start_refine = time.time()
-multi_contig_results = phase_correction.post_process_phase_greedy_all_contigs(
+multi_contig_results = phase_correction_testing.post_process_phase_greedy_all_contigs(
     multi_contig_results,
     pedigree_df,
     sample_names,
@@ -609,8 +580,6 @@ multi_contig_results = phase_correction.post_process_phase_greedy_all_contigs(
     verbose=True
 )
 print(f"Greedy refinement time: {time.time()-start_refine:.1f}s")
-
-#%%
 # =============================================================================
 # VALIDATE PHASE CORRECTION AGAINST GROUND TRUTH (ALLELE-LEVEL)
 # =============================================================================
@@ -623,6 +592,11 @@ from concurrent.futures import ThreadPoolExecutor
 def extract_founder_ids_at_positions(painting, positions):
     """
     Extract founder IDs using binary search on chunk boundaries.
+    Uses proper interval containment check.
+    
+    Returns:
+        hap1_ids: (n_positions,) array of founder IDs for track 1
+        hap2_ids: (n_positions,) array of founder IDs for track 2
     """
     n_pos = len(positions)
     hap1_ids = np.full(n_pos, -1, dtype=np.int32)
@@ -671,7 +645,7 @@ def evaluate_single_sample(args):
     n_pos = len(positions)
     max_founder_id = dense_haps.shape[0]
     
-    # Convert founder IDs to alleles
+    # Convert founder IDs to alleles using dense_haps[founder_id, position_idx]
     corr_allele1 = np.full(n_pos, -1, dtype=np.int8)
     corr_allele2 = np.full(n_pos, -1, dtype=np.int8)
     true_allele1 = np.full(n_pos, -1, dtype=np.int8)
@@ -689,7 +663,7 @@ def evaluate_single_sample(args):
     true_allele1[valid_true1] = dense_haps[true_hap1[valid_true1], pos_indices[valid_true1]]
     true_allele2[valid_true2] = dense_haps[true_hap2[valid_true2], pos_indices[valid_true2]]
     
-    # Compare ALLELES
+    # Compare ALLELES instead of founder IDs
     direct_match = (corr_allele1 == true_allele1) & (corr_allele2 == true_allele2)
     flipped_match = (corr_allele1 == true_allele2) & (corr_allele2 == true_allele1)
     correct_either = direct_match | flipped_match
@@ -719,14 +693,35 @@ def evaluate_single_sample(args):
         track1_acc = 0.0
         track2_acc = 0.0
     
+    # Also compute founder-level accuracy for comparison
+    founder_direct = (corr_hap1 == true_hap1) & (corr_hap2 == true_hap2)
+    founder_flipped = (corr_hap1 == true_hap2) & (corr_hap2 == true_hap1)
+    founder_correct = founder_direct | founder_flipped
+    founder_valid = (corr_hap1 != -1) & (corr_hap2 != -1) & (true_hap1 != -1) & (true_hap2 != -1)
+    founder_accuracy = np.sum(founder_correct & founder_valid) / np.sum(founder_valid) if np.sum(founder_valid) > 0 else 0.0
+    
+    # Founder-level track accuracy
+    if np.sum(founder_direct) >= np.sum(founder_flipped):
+        founder_t1_correct = (corr_hap1 == true_hap1)
+        founder_t2_correct = (corr_hap2 == true_hap2)
+    else:
+        founder_t1_correct = (corr_hap1 == true_hap2)
+        founder_t2_correct = (corr_hap2 == true_hap1)
+    
+    founder_track1_acc = np.sum(founder_t1_correct & founder_valid) / np.sum(founder_valid) if np.sum(founder_valid) > 0 else 0.0
+    founder_track2_acc = np.sum(founder_t2_correct & founder_valid) / np.sum(founder_valid) if np.sum(founder_valid) > 0 else 0.0
+    
     return {
         'Sample': name,
         'Total_sites': len(positions),
         'Valid_sites': int(n_valid),
         'Correct_sites': int(np.sum(correct_either & valid_mask)),
-        'Accuracy': accuracy,
-        'Track1_accuracy': track1_acc,
-        'Track2_accuracy': track2_acc,
+        'Accuracy': accuracy,  # Allele-level
+        'Track1_accuracy': track1_acc,  # Allele-level
+        'Track2_accuracy': track2_acc,  # Allele-level
+        'Founder_accuracy': founder_accuracy,  # Founder-level for comparison
+        'Founder_Track1_accuracy': founder_track1_acc,
+        'Founder_Track2_accuracy': founder_track2_acc,
         'Direct_matches': int(n_direct),
         'Flipped_matches': int(n_flipped),
         'Dominant_phase': dominant_phase
@@ -749,17 +744,18 @@ def evaluate_painting_accuracy(corrected_painting, truth_painting, sample_names,
 
 def evaluate_contig(args):
     """Worker function to evaluate a single contig."""
-    r_name, painting, truth, positions, dense_haps, sample_names = args
+    r_name, corrected, truth, positions, dense_haps, sample_names, stage_name = args
     
     contig_eval = evaluate_painting_accuracy(
-        painting, truth, sample_names, positions, dense_haps, n_workers=4
+        corrected, truth, sample_names, positions, dense_haps, n_workers=4
     )
     contig_eval['Contig'] = r_name
+    contig_eval['Stage'] = stage_name
     
-    return r_name, contig_eval
+    return r_name, stage_name, contig_eval
 
 
-# Evaluate refined paintings
+# Evaluate both corrected (before greedy) and refined (after greedy)
 print("Evaluating phase correction accuracy (allele-level)...")
 
 eval_args = []
@@ -770,26 +766,29 @@ for r_name in region_keys:
     truth = multi_contig_results[r_name]['truth_painting']
     founder_block = multi_contig_results[r_name]['control_founder_block']
     positions = founder_block.positions
-    dense_haps, _ = phase_correction.founder_block_to_dense(founder_block)
+    dense_haps, _ = phase_correction_testing.founder_block_to_dense(founder_block)
     
-    # Use refined painting (after greedy refinement)
+    # Evaluate corrected (before greedy refinement)
+    if 'corrected_painting' in multi_contig_results[r_name]:
+        corrected = multi_contig_results[r_name]['corrected_painting']
+        eval_args.append((r_name, corrected, truth, positions, dense_haps, sample_names, 'corrected'))
+    
+    # Evaluate refined (after greedy refinement)
     if 'refined_painting' in multi_contig_results[r_name]:
-        painting = multi_contig_results[r_name]['refined_painting']
-    elif 'corrected_painting' in multi_contig_results[r_name]:
-        painting = multi_contig_results[r_name]['corrected_painting']
-    else:
-        continue
-    
-    eval_args.append((r_name, painting, truth, positions, dense_haps, sample_names))
+        refined = multi_contig_results[r_name]['refined_painting']
+        eval_args.append((r_name, refined, truth, positions, dense_haps, sample_names, 'refined'))
 
 # Run contig evaluations in parallel
 all_contig_results = []
 with ThreadPoolExecutor(max_workers=len(region_keys)) as executor:
-    for r_name, contig_eval in executor.map(evaluate_contig, eval_args):
+    for r_name, stage_name, contig_eval in executor.map(evaluate_contig, eval_args):
         mean_acc = contig_eval['Accuracy'].mean()*100
         mean_t1 = contig_eval['Track1_accuracy'].mean()*100
         mean_t2 = contig_eval['Track2_accuracy'].mean()*100
-        print(f"  {r_name}: Allele={mean_acc:.2f}%, Track1={mean_t1:.2f}%, Track2={mean_t2:.2f}%")
+        mean_founder = contig_eval['Founder_accuracy'].mean()*100
+        print(f"  {r_name} [{stage_name}]: Allele={mean_acc:.2f}%, "
+              f"Track1={mean_t1:.2f}%, Track2={mean_t2:.2f}% | "
+              f"Founder={mean_founder:.2f}%")
         all_contig_results.append(contig_eval)
 
 # Aggregate results
@@ -801,64 +800,145 @@ if all_contig_results:
     full_eval_df.to_csv(eval_output, index=False)
     print(f"\nDetailed evaluation saved to: {eval_output}")
     
+    # Separate results by stage
+    corrected_df = full_eval_df[full_eval_df['Stage'] == 'corrected']
+    refined_df = full_eval_df[full_eval_df['Stage'] == 'refined']
+    
+    # Overall summary - compare corrected vs refined
+    print("\n" + "="*60)
+    print("COMPARISON: CORRECTED vs REFINED (Greedy Post-Processing)")
+    print("="*60)
+    
+    if len(corrected_df) > 0 and len(refined_df) > 0:
+        print(f"\n{'Metric':<30} {'Corrected':>12} {'Refined':>12} {'Improvement':>12}")
+        print("-" * 66)
+        
+        for metric in ['Accuracy', 'Track1_accuracy', 'Track2_accuracy', 'Founder_accuracy']:
+            corr_val = corrected_df[metric].mean() * 100
+            ref_val = refined_df[metric].mean() * 100
+            diff = ref_val - corr_val
+            print(f"{metric:<30} {corr_val:>11.2f}% {ref_val:>11.2f}% {diff:>+11.2f}%")
+    
+    # Use refined results for detailed analysis (or corrected if no refined)
+    analysis_df = refined_df if len(refined_df) > 0 else corrected_df
+    stage_label = 'REFINED' if len(refined_df) > 0 else 'CORRECTED'
+    
+    print("\n" + "="*60)
+    print(f"DETAILED ANALYSIS ({stage_label})")
+    print("="*60)
+    
     # Group by generation
-    full_eval_df['Generation'] = full_eval_df['Sample'].apply(
+    analysis_df = analysis_df.copy()
+    analysis_df['Generation'] = analysis_df['Sample'].apply(
         lambda x: 'F1' if x.startswith('F1') else ('F2' if x.startswith('F2') else 'F3')
     )
     
-    print("\n" + "="*60)
-    print("PHASE CORRECTION RESULTS")
-    print("="*60)
-    
-    print("\nAccuracy by Generation:")
+    print("\nALLELE-LEVEL Accuracy by Generation:")
     for gen in ['F1', 'F2', 'F3']:
-        gen_df = full_eval_df[full_eval_df['Generation'] == gen]
+        gen_df = analysis_df[analysis_df['Generation'] == gen]
         if len(gen_df) > 0:
             print(f"  {gen}: Accuracy={gen_df['Accuracy'].mean()*100:.2f}%, "
                   f"Track1={gen_df['Track1_accuracy'].mean()*100:.2f}%, "
                   f"Track2={gen_df['Track2_accuracy'].mean()*100:.2f}%, "
                   f"N={len(gen_df)}")
     
-    print(f"\nOverall Accuracy:  {full_eval_df['Accuracy'].mean()*100:.2f}%")
-    print(f"Overall Track1:    {full_eval_df['Track1_accuracy'].mean()*100:.2f}%")
-    print(f"Overall Track2:    {full_eval_df['Track2_accuracy'].mean()*100:.2f}%")
+    print(f"\nOverall ALLELE accuracy:  {analysis_df['Accuracy'].mean()*100:.2f}%")
+    print(f"Overall ALLELE track1:    {analysis_df['Track1_accuracy'].mean()*100:.2f}%")
+    print(f"Overall ALLELE track2:    {analysis_df['Track2_accuracy'].mean()*100:.2f}%")
+    
+    print("\nFOUNDER-LEVEL Accuracy by Generation:")
+    for gen in ['F1', 'F2', 'F3']:
+        gen_df = analysis_df[analysis_df['Generation'] == gen]
+        if len(gen_df) > 0:
+            print(f"  {gen}: Accuracy={gen_df['Founder_accuracy'].mean()*100:.2f}%, "
+                  f"Track1={gen_df['Founder_Track1_accuracy'].mean()*100:.2f}%, "
+                  f"Track2={gen_df['Founder_Track2_accuracy'].mean()*100:.2f}%, "
+                  f"N={len(gen_df)}")
+    
+    print(f"\nOverall FOUNDER accuracy: {analysis_df['Founder_accuracy'].mean()*100:.2f}%")
+    print(f"Overall FOUNDER track1:   {analysis_df['Founder_Track1_accuracy'].mean()*100:.2f}%")
+    print(f"Overall FOUNDER track2:   {analysis_df['Founder_Track2_accuracy'].mean()*100:.2f}%")
+    
+    # Show improvement from founder to allele level
+    allele_vs_founder = analysis_df['Accuracy'].mean() - analysis_df['Founder_accuracy'].mean()
+    print(f"\nAllele vs Founder accuracy difference: {allele_vs_founder*100:+.2f}%")
     
     # Phase consistency
-    n_direct = (full_eval_df['Dominant_phase'] == 'Direct').sum()
-    n_flipped = (full_eval_df['Dominant_phase'] == 'Flipped').sum()
+    n_direct = (analysis_df['Dominant_phase'] == 'Direct').sum()
+    n_flipped = (analysis_df['Dominant_phase'] == 'Flipped').sum()
     print(f"\nPhase assignment: {n_direct} samples Direct, {n_flipped} samples Flipped")
     
-    # Worst samples
-    print("\nWorst 10 samples by accuracy:")
-    worst = full_eval_df.nsmallest(10, 'Accuracy')[['Sample', 'Contig', 'Accuracy', 'Track1_accuracy', 'Track2_accuracy', 'Dominant_phase']]
+    # Worst samples (by allele accuracy)
+    print("\nWorst 10 samples by ALLELE accuracy:")
+    worst = analysis_df.nsmallest(10, 'Accuracy')[['Sample', 'Contig', 'Accuracy', 'Track1_accuracy', 'Track2_accuracy', 'Founder_accuracy', 'Dominant_phase']]
     worst_display = worst.copy()
     worst_display['Accuracy'] = worst_display['Accuracy'] * 100
     worst_display['Track1_accuracy'] = worst_display['Track1_accuracy'] * 100
     worst_display['Track2_accuracy'] = worst_display['Track2_accuracy'] * 100
+    worst_display['Founder_accuracy'] = worst_display['Founder_accuracy'] * 100
     print(worst_display.to_string(index=False, float_format='%.2f'))
+    
+    # Show samples that improved with greedy refinement
+    if len(corrected_df) > 0 and len(refined_df) > 0:
+        print("\n" + "="*60)
+        print("SAMPLES IMPROVED BY GREEDY REFINEMENT")
+        print("="*60)
+        
+        # Merge corrected and refined to compare
+        corr_subset = corrected_df[['Sample', 'Contig', 'Track1_accuracy']].copy()
+        corr_subset.columns = ['Sample', 'Contig', 'Track1_corrected']
+        ref_subset = refined_df[['Sample', 'Contig', 'Track1_accuracy']].copy()
+        ref_subset.columns = ['Sample', 'Contig', 'Track1_refined']
+        
+        merged = corr_subset.merge(ref_subset, on=['Sample', 'Contig'])
+        merged['Improvement'] = merged['Track1_refined'] - merged['Track1_corrected']
+        
+        improved = merged[merged['Improvement'] > 0.001].sort_values('Improvement', ascending=False)
+        
+        if len(improved) > 0:
+            print(f"\n{len(improved)} samples improved:")
+            improved_display = improved.head(20).copy()
+            improved_display['Track1_corrected'] = improved_display['Track1_corrected'] * 100
+            improved_display['Track1_refined'] = improved_display['Track1_refined'] * 100
+            improved_display['Improvement'] = improved_display['Improvement'] * 100
+            print(improved_display.to_string(index=False, float_format='%.2f'))
+        else:
+            print("\nNo samples improved by greedy refinement.")
+        
+        # Check for regressions
+        regressed = merged[merged['Improvement'] < -0.001].sort_values('Improvement')
+        if len(regressed) > 0:
+            print(f"\nWARNING: {len(regressed)} samples regressed:")
+            regressed_display = regressed.head(10).copy()
+            regressed_display['Track1_corrected'] = regressed_display['Track1_corrected'] * 100
+            regressed_display['Track1_refined'] = regressed_display['Track1_refined'] * 100
+            regressed_display['Improvement'] = regressed_display['Improvement'] * 100
+            print(regressed_display.to_string(index=False, float_format='%.2f'))
     
     # Perfect phasing summary
     print("\n" + "="*60)
-    print("PERFECT PHASING SUMMARY")
+    print(f"PERFECT PHASING SUMMARY ({stage_label})")
     print("="*60)
     
+    # Count samples with perfect track accuracy (>99.9%)
     perfect_threshold = 0.999
-    perfect_samples = full_eval_df[full_eval_df['Track1_accuracy'] >= perfect_threshold]
+    perfect_samples = analysis_df[analysis_df['Track1_accuracy'] >= perfect_threshold]
     n_perfect = len(perfect_samples)
-    n_total = len(full_eval_df)
+    n_total = len(analysis_df)
     
     print(f"\nSamples with >=99.9% Track1 accuracy: {n_perfect}/{n_total} ({100*n_perfect/n_total:.1f}%)")
     
+    # By generation
     for gen in ['F1', 'F2', 'F3']:
-        gen_df = full_eval_df[full_eval_df['Generation'] == gen]
+        gen_df = analysis_df[analysis_df['Generation'] == gen]
         gen_perfect = gen_df[gen_df['Track1_accuracy'] >= perfect_threshold]
         if len(gen_df) > 0:
             print(f"  {gen}: {len(gen_perfect)}/{len(gen_df)} ({100*len(gen_perfect)/len(gen_df):.1f}%)")
     
-    # Samples with internal phase switches
-    internal_switch = full_eval_df[
-        (full_eval_df['Track1_accuracy'] < perfect_threshold) & 
-        (full_eval_df['Track1_accuracy'] > 0.5)
+    # Samples with internal phase switches (track accuracy < 100% but > 50%)
+    internal_switch = analysis_df[
+        (analysis_df['Track1_accuracy'] < perfect_threshold) & 
+        (analysis_df['Track1_accuracy'] > 0.5)
     ]
     print(f"\nSamples with internal phase switches: {len(internal_switch)}")
     if len(internal_switch) > 0:
@@ -879,12 +959,12 @@ contig_name = "chr1"
 block_size = 100000
 shift_size = 50000
 starting = 0
-ending = 1000
+ending = 480
 
 start = time.time()
 
 
-mgenomic_data = vcf_data_loader.cleanup_block_reads_list(
+genomic_data = vcf_data_loader.cleanup_block_reads_list(
     vcf_path, 
     contig_name,
     start_block_idx=starting,
@@ -947,7 +1027,7 @@ sample_names = truth_pedigree['Sample'].tolist()
 
 # 4. Visualize the Biological Truth
 print("Generating Biological Truth Painting Plot...")
-paint_samples.plot_population_painting(
+paint_samples.plot_painting(
     true_biological_painting,
     output_file="biological_truth_painting.png",
     title="Biological Truth (Actual Recombinations during Simulation)",
@@ -1007,7 +1087,8 @@ initial_block_results = block_haplotypes.generate_all_block_haplotypes(
     uniqueness_threshold_percent=1.0, # 1.0% difference required to be distinct (2 SNPs)
     diff_threshold_percent=0.5,       # 0.5% difference threshold for merging (1 SNP)
     wrongness_threshold=1.0,
-    num_processes=16)
+    num_processes=16
+)
 
 #%%
 
@@ -1285,3 +1366,288 @@ if descendant_acc > 95.0:
     print("\n[SUCCESS] Pipeline successfully reconstructed the pedigree structure!")
 else:
     print("\n[WARNING] Pedigree reconstruction had errors. Check IBD thresholds in pedigree_inference.py.")
+#%%
+# =============================================================================
+# CONTROL EXPERIMENT: PEDIGREE INFERENCE ON GROUND TRUTH HAPLOTYPES
+# =============================================================================
+
+print("\n" + "="*60)
+print("CONTROL EXPERIMENT: Pedigree Inference using GROUND TRUTH Haplotypes")
+print("="*60)
+
+# 1. Package Ground Truth Haplotypes
+gt_indices = np.searchsorted(haplotype_sites, global_sites)
+
+gt_haps_sliced = {}
+for i, hap_arr in enumerate(haplotype_data):
+    gt_haps_sliced[i] = hap_arr[gt_indices]
+
+gt_flags = np.ones(len(global_sites), dtype=int)
+
+gt_block_result = block_haplotypes.BlockResult(
+    positions=global_sites,
+    haplotypes=gt_haps_sliced,
+    keep_flags=gt_flags
+)
+
+# 2. Paint samples using these PERFECT haplotypes
+print("Painting samples using Ground Truth Haplotypes...")
+gt_painting_result = paint_samples.paint_samples_in_block(
+    gt_block_result,
+    global_probs,
+    global_sites,
+    recomb_rate=5e-8,
+    switch_penalty=15.0 
+)
+
+# --- VISUALIZE GROUND TRUTH PAINTING ---
+print("Generating Ground Truth Painting Plot...")
+paint_samples.plot_painting(
+    gt_painting_result,
+    output_file="control_truth_painting.png",
+    title="Control Experiment: Ground Truth Haplotype Painting",
+    sample_names=sample_names,
+    figsize_width=20,          # Wide figure
+    row_height_per_sample=0.25 # 0.25 inches per sample -> tall image
+)
+
+#%%
+# =============================================================================
+# PEDIGREE RECONSTRUCTION v5 (HMM-Likelihood Approach)
+# =============================================================================
+
+print("\n" + "="*60)
+print("RE-RUNNING Pedigree Inference (HMM-Likelihood Approach)")
+print("="*60)
+
+# Run the new HMM-based inference
+gt_pedigree_data = pedigree_inference.run_pedigree_inference(
+    gt_painting_result,
+    sample_ids=sample_names,
+    snps_per_bin=150,              # Bin size for discretization
+    founder_block=gt_block_result, # <--- CRITICAL: Pass Founder Data for Allele conversion
+    output_prefix="control_truth_pedigree_hmm"
+)
+
+# Merge & Check
+control_validation_df = pd.merge(
+    truth_pedigree[['Sample', 'Generation', 'Parent1', 'Parent2']],
+    gt_pedigree_data.relationships[['Sample', 'Generation', 'Parent1', 'Parent2']],
+    on='Sample',
+    suffixes=('_True', '_Control')
+)
+
+def check_control_parent_match(row):
+    # 1. Get True Parents set (filtering out NaNs)
+    true_p = {row['Parent1_True'], row['Parent2_True']}
+    true_p = {x for x in true_p if pd.notna(x)}
+    
+    # 2. Get Inferred Parents set
+    inf_p = {row['Parent1_Control'], row['Parent2_Control']}
+    inf_p = {x for x in inf_p if pd.notna(x)}
+    
+    # 3. F1 Handling (Founders are not in sample list)
+    is_founder_child = any("Founder" in str(x) for x in true_p)
+    if is_founder_child: return len(inf_p) == 0
+    
+    # 4. Equality Check
+    return true_p == inf_p
+
+control_validation_df['Gen_Match'] = control_validation_df['Generation_True'] == control_validation_df['Generation_Control']
+control_validation_df['Parents_Match'] = control_validation_df.apply(check_control_parent_match, axis=1)
+
+print("\n--- Validation Results ---")
+print(f"Generation Accuracy: {control_validation_df['Gen_Match'].mean()*100:.2f}%")
+
+descendant_mask = control_validation_df['Generation_True'].isin(['F2', 'F3'])
+parent_acc = control_validation_df[descendant_mask]['Parents_Match'].mean() * 100
+print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
+
+
+#%%
+# =============================================================================
+# DEBUG: COMPARATIVE TRIO ANALYSIS (FIXED)
+# =============================================================================
+
+print("\n" + "="*60)
+print("DEBUG: Head-to-Head Parent Comparison (Allele Aware)")
+print("="*60)
+
+# Define Targets
+kid = "F2_0"
+true_p1, true_p2 = "F1_6", "F1_7"
+false_p1, false_p2 = "F1_7", "F3_187"
+
+if all(x in sample_names for x in [kid, true_p1, true_p2, false_p1, false_p2]):
+    k_idx = sample_names.index(kid)
+    tp1_idx, tp2_idx = sample_names.index(true_p1), sample_names.index(true_p2)
+    fp1_idx, fp2_idx = sample_names.index(false_p1), sample_names.index(false_p2)
+    
+    # 1. Regenerate Grids
+    # ID Grid
+    grid_id, bin_edges, bin_centers = pedigree_inference.discretize_paintings(gt_painting_result, snps_per_bin=150)
+    
+    # Allele Grid (Requires Founder Block)
+    grid_allele = pedigree_inference.convert_id_grid_to_allele_grid(grid_id, bin_centers, gt_block_result)
+
+    # --- HELPER FUNCTIONS ---
+    def get_ibd0(idx_a, idx_b, use_alleles=True):
+        g = grid_allele if use_alleles else grid_id
+        A, B = g[idx_a], g[idx_b]
+        matches = (A[:,0]==B[:,0]) | (A[:,0]==B[:,1]) | (A[:,1]==B[:,0]) | (A[:,1]==B[:,1])
+        valid = (A[:,0]!=-1) & (B[:,0]!=-1)
+        return np.sum((~matches) & valid) / np.sum(valid) if np.sum(valid) > 0 else 1.0
+
+    def count_switches(idx):
+        g = grid_id[idx] 
+        # Count changes along bins (axis 0)
+        switches = (g[:-1, :] != g[1:, :]) & (g[:-1, :] != -1) & (g[1:, :] != -1)
+        return np.sum(switches)
+
+    def calc_mendel(k_idx, p1_idx, p2_idx, use_alleles=True):
+        g = grid_allele if use_alleles else grid_id
+        k, pa, pb = g[k_idx], g[p1_idx], g[p2_idx]
+        k0_in_pa = (k[:,0] == pa[:,0]) | (k[:,0] == pa[:,1])
+        k0_in_pb = (k[:,0] == pb[:,0]) | (k[:,0] == pb[:,1])
+        k1_in_pa = (k[:,1] == pa[:,0]) | (k[:,1] == pa[:,1])
+        k1_in_pb = (k[:,1] == pb[:,0]) | (k[:,1] == pb[:,1])
+        
+        valid_inherit = (k0_in_pa & k1_in_pb) | (k0_in_pb & k1_in_pa)
+        valid_bins = (k[:,0]!=-1) & (pa[:,0]!=-1) & (pb[:,0]!=-1)
+        
+        return np.sum(valid_inherit & valid_bins) / np.sum(valid_bins) if np.sum(valid_bins) > 0 else 0.0
+
+    # --- METRICS ---
+    print(f"\n[1] Candidate Checks (Allele IBD0):")
+    print(f"  True P1 ({true_p1}):  {get_ibd0(k_idx, tp1_idx):.4f}")
+    print(f"  True P2 ({true_p2}):  {get_ibd0(k_idx, tp2_idx):.4f}")
+    print(f"  False P1 ({false_p1}): {get_ibd0(k_idx, fp1_idx):.4f}")
+    print(f"  False P2 ({false_p2}): {get_ibd0(k_idx, fp2_idx):.4f}")
+
+    k_sw = count_switches(k_idx)
+    tp1_sw = count_switches(tp1_idx)
+    tp2_sw = count_switches(tp2_idx)
+    fp1_sw = count_switches(fp1_idx)
+    fp2_sw = count_switches(fp2_idx)
+
+    print(f"\n[2] Directionality (ID Switches):")
+    print(f"  Kid ({kid}): {k_sw}")
+    print(f"  True ({true_p1}, {true_p2}): {tp1_sw} + {tp2_sw} = {tp1_sw + tp2_sw}")
+    print(f"  False ({false_p1}, {false_p2}): {fp1_sw} + {fp2_sw} = {fp1_sw + fp2_sw}")
+
+    print(f"\n[3] Mendelian Score (Alleles):")
+    print(f"  True Pair:  {calc_mendel(k_idx, tp1_idx, tp2_idx):.5f}")
+    print(f"  False Pair: {calc_mendel(k_idx, fp1_idx, fp2_idx):.5f}")
+    
+    true_metric_ibd = get_ibd0(k_idx, tp1_idx) + get_ibd0(k_idx, tp2_idx)
+    false_metric_ibd = get_ibd0(k_idx, fp1_idx) + get_ibd0(k_idx, fp2_idx)
+    
+    print(f"\n[4] IBD Tie-Breaker (Sum):")
+    print(f"  True Pair: {true_metric_ibd:.5f}")
+    print(f"  False Pair: {false_metric_ibd:.5f}")
+    
+    print(f"\n[5] Switch Tie-Breaker (Sum):")
+    print(f"  True Pair: {tp1_sw + tp2_sw}")
+    print(f"  False Pair: {fp1_sw + fp2_sw}")
+
+else:
+    print("Samples not found.")
+
+#%%
+# =============================================================================
+# DEBUG: HMM CANDIDATE INSPECTION FOR F2_0 (Fixed for Dynamic HMM)
+# =============================================================================
+
+print("\n" + "="*60)
+print("DEBUG: Inspecting HMM Scores for Sample F3_187")
+print("="*60)
+
+target_sample = "F2_1"
+
+if target_sample in sample_names:
+    kid_idx = sample_names.index(target_sample)
+    
+    # 1. Regenerate Grids
+    print("Regenerating grids...")
+    # FIX: Unpack 3 values now
+    id_grid, bin_edges, bin_centers = pedigree_inference.discretize_paintings(gt_painting_result, snps_per_bin=150)
+    
+    # Use the returned bin_centers directly
+    allele_grid = pedigree_inference.convert_id_grid_to_allele_grid(id_grid, bin_centers, gt_block_result)
+    
+    # 2. Calculate Recombination Counts (for filtering check)
+    switches = (id_grid[:, :-1, :] != id_grid[:, 1:, :]) & (id_grid[:, :-1, :] != -1) & (id_grid[:, 1:, :] != -1)
+    recomb_counts = np.sum(switches, axis=(1, 2))
+    kid_switches = recomb_counts[kid_idx]
+    
+    print(f"\nTarget {target_sample} Switch Count: {kid_switches}")
+    print(f"Filter Threshold (Kid + 5): {kid_switches + 5}")
+    
+    # 3. Setup HMM Scoring
+    from pedigree_inference import run_inheritance_hmm_dynamic
+    
+    # Pre-calculate Distance-Dependent Transition Costs
+    recomb_rate = 5e-8
+    error_penalty = 10.0
+    
+    num_bins = len(bin_centers)
+    dists = np.zeros(num_bins)
+    dists[1:] = np.diff(bin_centers)
+    
+    # Prob switch = 1 - exp(-r * d)
+    theta = 1.0 - np.exp(-dists * recomb_rate)
+    theta = np.clip(theta, 1e-15, 0.5)
+    
+    switch_costs = np.log(theta)
+    stay_costs = np.log(1.0 - theta)
+    
+    print(f"Running HMM (Dynamic Distances, Error Penalty={error_penalty})...")
+    
+    child_h0 = allele_grid[kid_idx, :, 0]
+    child_h1 = allele_grid[kid_idx, :, 1]
+    
+    candidates_h0 = []
+    candidates_h1 = []
+    
+    for cand_idx, cand_name in enumerate(sample_names):
+        if cand_idx == kid_idx: continue
+        
+        parent_dip = allele_grid[cand_idx]
+        switches = recomb_counts[cand_idx]
+        
+        # Calculate Scores using the new Dynamic Kernel
+        score_h0 = run_inheritance_hmm_dynamic(child_h0, parent_dip, switch_costs, stay_costs, error_penalty)
+        score_h1 = run_inheritance_hmm_dynamic(child_h1, parent_dip, switch_costs, stay_costs, error_penalty)
+        
+        # Check if it passes the directionality filter
+        passed_filter = switches <= (kid_switches + 5)
+        status = "PASS" if passed_filter else "FAIL"
+        
+        candidates_h0.append((cand_name, score_h0, switches, status))
+        candidates_h1.append((cand_name, score_h1, switches, status))
+        
+    # 4. Sort and Display
+    candidates_h0.sort(key=lambda x: x[1], reverse=True)
+    candidates_h1.sort(key=lambda x: x[1], reverse=True)
+    
+    def print_top_k(title, cands, k=20):
+        print(f"\n--- {title} (Top {k}) ---")
+        print(f"{'Rank':<5} {'Sample':<10} {'HMM Score':<12} {'Switches':<10} {'Filter'}")
+        print("-" * 50)
+        for i, (name, score, sw, status) in enumerate(cands[:k]):
+            print(f"{i+1:<5} {name:<10} {score:<12.4f} {sw:<10} {status}")
+            
+    print_top_k(f"Best Parents for {target_sample} Haplotype 0", candidates_h0)
+    print_top_k(f"Best Parents for {target_sample} Haplotype 1", candidates_h1)
+    
+else:
+    print(f"Sample {target_sample} not found.")
+
+
+
+
+
+
+
+
+

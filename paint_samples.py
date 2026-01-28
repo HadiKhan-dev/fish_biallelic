@@ -1,8 +1,32 @@
+"""
+paint_samples.py
+
+A robust module for reconstructing diploid haplotypes (painting) from probabilistic 
+genotype data using a Tolerance-based Viterbi algorithm.
+
+Key Features:
+1.  **Tolerance Viterbi:** Finds ALL valid paths within a log-likelihood margin.
+2.  **Topological Deduplication:** Collapses paths that are identical sequences of states.
+3.  **Beam-Capped Traceback:** Prevents combinatorial explosion in ambiguous regions.
+4.  **Double-Recomb Discount:** Prefers simultaneous switches to prevent 2^N path explosion.
+5.  **Allele-Aware Clustering:** Decomposes diploid paths into haploid tracks and clusters them.
+6.  **Phased Track Extraction:** Converts diploid chunks into independent haploid tracks.
+7.  **Visualization:** Plots individual fuzzy paths AND whole-population consensus.
+8.  **Parallel Execution:** Uses multiprocessing and tqdm.
+
+IMPORTANT: Uses float64 for alpha/beta arrays to prevent precision loss over long chromosomes.
+"""
+
 import numpy as np
 import math
 import pandas as pd
 import warnings
-from typing import List, Tuple, Dict, NamedTuple
+from typing import List, Tuple, Dict, NamedTuple, Set, DefaultDict, Counter, Optional, Union
+from collections import defaultdict
+import copy
+from multiprocess import Pool
+from tqdm import tqdm
+from functools import partial
 
 import analysis_utils
 
@@ -11,6 +35,7 @@ try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
     import seaborn as sns
+    import networkx as nx
     HAS_PLOTTING = True
 except ImportError:
     HAS_PLOTTING = False
@@ -20,7 +45,7 @@ warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid='ignore')
 
 try:
-    from numba import njit, prange
+    from numba import njit, prange, set_num_threads
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
@@ -29,68 +54,68 @@ except ImportError:
         def decorator(func): return func
         return decorator
     prange = range
+    def set_num_threads(n): pass
 
 # =============================================================================
-# 1. RESULT CLASSES
+# 1. DATA STRUCTURES (unchanged)
 # =============================================================================
 
 class PaintedChunk(NamedTuple):
-    """Represents a specific interval where the state (Hap1, Hap2) is constant."""
     start: int
     end: int
-    hap1: int  # Assigned to Track 1 (Bottom)
-    hap2: int  # Assigned to Track 2 (Top)
+    hap1: int
+    hap2: int
+
+class ConsensusChunk(NamedTuple):
+    start: int
+    end: int
+    possible_hap1: frozenset
+    possible_hap2: frozenset
 
 class PhasedSegment(NamedTuple):
-    """Represents a contiguous segment of a single phased haplotype."""
     start: int
     end: int
     founder_id: int
-    
+
+class ConsensusSegment(NamedTuple):
+    start: int
+    end: int
+    possible_ids: frozenset
+
 class SamplePainting:
-    """
-    Holds the painting results for a single sample.
-    """
     def __init__(self, sample_index: int, chunks: List[PaintedChunk]):
         self.sample_index = sample_index
-        self.chunks = chunks
-        self.num_recombinations = max(0, len(chunks) - 1)
+        self.chunks = chunks 
+        self.num_recombinations = max(0, len(self.chunks) - 1)
         
-        # Extract fully phased haplotypes by merging contiguous chunks per track
-        self.hap1_phased = self._extract_phased_track(chunks, track_idx=0)
-        self.hap2_phased = self._extract_phased_track(chunks, track_idx=1)
+        self.hap1_phased = self._extract_phased_track(track_idx=0)
+        self.hap2_phased = self._extract_phased_track(track_idx=1)
 
-    def _extract_phased_track(self, chunks, track_idx) -> List[PhasedSegment]:
+    def _extract_phased_track(self, track_idx: int) -> List[PhasedSegment]:
         segments = []
-        if not chunks: 
-            return segments
+        if not self.chunks: return segments
         
-        curr_start = chunks[0].start
-        curr_end = chunks[0].end
-        # track_idx 0 is hap1, 1 is hap2
-        curr_id = chunks[0].hap1 if track_idx == 0 else chunks[0].hap2
+        curr_start = self.chunks[0].start
+        curr_end = self.chunks[0].end
+        curr_id = self.chunks[0].hap1 if track_idx == 0 else self.chunks[0].hap2
         
-        for i in range(1, len(chunks)):
-            c = chunks[i]
+        for i in range(1, len(self.chunks)):
+            c = self.chunks[i]
             next_id = c.hap1 if track_idx == 0 else c.hap2
             
             if next_id == curr_id:
-                # Same founder, extend the segment
                 curr_end = c.end
             else:
-                # Founder changed, seal current segment
                 segments.append(PhasedSegment(curr_start, curr_end, curr_id))
-                # Start new segment
                 curr_start = c.start
                 curr_end = c.end
                 curr_id = next_id
                 
-        # Append final segment
         segments.append(PhasedSegment(curr_start, curr_end, curr_id))
         return segments
 
     def __repr__(self):
-        return f"<SamplePainting ID {self.sample_index}: {len(self.hap1_phased)} segs in Hap1, {len(self.hap2_phased)} segs in Hap2>"
+        return f"<SamplePainting ID {self.sample_index}: {len(self.chunks)} chunks>"
 
     def __iter__(self):
         return iter(self.chunks)
@@ -98,20 +123,330 @@ class SamplePainting:
     def __getitem__(self, idx):
         return self.chunks[idx]
 
-    def to_dict_list(self, sample_name=None):
-        """Helper for dataframe conversion (Exploded view)."""
-        name = sample_name if sample_name else f"Sample_{self.sample_index}"
-        rows = []
-        for c in self.chunks:
-            rows.append({
-                'Sample': name,
-                'Start': c.start,
-                'End': c.end,
-                'Hap1': c.hap1,
-                'Hap2': c.hap2,
-                'Length': c.end - c.start + 1
-            })
-        return rows
+class SampleConsensusPainting:
+    def __init__(self, sample_index: int, chunks: List[ConsensusChunk], weight: float = 1.0,
+                 representative_path: Optional['SamplePainting'] = None):
+        self.sample_index = sample_index
+        self.chunks = chunks
+        self.weight = weight
+        self.representative_path = representative_path
+        
+        self.hap1_consensus = self._extract_consensus_track(track_idx=0)
+        self.hap2_consensus = self._extract_consensus_track(track_idx=1)
+
+    def _extract_consensus_track(self, track_idx: int) -> List[ConsensusSegment]:
+        segments = []
+        if not self.chunks: return segments
+        
+        curr_start = self.chunks[0].start
+        curr_end = self.chunks[0].end
+        curr_set = self.chunks[0].possible_hap1 if track_idx == 0 else self.chunks[0].possible_hap2
+        
+        for i in range(1, len(self.chunks)):
+            c = self.chunks[i]
+            next_set = c.possible_hap1 if track_idx == 0 else c.possible_hap2
+            
+            if next_set == curr_set:
+                curr_end = c.end
+            else:
+                segments.append(ConsensusSegment(curr_start, curr_end, curr_set))
+                curr_start = c.start
+                curr_end = c.end
+                curr_set = next_set
+                
+        segments.append(ConsensusSegment(curr_start, curr_end, curr_set))
+        return segments
+
+    def __repr__(self):
+        return f"<SampleConsensus ID {self.sample_index}: {len(self.chunks)} chunks, Weight {self.weight:.2f}>"
+
+# =============================================================================
+# 2. NUMBA KERNELS (unchanged)
+# =============================================================================
+
+@njit(fastmath=True)
+def check_allelic_match(dense_haps, positions, h1, h2, start, end, mismatch_threshold=0.01):
+    if h1 == h2: return True
+    if h1 == -1 or h2 == -1: return True
+    
+    n_sites = len(positions)
+    idx_start = -1
+    for i in range(n_sites):
+        if positions[i] >= start:
+            idx_start = i
+            break
+            
+    if idx_start == -1: return True
+    
+    matches = 0
+    total = 0
+    
+    for i in range(idx_start, n_sites):
+        if positions[i] >= end: break
+        
+        a1 = dense_haps[h1, i]
+        a2 = dense_haps[h2, i]
+        
+        if a1 != -1 and a2 != -1:
+            total += 1
+            if a1 == a2: matches += 1
+                
+    if total == 0: return True
+    
+    mismatch_rate = 1.0 - (matches / total)
+    return mismatch_rate <= mismatch_threshold
+
+# =============================================================================
+# 3. CONTAINER & CLUSTERING LOGIC (unchanged)
+# =============================================================================
+
+class SampleTolerancePainting:
+    def __init__(self, sample_index: int, paths: List[SamplePainting]):
+        self.sample_index = sample_index
+        self.paths = paths 
+        self.consensus_list = [] 
+        
+    def generate_all_paths(self) -> List[SamplePainting]:
+        return self.paths
+
+    def _calculate_haploid_similarity(self, path_a: SamplePainting, path_b: SamplePainting, 
+                                      founder_data=None) -> Tuple[float, bool]:
+        if not path_a.chunks or not path_b.chunks: return 0.0, False
+
+        total_len = path_a.chunks[-1].end - path_a.chunks[0].start
+        if total_len == 0: return 1.0, False
+
+        def extract_tracks(p: SamplePainting):
+            t1, t2 = [], []
+            for c in p.chunks:
+                t1.append((c.start, c.end, c.hap1))
+                t2.append((c.start, c.end, c.hap2))
+            return t1, t2
+
+        a1, a2 = extract_tracks(path_a)
+        b1, b2 = extract_tracks(path_b)
+
+        dense_haps, positions = founder_data if founder_data else (None, None)
+
+        def score_track_overlap(track_x, track_y):
+            score = 0
+            idx_x, idx_y = 0, 0
+            n_x, n_y = len(track_x), len(track_y)
+            
+            while idx_x < n_x and idx_y < n_y:
+                sx, ex, idx = track_x[idx_x]
+                sy, ey, idy = track_y[idx_y]
+                start = max(sx, sy)
+                end = min(ex, ey)
+                
+                if start < end:
+                    match = False
+                    if idx == idy: match = True
+                    elif dense_haps is not None:
+                        if check_allelic_match(dense_haps, positions, idx, idy, start, end):
+                            match = True
+                    if match: score += (end - start)
+                
+                if ex < ey: idx_x += 1
+                else: idx_y += 1
+            return score
+
+        match_11 = score_track_overlap(a1, b1)
+        match_22 = score_track_overlap(a2, b2)
+        match_12 = score_track_overlap(a1, b2)
+        match_21 = score_track_overlap(a2, b1)
+        
+        direct_score = (match_11 + match_22) / (2 * total_len)
+        cross_score = (match_12 + match_21) / (2 * total_len)
+        
+        if cross_score > direct_score: return cross_score, True
+        else: return direct_score, False
+
+    def generate_clustered_consensus(self, similarity_threshold=0.999, founder_data=None,
+                                      collapse_ibs=False) -> List[SampleConsensusPainting]:
+        """
+        Generate clustered consensus paintings.
+        
+        Args:
+            similarity_threshold: Threshold for clustering paths together
+            founder_data: (dense_haps, positions) for IBS checking during clustering
+            collapse_ibs: If True, collapse IBS-equivalent founders in final consensus
+                          (hides uncertainty). If False (default), keep all founders 
+                          to show full uncertainty with split bars.
+        """
+        if not self.paths: return []
+        
+        clusters = []
+        for p in self.paths:
+            assigned = False
+            for cluster_data in clusters:
+                rep_path, _ = cluster_data[0]
+                # NOTE: We still use IBS for CLUSTERING (grouping similar paths)
+                # but not for the final DISPLAY of uncertainty
+                score, should_flip = self._calculate_haploid_similarity(rep_path, p, founder_data)
+                
+                if score >= similarity_threshold:
+                    cluster_data.append((p, should_flip))
+                    assigned = True
+                    break
+            
+            if not assigned: clusters.append([(p, False)])
+                
+        results = []
+        total_paths = len(self.paths)
+        
+        for cluster_data in clusters:
+            aligned_paths = []
+            for p, flip in cluster_data:
+                if flip:
+                    new_chunks = [PaintedChunk(c.start, c.end, c.hap2, c.hap1) for c in p.chunks]
+                    aligned_paths.append(SamplePainting(p.sample_index, new_chunks))
+                else:
+                    aligned_paths.append(p)
+            
+            # Pass collapse_ibs to control whether to hide IBS-equivalent uncertainty
+            cons_chunks = self._merge_aligned_paths(aligned_paths, founder_data=founder_data,
+                                                     collapse_ibs=collapse_ibs)
+            weight = len(aligned_paths) / total_paths
+            
+            representative_path = aligned_paths[0] if aligned_paths else None
+            results.append(SampleConsensusPainting(self.sample_index, cons_chunks, weight, 
+                                                    representative_path=representative_path))
+            
+        self.consensus_list = results
+        return results
+
+    def _merge_aligned_paths(self, paths: List[SamplePainting], founder_data=None,
+                              collapse_ibs=False) -> List[ConsensusChunk]:
+        """
+        Merge aligned paths into consensus chunks.
+        
+        Args:
+            paths: List of aligned SamplePainting objects
+            founder_data: (dense_haps, positions) for IBS checking
+            collapse_ibs: If True, collapse IBS-equivalent founders to one representative.
+                          If False (default), keep all founders to show full uncertainty.
+        """
+        breakpoints = set()
+        for p in paths:
+            for c in p.chunks:
+                breakpoints.add(c.start); breakpoints.add(c.end)
+        sorted_bp = sorted(list(breakpoints))
+        
+        consensus_chunks = []
+        dense_haps, positions = founder_data if founder_data else (None, None)
+        
+        for i in range(len(sorted_bp) - 1):
+            start, end = sorted_bp[i], sorted_bp[i+1]
+            midpoint = (start + end) // 2
+            t1_options = set()
+            t2_options = set()
+            
+            for p in paths:
+                for c in p.chunks:
+                    if c.start <= midpoint < c.end:
+                        t1_options.add(c.hap1); t2_options.add(c.hap2)
+                        break
+            
+            # Only collapse IBS-equivalent founders if explicitly requested
+            if collapse_ibs and dense_haps is not None:
+                def collapse_set(id_set):
+                    if len(id_set) <= 1: return id_set
+                    ids = list(id_set)
+                    ref = ids[0]
+                    all_match = True
+                    for other in ids[1:]:
+                        if not check_allelic_match(dense_haps, positions, ref, other, start, end):
+                            all_match = False
+                            break
+                    if all_match: return frozenset([ref])
+                    return id_set
+                
+                t1_options = collapse_set(t1_options)
+                t2_options = collapse_set(t2_options)
+
+            new_chunk = ConsensusChunk(start, end, frozenset(t1_options), frozenset(t2_options))
+            
+            if consensus_chunks:
+                prev = consensus_chunks[-1]
+                if (prev.possible_hap1 == new_chunk.possible_hap1 and 
+                    prev.possible_hap2 == new_chunk.possible_hap2):
+                    consensus_chunks[-1] = ConsensusChunk(prev.start, new_chunk.end, prev.possible_hap1, prev.possible_hap2)
+                else:
+                    consensus_chunks.append(new_chunk)
+            else:
+                consensus_chunks.append(new_chunk)
+                
+        return consensus_chunks
+
+    def get_best_representative_path(self, founder_data=None) -> SamplePainting:
+        if not self.paths: return SamplePainting(self.sample_index, [])
+        
+        if self.consensus_list: cons_list = self.consensus_list
+        else: cons_list = self.generate_clustered_consensus(similarity_threshold=0.999, founder_data=founder_data)
+            
+        if not cons_list: return self.paths[0]
+        
+        dominant_cons = max(cons_list, key=lambda x: x.weight)
+        
+        raw_best = dominant_cons.representative_path
+        if raw_best is None:
+            raw_best = self.paths[0]
+        
+        masked_chunks = []
+        dense_haps, positions = founder_data if founder_data else (None, None)
+        
+        for c_cons in dominant_cons.chunks:
+            t1_ids = list(c_cons.possible_hap1)
+            t2_ids = list(c_cons.possible_hap2)
+            is_t1_uncertain = len(t1_ids) > 1
+            is_t2_uncertain = len(t2_ids) > 1
+            
+            # For best representative, we DO want to collapse IBS-equivalent
+            # because we're picking a single concrete path
+            if is_t1_uncertain and dense_haps is not None:
+                ref = t1_ids[0]; all_match = True
+                for other in t1_ids[1:]:
+                    if not check_allelic_match(dense_haps, positions, ref, other, c_cons.start, c_cons.end):
+                        all_match = False; break
+                if all_match: is_t1_uncertain = False
+                
+            if is_t2_uncertain and dense_haps is not None:
+                ref = t2_ids[0]; all_match = True
+                for other in t2_ids[1:]:
+                    if not check_allelic_match(dense_haps, positions, ref, other, c_cons.start, c_cons.end):
+                        all_match = False; break
+                if all_match: is_t2_uncertain = False
+            
+            midpoint = (c_cons.start + c_cons.end) // 2
+            h1, h2 = -1, -1
+            
+            for c_raw in raw_best.chunks:
+                if c_raw.start <= midpoint < c_raw.end:
+                    h1, h2 = c_raw.hap1, c_raw.hap2; break
+            
+            if is_t1_uncertain: h1 = -1
+            if is_t2_uncertain: h2 = -1
+            
+            if masked_chunks:
+                prev = masked_chunks[-1]
+                if prev.hap1 == h1 and prev.hap2 == h2:
+                    masked_chunks[-1] = PaintedChunk(prev.start, c_cons.end, h1, h2)
+                else:
+                    masked_chunks.append(PaintedChunk(c_cons.start, c_cons.end, h1, h2))
+            else:
+                masked_chunks.append(PaintedChunk(c_cons.start, c_cons.end, h1, h2))
+                
+        return SamplePainting(self.sample_index, masked_chunks)
+
+class BlockTolerancePainting:
+    def __init__(self, block_position_range: Tuple[int, int], samples: List[SampleTolerancePainting]):
+        self.start_pos = block_position_range[0]
+        self.end_pos = block_position_range[1]
+        self.samples = samples
+
+    def __getitem__(self, idx): return self.samples[idx]
+    def __len__(self): return len(self.samples)
 
 class BlockPainting:
     def __init__(self, block_position_range: Tuple[int, int], samples: List[SamplePainting]):
@@ -120,348 +455,38 @@ class BlockPainting:
         self.samples = samples
         self.num_samples = len(samples)
 
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, idx):
-        return self.samples[idx]
-
-    def __iter__(self):
-        return iter(self.samples)
-
-    def __repr__(self):
-        return f"<BlockPainting: {self.num_samples} samples, Range {self.start_pos}-{self.end_pos}>"
-
-    def to_dataframe(self, sample_names=None) -> pd.DataFrame:
-        all_rows = []
-        for i, sample in enumerate(self.samples):
-            name = sample_names[i] if sample_names else None
-            all_rows.extend(sample.to_dict_list(name))
-        return pd.DataFrame(all_rows)
+    def __len__(self): return self.num_samples
+    def __getitem__(self, idx): return self.samples[idx]
+    def __iter__(self): return iter(self.samples)
 
 # =============================================================================
-# 2. HELPER: DENSE MATRIX CONVERSION (For Cleanup)
+# 4. HELPER: DENSE MATRIX CONVERSION (unchanged)
 # =============================================================================
 
 def founder_block_to_dense(block_result):
-    """
-    Converts a BlockResult object (dictionary of haps) into a dense matrix
-    for fast lookup during cleanup.
-    Returns: (hap_matrix, positions)
-    """
-    positions = block_result.positions
+    """Convert probabilistic haplotypes to dense integer matrix via argmax."""
+    positions = np.array(block_result.positions, dtype=np.int64)
     hap_dict = block_result.haplotypes
-    
-    if not hap_dict:
-        return np.zeros((0, 0), dtype=np.int8), positions
-
-    # Determine max ID
+    if not hap_dict: return np.zeros((0, 0), dtype=np.int8), positions
     max_id = max(hap_dict.keys())
     n_sites = len(positions)
-    
-    # Init with -1 (Missing)
-    # Shape: (MaxID+1, Sites)
     dense_haps = np.full((max_id + 1, n_sites), -1, dtype=np.int8)
-    
     for fid, hap_arr in hap_dict.items():
-        # Handle probabilistic (N,2) vs concrete (N,)
-        if hap_arr.ndim == 2:
+        if hap_arr.ndim == 2: 
             concrete = np.argmax(hap_arr, axis=1)
-        else:
+        else: 
             concrete = hap_arr
-        dense_haps[fid, :] = concrete
-        
+        dense_haps[fid, :] = concrete.astype(np.int8)
     return dense_haps, positions
 
 # =============================================================================
-# 3. CLEANUP KERNELS (INDEPENDENT TRACK RESOLUTION)
+# 5. EMISSION CALCULATOR (unchanged)
 # =============================================================================
-
-@njit(fastmath=True)
-def find_equivalent_founders_for_chunk(
-    hap_matrix,      # (MaxID, Sites)
-    snp_positions,   # (Sites,)
-    chunk_start,
-    chunk_end,
-    current_id,
-    tolerance=0.01   # 1% difference allowed to be considered "Equal"
-):
-    """
-    Checks all founders to see which ones match the 'current_id' haplotype
-    in the specific region [chunk_start, chunk_end).
-    
-    Returns a boolean mask of valid candidates.
-    """
-    n_founders, n_sites = hap_matrix.shape
-    candidates = np.zeros(n_founders, dtype=np.bool_)
-    
-    # Find SNP range
-    start_idx = -1
-    end_idx = -1
-    
-    for i in range(n_sites):
-        if snp_positions[i] >= chunk_start:
-            start_idx = i
-            break
-            
-    if start_idx == -1: return candidates # No SNPs
-    
-    for i in range(start_idx, n_sites):
-        if snp_positions[i] >= chunk_end:
-            break
-        end_idx = i
-    
-    # If region is empty or 1 SNP, difficult to judge, but we proceed
-    if end_idx < start_idx:
-        candidates[current_id] = True
-        return candidates
-        
-    # Extract reference sequence (what we assigned)
-    ref_seq = hap_matrix[current_id, start_idx:end_idx+1]
-    
-    valid_sites_count = 0
-    for x in ref_seq:
-        if x != -1: valid_sites_count += 1
-        
-    if valid_sites_count == 0:
-        candidates[current_id] = True
-        return candidates
-
-    # Compare against all other founders
-    for f_id in range(n_founders):
-        if f_id == current_id:
-            candidates[f_id] = True
-            continue
-            
-        test_seq = hap_matrix[f_id, start_idx:end_idx+1]
-        
-        matches = 0
-        total_comp = 0
-        
-        for k in range(len(ref_seq)):
-            r = ref_seq[k]
-            t = test_seq[k]
-            if r != -1 and t != -1:
-                total_comp += 1
-                if r == t:
-                    matches += 1
-        
-        if total_comp > 0:
-            diff = 1.0 - (matches / total_comp)
-            if diff <= tolerance:
-                candidates[f_id] = True
-        
-    return candidates
-
-def resolve_single_track(segments: List[PhasedSegment], hap_matrix, snp_positions) -> List[PhasedSegment]:
-    """
-    Resolves ambiguous IDs on a single haploid track by checking neighbors.
-    Merges adjacent segments if they resolve to the same ID.
-    """
-    if not segments: return []
-    
-    # 1. Calculate Options for every segment
-    # Store: (original_segment, valid_ids_set, resolved_id)
-    seg_meta = []
-    
-    for seg in segments:
-        cands = find_equivalent_founders_for_chunk(
-            hap_matrix, snp_positions, seg.start, seg.end, seg.founder_id
-        )
-        valid_set = set(np.where(cands)[0])
-        
-        seg_meta.append({
-            'seg': seg,
-            'opts': valid_set,
-            'final_id': seg.founder_id
-        })
-        
-    n_segs = len(seg_meta)
-    
-    # 2. Resolve Ambiguities
-    for i in range(n_segs):
-        opts = seg_meta[i]['opts']
-        curr_id = seg_meta[i]['final_id']
-        
-        if len(opts) > 1:
-            # Ambiguous! Search neighbors.
-            best_choice = curr_id
-            min_dist = float('inf')
-            
-            # Search Left
-            for j in range(i-1, -1, -1):
-                neighbor_id = seg_meta[j]['final_id'] # Use resolved neighbor
-                if neighbor_id in opts:
-                    dist = i - j
-                    if dist < min_dist:
-                        min_dist = dist
-                        best_choice = neighbor_id
-                    break 
-            
-            # Search Right
-            for j in range(i+1, n_segs):
-                neighbor_id = seg_meta[j]['seg'].founder_id # Use original neighbor (future)
-                if neighbor_id in opts:
-                    dist = j - i
-                    if dist < min_dist:
-                        min_dist = dist
-                        best_choice = neighbor_id
-                    break
-            
-            seg_meta[i]['final_id'] = best_choice
-            
-    # 3. Merge Adjacent Segments
-    new_segments = []
-    
-    curr = seg_meta[0]
-    curr_start = curr['seg'].start
-    curr_end = curr['seg'].end
-    curr_id = curr['final_id']
-    
-    for i in range(1, n_segs):
-        next_s = seg_meta[i]
-        next_id = next_s['final_id']
-        
-        # Continuity check + ID check
-        if (curr_end == next_s['seg'].start) and (curr_id == next_id):
-            curr_end = next_s['seg'].end
-        else:
-            new_segments.append(PhasedSegment(curr_start, curr_end, curr_id))
-            curr_start = next_s['seg'].start
-            curr_end = next_s['seg'].end
-            curr_id = next_id
-            
-    new_segments.append(PhasedSegment(curr_start, curr_end, curr_id))
-    return new_segments
-
-def zip_tracks_to_chunks(track1: List[PhasedSegment], track2: List[PhasedSegment]) -> List[PaintedChunk]:
-    """
-    Combines two independent haploid tracks back into diploid chunks.
-    Takes the Union of breakpoints from both tracks.
-    """
-    breakpoints = set()
-    for s in track1:
-        breakpoints.add(s.start)
-        breakpoints.add(s.end)
-    for s in track2:
-        breakpoints.add(s.start)
-        breakpoints.add(s.end)
-        
-    sorted_bp = sorted(list(breakpoints))
-    chunks = []
-    
-    # Cursors
-    t1_idx = 0
-    t2_idx = 0
-    n1 = len(track1)
-    n2 = len(track2)
-    
-    for k in range(len(sorted_bp) - 1):
-        start = sorted_bp[k]
-        end = sorted_bp[k+1]
-        
-        # Find active segment for Track 1
-        # Since sorted_bp are derived from track1, we are guaranteed exact alignment or containment
-        while t1_idx < n1 and track1[t1_idx].end <= start:
-            t1_idx += 1
-        
-        h1 = track1[t1_idx].founder_id if t1_idx < n1 else -1
-        
-        # Find active segment for Track 2
-        while t2_idx < n2 and track2[t2_idx].end <= start:
-            t2_idx += 1
-            
-        h2 = track2[t2_idx].founder_id if t2_idx < n2 else -1
-        
-        chunks.append(PaintedChunk(start, end, h1, h2))
-        
-    return chunks
-
-# =============================================================================
-# 4. VECTORIZED VITERBI KERNEL (STRICT PAINTING)
-# =============================================================================
-
-@njit(parallel=True, fastmath=True)
-def viterbi_painting_solver(ll_tensor, positions, recomb_rate, state_definitions, n_haps, switch_penalty):
-    """
-    Solves the Viterbi path for N samples simultaneously.
-    """
-    n_samples, K, n_sites = ll_tensor.shape
-    final_paths = np.zeros((n_samples, n_sites), dtype=np.int32)
-    
-    if n_haps > 1:
-        log_N_minus_1 = math.log(float(n_haps - 1))
-    else:
-        log_N_minus_1 = 0.0
-
-    for s in prange(n_samples):
-        backpointers = np.zeros((n_sites, K), dtype=np.int32)
-        current_scores = np.empty(K, dtype=np.float64)
-        prev_scores = np.empty(K, dtype=np.float64)
-
-        for k in range(K):
-            current_scores[k] = ll_tensor[s, k, 0]
-
-        for i in range(1, n_sites):
-            prev_scores[:] = current_scores[:]
-            dist_bp = positions[i] - positions[i-1]
-            if dist_bp < 1: dist_bp = 1
-            theta = float(dist_bp) * recomb_rate
-            
-            if theta > 0.5: theta = 0.5
-            if theta < 1e-15: theta = 1e-15
-            
-            log_switch = math.log(theta) - switch_penalty
-            log_stay = math.log(1.0 - theta)
-            
-            cost_0 = 2.0 * log_stay
-            cost_1 = log_switch + log_stay - log_N_minus_1
-            cost_2 = 2.0 * log_switch - 2.0 * log_N_minus_1
-            
-            for k_curr in range(K):
-                h1_curr = state_definitions[k_curr, 0]
-                h2_curr = state_definitions[k_curr, 1]
-                
-                best_prev_k = -1
-                best_score = -np.inf
-                
-                for k_prev in range(K):
-                    h1_prev = state_definitions[k_prev, 0]
-                    h2_prev = state_definitions[k_prev, 1]
-                    
-                    dist = 0
-                    if h1_curr != h1_prev: dist += 1
-                    if h2_curr != h2_prev: dist += 1
-                    
-                    if dist == 0: trans_cost = cost_0
-                    elif dist == 1: trans_cost = cost_1
-                    else: trans_cost = cost_2
-                    
-                    score = prev_scores[k_prev] + trans_cost
-                    if score > best_score:
-                        best_score = score
-                        best_prev_k = k_prev
-                
-                backpointers[i, k_curr] = best_prev_k
-                current_scores[k_curr] = best_score + ll_tensor[s, k_curr, i]
-
-        best_end_k = -1
-        best_end_score = -np.inf
-        for k in range(K):
-            if current_scores[k] > best_end_score:
-                best_end_score = current_scores[k]
-                best_end_k = k
-        
-        final_paths[s, n_sites - 1] = best_end_k
-        
-        for i in range(n_sites - 1, 0, -1):
-            curr_k = final_paths[s, i]
-            prev_k = backpointers[i, curr_k]
-            final_paths[s, i-1] = prev_k
-            
-    return final_paths
 
 def calculate_batch_emissions(sample_probs_matrix, hap_dict, robustness_epsilon=1e-3):
+    """
+    Calculate emission log-likelihoods using PROBABILISTIC haplotype values.
+    """
     hap_keys = sorted(list(hap_dict.keys()))
     num_haps = len(hap_keys)
     num_samples, num_sites, _ = sample_probs_matrix.shape
@@ -470,9 +495,9 @@ def calculate_batch_emissions(sample_probs_matrix, hap_dict, robustness_epsilon=
     state_defs = np.stack([idx_i, idx_j], axis=1).astype(np.int32)
     
     hap_list = [hap_dict[k] for k in hap_keys]
-    if not hap_list:
+    if not hap_list: 
         return np.zeros((num_samples, 0, num_sites)), state_defs, hap_keys
-        
+    
     haps_tensor = np.array(hap_list)
     h0 = haps_tensor[:, :, 0]
     h1 = haps_tensor[:, :, 1]
@@ -489,11 +514,10 @@ def calculate_batch_emissions(sample_probs_matrix, hap_dict, robustness_epsilon=
     s1 = sample_probs_matrix[:, :, 1][:, np.newaxis, :]
     s2 = sample_probs_matrix[:, :, 2][:, np.newaxis, :]
     
-    c0 = combos_0[np.newaxis, :, :]
-    c1 = combos_1[np.newaxis, :, :]
-    c2 = combos_2[np.newaxis, :, :]
+    model_probs = (s0 * combos_0[np.newaxis, :, :]) + \
+                  (s1 * combos_1[np.newaxis, :, :]) + \
+                  (s2 * combos_2[np.newaxis, :, :])
     
-    model_probs = (s0 * c0) + (s1 * c1) + (s2 * c2)
     uniform_prob = 1.0 / 3.0
     final_probs = (model_probs * (1.0 - robustness_epsilon)) + (robustness_epsilon * uniform_prob)
     
@@ -504,119 +528,708 @@ def calculate_batch_emissions(sample_probs_matrix, hap_dict, robustness_epsilon=
     
     return ll_matrix, state_defs, hap_keys
 
-def compress_path_to_chunks(path_indices, positions, state_defs, hap_keys):
-    chunks = []
-    if len(path_indices) == 0: return chunks
+# =============================================================================
+# 6. TOLERANCE VITERBI KERNELS (WITH DOUBLE-RECOMB DISCOUNT)
+# =============================================================================
 
-    h1_idx, h2_idx = state_defs[path_indices[0]]
-    curr_t1 = hap_keys[h1_idx]
-    curr_t2 = hap_keys[h2_idx]
+@njit(parallel=True, fastmath=True)
+def run_forward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definitions, 
+                              n_haps, switch_penalty, double_recomb_factor=1.5):
+    """
+    Forward pass of max-sum Viterbi algorithm.
     
-    if curr_t1 > curr_t2: curr_t1, curr_t2 = curr_t2, curr_t1
-        
-    start_pos = positions[0]
+    IMPORTANT: Uses float64 to prevent precision loss over long chromosomes.
     
-    for i in range(1, len(path_indices)):
-        h1_idx_next, h2_idx_next = state_defs[path_indices[i]]
-        cand_a = hap_keys[h1_idx_next]
-        cand_b = hap_keys[h2_idx_next]
+    Args:
+        double_recomb_factor: Multiplier for double-switch cost (default 1.5).
+            - 2.0 = standard (double switch costs 2× single switch)
+            - 1.5 = discounted (prefers simultaneous switches, prevents path explosion)
+            - 1.0 = no extra penalty for double switch
+    """
+    n_samples, K, n_sites = ll_tensor.shape
+    
+    alpha = np.full((n_samples, n_sites, K), -np.inf, dtype=np.float64)
+    
+    if n_haps > 1: 
+        log_N_minus_1 = math.log(float(n_haps - 1))
+    else: 
+        log_N_minus_1 = 0.0
+
+    for s in prange(n_samples):
+        for k in range(K): 
+            alpha[s, 0, k] = ll_tensor[s, k, 0]
+
+        for i in range(1, n_sites):
+            dist_bp = positions[i] - positions[i-1]
+            if dist_bp < 1: dist_bp = 1
+            theta = float(dist_bp) * recomb_rate
+            if theta > 0.5: theta = 0.5
+            if theta < 1e-15: theta = 1e-15
+            
+            log_switch = math.log(theta) - switch_penalty
+            log_stay = math.log(1.0 - theta)
+            
+            cost_0 = 2.0 * log_stay                                    # Neither switches
+            cost_1 = log_switch + log_stay - log_N_minus_1             # One switches
+            cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # Both switch (DISCOUNTED)
+            
+            for k_curr in range(K):
+                h1_curr = state_definitions[k_curr, 0]
+                h2_curr = state_definitions[k_curr, 1]
+                best_score = -np.inf
+                
+                for k_prev in range(K):
+                    h1_prev = state_definitions[k_prev, 0]
+                    h2_prev = state_definitions[k_prev, 1]
+                    
+                    dist = 0
+                    if h1_curr != h1_prev: dist += 1
+                    if h2_curr != h2_prev: dist += 1
+                    
+                    if dist == 0: trans = cost_0
+                    elif dist == 1: trans = cost_1
+                    else: trans = cost_2
+                    
+                    score = alpha[s, i-1, k_prev] + trans
+                    if score > best_score: best_score = score
+                    
+                alpha[s, i, k_curr] = best_score + ll_tensor[s, k_curr, i]
+                
+    return alpha
+
+@njit(parallel=True, fastmath=True)
+def run_backward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definitions, 
+                               n_haps, switch_penalty, double_recomb_factor=1.5):
+    """
+    Backward pass of max-sum Viterbi algorithm.
+    
+    IMPORTANT: Uses float64 to prevent precision loss over long chromosomes.
+    """
+    n_samples, K, n_sites = ll_tensor.shape
+    
+    beta = np.full((n_samples, n_sites, K), -np.inf, dtype=np.float64)
+    
+    if n_haps > 1: 
+        log_N_minus_1 = math.log(float(n_haps - 1))
+    else: 
+        log_N_minus_1 = 0.0
+
+    for s in prange(n_samples):
+        for k in range(K): 
+            beta[s, n_sites-1, k] = 0.0
+
+        for i in range(n_sites - 2, -1, -1):
+            dist_bp = positions[i+1] - positions[i]
+            if dist_bp < 1: dist_bp = 1
+            theta = float(dist_bp) * recomb_rate
+            if theta > 0.5: theta = 0.5
+            if theta < 1e-15: theta = 1e-15
+            
+            log_switch = math.log(theta) - switch_penalty
+            log_stay = math.log(1.0 - theta)
+            
+            cost_0 = 2.0 * log_stay
+            cost_1 = log_switch + log_stay - log_N_minus_1
+            cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # DISCOUNTED
+            
+            for k_curr in range(K): 
+                h1_curr = state_definitions[k_curr, 0]
+                h2_curr = state_definitions[k_curr, 1]
+                best_score = -np.inf
+                
+                for k_next in range(K): 
+                    h1_next = state_definitions[k_next, 0]
+                    h2_next = state_definitions[k_next, 1]
+                    
+                    dist = 0
+                    if h1_curr != h1_next: dist += 1
+                    if h2_curr != h2_next: dist += 1
+                    
+                    if dist == 0: trans = cost_0
+                    elif dist == 1: trans = cost_1
+                    else: trans = cost_2
+                    
+                    score = trans + ll_tensor[s, k_next, i+1] + beta[s, i+1, k_next]
+                    if score > best_score: best_score = score
+                    
+                beta[s, i, k_curr] = best_score
+                
+    return beta
+
+# =============================================================================
+# 7. OPTIMIZED PRE-COMPUTATION KERNEL (WITH DOUBLE-RECOMB DISCOUNT)
+# =============================================================================
+
+@njit(parallel=True, fastmath=True)
+def precompute_valid_transitions(alpha, beta, ll_tensor, positions, recomb_rate, 
+                                  state_definitions, n_haps, switch_penalty, 
+                                  min_total_score, double_recomb_factor=1.5):
+    """
+    Pre-compute which transitions are valid (within margin of optimal).
+    """
+    n_sites, K = alpha.shape
+    valid_edges = np.zeros((n_sites, K, K), dtype=np.bool_)
+    
+    if n_haps > 1: 
+        log_N_minus_1 = math.log(float(n_haps - 1))
+    else: 
+        log_N_minus_1 = 0.0
+    
+    for t in prange(1, n_sites):
+        dist_bp = positions[t] - positions[t-1]
+        if dist_bp < 1: dist_bp = 1
+        theta = float(dist_bp) * recomb_rate
+        if theta > 0.5: theta = 0.5
+        if theta < 1e-15: theta = 1e-15
         
-        score_1 = (1 if cand_a == curr_t1 else 0) + (1 if cand_b == curr_t2 else 0)
-        score_2 = (1 if cand_b == curr_t1 else 0) + (1 if cand_a == curr_t2 else 0)
+        log_switch = math.log(theta) - switch_penalty
+        log_stay = math.log(1.0 - theta)
         
-        if score_1 >= score_2:
-            next_t1, next_t2 = cand_a, cand_b
+        cost_0 = 2.0 * log_stay
+        cost_1 = log_switch + log_stay - log_N_minus_1
+        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # DISCOUNTED
+        
+        for k_curr in range(K):
+            if (alpha[t, k_curr] + beta[t, k_curr]) < min_total_score: 
+                continue
+                
+            h1_curr = state_definitions[k_curr, 0]
+            h2_curr = state_definitions[k_curr, 1]
+            
+            for k_prev in range(K):
+                if alpha[t-1, k_prev] == -np.inf: 
+                    continue
+                    
+                h1_prev = state_definitions[k_prev, 0]
+                h2_prev = state_definitions[k_prev, 1]
+                
+                dist = 0
+                if h1_curr != h1_prev: dist += 1
+                if h2_curr != h2_prev: dist += 1
+                
+                if dist == 0: trans = cost_0
+                elif dist == 1: trans = cost_1
+                else: trans = cost_2
+                
+                if trans > -1e19:
+                    score = alpha[t-1, k_prev] + trans + ll_tensor[k_curr, t] + beta[t, k_curr]
+                    if score >= min_total_score:
+                        valid_edges[t, k_prev, k_curr] = True
+                        
+    return valid_edges
+
+# =============================================================================
+# 8. DEDUPLICATED TRACEBACK (WITH DOUBLE-RECOMB DISCOUNT)
+# =============================================================================
+
+class PathState:
+    def __init__(self, current_k, chunks, backward_score):
+        self.current_k = current_k
+        self.chunks = chunks 
+        self.backward_score = backward_score 
+
+    @property
+    def topology_key(self):
+        sig = []
+        for c in self.chunks:
+            h1, h2 = sorted((c.hap1, c.hap2))
+            sig.append((h1, h2))
+        return tuple(sig)
+
+def reconstruct_single_best_path(alpha, beta, ll_tensor, positions, recomb_rate, 
+                                  state_definitions, n_haps, switch_penalty, hap_keys,
+                                  double_recomb_factor=1.5):
+    """Fallback: reconstruct the single best path via standard Viterbi traceback."""
+    n_sites, K = alpha.shape
+    if n_haps > 1: 
+        log_N_minus_1 = math.log(float(n_haps - 1))
+    else: 
+        log_N_minus_1 = 0.0
+    
+    curr_k = np.argmax(alpha[n_sites-1])
+    h1_idx, h2_idx = state_definitions[curr_k]
+    t1, t2 = hap_keys[h1_idx], hap_keys[h2_idx]
+    chunks = [PaintedChunk(start=int(positions[n_sites-1]), end=int(positions[n_sites-1]), hap1=t1, hap2=t2)]
+    
+    for t in range(n_sites - 1, 0, -1):
+        prev_t = t - 1
+        curr_h1, curr_h2 = state_definitions[curr_k]
+        
+        dist_bp = positions[t] - positions[prev_t]
+        if dist_bp < 1: dist_bp = 1
+        theta = float(dist_bp) * recomb_rate
+        if theta > 0.5: theta = 0.5
+        if theta < 1e-15: theta = 1e-15
+        
+        log_switch = math.log(theta) - switch_penalty
+        log_stay = math.log(1.0 - theta)
+        
+        cost_0 = 2.0 * log_stay
+        cost_1 = log_switch + log_stay - log_N_minus_1
+        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # DISCOUNTED
+        
+        best_prev = -1
+        best_score = -np.inf
+        
+        for prev_k in range(K):
+            if alpha[prev_t, prev_k] == -np.inf: continue
+            prev_h1, prev_h2 = state_definitions[prev_k]
+            dist = 0
+            if curr_h1 != prev_h1: dist += 1
+            if curr_h2 != prev_h2: dist += 1
+            
+            trans = cost_0 if dist == 0 else (cost_1 if dist == 1 else cost_2)
+            score = alpha[prev_t, prev_k] + trans
+            if score > best_score:
+                best_score = score
+                best_prev = prev_k
+                
+        curr_k = best_prev
+        prev_h1, prev_h2 = state_definitions[curr_k]
+        pt1, pt2 = hap_keys[prev_h1], hap_keys[prev_h2]
+        old_chunk = chunks[0]
+        
+        is_extension = False
+        if (pt1 == old_chunk.hap1 and pt2 == old_chunk.hap2): is_extension = True
+        elif (pt1 == old_chunk.hap2 and pt2 == old_chunk.hap1): is_extension = True
+        
+        if is_extension:
+            chunks[0] = PaintedChunk(start=int(positions[prev_t]), end=old_chunk.end, 
+                                     hap1=old_chunk.hap1, hap2=old_chunk.hap2)
         else:
-            next_t1, next_t2 = cand_b, cand_a
+            chunks.insert(0, PaintedChunk(start=int(positions[prev_t]), end=int(positions[t]), 
+                                          hap1=pt1, hap2=pt2))
             
-        if (next_t1 != curr_t1) or (next_t2 != curr_t2):
-            midpoint = (positions[i-1] + positions[i]) // 2
-            chunks.append(PaintedChunk(int(start_pos), int(midpoint), curr_t1, curr_t2))
-            curr_t1, curr_t2 = next_t1, next_t2
-            start_pos = midpoint
-            
-    end_pos = positions[-1]
-    chunks.append(PaintedChunk(int(start_pos), int(end_pos), curr_t1, curr_t2))
-    return chunks
+    return [SamplePainting(0, chunks)]
 
-# =============================================================================
-# 5. MAIN DRIVER
-# =============================================================================
-
-def paint_samples_in_block(block_result, sample_probs_matrix, sample_sites, 
-                           recomb_rate=1e-8,
-                           switch_penalty=10.0,
-                           robustness_epsilon=1e-3, 
-                           batch_size=10):
+def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rate, 
+                                    state_definitions, n_haps, switch_penalty, 
+                                    total_margin, hap_keys, max_active_paths=2000,
+                                    double_recomb_factor=1.5):
     """
-    Paints all samples using Viterbi, then applies INDEPENDENT TRACK CLEANUP.
+    Reconstruct all paths within margin of optimal using beam-capped traceback.
     """
+    n_sites, K = alpha.shape
+    global_max = np.max(alpha[n_sites-1])
+    min_total_score = global_max - total_margin - 1e-5
     
-    positions = block_result.positions
-    hap_dict = block_result.haplotypes
-    
-    # 1. Prepare for Cleanup (Dense Matrix)
-    hap_matrix, snp_positions = founder_block_to_dense(block_result)
-    
-    block_samples_data = analysis_utils.get_sample_data_at_sites_multiple(
-        sample_probs_matrix, sample_sites, positions
+    valid_edges = precompute_valid_transitions(
+        alpha, beta, ll_tensor, positions, recomb_rate, 
+        state_definitions, n_haps, switch_penalty, min_total_score,
+        double_recomb_factor
     )
     
-    num_samples = block_samples_data.shape[0]
-    all_sample_paintings = []
+    active_paths = defaultdict(dict)
+    valid_ends = np.where((alpha[n_sites-1] + beta[n_sites-1]) >= min_total_score)[0]
     
-    print(f"Painting {num_samples} samples in batches of {batch_size} (eps={robustness_epsilon:.1e})...")
+    for k in valid_ends:
+        h1_idx, h2_idx = state_definitions[k]
+        t1, t2 = hap_keys[h1_idx], hap_keys[h2_idx]
+        initial_chunk = PaintedChunk(start=int(positions[n_sites-1]), end=int(positions[n_sites-1]), 
+                                     hap1=t1, hap2=t2)
+        p = PathState(k, [initial_chunk], 0.0)
+        active_paths[k][p.topology_key] = p
+
+    if n_haps > 1: 
+        log_N_minus_1 = math.log(float(n_haps - 1))
+    else: 
+        log_N_minus_1 = 0.0
+
+    for t in range(n_sites - 1, 0, -1):
+        prev_t = t - 1
+        
+        rows, cols = np.where(valid_edges[t])
+        valid_prev_map = defaultdict(list)
+        for r, c in zip(rows, cols):
+            valid_prev_map[c].append(r)
+            
+        dist_bp = positions[t] - positions[prev_t]
+        if dist_bp < 1: dist_bp = 1
+        theta = float(dist_bp) * recomb_rate
+        if theta > 0.5: theta = 0.5
+        if theta < 1e-15: theta = 1e-15
+        
+        log_switch = math.log(theta) - switch_penalty
+        log_stay = math.log(1.0 - theta)
+        
+        cost_0 = 2.0 * log_stay
+        cost_1 = log_switch + log_stay - log_N_minus_1
+        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # DISCOUNTED
+        
+        next_active_paths = defaultdict(dict)
+        
+        for curr_k, topo_dict in active_paths.items():
+            valid_parents = valid_prev_map.get(curr_k, [])
+            if not valid_parents: continue
+            
+            curr_h1, curr_h2 = state_definitions[curr_k]
+            emission_t = ll_tensor[curr_k, t]
+            
+            for topo_key, path_obj in topo_dict.items():
+                for prev_k in valid_parents:
+                    prev_h1, prev_h2 = state_definitions[prev_k]
+                    dist = 0
+                    if curr_h1 != prev_h1: dist += 1
+                    if curr_h2 != prev_h2: dist += 1
+                    
+                    if dist == 0: trans = cost_0
+                    elif dist == 1: trans = cost_1
+                    else: trans = cost_2
+                    
+                    new_backward_score = trans + emission_t + path_obj.backward_score
+                    
+                    if (alpha[prev_t, prev_k] + new_backward_score) < min_total_score:
+                        continue
+
+                    pt1, pt2 = hap_keys[prev_h1], hap_keys[prev_h2]
+                    old_chunk = path_obj.chunks[0]
+                    new_chunks = list(path_obj.chunks)
+                    
+                    is_extension = False
+                    if (pt1 == old_chunk.hap1 and pt2 == old_chunk.hap2): is_extension = True
+                    elif (pt1 == old_chunk.hap2 and pt2 == old_chunk.hap1): is_extension = True
+                    
+                    if is_extension:
+                        updated_chunk = PaintedChunk(start=int(positions[prev_t]), end=old_chunk.end, 
+                                                     hap1=old_chunk.hap1, hap2=old_chunk.hap2)
+                        new_chunks[0] = updated_chunk
+                        new_topo_key = topo_key
+                    else:
+                        d_direct = (0 if pt1 == old_chunk.hap1 else 1) + (0 if pt2 == old_chunk.hap2 else 1)
+                        d_cross = (0 if pt1 == old_chunk.hap2 else 1) + (0 if pt2 == old_chunk.hap1 else 1)
+                        final_h1, final_h2 = (pt1, pt2) if d_direct <= d_cross else (pt2, pt1)
+                        
+                        new_chunk = PaintedChunk(start=int(positions[prev_t]), end=int(positions[t]), 
+                                                 hap1=final_h1, hap2=final_h2)
+                        new_chunks.insert(0, new_chunk)
+                        h1n, h2n = sorted((final_h1, final_h2))
+                        new_topo_key = ((h1n, h2n),) + topo_key
+                        
+                    existing = next_active_paths[prev_k].get(new_topo_key)
+                    if existing is None or new_backward_score >= existing.backward_score:
+                        next_active_paths[prev_k][new_topo_key] = PathState(prev_k, new_chunks, new_backward_score)
+        
+        total_paths = sum(len(d) for d in next_active_paths.values())
+        if total_paths > max_active_paths:
+            all_entries = []
+            for k, topo_dict in next_active_paths.items():
+                for key, p_obj in topo_dict.items():
+                    total_s = alpha[prev_t, k] + p_obj.backward_score
+                    all_entries.append((total_s, k, key))
+            
+            all_entries.sort(key=lambda x: x[0], reverse=True)
+            keep_entries = all_entries[:max_active_paths]
+            
+            pruned_active = defaultdict(dict)
+            for _, k, key in keep_entries:
+                pruned_active[k][key] = next_active_paths[k][key]
+            next_active_paths = pruned_active
+
+        active_paths = next_active_paths
+        if not active_paths: break 
+        
+    all_paths_flat = []
+    seen_topologies = set()
+    
+    for k, topo_dict in active_paths.items():
+        for path_obj in topo_dict.values():
+            all_paths_flat.append(path_obj)
+            
+    if not all_paths_flat:
+        return reconstruct_single_best_path(alpha, beta, ll_tensor, positions, recomb_rate, 
+                                            state_definitions, n_haps, switch_penalty, hap_keys,
+                                            double_recomb_factor)
+
+    SHORT_THRESH = 50_000
+    def get_parsimony_score(p_obj):
+        penalty = 0.0
+        for c in p_obj.chunks:
+            if (c.end - c.start) < SHORT_THRESH: penalty += 5.0
+        return p_obj.backward_score - penalty
+
+    all_paths_flat.sort(key=get_parsimony_score, reverse=True)
+    
+    final_results = []
+    for path_obj in all_paths_flat:
+        norm_chunks = []
+        for c in path_obj.chunks:
+            h1, h2 = sorted((c.hap1, c.hap2))
+            norm_chunks.append(PaintedChunk(c.start, c.end, h1, h2))
+        norm_sig = tuple((c.hap1, c.hap2) for c in norm_chunks)
+        
+        if norm_sig not in seen_topologies:
+            seen_topologies.add(norm_sig)
+            final_results.append(SamplePainting(0, path_obj.chunks)) 
+                
+    return final_results
+
+# =============================================================================
+# 9. MULTIPROCESSING DRIVER (WITH DOUBLE-RECOMB DISCOUNT)
+# =============================================================================
+
+def _worker_paint_tolerance_batch(args):
+    """Worker function for parallel painting."""
+    indices, sample_probs_slice, block_result, params = args
+    positions = block_result.positions
+    hap_dict = block_result.haplotypes
+    recomb_rate = params['recomb_rate']
+    switch_penalty = params['switch_penalty']
+    robustness_epsilon = params['robustness_epsilon']
+    total_margin = params['total_margin']
+    founder_data = params['founder_data']
+    max_active_paths = params.get('max_active_paths', 2000)
+    double_recomb_factor = params.get('double_recomb_factor', 1.5)  # NEW PARAMETER
+    
+    ll_tensor, state_defs, hap_keys = calculate_batch_emissions(
+        sample_probs_slice, hap_dict, robustness_epsilon=robustness_epsilon
+    )
+    num_haps = len(hap_keys)
+    
+    if HAS_NUMBA: 
+        set_num_threads(1)
+        
+    # Pass double_recomb_factor to forward/backward passes
+    alpha = run_forward_pass_max_sum(ll_tensor, positions, recomb_rate, state_defs, 
+                                      num_haps, float(switch_penalty), double_recomb_factor)
+    beta = run_backward_pass_max_sum(ll_tensor, positions, recomb_rate, state_defs, 
+                                      num_haps, float(switch_penalty), double_recomb_factor)
+    
+    results = []
+    for i, global_idx in enumerate(indices):
+        valid_paintings = reconstruct_deduplicated_paths(
+            alpha[i], beta[i], ll_tensor[i], positions, recomb_rate, 
+            state_defs, num_haps, switch_penalty, total_margin, hap_keys,
+            max_active_paths=max_active_paths,
+            double_recomb_factor=double_recomb_factor
+        )
+        
+        for p in valid_paintings: 
+            p.sample_index = global_idx
+            
+        sample_obj = SampleTolerancePainting(global_idx, valid_paintings)
+        sample_obj.consensus_list = sample_obj.generate_clustered_consensus(founder_data=founder_data)
+        results.append(sample_obj)
+        
+    return results
+
+def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites, 
+                            recomb_rate=1e-8, switch_penalty=10.0,
+                            robustness_epsilon=1e-3, absolute_margin=5.0,
+                            margin_per_snp=0.0, batch_size=10, num_processes=16,
+                            max_active_paths=2000, double_recomb_factor=1.5):
+    """
+    Paint samples using tolerance Viterbi to find all paths within margin of optimal.
+    
+    Args:
+        block_result: BlockResult with positions and haplotypes dict
+        sample_probs_matrix: (n_samples, n_sites, 3) genotype probabilities
+        sample_sites: Array of site positions in sample_probs_matrix
+        recomb_rate: Per-bp recombination rate
+        switch_penalty: Additional penalty for haplotype switches
+        robustness_epsilon: Numerical stability term
+        absolute_margin: Log-likelihood margin for accepting paths
+        margin_per_snp: Additional margin per SNP (usually 0)
+        batch_size: Samples per worker batch
+        num_processes: Number of parallel workers
+        max_active_paths: Beam width for traceback
+        double_recomb_factor: Multiplier for double-switch cost (default 1.5).
+            - 2.0 = standard (double switch costs 2× single switch)
+            - 1.5 = discounted (prefers simultaneous switches, prevents path explosion)
+            - 1.0 = no extra penalty for double switch
+        
+    Returns:
+        BlockTolerancePainting with all samples' tolerance results
+    """
+    positions = block_result.positions
+    n_sites_block = len(positions)
+    total_margin = absolute_margin + (margin_per_snp * n_sites_block)
+    
+    dense_haps, dense_pos = founder_block_to_dense(block_result)
+    founder_data = (dense_haps, dense_pos)
+    
+    block_samples_data = analysis_utils.get_sample_data_at_sites_multiple(sample_probs_matrix, sample_sites, positions)
+    num_samples = block_samples_data.shape[0]
+    
+    print(f"Tolerance Painting {num_samples} samples (Margin={total_margin:.2f}, Cap={max_active_paths}, "
+          f"DoubleRecombFactor={double_recomb_factor}) using {num_processes} workers...")
+    
+    tasks = []
+    params = {
+        'recomb_rate': recomb_rate,
+        'switch_penalty': switch_penalty,
+        'robustness_epsilon': robustness_epsilon,
+        'total_margin': total_margin,
+        'founder_data': founder_data,
+        'max_active_paths': max_active_paths,
+        'double_recomb_factor': double_recomb_factor,  # NEW PARAMETER
+    }
     
     for start_idx in range(0, num_samples, batch_size):
         end_idx = min(start_idx + batch_size, num_samples)
+        batch_slice = block_samples_data[start_idx:end_idx]
+        indices = list(range(start_idx, end_idx))
+        tasks.append((indices, batch_slice, block_result, params))
         
-        batch_data = block_samples_data[start_idx:end_idx]
-        
-        ll_tensor, state_defs, hap_keys = calculate_batch_emissions(
-            batch_data, hap_dict, robustness_epsilon=robustness_epsilon
-        )
-        
-        num_haps = len(hap_keys)
-        raw_paths = viterbi_painting_solver(
-            ll_tensor, positions, recomb_rate, state_defs, num_haps, float(switch_penalty)
-        )
-        
-        batch_count = raw_paths.shape[0]
-        for i in range(batch_count):
-            global_sample_idx = start_idx + i
+    all_sample_paintings = []
+    with Pool(num_processes) as pool:
+        for batch_result in tqdm(pool.imap(_worker_paint_tolerance_batch, tasks), total=len(tasks)):
+            all_sample_paintings.extend(batch_result)
             
-            # A. Get Raw Diplotype Chunks
-            chunks = compress_path_to_chunks(raw_paths[i], positions, state_defs, hap_keys)
-            
-            # B. Split into Independent Tracks
-            # We reuse the logic from SamplePainting init
-            temp_obj = SamplePainting(global_sample_idx, chunks)
-            track1_segs = temp_obj.hap1_phased
-            track2_segs = temp_obj.hap2_phased
-            
-            # C. Clean Independently (Resolves IBS flickering using long-range neighbors)
-            clean_t1 = resolve_single_track(track1_segs, hap_matrix, snp_positions)
-            clean_t2 = resolve_single_track(track2_segs, hap_matrix, snp_positions)
-            
-            # D. Stitch back together
-            final_chunks = zip_tracks_to_chunks(clean_t1, clean_t2)
-            
-            all_sample_paintings.append(SamplePainting(global_sample_idx, final_chunks))
-            
+    all_sample_paintings.sort(key=lambda x: x.sample_index)
     range_tuple = (int(positions[0]), int(positions[-1]))
-    return BlockPainting(range_tuple, all_sample_paintings)
+    return BlockTolerancePainting(range_tuple, all_sample_paintings)
 
 # =============================================================================
-# 6. VISUALIZATION
+# 10. VISUALIZATIONS
 # =============================================================================
 
-def plot_painting(block_painting, output_file=None, 
-                  title="Chromosome Painting", 
-                  figsize_width=20, 
-                  row_height_per_sample=0.25,
-                  show_labels=True,
-                  sample_names=None):
+def plot_tolerance_graph_topology(block_painting, sample_idx=0, output_file=None):
+    """Plot the topology of valid paths as a graph."""
+    if not HAS_PLOTTING: return
+    sample_obj = block_painting[sample_idx]
+    paths = sample_obj.generate_all_paths() 
+    if not paths: return
+
+    G = nx.DiGraph()
+    unique_pairs = set()
+    for p in paths:
+        for c in p.chunks: 
+            unique_pairs.add(tuple(sorted((c.hap1, c.hap2))))
+            
+    sorted_pairs = sorted(list(unique_pairs))
+    pair_to_y = {p: i for i, p in enumerate(sorted_pairs)}
     
+    pos = {}
+    best_nodes = set()
+    
+    for p_idx, p in enumerate(paths):
+        for i, chunk in enumerate(p.chunks):
+            pair = tuple(sorted((chunk.hap1, chunk.hap2)))
+            pos_x = (chunk.start + chunk.end) / 2
+            node_id = (chunk.start, pair[0], pair[1])
+            G.add_node(node_id, label=f"{pair[0]}/{pair[1]}")
+            pos[node_id] = (pos_x, pair_to_y[pair])
+            if p_idx == 0: best_nodes.add(node_id)
+            if i > 0:
+                prev_c = p.chunks[i-1]
+                prev_p = tuple(sorted((prev_c.hap1, prev_c.hap2)))
+                prev_node = (prev_c.start, prev_p[0], prev_p[1])
+                G.add_edge(prev_node, node_id)
+
+    fig, ax = plt.subplots(figsize=(15, max(4, len(sorted_pairs))))
+    for pair, y in pair_to_y.items():
+        ax.axhline(y, color='gray', linestyle=':', linewidth=0.5, alpha=0.5)
+        ax.text(paths[0].chunks[0].start, y, f" {pair[0]}/{pair[1]}", va='center', fontsize=9, fontweight='bold')
+
+    node_colors = ['#ffaaaa' if n in best_nodes else '#aaccff' for n in G.nodes()]
+    edge_colors = ['red' if u in best_nodes and v in best_nodes else 'gray' for u, v in G.edges()]
+    widths = [2.0 if u in best_nodes and v in best_nodes else 0.5 for u, v in G.edges()]
+            
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=100, ax=ax)
+    nx.draw_networkx_edges(G, pos, edge_color=edge_colors, width=widths, ax=ax)
+    
+    ax.set_title(f"Topology of {len(paths)} Valid Paths", fontsize=14)
+    ax.set_xlabel("Genomic Position (bp)")
+    ax.set_yticks([])
+    if output_file: plt.savefig(output_file, bbox_inches='tight')
+    else: plt.show()
+    plt.close()
+
+def plot_viable_paintings(block_tolerance, sample_idx=0, max_paths=50, output_file=None):
+    """Plot all viable paintings for a sample with consensus clusters."""
+    if not HAS_PLOTTING: return
+    sample_obj = block_tolerance[sample_idx]
+    paths = sample_obj.generate_all_paths()
+    if not paths: return
+
+    if len(paths) > max_paths: paths = paths[:max_paths]
+
+    unique_haps = set()
+    for p in paths:
+        for c in p.chunks: 
+            unique_haps.add(c.hap1)
+            unique_haps.add(c.hap2)
+    sorted_haps = sorted(list(unique_haps))
+    hap_to_idx = {h: i for i, h in enumerate(sorted_haps)}
+    
+    if len(sorted_haps) <= 10: palette = sns.color_palette("tab10", len(sorted_haps))
+    else: palette = sns.color_palette("husl", len(sorted_haps))
+
+    row_height = 0.5
+    cons_list = sample_obj.consensus_list
+    
+    num_paths = len(paths)
+    num_cons = len(cons_list)
+    calc_height = (num_paths * row_height) + (num_cons * row_height) + 2.0
+    
+    fig, ax = plt.subplots(figsize=(20, calc_height))
+    y_height = 0.4 
+    
+    # Draw individual paths
+    for i, path_obj in enumerate(paths):
+        y_base = i * row_height
+        for chunk in path_obj.chunks:
+            width = chunk.end - chunk.start
+            if width <= 0: continue
+            c1 = palette[hap_to_idx[chunk.hap1]]
+            rect1 = mpatches.Rectangle((chunk.start, y_base), width, y_height/2, facecolor=c1, edgecolor='none')
+            ax.add_patch(rect1)
+            c2 = palette[hap_to_idx[chunk.hap2]]
+            rect2 = mpatches.Rectangle((chunk.start, y_base + y_height/2), width, y_height/2, facecolor=c2, edgecolor='none')
+            ax.add_patch(rect2)
+            
+    # Draw consensus clusters
+    y_cons_start = num_paths * row_height + 0.5
+    
+    for i, cons in enumerate(cons_list):
+        y_c = y_cons_start + (i * row_height)
+        label_text = f"CONSENSUS {i+1} ({cons.weight*100:.0f}%)"
+        ax.text(block_tolerance.start_pos, y_c + y_height/4, label_text, fontsize=9, fontweight='bold', va='center')
+        
+        for chunk in cons.chunks:
+            width = chunk.end - chunk.start
+            if width <= 0: continue
+            
+            def draw_stacked_track(possible_set, y_bottom, total_h):
+                candidates = sorted(list(possible_set))
+                if not candidates: return
+                sub_h = total_h / len(candidates)
+                for k, hap_id in enumerate(candidates):
+                    color = palette[hap_to_idx[hap_id]]
+                    rect = mpatches.Rectangle((chunk.start, y_bottom + k*sub_h), width, sub_h, facecolor=color, edgecolor='none')
+                    ax.add_patch(rect)
+
+            draw_stacked_track(chunk.possible_hap1, y_c, y_height/2)
+            draw_stacked_track(chunk.possible_hap2, y_c + y_height/2, y_height/2)
+
+    ax.set_xlim(block_tolerance.start_pos, block_tolerance.end_pos)
+    ax.set_ylim(0, y_cons_start + (num_cons * row_height) + 0.5)
+    
+    path_labels = [f"Path {i}" for i in range(len(paths))]
+    ticks = list(np.arange(len(paths)) * row_height + row_height/2)
+    for i in range(num_cons):
+        ticks.append(y_cons_start + (i*row_height) + row_height/2)
+        path_labels.append("")
+        
+    ax.set_yticks(ticks)
+    ax.set_yticklabels(path_labels, fontsize=8)
+    ax.set_xlabel("Genomic Position (bp)")
+    
+    patches = [mpatches.Patch(color=palette[hap_to_idx[h]], label=f"H{h}") for h in sorted_haps]
+    ax.legend(handles=patches, bbox_to_anchor=(1.01, 1), loc='upper left')
+    
+    plt.tight_layout()
+    if output_file: plt.savefig(output_file)
+    else: plt.show()
+    plt.close()
+
+def plot_population_painting(block_painting, output_file=None, 
+                             title="Population Painting", 
+                             figsize_width=20, 
+                             row_height_per_sample=0.25,
+                             show_labels=True,
+                             sample_names=None):
+    """Plot paintings for all samples in a population view."""
     if not HAS_PLOTTING:
         print("Error: Matplotlib/Seaborn not installed.")
         return
@@ -624,23 +1237,19 @@ def plot_painting(block_painting, output_file=None,
     unique_haps = set()
     for sample in block_painting:
         for chunk in sample:
-            unique_haps.add(chunk.hap1)
-            unique_haps.add(chunk.hap2)
+            if chunk.hap1 != -1: unique_haps.add(chunk.hap1)
+            if chunk.hap2 != -1: unique_haps.add(chunk.hap2)
     
     sorted_haps = sorted(list(unique_haps))
     hap_to_idx = {h: i for i, h in enumerate(sorted_haps)}
     
-    if len(sorted_haps) <= 10:
-        palette = sns.color_palette("tab10", len(sorted_haps))
-    elif len(sorted_haps) <= 20:
-        palette = sns.color_palette("tab20", len(sorted_haps))
-    else:
-        palette = sns.color_palette("husl", len(sorted_haps))
+    if len(sorted_haps) <= 10: palette = sns.color_palette("tab10", len(sorted_haps))
+    elif len(sorted_haps) <= 20: palette = sns.color_palette("tab20", len(sorted_haps))
+    else: palette = sns.color_palette("husl", len(sorted_haps))
         
     num_samples = len(block_painting)
     header_space = 2.0 
     calc_height = (num_samples * row_height_per_sample) + header_space
-    
     if calc_height < 6: calc_height = 6
     if calc_height > 300: calc_height = 300
     
@@ -655,32 +1264,25 @@ def plot_painting(block_painting, output_file=None,
             width = chunk.end - chunk.start
             if width <= 0: continue
             
-            color1 = palette[hap_to_idx[chunk.hap1]]
-            rect1 = mpatches.Rectangle(
-                (chunk.start, y_base), width, y_height/2,
-                facecolor=color1, edgecolor='none'
-            )
-            ax.add_patch(rect1)
+            if chunk.hap1 != -1:
+                color1 = palette[hap_to_idx[chunk.hap1]]
+                rect1 = mpatches.Rectangle((chunk.start, y_base), width, y_height/2, facecolor=color1, edgecolor='none')
+                ax.add_patch(rect1)
             
-            color2 = palette[hap_to_idx[chunk.hap2]]
-            rect2 = mpatches.Rectangle(
-                (chunk.start, y_base + y_height/2), width, y_height/2,
-                facecolor=color2, edgecolor='none'
-            )
-            ax.add_patch(rect2)
+            if chunk.hap2 != -1:
+                color2 = palette[hap_to_idx[chunk.hap2]]
+                rect2 = mpatches.Rectangle((chunk.start, y_base + y_height/2), width, y_height/2, facecolor=color2, edgecolor='none')
+                ax.add_patch(rect2)
             
     ax.set_xlim(block_painting.start_pos, block_painting.end_pos)
     ax.set_ylim(-0.5, len(block_painting) + 0.5)
-    
     ax.set_xlabel("Genomic Position (bp)")
     ax.set_ylabel("Samples")
     ax.set_title(title)
     
     if show_labels:
-        if sample_names and len(sample_names) == len(block_painting):
-            labels = sample_names
-        else:
-            labels = [f"S{s.sample_index}" for s in block_painting]
+        if sample_names and len(sample_names) == len(block_painting): labels = sample_names
+        else: labels = [f"S{s.sample_index}" for s in block_painting]
         ax.set_yticks(np.arange(len(block_painting)) + y_height/2)
         ax.set_yticklabels(labels, fontsize=8)
     else:
@@ -694,7 +1296,6 @@ def plot_painting(block_painting, output_file=None,
     ax.legend(handles=legend_patches, bbox_to_anchor=(1.01, 1), loc='upper left')
     
     plt.tight_layout()
-    
     if output_file:
         dpi = 100 if calc_height > 100 else 150
         plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
