@@ -304,7 +304,7 @@ def discretize_consensus_to_bins(consensus_painting, bin_edges: np.ndarray) -> T
     return id_grid, potential_hom_mask
 
 
-def compute_bin_edges(start_pos: int, end_pos: int, snps_per_bin: int = 150) -> np.ndarray:
+def compute_bin_edges(start_pos: int, end_pos: int, snps_per_bin: int = 100) -> np.ndarray:
     """
     Compute bin edges for a genomic region.
     
@@ -1202,7 +1202,7 @@ def correct_phase_all_contigs(
     pedigree_df: pd.DataFrame,
     sample_names: List[str],
     num_rounds: int = 3,
-    snps_per_bin: int = 150,
+    snps_per_bin: int = 100,
     recomb_rate: float = 5e-8,
     max_diff_fraction: float = 0.02,
     min_diff_sites: int = 2,
@@ -1367,7 +1367,7 @@ def find_hom_to_het_boundaries(hom_mask: np.ndarray) -> List[int]:
     Find all bin indices where a HOM→HET transition occurs.
     
     A HOM→HET boundary at bin k means hom_mask[k-1] is True and hom_mask[k] is False.
-    These are the only points where phase flips are biologically meaningful.
+    These are points where phase flips are biologically meaningful.
     
     Returns:
         List of bin indices where HOM→HET transitions occur
@@ -1377,6 +1377,77 @@ def find_hom_to_het_boundaries(hom_mask: np.ndarray) -> List[int]:
         if hom_mask[k-1] and not hom_mask[k]:
             boundaries.append(k)
     return boundaries
+
+
+def find_double_recomb_boundaries(sample_grid: np.ndarray) -> List[int]:
+    """
+    Find all bin indices where a double recombination occurs (both tracks change).
+    
+    A double recomb at bin k means:
+    - sample_grid[k-1, 0] != sample_grid[k, 0] (track 1 changed)
+    - sample_grid[k-1, 1] != sample_grid[k, 1] (track 2 changed)
+    
+    At these points, phase is ambiguous because flipping assigns the new founders
+    to opposite tracks while preserving the same number of recombinations.
+    
+    Example:
+        Before: track1=[A], track2=[B]
+        After:  track1=[C], track2=[D]
+        
+        Original assignment: A→C on track1, B→D on track2 (2 recombs)
+        Flipped assignment:  A→D on track1, B→C on track2 (still 2 recombs!)
+        
+    So flipping at this boundary is "free" - both are equally valid.
+    
+    Returns:
+        List of bin indices where double recombinations occur
+    """
+    boundaries = []
+    n_bins = sample_grid.shape[0]
+    
+    for k in range(1, n_bins):
+        # Get founder IDs
+        prev_h1, prev_h2 = sample_grid[k-1, 0], sample_grid[k-1, 1]
+        curr_h1, curr_h2 = sample_grid[k, 0], sample_grid[k, 1]
+        
+        # Skip if any is uncertain
+        if prev_h1 == -1 or prev_h2 == -1 or curr_h1 == -1 or curr_h2 == -1:
+            continue
+        
+        # Check if both tracks changed
+        track1_changed = (prev_h1 != curr_h1)
+        track2_changed = (prev_h2 != curr_h2)
+        
+        if track1_changed and track2_changed:
+            boundaries.append(k)
+    
+    return boundaries
+
+
+def find_all_valid_flip_boundaries(
+    sample_grid: np.ndarray,
+    hom_mask: np.ndarray
+) -> List[int]:
+    """
+    Find all valid flip boundaries: HOM→HET transitions OR double recombinations.
+    
+    Phase can be flipped at:
+    1. HOM→HET transitions: before the transition, phase is arbitrary (both tracks same)
+    2. Double recombinations: both tracks change, so swapping destinations is equivalent
+    
+    Note: HOM→HET with double recomb is already covered by case 1 (the HOM part
+    means both tracks were the same, so phase was already arbitrary).
+    
+    Returns:
+        Sorted list of unique bin indices where flips are valid
+    """
+    hom_het_boundaries = find_hom_to_het_boundaries(hom_mask)
+    double_recomb_boundaries = find_double_recomb_boundaries(sample_grid)
+    
+    # Combine and deduplicate
+    all_boundaries = set(hom_het_boundaries) | set(double_recomb_boundaries)
+    
+    return sorted(all_boundaries)
 
 
 def apply_phase_flip_to_grid(
@@ -1627,8 +1698,9 @@ def greedy_phase_refinement_single_sample(
     """
     Greedy phase refinement for a single sample.
     
-    Iteratively tries all singleton and pair flips at HOM→HET boundaries,
-    selecting the best improvement until no improvement is found.
+    Iteratively tries all singleton and pair flips at valid boundaries
+    (HOM→HET transitions AND double recombinations), selecting the best
+    improvement until no improvement is found.
     
     Uses founder equivalence matrix to handle aliasing.
     
@@ -1653,12 +1725,14 @@ def greedy_phase_refinement_single_sample(
     current_grid = sample_grid.copy()
     n_bins = len(hom_mask)
     
-    # Find HOM→HET boundaries
-    boundaries = find_hom_to_het_boundaries(hom_mask)
+    # Find all valid flip boundaries (HOM→HET + double recombs)
+    boundaries = find_all_valid_flip_boundaries(current_grid, hom_mask)
     n_boundaries = len(boundaries)
     
     if verbose:
-        print(f"    Found {n_boundaries} HOM→HET boundaries")
+        hom_het = find_hom_to_het_boundaries(hom_mask)
+        double_recomb = find_double_recomb_boundaries(current_grid)
+        print(f"    Found {len(hom_het)} HOM→HET + {len(double_recomb)} double-recomb = {n_boundaries} total boundaries")
     
     if n_boundaries == 0:
         # No boundaries to flip at
@@ -1680,6 +1754,12 @@ def greedy_phase_refinement_single_sample(
         best_improvement = 0.0
         best_candidate = None
         best_candidate_grid = None
+        
+        # Recompute boundaries after each flip (grid may have changed)
+        boundaries = find_all_valid_flip_boundaries(current_grid, hom_mask)
+        
+        if len(boundaries) == 0:
+            break
         
         # Try all singleton flips (flip from boundary to end)
         for i, b1 in enumerate(boundaries):
@@ -1763,8 +1843,9 @@ def post_process_phase_greedy(
     """
     Post-process corrected paintings using greedy phase refinement.
     
-    For each sample, finds HOM→HET boundaries and tries all singleton/pair flips
-    to minimize total recombinations (parent matching + child transmission).
+    For each sample, finds valid flip boundaries (HOM→HET transitions AND
+    double recombinations) and tries all singleton/pair flips to minimize
+    total recombinations (parent matching + child transmission).
     
     Runs multiple global passes until no sample is refined, since refining one
     sample can create improvement opportunities for related samples.
@@ -1929,7 +2010,7 @@ def post_process_phase_greedy_all_contigs(
     multi_contig_results: Dict,
     pedigree_df: pd.DataFrame,
     sample_names: List[str],
-    snps_per_bin: int = 150,
+    snps_per_bin: int = 100,
     recomb_rate: float = 5e-8,
     mismatch_cost: float = 4.6,
     max_diff_fraction: float = 0.02,
@@ -1940,7 +2021,8 @@ def post_process_phase_greedy_all_contigs(
     Apply greedy phase refinement to all contigs.
     
     This is a post-processing step that should be run after correct_phase_all_contigs.
-    It refines phase by trying singleton and pair flips at HOM→HET boundaries.
+    It refines phase by trying singleton and pair flips at valid boundaries
+    (HOM→HET transitions AND double recombinations).
     
     Uses founder equivalence to handle aliasing - two founders that are nearly
     identical in a bin are treated as equivalent for emission scoring.

@@ -1,16 +1,19 @@
 """
-paint_samples.py
+paint_samples.py (BINNED VERSION)
 
 A robust module for reconstructing diploid haplotypes (painting) from probabilistic 
 genotype data using a Tolerance-based Viterbi algorithm.
 
+BINNED VERSION: Aggregates SNP-level emissions into bins (~100 SNPs/bin) to reduce
+memory usage by ~100x while preserving accuracy.
+
 Key Features:
-1.  **Tolerance Viterbi:** Finds ALL valid paths within a log-likelihood margin.
-2.  **Topological Deduplication:** Collapses paths that are identical sequences of states.
-3.  **Beam-Capped Traceback:** Prevents combinatorial explosion in ambiguous regions.
-4.  **Double-Recomb Discount:** Prefers simultaneous switches to prevent 2^N path explosion.
-5.  **Allele-Aware Clustering:** Decomposes diploid paths into haploid tracks and clusters them.
-6.  **Phased Track Extraction:** Converts diploid chunks into independent haploid tracks.
+1.  **Binned Emissions:** Sums per-SNP log-likelihoods into bins for memory efficiency.
+2.  **Tolerance Viterbi:** Finds ALL valid paths within a log-likelihood margin.
+3.  **Topological Deduplication:** Collapses paths that are identical sequences of states.
+4.  **Beam-Capped Traceback:** Prevents combinatorial explosion in ambiguous regions.
+5.  **Double-Recomb Discount:** Prefers simultaneous switches to prevent 2^N path explosion.
+6.  **Allele-Aware Clustering:** Decomposes diploid paths into haploid tracks and clusters them.
 7.  **Visualization:** Plots individual fuzzy paths AND whole-population consensus.
 8.  **Parallel Execution:** Uses multiprocessing and tqdm.
 
@@ -57,7 +60,7 @@ except ImportError:
     def set_num_threads(n): pass
 
 # =============================================================================
-# 1. DATA STRUCTURES (unchanged)
+# 1. DATA STRUCTURES
 # =============================================================================
 
 class PaintedChunk(NamedTuple):
@@ -161,7 +164,7 @@ class SampleConsensusPainting:
         return f"<SampleConsensus ID {self.sample_index}: {len(self.chunks)} chunks, Weight {self.weight:.2f}>"
 
 # =============================================================================
-# 2. NUMBA KERNELS (unchanged)
+# 2. NUMBA KERNELS
 # =============================================================================
 
 @njit(fastmath=True)
@@ -197,7 +200,7 @@ def check_allelic_match(dense_haps, positions, h1, h2, start, end, mismatch_thre
     return mismatch_rate <= mismatch_threshold
 
 # =============================================================================
-# 3. CONTAINER & CLUSTERING LOGIC (unchanged)
+# 3. CONTAINER & CLUSTERING LOGIC
 # =============================================================================
 
 class SampleTolerancePainting:
@@ -264,16 +267,6 @@ class SampleTolerancePainting:
 
     def generate_clustered_consensus(self, similarity_threshold=0.999, founder_data=None,
                                       collapse_ibs=False) -> List[SampleConsensusPainting]:
-        """
-        Generate clustered consensus paintings.
-        
-        Args:
-            similarity_threshold: Threshold for clustering paths together
-            founder_data: (dense_haps, positions) for IBS checking during clustering
-            collapse_ibs: If True, collapse IBS-equivalent founders in final consensus
-                          (hides uncertainty). If False (default), keep all founders 
-                          to show full uncertainty with split bars.
-        """
         if not self.paths: return []
         
         clusters = []
@@ -281,8 +274,6 @@ class SampleTolerancePainting:
             assigned = False
             for cluster_data in clusters:
                 rep_path, _ = cluster_data[0]
-                # NOTE: We still use IBS for CLUSTERING (grouping similar paths)
-                # but not for the final DISPLAY of uncertainty
                 score, should_flip = self._calculate_haploid_similarity(rep_path, p, founder_data)
                 
                 if score >= similarity_threshold:
@@ -304,7 +295,6 @@ class SampleTolerancePainting:
                 else:
                     aligned_paths.append(p)
             
-            # Pass collapse_ibs to control whether to hide IBS-equivalent uncertainty
             cons_chunks = self._merge_aligned_paths(aligned_paths, founder_data=founder_data,
                                                      collapse_ibs=collapse_ibs)
             weight = len(aligned_paths) / total_paths
@@ -318,15 +308,6 @@ class SampleTolerancePainting:
 
     def _merge_aligned_paths(self, paths: List[SamplePainting], founder_data=None,
                               collapse_ibs=False) -> List[ConsensusChunk]:
-        """
-        Merge aligned paths into consensus chunks.
-        
-        Args:
-            paths: List of aligned SamplePainting objects
-            founder_data: (dense_haps, positions) for IBS checking
-            collapse_ibs: If True, collapse IBS-equivalent founders to one representative.
-                          If False (default), keep all founders to show full uncertainty.
-        """
         breakpoints = set()
         for p in paths:
             for c in p.chunks:
@@ -348,7 +329,6 @@ class SampleTolerancePainting:
                         t1_options.add(c.hap1); t2_options.add(c.hap2)
                         break
             
-            # Only collapse IBS-equivalent founders if explicitly requested
             if collapse_ibs and dense_haps is not None:
                 def collapse_set(id_set):
                     if len(id_set) <= 1: return id_set
@@ -402,8 +382,6 @@ class SampleTolerancePainting:
             is_t1_uncertain = len(t1_ids) > 1
             is_t2_uncertain = len(t2_ids) > 1
             
-            # For best representative, we DO want to collapse IBS-equivalent
-            # because we're picking a single concrete path
             if is_t1_uncertain and dense_haps is not None:
                 ref = t1_ids[0]; all_match = True
                 for other in t1_ids[1:]:
@@ -460,7 +438,7 @@ class BlockPainting:
     def __iter__(self): return iter(self.samples)
 
 # =============================================================================
-# 4. HELPER: DENSE MATRIX CONVERSION (unchanged)
+# 4. HELPER: DENSE MATRIX CONVERSION
 # =============================================================================
 
 def founder_block_to_dense(block_result):
@@ -480,75 +458,136 @@ def founder_block_to_dense(block_result):
     return dense_haps, positions
 
 # =============================================================================
-# 5. EMISSION CALCULATOR (unchanged)
+# 5. BINNED EMISSION CALCULATOR (NEW - MEMORY EFFICIENT)
 # =============================================================================
 
-def calculate_batch_emissions(sample_probs_matrix, hap_dict, robustness_epsilon=1e-3):
+def calculate_binned_emissions(sample_probs_matrix, hap_dict, positions, 
+                               snps_per_bin=100, robustness_epsilon=1e-2):
     """
-    Calculate emission log-likelihoods using PROBABILISTIC haplotype values.
+    Calculate emission log-likelihoods aggregated into bins.
+    
+    MEMORY EFFICIENT: Instead of (n_samples, K, n_sites), produces (n_samples, K, n_bins)
+    by summing log-likelihoods within each bin. For 50,000 SNPs with 100 SNPs/bin,
+    this reduces memory by ~100x.
+    
+    Args:
+        sample_probs_matrix: (n_samples, n_sites, 3) genotype probabilities
+        hap_dict: Dict mapping founder ID -> (n_sites, 2) haplotype probabilities
+        positions: (n_sites,) array of SNP positions
+        snps_per_bin: Number of SNPs to aggregate per bin
+        robustness_epsilon: Numerical stability term
+    
+    Returns:
+        binned_ll: (n_samples, K, n_bins) aggregated log-likelihoods
+        state_defs: (K, 2) state definitions
+        hap_keys: List of founder IDs
+        bin_centers: (n_bins,) physical positions of bin centers
+        bin_edges: (n_bins + 1,) bin boundary positions
     """
     hap_keys = sorted(list(hap_dict.keys()))
     num_haps = len(hap_keys)
     num_samples, num_sites, _ = sample_probs_matrix.shape
     
+    # Create state definitions
     idx_i, idx_j = np.unravel_index(np.arange(num_haps**2), (num_haps, num_haps))
     state_defs = np.stack([idx_i, idx_j], axis=1).astype(np.int32)
+    K = num_haps ** 2
     
+    if not hap_keys or num_sites == 0:
+        return np.zeros((num_samples, K, 0), dtype=np.float64), state_defs, hap_keys, np.array([]), np.array([])
+    
+    # Compute bin structure
+    n_bins = max(1, num_sites // snps_per_bin)
+    if n_bins == 0:
+        n_bins = 1
+    
+    # Split SNP indices into approximately equal bins
+    bin_snp_indices = np.array_split(np.arange(num_sites), n_bins)
+    
+    # Compute bin centers (average physical position of SNPs in each bin)
+    bin_centers = np.array([positions[idx].mean() for idx in bin_snp_indices], dtype=np.float64)
+    
+    # Compute bin edges for chunk reconstruction
+    bin_edges = np.zeros(n_bins + 1, dtype=np.int64)
+    bin_edges[0] = positions[0]
+    for i in range(n_bins - 1):
+        # Edge is midpoint between last SNP of this bin and first SNP of next bin
+        last_pos = positions[bin_snp_indices[i][-1]]
+        next_first = positions[bin_snp_indices[i+1][0]]
+        bin_edges[i+1] = (last_pos + next_first) // 2
+    bin_edges[-1] = positions[-1] + 1  # Final edge past last SNP
+    
+    # Pre-compute haplotype tensors
     hap_list = [hap_dict[k] for k in hap_keys]
-    if not hap_list: 
-        return np.zeros((num_samples, 0, num_sites)), state_defs, hap_keys
+    haps_tensor = np.array(hap_list)  # (num_haps, num_sites, 2)
+    h0 = haps_tensor[:, :, 0]  # (num_haps, num_sites) - prob of allele 0
+    h1 = haps_tensor[:, :, 1]  # (num_haps, num_sites) - prob of allele 1
     
-    haps_tensor = np.array(hap_list)
-    h0 = haps_tensor[:, :, 0]
-    h1 = haps_tensor[:, :, 1]
+    # Compute genotype probabilities for all state combinations at all sites
+    # c00[i,j,s] = P(genotype=0|state=(i,j)) at site s = h0[i,s] * h0[j,s]
+    c00 = h0[:, None, :] * h0[None, :, :]  # (num_haps, num_haps, num_sites)
+    c11 = h1[:, None, :] * h1[None, :, :]  # P(genotype=2)
+    c01 = (h0[:, None, :] * h1[None, :, :]) + (h1[:, None, :] * h0[None, :, :])  # P(genotype=1)
     
-    c00 = h0[:, None, :] * h0[None, :, :]
-    c11 = h1[:, None, :] * h1[None, :, :]
-    c01 = (h0[:, None, :] * h1[None, :, :]) + (h1[:, None, :] * h0[None, :, :])
+    # Reshape to (K, num_sites)
+    combos_0 = c00.reshape(K, -1)
+    combos_1 = c01.reshape(K, -1)
+    combos_2 = c11.reshape(K, -1)
     
-    combos_0 = c00.reshape(num_haps**2, -1)
-    combos_1 = c01.reshape(num_haps**2, -1)
-    combos_2 = c11.reshape(num_haps**2, -1)
+    # Allocate binned emissions
+    binned_ll = np.zeros((num_samples, K, n_bins), dtype=np.float64)
     
-    s0 = sample_probs_matrix[:, :, 0][:, np.newaxis, :]
-    s1 = sample_probs_matrix[:, :, 1][:, np.newaxis, :]
-    s2 = sample_probs_matrix[:, :, 2][:, np.newaxis, :]
-    
-    model_probs = (s0 * combos_0[np.newaxis, :, :]) + \
-                  (s1 * combos_1[np.newaxis, :, :]) + \
-                  (s2 * combos_2[np.newaxis, :, :])
-    
+    # Process each bin - aggregate SNP emissions
     uniform_prob = 1.0 / 3.0
-    final_probs = (model_probs * (1.0 - robustness_epsilon)) + (robustness_epsilon * uniform_prob)
     
-    min_prob = 1e-300
-    final_probs[final_probs < min_prob] = min_prob
-    ll_matrix = np.log(final_probs)
-    ll_matrix = np.maximum(ll_matrix, -50.0)
+    for bin_idx, snp_indices in enumerate(bin_snp_indices):
+        if len(snp_indices) == 0:
+            continue
+            
+        # Extract sample probabilities for SNPs in this bin
+        s0 = sample_probs_matrix[:, snp_indices, 0]  # (n_samples, n_snps_in_bin)
+        s1 = sample_probs_matrix[:, snp_indices, 1]
+        s2 = sample_probs_matrix[:, snp_indices, 2]
+        
+        # Extract haplotype combinations for this bin
+        c0_bin = combos_0[:, snp_indices]  # (K, n_snps_in_bin)
+        c1_bin = combos_1[:, snp_indices]
+        c2_bin = combos_2[:, snp_indices]
+        
+        # Compute model probabilities: P(observed genotype | state)
+        # Shape: (n_samples, K, n_snps_in_bin)
+        model_probs = (s0[:, np.newaxis, :] * c0_bin[np.newaxis, :, :] +
+                       s1[:, np.newaxis, :] * c1_bin[np.newaxis, :, :] +
+                       s2[:, np.newaxis, :] * c2_bin[np.newaxis, :, :])
+        
+        # Apply robustness epsilon
+        final_probs = model_probs * (1.0 - robustness_epsilon) + robustness_epsilon * uniform_prob
+        
+        # Compute log-likelihoods
+        final_probs = np.maximum(final_probs, 1e-300)
+        ll_snps = np.log(final_probs)
+        ll_snps = np.maximum(ll_snps, -50.0)
+        
+        # Sum log-likelihoods within bin
+        binned_ll[:, :, bin_idx] = ll_snps.sum(axis=2)
     
-    return ll_matrix, state_defs, hap_keys
+    return binned_ll, state_defs, hap_keys, bin_centers, bin_edges
 
 # =============================================================================
-# 6. TOLERANCE VITERBI KERNELS (WITH DOUBLE-RECOMB DISCOUNT)
+# 6. TOLERANCE VITERBI KERNELS (BINNED VERSION)
 # =============================================================================
 
 @njit(parallel=True, fastmath=True)
-def run_forward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definitions, 
-                              n_haps, switch_penalty, double_recomb_factor=1.5):
+def run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_definitions, 
+                                     n_haps, switch_penalty, double_recomb_factor=1.5):
     """
-    Forward pass of max-sum Viterbi algorithm.
+    Forward pass of max-sum Viterbi algorithm on BINNED data.
     
-    IMPORTANT: Uses float64 to prevent precision loss over long chromosomes.
-    
-    Args:
-        double_recomb_factor: Multiplier for double-switch cost (default 1.5).
-            - 2.0 = standard (double switch costs 2× single switch)
-            - 1.5 = discounted (prefers simultaneous switches, prevents path explosion)
-            - 1.0 = no extra penalty for double switch
+    Uses physical distance between bin centers for transition probabilities.
     """
-    n_samples, K, n_sites = ll_tensor.shape
+    n_samples, K, n_bins = ll_tensor.shape
     
-    alpha = np.full((n_samples, n_sites, K), -np.inf, dtype=np.float64)
+    alpha = np.full((n_samples, n_bins, K), -np.inf, dtype=np.float64)
     
     if n_haps > 1: 
         log_N_minus_1 = math.log(float(n_haps - 1))
@@ -559,8 +598,9 @@ def run_forward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definition
         for k in range(K): 
             alpha[s, 0, k] = ll_tensor[s, k, 0]
 
-        for i in range(1, n_sites):
-            dist_bp = positions[i] - positions[i-1]
+        for i in range(1, n_bins):
+            # Distance between bin centers
+            dist_bp = bin_centers[i] - bin_centers[i-1]
             if dist_bp < 1: dist_bp = 1
             theta = float(dist_bp) * recomb_rate
             if theta > 0.5: theta = 0.5
@@ -571,7 +611,7 @@ def run_forward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definition
             
             cost_0 = 2.0 * log_stay                                    # Neither switches
             cost_1 = log_switch + log_stay - log_N_minus_1             # One switches
-            cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # Both switch (DISCOUNTED)
+            cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # Both switch
             
             for k_curr in range(K):
                 h1_curr = state_definitions[k_curr, 0]
@@ -598,16 +638,14 @@ def run_forward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definition
     return alpha
 
 @njit(parallel=True, fastmath=True)
-def run_backward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definitions, 
-                               n_haps, switch_penalty, double_recomb_factor=1.5):
+def run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_definitions, 
+                                      n_haps, switch_penalty, double_recomb_factor=1.5):
     """
-    Backward pass of max-sum Viterbi algorithm.
-    
-    IMPORTANT: Uses float64 to prevent precision loss over long chromosomes.
+    Backward pass of max-sum Viterbi algorithm on BINNED data.
     """
-    n_samples, K, n_sites = ll_tensor.shape
+    n_samples, K, n_bins = ll_tensor.shape
     
-    beta = np.full((n_samples, n_sites, K), -np.inf, dtype=np.float64)
+    beta = np.full((n_samples, n_bins, K), -np.inf, dtype=np.float64)
     
     if n_haps > 1: 
         log_N_minus_1 = math.log(float(n_haps - 1))
@@ -616,10 +654,10 @@ def run_backward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definitio
 
     for s in prange(n_samples):
         for k in range(K): 
-            beta[s, n_sites-1, k] = 0.0
+            beta[s, n_bins-1, k] = 0.0
 
-        for i in range(n_sites - 2, -1, -1):
-            dist_bp = positions[i+1] - positions[i]
+        for i in range(n_bins - 2, -1, -1):
+            dist_bp = bin_centers[i+1] - bin_centers[i]
             if dist_bp < 1: dist_bp = 1
             theta = float(dist_bp) * recomb_rate
             if theta > 0.5: theta = 0.5
@@ -630,7 +668,7 @@ def run_backward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definitio
             
             cost_0 = 2.0 * log_stay
             cost_1 = log_switch + log_stay - log_N_minus_1
-            cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # DISCOUNTED
+            cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1
             
             for k_curr in range(K): 
                 h1_curr = state_definitions[k_curr, 0]
@@ -657,26 +695,26 @@ def run_backward_pass_max_sum(ll_tensor, positions, recomb_rate, state_definitio
     return beta
 
 # =============================================================================
-# 7. OPTIMIZED PRE-COMPUTATION KERNEL (WITH DOUBLE-RECOMB DISCOUNT)
+# 7. PRE-COMPUTATION KERNEL (BINNED VERSION)
 # =============================================================================
 
 @njit(parallel=True, fastmath=True)
-def precompute_valid_transitions(alpha, beta, ll_tensor, positions, recomb_rate, 
-                                  state_definitions, n_haps, switch_penalty, 
-                                  min_total_score, double_recomb_factor=1.5):
+def precompute_valid_transitions_binned(alpha, beta, ll_tensor, bin_centers, recomb_rate, 
+                                         state_definitions, n_haps, switch_penalty, 
+                                         min_total_score, double_recomb_factor=1.5):
     """
-    Pre-compute which transitions are valid (within margin of optimal).
+    Pre-compute which transitions are valid (within margin of optimal) - BINNED version.
     """
-    n_sites, K = alpha.shape
-    valid_edges = np.zeros((n_sites, K, K), dtype=np.bool_)
+    n_bins, K = alpha.shape
+    valid_edges = np.zeros((n_bins, K, K), dtype=np.bool_)
     
     if n_haps > 1: 
         log_N_minus_1 = math.log(float(n_haps - 1))
     else: 
         log_N_minus_1 = 0.0
     
-    for t in prange(1, n_sites):
-        dist_bp = positions[t] - positions[t-1]
+    for t in prange(1, n_bins):
+        dist_bp = bin_centers[t] - bin_centers[t-1]
         if dist_bp < 1: dist_bp = 1
         theta = float(dist_bp) * recomb_rate
         if theta > 0.5: theta = 0.5
@@ -687,7 +725,7 @@ def precompute_valid_transitions(alpha, beta, ll_tensor, positions, recomb_rate,
         
         cost_0 = 2.0 * log_stay
         cost_1 = log_switch + log_stay - log_N_minus_1
-        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # DISCOUNTED
+        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1
         
         for k_curr in range(K):
             if (alpha[t, k_curr] + beta[t, k_curr]) < min_total_score: 
@@ -719,7 +757,7 @@ def precompute_valid_transitions(alpha, beta, ll_tensor, positions, recomb_rate,
     return valid_edges
 
 # =============================================================================
-# 8. DEDUPLICATED TRACEBACK (WITH DOUBLE-RECOMB DISCOUNT)
+# 8. DEDUPLICATED TRACEBACK (BINNED VERSION)
 # =============================================================================
 
 class PathState:
@@ -736,26 +774,28 @@ class PathState:
             sig.append((h1, h2))
         return tuple(sig)
 
-def reconstruct_single_best_path(alpha, beta, ll_tensor, positions, recomb_rate, 
-                                  state_definitions, n_haps, switch_penalty, hap_keys,
-                                  double_recomb_factor=1.5):
-    """Fallback: reconstruct the single best path via standard Viterbi traceback."""
-    n_sites, K = alpha.shape
+def reconstruct_single_best_path_binned(alpha, beta, ll_tensor, bin_centers, bin_edges,
+                                         recomb_rate, state_definitions, n_haps, 
+                                         switch_penalty, hap_keys, double_recomb_factor=1.5):
+    """Fallback: reconstruct the single best path via standard Viterbi traceback - BINNED."""
+    n_bins, K = alpha.shape
     if n_haps > 1: 
         log_N_minus_1 = math.log(float(n_haps - 1))
     else: 
         log_N_minus_1 = 0.0
     
-    curr_k = np.argmax(alpha[n_sites-1])
+    curr_k = np.argmax(alpha[n_bins-1])
     h1_idx, h2_idx = state_definitions[curr_k]
     t1, t2 = hap_keys[h1_idx], hap_keys[h2_idx]
-    chunks = [PaintedChunk(start=int(positions[n_sites-1]), end=int(positions[n_sites-1]), hap1=t1, hap2=t2)]
     
-    for t in range(n_sites - 1, 0, -1):
+    # Use bin edges for chunk positions
+    chunks = [PaintedChunk(start=int(bin_edges[n_bins-1]), end=int(bin_edges[n_bins]), hap1=t1, hap2=t2)]
+    
+    for t in range(n_bins - 1, 0, -1):
         prev_t = t - 1
         curr_h1, curr_h2 = state_definitions[curr_k]
         
-        dist_bp = positions[t] - positions[prev_t]
+        dist_bp = bin_centers[t] - bin_centers[prev_t]
         if dist_bp < 1: dist_bp = 1
         theta = float(dist_bp) * recomb_rate
         if theta > 0.5: theta = 0.5
@@ -766,7 +806,7 @@ def reconstruct_single_best_path(alpha, beta, ll_tensor, positions, recomb_rate,
         
         cost_0 = 2.0 * log_stay
         cost_1 = log_switch + log_stay - log_N_minus_1
-        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # DISCOUNTED
+        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1
         
         best_prev = -1
         best_score = -np.inf
@@ -794,38 +834,38 @@ def reconstruct_single_best_path(alpha, beta, ll_tensor, positions, recomb_rate,
         elif (pt1 == old_chunk.hap2 and pt2 == old_chunk.hap1): is_extension = True
         
         if is_extension:
-            chunks[0] = PaintedChunk(start=int(positions[prev_t]), end=old_chunk.end, 
+            chunks[0] = PaintedChunk(start=int(bin_edges[prev_t]), end=old_chunk.end, 
                                      hap1=old_chunk.hap1, hap2=old_chunk.hap2)
         else:
-            chunks.insert(0, PaintedChunk(start=int(positions[prev_t]), end=int(positions[t]), 
+            chunks.insert(0, PaintedChunk(start=int(bin_edges[prev_t]), end=int(bin_edges[t]), 
                                           hap1=pt1, hap2=pt2))
             
     return [SamplePainting(0, chunks)]
 
-def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rate, 
-                                    state_definitions, n_haps, switch_penalty, 
-                                    total_margin, hap_keys, max_active_paths=2000,
-                                    double_recomb_factor=1.5):
+def reconstruct_deduplicated_paths_binned(alpha, beta, ll_tensor, bin_centers, bin_edges,
+                                           recomb_rate, state_definitions, n_haps, 
+                                           switch_penalty, total_margin, hap_keys, 
+                                           max_active_paths=2000, double_recomb_factor=1.5):
     """
-    Reconstruct all paths within margin of optimal using beam-capped traceback.
+    Reconstruct all paths within margin of optimal using beam-capped traceback - BINNED.
     """
-    n_sites, K = alpha.shape
-    global_max = np.max(alpha[n_sites-1])
+    n_bins, K = alpha.shape
+    global_max = np.max(alpha[n_bins-1])
     min_total_score = global_max - total_margin - 1e-5
     
-    valid_edges = precompute_valid_transitions(
-        alpha, beta, ll_tensor, positions, recomb_rate, 
+    valid_edges = precompute_valid_transitions_binned(
+        alpha, beta, ll_tensor, bin_centers, recomb_rate, 
         state_definitions, n_haps, switch_penalty, min_total_score,
         double_recomb_factor
     )
     
     active_paths = defaultdict(dict)
-    valid_ends = np.where((alpha[n_sites-1] + beta[n_sites-1]) >= min_total_score)[0]
+    valid_ends = np.where((alpha[n_bins-1] + beta[n_bins-1]) >= min_total_score)[0]
     
     for k in valid_ends:
         h1_idx, h2_idx = state_definitions[k]
         t1, t2 = hap_keys[h1_idx], hap_keys[h2_idx]
-        initial_chunk = PaintedChunk(start=int(positions[n_sites-1]), end=int(positions[n_sites-1]), 
+        initial_chunk = PaintedChunk(start=int(bin_edges[n_bins-1]), end=int(bin_edges[n_bins]), 
                                      hap1=t1, hap2=t2)
         p = PathState(k, [initial_chunk], 0.0)
         active_paths[k][p.topology_key] = p
@@ -835,7 +875,7 @@ def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rat
     else: 
         log_N_minus_1 = 0.0
 
-    for t in range(n_sites - 1, 0, -1):
+    for t in range(n_bins - 1, 0, -1):
         prev_t = t - 1
         
         rows, cols = np.where(valid_edges[t])
@@ -843,7 +883,7 @@ def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rat
         for r, c in zip(rows, cols):
             valid_prev_map[c].append(r)
             
-        dist_bp = positions[t] - positions[prev_t]
+        dist_bp = bin_centers[t] - bin_centers[prev_t]
         if dist_bp < 1: dist_bp = 1
         theta = float(dist_bp) * recomb_rate
         if theta > 0.5: theta = 0.5
@@ -854,7 +894,7 @@ def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rat
         
         cost_0 = 2.0 * log_stay
         cost_1 = log_switch + log_stay - log_N_minus_1
-        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1  # DISCOUNTED
+        cost_2 = double_recomb_factor * log_switch - 2.0 * log_N_minus_1
         
         next_active_paths = defaultdict(dict)
         
@@ -890,7 +930,7 @@ def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rat
                     elif (pt1 == old_chunk.hap2 and pt2 == old_chunk.hap1): is_extension = True
                     
                     if is_extension:
-                        updated_chunk = PaintedChunk(start=int(positions[prev_t]), end=old_chunk.end, 
+                        updated_chunk = PaintedChunk(start=int(bin_edges[prev_t]), end=old_chunk.end, 
                                                      hap1=old_chunk.hap1, hap2=old_chunk.hap2)
                         new_chunks[0] = updated_chunk
                         new_topo_key = topo_key
@@ -899,7 +939,7 @@ def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rat
                         d_cross = (0 if pt1 == old_chunk.hap2 else 1) + (0 if pt2 == old_chunk.hap1 else 1)
                         final_h1, final_h2 = (pt1, pt2) if d_direct <= d_cross else (pt2, pt1)
                         
-                        new_chunk = PaintedChunk(start=int(positions[prev_t]), end=int(positions[t]), 
+                        new_chunk = PaintedChunk(start=int(bin_edges[prev_t]), end=int(bin_edges[t]), 
                                                  hap1=final_h1, hap2=final_h2)
                         new_chunks.insert(0, new_chunk)
                         h1n, h2n = sorted((final_h1, final_h2))
@@ -936,9 +976,9 @@ def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rat
             all_paths_flat.append(path_obj)
             
     if not all_paths_flat:
-        return reconstruct_single_best_path(alpha, beta, ll_tensor, positions, recomb_rate, 
-                                            state_definitions, n_haps, switch_penalty, hap_keys,
-                                            double_recomb_factor)
+        return reconstruct_single_best_path_binned(alpha, beta, ll_tensor, bin_centers, bin_edges,
+                                                    recomb_rate, state_definitions, n_haps, 
+                                                    switch_penalty, hap_keys, double_recomb_factor)
 
     SHORT_THRESH = 50_000
     def get_parsimony_score(p_obj):
@@ -964,13 +1004,13 @@ def reconstruct_deduplicated_paths(alpha, beta, ll_tensor, positions, recomb_rat
     return final_results
 
 # =============================================================================
-# 9. MULTIPROCESSING DRIVER (WITH DOUBLE-RECOMB DISCOUNT)
+# 9. MULTIPROCESSING DRIVER (BINNED VERSION)
 # =============================================================================
 
-def _worker_paint_tolerance_batch(args):
-    """Worker function for parallel painting."""
+def _worker_paint_tolerance_batch_binned(args):
+    """Worker function for parallel painting - BINNED version."""
     indices, sample_probs_slice, block_result, params = args
-    positions = block_result.positions
+    positions = np.array(block_result.positions, dtype=np.int64)
     hap_dict = block_result.haplotypes
     recomb_rate = params['recomb_rate']
     switch_penalty = params['switch_penalty']
@@ -978,27 +1018,40 @@ def _worker_paint_tolerance_batch(args):
     total_margin = params['total_margin']
     founder_data = params['founder_data']
     max_active_paths = params.get('max_active_paths', 2000)
-    double_recomb_factor = params.get('double_recomb_factor', 1.5)  # NEW PARAMETER
+    double_recomb_factor = params.get('double_recomb_factor', 1.5)
+    snps_per_bin = params.get('snps_per_bin', 100)
     
-    ll_tensor, state_defs, hap_keys = calculate_batch_emissions(
-        sample_probs_slice, hap_dict, robustness_epsilon=robustness_epsilon
+    # Calculate BINNED emissions
+    ll_tensor, state_defs, hap_keys, bin_centers, bin_edges = calculate_binned_emissions(
+        sample_probs_slice, hap_dict, positions,
+        snps_per_bin=snps_per_bin,
+        robustness_epsilon=robustness_epsilon
     )
     num_haps = len(hap_keys)
+    n_bins = len(bin_centers)
+    
+    if n_bins == 0:
+        # No bins - return empty results
+        results = []
+        for global_idx in indices:
+            sample_obj = SampleTolerancePainting(global_idx, [])
+            results.append(sample_obj)
+        return results
     
     if HAS_NUMBA: 
         set_num_threads(1)
         
-    # Pass double_recomb_factor to forward/backward passes
-    alpha = run_forward_pass_max_sum(ll_tensor, positions, recomb_rate, state_defs, 
-                                      num_haps, float(switch_penalty), double_recomb_factor)
-    beta = run_backward_pass_max_sum(ll_tensor, positions, recomb_rate, state_defs, 
-                                      num_haps, float(switch_penalty), double_recomb_factor)
+    # Run forward/backward on BINNED data
+    alpha = run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_defs, 
+                                             num_haps, float(switch_penalty), double_recomb_factor)
+    beta = run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_defs, 
+                                             num_haps, float(switch_penalty), double_recomb_factor)
     
     results = []
     for i, global_idx in enumerate(indices):
-        valid_paintings = reconstruct_deduplicated_paths(
-            alpha[i], beta[i], ll_tensor[i], positions, recomb_rate, 
-            state_defs, num_haps, switch_penalty, total_margin, hap_keys,
+        valid_paintings = reconstruct_deduplicated_paths_binned(
+            alpha[i], beta[i], ll_tensor[i], bin_centers, bin_edges,
+            recomb_rate, state_defs, num_haps, switch_penalty, total_margin, hap_keys,
             max_active_paths=max_active_paths,
             double_recomb_factor=double_recomb_factor
         )
@@ -1014,11 +1067,14 @@ def _worker_paint_tolerance_batch(args):
 
 def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites, 
                             recomb_rate=1e-8, switch_penalty=10.0,
-                            robustness_epsilon=1e-3, absolute_margin=5.0,
+                            robustness_epsilon=1e-2, absolute_margin=5.0,
                             margin_per_snp=0.0, batch_size=10, num_processes=16,
-                            max_active_paths=2000, double_recomb_factor=1.5):
+                            max_active_paths=2000, double_recomb_factor=1.5,
+                            snps_per_bin=100):
     """
     Paint samples using tolerance Viterbi to find all paths within margin of optimal.
+    
+    BINNED VERSION: Aggregates SNP-level emissions into bins for ~100x memory reduction.
     
     Args:
         block_result: BlockResult with positions and haplotypes dict
@@ -1032,17 +1088,18 @@ def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites,
         batch_size: Samples per worker batch
         num_processes: Number of parallel workers
         max_active_paths: Beam width for traceback
-        double_recomb_factor: Multiplier for double-switch cost (default 1.5).
-            - 2.0 = standard (double switch costs 2× single switch)
-            - 1.5 = discounted (prefers simultaneous switches, prevents path explosion)
-            - 1.0 = no extra penalty for double switch
+        double_recomb_factor: Multiplier for double-switch cost (default 1.5)
+        snps_per_bin: Number of SNPs to aggregate per bin (default 100)
         
     Returns:
         BlockTolerancePainting with all samples' tolerance results
     """
     positions = block_result.positions
     n_sites_block = len(positions)
-    total_margin = absolute_margin + (margin_per_snp * n_sites_block)
+    
+    # Margin is now per-bin, not per-SNP
+    n_bins = max(1, n_sites_block // snps_per_bin)
+    total_margin = absolute_margin + (margin_per_snp * n_bins)
     
     dense_haps, dense_pos = founder_block_to_dense(block_result)
     founder_data = (dense_haps, dense_pos)
@@ -1050,8 +1107,8 @@ def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites,
     block_samples_data = analysis_utils.get_sample_data_at_sites_multiple(sample_probs_matrix, sample_sites, positions)
     num_samples = block_samples_data.shape[0]
     
-    print(f"Tolerance Painting {num_samples} samples (Margin={total_margin:.2f}, Cap={max_active_paths}, "
-          f"DoubleRecombFactor={double_recomb_factor}) using {num_processes} workers...")
+    print(f"Tolerance Painting (BINNED) {num_samples} samples ({n_sites_block} SNPs → {n_bins} bins, "
+          f"Margin={total_margin:.2f}, Cap={max_active_paths}) using {num_processes} workers...")
     
     tasks = []
     params = {
@@ -1061,7 +1118,8 @@ def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites,
         'total_margin': total_margin,
         'founder_data': founder_data,
         'max_active_paths': max_active_paths,
-        'double_recomb_factor': double_recomb_factor,  # NEW PARAMETER
+        'double_recomb_factor': double_recomb_factor,
+        'snps_per_bin': snps_per_bin,
     }
     
     for start_idx in range(0, num_samples, batch_size):
@@ -1072,7 +1130,7 @@ def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites,
         
     all_sample_paintings = []
     with Pool(num_processes) as pool:
-        for batch_result in tqdm(pool.imap(_worker_paint_tolerance_batch, tasks), total=len(tasks)):
+        for batch_result in tqdm(pool.imap(_worker_paint_tolerance_batch_binned, tasks), total=len(tasks)):
             all_sample_paintings.extend(batch_result)
             
     all_sample_paintings.sort(key=lambda x: x.sample_index)
@@ -1080,7 +1138,7 @@ def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites,
     return BlockTolerancePainting(range_tuple, all_sample_paintings)
 
 # =============================================================================
-# 10. VISUALIZATIONS
+# 10. VISUALIZATIONS (unchanged)
 # =============================================================================
 
 def plot_tolerance_graph_topology(block_painting, sample_idx=0, output_file=None):
