@@ -55,12 +55,12 @@ vcf_path = "./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz"
 # Define the regions you want to use for inference.
 # Each entry requires a unique name, the VCF contig name, and the block range.
 regions_config = [
-    {"contig": "chr1", "start": 0, "end": 2000},
-    {"contig": "chr2", "start": 0, "end": 2000},
-    {"contig": "chr3", "start": 0, "end": 2000},
-    {"contig": "chr4", "start": 0, "end": 2000},
-    {"contig": "chr5", "start": 0, "end": 2000},
-    {"contig": "chr6", "start": 0, "end": 2000}]
+    {"contig": "chr1", "start": 0, "end": 600},
+    {"contig": "chr2", "start": 0, "end": 600},
+    {"contig": "chr3", "start": 0, "end": 600},
+    {"contig": "chr4", "start": 0, "end": 600},
+    {"contig": "chr5", "start": 0, "end": 600},
+    {"contig": "chr6", "start": 0, "end": 600}]
 
 block_size = 100000
 shift_size = 50000
@@ -115,6 +115,7 @@ for region in regions_config:
 
 print(f"\nAll regions processed in {time.time() - total_start:.2f}s")
 #%%
+start = time.time()
 # Create a specific folder for simulation outputs
 output_dir = "results_simulation"
 os.makedirs(output_dir, exist_ok=True)
@@ -137,20 +138,37 @@ for r_name, data in multi_contig_results.items():
     sites_list.append(sites)
     region_keys.append(r_name)
 
-# 2. Run Multi-Contig Simulation
+# 2. Run Multi-Contig Simulation (PARALLELIZED)
 # This generates a SINGLE pedigree (relationships) applied to ALL contigs independently
 generation_sizes = [10, 100, 200]
 print(f"Running Multi-Contig Simulation for {len(region_keys)} regions...")
+
+# Calculate mutation rate for ~1% of SNPs per generation (stress testing)
+# mutate_rate = 0.01 * num_snps / chromosome_length
+# For typical data: ~1e-5 gives roughly 1% mutation rate
+# Use 1e-10 for essentially no mutations (original behavior)
+STRESS_TEST_MUTATIONS = False  # Set to True for 1% mutation stress test
+if STRESS_TEST_MUTATIONS:
+    # Approximate: assume ~1 SNP per 100bp on average
+    mutate_rate = 1e-5  # ~1% of SNPs mutated per generation
+    print(f"STRESS TEST MODE: Using mutation rate {mutate_rate} (~1% per generation)")
+else:
+    mutate_rate = 1e-10  # Essentially no mutations
+    print(f"Normal mode: Using mutation rate {mutate_rate} (minimal mutations)")
 
 # Returns lists-of-lists (one sub-list per contig)
 all_offspring_lists, truth_pedigree, truth_paintings_lists = simulate_sequences.simulate_pedigree(
     founders_list, 
     sites_list, 
     generation_sizes, 
-    recomb_rate=5*10**-8, 
-    mutate_rate=10**-10,
-    output_plot=os.path.join(output_dir, "ground_truth_pedigree.png")
+    recomb_rate=5e-8, 
+    mutate_rate=mutate_rate,
+    output_plot=os.path.join(output_dir, "ground_truth_pedigree.png"),
+    parallel=True,       # Enable parallel processing across contigs
+    max_workers=None     # Use all available cores (or set to specific number)
 )
+
+print(f"Pedigree simulation completed in {time.time()-start:.1f}s")
 
 # 3. Save Truth for later validation
 truth_csv_path = os.path.join(output_dir, "ground_truth_pedigree.csv")
@@ -249,184 +267,7 @@ for r_name in region_keys:
     print(f"    {r_name}: {len(sites)} sites, {len(haplotypes_dict)} founders")
 
 print("\nFounder blocks created for all regions.")
-
-
-
-
-#%%
-print("\n" + "="*60)
-print("CONTROL EXPERIMENT: Multi-Contig Painting using GROUND TRUTH Haplotypes")
-print("="*60)
-
-# 1. Generate Control Paintings (Unphased / Arbitrary Phase)
-for r_name in region_keys:
-    print(f"\n[Control Painting] Processing Region: {r_name}")
-    
-    # Retrieve Data
-    sites, haps_list = multi_contig_results[r_name]['naive_long_haps']
-    reads_matrix = multi_contig_results[r_name]['simulated_reads']
-    
-    # Calculate Probabilities
-    _, global_probs = analysis_utils.reads_to_probabilities(reads_matrix)
-    
-    # Package Ground Truth Haplotypes
-    gt_haps_dict = {i: h_arr for i, h_arr in enumerate(haps_list)}
-    gt_flags = np.ones(len(sites), dtype=int)
-    
-    gt_block_result = block_haplotypes.BlockResult(
-        positions=sites,
-        haplotypes=gt_haps_dict,
-        keep_flags=gt_flags
-    )
-    
-    # Paint samples
-    print(f"  Painting {len(sample_names)} samples...")
-    gt_painting_result = paint_samples.paint_samples_in_block(
-        gt_block_result,
-        global_probs,
-        sites,
-        recomb_rate=5e-8,
-        switch_penalty=15.0 
-    )
-    
-    # --- VISUALIZE GROUND TRUTH PAINTING (UNCORRECTED) ---
-    plot_filename = os.path.join(output_dir, f"{r_name}_control_painting.png")
-    print(f"  Generating Plot: {plot_filename}")
-    
-    paint_samples.plot_painting(
-        gt_painting_result,
-        output_file=plot_filename,
-        title=f"Control Experiment: Ground Truth Painting - {r_name}",
-        sample_names=sample_names,
-        figsize_width=20,
-        row_height_per_sample=0.25
-    )
-    
-    # Store results
-    multi_contig_results[r_name]['control_painting'] = gt_painting_result
-    multi_contig_results[r_name]['control_founder_block'] = gt_block_result
-
-print("\nControl Painting complete for all regions.")
-#%%
-# =============================================================================
-# MULTI-CONTIG PEDIGREE INFERENCE
-# =============================================================================
-
-print("\n" + "="*60)
-print("RUNNING: Multi-Contig Pedigree Inference (Control)")
-print("="*60)
-
-# 1. Gather Data from all regions
-contig_inputs = []
-
-for r_name in region_keys:
-    if 'control_painting' in multi_contig_results[r_name]:
-        entry = {
-            'painting': multi_contig_results[r_name]['control_painting'],
-            'founder_block': multi_contig_results[r_name]['control_founder_block']
-        }
-        contig_inputs.append(entry)
-    else:
-        print(f"Warning: Control painting missing for {r_name}")
-
-# 2. Run Inference (16-State HMM)
-# We call the core function directly to handle the multi-contig list
-pedigree_result = pedigree_inference.infer_pedigree_multi_contig(
-    contig_inputs, 
-    sample_ids=sample_names,
-    top_k=20
-)
-
-# 3. Apply Auto-Cutoff (Crucial for F1 identification)
-# This uses K-Means on the HMM scores to identify samples with no valid parents
-pedigree_result.perform_automatic_cutoff()
-
-# 4. Save & Visualize
-ped_df = pedigree_result.relationships
-output_csv = os.path.join(output_dir, "multi_contig_pedigree_control.csv")
-ped_df.to_csv(output_csv, index=False)
-print(f"Multi-Contig Pedigree saved to: {output_csv}")
-
-output_tree = os.path.join(output_dir, "multi_contig_tree_control.png")
-pedigree_inference.draw_pedigree_tree(ped_df, output_file=output_tree)
-
-# 5. Validate against Truth
-print("\n--- Multi-Contig Validation ---")
-control_validation_df = pd.merge(
-    truth_pedigree[['Sample', 'Generation', 'Parent1', 'Parent2']],
-    ped_df[['Sample', 'Generation', 'Parent1', 'Parent2']],
-    on='Sample',
-    suffixes=('_True', '_Inf')
-)
-
-def check_parent_match(row):
-    true_p = {row['Parent1_True'], row['Parent2_True']}
-    true_p = {x for x in true_p if pd.notna(x)}
-    inf_p = {row['Parent1_Inf'], row['Parent2_Inf']}
-    inf_p = {x for x in inf_p if pd.notna(x)}
-    
-    # F1 check (Truth has Founders, Inf has None)
-    if any("Founder" in str(x) for x in true_p):
-        return len(inf_p) == 0
-    return true_p == inf_p
-
-control_validation_df['Gen_Match'] = control_validation_df['Generation_True'] == control_validation_df['Generation_Inf']
-control_validation_df['Parents_Match'] = control_validation_df.apply(check_parent_match, axis=1)
-
-gen_acc = control_validation_df['Gen_Match'].mean() * 100
-descendant_mask = control_validation_df['Generation_True'].isin(['F2', 'F3'])
-parent_acc = control_validation_df[descendant_mask]['Parents_Match'].mean() * 100
-
-print(f"Generation Accuracy: {gen_acc:.2f}%")
-print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
-
-#%%
-# =============================================================================
-# PHASE CORRECTION (ALIGN TRACKS TO PARENTS)
-# =============================================================================
-
-print("\n" + "="*60)
-print("RUNNING: Phase Correction based on Inferred Pedigree")
-print("="*60)
-
-# 1. Run Correction
-# This uses the inferred trios to force Track 0 -> Parent 1 and Track 1 -> Parent 2
-# It handles the 'control_painting' inside the function automatically.
-multi_contig_results = phase_correction.correct_phase_all_contigs(
-    multi_contig_results,
-    pedigree_result.relationships,
-    sample_names
-)
-
-# 2. Visualize Corrected Paintings
-# We plot the same sample names as before to compare
-print("\nGenerating Corrected Plots...")
-
-for r_name in region_keys:
-    if 'corrected_painting' in multi_contig_results[r_name]:
-        plot_filename = os.path.join(output_dir, f"{r_name}_CORRECTED_painting.png")
-        
-        paint_samples.plot_painting(
-            multi_contig_results[r_name]['corrected_painting'],
-            output_file=plot_filename,
-            title=f"Corrected Phase Painting (Track 0=P1, Track 1=P2) - {r_name}",
-            sample_names=sample_names,
-            figsize_width=20,
-            row_height_per_sample=0.25
-        )
-        print(f"  Saved: {plot_filename}")
-
-print("\nPipeline Complete. Check the 'CORRECTED' plots to verify clean phasing.")
-#%%
-
-
-
-
-
-
-
-
-
+print(f"Total time: {time.time()-start:.1f}s")
 #%%
 # =============================================================================
 # TOLERANCE PAINTING
@@ -457,18 +298,6 @@ for r_name in region_keys:
 
     multi_contig_results[r_name]['tolerance_result'] = tol_painting_result
 
-    # 3. Visualization A: Detailed Uncertainty View
-    print(f"  Generating detailed tolerance plots for first 3 samples...")
-    for i in range(3):
-        if i < len(sample_names):
-            detail_filename = os.path.join(output_dir, f"{r_name}_tolerance_detail_S{i}.png")
-            paint_samples.plot_viable_paintings(
-                tol_painting_result,
-                sample_idx=i,
-                output_file=detail_filename
-            )
-
-    # 4. Visualization B: Population Consensus
     print(f"  Generating Population Consensus Plot...")
 
     dense_haps, dense_pos = paint_samples.founder_block_to_dense(gt_block_result)
