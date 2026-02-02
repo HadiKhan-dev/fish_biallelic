@@ -966,10 +966,11 @@ def generate_transition_probability_mesh(full_samples_data,
                                          max_num_iterations=10,
                                          minimum_transition_log_likelihood=-10,
                                          learning_rate=1,
-                                         use_standard_baum_welch=True):
+                                         use_standard_baum_welch=True,
+                                         num_processes=16):
     """
     Generates a TransitionMesh by calculating transition probabilities 
-    for ALL possible gap sizes (1 to N) in parallel.
+    for ALL possible gap sizes (1 to N).
     
     This creates a multi-scale view of the haplotype graph, allowing 
     downstream algorithms (like Beam Search) to skip over noisy blocks.
@@ -982,20 +983,19 @@ def generate_transition_probability_mesh(full_samples_data,
         use_standard_baum_welch (bool): 
             If True: Uses standard update (sensitive to initialization/priors).
             If False: Uses Reset update (recommended for Viterbi/Hard EM).
+        num_processes (int): Number of parallel processes. Use 1 for sequential
+                            execution (required when called from worker processes).
         
     Returns:
         TransitionMesh: The fully populated mesh of transition probabilities.
     """
     
-    print("Calculating block likelihoods (Mesh Generation)...")
     full_blocks_likelihoods = generate_all_block_likelihoods(
-        full_samples_data, sample_sites, haps_data
+        full_samples_data, sample_sites, haps_data, num_processes=1
     )
     
     max_gap = len(haps_data) - 1
     gaps = list(range(1, max_gap + 1))
-    
-    print(f"Calculating transitions for {len(gaps)} different gaps (StandardBW={use_standard_baum_welch})...")
 
     worker_args = []
     for gap in gaps:
@@ -1008,11 +1008,15 @@ def generate_transition_probability_mesh(full_samples_data,
             max_num_iterations,
             minimum_transition_log_likelihood,
             learning_rate,
-            use_standard_baum_welch # Append flag to args tuple
+            use_standard_baum_welch
         ))
 
-    with Pool(16) as pool:
-        results = pool.map(_gap_worker, worker_args)
+    if num_processes > 1:
+        with Pool(num_processes) as pool:
+            results = pool.map(_gap_worker, worker_args)
+    else:
+        # Sequential execution (for use inside worker processes)
+        results = [_gap_worker(args) for args in worker_args]
     
     mesh_dict = dict(zip(gaps, results))
     return TransitionMesh(mesh_dict)

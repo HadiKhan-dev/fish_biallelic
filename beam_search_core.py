@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 
 # Import the Viterbi kernel for the selection phase
-from block_haplotypes import viterbi_score_selection
+from block_haplotypes import viterbi_score_selection, prune_chimeras
 
 # =============================================================================
 # 1. FAST MESH (O(1) Lookup)
@@ -334,7 +334,7 @@ def run_backward_pass_guided(fast_mesh, forward_history, beam_width=100, weight_
     return final_results
 
 def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100, 
-                              weight_decay_func=None):
+                              weight_decay_func=None, verbose=True):
     """
     Main Driver for Bidirectional Beam Search.
     
@@ -343,17 +343,21 @@ def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100,
         transition_mesh: TransitionMesh object.
         beam_width: Number of paths to keep.
         weight_decay_func: Function to weight long-range connections.
+        verbose: If True, print progress messages.
         
     Returns:
         List of (path_indices, score) sorted by score.
     """
-    print("Building FastMesh for Beam Search...")
+    if verbose:
+        print("Building FastMesh for Beam Search...")
     mesh = FastMesh(haps_data, transition_mesh)
     
-    print("Pass 1: Forward History Calculation...")
+    if verbose:
+        print("Pass 1: Forward History Calculation...")
     fwd_history = run_forward_pass_history(mesh, beam_width)
     
-    print(f"Pass 2: Guided Backward Beam Search (Width={beam_width})...")
+    if verbose:
+        print(f"Pass 2: Guided Backward Beam Search (Width={beam_width})...")
     results = run_backward_pass_guided(mesh, fwd_history, beam_width, weight_decay_func)
     
     return results
@@ -399,7 +403,7 @@ def reconstruct_haplotypes_from_beam(beam_results, fast_mesh, haps_data):
 # 4. FOUNDER SELECTION LOGIC (Overshoot & Prune)
 # =============================================================================
 
-def precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh):
+def precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh, verbose=True):
     """
     Constructs the master tensor required for model selection.
     Tensor Shape: (Num_Samples, Num_Beam_Pairs, Num_Blocks)
@@ -408,7 +412,8 @@ def precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh):
     num_blocks = len(block_emissions)
     num_candidates = len(beam_results)
     
-    print(f"Building Selection Tensor for {num_candidates} candidates...")
+    if verbose:
+        print(f"Building Selection Tensor for {num_candidates} candidates...")
     
     map_matrix = np.zeros((num_candidates, num_blocks), dtype=int)
     
@@ -431,7 +436,8 @@ def precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh):
         vals = block_ll[:, grid_i, grid_j]
         tensor[:, :, b] = vals
         
-    print(f"Tensor built in {time.time() - start_t:.2f}s. Size: {tensor.nbytes / 1024**2:.1f} MB")
+    if verbose:
+        print(f"Tensor built in {time.time() - start_t:.2f}s. Size: {tensor.nbytes / 1024**2:.1f} MB")
     return tensor
 
 def calculate_score_for_subset(subset_indices, full_tensor, recomb_penalty):
@@ -453,7 +459,7 @@ def calculate_score_for_subset(subset_indices, full_tensor, recomb_penalty):
     
     return np.sum(sample_scores)
 
-def refine_selection_by_swapping(selected_indices, full_tensor, num_total_candidates, recomb_penalty):
+def refine_selection_by_swapping(selected_indices, full_tensor, num_total_candidates, recomb_penalty, verbose=True):
     """
     Iteratively attempts to swap a selected founder with an unselected one
     to improve the score.
@@ -464,7 +470,8 @@ def refine_selection_by_swapping(selected_indices, full_tensor, num_total_candid
     improved = True
     iteration = 0
     
-    print("\n--- Starting Swap Refinement ---")
+    if verbose:
+        print("\n--- Starting Swap Refinement ---")
     
     while improved:
         improved = False
@@ -488,18 +495,20 @@ def refine_selection_by_swapping(selected_indices, full_tensor, num_total_candid
         
         if best_swap:
             remove_idx, add_idx = best_swap
-            print(f"  Iter {iteration}: Swapped {remove_idx} -> {add_idx} (Gain: {best_swap_gain:.2f})")
+            if verbose:
+                print(f"  Iter {iteration}: Swapped {remove_idx} -> {add_idx} (Gain: {best_swap_gain:.2f})")
             idx_to_replace = current_indices.index(remove_idx)
             current_indices[idx_to_replace] = add_idx
             current_score += best_swap_gain
             improved = True
         else:
-            print("  Converged. No further beneficial swaps found.")
+            if verbose:
+                print("  Converged. No further beneficial swaps found.")
             
     return current_indices, current_score
 
 def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty, 
-                              complexity_cost_per_founder, force_prune_to=None):
+                              complexity_cost_per_founder, force_prune_to=None, verbose=True):
     """
     Backward Elimination: Iteratively tries to remove the least useful founder
     from the set to improve the BIC score.
@@ -509,6 +518,7 @@ def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty,
                         when collapsing chimeras.
         force_prune_to (int): If set, forces deletion of least useful founders
                               until this count is reached, ignoring BIC score.
+        verbose: If True, print progress messages.
     """
     current_indices = list(selected_indices)
     
@@ -517,7 +527,8 @@ def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty,
     k = len(current_indices)
     current_bic = (k * complexity_cost_per_founder) - (2 * current_ll)
     
-    print("\n--- Starting Pruning Refinement (Backward Elimination) ---")
+    if verbose:
+        print("\n--- Starting Pruning Refinement (Backward Elimination) ---")
     
     while True:
         k = len(current_indices)
@@ -565,7 +576,8 @@ def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty,
             reason = f"BIC Improved ({current_bic:.1f} -> {best_new_bic:.1f})"
             
         if should_prune:
-            print(f"  Removed Founder {best_removal_idx} [{reason}]")
+            if verbose:
+                print(f"  Removed Founder {best_removal_idx} [{reason}]")
             current_indices.remove(best_removal_idx)
             
             # Update current state vars for next loop
@@ -573,7 +585,8 @@ def refine_selection_by_pruning(selected_indices, full_tensor, recomb_penalty,
             current_ll = new_ll
             current_bic = ((k-1) * complexity_cost_per_founder) - (2 * new_ll)
         else:
-            print("  Converged. No deletions improve the BIC.")
+            if verbose:
+                print("  Converged. No deletions improve the BIC.")
             break
             
     return current_indices
@@ -585,7 +598,8 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
                              complexity_penalty_scale=0.1, 
                              do_refinement=True,
                              overshoot_limit=30,
-                             use_standard_bic=False): 
+                             use_standard_bic=False,
+                             verbose=True): 
     """
     Overshoot & Prune Strategy with Configurable Penalty Scaling.
     
@@ -594,13 +608,14 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
         pruning_recomb_penalty: Cost to switch used during Pruning (Should be LOW).
         complexity_penalty_scale: Multiplier for the complexity term.
         use_standard_bic: If True, uses log(N) scaling. If False, uses Linear N scaling.
+        verbose: If True, print progress messages.
     """
     
     # Default to symmetric penalty if not specified
     if pruning_recomb_penalty is None:
         pruning_recomb_penalty = recomb_penalty
 
-    full_tensor = precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh)
+    full_tensor = precompute_beam_likelihoods(beam_results, block_emissions, fast_mesh, verbose=verbose)
     
     num_candidates = len(beam_results)
     num_samples, _, num_blocks = full_tensor.shape
@@ -616,14 +631,16 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
         # Prevents founder explosion with large sample counts
         complexity_cost_per_founder = complexity_penalty_scale * num_samples * num_blocks
         cost_type = "Linear Loss (N)"
-        
-    print(f"Selection Cost per Founder: {complexity_cost_per_founder:.1f} [{cost_type}, Scale={complexity_penalty_scale}]")
-    print(f"Penalties -> Add/Swap: {recomb_penalty:.1f}, Prune: {pruning_recomb_penalty:.1f}")
+    
+    if verbose:
+        print(f"Selection Cost per Founder: {complexity_cost_per_founder:.1f} [{cost_type}, Scale={complexity_penalty_scale}]")
+        print(f"Penalties -> Add/Swap: {recomb_penalty:.1f}, Prune: {pruning_recomb_penalty:.1f}")
 
     selected_indices = []
     current_best_bic = float('inf')
     
-    print(f"\n--- Starting Forward Selection (Attempting up to {overshoot_limit}) ---")
+    if verbose:
+        print(f"\n--- Starting Forward Selection (Attempting up to {overshoot_limit}) ---")
     
     # 1. FORWARD SELECTION (Use strict/high recomb_penalty)
     for k in range(overshoot_limit):
@@ -646,21 +663,24 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
         penalty = num_params * complexity_cost_per_founder
         new_bic = penalty - (2 * best_new_score)
         
-        print(f"  Round {k+1}: Cand {best_new_idx} -> BIC {new_bic:.1f} (Current Best: {current_best_bic:.1f})")
+        if verbose:
+            print(f"  Round {k+1}: Cand {best_new_idx} -> BIC {new_bic:.1f} (Current Best: {current_best_bic:.1f})")
         
         # Stop if BIC stops improving
         if new_bic < current_best_bic:
             current_best_bic = new_bic
             selected_indices.append(best_new_idx)
-            print(f"    >> ACCEPTED.")
+            if verbose:
+                print(f"    >> ACCEPTED.")
         else:
-            print(f"    >> REJECTED. BIC did not improve.")
+            if verbose:
+                print(f"    >> REJECTED. BIC did not improve.")
             break
     
     # 2. SWAP (Use strict/high recomb_penalty)
     if do_refinement and len(selected_indices) > 1:
         selected_indices, final_score = refine_selection_by_swapping(
-            selected_indices, full_tensor, num_candidates, recomb_penalty
+            selected_indices, full_tensor, num_candidates, recomb_penalty, verbose=verbose
         )
         
         # 3. FORCE PRUNE & BIC PRUNE (Use LOOSE/LOW pruning_recomb_penalty)
@@ -672,7 +692,8 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
             selected_indices, full_tensor, 
             pruning_recomb_penalty, # <--- Uses low penalty
             complexity_cost_per_founder,
-            force_prune_to=max_founders
+            force_prune_to=max_founders,
+            verbose=verbose
         )
 
     selected_founders = []
@@ -680,3 +701,52 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
         selected_founders.append(beam_results[idx])
         
     return selected_founders
+
+
+# =============================================================================
+# 5. STRUCTURAL CHIMERA PRUNING FOR SUPER-BLOCKS
+# =============================================================================
+
+def prune_superblock_chimeras(super_block, max_recombs=1, max_mismatch_percent=1.0,
+                               min_mean_delta_to_protect=0.25):
+    """
+    Applies structural chimera pruning to a super-block after reconstruction.
+    
+    This is a post-processing step that removes haplotypes which can be explained
+    as recombinations of other haplotypes in the set, using mean_delta (average
+    sample error increase) to protect essential haplotypes.
+    
+    Args:
+        super_block: A BlockResult object containing the reconstructed super-block.
+        max_recombs: Maximum recombinations for chimera detection (default 1).
+        max_mismatch_percent: Maximum mismatch % for chimera (default 1.0%).
+        min_mean_delta_to_protect: Protect haplotypes with mean_delta above this (default 0.25%).
+    
+    Returns:
+        The super_block with pruned and reindexed haplotypes.
+        Returns the original super_block unchanged if pruning cannot be performed.
+    """
+    if super_block is None:
+        return super_block
+    
+    if super_block.probs_array is None:
+        # Cannot prune without sample data
+        return super_block
+    
+    if len(super_block.haplotypes) < 3:
+        # Need at least 3 haplotypes to have a chimera
+        return super_block
+    
+    # Apply structural chimera pruning
+    pruned_haps = prune_chimeras(
+        super_block.haplotypes,
+        super_block.probs_array,
+        max_recombs=max_recombs,
+        max_mismatch_percent=max_mismatch_percent,
+        min_mean_delta_to_protect=min_mean_delta_to_protect
+    )
+    
+    # Reindex haplotypes to be sequential
+    super_block.haplotypes = {i: v for i, v in enumerate(pruned_haps.values())}
+    
+    return super_block
