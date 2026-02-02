@@ -6,6 +6,9 @@ import warnings
 import time
 from scipy.spatial.distance import cdist
 from functools import partial
+from dataclasses import dataclass
+from typing import Dict
+
 
 import analysis_utils
 import hap_statistics
@@ -48,6 +51,12 @@ def _worker_generate_block(block_idx, **kwargs):
         keep_flags=flags, 
         **kwargs
     )
+
+@dataclass
+class FounderBlock:
+    """Simple container for founder haplotype data."""
+    positions: np.ndarray
+    haplotypes: Dict[int, np.ndarray]
 
 class BlockResult:
     """
@@ -297,84 +306,205 @@ def viterbi_score_selection(ll_tensor, penalty):
         
     return best_scores
 
-def prune_chimeras(hap_dict, probs_array=None, recomb_penalty=10.0, error_tolerance_sites=10):
+@njit(parallel=False, fastmath=True)
+def viterbi_chimera_check_free_recombs(ll_tensor, max_recombs):
     """
-    Identifies and removes haplotypes that can be explained as 
-    recombinations of OTHER haplotypes.
+    Viterbi that allows FREE recombinations up to max_recombs.
+    
+    Returns the minimum mismatch count achievable with at most max_recombs switches.
+    This cleanly separates the structural question (can it be reconstructed?) from
+    the quality question (with how many mismatches?).
     
     Args:
-        recomb_penalty: Cost to switch haplotypes in the Viterbi model.
-        error_tolerance_sites: Number of sites of mismatch allowed before deletion.
-                               (Each mismatch penalizes the score by 0.5)
+        ll_tensor: (n_samples, K_haps, n_sites) - values are 0 (match) or negative (mismatch)
+        max_recombs: Maximum allowed recombinations (free, no penalty)
+    
+    Returns:
+        min_mismatches: (n_samples,) - minimum mismatches achievable within recomb budget
+        best_recombs: (n_samples,) - number of recombs used for best path
+    """
+    n_samples, K, n_sites = ll_tensor.shape
+    min_mismatches = np.empty(n_samples, dtype=np.int64)
+    best_recombs = np.empty(n_samples, dtype=np.int64)
+    
+    INF = 999999999
+    
+    for s in range(n_samples):
+        # dp[k][r] = minimum mismatches to reach hap k with exactly r recombs used
+        # Initialize at site 0
+        dp = np.full((K, max_recombs + 1), INF, dtype=np.int64)
+        
+        for k in range(K):
+            is_mismatch = 1 if ll_tensor[s, k, 0] < -0.1 else 0
+            dp[k, 0] = is_mismatch  # Start on hap k with 0 recombs
+        
+        # Process sites 1 to n_sites-1
+        for i in range(1, n_sites):
+            new_dp = np.full((K, max_recombs + 1), INF, dtype=np.int64)
+            
+            # First, find best (minimum mismatch) state for each recomb count
+            # to avoid O(K^2) work per site
+            best_at_r = np.full(max_recombs + 1, INF, dtype=np.int64)
+            for r in range(max_recombs + 1):
+                for k in range(K):
+                    if dp[k, r] < best_at_r[r]:
+                        best_at_r[r] = dp[k, r]
+            
+            for k in range(K):
+                is_mismatch = 1 if ll_tensor[s, k, i] < -0.1 else 0
+                
+                for r in range(max_recombs + 1):
+                    # Option 1: Stay on hap k (no new recomb)
+                    if dp[k, r] < INF:
+                        new_val = dp[k, r] + is_mismatch
+                        if new_val < new_dp[k, r]:
+                            new_dp[k, r] = new_val
+                    
+                    # Option 2: Switch from any other hap (costs 1 recomb)
+                    if r > 0 and best_at_r[r - 1] < INF:
+                        # We can switch from the best state at r-1 recombs
+                        new_val = best_at_r[r - 1] + is_mismatch
+                        if new_val < new_dp[k, r]:
+                            new_dp[k, r] = new_val
+            
+            # Copy new_dp to dp
+            for k in range(K):
+                for r in range(max_recombs + 1):
+                    dp[k, r] = new_dp[k, r]
+        
+        # Find best (minimum mismatches across all ending states)
+        best_mm = INF
+        best_r = 0
+        for k in range(K):
+            for r in range(max_recombs + 1):
+                if dp[k, r] < best_mm:
+                    best_mm = dp[k, r]
+                    best_r = r
+        
+        min_mismatches[s] = best_mm
+        best_recombs[s] = best_r
+    
+    return min_mismatches, best_recombs
+
+def prune_chimeras(hap_dict, probs_array, 
+                   max_recombs=1,
+                   max_mismatch_percent=1.0,
+                   min_mean_delta_to_protect=0.25):
+    """
+    Identifies and removes haplotypes that can be explained as 
+    recombinations of OTHER haplotypes, using mean_delta to protect
+    essential haplotypes.
+    
+    Algorithm:
+    1. Find all candidate chimeras (structural: >= 1 recomb, <= max_recombs, <= max_mismatch_percent)
+    2. For each candidate, compute mean_delta = mean increase in sample error if removed
+    3. Remove the candidate with minimum mean_delta (if below protection threshold)
+    4. Repeat until no removable candidates remain
+    
+    A haplotype is protected if:
+    - It cannot be explained as a chimera of others, OR
+    - Its mean_delta >= min_mean_delta_to_protect (removing it hurts too much)
+    
+    Args:
+        hap_dict: Dictionary of haplotypes {idx: array}
+        probs_array: Sample genotype probabilities (n_samples, n_sites, 3)
+        max_recombs: Maximum recombinations for chimera detection (default 1)
+        max_mismatch_percent: Maximum mismatch % for chimera (default 1.0)
+        min_mean_delta_to_protect: Protect haplotypes with mean_delta above this (default 0.25%)
     """
     if len(hap_dict) < 3:
         return hap_dict
+    
+    if probs_array is None:
+        return hap_dict
+    
+    def compute_best_pair_errors(hap_dict_local, probs_array_local):
+        """For each sample, compute error of best haplotype pair (no recomb within block)."""
+        hap_list = [np.argmax(h, axis=1) if h.ndim > 1 else h for h in hap_dict_local.values()]
+        num_samples = probs_array_local.shape[0]
+        num_sites = probs_array_local.shape[1]
+        num_haps = len(hap_list)
         
+        sample_errors = np.zeros(num_samples)
+        
+        for s in range(num_samples):
+            sample_geno = np.argmax(probs_array_local[s], axis=1)
+            best_error = 100.0
+            
+            for i in range(num_haps):
+                for j in range(i, num_haps):
+                    geno = hap_list[i] + hap_list[j]
+                    error = np.mean(geno != sample_geno) * 100
+                    if error < best_error:
+                        best_error = error
+            
+            sample_errors[s] = best_error
+        
+        return sample_errors
+    
     kept_keys = sorted(list(hap_dict.keys()))
+    n_sites = next(iter(hap_dict.values())).shape[0]
     
-    # Calculate usage counts if data is available (for tie-breaking)
-    usage_map = {}
-    if probs_array is not None:
-        matches = hap_statistics.match_best_vectorised(hap_dict, probs_array)
-        usage_map = matches[1]
-    
-    # Mismatch penalty matching your error floor
-    mismatch_penalty = 0.5 
-    
-    # We loop until we can no longer explain ANY haplotype using the others
-    # or until we hit the minimum of 2 haplotypes
     while len(kept_keys) >= 3:
         
-        candidate_scores = []
+        # Build haplotype stack
+        H_stack = np.array([np.argmax(hap_dict[k], axis=1) if hap_dict[k].ndim == 2 
+                           else hap_dict[k] for k in kept_keys])
+        n_haps = len(kept_keys)
         
-        # Convert all kept haps to a tensor for fast comparison
-        H_stack = np.array([hap_dict[k] for k in kept_keys])
-        n_haps, n_sites, _ = H_stack.shape
+        # Compute baseline errors with current haplotype set
+        current_dict = {k: hap_dict[k] for k in kept_keys}
+        baseline_errors = compute_best_pair_errors(current_dict, probs_array)
+        
+        # Find candidate chimeras
+        candidate_chimeras = []
         
         for i, target_key in enumerate(kept_keys):
             target_hap = H_stack[i]
             
-            # Basis = Everyone except i
             other_indices = [idx for idx in range(n_haps) if idx != i]
             other_haps = H_stack[other_indices]
             
-            # 1. Calculate Likelihoods (Target vs Basis)
-            # Distance 0 -> Score 0. Distance > 0 -> Score -0.5
-            mismatches = np.sum(np.abs(target_hap[None, :, :] - other_haps), axis=2)
-            ll_tensor = np.where(mismatches < 0.5, 0.0, -mismatch_penalty)
+            # Build mismatch tensor
+            mismatches = np.abs(target_hap[None, :] - other_haps)
+            ll_tensor = np.where(mismatches < 0.5, 0.0, -1.0)
+            ll_tensor = ll_tensor[np.newaxis, :, :].astype(np.float64)
             
-            # Add dimension: (1_Sample, N-1_States, Sites)
-            ll_tensor = ll_tensor[np.newaxis, :, :]
+            # Check if chimera (structural test)
+            mismatch_counts, recombs = viterbi_chimera_check_free_recombs(ll_tensor, max_recombs)
             
-            # 2. Run Viterbi
-            # "How well can I construct Target using the Others?"
-            best_score = viterbi_score_selection(
-                ll_tensor, float(recomb_penalty)
-            )[0]
+            n_recombs_val = recombs[0]
+            n_mismatches_val = mismatch_counts[0]
+            mismatch_pct = (n_mismatches_val / n_sites) * 100
             
-            # 3. Apply Tie-Breaker
-            usage = usage_map.get(target_key, 0)
-            adjusted_score = best_score - (usage * 1e-9)
+            # Must have at least 1 recomb (otherwise it's just a similar haplotype, not a chimera)
+            is_chimera = (n_recombs_val >= 1) and (n_recombs_val <= max_recombs) and (mismatch_pct <= max_mismatch_percent)
             
-            candidate_scores.append((target_key, adjusted_score, best_score))
-            
-        # Sort candidates by Adjusted Score Descending
-        candidate_scores.sort(key=lambda x: x[1], reverse=True)
+            if is_chimera:
+                # Compute mean_delta: how much does removing this haplotype hurt?
+                reduced_dict = {k: hap_dict[k] for k in kept_keys if k != target_key}
+                reduced_errors = compute_best_pair_errors(reduced_dict, probs_array)
+                delta_errors = reduced_errors - baseline_errors
+                mean_delta = np.mean(delta_errors)
+                
+                candidate_chimeras.append((target_key, n_recombs_val, n_mismatches_val, mismatch_pct, mean_delta))
         
-        worst_key, _, raw_score = candidate_scores[0]
-        
-        # 4. Decision Logic
-        allowed_switches = 2
-        threshold = -((recomb_penalty * allowed_switches) + 
-                      (mismatch_penalty * error_tolerance_sites))
-        
-        # If score is BETTER (less negative) than threshold, it means 
-        # we found a good way to mimic this haplotype using others. Delete it.
-        if raw_score > threshold:
-            kept_keys.remove(worst_key)
-        else:
+        if len(candidate_chimeras) == 0:
             break
-            
+        
+        # Sort by mean_delta (ascending) - remove the least essential first
+        candidate_chimeras.sort(key=lambda x: x[4])
+        
+        # Check if the least essential candidate is below protection threshold
+        worst_key, worst_recombs, worst_mismatches, worst_pct, worst_delta = candidate_chimeras[0]
+        
+        if worst_delta >= min_mean_delta_to_protect:
+            # Even the least essential chimera is too important to remove
+            break
+        
+        # Remove the least essential chimera
+        kept_keys.remove(worst_key)
+    
     return {k: hap_dict[k] for k in kept_keys}
 
 def select_optimal_haplotype_set_viterbi(candidate_haps, probs_array, 
@@ -904,7 +1034,7 @@ def generate_further_haps(site_priors,
         try:
             initial_clusters = hdbscan_cluster(
                                 candidate_dist_matrix,
-                                min_cluster_size=len(initial_haps)+1,
+                                min_cluster_size=3,
                                 min_samples=1,
                                 cluster_selection_method="eom",
                                 alpha=1.0)
@@ -913,6 +1043,8 @@ def generate_further_haps(site_priors,
              cluster_labels = np.zeros(len(unique_candidates), dtype=int)
     else:
          cluster_labels = np.array([0])
+         
+    #breakpoint()
 
     # --- FILLING MASKED SITES (Fix for NaN issue) ---
     final_candidates_full = np.zeros((len(unique_candidates), num_sites, 2))
@@ -950,11 +1082,12 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                               penalty_strength=5.0,
                               max_intermediate_haps=25,
                               known_haplotypes=None,
-                              uniqueness_threshold_percent=2.0, # PARAM
-                              diff_threshold_percent=1.0,       # PARAM
-                              wrongness_threshold=10.0,         # PARAM
-                              chimera_switch_cost=10.0,         # PARAM
-                              chimera_mismatch_tol=1):          # PARAM (Default 1 site)
+                              uniqueness_threshold_percent=2.0,
+                              diff_threshold_percent=1.0,
+                              wrongness_threshold=10.0,
+                              chimera_max_recombs=1,
+                              chimera_max_mismatch_pct=1.0,
+                              chimera_min_delta_to_protect=0.25):
     """
     Given the read count array of our sample data for a single block
     generates the haplotypes that make up the samples present in our data.
@@ -1096,16 +1229,17 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                 used_haps[new_idx] = selected_haps_dict[h_idx]
                 new_idx += 1
         
-        # Step D: Chimera Pruning
-        # DISABLED per biological reasoning (Inbreeding indistinguishable from Chimerism in small blocks)
-        # final_haps = prune_chimeras(
-        #     used_haps, 
-        #     probs_array, 
-        #     recomb_penalty=chimera_switch_cost, 
-        #     error_tolerance_sites=chimera_mismatch_tol
-        # )
+        # Step D: Chimera Pruning (uses mean_delta criterion to protect essential haplotypes)
+        final_haps = prune_chimeras(
+            used_haps, 
+            probs_array, 
+            max_recombs=chimera_max_recombs,
+            max_mismatch_percent=chimera_max_mismatch_pct,
+            min_mean_delta_to_protect=chimera_min_delta_to_protect
+        )
         
-        final_haps = {i: v for i, v in enumerate(used_haps.values())}
+        # Reindex
+        final_haps = {i: v for i, v in enumerate(final_haps.values())}
         
     else:
         final_haps = candidates_to_filter
@@ -1231,11 +1365,12 @@ def generate_haplotypes_block_robust(positions, reads_array, keep_flags=None,
 def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
                             penalty_strength=1.0, 
                             max_intermediate_haps=100,
-                            uniqueness_threshold_percent=2.0, # NEW PARAM
-                            diff_threshold_percent=1.0,       # NEW PARAM
-                            wrongness_threshold=10.0,         # NEW PARAM
-                            chimera_switch_cost=10.0,         # NEW PARAM
-                            chimera_mismatch_tol=1,           # NEW PARAM
+                            uniqueness_threshold_percent=2.0,
+                            diff_threshold_percent=1.0,
+                            wrongness_threshold=10.0,
+                            chimera_max_recombs=1,
+                            chimera_max_mismatch_pct=1.0,
+                            chimera_min_delta_to_protect=0.25,
                             num_processes=16):
     """
     Generate a list of block haplotypes using multiprocessing.
@@ -1244,6 +1379,9 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
         genomic_data: A GenomicData object containing blocks to process.
         penalty_strength: Controls strictness of final Viterbi selection (1.0 = standard).
         max_intermediate_haps: Trigger for intermediate pruning during the loop.
+        chimera_max_recombs: Max recombinations for chimera detection (default 1).
+        chimera_max_mismatch_pct: Max mismatch % for chimera (default 1.0%).
+        chimera_min_delta_to_protect: Protect haplotypes with mean_delta above this (default 0.25%).
     
     Optimized: Uses shared memory for genomic_data to avoid massive serialization overhead.
     """
@@ -1256,8 +1394,9 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
         uniqueness_threshold_percent=uniqueness_threshold_percent,
         diff_threshold_percent=diff_threshold_percent,
         wrongness_threshold=wrongness_threshold,
-        chimera_switch_cost=chimera_switch_cost,
-        chimera_mismatch_tol=chimera_mismatch_tol
+        chimera_max_recombs=chimera_max_recombs,
+        chimera_max_mismatch_pct=chimera_max_mismatch_pct,
+        chimera_min_delta_to_protect=chimera_min_delta_to_protect
     )
 
     # Setup Shared Memory with GenomicData
