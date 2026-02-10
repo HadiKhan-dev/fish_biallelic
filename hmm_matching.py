@@ -904,15 +904,18 @@ def _gap_worker(args):
     )
 
 def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_sites, haps_data, 
-                                                 max_num_iterations=5, recomb_rate=5e-7,
+                                                 max_num_iterations=20, recomb_rate=5e-7,
                                                  use_standard_baum_welch=True,
-                                                 precalculated_viterbi_emissions=None): # NEW ARGUMENT
+                                                 precalculated_viterbi_emissions=None,
+                                                 num_processes=16):
     """
     Generates a full mesh of transition probabilities for all gap sizes using Viterbi-EM.
     
     Args:
         precalculated_viterbi_emissions: Optional ViterbiBlockList. If provided, 
         full_samples_data and sample_sites are IGNORED to prevent memory pickling overhead.
+        num_processes: Number of parallel processes. Use 1 for sequential execution
+                      (required when called from within a worker process).
     """
     max_gap = len(haps_data) - 1
     gaps = list(range(1, max_gap + 1))
@@ -947,11 +950,16 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
             use_shared_emissions # Flag to tell worker to check shared memory
         ))
     
-    print(f"Calculating HMM-based transitions for {len(gaps)} gaps (StandardBW={use_standard_baum_welch})...")
-    
-    # Initialize Pool with Shared Data
-    with Pool(16, initializer=_init_shared_data, initargs=(shared_context,)) as pool:
-        results = pool.map(_gap_worker, worker_args)
+    # Handle sequential vs parallel execution
+    if num_processes == 1:
+        # Sequential execution - required when called from within a worker process
+        # Initialize shared data for the current process
+        _init_shared_data(shared_context)
+        results = [_gap_worker(args) for args in worker_args]
+    else:
+        # Parallel execution
+        with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as pool:
+            results = pool.map(_gap_worker, worker_args)
     
     mesh_dict = dict(zip(gaps, results))
     return block_linking_em.TransitionMesh(mesh_dict)

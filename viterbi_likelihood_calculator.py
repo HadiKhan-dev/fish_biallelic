@@ -91,19 +91,21 @@ def viterbi_distance_aware_forward(ll_tensor, positions, recomb_rate, state_defi
                     h1_prev = state_definitions[k_prev, 0]
                     h2_prev = state_definitions[k_prev, 1]
                     
-                    # Determine transition distance
+                    # Determine transition distance (number of recombination events)
+                    # dist=0: No recombination (exact match only)
+                    # dist=1: Single recombination (one chromosome switches)
+                    # dist=2: Double recombination (both chromosomes switch, including phase flip)
                     dist = 2
                     
-                    # Case 0: Exact match
+                    # Case 0: Exact match (no recombination)
                     if h1_curr == h1_prev and h2_curr == h2_prev: 
                         dist = 0
-                    # Case 0 (Flip): Free phase switching allowed to match Unordered Genotype model
-                    elif h1_curr == h2_prev and h2_curr == h1_prev: 
-                        dist = 0
-                    # Case 1: Single Recombination
+                    # Case 1: Single Recombination (one chromosome changes)
                     elif (h1_curr == h1_prev or h1_curr == h2_prev or 
                           h2_curr == h1_prev or h2_curr == h2_prev): 
                         dist = 1
+                    # Case 2: Double recombination (default) - includes phase flip (X,Y)->(Y,X)
+                    # Phase flip requires BOTH chromosomes to change, so it's dist=2
                     
                     trans_log_prob = -np.inf
                     if dist == 0: trans_log_prob = cost_0
@@ -173,11 +175,21 @@ def viterbi_distance_aware_backward(ll_tensor, positions, recomb_rate, state_def
                     h1_next = state_definitions[k_next, 0]
                     h2_next = state_definitions[k_next, 1]
                     
+                    # Determine transition distance (number of recombination events)
+                    # dist=0: No recombination (exact match only)
+                    # dist=1: Single recombination (one chromosome switches)
+                    # dist=2: Double recombination (both chromosomes switch, including phase flip)
                     dist = 2
-                    if h1_curr == h1_next and h2_curr == h2_next: dist = 0
-                    elif h1_curr == h2_next and h2_curr == h1_next: dist = 0
+                    
+                    # Case 0: Exact match (no recombination)
+                    if h1_curr == h1_next and h2_curr == h2_next: 
+                        dist = 0
+                    # Case 1: Single Recombination (one chromosome changes)
                     elif (h1_curr == h1_next or h1_curr == h2_next or 
-                          h2_curr == h1_next or h2_curr == h2_next): dist = 1
+                          h2_curr == h1_next or h2_curr == h2_next): 
+                        dist = 1
+                    # Case 2: Double recombination (default) - includes phase flip (X,Y)->(Y,X)
+                    # Phase flip requires BOTH chromosomes to change, so it's dist=2
                     
                     trans_log_prob = -np.inf
                     if dist == 0: trans_log_prob = cost_0
@@ -310,10 +322,11 @@ def calculate_viterbi_emission_tensors(samples_matrix, block_result,
     dense_start = total_ll_start.reshape(num_samples, num_haps, num_haps)
     dense_end = total_ll_end.reshape(num_samples, num_haps, num_haps)
     
-    # Ensure symmetry by taking maximum (accounting for numerical precision)
-    # This is valid because free phase flipping means (i,j) ≡ (j,i)
-    dense_start = np.maximum(dense_start, dense_start.transpose(0, 2, 1))
-    dense_end = np.maximum(dense_end, dense_end.transpose(0, 2, 1))
+    # NOTE: We do NOT enforce symmetry between (i,j) and (j,i) states.
+    # While these states have identical EMISSIONS (same unordered genotype),
+    # they have different TRANSITION histories. A phase flip (i,j)->(j,i)
+    # requires double recombination (cost_2), so the Viterbi path scores
+    # for reaching these states can legitimately differ.
     
     return (dense_start, dense_end)
 # --- Worker Utilities ---

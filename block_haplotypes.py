@@ -4,6 +4,7 @@ import hdbscan
 from multiprocess import Pool
 import warnings
 import time
+import gc
 from scipy.spatial.distance import cdist
 from functools import partial
 from dataclasses import dataclass
@@ -1244,6 +1245,14 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     else:
         final_haps = candidates_to_filter
 
+    # --- 6. MEMORY CLEANUP ---
+    # Clear intermediate data structures that are no longer needed
+    del matches_history
+    del errors_history
+    del haps_history
+    del candidates_to_filter
+    gc.collect()
+
     return BlockResult(positions, final_haps, reads_array, keep_flags=keep_flags, probs_array=probs_array)
 
 def find_missing_haplotypes_iterative(positions, reads_array, current_haps, 
@@ -1371,7 +1380,8 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
                             chimera_max_recombs=1,
                             chimera_max_mismatch_pct=1.0,
                             chimera_min_delta_to_protect=0.25,
-                            num_processes=16):
+                            num_processes=16,
+                            discard_reads_after=True):
     """
     Generate a list of block haplotypes using multiprocessing.
     
@@ -1382,6 +1392,8 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
         chimera_max_recombs: Max recombinations for chimera detection (default 1).
         chimera_max_mismatch_pct: Max mismatch % for chimera (default 1.0%).
         chimera_min_delta_to_protect: Protect haplotypes with mean_delta above this (default 0.25%).
+        discard_reads_after: If True, discard reads_count_matrix after processing to save memory.
+                            probs_array is retained since it's used downstream. (default True)
     
     Optimized: Uses shared memory for genomic_data to avoid massive serialization overhead.
     """
@@ -1410,5 +1422,11 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
             worker_partial, 
             range(len(genomic_data))
         )
+
+    # FREE MEMORY: Drop reads since probs_array is already computed and stored
+    if discard_reads_after:
+        for block in overall_haplotypes:
+            block.reads_count_matrix = None
+        gc.collect()
 
     return BlockResults(overall_haplotypes)

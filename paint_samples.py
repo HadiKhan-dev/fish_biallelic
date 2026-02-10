@@ -16,8 +16,18 @@ Key Features:
 6.  **Allele-Aware Clustering:** Decomposes diploid paths into haploid tracks and clusters them.
 7.  **Visualization:** Plots individual fuzzy paths AND whole-population consensus.
 8.  **Parallel Execution:** Uses multiprocessing and tqdm.
+9.  **Deterministic Emissions:** Converts probabilistic haplotypes to deterministic via argmax
+    to prevent epistemic uncertainty from biasing founder selection.
 
 IMPORTANT: Uses float64 for alpha/beta arrays to prevent precision loss over long chromosomes.
+
+IMPORTANT FIX (v2): Emission calculations now use DETERMINISTIC haplotypes (via argmax).
+This fixes the "founder aliasing" bug where epistemic uncertainty in founder haplotypes
+(e.g., 50/50 probability at a site) caused systematic bias toward uncertain founders.
+The probabilistic approach gave uncertain founders "moderate" scores everywhere, making
+them appear better than founders who were certain but had occasional mismatches. By
+converting to deterministic alleles, we treat "I don't know" as a coin flip (unbiased
+noise) rather than as evidence (systematic bias).
 """
 
 import numpy as np
@@ -470,9 +480,19 @@ def calculate_binned_emissions(sample_probs_matrix, hap_dict, positions,
     by summing log-likelihoods within each bin. For 50,000 SNPs with 100 SNPs/bin,
     this reduces memory by ~100x.
     
+    IMPORTANT: Haplotypes are converted to DETERMINISTIC (via argmax) before emission
+    calculation. This fixes a bug where epistemic uncertainty in founder haplotypes
+    caused a systematic bias toward uncertain founders. When a founder has 50/50
+    probability at a site, the old probabilistic approach would give it "moderate"
+    emissions everywhere, making it appear better than founders who are certain but
+    happen to mismatch at a few sites. The argmax approach introduces small unbiased
+    noise at uncertain sites (<1%), which is preferable to systematic bias.
+    
     Args:
         sample_probs_matrix: (n_samples, n_sites, 3) genotype probabilities
-        hap_dict: Dict mapping founder ID -> (n_sites, 2) haplotype probabilities
+        hap_dict: Dict mapping founder ID -> (n_sites,) or (n_sites, 2) haplotypes
+                  If (n_sites, 2), columns are P(allele=0), P(allele=1) - converted via argmax
+                  If (n_sites,), values are deterministic alleles (0 or 1)
         positions: (n_sites,) array of SNP positions
         snps_per_bin: Number of SNPs to aggregate per bin
         robustness_epsilon: Numerical stability term
@@ -517,22 +537,42 @@ def calculate_binned_emissions(sample_probs_matrix, hap_dict, positions,
         bin_edges[i+1] = (last_pos + next_first) // 2
     bin_edges[-1] = positions[-1] + 1  # Final edge past last SNP
     
-    # Pre-compute haplotype tensors
-    hap_list = [hap_dict[k] for k in hap_keys]
-    haps_tensor = np.array(hap_list)  # (num_haps, num_sites, 2)
-    h0 = haps_tensor[:, :, 0]  # (num_haps, num_sites) - prob of allele 0
-    h1 = haps_tensor[:, :, 1]  # (num_haps, num_sites) - prob of allele 1
+    # =========================================================================
+    # CRITICAL FIX: Convert haplotypes to DETERMINISTIC using argmax
+    # =========================================================================
+    # This fixes the "founder aliasing" bug where epistemic uncertainty in founder
+    # haplotypes caused biased emissions. When founder A is 50/50 uncertain at many
+    # sites but founder B is certain, the old probabilistic approach would give A
+    # "moderate" scores everywhere while B would get perfect scores at matches but
+    # harsh penalties at mismatches. This made uncertain founders appear artificially
+    # better than they should be.
+    #
+    # By converting to deterministic alleles via argmax, we treat "I don't know" as
+    # a coin flip rather than as evidence. This introduces small unbiased noise at
+    # uncertain sites (<1% of sites typically), which is far preferable to the
+    # systematic bias of the probabilistic approach.
+    # =========================================================================
     
-    # Compute genotype probabilities for all state combinations at all sites
-    # c00[i,j,s] = P(genotype=0|state=(i,j)) at site s = h0[i,s] * h0[j,s]
-    c00 = h0[:, None, :] * h0[None, :, :]  # (num_haps, num_haps, num_sites)
-    c11 = h1[:, None, :] * h1[None, :, :]  # P(genotype=2)
-    c01 = (h0[:, None, :] * h1[None, :, :]) + (h1[:, None, :] * h0[None, :, :])  # P(genotype=1)
+    deterministic_alleles = np.zeros((num_haps, num_sites), dtype=np.int8)
     
-    # Reshape to (K, num_sites)
-    combos_0 = c00.reshape(K, -1)
-    combos_1 = c01.reshape(K, -1)
-    combos_2 = c11.reshape(K, -1)
+    for i, k in enumerate(hap_keys):
+        hap = hap_dict[k]
+        if hap.ndim == 2 and hap.shape[1] == 2:
+            # Probabilistic: (n_sites, 2) with P(allele=0), P(allele=1)
+            # Use argmax to get deterministic allele (0 or 1)
+            deterministic_alleles[i] = np.argmax(hap, axis=1).astype(np.int8)
+        else:
+            # Already deterministic: (n_sites,) with values 0 or 1
+            deterministic_alleles[i] = hap.astype(np.int8)
+    
+    # Compute deterministic genotypes for all state pairs
+    # genotype = allele_i + allele_j (values: 0, 1, or 2)
+    # Shape: (num_haps, num_haps, num_sites)
+    state_genotypes = (deterministic_alleles[:, None, :] + 
+                       deterministic_alleles[None, :, :])
+    
+    # Reshape to (K, num_sites) to match state indexing
+    state_genotypes_flat = state_genotypes.reshape(K, num_sites)
     
     # Allocate binned emissions
     binned_ll = np.zeros((num_samples, K, n_bins), dtype=np.float64)
@@ -543,22 +583,34 @@ def calculate_binned_emissions(sample_probs_matrix, hap_dict, positions,
     for bin_idx, snp_indices in enumerate(bin_snp_indices):
         if len(snp_indices) == 0:
             continue
-            
+        
+        n_snps_bin = len(snp_indices)
+        
         # Extract sample probabilities for SNPs in this bin
-        s0 = sample_probs_matrix[:, snp_indices, 0]  # (n_samples, n_snps_in_bin)
-        s1 = sample_probs_matrix[:, snp_indices, 1]
-        s2 = sample_probs_matrix[:, snp_indices, 2]
+        # Shape: (n_samples, n_snps_in_bin, 3)
+        sample_probs_bin = sample_probs_matrix[:, snp_indices, :]
         
-        # Extract haplotype combinations for this bin
-        c0_bin = combos_0[:, snp_indices]  # (K, n_snps_in_bin)
-        c1_bin = combos_1[:, snp_indices]
-        c2_bin = combos_2[:, snp_indices]
+        # Extract state genotypes for this bin
+        # Shape: (K, n_snps_in_bin)
+        geno_bin = state_genotypes_flat[:, snp_indices]
         
-        # Compute model probabilities: P(observed genotype | state)
-        # Shape: (n_samples, K, n_snps_in_bin)
-        model_probs = (s0[:, np.newaxis, :] * c0_bin[np.newaxis, :, :] +
-                       s1[:, np.newaxis, :] * c1_bin[np.newaxis, :, :] +
-                       s2[:, np.newaxis, :] * c2_bin[np.newaxis, :, :])
+        # For each state, look up P(observed | genotype) using the deterministic genotype
+        # We need to gather: sample_probs_bin[sample, snp, geno[state, snp]]
+        # for all (sample, state, snp) combinations
+        
+        # Efficient approach: compute for each genotype value separately and combine
+        model_probs = np.zeros((num_samples, K, n_snps_bin), dtype=np.float64)
+        
+        for geno_val in range(3):
+            # Mask where this genotype applies: (K, n_snps_bin)
+            mask = (geno_bin == geno_val)
+            # Get sample probability for this genotype: (n_samples, n_snps_bin)
+            s_prob = sample_probs_bin[:, :, geno_val]
+            # Expand dimensions for broadcasting: (n_samples, 1, n_snps_bin)
+            s_prob_expanded = s_prob[:, np.newaxis, :]
+            # mask broadcasts from (1, K, n_snps_bin) to (n_samples, K, n_snps_bin)
+            # Apply where mask is True
+            model_probs += mask[np.newaxis, :, :] * s_prob_expanded
         
         # Apply robustness epsilon
         final_probs = model_probs * (1.0 - robustness_epsilon) + robustness_epsilon * uniform_prob
