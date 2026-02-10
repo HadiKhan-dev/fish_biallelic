@@ -279,17 +279,28 @@ def combined_best_hap_matches(block_result):
         reads_array = block_result.reads_count_matrix
         haps = block_result.haplotypes
         keep_flags = getattr(block_result, 'keep_flags', None)
+        probs_array = getattr(block_result, 'probs_array', None)
     else:
         # Assuming tuple structure (pos, keep_flags, reads, haps)
         keep_flags = block_result[1]
         reads_array = block_result[2]
         haps = block_result[3]
+        probs_array = None
         
     # Handle Empty Block Case
-    if reads_array is None or reads_array.size == 0 or len(haps) == 0:
+    if len(haps) == 0:
         return ([], {}, [])
 
-    (site_priors, actual_probs) = analysis_utils.reads_to_probabilities(reads_array)
+    # Determine which probability source to use
+    if reads_array is not None and reads_array.size > 0:
+        # Prefer computing from reads (original behavior)
+        (site_priors, actual_probs) = analysis_utils.reads_to_probabilities(reads_array)
+    elif probs_array is not None and probs_array.size > 0:
+        # Fallback to pre-computed probs_array (when reads discarded for memory)
+        actual_probs = probs_array
+    else:
+        # No probability data available
+        return ([], {}, [])
     
     matches = match_best_vectorised(haps, actual_probs, keep_flags=keep_flags)
     return matches

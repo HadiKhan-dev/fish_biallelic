@@ -31,8 +31,12 @@ def _worker_match_overlap(i):
     """
     Worker function to calculate overlap similarity between block[i] and block[i+1].
     Accesses data from _SHARED_DATA to avoid serialization.
+    
+    If there is no overlap (gap between blocks), returns low-score "bridge" edges
+    to maintain graph connectivity.
     """
     blocks = _SHARED_DATA['blocks']
+    gap_bridge_score = 1.0  # Low score to allow paths through gaps
     
     # Get the two blocks
     curr_block = blocks[i]
@@ -50,8 +54,18 @@ def _worker_match_overlap(i):
     
     overlap_length = len(curr_block.positions) - overlap_start_idx
     
+    # Handle NO OVERLAP case (gap between blocks)
     if overlap_length <= 0:
-        return {}
+        # Create low-score bridge edges to maintain connectivity
+        bridge_edges = {}
+        curr_haps = curr_block.haplotypes
+        next_haps = next_block.haplotypes
+        
+        for curr_name in curr_haps.keys():
+            for next_name in next_haps.keys():
+                bridge_edges[((i, curr_name), (i+1, next_name))] = gap_bridge_score
+        
+        return bridge_edges
 
     # 2. Extract Haplotype Slices
     curr_haps = curr_block.haplotypes
@@ -156,122 +170,6 @@ def _worker_get_match_probabilities(sample_idx, recomb_rate, value_error_rate):
     )
 
 #%%
-def match_haplotypes_by_overlap(block_level_haps,
-                     hap_cutoff_autoinclude=2,
-                     hap_cutoff_noninclude=5):
-    """
-    Takes as input a list of BlockResult objects and finds matching haps 
-    based on overlapping suffix/prefix similarity.
-    """        
-    
-    next_starting = []
-    matches = []
-    
-    block_haps_names = []
-    block_counts = {}
-    
-    #Find overlap starting points
-    for i in range(1,len(block_level_haps)):
-        if len(block_level_haps[i].positions) == 0 or len(block_level_haps[i-1].positions) == 0:
-            next_starting.append(0)
-            continue
-            
-        start_position = block_level_haps[i].positions[0]
-        insertion_point = np.searchsorted(block_level_haps[i-1].positions, start_position)
-        next_starting.append(insertion_point)
-        
-    #Create list of unique names for the haps in each of the blocks    
-    for i in range(len(block_level_haps)):
-        block_haps_names.append([])
-        block_counts[i] = len(block_level_haps[i].haplotypes)
-        for name in block_level_haps[i].haplotypes.keys():
-            block_haps_names[-1].append((i,name))
-
-    #Iterate over all the blocks
-    for i in range(len(block_level_haps)-1):
-        # Empty block check
-        if len(block_level_haps[i].positions) == 0 or len(block_level_haps[i+1].positions) == 0:
-            matches.append([])
-            continue
-
-        start_point = next_starting[i]
-        overlap_length = len(block_level_haps[i].positions) - start_point   
-        
-        curr_haps = block_level_haps[i].haplotypes
-        next_haps = block_level_haps[i+1].haplotypes
-        
-        cur_ends = {k: curr_haps[k][start_point:] for k in curr_haps.keys()}
-        next_ends = {k: next_haps[k][:overlap_length] for k in next_haps.keys()}
-
-        # Flags
-        if block_level_haps[i].keep_flags is not None:
-            cur_keep_flags = np.array(block_level_haps[i].keep_flags[start_point:], dtype=bool)
-        else:
-            if len(cur_ends) > 0:
-                cur_keep_flags = np.ones(len(list(cur_ends.values())[0]), dtype=bool)
-            else:
-                cur_keep_flags = np.array([], dtype=bool)
-
-        if block_level_haps[i+1].keep_flags is not None:
-            next_keep_flags = np.array(block_level_haps[i+1].keep_flags[:overlap_length], dtype=bool)
-        else:
-            next_keep_flags = np.ones(overlap_length, dtype=bool)
-        
-        min_len = min(len(cur_keep_flags), len(next_keep_flags))
-        cur_keep_flags = cur_keep_flags[:min_len]
-        next_keep_flags = next_keep_flags[:min_len]
-        
-        matches.append([])
-        
-        min_expected_connections = max(block_counts[i], block_counts[i+1])
-        if block_counts[i] == 0 or block_counts[i+1] == 0:
-            min_expected_connections = 0
-            
-        amount_added = 0
-        all_edges_consideration = {}
-        
-        for first_name in cur_ends.keys(): 
-            dist_values = {}
-
-            for second_name in next_ends.keys():
-                
-                first_new_hap = cur_ends[first_name][:min_len][cur_keep_flags]
-                second_new_hap = next_ends[second_name][:min_len][next_keep_flags]
-                
-                common_size = len(first_new_hap)
-                
-                if common_size > 0:
-                    haps_dist = 100 * analysis_utils.calc_distance(
-                        first_new_hap,
-                        second_new_hap,
-                        calc_type="haploid"
-                    ) / common_size
-                else:
-                    haps_dist = 0
-                    
-                dist_values[(first_name,second_name)] = haps_dist
-
-            removals = []
-            for k in dist_values.keys():
-                if dist_values[k] <= hap_cutoff_autoinclude:
-                    matches[-1].append(((i,k[0]),(i+1,k[1])))
-                    amount_added += 1
-                    removals.append(k)
-                if dist_values[k] >= hap_cutoff_noninclude:
-                    removals.append(k)
-            for k in removals:
-                dist_values.pop(k)
-            all_edges_consideration.update(dist_values)
-        
-        all_edges_consideration = {k:v for k, v in sorted(all_edges_consideration.items(), key=lambda item: item[1])}
-        
-        for key in all_edges_consideration:
-            if amount_added < min_expected_connections:
-                matches[-1].append(((i,key[0]),(i+1,key[1])))
-                amount_added += 1
-                continue
-            
-    return (block_haps_names,matches)
 
 def match_haplotypes_by_overlap_probabalistic(block_level_haps, num_processes=16):
     """
@@ -300,94 +198,7 @@ def match_haplotypes_by_overlap_probabalistic(block_level_haps, num_processes=16
         matches = processing_pool.map(_worker_match_overlap, range(num_junctions))
             
     return (block_haps_names, matches)
-
-def match_haplotypes_by_samples(full_haps_data, num_processes=16):
-    """
-    Match haplotypes based on sample usage (best matches).
-    full_haps_data should be a BlockResults object.
-    
-    Optimized: Uses shared memory for full_haps_data and split pools.
-    """
-    
-    auto_add_val = 70
-    max_reduction_include = 0.8
-    
-    num_blocks = len(full_haps_data)
-    all_matches = []
-    
-    block_haps_names = []
-    for i in range(len(full_haps_data)):
-        block_haps_names.append([])
-        for nm in full_haps_data[i].haplotypes.keys():
-            block_haps_names[-1].append((i,nm))
-    
-    # --- PHASE 1: Get Best Matches ---
-    shared_context_1 = {'blocks': full_haps_data}
-
-    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_1,)) as processing_pool:
-        match_best_results = processing_pool.map(
-            _worker_combined_best_hap_matches,
-            range(num_blocks)
-        )
-        
-    # --- PHASE 2: Compare Neighboring Blocks ---
-    shared_context_2 = {'blocks': full_haps_data, 'match_results': match_best_results}
-    
-    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_2,)) as processing_pool:
-        args_list = [(i, i+1) for i in range(num_blocks - 1)]
-        neighbouring_usages = processing_pool.starmap(
-            _worker_hap_matching_comparison,
-            args_list
-        )
-    
-    forward_matches = []
-    backward_matches = []
-    
-    for x in range(len(block_haps_names)-1):
-        first_names = block_haps_names[x]
-        second_names = block_haps_names[x+1]
-        
-        forward_edges_add = []
-        for first_hap in first_names:
-            highest_score_found = -1
-            for second_hap in second_names:
-                sim_val = neighbouring_usages[x][0].get((first_hap,second_hap), 0)
-                if sim_val > highest_score_found:
-                    highest_score_found = sim_val
-
-            for second_hap in second_names:
-                sim_val = neighbouring_usages[x][0].get((first_hap,second_hap), 0)
-                
-                if sim_val >= auto_add_val or sim_val > highest_score_found*max_reduction_include:
-                    forward_edges_add.append((first_hap,second_hap))
-        
-        forward_matches.append(forward_edges_add)
-        
-        backward_edges_add = []
-        for second_hap in second_names:
-            highest_score_found = -1
-            for first_hap in first_names:
-                sim_val = neighbouring_usages[x][1].get((first_hap,second_hap), 0)
-                if sim_val > highest_score_found:
-                    highest_score_found = sim_val
-                    
-            for first_hap in first_names:
-                sim_val = neighbouring_usages[x][1].get((first_hap,second_hap), 0)
-                
-                if sim_val >= auto_add_val or sim_val > highest_score_found*max_reduction_include:
-                    backward_edges_add.append((first_hap,second_hap))
-        
-        backward_matches.append(backward_edges_add)
-
-    for i in range(len(forward_matches)):
-        commons = []
-        for x in forward_matches[i]:
-            if x in backward_matches[i]:
-                commons.append(x)
-        all_matches.append(commons)
-        
-    return [(block_haps_names,forward_matches),(block_haps_names,backward_matches),(block_haps_names,all_matches)]
-        
+       
 def match_haplotypes_by_samples_probabalistic(full_haps_data, num_processes=16):
     """
     Probabilistic version of match_haplotypes_by_samples.

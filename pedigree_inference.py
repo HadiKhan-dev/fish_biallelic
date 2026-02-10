@@ -102,7 +102,7 @@ class PedigreeResult:
             if updates == 0:
                 break
 
-    def perform_automatic_cutoff(self, force_clusters=2, sigma_threshold=4.0):
+    def perform_automatic_cutoff(self, force_clusters=2, sigma_threshold=5.0):
         """
         Uses Sigma Clipping on Score-Per-Bin to distinguish True Trios (F2/F3) from
         False Trios (F1s). 
@@ -283,7 +283,7 @@ class PedigreeResult:
 # 2. DISCRETIZATION & ALLELE CONVERSION FOR TOLERANCE PAINTINGS
 # =============================================================================
 
-def discretize_consensus_with_uncertainty(consensus_painting, start_pos, end_pos, snps_per_bin=50):
+def discretize_consensus_with_uncertainty(consensus_painting, start_pos, end_pos, snps_per_bin=100):
     """
     Discretize a SampleConsensusPainting, preserving uncertainty information.
     
@@ -363,7 +363,7 @@ def discretize_consensus_with_uncertainty(consensus_painting, start_pos, end_pos
     return id_grid, potential_hom_mask, bin_centers
 
 
-def discretize_sample_painting_with_hom_mask(sample_painting, start_pos, end_pos, snps_per_bin=50):
+def discretize_sample_painting_with_hom_mask(sample_painting, start_pos, end_pos, snps_per_bin=100):
     """
     Discretize a SamplePainting (no uncertainty info).
     
@@ -1746,7 +1746,7 @@ def _score_trios_batch(args):
 
 
 def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20,
-                                          snps_per_bin=150, recomb_rate=5e-8,
+                                          snps_per_bin=100, recomb_rate=5e-8,
                                           mismatch_penalty=DEFAULT_MISMATCH_PENALTY,
                                           max_snps_per_bin=10,
                                           n_workers=None):
@@ -2187,7 +2187,7 @@ def draw_pedigree_tree(relationships_df, output_file="pedigree_tree.png"):
     plt.axis('off'); plt.tight_layout(); plt.savefig(output_file, dpi=150); plt.close()
 
 
-def run_pedigree_inference_tolerance(tolerance_painting, sample_ids=None, snps_per_bin=150, 
+def run_pedigree_inference_tolerance(tolerance_painting, sample_ids=None, snps_per_bin=100, 
                                      founder_block=None, recomb_rate=5e-8,
                                      output_prefix="pedigree",
                                      mismatch_penalty=DEFAULT_MISMATCH_PENALTY,

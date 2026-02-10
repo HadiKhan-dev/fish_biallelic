@@ -129,6 +129,43 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, gl
     
     return super_block
 
+
+def compute_max_gap(blocks, recomb_rate, n_generations, recomb_tolerance):
+    """
+    Compute the maximum gap to use for beam search transition lookups.
+    
+    gap=1 corresponds to ~0bp (adjacent block boundary).
+    gap=G spans (G-1) full blocks of physical distance.
+    
+    We want: (G-1) * avg_block_span * recomb_rate * n_generations < recomb_tolerance
+    
+    Args:
+        blocks: List of BlockResult/proxy objects with .positions.
+        recomb_rate: Per-bp recombination rate.
+        n_generations: Average number of generations between founders and samples.
+        recomb_tolerance: Maximum expected recombinations before we stop trusting linkage.
+    
+    Returns:
+        int: max_gap (always >= 1).
+    """
+    # Average physical span of blocks
+    block_spans = [b.positions[-1] - b.positions[0] for b in blocks if len(b.positions) > 1]
+    if not block_spans:
+        return 1
+    
+    avg_block_span = np.mean(block_spans)
+    
+    # Expected recombs per block-step
+    recombs_per_step = avg_block_span * recomb_rate * n_generations
+    
+    if recombs_per_step <= 0:
+        return len(blocks)  # No recombination: use all gaps
+    
+    max_gap = max(1, 1 + int(math.floor(recomb_tolerance / recombs_per_step)))
+    
+    return max_gap
+
+
 # =============================================================================
 # BATCH WORKER FUNCTION (For Parallel Processing)
 # =============================================================================
@@ -142,7 +179,7 @@ def _process_single_batch(args):
      use_hmm_linking, recomb_rate, beam_width, max_founders,
      switch_cost_scale, recomb_penalty, pruning_switch_cost_scale, 
      pruning_recomb_penalty, complexity_penalty_scale, use_standard_bic,
-     max_sites_for_linking, verbose) = args
+     max_sites_for_linking, n_generations, recomb_tolerance, verbose) = args
     
     # Convert list back to BlockResults
     original_portion = block_haplotypes.BlockResults(original_blocks_list)
@@ -182,6 +219,14 @@ def _process_single_batch(args):
     snp_growth_factor = avg_snps / 200.0
     effective_complexity_scale = complexity_penalty_scale * snp_growth_factor
 
+    # --- COMPUTE MAX_GAP ---
+    if n_generations is not None and recomb_tolerance is not None:
+        # Use ORIGINAL blocks for physical span (not proxy)
+        beam_max_gap = compute_max_gap(original_blocks_list, recomb_rate, 
+                                        n_generations, recomb_tolerance)
+    else:
+        beam_max_gap = None  # No limit
+
     # 2. Generate Mesh
     if use_hmm_linking:
         viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
@@ -191,7 +236,8 @@ def _process_single_batch(args):
             None, None, portion_proxy, 
             recomb_rate=recomb_rate, 
             use_standard_baum_welch=False,
-            precalculated_viterbi_emissions=viterbi_emissions
+            precalculated_viterbi_emissions=viterbi_emissions,
+            num_processes=1  # Avoid nested Pool inside worker
         )
     else:
         # Standard Linker - use num_processes=1 to avoid nested Pool
@@ -203,7 +249,8 @@ def _process_single_batch(args):
         
     # 3. Beam Search on Proxy
     beam_results = beam_search_core.run_full_mesh_beam_search(
-        portion_proxy, mesh, beam_width=beam_width, verbose=verbose
+        portion_proxy, mesh, beam_width=beam_width, 
+        max_gap=beam_max_gap, verbose=verbose
     )
     
     if not beam_results:
@@ -274,6 +321,9 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           use_standard_bic=False,
                           # Memory Safety
                           max_sites_for_linking=2000,
+                          # Max Gap Parameters
+                          n_generations=None,        # Avg generations between founders and samples
+                          recomb_tolerance=0.5,      # Max expected recombs before linkage is untrusted
                           # Parallelization
                           num_processes=16,
                           # Output control
@@ -283,11 +333,13 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     Includes Proxy Logic and Pre-Calculated Emissions to prevent OOM.
     
     Args:
-        switch_cost_scale: Factor to calculate High Penalty from block size (e.g. 0.075).
-        pruning_switch_cost_scale: Factor to calculate Low Penalty from block size (e.g. 0.001).
-                                   If None, falls back to raw pruning_recomb_penalty or defaults to High.
+        switch_cost_scale: Factor to calculate High Penalty from block size.
+        pruning_switch_cost_scale: Factor to calculate Low Penalty from block size.
+        n_generations: Average number of meioses between founders and samples.
+                       If None, max_gap is not limited (all transitions used).
+        recomb_tolerance: Maximum expected recombinations across the gap before
+                          linkage information is too degraded to use. Default 0.5.
         num_processes: Number of parallel processes for batch processing.
-                      Use 1 for sequential execution.
         verbose: If True, print detailed progress from beam search and selection.
     """
     from multiprocess import Pool
@@ -295,9 +347,19 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     total_blocks = len(input_blocks)
     num_batches = math.ceil(total_blocks / batch_size)
     
-    print(f"\n--- Starting Hierarchical Step ---")
-    print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
-    print(f"Processing with {num_processes} workers...")
+    # Preview max_gap for user
+    if n_generations is not None:
+        preview_max_gap = compute_max_gap(list(input_blocks), recomb_rate, 
+                                           n_generations, recomb_tolerance)
+        print(f"\n--- Starting Hierarchical Step ---")
+        print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
+        print(f"Max gap: {preview_max_gap} (n_gen={n_generations}, tol={recomb_tolerance}, rate={recomb_rate})")
+        print(f"Processing with {num_processes} workers...")
+    else:
+        print(f"\n--- Starting Hierarchical Step ---")
+        print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
+        print(f"Max gap: unlimited (n_generations not specified)")
+        print(f"Processing with {num_processes} workers...")
     
     # Prepare worker arguments
     worker_args = []
@@ -315,7 +377,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             use_hmm_linking, recomb_rate, beam_width, max_founders,
             switch_cost_scale, recomb_penalty, pruning_switch_cost_scale,
             pruning_recomb_penalty, complexity_penalty_scale, use_standard_bic,
-            max_sites_for_linking, verbose
+            max_sites_for_linking, n_generations, recomb_tolerance, verbose
         ))
     
     # Process batches

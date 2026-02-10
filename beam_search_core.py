@@ -18,12 +18,16 @@ class FastMesh:
     dense NumPy log-probability matrices. This allows for O(1) lookups and 
     vectorized broadcasting during the Beam Search.
     
+    Stores BOTH forward and backward transition matrices:
+      - Forward:  P(later_hap | earlier_hap)  — used when scoring from past to future
+      - Backward: P(earlier_hap | later_hap)  — used when scoring from future to past
+    
     Attributes:
         num_blocks (int): Total number of genomic blocks.
         mappings (list): List of dicts mapping {real_hap_key: dense_index} for each block.
         reverse_mappings (list): List of lists mapping [dense_index] -> real_hap_key.
-        registry (dict): Nested dictionary storing dense matrices.
-                         registry[from_block_idx][to_block_idx] = Log_Prob_Matrix (N_from x N_to).
+        registry (dict): Forward matrices. registry[from_block][to_block] = Log_Prob_Matrix (N_from x N_to).
+        backward_registry (dict): Backward matrices. backward_registry[later_block][earlier_block] = Log_Prob_Matrix (N_later x N_earlier).
     """
     def __init__(self, block_results, transition_mesh):
         """
@@ -44,13 +48,11 @@ class FastMesh:
             self.mappings.append({k: idx for idx, k in enumerate(keys)})
             self.reverse_mappings.append(keys)
             
-        # 2. Build Dense Matrices Registry
+        # 2. Build Forward Dense Matrices Registry
         self.registry = {}
 
-        # Iterate over all gap sizes available in the mesh
         for gap in transition_mesh.keys():
-            # We use the Forward Dictionary: P(Next | Curr)
-            # Structure: { block_idx: { ((i, u), (j, v)): prob } }
+            # Forward Dictionary: P(Next | Curr)
             fwd_dict = transition_mesh[gap][0] 
             
             if fwd_dict is None: continue
@@ -58,16 +60,13 @@ class FastMesh:
             for i_idx, transitions in fwd_dict.items():
                 j_idx = i_idx + gap
                 
-                # Check bounds
                 if j_idx >= self.num_blocks: continue
                 
-                # Create dense matrix initialized to -inf (log(0))
                 n_from = len(self.mappings[i_idx])
                 n_to = len(self.mappings[j_idx])
                 
                 mat = np.full((n_from, n_to), -np.inf, dtype=np.float32)
                 
-                # Fill matrix
                 for (key_from, key_to), prob in transitions.items():
                     u_key = key_from[1]
                     v_key = key_to[1]
@@ -80,13 +79,60 @@ class FastMesh:
                 if i_idx not in self.registry: self.registry[i_idx] = {}
                 self.registry[i_idx][j_idx] = mat
 
+        # 3. Build Backward Dense Matrices Registry
+        self.backward_registry = {}
+
+        for gap in transition_mesh.keys():
+            # Backward Dictionary: P(Prev | Curr)
+            bwd_dict = transition_mesh[gap][1]
+            
+            if bwd_dict is None: continue
+            
+            for j_idx, transitions in bwd_dict.items():
+                i_idx = j_idx - gap  # the earlier block
+                
+                if i_idx < 0: continue
+                
+                # Rows = later block (j_idx), Cols = earlier block (i_idx)
+                # mat[h_later, h_earlier] = log P(h_earlier | h_later)
+                n_later = len(self.mappings[j_idx])
+                n_earlier = len(self.mappings[i_idx])
+                
+                mat = np.full((n_later, n_earlier), -np.inf, dtype=np.float32)
+                
+                for (key_from, key_to), prob in transitions.items():
+                    u_key = key_from[1]  # hap in later block (j_idx)
+                    v_key = key_to[1]    # hap in earlier block (i_idx)
+                    
+                    if u_key in self.mappings[j_idx] and v_key in self.mappings[i_idx]:
+                        r = self.mappings[j_idx][u_key]
+                        c = self.mappings[i_idx][v_key]
+                        mat[r, c] = math.log(prob)
+                
+                if j_idx not in self.backward_registry:
+                    self.backward_registry[j_idx] = {}
+                self.backward_registry[j_idx][i_idx] = mat
+
     def get_transition_matrix(self, from_block, to_block):
         """
-        Returns the dense log-probability matrix P(to_block | from_block).
+        Returns the forward dense log-probability matrix P(to_block | from_block).
+        from_block < to_block.
         Returns None if no transition data exists for this pair.
         """
         if from_block in self.registry and to_block in self.registry[from_block]:
             return self.registry[from_block][to_block]
+        return None
+
+    def get_backward_matrix(self, later_block, earlier_block):
+        """
+        Returns the backward dense log-probability matrix P(earlier_hap | later_hap).
+        later_block > earlier_block.
+        Shape: (n_later_haps, n_earlier_haps)
+        Entry [h_later, h_earlier] = log P(h_earlier | h_later)
+        Returns None if no transition data exists for this pair.
+        """
+        if later_block in self.backward_registry and earlier_block in self.backward_registry[later_block]:
+            return self.backward_registry[later_block][earlier_block]
         return None
 
     def get_key_from_dense(self, block_idx, dense_idx):
@@ -98,243 +144,234 @@ class FastMesh:
         return len(self.reverse_mappings[block_idx])
 
 # =============================================================================
-# 2. BEAM SEARCH UTILITIES
+# 2. BIDIRECTIONAL BEAM SEARCH
 # =============================================================================
 
-def enforce_tip_diversity(candidates, beam_width, num_possible_tips):
+def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200, 
+                                  max_gap=None, verbose=True):
     """
-    Selects the next beam to ensure DIVERSITY.
+    Bidirectional Beam Search - forward pass builds paths, backward pass refines
+    using both backward transitions AND the forward path as context.
     
-    Logic:
-    1. Identify the BEST scoring path for EVERY possible local haplotype (tip).
-    2. Add these to the beam first (ensuring coverage).
-    3. Fill the rest of the beam with the highest scoring remaining paths.
+    Uses MEAN-PER-STEP scoring: at each block, adds the mean of transition scores
+    rather than the sum. This prevents later blocks from dominating the score
+    (block N would otherwise add N transitions while block 1 adds only 1).
+    
+    For each forward path F = [f0, f1, ..., fN-1]:
+    - Backward pass builds B = [b0, b1, ..., bN-1]
+    - When choosing b_k, score includes:
+      - P(b_k | b_{k+1}, b_{k+2}, ...) - backward transitions from future blocks
+      - P(b_k | f_0, f_1, ..., f_{k-1}) - forward transitions from past blocks
     
     Args:
-        candidates: List of (path_list, score, tip_index) tuples.
-        beam_width: Total size of beam.
-        num_possible_tips: Number of haplotypes in the current block.
+        haps_data: List of BlockResult objects.
+        transition_mesh: TransitionMesh object.
+        beam_width: Number of paths to keep.
+        max_gap: Maximum gap between blocks to consider transitions for.
+                 If None, use all available transitions (no limit).
+                 gap=1 means adjacent blocks (essentially 0bp between them).
+                 gap=G spans G-1 full blocks of physical distance.
+        verbose: If True, print progress.
     
     Returns:
-        List of (path_list, score, tip_index) selected for the beam.
+        List of (path_indices, score) sorted by score.
     """
-    # 1. Bucketing by Tip
-    best_per_tip = {} # tip_idx -> (path, score, tip)
-    remainder = []    # List of all other candidates
+    if verbose:
+        print("Building FastMesh for Bidirectional Beam Search...")
+    fast_mesh = FastMesh(haps_data, transition_mesh)
+    num_blocks = fast_mesh.num_blocks
     
-    # Sort candidates by score descending first
+    if num_blocks < 2:
+        n_0 = fast_mesh.get_num_haps(0)
+        return [([h], 0.0) for h in range(n_0)]
+    
+    # Effective max_gap: if None, use all blocks
+    eff_max_gap = max_gap if max_gap is not None else num_blocks
+    
+    if verbose:
+        print(f"  max_gap={max_gap} (effective: {eff_max_gap})")
+    
+    # ========== FORWARD PASS ==========
+    # Build full paths from block 0 to block N-1
+    # Uses MEAN scoring: add mean of transitions at each step
+    if verbose:
+        print(f"Pass 1: Forward Beam (blocks 0 to {num_blocks-1})...")
+    
+    n_0 = fast_mesh.get_num_haps(0)
+    # (path, cumulative_score, tip)
+    forward_beam = [([h], 0.0, h) for h in range(n_0)]
+    
+    for curr_block in range(1, num_blocks):
+        candidates = []
+        n_curr = fast_mesh.get_num_haps(curr_block)
+        
+        # Earliest past block to consider (limited by max_gap)
+        earliest_past = max(0, curr_block - eff_max_gap)
+        
+        for path, path_score, _ in forward_beam:
+            # Compute transition scores from previous blocks within max_gap to curr_block
+            # Using FORWARD matrices: P(curr_h | past_h)
+            transition_to_curr = np.zeros(n_curr, dtype=np.float32)
+            n_transitions = 0
+            
+            for past_idx in range(earliest_past, curr_block):
+                past_h = path[past_idx]
+                mat = fast_mesh.get_transition_matrix(past_idx, curr_block)
+                if mat is not None:
+                    transition_to_curr += mat[past_h, :]
+                    n_transitions += 1
+            
+            # MEAN scoring: divide by number of transitions actually used
+            if n_transitions > 0:
+                mean_transition = transition_to_curr / n_transitions
+            else:
+                mean_transition = transition_to_curr
+            
+            for h in range(n_curr):
+                new_path = path + [h]
+                new_score = path_score + mean_transition[h]
+                candidates.append((new_path, new_score, h))
+        
+        forward_beam = _enforce_diversity_simple(candidates, beam_width, n_curr)
+    
+    if verbose:
+        print(f"  Forward beam has {len(forward_beam)} full paths")
+        print(f"Pass 2: Backward Beam conditioned on forward paths...")
+    
+    # ========== BACKWARD PASS (conditioned on each forward path) ==========
+    all_backward_paths = []
+    
+    for fwd_path, fwd_score, _ in forward_beam:
+        # For this forward path, build backward paths
+        # backward_beam contains (path, bwd_score, tip) where path is in forward order [k, k+1, ..., N-1]
+        
+        n_last = fast_mesh.get_num_haps(num_blocks - 1)
+        
+        # Initialize backward beam with forward path context at the last block
+        # Score for haplotype h at block N-1 = mean of FORWARD transitions from past blocks within max_gap
+        # (These are forward because we're asking: given the forward path's past, how likely is h?)
+        earliest_past = max(0, (num_blocks - 1) - eff_max_gap)
+        
+        backward_beam = []
+        for h in range(n_last):
+            init_score = 0.0
+            n_transitions = 0
+            for past_block in range(earliest_past, num_blocks - 1):
+                past_h = fwd_path[past_block]
+                mat = fast_mesh.get_transition_matrix(past_block, num_blocks - 1)
+                if mat is not None:
+                    init_score += mat[past_h, h]
+                    n_transitions += 1
+            if n_transitions > 0:
+                init_score /= n_transitions
+            backward_beam.append(([h], init_score, h))
+        
+        for curr_block in range(num_blocks - 2, -1, -1):
+            candidates = []
+            n_curr = fast_mesh.get_num_haps(curr_block)
+            
+            for bwd_path, bwd_score, _ in backward_beam:
+                # bwd_path = [h_{curr+1}, h_{curr+2}, ..., h_{N-1}] in forward order
+                
+                # Score for extending with haplotype h at curr_block:
+                # 1. BACKWARD transitions: P(curr_h | future_h) for future blocks in bwd_path
+                # 2. FORWARD transitions: P(curr_h | past_h) for past blocks in fwd_path
+                
+                total_trans = np.zeros(n_curr, dtype=np.float32)
+                n_transitions = 0
+                
+                # Backward transitions: use BACKWARD matrix P(curr_h | future_h)
+                for future_idx, future_h in enumerate(bwd_path):
+                    future_block = curr_block + 1 + future_idx
+                    if future_block - curr_block > eff_max_gap:
+                        break
+                    bwd_mat = fast_mesh.get_backward_matrix(future_block, curr_block)
+                    if bwd_mat is not None:
+                        # bwd_mat[future_h, :] gives log P(curr_h | future_h) for all curr_h
+                        total_trans += bwd_mat[future_h, :]
+                        n_transitions += 1
+                
+                # Forward transitions: use FORWARD matrix P(curr_h | past_h)
+                # Limited to past blocks within max_gap
+                earliest_past = max(0, curr_block - eff_max_gap)
+                for past_block in range(earliest_past, curr_block):
+                    past_h = fwd_path[past_block]
+                    mat = fast_mesh.get_transition_matrix(past_block, curr_block)
+                    if mat is not None:
+                        total_trans += mat[past_h, :]
+                        n_transitions += 1
+                
+                # MEAN scoring: divide by number of transitions
+                if n_transitions > 0:
+                    mean_trans = total_trans / n_transitions
+                else:
+                    mean_trans = total_trans
+                
+                for h in range(n_curr):
+                    new_path = [h] + bwd_path
+                    new_score = bwd_score + mean_trans[h]
+                    candidates.append((new_path, new_score, h))
+            
+            backward_beam = _enforce_diversity_simple(candidates, beam_width, n_curr)
+        
+        # backward_beam now contains full paths [0, 1, ..., N-1]
+        # Add best backward path(s) to results
+        for bwd_path, bwd_score, _ in backward_beam:
+            all_backward_paths.append((bwd_path, bwd_score))
+    
+    if verbose:
+        print(f"  Generated {len(all_backward_paths)} backward paths from {len(forward_beam)} forward paths")
+    
+    # ========== COMBINE AND SELECT FINAL ==========
+    # De-duplicate paths and keep best score for each
+    path_scores = {}
+    for path, score in all_backward_paths:
+        path_tuple = tuple(path)
+        if path_tuple not in path_scores or score > path_scores[path_tuple]:
+            path_scores[path_tuple] = score
+    
+    # Also add forward paths (they might be good too)
+    for path, score, _ in forward_beam:
+        path_tuple = tuple(path)
+        if path_tuple not in path_scores or score > path_scores[path_tuple]:
+            path_scores[path_tuple] = score
+    
+    # Sort and return
+    final_results = [(list(p), s) for p, s in path_scores.items()]
+    final_results.sort(key=lambda x: x[1], reverse=True)
+    
+    if verbose:
+        print(f"  Final unique paths: {len(final_results)}")
+    
+    return final_results[:beam_width]
+
+
+def _enforce_diversity_simple(candidates, beam_width, num_tips):
+    """Simple diversity enforcement for forward/backward passes."""
+    if not candidates:
+        return []
+    
     candidates.sort(key=lambda x: x[1], reverse=True)
     
-    for cand in candidates:
-        path, score, tip = cand
-        
-        if tip not in best_per_tip:
-            # First time seeing this tip -> it's the best one (due to sort)
-            best_per_tip[tip] = cand
-        else:
-            remainder.append(cand)
-            
-    # 2. Construct Beam
-    # First, add the best representative for every tip
-    beam = list(best_per_tip.values())
+    best_per_tip = {}
+    remainder = []
     
-    # 3. Fill Remainder
-    # We already sorted candidates, so 'remainder' is also sorted desc
+    for path, score, tip in candidates:
+        if tip not in best_per_tip:
+            best_per_tip[tip] = (path, score, tip)
+        else:
+            remainder.append((path, score, tip))
+    
+    beam = list(best_per_tip.values())
     slots_left = beam_width - len(beam)
     if slots_left > 0:
         beam.extend(remainder[:slots_left])
-        
+    
     return beam
 
-# =============================================================================
-# 3. BIDIRECTIONAL BEAM SEARCH
-# =============================================================================
-
-def run_forward_pass_history(fast_mesh, beam_width=100):
-    """
-    PASS 1: Forward Scoring (Viterbi-like).
-    
-    Calculates the 'Best Possible History Score' to reach every node in the graph.
-    This does NOT build paths; it builds a score map used to guide the backward pass.
-    
-    Args:
-        fast_mesh: FastMesh object.
-        beam_width: (Unused in pure scoring, but implies scope).
-    
-    Returns:
-        history_scores: List of arrays. history_scores[b][h] = Max LogProb to reach Hap h at Block b from Start.
-    """
-    num_blocks = fast_mesh.num_blocks
-    
-    # Init: [Block_Idx] -> Array of scores (shape: N_haps)
-    history_scores = []
-    
-    # Block 0: Uniform (or 0.0 log prob)
-    n_0 = fast_mesh.get_num_haps(0)
-    history_scores.append(np.zeros(n_0, dtype=np.float32))
-    
-    for curr_block in range(1, num_blocks):
-        n_curr = fast_mesh.get_num_haps(curr_block)
-        current_block_scores = np.full(n_curr, -np.inf, dtype=np.float32)
-        
-        # Look back at history (All-to-All / Multi-Gap)
-        # Score[curr] = Max_over_past ( Score[past] + P(past -> curr) )
-        
-        updated = False
-        for past_block in range(curr_block):
-            mat = fast_mesh.get_transition_matrix(past_block, curr_block)
-            if mat is None: continue
-            
-            # mat is (N_past, N_curr)
-            prev_scores = history_scores[past_block]
-            
-            # Mask -inf scores to avoid useless computation
-            valid_mask = (prev_scores > -1e20)
-            if not np.any(valid_mask): continue
-            
-            # Broadcasting: (N_past, 1) + (N_past, N_curr) -> (N_past, N_curr)
-            scores_expanded = prev_scores[valid_mask, np.newaxis] + mat[valid_mask, :]
-            
-            # Max over the past nodes -> Best way to reach 'curr' from 'past_block'
-            best_from_this_gap = np.max(scores_expanded, axis=0)
-            
-            # Update current block max (Accumulate evidence from all gaps)
-            current_block_scores = np.maximum(current_block_scores, best_from_this_gap)
-            updated = True
-            
-        if not updated:
-            # Handle disconnected blocks (rare)
-            current_block_scores = np.zeros(n_curr, dtype=np.float32) - 1000.0
-            
-        history_scores.append(current_block_scores)
-        
-    return history_scores
-
-def run_backward_pass_guided(fast_mesh, forward_history, beam_width=100, weight_decay_func=None):
-    """
-    PASS 2: Backward Construction.
-    
-    Builds paths from Right (End) to Left (Start).
-    At each step, it selects the best parents based on:
-      Score = (Accumulated Future Score) + (Transition Prob) + (Forward History Score)
-      
-    This guarantees global optimality (or near-optimality) because the Forward History
-    encodes the best possible path from the start.
-    
-    Args:
-        fast_mesh: FastMesh object.
-        forward_history: Output of run_forward_pass_history.
-        beam_width: Number of paths to keep.
-        weight_decay_func: Optional scaling for long-range transitions.
-    
-    Returns:
-        List of (path_indices, score), sorted by score.
-    """
-    num_blocks = fast_mesh.num_blocks
-    
-    # 1. Initialize Beam at Last Block
-    # Candidates are stored as: ( [path_indices], backward_accumulated_score, tip_index )
-    # Note: 'path_indices' are built in reverse order [N, N-1, ...]. Reversed at end.
-    
-    last_block_scores = forward_history[-1]
-    n_last = fast_mesh.get_num_haps(num_blocks - 1)
-    
-    candidates = []
-    for i in range(n_last):
-        if last_block_scores[i] > -1e20:
-            # Score for sorting = Forward History (since Backward Score is 0 at start)
-            candidates.append( ([i], 0.0, i) )
-            
-    # Initial Pruning with Diversity
-    # We sort by total likelihood (Fwd + Bwd)
-    candidates.sort(key=lambda x: x[1] + last_block_scores[x[2]], reverse=True)
-    beam = enforce_tip_diversity(candidates, beam_width, n_last)
-    
-    # 2. Iterate Backwards (from N-2 down to 0)
-    # We are choosing nodes for 'curr_block' to attach to 'curr_block + 1'
-    for curr_block in range(num_blocks - 2, -1, -1):
-        candidates = []
-        n_curr = fast_mesh.get_num_haps(curr_block)
-        fwd_scores_loc = forward_history[curr_block]
-        
-        # Pre-fetch transition matrices from 'curr_block' to all 'future_blocks'
-        # We need P(Future | Curr)
-        future_matrices = []
-        for future_block in range(curr_block + 1, num_blocks):
-            mat = fast_mesh.get_transition_matrix(curr_block, future_block)
-            if mat is not None:
-                gap = future_block - curr_block
-                weight = 1.0
-                if weight_decay_func: weight = weight_decay_func(gap)
-                future_matrices.append((future_block, mat, weight))
-                
-        # Expand Beam
-        for path_indices, path_bwd_score, _ in beam:
-            
-            # The node we are immediately connecting to is the last one added to the path list
-            # which corresponds to block (curr_block + 1)
-            prev_node_idx = path_indices[-1] 
-            
-            # We want to calculate the 'Transition Cost' of adding node 'u' to this path.
-            # This includes the immediate link (u -> prev_node)
-            # AND all long-range links (u -> node_at_curr+2, u -> node_at_curr+3...)
-            
-            # Vectorized calculation for all 'u' in curr_block
-            transition_total = np.zeros(n_curr, dtype=np.float32)
-            
-            # 1. Base Transition (Gap 1)
-            # Matrix: curr -> curr+1
-            mat_1 = fast_mesh.get_transition_matrix(curr_block, curr_block + 1)
-            if mat_1 is not None:
-                # Column for 'prev_node_idx' gives P(v | u) for all u
-                transition_total += mat_1[:, prev_node_idx]
-            
-            # 2. Long Range Transitions
-            for future_abs, mat, weight in future_matrices:
-                # Find corresponding node index in the reversed path
-                path_idx = (num_blocks - 1) - future_abs
-                
-                if path_idx >= 0 and path_idx < len(path_indices):
-                    future_node = path_indices[path_idx]
-                    transition_total += (mat[:, future_node] * weight)
-
-            # 3. Total Score for Ranking
-            # Total = Forward_History(u) + Path_Backward_Accumulated + New_Transitions
-            rank_scores = fwd_scores_loc + path_bwd_score + transition_total
-            
-            # 4. Filter & Add Candidates
-            valid_u = np.where(rank_scores > -1e20)[0]
-            
-            # Optimization: Only take top K extensions for this specific path 
-            # to avoid explosion before the diversity filter
-            if len(valid_u) > 20:
-                top_local = valid_u[np.argpartition(rank_scores[valid_u], -20)[-20:]]
-                valid_u = top_local
-
-            for u in valid_u:
-                u_int = int(u)
-                new_path = path_indices + [u_int]
-                
-                # New Bwd Score: Accumulate the transitions only
-                new_bwd_score = path_bwd_score + transition_total[u]
-                
-                # Candidate: (Path, Rank_Score, Tip_Index)
-                candidates.append((new_path, rank_scores[u], u_int))
-                
-        # 5. Select Beam with Diversity
-        beam = enforce_tip_diversity(candidates, beam_width, n_curr)
-    
-    # 3. Finalize
-    # Reverse paths to be 0 -> N
-    final_results = []
-    for path, score, _ in beam:
-        final_results.append((path[::-1], score))
-        
-    final_results.sort(key=lambda x: x[1], reverse=True)
-    return final_results
 
 def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100, 
-                              weight_decay_func=None, verbose=True):
+                              max_gap=None, weight_decay_func=None, verbose=True):
     """
     Main Driver for Bidirectional Beam Search.
     
@@ -342,25 +379,15 @@ def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100,
         haps_data: List of BlockResult objects.
         transition_mesh: TransitionMesh object.
         beam_width: Number of paths to keep.
-        weight_decay_func: Function to weight long-range connections.
+        max_gap: Maximum gap between blocks for transition lookups. None = no limit.
+        weight_decay_func: Function to weight long-range connections (unused).
         verbose: If True, print progress messages.
         
     Returns:
         List of (path_indices, score) sorted by score.
     """
-    if verbose:
-        print("Building FastMesh for Beam Search...")
-    mesh = FastMesh(haps_data, transition_mesh)
-    
-    if verbose:
-        print("Pass 1: Forward History Calculation...")
-    fwd_history = run_forward_pass_history(mesh, beam_width)
-    
-    if verbose:
-        print(f"Pass 2: Guided Backward Beam Search (Width={beam_width})...")
-    results = run_backward_pass_guided(mesh, fwd_history, beam_width, weight_decay_func)
-    
-    return results
+    return run_bidirectional_beam_search(haps_data, transition_mesh, beam_width, 
+                                         max_gap=max_gap, verbose=verbose)
 
 def reconstruct_haplotypes_from_beam(beam_results, fast_mesh, haps_data):
     """
