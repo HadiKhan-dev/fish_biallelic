@@ -243,7 +243,7 @@ def _process_single_batch(args):
         # Standard Linker - use num_processes=1 to avoid nested Pool
         mesh = block_linking_em.generate_transition_probability_mesh(
             global_probs, global_sites, portion_proxy,
-            use_standard_baum_welch=True,
+            use_standard_baum_welch=False,
             num_processes=1
         )
         

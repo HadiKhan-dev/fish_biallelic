@@ -389,7 +389,7 @@ def viterbi_chimera_check_free_recombs(ll_tensor, max_recombs):
 
 def prune_chimeras(hap_dict, probs_array, 
                    max_recombs=1,
-                   max_mismatch_percent=1.0,
+                   max_mismatch_percent=0.5,
                    min_mean_delta_to_protect=0.25):
     """
     Identifies and removes haplotypes that can be explained as 
@@ -1044,8 +1044,12 @@ def generate_further_haps(site_priors,
              cluster_labels = np.zeros(len(unique_candidates), dtype=int)
     else:
          cluster_labels = np.array([0])
-         
-    #breakpoint()
+
+    # Fallback: if HDBSCAN labelled ALL candidates as noise (-1),
+    # treat them as a single cluster so get_representatives_probs
+    # builds one representative instead of discarding everything.
+    if np.all(cluster_labels == -1):
+        cluster_labels = np.zeros(len(unique_candidates), dtype=int)
 
     # --- FILLING MASKED SITES (Fix for NaN issue) ---
     final_candidates_full = np.zeros((len(unique_candidates), num_sites, 2))
@@ -1087,7 +1091,7 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                               diff_threshold_percent=1.0,
                               wrongness_threshold=10.0,
                               chimera_max_recombs=1,
-                              chimera_max_mismatch_pct=1.0,
+                              chimera_max_mismatch_pct=0.5,
                               chimera_min_delta_to_protect=0.25):
     """
     Given the read count array of our sample data for a single block
@@ -1378,7 +1382,7 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
                             diff_threshold_percent=1.0,
                             wrongness_threshold=10.0,
                             chimera_max_recombs=1,
-                            chimera_max_mismatch_pct=1.0,
+                            chimera_max_mismatch_pct=0.5,
                             chimera_min_delta_to_protect=0.25,
                             num_processes=16,
                             discard_reads_after=True):
