@@ -9,6 +9,7 @@ import block_linking_em
 import hmm_matching
 import beam_search_core
 import analysis_utils
+import chimera_resolution
 
 # =============================================================================
 # DATA HELPERS
@@ -44,7 +45,6 @@ def create_downsampled_proxy(block, max_sites=2000):
         new_flags = None
 
     # Optional: Slice reads/probs if they exist on the block object
-    # (Though usually we fetch from global arrays in the pipeline)
     new_reads = None
     if block.reads_count_matrix is not None:
         new_reads = np.ascontiguousarray(block.reads_count_matrix[:, ::stride, :])
@@ -93,11 +93,9 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, gl
     # Get probs - prefer slicing from global_probs if available
     super_probs = None
     if global_probs is not None and global_sites is not None:
-        # Find indices of super_positions in global_sites
         indices = np.searchsorted(global_sites, super_positions)
         super_probs = global_probs[:, indices, :]
     else:
-        # Fallback: try to get from original blocks
         probs_list = []
         for b in original_blocks:
             if b.probs_array is not None:
@@ -148,18 +146,15 @@ def compute_max_gap(blocks, recomb_rate, n_generations, recomb_tolerance):
     Returns:
         int: max_gap (always >= 1).
     """
-    # Average physical span of blocks
     block_spans = [b.positions[-1] - b.positions[0] for b in blocks if len(b.positions) > 1]
     if not block_spans:
         return 1
     
     avg_block_span = np.mean(block_spans)
-    
-    # Expected recombs per block-step
     recombs_per_step = avg_block_span * recomb_rate * n_generations
     
     if recombs_per_step <= 0:
-        return len(blocks)  # No recombination: use all gaps
+        return len(blocks)
     
     max_gap = max(1, 1 + int(math.floor(recomb_tolerance / recombs_per_step)))
     
@@ -173,13 +168,17 @@ def compute_max_gap(blocks, recomb_rate, n_generations, recomb_tolerance):
 def _process_single_batch(args):
     """
     Worker function to process a single batch.
-    Returns the super_block or None if processing failed.
+    
+    Uses chimera_resolution.select_and_resolve for sub-block Viterbi
+    selection, top-N swap refinement, BIC pruning, and chimera resolution.
+    
+    Returns dict with 'batch_idx', 'super_block', and 'status'.
     """
     (b_idx, start_i, end_i, original_blocks_list, global_probs, global_sites,
      use_hmm_linking, recomb_rate, beam_width, max_founders,
-     switch_cost_scale, recomb_penalty, pruning_switch_cost_scale, 
-     pruning_recomb_penalty, complexity_penalty_scale, use_standard_bic,
-     max_sites_for_linking, n_generations, recomb_tolerance, verbose) = args
+     max_sites_for_linking, n_generations, recomb_tolerance,
+     top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
+     cc_scale, verbose) = args
     
     # Convert list back to BlockResults
     original_portion = block_haplotypes.BlockResults(original_blocks_list)
@@ -192,42 +191,20 @@ def _process_single_batch(args):
             'status': 'passthrough'
         }
 
-    # 1. Create Proxies
+    # 1. Create Proxies (for mesh generation and beam search only)
     proxy_list = []
     for b in original_portion:
         proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
     portion_proxy = block_haplotypes.BlockResults(proxy_list)
 
-    # --- DYNAMIC PENALTY LOGIC ---
-    avg_snps = np.mean([len(b.positions) for b in portion_proxy])
-    
-    # Determine Add/Swap Penalty (High)
-    if switch_cost_scale is not None:
-        current_recomb_penalty = avg_snps * switch_cost_scale
-    else:
-        current_recomb_penalty = recomb_penalty if recomb_penalty is not None else 15.0
-
-    # Determine Pruning Penalty (Low)
-    if pruning_switch_cost_scale is not None:
-        current_pruning_penalty = avg_snps * pruning_switch_cost_scale
-    elif pruning_recomb_penalty is not None:
-        current_pruning_penalty = pruning_recomb_penalty
-    else:
-        current_pruning_penalty = current_recomb_penalty
-        
-    # Auto-scale complexity penalty
-    snp_growth_factor = avg_snps / 200.0
-    effective_complexity_scale = complexity_penalty_scale * snp_growth_factor
-
-    # --- COMPUTE MAX_GAP ---
+    # 2. Compute Max Gap
     if n_generations is not None and recomb_tolerance is not None:
-        # Use ORIGINAL blocks for physical span (not proxy)
         beam_max_gap = compute_max_gap(original_blocks_list, recomb_rate, 
                                         n_generations, recomb_tolerance)
     else:
-        beam_max_gap = None  # No limit
+        beam_max_gap = None
 
-    # 2. Generate Mesh
+    # 3. Generate Mesh (on proxy blocks)
     if use_hmm_linking:
         viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
             global_probs, global_sites, portion_proxy, num_processes=1
@@ -237,17 +214,16 @@ def _process_single_batch(args):
             recomb_rate=recomb_rate, 
             use_standard_baum_welch=False,
             precalculated_viterbi_emissions=viterbi_emissions,
-            num_processes=1  # Avoid nested Pool inside worker
+            num_processes=1
         )
     else:
-        # Standard Linker - use num_processes=1 to avoid nested Pool
         mesh = block_linking_em.generate_transition_probability_mesh(
             global_probs, global_sites, portion_proxy,
-            use_standard_baum_welch=False,
+            use_standard_baum_welch=True,
             num_processes=1
         )
         
-    # 3. Beam Search on Proxy
+    # 4. Beam Search on Proxy
     beam_results = beam_search_core.run_full_mesh_beam_search(
         portion_proxy, mesh, beam_width=beam_width, 
         max_gap=beam_max_gap, verbose=verbose
@@ -260,37 +236,34 @@ def _process_single_batch(args):
             'status': 'beam_search_failed'
         }
         
-    # 4. Selection on Proxy
-    portion_emissions_standard = block_linking_em.generate_all_block_likelihoods(
-        global_probs, global_sites, portion_proxy, num_processes=1
-    )
-    
     fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
     
-    selected_founders = beam_search_core.select_founders_likelihood(
-        beam_results, 
-        portion_emissions_standard, 
-        fast_mesh,
+    # 5. Selection + Swap + CR (on original blocks via sub-block emissions)
+    resolved_beam = chimera_resolution.select_and_resolve(
+        beam_results=beam_results,
+        fast_mesh=fast_mesh,
+        batch_blocks=list(original_portion),
+        global_probs=global_probs,
+        global_sites=global_sites,
         max_founders=max_founders,
-        recomb_penalty=current_recomb_penalty,
-        pruning_recomb_penalty=current_pruning_penalty,
-        complexity_penalty_scale=effective_complexity_scale,
-        do_refinement=True,
-        use_standard_bic=use_standard_bic,
-        verbose=verbose
+        top_n_swap=top_n_swap,
+        max_cr_iterations=max_cr_iterations,
+        paint_penalty=paint_penalty,
+        min_hotspot_samples=min_hotspot_samples,
+        cc_scale=cc_scale,
     )
     
-    # 5. Reconstruction on Originals
+    # 6. Reconstruction on Originals
     reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
-        selected_founders, fast_mesh, original_portion
+        resolved_beam, fast_mesh, original_portion
     )
     
-    # 6. Package (pass global_probs/sites so probs get stored on super_block)
+    # 7. Package
     super_block = convert_reconstruction_to_superblock(
         reconstructed_data, original_portion, global_probs, global_sites
     )
     
-    # 7. Structural Chimera Pruning
+    # 8. Structural Chimera Pruning
     super_block = beam_search_core.prune_superblock_chimeras(super_block)
     
     return {
@@ -313,41 +286,54 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           beam_width=200,
                           # Selection Parameters
                           max_founders=12,
-                          complexity_penalty_scale=0.1, 
-                          recomb_penalty=None,          # Raw High penalty (if scale not used)
-                          pruning_recomb_penalty=None,  # Raw Low penalty (if scale not used)
-                          switch_cost_scale=0.1,      # Scaling factor for High Penalty
-                          pruning_switch_cost_scale=None, # Scaling factor for Low Penalty
-                          use_standard_bic=False,
                           # Memory Safety
                           max_sites_for_linking=2000,
                           # Max Gap Parameters
-                          n_generations=None,        # Avg generations between founders and samples
-                          recomb_tolerance=0.5,      # Max expected recombs before linkage is untrusted
+                          n_generations=None,
+                          recomb_tolerance=0.5,
+                          # Chimera Resolution Parameters
+                          top_n_swap=20,
+                          max_cr_iterations=10,
+                          paint_penalty=10.0,
+                          min_hotspot_samples=5,
+                          cc_scale=0.2,
                           # Parallelization
                           num_processes=16,
                           # Output control
                           verbose=False): 
     """
     Performs one level of Hierarchical Assembly.
-    Includes Proxy Logic and Pre-Calculated Emissions to prevent OOM.
+    
+    Uses sub-block Viterbi forward selection, top-N swap refinement,
+    BIC pruning with actual-size CC, and chimera resolution.
     
     Args:
-        switch_cost_scale: Factor to calculate High Penalty from block size.
-        pruning_switch_cost_scale: Factor to calculate Low Penalty from block size.
-        n_generations: Average number of meioses between founders and samples.
-                       If None, max_gap is not limited (all transitions used).
-        recomb_tolerance: Maximum expected recombinations across the gap before
-                          linkage information is too degraded to use. Default 0.5.
+        input_blocks: BlockResults from the previous level.
+        global_probs: (n_samples, n_sites, 3) genotype probability array.
+        global_sites: Array of genomic site positions.
+        batch_size: Number of input blocks per batch.
+        use_hmm_linking: If True, use HMM matching for mesh. If False, use EM linking.
+        recomb_rate: Per-bp recombination rate for HMM mesh.
+        beam_width: Number of beam search candidates.
+        max_founders: Maximum number of founders to retain.
+        max_sites_for_linking: Maximum sites for proxy blocks used in mesh generation.
+        n_generations: Average meioses between founders and samples (for max_gap).
+                       If None, max_gap is unlimited.
+        recomb_tolerance: Maximum expected recombinations before linkage is degraded.
+        top_n_swap: Number of candidates to evaluate per swap position.
+        max_cr_iterations: Maximum chimera resolution iterations.
+        paint_penalty: Viterbi penalty for sample painting in CR.
+        min_hotspot_samples: Minimum samples for a hotspot to be actionable.
+        cc_scale: Complexity cost scaling factor.
         num_processes: Number of parallel processes for batch processing.
-        verbose: If True, print detailed progress from beam search and selection.
+        verbose: If True, print detailed progress.
     """
     from multiprocess import Pool
     
     total_blocks = len(input_blocks)
     num_batches = math.ceil(total_blocks / batch_size)
     
-    # Preview max_gap for user
+    # Preview
     if n_generations is not None:
         preview_max_gap = compute_max_gap(list(input_blocks), recomb_rate, 
                                            n_generations, recomb_tolerance)
@@ -363,21 +349,19 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     
     # Prepare worker arguments
     worker_args = []
-    batch_blocks_storage = []
     
     for b_idx in range(num_batches):
         start_i = b_idx * batch_size
         end_i = min(start_i + batch_size, total_blocks)
         
         original_blocks_list = list(input_blocks[start_i:end_i])
-        batch_blocks_storage.append(original_blocks_list)
         
         worker_args.append((
             b_idx, start_i, end_i, original_blocks_list, global_probs, global_sites,
             use_hmm_linking, recomb_rate, beam_width, max_founders,
-            switch_cost_scale, recomb_penalty, pruning_switch_cost_scale,
-            pruning_recomb_penalty, complexity_penalty_scale, use_standard_bic,
-            max_sites_for_linking, n_generations, recomb_tolerance, verbose
+            max_sites_for_linking, n_generations, recomb_tolerance,
+            top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
+            cc_scale, verbose
         ))
     
     # Process batches
@@ -389,7 +373,6 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                 desc="Processing Batches"
             ))
     else:
-        # Sequential processing
         results = []
         for args in tqdm(worker_args, desc="Processing Batches"):
             results.append(_process_single_batch(args))
