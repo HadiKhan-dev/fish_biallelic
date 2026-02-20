@@ -31,10 +31,12 @@ import simulate_sequences
 import hmm_matching
 import viterbi_likelihood_calculator
 import beam_search_core
+import chimera_resolution
 import hierarchical_assembly
 import paint_samples
 import pedigree_inference
 import phase_correction
+
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
@@ -172,7 +174,7 @@ print(f"Ground Truth Pedigree data saved to '{truth_csv_path}'")
 sample_names = truth_pedigree['Sample'].tolist()
 
 # 4. Process Each Contig Individually (Visualization, Sequencing, Chunking)
-read_depth = 2000
+read_depth = 4
 
 for i, r_name in enumerate(region_keys):
     print(f"\nProcessing Simulated Data for Region: {r_name}")
@@ -425,32 +427,21 @@ for r_name in region_keys:
 
     print(f"    Input: {len(simd_block_results)} blocks of 200 SNPs each")
     
-    # Run hierarchical step (internally parallelized across batches)
     super_blocks = hierarchical_assembly.run_hierarchical_step(
         input_blocks=simd_block_results,
         global_probs=global_probs,
         global_sites=global_sites,
         batch_size=10,
-        # Linking parameters
-        use_hmm_linking=False,  # Use block_linking_em
-        # Search parameters
+        use_hmm_linking=False,
         beam_width=200,
-        # Selection parameters
         max_founders=12,
-        complexity_penalty_scale=0.1,
-        switch_cost_scale=0.1,
-        pruning_switch_cost_scale=0.05,
-        use_standard_bic=False,
-        # Memory safety
         max_sites_for_linking=2000,
-        # Parallelization
+        cc_scale=0.2,
         num_processes=16
     )
     
-    # Store results
     multi_contig_results[r_name]['super_blocks_L1'] = super_blocks
     
-    # Summary
     hap_counts = [len(b.haplotypes) for b in super_blocks]
     total_sites = sum(len(b.positions) for b in super_blocks)
     print(f"\n    Output: {len(super_blocks)} super-blocks")
@@ -470,7 +461,6 @@ print(f"{'='*60}")
 for r_name in region_keys:
     super_blocks = multi_contig_results[r_name]['super_blocks_L1']
     
-    # Get ground truth founder haplotypes
     orig_sites, orig_haps = multi_contig_results[r_name]['naive_long_haps']
     orig_haps_concrete = simulate_sequences.concretify_haps(orig_haps)
     orig_site_to_idx = {s: i for i, s in enumerate(orig_sites)}
@@ -487,14 +477,12 @@ for r_name in region_keys:
     for block_idx, block in enumerate(super_blocks):
         positions = block.positions
         
-        # Get true founder haplotypes at this block's positions
         true_at_block = []
         for f_idx in range(num_true_founders):
             founder_vals = np.array([orig_haps_concrete[f_idx][orig_site_to_idx[pos]] 
                                       for pos in positions])
             true_at_block.append(founder_vals)
         
-        # Count founders found
         founders_found = 0
         for f_idx, tf in enumerate(true_at_block):
             best_error = 100
@@ -507,7 +495,6 @@ for r_name in region_keys:
             if best_error < 2.0:
                 founders_found += 1
         
-        # Count good vs chimera haplotypes
         for h_idx, hap in block.haplotypes.items():
             if hap.ndim > 1:
                 hap = np.argmax(hap, axis=1)
@@ -541,6 +528,7 @@ for r_name in region_keys:
         print(f"\nChimera details:")
         for c in sorted(chimera_details, key=lambda x: x['error'], reverse=True):
             print(f"  Block {c['block']}, H{c['hap']}: F{c['best_f']} @ {c['error']:.2f}%")
+
 #%% 
 # ==========================================================================
 # Level 2 Hierarchical Assembly
@@ -555,17 +543,14 @@ start_time = time.time()
 for r_name in region_keys:
     print(f"\n  Processing {r_name}...")
     
-    # Get L1 super-blocks
     super_blocks_L1 = multi_contig_results[r_name]['super_blocks_L1']
     
     print(f"    Input: {len(super_blocks_L1)} L1 super-blocks")
     print(f"    Sites per L1 block: {[len(b.positions) for b in super_blocks_L1[:5]]}...")
     
-    # Get global data
     global_probs = multi_contig_results[r_name]['simd_probs']
     global_sites = multi_contig_results[r_name]['naive_long_haps'][0]
     
-    # Run hierarchical step with batch_size=10
     super_blocks_L2 = hierarchical_assembly.run_hierarchical_step(
         super_blocks_L1,
         global_probs,
@@ -575,17 +560,14 @@ for r_name in region_keys:
         recomb_rate=5e-8,
         beam_width=200,
         max_founders=12,
-        complexity_penalty_scale=0.1,
-        switch_cost_scale=0.1,
+        cc_scale=0.2,
         num_processes=16,
         n_generations=3,
         verbose=False
     )
     
-    # Store results
     multi_contig_results[r_name]['super_blocks_L2'] = super_blocks_L2
     
-    # Summary
     haps_per_block = [len(b.haplotypes) for b in super_blocks_L2]
     total_sites = sum(len(b.positions) for b in super_blocks_L2)
     print(f"\n    Output: {len(super_blocks_L2)} L2 super-blocks")
@@ -601,7 +583,6 @@ print("="*60)
 
 super_blocks_L2 = multi_contig_results['chr1']['super_blocks_L2']
 
-# Get ground truth
 orig_sites, orig_haps = multi_contig_results['chr1']['naive_long_haps']
 orig_haps_concrete = simulate_sequences.concretify_haps(orig_haps)
 orig_site_to_idx = {s: idx for idx, s in enumerate(orig_sites)}
@@ -614,17 +595,13 @@ blocks_with_all_founders = 0
 for block_idx, block in enumerate(super_blocks_L2):
     positions = block.positions
     
-    # Get true founders at this block
     true_at_block = []
     for f_idx in range(len(orig_haps_concrete)):
         founder_vals = np.array([orig_haps_concrete[f_idx][orig_site_to_idx[pos]] 
                                   for pos in positions])
         true_at_block.append(founder_vals)
     
-    # Count founders found and chimeras
     founders_found = 0
-    block_chimeras = 0
-    
     for f_idx, tf in enumerate(true_at_block):
         best_error = 100
         for h_idx, hap in block.haplotypes.items():
@@ -678,9 +655,6 @@ for r_name in region_keys:
     global_probs = multi_contig_results[r_name]['simd_probs']
     global_sites = multi_contig_results[r_name]['naive_long_haps'][0]
     
-    # 17 L2 blocks with batch_size=10 -> 2 batches
-    num_batches = math.ceil(len(super_blocks_L2) / 10)
-    
     super_blocks_L3 = hierarchical_assembly.run_hierarchical_step(
         super_blocks_L2,
         global_probs,
@@ -690,23 +664,21 @@ for r_name in region_keys:
         recomb_rate=5e-8,
         beam_width=200,
         max_founders=12,
-        complexity_penalty_scale=0.1,
-        switch_cost_scale=0.1,
+        cc_scale=0.2,
         num_processes=16,
         n_generations=3,
         verbose=False
     )
     
-    # Store results
     multi_contig_results[r_name]['super_blocks_L3'] = super_blocks_L3
     
-    # Summary
     haps_per_block = [len(b.haplotypes) for b in super_blocks_L3]
     print(f"\n    Output: {len(super_blocks_L3)} L3 super-blocks")
     print(f"    Sites per block: {[len(b.positions) for b in super_blocks_L3]}")
     print(f"    Haps per super-block: {haps_per_block}")
 
-print(f"\nHierarchical Assembly (Level 3) complete in {time.time()-start_time:.1f}s")#%% 
+print(f"\nHierarchical Assembly (Level 3) complete in {time.time()-start_time:.1f}s")
+
 #%%
 # ==========================================================================
 # Validate Level 3 Super Blocks
@@ -797,13 +769,16 @@ for r_name in region_keys:
     
     super_blocks_L3 = multi_contig_results[r_name]['super_blocks_L3']
     
+    if len(super_blocks_L3) < 2:
+        print("    Only 1 L3 block — no L4 needed.")
+        multi_contig_results[r_name]['super_blocks_L4'] = super_blocks_L3
+        continue
+    
     print(f"    Input: {len(super_blocks_L3)} L3 super-blocks")
     print(f"    Sites per L3 block: {[len(b.positions) for b in super_blocks_L3]}")
     
     global_probs = multi_contig_results[r_name]['simd_probs']
     global_sites = multi_contig_results[r_name]['naive_long_haps'][0]
-    
-    num_batches = math.ceil(len(super_blocks_L3) / 10)
     
     super_blocks_L4 = hierarchical_assembly.run_hierarchical_step(
         super_blocks_L3,
@@ -814,17 +789,14 @@ for r_name in region_keys:
         recomb_rate=5e-8,
         beam_width=200,
         max_founders=12,
-        complexity_penalty_scale=0.1,
-        switch_cost_scale=0.1,
+        cc_scale=0.2,
         num_processes=16,
         n_generations=3,
         verbose=False
     )
     
-    # Store results
     multi_contig_results[r_name]['super_blocks_L4'] = super_blocks_L4
     
-    # Summary
     haps_per_block = [len(b.haplotypes) for b in super_blocks_L4]
     print(f"\n    Output: {len(super_blocks_L4)} L4 super-blocks")
     print(f"    Sites per block: {[len(b.positions) for b in super_blocks_L4]}")
@@ -834,16 +806,21 @@ print(f"\nHierarchical Assembly (Level 4) complete in {time.time()-start_time:.1
 
 #%%
 # ==========================================================================
-# Validate Level 4 Super Blocks
+# Validate Level 4 Super Blocks (FINAL)
 # ==========================================================================
 
 print("="*60)
 print("Validating Level 4 Super Blocks against Ground Truth")
 print("="*60)
 
-super_blocks_L4 = multi_contig_results['chr1']['super_blocks_L4']
+# Use L4 if available, else L3
+if 'super_blocks_L4' in multi_contig_results['chr1']:
+    final_blocks = multi_contig_results['chr1']['super_blocks_L4']
+    level_name = "L4"
+else:
+    final_blocks = multi_contig_results['chr1']['super_blocks_L3']
+    level_name = "L3 (final)"
 
-# Get ground truth
 orig_sites, orig_haps = multi_contig_results['chr1']['naive_long_haps']
 orig_haps_concrete = simulate_sequences.concretify_haps(orig_haps)
 orig_site_to_idx = {s: idx for idx, s in enumerate(orig_sites)}
@@ -855,7 +832,7 @@ blocks_with_all_founders = 0
 
 chimera_details = []
 
-for block_idx, block in enumerate(super_blocks_L4):
+for block_idx, block in enumerate(final_blocks):
     positions = block.positions
     
     true_at_block = []
@@ -900,9 +877,9 @@ for block_idx, block in enumerate(super_blocks_L4):
     
     print(f"Block {block_idx}: {len(positions)} sites, {len(block.haplotypes)} haps, {founders_found}/6 founders")
 
-print(f"\nResults:")
-print(f"  L4 super-blocks: {len(super_blocks_L4)}")
-print(f"  Blocks with ALL founders: {blocks_with_all_founders} / {len(super_blocks_L4)}")
+print(f"\nFinal Results ({level_name}):")
+print(f"  Super-blocks: {len(final_blocks)}")
+print(f"  Blocks with ALL founders: {blocks_with_all_founders} / {len(final_blocks)}")
 print(f"  Total haplotypes: {total_discovered}")
 print(f"  Good haplotypes (<2% error): {total_good}")
 print(f"  Chimeras (>2% error): {total_chimeras}")
@@ -910,9 +887,8 @@ print(f"  Chimeras (>2% error): {total_chimeras}")
 if chimera_details:
     print(f"\nChimera details:")
     for c in sorted(chimera_details, key=lambda x: x['error'], reverse=True):
-        print(f"  Block {c['block']}, H{c['hap']}: F{c['best_f']} @ {c['error']:.2f}%")
+        print(f"  Block {c['block']}, H{c['hap']}: F{c['best_f']} @ {c['error']:.2f}%")#%%
 #%%
-
 
 
 
@@ -1093,7 +1069,7 @@ multi_contig_results = phase_correction.post_process_phase_greedy_all_contigs(
     multi_contig_results,
     pedigree_df,
     sample_names,
-    snps_per_bin=150,
+    snps_per_bin=100,
     recomb_rate=5e-8,
     mismatch_cost=4.6,
     verbose=True
