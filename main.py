@@ -105,7 +105,7 @@ for region in regions_config:
         "block_results": block_results,
         "naive_long_haps": naive_long_haps # Tuple: (sites, haps_list)
     }
-    time.sleep(60) #Give machine time to cool down
+    #time.sleep(60) #Give machine time to cool down
 
 print(f"\nAll regions processed in {time.time() - total_start:.2f}s")
 #%%
@@ -459,7 +459,8 @@ for r_name in region_keys:
 
 print(f"\nHierarchical Assembly (Level 1) complete in {time.time()-start:.1f}s")
 
-#%% ==========================================================================
+#%% 
+# ==========================================================================
 # VALIDATE: Compare Level 1 Super Blocks against True Founders
 # ==========================================================================
 print(f"\n{'='*60}")
@@ -467,8 +468,6 @@ print("Validating Level 1 Super Blocks against Ground Truth")
 print(f"{'='*60}")
 
 for r_name in region_keys:
-    print(f"\n  Processing {r_name}...")
-    
     super_blocks = multi_contig_results[r_name]['super_blocks_L1']
     
     # Get ground truth founder haplotypes
@@ -478,81 +477,70 @@ for r_name in region_keys:
     
     num_true_founders = len(orig_haps_concrete)
     
-    # Track results
-    founders_found_per_block = []
-    all_best_errors = []
+    total_discovered = 0
+    total_good = 0
+    total_chimeras = 0
+    blocks_with_all_founders = 0
+    
+    chimera_details = []
     
     for block_idx, block in enumerate(super_blocks):
         positions = block.positions
         
         # Get true founder haplotypes at this block's positions
-        true_founders_at_block = []
+        true_at_block = []
         for f_idx in range(num_true_founders):
             founder_vals = np.array([orig_haps_concrete[f_idx][orig_site_to_idx[pos]] 
                                       for pos in positions])
-            true_founders_at_block.append(founder_vals)
+            true_at_block.append(founder_vals)
         
-        # Compare each discovered haplotype against all true founders
-        discovered_haps = []
-        for hap_idx, hap_arr in block.haplotypes.items():
-            # Convert probabilistic to concrete
-            if hap_arr.ndim > 1:
-                hap_concrete = np.argmax(hap_arr, axis=1)
-            else:
-                hap_concrete = hap_arr
-            discovered_haps.append(hap_concrete)
-        
-        # For each true founder, find the best matching discovered haplotype
+        # Count founders found
         founders_found = 0
-        block_errors = []
-        
-        for f_idx, true_founder in enumerate(true_founders_at_block):
-            best_error = 100.0
-            for disc_hap in discovered_haps:
-                error = np.mean(disc_hap != true_founder) * 100
+        for f_idx, tf in enumerate(true_at_block):
+            best_error = 100
+            for h_idx, hap in block.haplotypes.items():
+                if hap.ndim > 1:
+                    hap = np.argmax(hap, axis=1)
+                error = np.mean(hap != tf) * 100
                 if error < best_error:
                     best_error = error
-            
-            block_errors.append(best_error)
-            if best_error < 2.0:  # Threshold for "found"
+            if best_error < 2.0:
                 founders_found += 1
         
-        founders_found_per_block.append(founders_found)
-        all_best_errors.extend(block_errors)
+        # Count good vs chimera haplotypes
+        for h_idx, hap in block.haplotypes.items():
+            if hap.ndim > 1:
+                hap = np.argmax(hap, axis=1)
+            errors = [np.mean(hap != tf) * 100 for tf in true_at_block]
+            best_f = np.argmin(errors)
+            best_error = errors[best_f]
+            total_discovered += 1
+            if best_error < 2.0:
+                total_good += 1
+            else:
+                total_chimeras += 1
+                chimera_details.append({
+                    'block': block_idx,
+                    'hap': h_idx,
+                    'best_f': best_f,
+                    'error': best_error,
+                    'n_sites': len(positions)
+                })
+        
+        if founders_found == num_true_founders:
+            blocks_with_all_founders += 1
     
-    # Summary statistics
-    blocks_with_all = sum(1 for f in founders_found_per_block if f == num_true_founders)
-    avg_found = np.mean(founders_found_per_block)
-    avg_error = np.mean(all_best_errors)
+    print(f"\nResults:")
+    print(f"  L1 super-blocks: {len(super_blocks)}")
+    print(f"  Blocks with ALL founders: {blocks_with_all_founders} / {len(super_blocks)} ({100*blocks_with_all_founders/len(super_blocks):.1f}%)")
+    print(f"  Total haplotypes: {total_discovered}")
+    print(f"  Good haplotypes (<2% error): {total_good}")
+    print(f"  Chimeras (>2% error): {total_chimeras}")
     
-    print(f"\n  Results for {r_name}:")
-    print(f"    Super blocks analyzed: {len(super_blocks)}")
-    print(f"    True founders: {num_true_founders}")
-    print(f"    Avg founders found per block: {avg_found:.1f} / {num_true_founders}")
-    print(f"    Blocks with ALL founders found: {blocks_with_all} / {len(super_blocks)} ({100*blocks_with_all/len(super_blocks):.1f}%)")
-    print(f"    Avg best-match error: {avg_error:.2f}%")
-    
-    # Distribution of founders found
-    from collections import Counter
-    dist = Counter(founders_found_per_block)
-    print(f"    Founders found distribution:")
-    for k in sorted(dist.keys()):
-        print(f"      {k} founders: {dist[k]} blocks ({100*dist[k]/len(super_blocks):.1f}%)")
-    
-    # Show worst blocks
-    worst_blocks = sorted(enumerate(founders_found_per_block), key=lambda x: x[1])[:5]
-    print(f"\n    Worst 5 blocks:")
-    for block_idx, found in worst_blocks:
-        n_haps = len(super_blocks[block_idx].haplotypes)
-        print(f"      Block {block_idx}: {found}/{num_true_founders} founders found, {n_haps} discovered haps")
-    
-    # Store validation results
-    multi_contig_results[r_name]['L1_validation'] = {
-        'founders_found_per_block': founders_found_per_block,
-        'blocks_with_all': blocks_with_all,
-        'avg_found': avg_found,
-        'avg_error': avg_error
-    }
+    if chimera_details:
+        print(f"\nChimera details:")
+        for c in sorted(chimera_details, key=lambda x: x['error'], reverse=True):
+            print(f"  Block {c['block']}, H{c['hap']}: F{c['best_f']} @ {c['error']:.2f}%")
 #%% 
 # ==========================================================================
 # Level 2 Hierarchical Assembly
@@ -704,7 +692,7 @@ for r_name in region_keys:
         max_founders=12,
         complexity_penalty_scale=0.1,
         switch_cost_scale=0.1,
-        num_processes=num_batches,
+        num_processes=16,
         n_generations=3,
         verbose=False
     )
@@ -794,6 +782,135 @@ if chimera_details:
     for c in sorted(chimera_details, key=lambda x: x['error'], reverse=True):
         print(f"  Block {c['block']}, H{c['hap']}: F{c['best_f']} @ {c['error']:.2f}%")
         
+#%% 
+# ==========================================================================
+# Level 4 Hierarchical Assembly
+# ==========================================================================
+print("="*60)
+print("Level 4 Hierarchical Assembly")
+print("="*60)
+
+start_time = time.time()
+
+for r_name in region_keys:
+    print(f"\n  Processing {r_name}...")
+    
+    super_blocks_L3 = multi_contig_results[r_name]['super_blocks_L3']
+    
+    print(f"    Input: {len(super_blocks_L3)} L3 super-blocks")
+    print(f"    Sites per L3 block: {[len(b.positions) for b in super_blocks_L3]}")
+    
+    global_probs = multi_contig_results[r_name]['simd_probs']
+    global_sites = multi_contig_results[r_name]['naive_long_haps'][0]
+    
+    num_batches = math.ceil(len(super_blocks_L3) / 10)
+    
+    super_blocks_L4 = hierarchical_assembly.run_hierarchical_step(
+        super_blocks_L3,
+        global_probs,
+        global_sites,
+        batch_size=10,
+        use_hmm_linking=True,
+        recomb_rate=5e-8,
+        beam_width=200,
+        max_founders=12,
+        complexity_penalty_scale=0.1,
+        switch_cost_scale=0.1,
+        num_processes=16,
+        n_generations=3,
+        verbose=False
+    )
+    
+    # Store results
+    multi_contig_results[r_name]['super_blocks_L4'] = super_blocks_L4
+    
+    # Summary
+    haps_per_block = [len(b.haplotypes) for b in super_blocks_L4]
+    print(f"\n    Output: {len(super_blocks_L4)} L4 super-blocks")
+    print(f"    Sites per block: {[len(b.positions) for b in super_blocks_L4]}")
+    print(f"    Haps per super-block: {haps_per_block}")
+
+print(f"\nHierarchical Assembly (Level 4) complete in {time.time()-start_time:.1f}s")
+
+#%%
+# ==========================================================================
+# Validate Level 4 Super Blocks
+# ==========================================================================
+
+print("="*60)
+print("Validating Level 4 Super Blocks against Ground Truth")
+print("="*60)
+
+super_blocks_L4 = multi_contig_results['chr1']['super_blocks_L4']
+
+# Get ground truth
+orig_sites, orig_haps = multi_contig_results['chr1']['naive_long_haps']
+orig_haps_concrete = simulate_sequences.concretify_haps(orig_haps)
+orig_site_to_idx = {s: idx for idx, s in enumerate(orig_sites)}
+
+total_discovered = 0
+total_good = 0
+total_chimeras = 0
+blocks_with_all_founders = 0
+
+chimera_details = []
+
+for block_idx, block in enumerate(super_blocks_L4):
+    positions = block.positions
+    
+    true_at_block = []
+    for f_idx in range(len(orig_haps_concrete)):
+        founder_vals = np.array([orig_haps_concrete[f_idx][orig_site_to_idx[pos]] 
+                                  for pos in positions])
+        true_at_block.append(founder_vals)
+    
+    founders_found = 0
+    for f_idx, tf in enumerate(true_at_block):
+        best_error = 100
+        for h_idx, hap in block.haplotypes.items():
+            if hap.ndim > 1:
+                hap = np.argmax(hap, axis=1)
+            error = np.mean(hap != tf) * 100
+            if error < best_error:
+                best_error = error
+        if best_error < 2.0:
+            founders_found += 1
+    
+    for h_idx, hap in block.haplotypes.items():
+        if hap.ndim > 1:
+            hap = np.argmax(hap, axis=1)
+        errors = [np.mean(hap != tf) * 100 for tf in true_at_block]
+        best_f = np.argmin(errors)
+        best_error = errors[best_f]
+        total_discovered += 1
+        if best_error < 2.0:
+            total_good += 1
+        else:
+            total_chimeras += 1
+            chimera_details.append({
+                'block': block_idx,
+                'hap': h_idx,
+                'best_f': best_f,
+                'error': best_error,
+                'n_sites': len(positions)
+            })
+    
+    if founders_found == 6:
+        blocks_with_all_founders += 1
+    
+    print(f"Block {block_idx}: {len(positions)} sites, {len(block.haplotypes)} haps, {founders_found}/6 founders")
+
+print(f"\nResults:")
+print(f"  L4 super-blocks: {len(super_blocks_L4)}")
+print(f"  Blocks with ALL founders: {blocks_with_all_founders} / {len(super_blocks_L4)}")
+print(f"  Total haplotypes: {total_discovered}")
+print(f"  Good haplotypes (<2% error): {total_good}")
+print(f"  Chimeras (>2% error): {total_chimeras}")
+
+if chimera_details:
+    print(f"\nChimera details:")
+    for c in sorted(chimera_details, key=lambda x: x['error'], reverse=True):
+        print(f"  Block {c['block']}, H{c['hap']}: F{c['best_f']} @ {c['error']:.2f}%")
 #%%
 
 

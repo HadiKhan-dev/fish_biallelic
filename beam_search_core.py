@@ -144,37 +144,129 @@ class FastMesh:
         return len(self.reverse_mappings[block_idx])
 
 # =============================================================================
-# 2. BIDIRECTIONAL BEAM SEARCH
+# 2. SCORING HELPERS
+# =============================================================================
+
+def _compute_step_scores(path, fast_mesh, eff_max_gap):
+    """
+    Compute the per-step mean-transition scores for a complete path.
+    
+    Step k (for k=1..N-1) is the mean of forward transition log-probs
+    from all earlier blocks within max_gap to block k.
+    Step 0 is always 0.0 (no incoming transitions).
+    
+    Args:
+        path: List of dense hap indices, one per block.
+        fast_mesh: FastMesh object.
+        eff_max_gap: Effective maximum gap for transitions.
+    
+    Returns:
+        np.ndarray of shape (num_blocks,) with per-step scores.
+    """
+    num_blocks = len(path)
+    step_scores = np.zeros(num_blocks, dtype=np.float64)
+    
+    for curr_block in range(1, num_blocks):
+        earliest_past = max(0, curr_block - eff_max_gap)
+        step_total = 0.0
+        n_transitions = 0
+        
+        for past_idx in range(earliest_past, curr_block):
+            mat = fast_mesh.get_transition_matrix(past_idx, curr_block)
+            if mat is not None:
+                step_total += mat[path[past_idx], path[curr_block]]
+                n_transitions += 1
+        
+        if n_transitions > 0:
+            step_scores[curr_block] = step_total / n_transitions
+    
+    return step_scores
+
+
+def _recompute_affected_steps(path, step_scores, changed_block, fast_mesh, eff_max_gap):
+    """
+    Recompute only the step scores affected by changing one block.
+    
+    When block k changes, the affected steps are:
+      - Step k itself (transitions from past blocks INTO k)
+      - Steps k+1 through min(k + max_gap, N-1) (transitions FROM k into future blocks)
+    
+    Args:
+        path: The full path (already modified at changed_block).
+        step_scores: The current per-step scores array (will be modified in-place copy).
+        changed_block: Index of the block that was changed.
+        fast_mesh: FastMesh object.
+        eff_max_gap: Effective maximum gap for transitions.
+    
+    Returns:
+        New step_scores array with affected steps recomputed, and new total score.
+    """
+    num_blocks = len(path)
+    new_steps = step_scores.copy()
+    
+    # Range of steps to recompute:
+    # - Step changed_block (if > 0): transitions into changed_block
+    # - Steps changed_block+1 .. min(changed_block+max_gap, N-1): 
+    #   transitions where changed_block is a past block
+    recompute_start = max(1, changed_block)  # step 0 is always 0
+    recompute_end = min(changed_block + eff_max_gap, num_blocks - 1)
+    
+    for curr_block in range(recompute_start, recompute_end + 1):
+        earliest_past = max(0, curr_block - eff_max_gap)
+        step_total = 0.0
+        n_transitions = 0
+        
+        for past_idx in range(earliest_past, curr_block):
+            mat = fast_mesh.get_transition_matrix(past_idx, curr_block)
+            if mat is not None:
+                step_total += mat[path[past_idx], path[curr_block]]
+                n_transitions += 1
+        
+        if n_transitions > 0:
+            new_steps[curr_block] = step_total / n_transitions
+        else:
+            new_steps[curr_block] = 0.0
+    
+    return new_steps, np.sum(new_steps)
+
+# =============================================================================
+# 3. BIDIRECTIONAL BEAM SEARCH (Scaffold Refinement)
 # =============================================================================
 
 def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200, 
-                                  max_gap=None, verbose=True):
+                                  max_gap=None, mmr_lambda=0.7, verbose=True):
     """
-    Bidirectional Beam Search - forward pass builds paths, backward pass refines
-    using both backward transitions AND the forward path as context.
+    Bidirectional Beam Search with scaffold-based backward refinement.
     
-    Uses MEAN-PER-STEP scoring: at each block, adds the mean of transition scores
-    rather than the sum. This prevents later blocks from dominating the score
-    (block N would otherwise add N transitions while block 1 adds only 1).
+    Pass 1 (Forward): Builds full paths left-to-right using MMR-based selection
+    to maintain diversity. This prevents the beam from filling up with minor 
+    variants of the top-scoring path while crowding out genuinely distinct paths.
     
-    For each forward path F = [f0, f1, ..., fN-1]:
-    - Backward pass builds B = [b0, b1, ..., bN-1]
-    - When choosing b_k, score includes:
-      - P(b_k | b_{k+1}, b_{k+2}, ...) - backward transitions from future blocks
-      - P(b_k | f_0, f_1, ..., f_{k-1}) - forward transitions from past blocks
+    Pass 2 (Backward Refinement): Uses each forward path as a scaffold.
+    At each block k (from N-1 down to 0), tries all possible haplotype choices
+    for block k while keeping the rest of the scaffold fixed, then scores the
+    full resulting path using cached per-step scores (only recomputing steps
+    affected by the change). All candidates across all scaffolds are pooled
+    and selected via MMR to maintain diversity.
+    
+    This ensures:
+    - The beam_width budget is respected at every step
+    - Cross-scaffold competition happens at every block, not just at the end
+    - Diverse paths are maintained (via MMR) preventing dominant founders from
+      crowding out rare ones
     
     Args:
         haps_data: List of BlockResult objects.
         transition_mesh: TransitionMesh object.
-        beam_width: Number of paths to keep.
+        beam_width: Number of paths to keep at each step.
         max_gap: Maximum gap between blocks to consider transitions for.
                  If None, use all available transitions (no limit).
-                 gap=1 means adjacent blocks (essentially 0bp between them).
-                 gap=G spans G-1 full blocks of physical distance.
+        mmr_lambda: Balance between score and diversity (0=pure diversity, 1=pure score).
+                    Default 0.7 gives 70% weight to score, 30% to novelty.
         verbose: If True, print progress.
     
     Returns:
-        List of (path_indices, score) sorted by score.
+        List of (path_indices, score) sorted by score descending.
     """
     if verbose:
         print("Building FastMesh for Bidirectional Beam Search...")
@@ -232,146 +324,200 @@ def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
                 new_score = path_score + mean_transition[h]
                 candidates.append((new_path, new_score, h))
         
-        forward_beam = _enforce_diversity_simple(candidates, beam_width, n_curr)
+        forward_beam = _select_beam_mmr_forward(candidates, beam_width, mmr_lambda)
     
     if verbose:
         print(f"  Forward beam has {len(forward_beam)} full paths")
-        print(f"Pass 2: Backward Beam conditioned on forward paths...")
     
-    # ========== BACKWARD PASS (conditioned on each forward path) ==========
-    all_backward_paths = []
-    
-    for fwd_path, fwd_score, _ in forward_beam:
-        # For this forward path, build backward paths
-        # backward_beam contains (path, bwd_score, tip) where path is in forward order [k, k+1, ..., N-1]
-        
-        n_last = fast_mesh.get_num_haps(num_blocks - 1)
-        
-        # Initialize backward beam with forward path context at the last block
-        # Score for haplotype h at block N-1 = mean of FORWARD transitions from past blocks within max_gap
-        # (These are forward because we're asking: given the forward path's past, how likely is h?)
-        earliest_past = max(0, (num_blocks - 1) - eff_max_gap)
-        
-        backward_beam = []
-        for h in range(n_last):
-            init_score = 0.0
-            n_transitions = 0
-            for past_block in range(earliest_past, num_blocks - 1):
-                past_h = fwd_path[past_block]
-                mat = fast_mesh.get_transition_matrix(past_block, num_blocks - 1)
-                if mat is not None:
-                    init_score += mat[past_h, h]
-                    n_transitions += 1
-            if n_transitions > 0:
-                init_score /= n_transitions
-            backward_beam.append(([h], init_score, h))
-        
-        for curr_block in range(num_blocks - 2, -1, -1):
-            candidates = []
-            n_curr = fast_mesh.get_num_haps(curr_block)
-            
-            for bwd_path, bwd_score, _ in backward_beam:
-                # bwd_path = [h_{curr+1}, h_{curr+2}, ..., h_{N-1}] in forward order
-                
-                # Score for extending with haplotype h at curr_block:
-                # 1. BACKWARD transitions: P(curr_h | future_h) for future blocks in bwd_path
-                # 2. FORWARD transitions: P(curr_h | past_h) for past blocks in fwd_path
-                
-                total_trans = np.zeros(n_curr, dtype=np.float32)
-                n_transitions = 0
-                
-                # Backward transitions: use BACKWARD matrix P(curr_h | future_h)
-                for future_idx, future_h in enumerate(bwd_path):
-                    future_block = curr_block + 1 + future_idx
-                    if future_block - curr_block > eff_max_gap:
-                        break
-                    bwd_mat = fast_mesh.get_backward_matrix(future_block, curr_block)
-                    if bwd_mat is not None:
-                        # bwd_mat[future_h, :] gives log P(curr_h | future_h) for all curr_h
-                        total_trans += bwd_mat[future_h, :]
-                        n_transitions += 1
-                
-                # Forward transitions: use FORWARD matrix P(curr_h | past_h)
-                # Limited to past blocks within max_gap
-                earliest_past = max(0, curr_block - eff_max_gap)
-                for past_block in range(earliest_past, curr_block):
-                    past_h = fwd_path[past_block]
-                    mat = fast_mesh.get_transition_matrix(past_block, curr_block)
-                    if mat is not None:
-                        total_trans += mat[past_h, :]
-                        n_transitions += 1
-                
-                # MEAN scoring: divide by number of transitions
-                if n_transitions > 0:
-                    mean_trans = total_trans / n_transitions
-                else:
-                    mean_trans = total_trans
-                
-                for h in range(n_curr):
-                    new_path = [h] + bwd_path
-                    new_score = bwd_score + mean_trans[h]
-                    candidates.append((new_path, new_score, h))
-            
-            backward_beam = _enforce_diversity_simple(candidates, beam_width, n_curr)
-        
-        # backward_beam now contains full paths [0, 1, ..., N-1]
-        # Add best backward path(s) to results
-        for bwd_path, bwd_score, _ in backward_beam:
-            all_backward_paths.append((bwd_path, bwd_score))
+    # ========== BACKWARD PASS (Scaffold Refinement with Cached Scores) ==========
+    # Start with the forward paths as scaffolds.
+    # At each block k (N-1 down to 0), for each scaffold, try all possible
+    # hap choices at block k, score using cached per-step scores (only recomputing
+    # the affected steps), pool across all scaffolds, and keep top beam_width
+    # using MMR to maintain path diversity.
     
     if verbose:
-        print(f"  Generated {len(all_backward_paths)} backward paths from {len(forward_beam)} forward paths")
+        print(f"Pass 2: Backward Refinement (blocks {num_blocks-1} to 0)...")
     
-    # ========== COMBINE AND SELECT FINAL ==========
-    # De-duplicate paths and keep best score for each
-    path_scores = {}
-    for path, score in all_backward_paths:
-        path_tuple = tuple(path)
-        if path_tuple not in path_scores or score > path_scores[path_tuple]:
-            path_scores[path_tuple] = score
-    
-    # Also add forward paths (they might be good too)
+    # Initialize scaffold pool from forward beam (deduplicated)
+    # Each scaffold is (path_list, total_score, step_scores_array)
+    scaffold_cache = {}  # path_tuple -> (path_list, total_score, step_scores)
     for path, score, _ in forward_beam:
         path_tuple = tuple(path)
-        if path_tuple not in path_scores or score > path_scores[path_tuple]:
-            path_scores[path_tuple] = score
+        if path_tuple not in scaffold_cache:
+            step_scores = _compute_step_scores(path, fast_mesh, eff_max_gap)
+            scaffold_cache[path_tuple] = (list(path), np.sum(step_scores), step_scores)
     
-    # Sort and return
-    final_results = [(list(p), s) for p, s in path_scores.items()]
-    final_results.sort(key=lambda x: x[1], reverse=True)
+    current_scaffolds = list(scaffold_cache.values())
+    
+    for refine_block in range(num_blocks - 1, -1, -1):
+        n_choices = fast_mesh.get_num_haps(refine_block)
+        
+        # Generate candidates: for each scaffold, try every hap at refine_block
+        # candidates maps path_tuple -> (path_list, total_score, step_scores)
+        candidates = {}
+        
+        for scaffold_path, scaffold_total, scaffold_steps in current_scaffolds:
+            original_h = scaffold_path[refine_block]
+            
+            for h in range(n_choices):
+                if h == original_h:
+                    # Unchanged — reuse cached scores
+                    path_tuple = tuple(scaffold_path)
+                    if path_tuple not in candidates:
+                        candidates[path_tuple] = (scaffold_path, scaffold_total, scaffold_steps)
+                else:
+                    # Create variant with one block changed
+                    new_path = scaffold_path[:refine_block] + [h] + scaffold_path[refine_block + 1:]
+                    path_tuple = tuple(new_path)
+                    
+                    if path_tuple not in candidates:
+                        # Recompute only affected steps
+                        new_steps, new_total = _recompute_affected_steps(
+                            new_path, scaffold_steps, refine_block, fast_mesh, eff_max_gap
+                        )
+                        candidates[path_tuple] = (new_path, new_total, new_steps)
+        
+        # Select top beam_width using MMR
+        cand_list = list(candidates.values())  # [(path, total, steps), ...]
+        current_scaffolds = _select_beam_mmr_backward(cand_list, beam_width, mmr_lambda)
     
     if verbose:
-        print(f"  Final unique paths: {len(final_results)}")
+        print(f"  Backward refinement complete. {len(current_scaffolds)} paths.")
+    
+    # ========== FINAL OUTPUT ==========
+    # Convert to (path, score) format and sort by score descending
+    final_results = [(path, total) for path, total, _ in current_scaffolds]
+    final_results.sort(key=lambda x: x[1], reverse=True)
     
     return final_results[:beam_width]
 
 
-def _enforce_diversity_simple(candidates, beam_width, num_tips):
-    """Simple diversity enforcement for forward/backward passes."""
-    if not candidates:
+def _select_beam_mmr_forward(candidates, beam_width, mmr_lambda=0.7):
+    """
+    MMR-based beam selection for the forward pass.
+    
+    Greedily selects paths that balance high score with diversity.
+    Similarity between two partial paths = fraction of blocks where they agree.
+    
+    Args:
+        candidates: list of (path, score, tip)
+        beam_width: number to select
+        mmr_lambda: weight on score vs novelty (0=pure diversity, 1=pure score)
+    
+    Returns:
+        list of (path, score, tip) of size min(beam_width, len(candidates))
+    """
+    if not candidates or beam_width <= 0:
         return []
     
-    candidates.sort(key=lambda x: x[1], reverse=True)
+    n = len(candidates)
+    if n <= beam_width:
+        return candidates
     
-    best_per_tip = {}
-    remainder = []
+    # Convert paths to numpy for vectorized similarity
+    all_paths = np.array([c[0] for c in candidates], dtype=np.int32)  # (N, path_len)
+    all_scores = np.array([c[1] for c in candidates], dtype=np.float64)
     
-    for path, score, tip in candidates:
-        if tip not in best_per_tip:
-            best_per_tip[tip] = (path, score, tip)
+    # Normalize scores to [0, 1]
+    score_min, score_max = all_scores.min(), all_scores.max()
+    if score_max > score_min:
+        norm_scores = (all_scores - score_min) / (score_max - score_min)
+    else:
+        norm_scores = np.ones(n, dtype=np.float64)
+    
+    selected_indices = []
+    remaining_mask = np.ones(n, dtype=bool)
+    
+    # Track max similarity to any selected path for each candidate
+    max_sim_to_selected = np.full(n, -1.0, dtype=np.float64)
+    
+    for _ in range(min(beam_width, n)):
+        if not np.any(remaining_mask):
+            break
+        
+        if not selected_indices:
+            # First pick: pure score
+            rem_scores = np.where(remaining_mask, all_scores, -np.inf)
+            best = np.argmax(rem_scores)
         else:
-            remainder.append((path, score, tip))
+            # MMR: lambda*score + (1-lambda)*(1 - max_sim)
+            novelty = 1.0 - max_sim_to_selected
+            mmr = mmr_lambda * norm_scores + (1.0 - mmr_lambda) * novelty
+            mmr[~remaining_mask] = -np.inf
+            best = np.argmax(mmr)
+        
+        selected_indices.append(best)
+        remaining_mask[best] = False
+        
+        # Update max_sim for all remaining candidates against newly selected path
+        # Vectorized: compare all paths against the selected path
+        new_path = all_paths[best]  # (path_len,)
+        sims = np.mean(all_paths == new_path[None, :], axis=1)  # (N,)
+        max_sim_to_selected = np.maximum(max_sim_to_selected, sims)
     
-    beam = list(best_per_tip.values())
-    slots_left = beam_width - len(beam)
-    if slots_left > 0:
-        beam.extend(remainder[:slots_left])
+    return [candidates[i] for i in selected_indices]
+
+
+def _select_beam_mmr_backward(candidates, beam_width, mmr_lambda=0.7):
+    """
+    MMR-based beam selection for the backward refinement pass.
     
-    return beam
+    Same MMR logic but operates on (path, total_score, step_scores) tuples.
+    
+    Args:
+        candidates: list of (path_list, total_score, step_scores_array)
+        beam_width: number to select
+        mmr_lambda: weight on score vs novelty
+    
+    Returns:
+        list of (path_list, total_score, step_scores_array)
+    """
+    if not candidates or beam_width <= 0:
+        return []
+    
+    n = len(candidates)
+    if n <= beam_width:
+        return candidates
+    
+    all_paths = np.array([c[0] for c in candidates], dtype=np.int32)
+    all_scores = np.array([c[1] for c in candidates], dtype=np.float64)
+    
+    score_min, score_max = all_scores.min(), all_scores.max()
+    if score_max > score_min:
+        norm_scores = (all_scores - score_min) / (score_max - score_min)
+    else:
+        norm_scores = np.ones(n, dtype=np.float64)
+    
+    selected_indices = []
+    remaining_mask = np.ones(n, dtype=bool)
+    max_sim_to_selected = np.full(n, -1.0, dtype=np.float64)
+    
+    for _ in range(min(beam_width, n)):
+        if not np.any(remaining_mask):
+            break
+        
+        if not selected_indices:
+            rem_scores = np.where(remaining_mask, all_scores, -np.inf)
+            best = np.argmax(rem_scores)
+        else:
+            novelty = 1.0 - max_sim_to_selected
+            mmr = mmr_lambda * norm_scores + (1.0 - mmr_lambda) * novelty
+            mmr[~remaining_mask] = -np.inf
+            best = np.argmax(mmr)
+        
+        selected_indices.append(best)
+        remaining_mask[best] = False
+        
+        new_path = all_paths[best]
+        sims = np.mean(all_paths == new_path[None, :], axis=1)
+        max_sim_to_selected = np.maximum(max_sim_to_selected, sims)
+    
+    return [candidates[i] for i in selected_indices]
 
 
 def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100, 
-                              max_gap=None, weight_decay_func=None, verbose=True):
+                              max_gap=None, mmr_lambda=0.7, weight_decay_func=None, verbose=True):
     """
     Main Driver for Bidirectional Beam Search.
     
@@ -380,6 +526,7 @@ def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100,
         transition_mesh: TransitionMesh object.
         beam_width: Number of paths to keep.
         max_gap: Maximum gap between blocks for transition lookups. None = no limit.
+        mmr_lambda: Balance between score and diversity (0=pure diversity, 1=pure score).
         weight_decay_func: Function to weight long-range connections (unused).
         verbose: If True, print progress messages.
         
@@ -387,7 +534,7 @@ def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100,
         List of (path_indices, score) sorted by score.
     """
     return run_bidirectional_beam_search(haps_data, transition_mesh, beam_width, 
-                                         max_gap=max_gap, verbose=verbose)
+                                         max_gap=max_gap, mmr_lambda=mmr_lambda, verbose=verbose)
 
 def reconstruct_haplotypes_from_beam(beam_results, fast_mesh, haps_data):
     """
@@ -734,7 +881,7 @@ def select_founders_likelihood(beam_results, block_emissions, fast_mesh,
 # 5. STRUCTURAL CHIMERA PRUNING FOR SUPER-BLOCKS
 # =============================================================================
 
-def prune_superblock_chimeras(super_block, max_recombs=1, max_mismatch_percent=1.0,
+def prune_superblock_chimeras(super_block, max_recombs=1, max_mismatch_percent=0.25,
                                min_mean_delta_to_protect=0.25):
     """
     Applies structural chimera pruning to a super-block after reconstruction.
@@ -746,7 +893,7 @@ def prune_superblock_chimeras(super_block, max_recombs=1, max_mismatch_percent=1
     Args:
         super_block: A BlockResult object containing the reconstructed super-block.
         max_recombs: Maximum recombinations for chimera detection (default 1).
-        max_mismatch_percent: Maximum mismatch % for chimera (default 1.0%).
+        max_mismatch_percent: Maximum mismatch % for chimera (default 0.25%).
         min_mean_delta_to_protect: Protect haplotypes with mean_delta above this (default 0.25%).
     
     Returns:
