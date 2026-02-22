@@ -9,16 +9,25 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Generated images
+*.png
+
+# Generated data/logs
+*.csv
+*.ped
+*.log
+*.stats
+*.relatedness
+
 # Temp/lock files
 .~lock.*
 *.swp
 *~
 
-# Images (generated)
-*.png
-
 # Old/scratch
 old_files/
+prev_versions/
+untitled*.py
 
 # Jupyter
 .ipynb_checkpoints/
