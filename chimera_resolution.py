@@ -482,38 +482,42 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     
     current_score = score_subset(selected)
     K_sel = len(selected)
-    swap_chunk = max(4, min(64,
-        int(2e9 / (num_samples * K_sel * K_sel * total_bins * 8))))
     
-    while True:
-        unselected = [x for x in range(n_cands) if x not in selected]
-        best_swap = None; best_swap_gain = 0.0
-        for i, remove_idx in enumerate(selected):
-            temp_set = selected[:i] + selected[i + 1:]
-            base_maxes = precompute_base_max(temp_set)
-            cheap_scores = {
-                add: cheap_score_fn(base_maxes, temp_set, add)
-                for add in unselected
-            }
-            ranked = sorted(cheap_scores, key=cheap_scores.get,
-                           reverse=True)[:top_n_swap]
-            for cs in range(0, len(ranked), swap_chunk):
-                chunk = ranked[cs:cs + swap_chunk]
-                tensors = build_tensors_threaded(
-                    [temp_set + [add] for add in chunk])
-                stacked = np.stack(tensors, axis=0); del tensors
-                scores = _batched_viterbi_score(stacked, float(pen_sel))
-                del stacked
-                for j, add_idx in enumerate(chunk):
-                    gain = float(scores[j]) - current_score
-                    if gain > 1e-4 and gain > best_swap_gain:
-                        best_swap_gain = gain
-                        best_swap = (remove_idx, add_idx)
-        if best_swap:
-            selected[selected.index(best_swap[0])] = best_swap[1]
-            current_score += best_swap_gain
-        else:
-            break
+    if K_sel >= 2:
+        swap_chunk = max(4, min(64,
+            int(2e9 / (num_samples * K_sel * K_sel * total_bins * 8))))
+        
+        while True:
+            unselected = [x for x in range(n_cands) if x not in selected]
+            best_swap = None; best_swap_gain = 0.0
+            for i, remove_idx in enumerate(selected):
+                temp_set = selected[:i] + selected[i + 1:]
+                if not temp_set:
+                    continue
+                base_maxes = precompute_base_max(temp_set)
+                cheap_scores = {
+                    add: cheap_score_fn(base_maxes, temp_set, add)
+                    for add in unselected
+                }
+                ranked = sorted(cheap_scores, key=cheap_scores.get,
+                               reverse=True)[:top_n_swap]
+                for cs in range(0, len(ranked), swap_chunk):
+                    chunk = ranked[cs:cs + swap_chunk]
+                    tensors = build_tensors_threaded(
+                        [temp_set + [add] for add in chunk])
+                    stacked = np.stack(tensors, axis=0); del tensors
+                    scores = _batched_viterbi_score(stacked, float(pen_sel))
+                    del stacked
+                    for j, add_idx in enumerate(chunk):
+                        gain = float(scores[j]) - current_score
+                        if gain > 1e-4 and gain > best_swap_gain:
+                            best_swap_gain = gain
+                            best_swap = (remove_idx, add_idx)
+            if best_swap:
+                selected[selected.index(best_swap[0])] = best_swap[1]
+                current_score += best_swap_gain
+            else:
+                break
     
     # =========================================================================
     # STEP 3: Force Prune + BIC Prune
