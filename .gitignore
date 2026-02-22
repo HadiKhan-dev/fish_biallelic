@@ -1,0 +1,24 @@
+# Data
+fish_vcf/
+
+# Outputs
+results_simulation/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Temp/lock files
+.~lock.*
+*.swp
+*~
+
+# Images (generated)
+*.png
+
+# Old/scratch
+old_files/
+
+# Jupyter
+.ipynb_checkpoints/
