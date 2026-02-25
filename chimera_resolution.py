@@ -118,7 +118,7 @@ def compute_penalty(batch_blocks):
     avg_input_sites = np.mean([len(b.positions) for b in batch_blocks])
     avg_output_sites = avg_input_sites * len(batch_blocks)
     if avg_output_sites <= 5000:
-        return 10.0
+        return 20.0
     return 20.0 * math.sqrt(avg_output_sites / 2000.0)
 
 
