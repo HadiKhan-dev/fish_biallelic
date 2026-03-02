@@ -6,7 +6,7 @@ from scipy.special import logsumexp
 from functools import partial
 
 import analysis_utils 
-import block_linking
+import block_linking_em
 
 # Suppress divide by zero warnings in log-space calculations
 np.seterr(divide='ignore', invalid='ignore')
@@ -426,9 +426,19 @@ def generate_viterbi_block_emissions(samples_matrix, sample_sites, block_results
 # 3. GLOBAL FORWARD-BACKWARD PASS
 # =============================================================================
 
-def build_dense_transition_matrix(trans_dict, prev_keys, curr_keys, prev_idx, curr_idx):
+def build_dense_transition_matrix(trans_dict, prev_keys, curr_keys, prev_idx, curr_idx,
+                                  correct_hom_hom=False):
     """
     Converts sparse dictionary transition probs to dense log-prob matrix T.
+    
+    For diploid state (u1,u2) -> (v1,v2), the entry is:
+        T[r, c] = log T(u1->v1) + log T(u2->v2)
+    
+    If correct_hom_hom=True, homozygous->homozygous entries (a,a)->(b,b) use
+    only a SINGLE copy of log T(a->b) instead of two.  This prevents the
+    partner prior from double-counting a single transition event when both
+    chromosomes carry the same haplotype at source and destination (no phase
+    ambiguity exists in this case).
     
     Args:
         trans_dict: Dictionary {(prev_hap, curr_hap): prob}.
@@ -436,6 +446,7 @@ def build_dense_transition_matrix(trans_dict, prev_keys, curr_keys, prev_idx, cu
         curr_keys: List of haplotype IDs in current block.
         prev_idx: Index of previous block.
         curr_idx: Index of current block.
+        correct_hom_hom: If True, use single prior for hom->hom transitions.
         
     Returns:
         np.ndarray: Matrix of shape (K_prev, K_curr) containing log probabilities.
@@ -470,61 +481,14 @@ def build_dense_transition_matrix(trans_dict, prev_keys, curr_keys, prev_idx, cu
             val_2 = log_trans_cache[v_idx][y_idx]
             
             if val_1 != -np.inf and val_2 != -np.inf:
-                T[r, c] = val_1 + val_2
+                # For hom->hom (u1==u2 and v1==v2): both chromosomes take
+                # the same edge, so count it once instead of twice.
+                if correct_hom_hom and u_idx == v_idx and x_idx == y_idx:
+                    T[r, c] = val_1  # single copy (val_1 == val_2 here)
+                else:
+                    T[r, c] = val_1 + val_2
                 
     return T
-
-
-def build_hom_hom_correction(trans_dict, prev_keys, curr_keys, prev_idx, curr_idx):
-    """
-    Build a correction matrix for homozygous -> homozygous diploid transitions.
-    
-    For diploid state (a,a) -> (b,b), the standard T_mat contains 
-    log T(a->b) + log T(a->b) = 2 * log T(a->b).  But when both chromosomes
-    carry the same haplotype at source AND destination, there is no phase
-    ambiguity — both chromosomes must take the same edge a->b.  The partner
-    prior is redundant because it's the SAME event, not independent evidence.
-    
-    This function returns a matrix of the same shape as T_mat containing
-    the log-probability to SUBTRACT: log T(a->b) for hom->hom entries, 
-    0.0 for all other entries.  After subtraction, hom->hom entries in T_mat
-    will contain just log T(a->b) instead of 2 * log T(a->b).
-    
-    Args:
-        trans_dict: Sparse transition dictionary.
-        prev_keys: Haplotype keys for the source block.
-        curr_keys: Haplotype keys for the destination block.
-        prev_idx: Block index of source.
-        curr_idx: Block index of destination.
-        
-    Returns:
-        np.ndarray: Correction matrix (K_prev, K_curr) — subtract from T_mat.
-    """
-    n_prev = len(prev_keys)
-    n_curr = len(curr_keys)
-    K_prev = n_prev * n_prev
-    K_curr = n_curr * n_curr
-    
-    correction = np.zeros((K_prev, K_curr), dtype=np.float64)
-    
-    # Pre-cache haploid log-transitions
-    log_trans_cache = {}
-    for u_i, u_key in enumerate(prev_keys):
-        for x_i, x_key in enumerate(curr_keys):
-            key = ((prev_idx, u_key), (curr_idx, x_key))
-            if key in trans_dict:
-                log_trans_cache[(u_i, x_i)] = math.log(trans_dict[key])
-    
-    # Only fill entries where source is hom (u1==u2) AND dest is hom (v1==v2)
-    for a in range(n_prev):
-        r = a * n_prev + a  # diploid state (a, a)
-        for b in range(n_curr):
-            c = b * n_curr + b  # diploid state (b, b)
-            val = log_trans_cache.get((a, b), -np.inf)
-            if val != -np.inf:
-                correction[r, c] = val  # subtract one copy of log T(a->b)
-    
-    return correction
 
 def global_forward_backward_pass(raw_blocks, block_results, transition_probs, space_gap, recomb_rate):
     """
@@ -642,13 +606,12 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         curr_keys = sorted(list(block_results[i].haplotypes.keys()))
         next_keys = sorted(list(block_results[next_idx].haplotypes.keys()))
         
-        # Build dense transition matrix (Required for Partner Priors)
-        T_mat = build_dense_transition_matrix(current_trans[0][i], curr_keys, next_keys, i, next_idx)
-        
-        # Build hom->hom correction: for (a,a)->(b,b) states, remove one copy
-        # of log T(a->b) so these transitions are not double-penalized.
-        hom_correction = build_hom_hom_correction(current_trans[0][i], curr_keys, next_keys, i, next_idx)
-        T_mat_corrected = T_mat - hom_correction
+        # Build dense transition matrix with hom->hom correction for M-step.
+        # For (a,a)->(b,b) states, uses single prior instead of double.
+        T_mat = build_dense_transition_matrix(
+            current_trans[0][i], curr_keys, next_keys, i, next_idx,
+            correct_hom_hom=True
+        )
         
         numerators = np.full((len(curr_keys)**2, len(next_keys)**2), -np.inf)
         
@@ -661,9 +624,8 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
             # Base: S (History) + R (Future)
             Total = S_batch[:, :, np.newaxis] + R_batch[:, np.newaxis, :]
             
-            # Add CORRECTED T_mat: hom->hom states get single prior,
-            # het states get the standard double prior (partner included).
-            Total += T_mat_corrected[np.newaxis, :, :]
+            # Add T_mat (with hom->hom correction already applied).
+            Total += T_mat[np.newaxis, :, :]
             
             # Normalize per sample to get Posterior (Soft Count)
             sample_totals = logsumexp(Total, axis=(1, 2), keepdims=True)
@@ -697,10 +659,9 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
                 # --- EDGE 1: Chromosome 1 (u1 -> v1) ---
                 val = mass
                 if not use_standard_baum_welch:
-                    # For hom->hom: T_mat_corrected had one copy of log T(a->b).
-                    #   Subtracting it gives: val = S + R (purely data-driven).
-                    # For het: T_mat_corrected had log T(u1->v1) + log T(u2->v2).
-                    #   Subtracting edge 1's prior leaves partner prior: val = S + R + log T(u2->v2).
+                    # Subtract ONLY this edge's prior. 
+                    # T_mat included (prior_1 + prior_2). We want (prior_2).
+                    # So: (S + R + p1 + p2) - p1 = S + R + p2
                     edge_prior = sparse_trans.get(((i, k_u1), (next_idx, k_v1)), 1e-9)
                     val = mass - math.log(edge_prior)
                 hap_masses.setdefault((u1, v1), []).append(val)
@@ -774,11 +735,10 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         curr_keys = sorted(list(block_results[i].haplotypes.keys()))      
         prev_keys = sorted(list(block_results[prev_idx].haplotypes.keys())) 
         
-        T_mat = build_dense_transition_matrix(current_trans[1][i], curr_keys, prev_keys, i, prev_idx)
-        
-        # Build hom->hom correction for backward direction
-        hom_correction = build_hom_hom_correction(current_trans[1][i], curr_keys, prev_keys, i, prev_idx)
-        T_mat_corrected = T_mat - hom_correction
+        T_mat = build_dense_transition_matrix(
+            current_trans[1][i], curr_keys, prev_keys, i, prev_idx,
+            correct_hom_hom=True
+        )
         
         numerators = np.full((len(curr_keys)**2, len(prev_keys)**2), -np.inf)
         
@@ -788,7 +748,7 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
             S_batch = S_earlier_dest[start_s:end_s]
             
             Total = R_batch[:, :, np.newaxis] + S_batch[:, np.newaxis, :]
-            Total += T_mat_corrected[np.newaxis, :, :]  # Corrected T
+            Total += T_mat[np.newaxis, :, :]
             
             sample_totals = logsumexp(Total, axis=(1, 2), keepdims=True)
             Normalized_Total = Total - sample_totals
@@ -812,7 +772,7 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
                 
                 mass = numerators[r, c]
                 if mass == -np.inf: continue
-                
+
                 # Edge 1
                 val = mass
                 if not use_standard_baum_welch:
@@ -891,7 +851,7 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
     Main driver for HMM-EM transition calculation.
     Supports pre-calculated emissions to avoid passing massive raw data to workers.
     """
-    current_trans = block_linking.initial_transition_probabilities(haps_data, space_gap)
+    current_trans = block_linking_em.initial_transition_probabilities(haps_data, space_gap)
     
     # Use pre-calculated emissions if provided, otherwise calculate them here
     if precalculated_viterbi_emissions is not None:
@@ -1024,4 +984,4 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
             results = pool.map(_gap_worker, worker_args)
     
     mesh_dict = dict(zip(gaps, results))
-    return block_linking.TransitionMesh(mesh_dict)
+    return block_linking_em.TransitionMesh(mesh_dict)
