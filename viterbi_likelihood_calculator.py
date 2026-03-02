@@ -6,8 +6,7 @@ from scipy.special import logsumexp
 from functools import partial
 
 # Import existing utilities
-import analysis_utils 
-import block_linking_em
+import analysis_utils
 
 # Disable underflow warnings common in log-space HMMs
 np.seterr(divide='ignore', invalid='ignore')
