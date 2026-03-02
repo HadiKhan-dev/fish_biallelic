@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 # Import your specific modules
 import block_haplotypes
-import block_linking_em
+import block_linking
 import hmm_matching
 import beam_search_core
 import analysis_utils
@@ -217,7 +217,7 @@ def _process_single_batch(args):
             num_processes=1
         )
     else:
-        mesh = block_linking_em.generate_transition_probability_mesh(
+        mesh = block_linking.generate_transition_probability_mesh(
             global_probs, global_sites, portion_proxy,
             use_standard_baum_welch=True,
             num_processes=1

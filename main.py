@@ -26,7 +26,7 @@ import analysis_utils
 import hap_statistics
 import block_haplotypes
 import block_linking_naive
-import block_linking_em
+import block_linking
 import simulate_sequences
 import hmm_matching
 import viterbi_likelihood_calculator
@@ -159,7 +159,7 @@ print(f"Ground Truth Pedigree data saved to '{truth_csv_path}'")
 sample_names = truth_pedigree['Sample'].tolist()
 
 # 4. Process Each Contig (Sequencing, Chunking)
-read_depth = 4
+read_depth = 30
 
 for i, r_name in enumerate(region_keys):
     print(f"\nProcessing Simulated Data for Region: {r_name}")
