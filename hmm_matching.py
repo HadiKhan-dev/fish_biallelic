@@ -6,7 +6,7 @@ from scipy.special import logsumexp
 from functools import partial
 
 import analysis_utils 
-import block_linking_em
+import block_linking
 
 # Suppress divide by zero warnings in log-space calculations
 np.seterr(divide='ignore', invalid='ignore')
@@ -851,7 +851,7 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
     Main driver for HMM-EM transition calculation.
     Supports pre-calculated emissions to avoid passing massive raw data to workers.
     """
-    current_trans = block_linking_em.initial_transition_probabilities(haps_data, space_gap)
+    current_trans = block_linking.initial_transition_probabilities(haps_data, space_gap)
     
     # Use pre-calculated emissions if provided, otherwise calculate them here
     if precalculated_viterbi_emissions is not None:
@@ -984,4 +984,4 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
             results = pool.map(_gap_worker, worker_args)
     
     mesh_dict = dict(zip(gaps, results))
-    return block_linking_em.TransitionMesh(mesh_dict)
+    return block_linking.TransitionMesh(mesh_dict)
