@@ -118,7 +118,8 @@ def hdbscan_cluster(dist_matrix,
                                       min_samples=min_samples,
                                       cluster_selection_method=cluster_selection_method,
                                       alpha=alpha,
-                                      allow_single_cluster=allow_single_cluster)
+                                      allow_single_cluster=allow_single_cluster,
+                                      core_dist_n_jobs=1)
     
     #Fit data to clustering
     base_clustering.fit(dist_matrix)
