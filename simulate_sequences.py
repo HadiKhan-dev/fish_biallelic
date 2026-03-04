@@ -5,6 +5,9 @@ progeny of founders made up of these haplotypes
 
 PARALLELIZED VERSION: Contigs processed in parallel within each generation.
 """
+import thread_config
+
+
 import random
 import numpy as np
 import pickle

@@ -29,6 +29,7 @@ them appear better than founders who were certain but had occasional mismatches.
 converting to deterministic alleles, we treat "I don't know" as a coin flip (unbiased
 noise) rather than as evidence (systematic bias).
 """
+import thread_config
 
 import numpy as np
 import math

@@ -10,6 +10,7 @@ Pedigree inference using tolerance paintings from paint_samples.py.
 
 The 16-state HMM and free switches in homozygous regions are preserved.
 """
+import thread_config
 
 import numpy as np
 import pandas as pd

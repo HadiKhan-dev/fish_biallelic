@@ -1,3 +1,5 @@
+import thread_config
+
 import numpy as np
 from multiprocess import Pool
 import warnings
