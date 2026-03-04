@@ -1,3 +1,5 @@
+import thread_config
+
 import numpy as np
 import math
 import warnings

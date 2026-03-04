@@ -14,6 +14,7 @@ Algorithm:
 - Rounds 1-3: Phase correction using parent + child information
 - Post-rounds: Select best-LL consensus for each sample
 """
+import thread_config
 
 import numpy as np
 import pandas as pd

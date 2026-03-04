@@ -6,6 +6,8 @@ and chimera resolution via hotspot-guided splicing.
 
 Main entry point: select_and_resolve()
 """
+import thread_config
+
 
 import numpy as np
 import math

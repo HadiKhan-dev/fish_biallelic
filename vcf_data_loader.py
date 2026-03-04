@@ -1,3 +1,5 @@
+import thread_config
+
 import numpy as np
 import warnings
 from cyvcf2 import VCF

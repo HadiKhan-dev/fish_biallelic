@@ -9,6 +9,7 @@ Pipeline:
     → L1 assembly → Viterbi paint → deconvolve → L1 refined raw blocks
     → dedup → L1 v2 → L2 → Viterbi paint → deconvolve → L2 refined raw blocks
 """
+import thread_config
 
 import numpy as np
 import math
