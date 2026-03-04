@@ -1,3 +1,4 @@
+#%%
 import os
 
 # FORCE NUMPY TO USE 1 THREAD PER PROCESS
@@ -43,7 +44,7 @@ warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid="ignore")
 
 if platform.system() != "Windows":
-    os.nice(15)
+    #os.nice(15)
     print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
 
@@ -84,7 +85,8 @@ for region in regions_config:
 
     # 2. Run Haplotype Discovery
     start = time.time()
-    block_results = block_haplotypes.generate_all_block_haplotypes(genomic_data)
+    block_results = block_haplotypes.generate_all_block_haplotypes(genomic_data,
+                                                                   num_processes=112)
 
     valid_blocks = [b for b in block_results if len(b.positions) > 0]
     block_results = block_haplotypes.BlockResults(valid_blocks)
@@ -227,7 +229,7 @@ for r_name in region_keys:
         uniqueness_threshold_percent=1.0,
         diff_threshold_percent=0.5,
         wrongness_threshold=1.0,
-        num_processes=16
+        num_processes=56
     )
     
     valid_blocks = [b for b in simd_block_results if len(b.positions) > 0]
@@ -284,7 +286,7 @@ for r_name in region_keys:
                     max_founders=12,
                     max_sites_for_linking=2000,
                     cc_scale=0.2,
-                    num_processes=16
+                    num_processes=56
                 )
             return l1_fn
         
@@ -300,7 +302,7 @@ for r_name in region_keys:
                     beam_width=200,
                     max_founders=12,
                     cc_scale=0.2,
-                    num_processes=16,
+                    num_processes=56,
                     n_generations=N_GENERATIONS,
                     verbose=False
                 )
@@ -369,7 +371,7 @@ for r_name in region_keys:
         max_founders=12,
         max_sites_for_linking=2000,
         cc_scale=0.2,
-        num_processes=16
+        num_processes=56
     )
     
     multi_contig_results[r_name]['super_blocks_L1'] = super_blocks
@@ -412,7 +414,7 @@ for r_name in region_keys:
         beam_width=200,
         max_founders=12,
         cc_scale=0.2,
-        num_processes=16,
+        num_processes=56,
         n_generations=3,
         verbose=False
     )
@@ -457,7 +459,7 @@ for r_name in region_keys:
         beam_width=200,
         max_founders=12,
         cc_scale=0.2,
-        num_processes=16,
+        num_processes=56,
         n_generations=3,
         verbose=False
     )
@@ -506,7 +508,7 @@ for r_name in region_keys:
         beam_width=200,
         max_founders=12,
         cc_scale=0.2,
-        num_processes=16,
+        num_processes=56,
         n_generations=3,
         verbose=False
     )
