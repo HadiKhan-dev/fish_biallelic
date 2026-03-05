@@ -266,7 +266,7 @@ def consolidate_similar_candidates(candidates, diff_threshold_percent=1.0):
     # Rebuild dictionary with sequential keys
     return {i: h for i, h in enumerate(unique_haps)}
 
-@njit(parallel=True, fastmath=True)
+@njit(fastmath=True)
 def viterbi_score_selection(ll_tensor, penalty):
     """
     Calculates the BEST Viterbi path score for each sample given a set of active pairs.
@@ -274,7 +274,7 @@ def viterbi_score_selection(ll_tensor, penalty):
     n_samples, K, n_sites = ll_tensor.shape
     best_scores = np.empty(n_samples, dtype=np.float64)
     
-    for s in prange(n_samples):
+    for s in range(n_samples):
         # Buffer for current scores (faster than allocation in loop)
         current_scores = np.empty(K, dtype=np.float64)
         for k in range(K):

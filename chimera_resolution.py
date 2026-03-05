@@ -24,12 +24,12 @@ try:
     from numba import njit, prange
     _HAS_NUMBA = True
 
-    @njit(parallel=True, fastmath=True)
+    @njit(fastmath=True)
     def _batched_viterbi_score(stacked_tensor, penalty):
         """Score multiple candidate sets in parallel via Viterbi."""
         n_batch, n_samples, n_pairs, n_bins = stacked_tensor.shape
         scores = np.empty(n_batch, dtype=np.float64)
-        for b in prange(n_batch):
+        for b in range(n_batch):
             total = 0.0
             for s in range(n_samples):
                 current_scores = np.empty(n_pairs, dtype=np.float64)
@@ -56,12 +56,12 @@ try:
             scores[b] = total
         return scores
 
-    @njit(parallel=True, fastmath=True)
+    @njit(fastmath=True)
     def _viterbi_traceback(tensor, penalty):
         """Viterbi traceback for sample painting."""
         n_samples, n_pairs, n_bins = tensor.shape
         sample_paths = np.zeros((n_samples, n_bins), dtype=np.int32)
-        for s in prange(n_samples):
+        for s in range(n_samples):
             current_scores = np.empty(n_pairs, dtype=np.float64)
             for p in range(n_pairs):
                 current_scores[p] = tensor[s, p, 0]
