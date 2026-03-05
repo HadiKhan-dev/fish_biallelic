@@ -630,7 +630,7 @@ def calculate_binned_emissions(sample_probs_matrix, hap_dict, positions,
 # 6. TOLERANCE VITERBI KERNELS (BINNED VERSION)
 # =============================================================================
 
-@njit(parallel=True, fastmath=True)
+@njit(fastmath=True)
 def run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_definitions, 
                                      n_haps, switch_penalty, double_recomb_factor=1.5):
     """
@@ -647,7 +647,7 @@ def run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_d
     else: 
         log_N_minus_1 = 0.0
 
-    for s in prange(n_samples):
+    for s in range(n_samples):
         for k in range(K): 
             alpha[s, 0, k] = ll_tensor[s, k, 0]
 
@@ -690,7 +690,7 @@ def run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_d
                 
     return alpha
 
-@njit(parallel=True, fastmath=True)
+@njit(fastmath=True)
 def run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_definitions, 
                                       n_haps, switch_penalty, double_recomb_factor=1.5):
     """
@@ -705,7 +705,7 @@ def run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_
     else: 
         log_N_minus_1 = 0.0
 
-    for s in prange(n_samples):
+    for s in range(n_samples):
         for k in range(K): 
             beta[s, n_bins-1, k] = 0.0
 
@@ -751,7 +751,7 @@ def run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_
 # 7. PRE-COMPUTATION KERNEL (BINNED VERSION)
 # =============================================================================
 
-@njit(parallel=True, fastmath=True)
+@njit(fastmath=True)
 def precompute_valid_transitions_binned(alpha, beta, ll_tensor, bin_centers, recomb_rate, 
                                          state_definitions, n_haps, switch_penalty, 
                                          min_total_score, double_recomb_factor=1.5):
@@ -766,7 +766,7 @@ def precompute_valid_transitions_binned(alpha, beta, ll_tensor, bin_centers, rec
     else: 
         log_N_minus_1 = 0.0
     
-    for t in prange(1, n_bins):
+    for t in range(1, n_bins):
         dist_bp = bin_centers[t] - bin_centers[t-1]
         if dist_bp < 1: dist_bp = 1
         theta = float(dist_bp) * recomb_rate

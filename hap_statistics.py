@@ -101,7 +101,7 @@ def match_best_vectorised(haps_dict, diploids, keep_flags=None):
 
     return (dips_matches, haps_usage, best_errors)
 
-@njit(parallel=True, fastmath=True)
+@njit(fastmath=True)
 def viterbi_constrained_k(dist_tensor, max_k, state_defs):
     """
     Finds the best path with AT MOST 'max_k' haplotype switches.
@@ -112,7 +112,7 @@ def viterbi_constrained_k(dist_tensor, max_k, state_defs):
     final_costs = np.empty(n_samples, dtype=np.float64)
     backpointers = np.empty((n_samples, n_sites, n_pairs, budget_size), dtype=np.int32)
     
-    for s in prange(n_samples):
+    for s in range(n_samples):
         curr_dp = np.full((n_pairs, budget_size), np.inf, dtype=np.float64)
         prev_dp = np.full((n_pairs, budget_size), np.inf, dtype=np.float64)
         

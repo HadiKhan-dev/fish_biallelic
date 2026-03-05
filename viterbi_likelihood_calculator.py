@@ -38,7 +38,7 @@ except ImportError:
 # 1. CORE MATH & VITERBI (MULTI-STATE INTRA-BLOCK RECOMBINATION)
 # =============================================================================
 
-@njit(parallel=True, fastmath=True)
+@njit(fastmath=True)
 def viterbi_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definitions):
     """
     Performs a Viterbi Forward Scan (Site 0 -> N) through a genomic block.
@@ -49,7 +49,7 @@ def viterbi_distance_aware_forward(ll_tensor, positions, recomb_rate, state_defi
     
     log_2 = 0.69314718056
     
-    for s in prange(n_samples):
+    for s in range(n_samples):
         # 1. Initialize with First Site
         current_scores = np.empty(K, dtype=np.float64)
         for k in range(K):
@@ -128,7 +128,7 @@ def viterbi_distance_aware_forward(ll_tensor, positions, recomb_rate, state_defi
             
     return end_scores
 
-@njit(parallel=True, fastmath=True)
+@njit(fastmath=True)
 def viterbi_distance_aware_backward(ll_tensor, positions, recomb_rate, state_definitions):
     """
     Performs a Viterbi Backward Scan (Site N -> 0) through a genomic block.
@@ -139,7 +139,7 @@ def viterbi_distance_aware_backward(ll_tensor, positions, recomb_rate, state_def
     
     log_2 = 0.69314718056
     
-    for s in prange(n_samples):
+    for s in range(n_samples):
         # 1. Initialize with Last Site
         next_scores = np.empty(K, dtype=np.float64)
         for k in range(K):

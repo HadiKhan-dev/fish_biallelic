@@ -46,7 +46,7 @@ warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid="ignore")
 
 if platform.system() != "Windows":
-    #os.nice(15)
+    os.nice(15)
     print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
 
@@ -88,7 +88,7 @@ for region in regions_config:
     # 2. Run Haplotype Discovery
     start = time.time()
     block_results = block_haplotypes.generate_all_block_haplotypes(genomic_data,
-                                                                   num_processes=112)
+                                                                   num_processes=24)
 
     valid_blocks = [b for b in block_results if len(b.positions) > 0]
     block_results = block_haplotypes.BlockResults(valid_blocks)
