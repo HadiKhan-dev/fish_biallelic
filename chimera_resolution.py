@@ -6,8 +6,8 @@ and chimera resolution via hotspot-guided splicing.
 
 Main entry point: select_and_resolve()
 """
-import thread_config
 
+import thread_config
 
 import numpy as np
 import math
@@ -21,12 +21,12 @@ import block_haplotypes
 # =============================================================================
 
 try:
-    from numba import njit, prange
+    from numba import njit
     _HAS_NUMBA = True
 
     @njit(fastmath=True)
     def _batched_viterbi_score(stacked_tensor, penalty):
-        """Score multiple candidate sets in parallel via Viterbi."""
+        """Score multiple candidate sets via Viterbi."""
         n_batch, n_samples, n_pairs, n_bins = stacked_tensor.shape
         scores = np.empty(n_batch, dtype=np.float64)
         for b in range(n_batch):
@@ -214,8 +214,12 @@ def score_path_set(path_set, sub_emissions, penalty, num_samples):
 
 
 def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
-                             chunk_size=64):
-    """Score multiple path sets, grouped by size for batched Viterbi."""
+                             chunk_size=64, num_threads=8):
+    """Score multiple path sets, grouped by size for batched Viterbi.
+    
+    Args:
+        num_threads: Number of threads for parallel tensor building.
+    """
     groups = defaultdict(list)
     for i, ps in enumerate(path_sets):
         groups[len(ps)].append((i, ps))
@@ -230,7 +234,7 @@ def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
             def _build_one(item):
                 _, ps = item
                 return _build_tensor_from_paths(ps, sub_emissions, num_samples)
-            with ThreadPoolExecutor(max_workers=8) as executor:
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 chunk_tensors = list(executor.map(_build_one, chunk))
             stacked = np.stack(chunk_tensors, axis=0); del chunk_tensors
             chunk_scores = _batched_viterbi_score(stacked, float(penalty)); del stacked
@@ -353,6 +357,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                        min_hotspot_samples=5,
                        cc_scale=0.2,
                        chunk_size=64,
+                       num_threads=8,
                        penalty_override=None,
                        spb_override=None,
                        cc_override=None):
@@ -372,6 +377,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         min_hotspot_samples: Minimum samples for a hotspot to be actionable.
         cc_scale: Complexity cost scaling factor.
         chunk_size: Maximum batch size for parallel scoring.
+        num_threads: Number of threads for parallel tensor building.
         penalty_override: If set, use this penalty instead of auto-computed.
         spb_override: If set, use this SPB instead of auto-computed.
         cc_override: If set, use this CC instead of auto-computed.
@@ -415,7 +421,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         return np.ascontiguousarray(tensor)
     
     def build_tensors_threaded(subset_list):
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
             return list(executor.map(build_tensor_sel, subset_list))
     
     def score_subset(subset_indices):
@@ -638,7 +644,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             break
         
         all_scores = score_path_sets_parallel(
-            all_path_sets, sub_em, pen_sel, num_samples, chunk_size)
+            all_path_sets, sub_em, pen_sel, num_samples, chunk_size,
+            num_threads=num_threads)
         
         # 4e. Pick best improving option
         best_option = None; best_gain = 0.0
