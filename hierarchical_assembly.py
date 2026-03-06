@@ -4,6 +4,7 @@ import numpy as np
 import math
 import time
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
 
 # Import your specific modules
 import block_haplotypes
@@ -190,6 +191,10 @@ def _process_single_batch(args):
     instead of receiving them as arguments, avoiding massive
     serialization overhead.
     
+    Uses inner_num_processes for internal parallelism (mesh generation,
+    viterbi emissions) so that cores are fully utilised even when the
+    number of batches is small.
+    
     Uses chimera_resolution.select_and_resolve for sub-block Viterbi
     selection, top-N swap refinement, BIC pruning, and chimera resolution.
     
@@ -199,7 +204,7 @@ def _process_single_batch(args):
      use_hmm_linking, recomb_rate, beam_width, max_founders,
      max_sites_for_linking, n_generations, recomb_tolerance,
      top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
-     cc_scale, verbose) = args
+     cc_scale, inner_num_processes, verbose) = args
     
     # Retrieve large arrays from shared memory
     global_probs = _SHARED_DATA['global_probs']
@@ -232,20 +237,20 @@ def _process_single_batch(args):
     # 3. Generate Mesh (on proxy blocks)
     if use_hmm_linking:
         viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
-            global_probs, global_sites, portion_proxy, num_processes=1
+            global_probs, global_sites, portion_proxy, num_processes=inner_num_processes
         )
         mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
             None, None, portion_proxy, 
             recomb_rate=recomb_rate, 
             use_standard_baum_welch=False,
             precalculated_viterbi_emissions=viterbi_emissions,
-            num_processes=1
+            num_processes=inner_num_processes
         )
     else:
         mesh = block_linking.generate_transition_probability_mesh(
             global_probs, global_sites, portion_proxy,
             use_standard_baum_welch=True,
-            num_processes=1
+            num_processes=inner_num_processes
         )
         
     # 4. Beam Search on Proxy
@@ -299,6 +304,18 @@ def _process_single_batch(args):
 
 
 # =============================================================================
+# PROCESS POOL INITIALIZER WRAPPER
+# =============================================================================
+
+def _initializer_wrapper(shared_context):
+    """
+    Initializer for ProcessPoolExecutor workers.
+    Called once per worker process at creation time.
+    """
+    _init_shared_data(shared_context)
+
+
+# =============================================================================
 # MAIN DRIVER
 # =============================================================================
 
@@ -332,6 +349,11 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     Uses sub-block Viterbi forward selection, top-N swap refinement,
     BIC pruning with actual-size CC, and chimera resolution.
     
+    Uses ProcessPoolExecutor (non-daemonic workers) so that batch workers
+    can spawn their own child pools for internal parallelism. When the
+    number of batches is less than num_processes, each batch gets multiple
+    internal cores to keep total utilisation high.
+    
     Args:
         input_blocks: BlockResults from the previous level.
         global_probs: (n_samples, n_sites, 3) genotype probability array.
@@ -350,13 +372,16 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         paint_penalty: Viterbi penalty for sample painting in CR.
         min_hotspot_samples: Minimum samples for a hotspot to be actionable.
         cc_scale: Complexity cost scaling factor.
-        num_processes: Number of parallel processes for batch processing.
+        num_processes: Total number of cores available for this step.
         verbose: If True, print detailed progress.
     """
-    from multiprocess import Pool
-    
     total_blocks = len(input_blocks)
     num_batches = math.ceil(total_blocks / batch_size)
+    
+    # Compute parallelism split: outer workers vs inner cores per worker
+    # Cap outer workers at num_batches (no point having idle workers)
+    outer_workers = min(num_batches, num_processes)
+    inner_num_processes = max(1, num_processes // outer_workers)
     
     # Preview
     if n_generations is not None:
@@ -365,12 +390,12 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         print(f"\n--- Starting Hierarchical Step ---")
         print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
         print(f"Max gap: {preview_max_gap} (n_gen={n_generations}, tol={recomb_tolerance}, rate={recomb_rate})")
-        print(f"Processing with {num_processes} workers...")
+        print(f"Parallelism: {outer_workers} outer workers x {inner_num_processes} inner cores = {outer_workers * inner_num_processes} total")
     else:
         print(f"\n--- Starting Hierarchical Step ---")
         print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
         print(f"Max gap: unlimited (n_generations not specified)")
-        print(f"Processing with {num_processes} workers...")
+        print(f"Parallelism: {outer_workers} outer workers x {inner_num_processes} inner cores = {outer_workers * inner_num_processes} total")
     
     # Prepare shared memory context (avoids serializing large arrays per task)
     shared_context = {
@@ -392,17 +417,40 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             use_hmm_linking, recomb_rate, beam_width, max_founders,
             max_sites_for_linking, n_generations, recomb_tolerance,
             top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
-            cc_scale, verbose
+            cc_scale, inner_num_processes, verbose
         ))
     
     # Process batches
     if num_processes > 1:
-        with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as pool:
-            results = list(tqdm(
-                pool.imap(_process_single_batch, worker_args),
-                total=num_batches,
-                desc="Processing Batches"
-            ))
+        # ProcessPoolExecutor creates non-daemonic workers, allowing
+        # child pools inside _process_single_batch.
+        # We use explicit cleanup to prevent orphaned processes on
+        # interruption (Ctrl+C, SIGTERM, exceptions).
+        executor = ProcessPoolExecutor(
+            max_workers=outer_workers,
+            initializer=_initializer_wrapper,
+            initargs=(shared_context,)
+        )
+        futures = []
+        results = []
+        try:
+            futures = [executor.submit(_process_single_batch, args) for args in worker_args]
+            for future in tqdm(futures, total=num_batches, desc="Processing Batches"):
+                results.append(future.result())
+        except (KeyboardInterrupt, SystemExit, Exception) as e:
+            # Cancel any pending futures that haven't started yet
+            for f in futures:
+                f.cancel()
+            # Shut down forcefully — kills running workers
+            # cancel_futures requires Python 3.9+
+            import sys
+            if sys.version_info >= (3, 9):
+                executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                executor.shutdown(wait=False)
+            raise
+        else:
+            executor.shutdown(wait=True)
     else:
         # Sequential execution — initialize shared data in current process
         _init_shared_data(shared_context)
