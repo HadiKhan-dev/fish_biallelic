@@ -53,6 +53,8 @@ if platform.system() != "Windows":
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', None)
 
+n_processes=72
+
 #%%
 vcf_path = "./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz"
 
@@ -88,7 +90,7 @@ for region in regions_config:
     # 2. Run Haplotype Discovery
     start = time.time()
     block_results = block_haplotypes.generate_all_block_haplotypes(genomic_data,
-                                                                   num_processes=24)
+                                                                   num_processes=n_processes)
 
     valid_blocks = [b for b in block_results if len(b.positions) > 0]
     block_results = block_haplotypes.BlockResults(valid_blocks)
@@ -231,7 +233,7 @@ for r_name in region_keys:
         uniqueness_threshold_percent=1.0,
         diff_threshold_percent=0.5,
         wrongness_threshold=1.0,
-        num_processes=56
+        num_processes=n_processes
     )
     
     valid_blocks = [b for b in simd_block_results if len(b.positions) > 0]
@@ -288,7 +290,7 @@ for r_name in region_keys:
                     max_founders=12,
                     max_sites_for_linking=2000,
                     cc_scale=0.2,
-                    num_processes=56
+                    num_processes=n_processes
                 )
             return l1_fn
         
@@ -304,7 +306,7 @@ for r_name in region_keys:
                     beam_width=200,
                     max_founders=12,
                     cc_scale=0.2,
-                    num_processes=56,
+                    num_processes=n_processes,
                     n_generations=N_GENERATIONS,
                     verbose=False
                 )
@@ -373,7 +375,7 @@ for r_name in region_keys:
         max_founders=12,
         max_sites_for_linking=2000,
         cc_scale=0.2,
-        num_processes=56
+        num_processes=n_processes
     )
     
     multi_contig_results[r_name]['super_blocks_L1'] = super_blocks
@@ -416,7 +418,7 @@ for r_name in region_keys:
         beam_width=200,
         max_founders=12,
         cc_scale=0.2,
-        num_processes=56,
+        num_processes=n_processes,
         n_generations=3,
         verbose=False
     )
@@ -461,7 +463,7 @@ for r_name in region_keys:
         beam_width=200,
         max_founders=12,
         cc_scale=0.2,
-        num_processes=56,
+        num_processes=n_processes,
         n_generations=3,
         verbose=False
     )
@@ -510,7 +512,7 @@ for r_name in region_keys:
         beam_width=200,
         max_founders=12,
         cc_scale=0.2,
-        num_processes=56,
+        num_processes=n_processes,
         n_generations=3,
         verbose=False
     )
