@@ -14,6 +14,21 @@ import analysis_utils
 import chimera_resolution
 
 # =============================================================================
+# SHARED MEMORY MANAGEMENT
+# =============================================================================
+
+_SHARED_DATA = {}
+
+def _init_shared_data(data_dict):
+    """
+    Initializer for the worker pool.
+    Stores large arrays in worker process memory to avoid serialization.
+    """
+    global _SHARED_DATA
+    _SHARED_DATA.clear()
+    _SHARED_DATA.update(data_dict)
+
+# =============================================================================
 # DATA HELPERS
 # =============================================================================
 
@@ -171,16 +186,24 @@ def _process_single_batch(args):
     """
     Worker function to process a single batch.
     
+    Retrieves global_probs and global_sites from shared memory
+    instead of receiving them as arguments, avoiding massive
+    serialization overhead.
+    
     Uses chimera_resolution.select_and_resolve for sub-block Viterbi
     selection, top-N swap refinement, BIC pruning, and chimera resolution.
     
     Returns dict with 'batch_idx', 'super_block', and 'status'.
     """
-    (b_idx, start_i, end_i, original_blocks_list, global_probs, global_sites,
+    (b_idx, start_i, end_i, original_blocks_list,
      use_hmm_linking, recomb_rate, beam_width, max_founders,
      max_sites_for_linking, n_generations, recomb_tolerance,
      top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
      cc_scale, verbose) = args
+    
+    # Retrieve large arrays from shared memory
+    global_probs = _SHARED_DATA['global_probs']
+    global_sites = _SHARED_DATA['global_sites']
     
     # Convert list back to BlockResults
     original_portion = block_haplotypes.BlockResults(original_blocks_list)
@@ -349,7 +372,13 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         print(f"Max gap: unlimited (n_generations not specified)")
         print(f"Processing with {num_processes} workers...")
     
-    # Prepare worker arguments
+    # Prepare shared memory context (avoids serializing large arrays per task)
+    shared_context = {
+        'global_probs': global_probs,
+        'global_sites': global_sites
+    }
+    
+    # Prepare worker arguments (without large arrays)
     worker_args = []
     
     for b_idx in range(num_batches):
@@ -359,7 +388,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         original_blocks_list = list(input_blocks[start_i:end_i])
         
         worker_args.append((
-            b_idx, start_i, end_i, original_blocks_list, global_probs, global_sites,
+            b_idx, start_i, end_i, original_blocks_list,
             use_hmm_linking, recomb_rate, beam_width, max_founders,
             max_sites_for_linking, n_generations, recomb_tolerance,
             top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
@@ -368,13 +397,15 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     
     # Process batches
     if num_processes > 1:
-        with Pool(num_processes) as pool:
+        with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as pool:
             results = list(tqdm(
                 pool.imap(_process_single_batch, worker_args),
                 total=num_batches,
                 desc="Processing Batches"
             ))
     else:
+        # Sequential execution — initialize shared data in current process
+        _init_shared_data(shared_context)
         results = []
         for args in tqdm(worker_args, desc="Processing Batches"):
             results.append(_process_single_batch(args))
