@@ -206,6 +206,10 @@ def _process_single_batch(args):
      top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
      cc_scale, inner_num_processes, verbose) = args
     
+    # inner_num_processes controls child Pool sizes (expensive — must not oversubscribe)
+    # inner_num_threads controls ThreadPoolExecutor sizes (cheap — safe to oversubscribe)
+    inner_num_threads = max(inner_num_processes, 8)
+    
     # Retrieve large arrays from shared memory
     global_probs = _SHARED_DATA['global_probs']
     global_sites = _SHARED_DATA['global_sites']
@@ -281,6 +285,7 @@ def _process_single_batch(args):
         paint_penalty=paint_penalty,
         min_hotspot_samples=min_hotspot_samples,
         cc_scale=cc_scale,
+        num_threads=inner_num_threads,
     )
     
     # 6. Reconstruction on Originals

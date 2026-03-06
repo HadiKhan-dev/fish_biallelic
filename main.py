@@ -46,7 +46,7 @@ warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid="ignore")
 
 if platform.system() != "Windows":
-    os.nice(15)
+    #os.nice(15)
     print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
 
