@@ -53,7 +53,7 @@ if platform.system() != "Windows":
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', None)
 
-n_processes=72
+n_processes=112
 
 #%%
 vcf_path = "./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz"
