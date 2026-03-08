@@ -1,10 +1,13 @@
 import thread_config
+from thread_config import numba_thread_scope
 
 import numpy as np
 import math
 import time
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
+import multiprocessing.pool
+from multiprocessing.shared_memory import SharedMemory
 
 # Import your specific modules
 import block_haplotypes
@@ -14,20 +17,121 @@ import beam_search_core
 import analysis_utils
 import chimera_resolution
 
+
+# =============================================================================
+# NON-DAEMONIC FORKSERVER POOL
+# =============================================================================
+# Workers are spawned via forkserver, NOT forked from the parent process.
+# This means workers start from a lightweight forkserver process (~50 MB),
+# not the parent's ~200 GB Python heap. No COW page dirtying.
+#
+# Workers import modules fresh, receive _SHARED_META via the pool
+# initializer (tiny dict, cheap to pickle), and attach to POSIX
+# SharedMemory for global_probs/global_sites.
+#
+# Non-daemonic so workers can spawn their own child pools for internal
+# parallelism at L2+ (HMM mesh generation, viterbi emissions).
+#
+# Uses stdlib multiprocessing (not dill-based multiprocess) because
+# multiprocess doesn't properly support forkserver.
+#
+# IMPORTANT: The parent's entry script must NOT be named main.py,
+# otherwise forkserver workers will re-execute it when importing __main__.
+
+try:
+    # Preloading is configured in thread_config.py (imported above).
+    _forkserver_ctx = mp.get_context('forkserver')
+except (ValueError, AttributeError):
+    _forkserver_ctx = mp.get_context('fork')
+
+class _NoDaemonProcess(_forkserver_ctx.Process):
+    @property
+    def daemon(self):
+        return False
+    
+    @daemon.setter
+    def daemon(self, value):
+        pass
+
+class _NoDaemonContext(type(_forkserver_ctx)):
+    Process = _NoDaemonProcess
+
+class NoDaemonPool(multiprocessing.pool.Pool):
+    """A Pool using forkserver context with non-daemonic workers."""
+    def __init__(self, *args, **kwargs):
+        kwargs['context'] = _NoDaemonContext()
+        super().__init__(*args, **kwargs)
+
+
 # =============================================================================
 # SHARED MEMORY MANAGEMENT
 # =============================================================================
+# Uses POSIX shared memory to share large numpy arrays. Data lives in
+# /dev/shm, completely outside any process's Python heap.
+#
+# Parent creates segments and passes metadata (name, shape, dtype) to
+# workers via pool initializer. Workers attach by name and get zero-copy
+# numpy views.
 
-_SHARED_DATA = {}
+_SHARED_META = {}
 
-def _init_shared_data(data_dict):
+
+def _init_worker_meta(meta_dict, numba_threads=1):
     """
-    Initializer for the worker pool.
-    Stores large arrays in worker process memory to avoid serialization.
+    Pool initializer — called once per worker at creation time.
+    Stores SharedMemory metadata so workers can attach to the segments.
+    
+    Also overrides numba's thread pool size BEFORE it gets created.
+    Numba reads NUMBA_NUM_THREADS at import time (in the forkserver),
+    but the thread pool is created lazily on first parallel function call.
+    Overriding numba.config.NUMBA_NUM_THREADS here ensures the pool
+    is created at the correct size for this worker, not 112.
     """
-    global _SHARED_DATA
-    _SHARED_DATA.clear()
-    _SHARED_DATA.update(data_dict)
+    import os
+    os.environ['NUMBA_NUM_THREADS'] = str(numba_threads)
+    try:
+        import numba
+        # Override the config that numba read at import time
+        numba.config.NUMBA_NUM_THREADS = numba_threads
+        # If thread pool already exists (shouldn't in forkserver workers),
+        # limit active threads
+        numba.set_num_threads(min(numba_threads, numba.get_num_threads()))
+    except Exception:
+        pass
+    
+    global _SHARED_META
+    _SHARED_META = meta_dict
+
+
+def _create_shared_array(array, label):
+    """
+    Copy a numpy array into a POSIX shared memory segment.
+    
+    Returns:
+        (SharedMemory handle, metadata_dict)
+    """
+    shm = SharedMemory(create=True, size=array.nbytes)
+    shared_view = np.ndarray(array.shape, dtype=array.dtype, buffer=shm.buf)
+    np.copyto(shared_view, array)
+    metadata = {
+        'name': shm.name,
+        'shape': array.shape,
+        'dtype': array.dtype,
+    }
+    return shm, metadata
+
+
+def _attach_shared_array(metadata):
+    """
+    Attach to an existing shared memory segment and return a numpy view.
+    
+    Returns:
+        (SharedMemory handle, numpy array view)
+    """
+    shm = SharedMemory(name=metadata['name'], create=False)
+    array = np.ndarray(metadata['shape'], dtype=metadata['dtype'], buffer=shm.buf)
+    return shm, array
+
 
 # =============================================================================
 # DATA HELPERS
@@ -37,8 +141,6 @@ def create_downsampled_proxy(block, max_sites=2000):
     """
     Creates a lightweight 'Proxy' of a BlockResult.
     Returns the original block if it's small enough.
-    
-    Correctly slices internal arrays to maintain consistency.
     """
     total_sites = len(block.positions)
     
@@ -47,7 +149,6 @@ def create_downsampled_proxy(block, max_sites=2000):
         
     stride = math.ceil(total_sites / max_sites)
     
-    # Force copy and contiguous to avoid view issues
     new_pos = np.ascontiguousarray(block.positions[::stride])
     
     new_haps = {}
@@ -62,7 +163,6 @@ def create_downsampled_proxy(block, max_sites=2000):
     else:
         new_flags = None
 
-    # Optional: Slice reads/probs if they exist on the block object
     new_reads = None
     if block.reads_count_matrix is not None:
         new_reads = np.ascontiguousarray(block.reads_count_matrix[:, ::stride, :])
@@ -84,12 +184,6 @@ def create_downsampled_proxy(block, max_sites=2000):
 def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, global_probs=None, global_sites=None):
     """
     Packages reconstruction results into a BlockResult (Super-Block).
-    
-    Args:
-        reconstructed_data: Output from beam search reconstruction.
-        original_blocks: Original BlockResults that were merged.
-        global_probs: Global probability matrix (n_samples, n_total_sites, 3).
-        global_sites: Global site positions array.
     """
     if not reconstructed_data:
         return None
@@ -108,7 +202,6 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, gl
             super_flags.extend(np.ones(len(b.positions), dtype=int))
     super_flags = np.array(super_flags)
     
-    # Get probs - prefer slicing from global_probs if available
     super_probs = None
     if global_probs is not None and global_sites is not None:
         indices = np.searchsorted(global_sites, super_positions)
@@ -125,7 +218,6 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, gl
         if probs_list:
             super_probs = np.concatenate(probs_list, axis=1)
     
-    # Concatenate reads from original blocks (optional)
     reads_list = []
     for b in original_blocks:
         if b.reads_count_matrix is not None:
@@ -149,20 +241,6 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, gl
 def compute_max_gap(blocks, recomb_rate, n_generations, recomb_tolerance):
     """
     Compute the maximum gap to use for beam search transition lookups.
-    
-    gap=1 corresponds to ~0bp (adjacent block boundary).
-    gap=G spans (G-1) full blocks of physical distance.
-    
-    We want: (G-1) * avg_block_span * recomb_rate * n_generations < recomb_tolerance
-    
-    Args:
-        blocks: List of BlockResult/proxy objects with .positions.
-        recomb_rate: Per-bp recombination rate.
-        n_generations: Average number of generations between founders and samples.
-        recomb_tolerance: Maximum expected recombinations before we stop trusting linkage.
-    
-    Returns:
-        int: max_gap (always >= 1).
     """
     block_spans = [b.positions[-1] - b.positions[0] for b in blocks if len(b.positions) > 1]
     if not block_spans:
@@ -187,16 +265,11 @@ def _process_single_batch(args):
     """
     Worker function to process a single batch.
     
-    Retrieves global_probs and global_sites from shared memory
-    instead of receiving them as arguments, avoiding massive
-    serialization overhead.
+    Attaches to POSIX shared memory segments for global_probs and
+    global_sites using metadata from _SHARED_META (set by pool initializer).
     
-    Uses inner_num_processes for internal parallelism (mesh generation,
-    viterbi emissions) so that cores are fully utilised even when the
-    number of batches is small.
-    
-    Uses chimera_resolution.select_and_resolve for sub-block Viterbi
-    selection, top-N swap refinement, BIC pruning, and chimera resolution.
+    Forkserver workers start clean (~50 MB), import modules, and only
+    allocate memory for actual work (~150 MB per batch).
     
     Returns dict with 'batch_idx', 'super_block', and 'status'.
     """
@@ -206,118 +279,116 @@ def _process_single_batch(args):
      top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
      cc_scale, inner_num_processes, verbose) = args
     
-    # inner_num_processes controls child Pool sizes (expensive — must not oversubscribe)
-    # inner_num_threads controls ThreadPoolExecutor sizes (cheap — safe to oversubscribe)
     inner_num_threads = max(inner_num_processes, 8)
     
-    # Retrieve large arrays from shared memory
-    global_probs = _SHARED_DATA['global_probs']
-    global_sites = _SHARED_DATA['global_sites']
+    # Attach to shared memory segments (zero-copy)
+    shm_probs, global_probs = _attach_shared_array(_SHARED_META['probs'])
+    shm_sites, global_sites = _attach_shared_array(_SHARED_META['sites'])
     
-    # Convert list back to BlockResults
-    original_portion = block_haplotypes.BlockResults(original_blocks_list)
-    
-    if len(original_portion) < 2:
-        # Single block tail - pass through
-        return {
-            'batch_idx': b_idx,
-            'super_block': original_portion[0],
-            'status': 'passthrough'
-        }
+    try:
+        with numba_thread_scope(inner_num_processes):
+            
+            original_portion = block_haplotypes.BlockResults(original_blocks_list)
+            
+            if len(original_portion) < 2:
+                return {
+                    'batch_idx': b_idx,
+                    'super_block': original_portion[0],
+                    'status': 'passthrough'
+                }
 
-    # 1. Create Proxies (for mesh generation and beam search only)
-    proxy_list = []
-    for b in original_portion:
-        proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
-    portion_proxy = block_haplotypes.BlockResults(proxy_list)
+            # 1. Create Proxies
+            proxy_list = []
+            for b in original_portion:
+                proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
+            portion_proxy = block_haplotypes.BlockResults(proxy_list)
+            
+            # 2. Slice to batch-relevant sites only
+            all_positions = np.concatenate([b.positions for b in original_portion])
+            batch_indices = np.searchsorted(global_sites, all_positions)
+            idx_min, idx_max = batch_indices.min(), batch_indices.max()
+            batch_probs = np.ascontiguousarray(global_probs[:, idx_min:idx_max+1, :])
+            batch_sites = np.ascontiguousarray(global_sites[idx_min:idx_max+1])
 
-    # 2. Compute Max Gap
-    if n_generations is not None and recomb_tolerance is not None:
-        beam_max_gap = compute_max_gap(original_blocks_list, recomb_rate, 
-                                        n_generations, recomb_tolerance)
-    else:
-        beam_max_gap = None
+            # 3. Compute Max Gap
+            if n_generations is not None and recomb_tolerance is not None:
+                beam_max_gap = compute_max_gap(original_blocks_list, recomb_rate, 
+                                                n_generations, recomb_tolerance)
+            else:
+                beam_max_gap = None
 
-    # 3. Generate Mesh (on proxy blocks)
-    if use_hmm_linking:
-        viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
-            global_probs, global_sites, portion_proxy, num_processes=inner_num_processes
-        )
-        mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
-            None, None, portion_proxy, 
-            recomb_rate=recomb_rate, 
-            use_standard_baum_welch=False,
-            precalculated_viterbi_emissions=viterbi_emissions,
-            num_processes=inner_num_processes
-        )
-    else:
-        mesh = block_linking.generate_transition_probability_mesh(
-            global_probs, global_sites, portion_proxy,
-            use_standard_baum_welch=True,
-            num_processes=inner_num_processes
-        )
-        
-    # 4. Beam Search on Proxy
-    beam_results = beam_search_core.run_full_mesh_beam_search(
-        portion_proxy, mesh, beam_width=beam_width, 
-        max_gap=beam_max_gap, verbose=verbose
-    )
-    
-    if not beam_results:
-        return {
-            'batch_idx': b_idx,
-            'super_block': None,
-            'status': 'beam_search_failed'
-        }
-        
-    fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
-    
-    # 5. Selection + Swap + CR (on original blocks via sub-block emissions)
-    resolved_beam = chimera_resolution.select_and_resolve(
-        beam_results=beam_results,
-        fast_mesh=fast_mesh,
-        batch_blocks=list(original_portion),
-        global_probs=global_probs,
-        global_sites=global_sites,
-        max_founders=max_founders,
-        top_n_swap=top_n_swap,
-        max_cr_iterations=max_cr_iterations,
-        paint_penalty=paint_penalty,
-        min_hotspot_samples=min_hotspot_samples,
-        cc_scale=cc_scale,
-        num_threads=inner_num_threads,
-    )
-    
-    # 6. Reconstruction on Originals
-    reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
-        resolved_beam, fast_mesh, original_portion
-    )
-    
-    # 7. Package
-    super_block = convert_reconstruction_to_superblock(
-        reconstructed_data, original_portion, global_probs, global_sites
-    )
-    
-    # 8. Structural Chimera Pruning
-    super_block = beam_search_core.prune_superblock_chimeras(super_block)
-    
-    return {
-        'batch_idx': b_idx,
-        'super_block': super_block,
-        'status': 'success' if super_block else 'reconstruction_failed'
-    }
-
-
-# =============================================================================
-# PROCESS POOL INITIALIZER WRAPPER
-# =============================================================================
-
-def _initializer_wrapper(shared_context):
-    """
-    Initializer for ProcessPoolExecutor workers.
-    Called once per worker process at creation time.
-    """
-    _init_shared_data(shared_context)
+            # 4. Generate Mesh — uses batch-sliced data
+            if use_hmm_linking:
+                viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
+                    batch_probs, batch_sites, portion_proxy, num_processes=inner_num_processes
+                )
+                mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
+                    None, None, portion_proxy, 
+                    recomb_rate=recomb_rate, 
+                    use_standard_baum_welch=False,
+                    precalculated_viterbi_emissions=viterbi_emissions,
+                    num_processes=inner_num_processes
+                )
+            else:
+                mesh = block_linking.generate_transition_probability_mesh(
+                    batch_probs, batch_sites, portion_proxy,
+                    use_standard_baum_welch=True,
+                    num_processes=inner_num_processes
+                )
+                
+            # 5. Beam Search on Proxy
+            beam_results = beam_search_core.run_full_mesh_beam_search(
+                portion_proxy, mesh, beam_width=beam_width, 
+                max_gap=beam_max_gap, verbose=verbose
+            )
+            
+            if not beam_results:
+                return {
+                    'batch_idx': b_idx,
+                    'super_block': None,
+                    'status': 'beam_search_failed'
+                }
+                
+            fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
+            
+            # 6. Selection + Swap + CR
+            resolved_beam = chimera_resolution.select_and_resolve(
+                beam_results=beam_results,
+                fast_mesh=fast_mesh,
+                batch_blocks=list(original_portion),
+                global_probs=batch_probs,
+                global_sites=batch_sites,
+                max_founders=max_founders,
+                top_n_swap=top_n_swap,
+                max_cr_iterations=max_cr_iterations,
+                paint_penalty=paint_penalty,
+                min_hotspot_samples=min_hotspot_samples,
+                cc_scale=cc_scale,
+                num_threads=inner_num_threads,
+            )
+            
+            # 7. Reconstruction on Originals
+            reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
+                resolved_beam, fast_mesh, original_portion
+            )
+            
+            # 8. Package
+            super_block = convert_reconstruction_to_superblock(
+                reconstructed_data, original_portion, batch_probs, batch_sites
+            )
+            
+            # 9. Structural Chimera Pruning
+            super_block = beam_search_core.prune_superblock_chimeras(super_block)
+            
+            return {
+                'batch_idx': b_idx,
+                'super_block': super_block,
+                'status': 'success' if super_block else 'reconstruction_failed'
+            }
+    finally:
+        # Detach from shared memory (do NOT unlink — parent handles that)
+        shm_probs.close()
+        shm_sites.close()
 
 
 # =============================================================================
@@ -351,40 +422,21 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     """
     Performs one level of Hierarchical Assembly.
     
-    Uses sub-block Viterbi forward selection, top-N swap refinement,
-    BIC pruning with actual-size CC, and chimera resolution.
+    Memory strategy:
+      - global_probs/global_sites placed in POSIX shared memory (/dev/shm)
+      - Workers spawned via forkserver — start from lightweight process
+        (~50 MB), NOT from the parent's large heap. Zero COW overhead.
+      - Workers receive SharedMemory metadata via pool initializer (tiny)
+      - Workers attach to shared segments by name for zero-copy access
+      - batch_probs slicing ensures inner pools only pickle small arrays
+      - Workers are non-daemonic, allowing inner child pools at L2+
     
-    Uses ProcessPoolExecutor (non-daemonic workers) so that batch workers
-    can spawn their own child pools for internal parallelism. When the
-    number of batches is less than num_processes, each batch gets multiple
-    internal cores to keep total utilisation high.
-    
-    Args:
-        input_blocks: BlockResults from the previous level.
-        global_probs: (n_samples, n_sites, 3) genotype probability array.
-        global_sites: Array of genomic site positions.
-        batch_size: Number of input blocks per batch.
-        use_hmm_linking: If True, use HMM matching for mesh. If False, use EM linking.
-        recomb_rate: Per-bp recombination rate for HMM mesh.
-        beam_width: Number of beam search candidates.
-        max_founders: Maximum number of founders to retain.
-        max_sites_for_linking: Maximum sites for proxy blocks used in mesh generation.
-        n_generations: Average meioses between founders and samples (for max_gap).
-                       If None, max_gap is unlimited.
-        recomb_tolerance: Maximum expected recombinations before linkage is degraded.
-        top_n_swap: Number of candidates to evaluate per swap position.
-        max_cr_iterations: Maximum chimera resolution iterations.
-        paint_penalty: Viterbi penalty for sample painting in CR.
-        min_hotspot_samples: Minimum samples for a hotspot to be actionable.
-        cc_scale: Complexity cost scaling factor.
-        num_processes: Total number of cores available for this step.
-        verbose: If True, print detailed progress.
+    IMPORTANT: The entry script must NOT be named main.py, otherwise
+    forkserver workers will re-execute it.
     """
     total_blocks = len(input_blocks)
     num_batches = math.ceil(total_blocks / batch_size)
     
-    # Compute parallelism split: outer workers vs inner cores per worker
-    # Cap outer workers at num_batches (no point having idle workers)
     outer_workers = min(num_batches, num_processes)
     inner_num_processes = max(1, num_processes // outer_workers)
     
@@ -402,13 +454,24 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         print(f"Max gap: unlimited (n_generations not specified)")
         print(f"Parallelism: {outer_workers} outer workers x {inner_num_processes} inner cores = {outer_workers * inner_num_processes} total")
     
-    # Prepare shared memory context (avoids serializing large arrays per task)
-    shared_context = {
-        'global_probs': global_probs,
-        'global_sites': global_sites
+    # =====================================================================
+    # Create POSIX shared memory for large arrays
+    # =====================================================================
+    t0 = time.time()
+    shm_probs, probs_meta = _create_shared_array(global_probs, 'global_probs')
+    shm_sites, sites_meta = _create_shared_array(global_sites, 'global_sites')
+    
+    shared_meta = {
+        'probs': probs_meta,
+        'sites': sites_meta,
     }
     
-    # Prepare worker arguments (without large arrays)
+    probs_gb = global_probs.nbytes / (1024**3)
+    print(f"  Shared memory created: {probs_gb:.1f} GB probs + sites ({time.time()-t0:.1f}s)")
+    
+    # =====================================================================
+    # Prepare worker arguments
+    # =====================================================================
     worker_args = []
     
     for b_idx in range(num_batches):
@@ -425,43 +488,65 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             cc_scale, inner_num_processes, verbose
         ))
     
+    # =====================================================================
     # Process batches
-    if num_processes > 1:
-        # ProcessPoolExecutor creates non-daemonic workers, allowing
-        # child pools inside _process_single_batch.
-        # We use explicit cleanup to prevent orphaned processes on
-        # interruption (Ctrl+C, SIGTERM, exceptions).
-        executor = ProcessPoolExecutor(
-            max_workers=outer_workers,
-            initializer=_initializer_wrapper,
-            initargs=(shared_context,)
-        )
-        futures = []
-        results = []
-        try:
-            futures = [executor.submit(_process_single_batch, args) for args in worker_args]
-            for future in tqdm(futures, total=num_batches, desc="Processing Batches"):
-                results.append(future.result())
-        except (KeyboardInterrupt, SystemExit, Exception) as e:
-            # Cancel any pending futures that haven't started yet
-            for f in futures:
-                f.cancel()
-            # Shut down forcefully — kills running workers
-            # cancel_futures requires Python 3.9+
-            import sys
-            if sys.version_info >= (3, 9):
-                executor.shutdown(wait=False, cancel_futures=True)
-            else:
-                executor.shutdown(wait=False)
-            raise
+    # =====================================================================
+    # Belt-and-suspenders: temporarily clear __main__.__file__ so
+    # forkserver workers don't re-execute the entry script, even if
+    # the caller forgot to add main guards to their pipeline file.
+    import sys as _sys
+    _main_mod = _sys.modules.get('__main__')
+    _saved_main_file = getattr(_main_mod, '__file__', None)
+    _saved_main_spec = getattr(_main_mod, '__spec__', None)
+    if _main_mod is not None:
+        if hasattr(_main_mod, '__file__'):
+            del _main_mod.__file__
+        _main_mod.__spec__ = None
+    
+    try:
+        if num_processes > 1:
+            t0 = time.time()
+            pool = NoDaemonPool(
+                processes=outer_workers,
+                initializer=_init_worker_meta,
+                initargs=(shared_meta, inner_num_processes)
+            )
+            print(f"  Pool creation ({outer_workers} workers): {time.time()-t0:.1f}s")
+            
+            t0 = time.time()
+            results = []
+            try:
+                for result in tqdm(
+                    pool.imap_unordered(_process_single_batch, worker_args),
+                    total=num_batches,
+                    desc="Processing Batches"
+                ):
+                    results.append(result)
+                pool.close()
+            except (KeyboardInterrupt, SystemExit, Exception) as e:
+                pool.terminate()
+                raise
+            finally:
+                pool.join()
+            print(f"  Pool work + result collection: {time.time()-t0:.1f}s")
         else:
-            executor.shutdown(wait=True)
-    else:
-        # Sequential execution — initialize shared data in current process
-        _init_shared_data(shared_context)
-        results = []
-        for args in tqdm(worker_args, desc="Processing Batches"):
-            results.append(_process_single_batch(args))
+            # Sequential execution — set metadata for current process
+            global _SHARED_META
+            _SHARED_META = shared_meta
+            results = []
+            for args in tqdm(worker_args, desc="Processing Batches"):
+                results.append(_process_single_batch(args))
+    finally:
+        # Clean up shared memory (always, even on error)
+        shm_probs.close()
+        shm_probs.unlink()
+        shm_sites.close()
+        shm_sites.unlink()
+        # Restore __main__ attributes
+        if _main_mod is not None:
+            if _saved_main_file is not None:
+                _main_mod.__file__ = _saved_main_file
+            _main_mod.__spec__ = _saved_main_spec
     
     # Sort by batch index and collect super blocks
     results = sorted(results, key=lambda x: x['batch_idx'])
