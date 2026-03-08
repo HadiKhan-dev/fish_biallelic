@@ -1,5 +1,3 @@
-import thread_config
-
 import numpy as np
 import math
 import hdbscan
@@ -44,16 +42,20 @@ def _worker_generate_block(block_idx, **kwargs):
     """
     Worker function that retrieves data from shared memory by index
     and calls the heavy logic function.
+    
+    Returns (block_idx, BlockResult) so results can be re-sorted
+    when using imap_unordered.
     """
     # GenomicData.__getitem__ returns (positions, reads, keep_flags)
     positions, reads, flags = _SHARED_DATA['genomic_data'][block_idx]
     
-    return generate_haplotypes_block_robust(
+    result = generate_haplotypes_block_robust(
         positions, 
         reads, 
         keep_flags=flags, 
         **kwargs
     )
+    return (block_idx, result)
 
 @dataclass
 class FounderBlock:
@@ -120,8 +122,7 @@ def hdbscan_cluster(dist_matrix,
                                       min_samples=min_samples,
                                       cluster_selection_method=cluster_selection_method,
                                       alpha=alpha,
-                                      allow_single_cluster=allow_single_cluster,
-                                      core_dist_n_jobs=1)
+                                      allow_single_cluster=allow_single_cluster)
     
     #Fit data to clustering
     base_clustering.fit(dist_matrix)
@@ -266,7 +267,7 @@ def consolidate_similar_candidates(candidates, diff_threshold_percent=1.0):
     # Rebuild dictionary with sequential keys
     return {i: h for i, h in enumerate(unique_haps)}
 
-@njit(fastmath=True)
+@njit(parallel=True, fastmath=True)
 def viterbi_score_selection(ll_tensor, penalty):
     """
     Calculates the BEST Viterbi path score for each sample given a set of active pairs.
@@ -274,7 +275,7 @@ def viterbi_score_selection(ll_tensor, penalty):
     n_samples, K, n_sites = ll_tensor.shape
     best_scores = np.empty(n_samples, dtype=np.float64)
     
-    for s in range(n_samples):
+    for s in prange(n_samples):
         # Buffer for current scores (faster than allocation in loop)
         current_scores = np.empty(K, dtype=np.float64)
         for k in range(K):
@@ -1423,12 +1424,19 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
     shared_context = {'genomic_data': genomic_data}
 
     with Pool(processes=num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
-        # We map over indices [0, 1, ... N]
-        # The worker fetches the data from shared memory using the index.
-        overall_haplotypes = processing_pool.map(
+        # imap_unordered lets fast workers grab the next task immediately
+        # instead of waiting for their chunk to complete. This eliminates
+        # idle time when block runtimes vary (e.g. HDBSCAN on blocks with
+        # different numbers of haplotypes).
+        indexed_results = list(processing_pool.imap_unordered(
             worker_partial, 
-            range(len(genomic_data))
-        )
+            range(len(genomic_data)),
+            chunksize=1
+        ))
+    
+    # Re-sort by original block index to restore genomic order
+    indexed_results.sort(key=lambda x: x[0])
+    overall_haplotypes = [result for _, result in indexed_results]
 
     # FREE MEMORY: Drop reads since probs_array is already computed and stored
     if discard_reads_after:

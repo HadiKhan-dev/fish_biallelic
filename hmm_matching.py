@@ -61,7 +61,7 @@ def log_add_exp(a, b):
     else:
         return b + math.log(1.0 + math.exp(a - b))
 
-@njit(fastmath=True)
+@njit(parallel=True, fastmath=True)
 def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definitions, incoming_priors, n_haps):
     """
     Performs the 'Micro-HMM' Forward Scan (Log-Sum-Exp) inside a single block.
@@ -72,6 +72,12 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
     
     Includes BURST LOGIC:
     Maintains parallel 'Normal' and 'Burst' states to handle gene conversions/errors.
+    
+    The sample loop uses prange for Numba thread-level parallelism.
+    The number of active threads is controlled externally via
+    thread_config.numba_thread_scope() — this allows adaptive scaling
+    (1 thread at L1 where process-level parallelism is sufficient,
+    many threads at L3/L4 where few outer processes are running).
     
     Args:
         ll_tensor (np.ndarray): Shape (Samples, K, Sites). Log-likelihood of data given state.
@@ -100,7 +106,7 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
     else:
         log_N_minus_1 = 0.0
 
-    for s in range(n_samples):
+    for s in prange(n_samples):
         # 1. INJECTION: Site 0 gets Emission + Incoming Prior (Macro-Transition)
         current_normal = np.empty(K, dtype=np.float64)
         current_burst = np.empty(K, dtype=np.float64)
@@ -189,11 +195,14 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
             
     return end_probs
 
-@njit(fastmath=True)
+@njit(parallel=True, fastmath=True)
 def scan_distance_aware_backward(ll_tensor, positions, recomb_rate, state_definitions, incoming_priors, n_haps):
     """
     Optimized Backward Scan (O(Sites * Haps^2)).
     Assumes Single-Switch Only.
+    
+    The sample loop uses prange for Numba thread-level parallelism.
+    Thread count is controlled externally via thread_config.numba_thread_scope().
     """
     n_samples, K, n_sites = ll_tensor.shape
     start_probs = np.full((n_samples, K), -np.inf, dtype=np.float64)
@@ -209,7 +218,7 @@ def scan_distance_aware_backward(ll_tensor, positions, recomb_rate, state_defini
     else:
         log_N_minus_1 = 0.0
     
-    for s in range(n_samples):
+    for s in prange(n_samples):
         # 1. Init (Site N)
         next_normal = np.empty(K, dtype=np.float64)
         next_burst = np.empty(K, dtype=np.float64)
