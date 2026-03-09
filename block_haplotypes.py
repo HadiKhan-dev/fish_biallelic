@@ -1,7 +1,10 @@
+import thread_config
+
 import numpy as np
 import math
 import hdbscan
-from multiprocess import Pool
+import multiprocessing as mp
+import multiprocessing.pool
 import warnings
 import time
 import gc
@@ -29,8 +32,30 @@ except ImportError:
         return decorator
     prange = range
 
-# --- SHARED MEMORY MANAGEMENT ---
-# Holds the GenomicData object in worker process memory to avoid serialization overhead
+
+# =============================================================================
+# FORKSERVER POOL
+# =============================================================================
+# Uses forkserver so workers start from a lightweight process (~500 MB)
+# rather than forking from the parent which may hold 200+ GB of data
+# from multiple chromosomes. Block data is passed directly as arguments
+# (~1 MB per block) rather than via shared memory.
+#
+# set_forkserver_preload is configured in thread_config.py.
+
+try:
+    _forkserver_ctx = mp.get_context('forkserver')
+except ValueError:
+    _forkserver_ctx = mp.get_context('fork')
+
+class _ForkserverPool(multiprocessing.pool.Pool):
+    """A Pool using forkserver context."""
+    def __init__(self, *args, **kwargs):
+        kwargs['context'] = _forkserver_ctx
+        super().__init__(*args, **kwargs)
+
+
+# --- SHARED MEMORY MANAGEMENT (legacy, used by other modules) ---
 _SHARED_DATA = {}
 
 def _init_shared_data(data_dict):
@@ -40,14 +65,24 @@ def _init_shared_data(data_dict):
 
 def _worker_generate_block(block_idx, **kwargs):
     """
-    Worker function that retrieves data from shared memory by index
-    and calls the heavy logic function.
-    
-    Returns (block_idx, BlockResult) so results can be re-sorted
-    when using imap_unordered.
+    Legacy worker function that retrieves data from shared memory by index.
+    Used when fork-based Pool is in use.
     """
-    # GenomicData.__getitem__ returns (positions, reads, keep_flags)
     positions, reads, flags = _SHARED_DATA['genomic_data'][block_idx]
+    
+    return generate_haplotypes_block_robust(
+        positions, 
+        reads, 
+        keep_flags=flags, 
+        **kwargs
+    )
+
+def _worker_generate_block_direct(args):
+    """
+    Forkserver worker function that receives block data directly.
+    Returns (block_idx, result) for correct ordering with imap_unordered.
+    """
+    block_idx, positions, reads, flags, kwargs = args
     
     result = generate_haplotypes_block_robust(
         positions, 
@@ -1393,50 +1428,64 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
     """
     Generate a list of block haplotypes using multiprocessing.
     
-    Args:
-        genomic_data: A GenomicData object containing blocks to process.
-        penalty_strength: Controls strictness of final Viterbi selection (1.0 = standard).
-        max_intermediate_haps: Trigger for intermediate pruning during the loop.
-        chimera_max_recombs: Max recombinations for chimera detection (default 1).
-        chimera_max_mismatch_pct: Max mismatch % for chimera (default 1.0%).
-        chimera_min_delta_to_protect: Protect haplotypes with mean_delta above this (default 0.25%).
-        discard_reads_after: If True, discard reads_count_matrix after processing to save memory.
-                            probs_array is retained since it's used downstream. (default True)
+    Uses forkserver so workers start from a lightweight process (~500 MB),
+    not the parent's potentially 200+ GB heap. Block data (~1 MB each)
+    is passed directly as arguments rather than via shared memory.
     
-    Optimized: Uses shared memory for genomic_data to avoid massive serialization overhead.
+    Uses imap_unordered for better load balancing — fast blocks don't
+    hold up the queue. Results are sorted by index after collection.
     """
+    from tqdm import tqdm
     
-    # Create partial with the fixed arguments
-    worker_partial = partial(
-        _worker_generate_block, 
-        penalty_strength=penalty_strength, 
-        max_intermediate_haps=max_intermediate_haps,
-        uniqueness_threshold_percent=uniqueness_threshold_percent,
-        diff_threshold_percent=diff_threshold_percent,
-        wrongness_threshold=wrongness_threshold,
-        chimera_max_recombs=chimera_max_recombs,
-        chimera_max_mismatch_pct=chimera_max_mismatch_pct,
-        chimera_min_delta_to_protect=chimera_min_delta_to_protect
-    )
-
-    # Setup Shared Memory with GenomicData
-    # Note: GenomicData is just a container of lists. It is efficient to reference.
-    shared_context = {'genomic_data': genomic_data}
-
-    with Pool(processes=num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
-        # imap_unordered lets fast workers grab the next task immediately
-        # instead of waiting for their chunk to complete. This eliminates
-        # idle time when block runtimes vary (e.g. HDBSCAN on blocks with
-        # different numbers of haplotypes).
-        indexed_results = list(processing_pool.imap_unordered(
-            worker_partial, 
-            range(len(genomic_data)),
-            chunksize=1
-        ))
+    # Pack kwargs once
+    kwargs = {
+        'penalty_strength': penalty_strength,
+        'max_intermediate_haps': max_intermediate_haps,
+        'uniqueness_threshold_percent': uniqueness_threshold_percent,
+        'diff_threshold_percent': diff_threshold_percent,
+        'wrongness_threshold': wrongness_threshold,
+        'chimera_max_recombs': chimera_max_recombs,
+        'chimera_max_mismatch_pct': chimera_max_mismatch_pct,
+        'chimera_min_delta_to_protect': chimera_min_delta_to_protect,
+    }
     
-    # Re-sort by original block index to restore genomic order
-    indexed_results.sort(key=lambda x: x[0])
-    overall_haplotypes = [result for _, result in indexed_results]
+    # Build task args — each includes the block's data directly (~1 MB per block)
+    n_blocks = len(genomic_data)
+    task_args = []
+    for i in range(n_blocks):
+        positions, reads, flags = genomic_data[i]
+        task_args.append((i, positions, reads, flags, kwargs))
+    
+    # Belt-and-suspenders: clear __main__.__file__ to prevent forkserver
+    # from re-executing the entry script
+    import sys as _sys
+    _main_mod = _sys.modules.get('__main__')
+    _saved_main_file = getattr(_main_mod, '__file__', None)
+    _saved_main_spec = getattr(_main_mod, '__spec__', None)
+    if _main_mod is not None:
+        if hasattr(_main_mod, '__file__'):
+            del _main_mod.__file__
+        _main_mod.__spec__ = None
+    
+    try:
+        with _ForkserverPool(processes=num_processes) as pool:
+            results = []
+            for result in tqdm(
+                pool.imap_unordered(_worker_generate_block_direct, task_args, chunksize=1),
+                total=n_blocks,
+                desc="Block Haplotypes"
+            ):
+                results.append(result)
+    finally:
+        # Restore __main__ attributes
+        if _main_mod is not None:
+            if _saved_main_file is not None:
+                _main_mod.__file__ = _saved_main_file
+            _main_mod.__spec__ = _saved_main_spec
+    
+    # Sort by block index to restore genomic order
+    results.sort(key=lambda x: x[0])
+    overall_haplotypes = [r[1] for r in results]
 
     # FREE MEMORY: Drop reads since probs_array is already computed and stored
     if discard_reads_after:

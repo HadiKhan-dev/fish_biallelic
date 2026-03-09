@@ -58,7 +58,7 @@ try:
     import multiprocessing as _mp
     _mp.set_forkserver_preload([
         # Core scientific stack
-        'numpy', 'numba', 'scipy', 'math', 'time',
+        'numpy', 'numba', 'scipy', 'math', 'time', 'hdbscan',
         # Project modules used by workers
         'thread_config',
         'block_haplotypes', 'block_linking', 'hmm_matching',

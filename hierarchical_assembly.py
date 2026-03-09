@@ -261,6 +261,19 @@ def compute_max_gap(blocks, recomb_rate, n_generations, recomb_tolerance):
 # BATCH WORKER FUNCTION (For Parallel Processing)
 # =============================================================================
 
+_MEMORY_DEBUG = False  # Set to True to enable per-step memory logging
+
+def _get_rss_mb():
+    """Get current process RSS in MB."""
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / 1024
+    except:
+        pass
+    return 0
+
 def _process_single_batch(args):
     """
     Worker function to process a single batch.
@@ -281,12 +294,20 @@ def _process_single_batch(args):
     
     inner_num_threads = max(inner_num_processes, 8)
     
+    # Memory debug logging
+    _log = []
+    if _MEMORY_DEBUG and b_idx == 0:
+        _log.append(f"b{b_idx}_00_start: {_get_rss_mb():.0f} MB")
+    
     # Attach to shared memory segments (zero-copy)
     shm_probs, global_probs = _attach_shared_array(_SHARED_META['probs'])
     shm_sites, global_sites = _attach_shared_array(_SHARED_META['sites'])
     
     try:
         with numba_thread_scope(inner_num_processes):
+            
+            if _MEMORY_DEBUG and b_idx == 0:
+                _log.append(f"b{b_idx}_01_attached: {_get_rss_mb():.0f} MB")
             
             original_portion = block_haplotypes.BlockResults(original_blocks_list)
             
@@ -309,6 +330,9 @@ def _process_single_batch(args):
             idx_min, idx_max = batch_indices.min(), batch_indices.max()
             batch_probs = np.ascontiguousarray(global_probs[:, idx_min:idx_max+1, :])
             batch_sites = np.ascontiguousarray(global_sites[idx_min:idx_max+1])
+
+            if _MEMORY_DEBUG and b_idx == 0:
+                _log.append(f"b{b_idx}_02_sliced: {_get_rss_mb():.0f} MB")
 
             # 3. Compute Max Gap
             if n_generations is not None and recomb_tolerance is not None:
@@ -335,12 +359,18 @@ def _process_single_batch(args):
                     use_standard_baum_welch=True,
                     num_processes=inner_num_processes
                 )
+            
+            if _MEMORY_DEBUG and b_idx == 0:
+                _log.append(f"b{b_idx}_03_mesh: {_get_rss_mb():.0f} MB")
                 
             # 5. Beam Search on Proxy
             beam_results = beam_search_core.run_full_mesh_beam_search(
                 portion_proxy, mesh, beam_width=beam_width, 
                 max_gap=beam_max_gap, verbose=verbose
             )
+            
+            if _MEMORY_DEBUG and b_idx == 0:
+                _log.append(f"b{b_idx}_04_beam: {_get_rss_mb():.0f} MB")
             
             if not beam_results:
                 return {
@@ -367,6 +397,9 @@ def _process_single_batch(args):
                 num_threads=inner_num_threads,
             )
             
+            if _MEMORY_DEBUG and b_idx == 0:
+                _log.append(f"b{b_idx}_05_chimera: {_get_rss_mb():.0f} MB")
+            
             # 7. Reconstruction on Originals
             reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
                 resolved_beam, fast_mesh, original_portion
@@ -379,6 +412,15 @@ def _process_single_batch(args):
             
             # 9. Structural Chimera Pruning
             super_block = beam_search_core.prune_superblock_chimeras(super_block)
+            
+            if _MEMORY_DEBUG and b_idx == 0:
+                _log.append(f"b{b_idx}_06_done: {_get_rss_mb():.0f} MB")
+                # Write to temp file since we can't print from forkserver workers
+                import os, tempfile
+                log_path = os.path.join(tempfile.gettempdir(), f"ha_mem_b{b_idx}_{os.getpid()}.log")
+                with open(log_path, 'w') as f:
+                    f.write('\n'.join(_log) + '\n')
+                print(f"  [Memory debug] Worker {b_idx} log: {log_path}")
             
             return {
                 'batch_idx': b_idx,
