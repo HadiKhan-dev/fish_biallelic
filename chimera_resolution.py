@@ -7,21 +7,29 @@ and chimera resolution via hotspot-guided splicing.
 Main entry point: select_and_resolve()
 """
 
-import thread_config
-
 import numpy as np
 import math
+import ctypes
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
 import block_haplotypes
+
+# glibc malloc_trim — releases freed pages back to OS
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _malloc_trim():
+        _libc.malloc_trim(0)
+except OSError:
+    def _malloc_trim():
+        pass
 
 # =============================================================================
 # NUMBA JIT FUNCTIONS
 # =============================================================================
 
 try:
-    from numba import njit
+    from numba import njit, prange
     _HAS_NUMBA = True
 
     @njit(fastmath=True)
@@ -169,18 +177,23 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites, snps_pe
         model_prob = (s0[:, None, None, :] * c00[None, :, :, :] +
                       s1[:, None, None, :] * c01[None, :, :, :] +
                       s2[:, None, None, :] * c11[None, :, :, :])
+        del c00, c01, c11, s0, s1, s2, haps_tensor, h0, h1, block_samples
         final_prob = np.maximum(model_prob * 0.99 + 0.01 / 3.0, 1e-300)
+        del model_prob
         ll_per_site = np.maximum(np.log(final_prob), -2.0)
+        del final_prob
         bin_emissions = np.zeros((num_samples, n_haps, n_haps, n_bins), dtype=np.float64)
         for sb in range(n_bins):
             start = sb * snps_per_bin
             end = min(start + snps_per_bin, n_sites)
             bin_emissions[:, :, :, sb] = np.sum(ll_per_site[:, :, :, start:end], axis=3)
+        del ll_per_site
         all_emissions.append({
             'hap_keys': hap_keys,
             'bin_emissions': bin_emissions,
             'n_bins': n_bins
         })
+    _malloc_trim()
     return all_emissions
 
 
@@ -215,11 +228,7 @@ def score_path_set(path_set, sub_emissions, penalty, num_samples):
 
 def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
                              chunk_size=64, num_threads=8):
-    """Score multiple path sets, grouped by size for batched Viterbi.
-    
-    Args:
-        num_threads: Number of threads for parallel tensor building.
-    """
+    """Score multiple path sets, grouped by size for batched Viterbi."""
     groups = defaultdict(list)
     for i, ps in enumerate(path_sets):
         groups[len(ps)].append((i, ps))
@@ -227,7 +236,7 @@ def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
     for K, group_items in groups.items():
         n_pairs = K * K
         total_b = sum(e['n_bins'] for e in sub_emissions)
-        adaptive_cs = max(4, min(64, int(2e9 / (num_samples * n_pairs * total_b * 8))))
+        adaptive_cs = max(4, min(64, int(5e8 / (num_samples * n_pairs * total_b * 8))))
         cs = min(adaptive_cs, chunk_size)
         for chunk_start in range(0, len(group_items), cs):
             chunk = group_items[chunk_start:chunk_start + cs]
@@ -236,8 +245,14 @@ def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
                 return _build_tensor_from_paths(ps, sub_emissions, num_samples)
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 chunk_tensors = list(executor.map(_build_one, chunk))
-            stacked = np.stack(chunk_tensors, axis=0); del chunk_tensors
+            # Pre-allocate and fill to avoid double memory from np.stack
+            stacked = np.empty((len(chunk), num_samples, n_pairs, total_b),
+                               dtype=np.float64)
+            for j, t in enumerate(chunk_tensors):
+                stacked[j] = t
+            del chunk_tensors
             chunk_scores = _batched_viterbi_score(stacked, float(penalty)); del stacked
+            _malloc_trim()
             for j, (orig_idx, _) in enumerate(chunk):
                 results[orig_idx] = float(chunk_scores[j])
     return results
@@ -357,10 +372,10 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                        min_hotspot_samples=5,
                        cc_scale=0.2,
                        chunk_size=64,
-                       num_threads=8,
                        penalty_override=None,
                        spb_override=None,
-                       cc_override=None):
+                       cc_override=None,
+                       num_threads=8):
     """
     Sub-block forward selection + top-N swap + BIC prune + chimera resolution.
     
@@ -377,7 +392,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         min_hotspot_samples: Minimum samples for a hotspot to be actionable.
         cc_scale: Complexity cost scaling factor.
         chunk_size: Maximum batch size for parallel scoring.
-        num_threads: Number of threads for parallel tensor building.
         penalty_override: If set, use this penalty instead of auto-computed.
         spb_override: If set, use this SPB instead of auto-computed.
         cc_override: If set, use this CC instead of auto-computed.
@@ -441,13 +455,21 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         K_next = len(selected) + 1
         n_pairs = K_next * K_next
         max_chunk = max(4, min(64,
-            int(2e9 / (num_samples * n_pairs * total_bins * 8))))
+            int(5e8 / (num_samples * n_pairs * total_bins * 8))))
         all_scores = {}
         for cs in range(0, len(remaining), max_chunk):
             chunk = remaining[cs:cs + max_chunk]
-            tensors = build_tensors_threaded([selected + [ci] for ci in chunk])
-            stacked = np.stack(tensors, axis=0); del tensors
+            # Pre-allocate stacked tensor and fill in-place to avoid
+            # double memory from building list + np.stack
+            stacked = np.empty((len(chunk), num_samples, n_pairs, total_bins), 
+                               dtype=np.float64)
+            subset_lists = [selected + [ci] for ci in chunk]
+            tensors = build_tensors_threaded(subset_lists)
+            for j, t in enumerate(tensors):
+                stacked[j] = t
+            del tensors
             scores = _batched_viterbi_score(stacked, float(pen_sel)); del stacked
+            _malloc_trim()
             for j, ci in enumerate(chunk):
                 all_scores[ci] = float(scores[j])
         best_idx = max(all_scores, key=all_scores.get)
@@ -493,7 +515,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     
     if K_sel >= 2:
         swap_chunk = max(4, min(64,
-            int(2e9 / (num_samples * K_sel * K_sel * total_bins * 8))))
+            int(5e8 / (num_samples * K_sel * K_sel * total_bins * 8))))
         
         while True:
             unselected = [x for x in range(n_cands) if x not in selected]
@@ -509,13 +531,19 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 }
                 ranked = sorted(cheap_scores, key=cheap_scores.get,
                                reverse=True)[:top_n_swap]
+                n_pairs_swap = K_sel * K_sel
                 for cs in range(0, len(ranked), swap_chunk):
                     chunk = ranked[cs:cs + swap_chunk]
-                    tensors = build_tensors_threaded(
-                        [temp_set + [add] for add in chunk])
-                    stacked = np.stack(tensors, axis=0); del tensors
+                    subset_lists = [temp_set + [add] for add in chunk]
+                    tensors = build_tensors_threaded(subset_lists)
+                    stacked = np.empty((len(chunk), num_samples, n_pairs_swap, total_bins),
+                                       dtype=np.float64)
+                    for j, t in enumerate(tensors):
+                        stacked[j] = t
+                    del tensors
                     scores = _batched_viterbi_score(stacked, float(pen_sel))
                     del stacked
+                    _malloc_trim()
                     for j, add_idx in enumerate(chunk):
                         gain = float(scores[j]) - current_score
                         if gain > 1e-4 and gain > best_swap_gain:
@@ -644,8 +672,9 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             break
         
         all_scores = score_path_sets_parallel(
-            all_path_sets, sub_em, pen_sel, num_samples, chunk_size,
-            num_threads=num_threads)
+            all_path_sets, sub_em, pen_sel, num_samples, chunk_size, num_threads)
+        del all_path_sets
+        _malloc_trim()
         
         # 4e. Pick best improving option
         best_option = None; best_gain = 0.0
