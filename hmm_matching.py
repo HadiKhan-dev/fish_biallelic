@@ -3,12 +3,22 @@ import thread_config
 import numpy as np
 import math
 import warnings
+import ctypes
 from multiprocess import Pool
 from scipy.special import logsumexp
 from functools import partial
 
 import analysis_utils 
 import block_linking
+
+# glibc malloc_trim — releases freed pages back to OS
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _malloc_trim():
+        _libc.malloc_trim(0)
+except OSError:
+    def _malloc_trim():
+        pass
 
 # Suppress divide by zero warnings in log-space calculations
 np.seterr(divide='ignore', invalid='ignore')
@@ -72,12 +82,6 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
     
     Includes BURST LOGIC:
     Maintains parallel 'Normal' and 'Burst' states to handle gene conversions/errors.
-    
-    The sample loop uses prange for Numba thread-level parallelism.
-    The number of active threads is controlled externally via
-    thread_config.numba_thread_scope() — this allows adaptive scaling
-    (1 thread at L1 where process-level parallelism is sufficient,
-    many threads at L3/L4 where few outer processes are running).
     
     Args:
         ll_tensor (np.ndarray): Shape (Samples, K, Sites). Log-likelihood of data given state.
@@ -200,9 +204,6 @@ def scan_distance_aware_backward(ll_tensor, positions, recomb_rate, state_defini
     """
     Optimized Backward Scan (O(Sites * Haps^2)).
     Assumes Single-Switch Only.
-    
-    The sample loop uses prange for Numba thread-level parallelism.
-    Thread count is controlled externally via thread_config.numba_thread_scope().
     """
     n_samples, K, n_sites = ll_tensor.shape
     start_probs = np.full((n_samples, K), -np.inf, dtype=np.float64)
@@ -430,7 +431,10 @@ def generate_viterbi_block_emissions(samples_matrix, sample_sites, block_results
             results = pool.map(_worker_generate_viterbi_emissions, tasks)
     else:
         results = list(map(_worker_generate_viterbi_emissions, tasks))
-        
+    
+    del tasks
+    _malloc_trim()
+    
     return ViterbiBlockList(results)
 
 # =============================================================================
@@ -988,11 +992,17 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
         # Sequential execution - required when called from within a worker process
         # Initialize shared data for the current process
         _init_shared_data(shared_context)
-        results = [_gap_worker(args) for args in worker_args]
+        results = []
+        for args in worker_args:
+            results.append(_gap_worker(args))
+            _malloc_trim()
     else:
         # Parallel execution
         with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as pool:
             results = pool.map(_gap_worker, worker_args)
+    
+    del worker_args, shared_context
+    _malloc_trim()
     
     mesh_dict = dict(zip(gaps, results))
     return block_linking.TransitionMesh(mesh_dict)

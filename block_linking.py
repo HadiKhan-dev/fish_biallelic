@@ -1,14 +1,22 @@
-import thread_config
-
 import numpy as np
 import math
 import time
+import ctypes
 from multiprocess import Pool
 from scipy.special import logsumexp
 from functools import partial
 
 import analysis_utils
 import block_haplotypes
+
+# glibc malloc_trim — releases freed pages back to OS
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _malloc_trim():
+        _libc.malloc_trim(0)
+except OSError:
+    def _malloc_trim():
+        pass
 
 # Define defaults as constants
 DEFAULT_LOG_BASE = math.e
@@ -1008,6 +1016,7 @@ def generate_transition_probability_mesh(full_samples_data,
     full_blocks_likelihoods = generate_all_block_likelihoods(
         full_samples_data, sample_sites, haps_data, num_processes=1
     )
+    _malloc_trim()
     
     max_gap = len(haps_data) - 1
     gaps = list(range(1, max_gap + 1))
@@ -1030,8 +1039,14 @@ def generate_transition_probability_mesh(full_samples_data,
         with Pool(num_processes) as pool:
             results = pool.map(_gap_worker, worker_args)
     else:
-        # Sequential execution (for use inside worker processes)
-        results = [_gap_worker(args) for args in worker_args]
+        # Sequential execution — malloc_trim after each gap to release temporaries
+        results = []
+        for args in worker_args:
+            results.append(_gap_worker(args))
+            _malloc_trim()
+    
+    del full_blocks_likelihoods, worker_args
+    _malloc_trim()
     
     mesh_dict = dict(zip(gaps, results))
     return TransitionMesh(mesh_dict)

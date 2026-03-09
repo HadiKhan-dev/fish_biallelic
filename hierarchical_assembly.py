@@ -281,11 +281,14 @@ def _process_single_batch(args):
     Attaches to POSIX shared memory segments for global_probs and
     global_sites using metadata from _SHARED_META (set by pool initializer).
     
-    Forkserver workers start clean (~50 MB), import modules, and only
-    allocate memory for actual work (~150 MB per batch).
+    Explicitly deletes large intermediates and calls malloc_trim between
+    steps to release freed pages back to the OS, reducing peak memory.
     
     Returns dict with 'batch_idx', 'super_block', and 'status'.
     """
+    import ctypes
+    _libc = ctypes.CDLL("libc.so.6")
+    
     (b_idx, start_i, end_i, original_blocks_list,
      use_hmm_linking, recomb_rate, beam_width, max_founders,
      max_sites_for_linking, n_generations, recomb_tolerance,
@@ -353,6 +356,7 @@ def _process_single_batch(args):
                     precalculated_viterbi_emissions=viterbi_emissions,
                     num_processes=inner_num_processes
                 )
+                del viterbi_emissions
             else:
                 mesh = block_linking.generate_transition_probability_mesh(
                     batch_probs, batch_sites, portion_proxy,
@@ -381,6 +385,13 @@ def _process_single_batch(args):
                 
             fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
             
+            # Free mesh — fast_mesh has what it needs
+            del mesh
+            _libc.malloc_trim(0)
+            
+            if _MEMORY_DEBUG and b_idx == 0:
+                _log.append(f"b{b_idx}_04b_mesh_freed: {_get_rss_mb():.0f} MB")
+            
             # 6. Selection + Swap + CR
             resolved_beam = chimera_resolution.select_and_resolve(
                 beam_results=beam_results,
@@ -397,6 +408,10 @@ def _process_single_batch(args):
                 num_threads=inner_num_threads,
             )
             
+            # Free beam_results and batch data — chimera resolution is done with them
+            del beam_results
+            _libc.malloc_trim(0)
+            
             if _MEMORY_DEBUG and b_idx == 0:
                 _log.append(f"b{b_idx}_05_chimera: {_get_rss_mb():.0f} MB")
             
@@ -405,10 +420,18 @@ def _process_single_batch(args):
                 resolved_beam, fast_mesh, original_portion
             )
             
+            # Free resolved_beam and fast_mesh — reconstruction is done
+            del resolved_beam, fast_mesh
+            _libc.malloc_trim(0)
+            
             # 8. Package
             super_block = convert_reconstruction_to_superblock(
                 reconstructed_data, original_portion, batch_probs, batch_sites
             )
+            
+            # Free intermediates — super_block has everything needed
+            del reconstructed_data, batch_probs, batch_sites, portion_proxy, proxy_list
+            _libc.malloc_trim(0)
             
             # 9. Structural Chimera Pruning
             super_block = beam_search_core.prune_superblock_chimeras(super_block)

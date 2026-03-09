@@ -8,6 +8,7 @@ import multiprocessing.pool
 import warnings
 import time
 import gc
+import ctypes
 from scipy.spatial.distance import cdist
 from functools import partial
 from dataclasses import dataclass
@@ -31,6 +32,15 @@ except ImportError:
         def decorator(func): return func
         return decorator
     prange = range
+
+# glibc malloc_trim — releases freed pages back to OS
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _malloc_trim():
+        _libc.malloc_trim(0)
+except OSError:
+    def _malloc_trim():
+        pass
 
 
 # =============================================================================
@@ -90,6 +100,7 @@ def _worker_generate_block_direct(args):
         keep_flags=flags, 
         **kwargs
     )
+    _malloc_trim()
     return (block_idx, result)
 
 @dataclass
