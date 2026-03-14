@@ -103,7 +103,7 @@ if __name__ == '__main__':
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_rows', None)
 
-    n_processes=112
+    n_processes=76
 
     # Start the forkserver NOW, before any data is loaded.
     # The forkserver process inherits only the current ~500 MB footprint
@@ -123,11 +123,16 @@ if __name__ == '__main__':
     # Define the regions you want to use for inference.
     regions_config = [
         {"contig": "chr1", "start": 0, "end": 3000},
-        {"contig": "chr2", "start": 0, "end": 3000},
-        {"contig": "chr3", "start": 0, "end": 3000},
-        {"contig": "chr4", "start": 0, "end": 3000},
-        {"contig": "chr5", "start": 0, "end": 3000},
-        {"contig": "chr6", "start": 0, "end": 3000},]
+        #{"contig": "chr2", "start": 0, "end": 3000},
+        #{"contig": "chr3", "start": 0, "end": 3000},
+        #{"contig": "chr4", "start": 0, "end": 3000},
+        #{"contig": "chr5", "start": 0, "end": 3000},
+        #{"contig": "chr6", "start": 0, "end": 3000},
+        #{"contig": "chr7", "start": 0, "end": 3000},
+        #{"contig": "chr8", "start": 0, "end": 3000},
+        #{"contig": "chr9", "start": 0, "end": 3000},
+        #{"contig": "chr10", "start": 0, "end": 3000},
+        ]
 
     block_size = 100000
     shift_size = 50000
@@ -1007,24 +1012,28 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # =============================================================================
-    # TOLERANCE PAINTING
+    # TOLERANCE PAINTING (using DISCOVERED haplotypes from L4 assembly)
     # =============================================================================
 
     print("\n" + "="*60)
-    print("RUNNING: Tolerance Painting")
+    print("RUNNING: Tolerance Painting (Discovered Haplotypes)")
     print("="*60)
 
     for r_name in region_keys:
         print(f"\n[Tolerance Painting] Processing Region: {r_name}")
 
-        # 1. Retrieve Data
-        gt_block_result = multi_contig_results[r_name]['control_founder_block']
+        # 1. Retrieve Data — use L4 discovered super-block instead of ground truth
+        if 'super_blocks_L4' in multi_contig_results[r_name]:
+            discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
+        else:
+            discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
+        
         global_probs = multi_contig_results[r_name]['simd_probs']
         sites, _ = multi_contig_results[r_name]['naive_long_haps']
 
         # 2. Run Tolerance Painting
         tol_painting_result = paint_samples.paint_samples_tolerance(
-            gt_block_result,
+            discovered_block,
             global_probs,
             sites,
             recomb_rate=5e-8,
@@ -1049,7 +1058,7 @@ if __name__ == '__main__':
         # 4. Visualization B: Population Consensus
         print(f"  Generating Population Consensus Plot...")
 
-        dense_haps, dense_pos = paint_samples.founder_block_to_dense(gt_block_result)
+        dense_haps, dense_pos = paint_samples.founder_block_to_dense(discovered_block)
         founder_data = (dense_haps, dense_pos)
 
         consensus_samples = []
@@ -1067,7 +1076,7 @@ if __name__ == '__main__':
         paint_samples.plot_population_painting(
             consensus_block,
             output_file=cons_filename,
-            title=f"Tolerance Consensus (Uncertainty Masked) - {r_name}",
+            title=f"Tolerance Consensus (Discovered Haplotypes) - {r_name}",
             sample_names=sample_names,
             figsize_width=20,
             row_height_per_sample=0.25
@@ -1078,19 +1087,25 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # =============================================================================
-    # MULTI-CONTIG PEDIGREE INFERENCE
+    # MULTI-CONTIG PEDIGREE INFERENCE (using DISCOVERED haplotypes)
     # =============================================================================
     print("\n" + "="*60)
-    print("RUNNING: Multi-Contig Pedigree Inference")
+    print("RUNNING: Multi-Contig Pedigree Inference (Discovered Haplotypes)")
     print("="*60)
 
     # 1. Gather Data from all regions
     contig_inputs = []
     for r_name in region_keys:
         if 'tolerance_result' in multi_contig_results[r_name]:
+            # Use discovered L4 block instead of ground truth
+            if 'super_blocks_L4' in multi_contig_results[r_name]:
+                discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
+            else:
+                discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
+            
             entry = {
                 'tolerance_painting': multi_contig_results[r_name]['tolerance_result'],
-                'founder_block': multi_contig_results[r_name]['control_founder_block']
+                'founder_block': discovered_block
             }
             contig_inputs.append(entry)
         else:
@@ -1108,11 +1123,11 @@ if __name__ == '__main__':
 
     # 4. Save & Visualize
     pedigree_df = pedigree_result.relationships
-    output_csv = os.path.join(output_dir, "pedigree_inference.csv")
+    output_csv = os.path.join(output_dir, "pedigree_inference_discovered.csv")
     pedigree_df.to_csv(output_csv, index=False)
     print(f"Pedigree saved to: {output_csv}")
 
-    output_tree = os.path.join(output_dir, "pedigree_tree.png")
+    output_tree = os.path.join(output_dir, "pedigree_tree_discovered.png")
     pedigree_inference.draw_pedigree_tree(pedigree_df, output_file=output_tree)
 
     # 5. Validate against Truth (if available)
@@ -1149,16 +1164,18 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # =============================================================================
-    # PHASE CORRECTION
+    # PHASE CORRECTION (using DISCOVERED haplotypes)
     # =============================================================================
     print("\n" + "="*60)
-    print("RUNNING: Phase Correction (Parent + Children)")
+    print("RUNNING: Phase Correction (Discovered Haplotypes)")
     print("="*60)
 
-    # Copy founder_block reference so phase correction can find it
+    # Set founder_block to discovered L4 super-block
     for r_name in multi_contig_results:
-        if 'control_founder_block' in multi_contig_results[r_name]:
-            multi_contig_results[r_name]['founder_block'] = multi_contig_results[r_name]['control_founder_block']
+        if 'super_blocks_L4' in multi_contig_results[r_name]:
+            multi_contig_results[r_name]['founder_block'] = multi_contig_results[r_name]['super_blocks_L4'][0]
+        elif 'super_blocks_L3' in multi_contig_results[r_name]:
+            multi_contig_results[r_name]['founder_block'] = multi_contig_results[r_name]['super_blocks_L3'][0]
 
     start = time.time()
     # Run phase correction on all contigs
@@ -1197,6 +1214,7 @@ if __name__ == '__main__':
     # =============================================================================
     print("\n" + "="*60)
     print("VALIDATING: Phase Correction vs Ground Truth (Allele-Level)")
+    print("  (Using DISCOVERED haplotypes for painting, TRUE founders for validation)")
     print("="*60)
 
     from concurrent.futures import ThreadPoolExecutor
@@ -1341,7 +1359,12 @@ if __name__ == '__main__':
 
 
     # Evaluate refined paintings
+    # NOTE: For validation, we use the TRUE founder alleles to convert
+    # founder IDs to alleles. The painting itself used discovered haplotypes,
+    # but validation needs ground truth to measure accuracy.
     print("Evaluating phase correction accuracy (allele-level)...")
+    print("  Paintings use DISCOVERED haplotypes")
+    print("  Validation converts to alleles using TRUE founders")
 
     eval_args = []
     for r_name in region_keys:
@@ -1349,9 +1372,16 @@ if __name__ == '__main__':
             continue
         
         truth = multi_contig_results[r_name]['truth_painting']
-        founder_block = multi_contig_results[r_name]['control_founder_block']
-        positions = founder_block.positions
-        dense_haps, _ = phase_correction.founder_block_to_dense(founder_block)
+        
+        # For allele conversion: use the DISCOVERED founder block
+        # (since paintings reference discovered haplotype IDs, not true founder IDs)
+        if 'super_blocks_L4' in multi_contig_results[r_name]:
+            discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
+        else:
+            discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
+        
+        positions = discovered_block.positions
+        dense_haps, _ = phase_correction.founder_block_to_dense(discovered_block)
         
         # Use refined painting (after greedy refinement)
         if 'refined_painting' in multi_contig_results[r_name]:
@@ -1361,12 +1391,105 @@ if __name__ == '__main__':
         else:
             continue
         
-        eval_args.append((r_name, painting, truth, positions, dense_haps, sample_names))
+        # For truth painting allele conversion, we also need true founder alleles
+        # The truth_painting references TRUE founder IDs, so we need the true dense_haps
+        # for the truth side. Build both:
+        true_founder_block = multi_contig_results[r_name]['control_founder_block']
+        true_dense_haps, _ = phase_correction.founder_block_to_dense(true_founder_block)
+        
+        # We need a custom evaluation that uses different dense_haps for
+        # corrected (discovered) vs truth (ground truth) paintings.
+        # For now, since both paintings get converted to alleles and compared,
+        # and both reference their own founder ID space, we evaluate them separately.
+        
+        eval_args.append((r_name, painting, truth, positions, dense_haps, 
+                          true_dense_haps, sample_names))
 
-    # Run contig evaluations in parallel
+    # Custom evaluation that handles different founder ID spaces
+    def evaluate_contig_dual_founders(args):
+        """Evaluate with discovered haps for corrected, true haps for truth."""
+        r_name, painting, truth, positions, disc_dense_haps, true_dense_haps, sample_names = args
+        
+        results = []
+        for i, name in enumerate(sample_names):
+            corrected_sample = painting[i]
+            truth_sample = truth[i]
+            
+            # Extract founder IDs
+            corr_hap1, corr_hap2 = extract_founder_ids_at_positions(corrected_sample, positions)
+            true_hap1, true_hap2 = extract_founder_ids_at_positions(truth_sample, positions)
+            
+            n_pos = len(positions)
+            pos_indices = np.arange(n_pos)
+            
+            # Convert corrected founder IDs to alleles using DISCOVERED haplotypes
+            max_disc = disc_dense_haps.shape[0]
+            corr_allele1 = np.full(n_pos, -1, dtype=np.int8)
+            corr_allele2 = np.full(n_pos, -1, dtype=np.int8)
+            v1 = (corr_hap1 >= 0) & (corr_hap1 < max_disc)
+            v2 = (corr_hap2 >= 0) & (corr_hap2 < max_disc)
+            corr_allele1[v1] = disc_dense_haps[corr_hap1[v1], pos_indices[v1]]
+            corr_allele2[v2] = disc_dense_haps[corr_hap2[v2], pos_indices[v2]]
+            
+            # Convert truth founder IDs to alleles using TRUE haplotypes
+            max_true = true_dense_haps.shape[0]
+            true_allele1 = np.full(n_pos, -1, dtype=np.int8)
+            true_allele2 = np.full(n_pos, -1, dtype=np.int8)
+            v3 = (true_hap1 >= 0) & (true_hap1 < max_true)
+            v4 = (true_hap2 >= 0) & (true_hap2 < max_true)
+            true_allele1[v3] = true_dense_haps[true_hap1[v3], pos_indices[v3]]
+            true_allele2[v4] = true_dense_haps[true_hap2[v4], pos_indices[v4]]
+            
+            # Compare ALLELES (same logic as before)
+            direct_match = (corr_allele1 == true_allele1) & (corr_allele2 == true_allele2)
+            flipped_match = (corr_allele1 == true_allele2) & (corr_allele2 == true_allele1)
+            correct_either = direct_match | flipped_match
+            
+            n_direct = np.sum(direct_match)
+            n_flipped = np.sum(flipped_match)
+            
+            if n_direct >= n_flipped:
+                track1_correct = (corr_allele1 == true_allele1)
+                track2_correct = (corr_allele2 == true_allele2)
+                dominant_phase = "Direct"
+            else:
+                track1_correct = (corr_allele1 == true_allele2)
+                track2_correct = (corr_allele2 == true_allele1)
+                dominant_phase = "Flipped"
+            
+            valid_mask = (corr_allele1 != -1) & (corr_allele2 != -1) & (true_allele1 != -1) & (true_allele2 != -1)
+            n_valid = np.sum(valid_mask)
+            
+            if n_valid > 0:
+                accuracy = np.sum(correct_either & valid_mask) / n_valid
+                track1_acc = np.sum(track1_correct & valid_mask) / n_valid
+                track2_acc = np.sum(track2_correct & valid_mask) / n_valid
+            else:
+                accuracy = 0.0
+                track1_acc = 0.0
+                track2_acc = 0.0
+            
+            results.append({
+                'Sample': name,
+                'Total_sites': n_pos,
+                'Valid_sites': int(n_valid),
+                'Correct_sites': int(np.sum(correct_either & valid_mask)),
+                'Accuracy': accuracy,
+                'Track1_accuracy': track1_acc,
+                'Track2_accuracy': track2_acc,
+                'Direct_matches': int(n_direct),
+                'Flipped_matches': int(n_flipped),
+                'Dominant_phase': dominant_phase
+            })
+        
+        contig_eval = pd.DataFrame(results)
+        contig_eval['Contig'] = r_name
+        return r_name, contig_eval
+
+    # Run contig evaluations
     all_contig_results = []
     with ThreadPoolExecutor(max_workers=len(region_keys)) as executor:
-        for r_name, contig_eval in executor.map(evaluate_contig, eval_args):
+        for r_name, contig_eval in executor.map(evaluate_contig_dual_founders, eval_args):
             mean_acc = contig_eval['Accuracy'].mean()*100
             mean_t1 = contig_eval['Track1_accuracy'].mean()*100
             mean_t2 = contig_eval['Track2_accuracy'].mean()*100
@@ -1378,7 +1501,7 @@ if __name__ == '__main__':
         full_eval_df = pd.concat(all_contig_results, ignore_index=True)
         
         # Save detailed results
-        eval_output = os.path.join(output_dir, "phase_correction_evaluation.csv")
+        eval_output = os.path.join(output_dir, "phase_correction_evaluation_discovered.csv")
         full_eval_df.to_csv(eval_output, index=False)
         print(f"\nDetailed evaluation saved to: {eval_output}")
         
@@ -1388,7 +1511,7 @@ if __name__ == '__main__':
         )
         
         print("\n" + "="*60)
-        print("PHASE CORRECTION RESULTS")
+        print("PHASE CORRECTION RESULTS (DISCOVERED HAPLOTYPES)")
         print("="*60)
         
         print("\nAccuracy by Generation:")
@@ -1458,3 +1581,4 @@ if __name__ == '__main__':
     print(f"COMPLETE RUN FINISHED in {total_elapsed:.1f}s ({total_elapsed/60:.1f} min)")
     print(f"Log saved to: {log_path}")
     print(f"{'='*60}")
+# %%
