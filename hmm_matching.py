@@ -2,9 +2,11 @@ import thread_config
 
 import numpy as np
 import math
+import os
 import warnings
 import ctypes
 from multiprocess import Pool
+from concurrent.futures import ThreadPoolExecutor
 from scipy.special import logsumexp
 from functools import partial
 
@@ -44,7 +46,7 @@ except ImportError:
 
 _SHARED_DATA = {}
 
-def _init_shared_data(data_dict):
+def _init_shared_data(data_dict, numba_threads=None):
     """
     Initializer for the worker pool.
     Updates the global _SHARED_DATA dict in the worker process.
@@ -52,6 +54,12 @@ def _init_shared_data(data_dict):
     global _SHARED_DATA
     _SHARED_DATA.clear()
     _SHARED_DATA.update(data_dict)
+    if numba_threads is not None:
+        try:
+            import numba
+            numba.set_num_threads(numba_threads)
+        except Exception:
+            pass
 
 # =============================================================================
 # 1. OPTIMIZED NUMBA KERNELS (O(N^2) Single-Switch)
@@ -398,41 +406,33 @@ def generate_viterbi_block_emissions(samples_matrix, sample_sites, block_results
     """
     Parallel generator for ViterbiBlockLikelihood objects used in the scan.
     
-    Updated to support both contiguous blocks and sparse (proxy) blocks by using 
-    exact index mapping rather than slicing.
-    
-    Args:
-        samples_matrix: (Samples x Global_Sites x 3) probability matrix.
-        sample_sites: (Global_Sites,) array of positions.
-        block_results: List of BlockResult objects (contiguous or proxy).
-        num_processes: Parallel workers.
-        
-    Returns:
-        ViterbiBlockList containing site-specific likelihood tensors.
+    Uses ThreadPoolExecutor (not Pool) because the worker is pure numpy —
+    no numba calls, so no deadlock risk. ThreadPoolExecutor avoids the overhead
+    of process creation and pickling large sample arrays.
     """
-    tasks = []
-    # Params dict allows passing configs easily
     params = {'robustness_epsilon': DEFAULT_ROBUSTNESS_EPSILON}
-    
-    for block in block_results:
-        # ROBUST DATA FETCHING:
-        # We find the exact indices of the block's positions in the global array.
-        # This handles both contiguous ranges (0,1,2) and sparse proxies (0,10,20) correctly.
-        indices = np.searchsorted(sample_sites, block.positions)
-        
-        # Fancy indexing returns a copy containing only the requested sites.
-        # This guarantees the dimensions of block_samples match block.positions exactly.
-        block_samples = samples_matrix[:, indices, :]
-        
-        tasks.append((block_samples, block, params))
 
-    if num_processes > 1 and len(tasks) > 1:
-        with Pool(num_processes) as pool:
-            results = pool.map(_worker_generate_viterbi_emissions, tasks)
+    if num_processes > 1 and len(block_results) > 1:
+        # Prepare tasks (references only, no pickling needed with threads)
+        tasks = []
+        for block in block_results:
+            indices = np.searchsorted(sample_sites, block.positions)
+            block_samples = samples_matrix[:, indices, :]
+            tasks.append((block_samples, block, params))
+        
+        with ThreadPoolExecutor(max_workers=min(num_processes, len(tasks))) as executor:
+            results = list(executor.map(_worker_generate_viterbi_emissions, tasks))
+        del tasks
     else:
-        results = list(map(_worker_generate_viterbi_emissions, tasks))
+        # Sequential: process one block at a time, free each before the next
+        results = []
+        for block in block_results:
+            indices = np.searchsorted(sample_sites, block.positions)
+            block_samples = samples_matrix[:, indices, :]
+            result = _worker_generate_viterbi_emissions((block_samples, block, params))
+            del block_samples
+            results.append(result)
     
-    del tasks
     _malloc_trim()
     
     return ViterbiBlockList(results)
@@ -988,17 +988,24 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
         ))
     
     # Handle sequential vs parallel execution
-    if num_processes == 1:
-        # Sequential execution - required when called from within a worker process
-        # Initialize shared data for the current process
+    n_gaps = len(gaps)
+    if num_processes == 1 or n_gaps <= 1:
+        # Sequential: either required (within worker) or only 1 gap (L4).
+        # For 1 gap, the caller's numba_thread_scope gives full thread count
+        # to the prange scans — no need for Pool overhead.
         _init_shared_data(shared_context)
         results = []
         for args in worker_args:
             results.append(_gap_worker(args))
             _malloc_trim()
     else:
-        # Parallel execution
-        with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as pool:
+        # Split num_processes budget into pool workers × numba threads per worker.
+        # No oversubscription: n_pool * threads_per_worker <= num_processes.
+        n_pool = min(num_processes, n_gaps)
+        threads_per_worker = max(1, num_processes // n_pool)
+        
+        with Pool(n_pool, initializer=_init_shared_data,
+                  initargs=(shared_context, threads_per_worker)) as pool:
             results = pool.map(_gap_worker, worker_args)
     
     del worker_args, shared_context

@@ -617,20 +617,27 @@ def select_optimal_haplotype_set_viterbi(candidate_haps, probs_array,
         g00 = h0 * h2_0
         g11 = h1 * h2_1
         g01 = (h0 * h2_1) + (h1 * h2_0)
+        del h0, h1, h2_0, h2_1
         
         batch_pairs = np.stack([g00, g01, g11], axis=-1)
+        del g00, g01, g11
         
         weighted_pairs = batch_pairs @ W
+        del batch_pairs
         
         batch_dist = np.sum(
             probs_active[:, np.newaxis, :, :] * weighted_pairs[np.newaxis, :, :, :],
             axis=3
         )
+        del weighted_pairs
         
         ll_tensor[:, start_p:end_p, :] = (-batch_dist * stride)
+        del batch_dist
 
+    del H_active, probs_active
     ll_tensor = np.maximum(ll_tensor, -2.0 * stride)
     ll_tensor = np.ascontiguousarray(ll_tensor, dtype=np.float64)
+    _malloc_trim()
 
     # --- 4. SELECTION LOOP ---
     
@@ -803,12 +810,15 @@ def add_distinct_haplotypes_smart(initial_haps,
         comb_01 = (p0_A[:, None, :] * p1_B[None, :, :]) + (p1_A[:, None, :] * p0_B[None, :, :])
         
         comb_stacked = np.stack([comb_00, comb_01, comb_11], axis=-1)
+        del comb_00, comb_01, comb_11
         comb_list = comb_stacked.reshape(nA * nB, masked_len, 3)
         
-        comb_weighted = comb_list @ dist_weights 
+        comb_weighted = comb_list @ dist_weights
+        del comb_stacked, comb_list
         comb_flat = comb_weighted.reshape(nA * nB, masked_len * 3)
         
         scores_flat = diploids_flat @ comb_flat.T
+        del comb_flat
         
         scores = scores_flat.reshape(num_samples, nA, nB)
         scores *= (100.0 / num_sites) 
@@ -818,7 +828,9 @@ def add_distinct_haplotypes_smart(initial_haps,
     if len(cur_keys) > 0:
         base_dists = compute_pair_scores(cur_haps_mat, cur_haps_mat) 
         base_dists_flat = base_dists.reshape(num_samples, -1)
+        del base_dists
         current_best_errors = np.min(base_dists_flat, axis=1)
+        del base_dists_flat
     else:
         current_best_errors = np.full(num_samples, np.inf)
 
@@ -832,16 +844,21 @@ def add_distinct_haplotypes_smart(initial_haps,
     homo_11 = c_p1 * c_p1
     homo_01 = 2 * c_p0 * c_p1
     homo_comb = np.stack([homo_00, homo_01, homo_11], axis=-1) @ dist_weights
+    del homo_00, homo_01, homo_11
     homo_flat = homo_comb.reshape(num_cand, -1)
-    homo_scores = (diploids_flat @ homo_flat.T) * (100.0 / num_sites) 
+    del homo_comb
+    homo_scores = (diploids_flat @ homo_flat.T) * (100.0 / num_sites)
+    del homo_flat
     
     if len(cur_keys) > 0:
         hetero_scores_3d = compute_pair_scores(cand_haps_mat, cur_haps_mat)
         hetero_best = np.min(hetero_scores_3d, axis=2)
+        del hetero_scores_3d
     else:
         hetero_best = np.full((num_samples, num_cand), np.inf)
 
     cand_best_potentials = np.minimum(homo_scores, hetero_best)
+    del homo_scores, hetero_best
     
     cand_active = np.ones(num_cand, dtype=bool)
     
@@ -1035,7 +1052,9 @@ def generate_further_haps(site_priors,
     
     # --- 3. CALCULATE WRONGNESS (Vectorized) ---
     wrong_per_site = (H1 * D0) + (H0 * D2)
+    del D0, D2  # D1, H0, H1 still needed for candidate generation
     wrongness_scores = (np.sum(wrong_per_site, axis=2) * 100.0) / masked_sites_len
+    del wrong_per_site
     
     valid_mask = wrongness_scores <= wrongness_cutoff
     
@@ -1044,18 +1063,23 @@ def generate_further_haps(site_priors,
 
     # --- 4. CALCULATE NEW CANDIDATES (Only for valid pairs) ---
     idx_s, idx_h = np.where(valid_mask)
+    del valid_mask, wrongness_scores
     
     D0_sub = probs_masked[idx_s, :, 0]
     D1_sub = probs_masked[idx_s, :, 1]
     D2_sub = probs_masked[idx_s, :, 2]
+    del D1  # No longer needed
     
     H0_sub = initial_list_masked[idx_h, :, 0]
     H1_sub = initial_list_masked[idx_h, :, 1]
+    del H0, H1  # No longer needed
     
     new_haps_0 = D0_sub + (H1_sub * D1_sub)
     new_haps_1 = D2_sub + (H0_sub * D1_sub)
+    del D0_sub, D1_sub, D2_sub, H0_sub, H1_sub
     
     candidate_haps_masked = np.stack([new_haps_0, new_haps_1], axis=-1)
+    del new_haps_0, new_haps_1
     
     # --- 5. UNIQUENESS CHECK ---
     cand_p1 = candidate_haps_masked[:, :, 1]
@@ -1063,12 +1087,16 @@ def generate_further_haps(site_priors,
     
     dists = cdist(cand_p1, init_p1, metric='cityblock')
     perc_dists = (dists * 100.0) / masked_sites_len
+    del dists
     
     min_dist_to_existing = np.min(perc_dists, axis=1)
+    del perc_dists
     
     is_unique = min_dist_to_existing >= uniqueness_threshold_percent
+    del min_dist_to_existing
     
     unique_candidates = candidate_haps_masked[is_unique]
+    del candidate_haps_masked, is_unique
     
     if len(unique_candidates) == 0:
         return initial_haps
@@ -1080,6 +1108,7 @@ def generate_further_haps(site_priors,
     unique_p1 = unique_candidates[:, :, 1]
     
     candidate_dist_matrix = cdist(unique_p1, unique_p1, metric='cityblock')
+    del unique_p1
 
     if len(unique_candidates) > 1:
         try:
@@ -1090,10 +1119,14 @@ def generate_further_haps(site_priors,
                                 cluster_selection_method="eom",
                                 alpha=1.0)
             cluster_labels = initial_clusters[0]
+            del initial_clusters
         except:
              cluster_labels = np.zeros(len(unique_candidates), dtype=int)
     else:
          cluster_labels = np.array([0])
+    
+    del candidate_dist_matrix
+    _malloc_trim()
 
     # Fallback: if HDBSCAN labelled ALL candidates as noise (-1),
     # treat them as a single cluster so get_representatives_probs
@@ -1104,6 +1137,7 @@ def generate_further_haps(site_priors,
     # --- FILLING MASKED SITES (Fix for NaN issue) ---
     final_candidates_full = np.zeros((len(unique_candidates), num_sites, 2))
     final_candidates_full[:, keep_flags, :] = unique_candidates
+    del unique_candidates
     
     # Fill masked regions with site priors to avoid log(0) in get_representatives
     # Calculate haploid priors: P(Ref) ~ sqrt(P(RefRef))
@@ -1118,9 +1152,12 @@ def generate_further_haps(site_priors,
     if np.any(inverse_mask):
         # Broadcast the priors to all candidates at masked sites
         final_candidates_full[:, inverse_mask, :] = haploid_priors[inverse_mask, :]
+    del haploid_priors
         
     representatives = get_representatives_probs(
         site_priors, final_candidates_full, cluster_labels)
+    del final_candidates_full, cluster_labels
+    _malloc_trim()
     
     final_haps = add_distinct_haplotypes_smart(initial_haps,
                 representatives, probs_array,
@@ -1183,10 +1220,11 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     # --- 3. INITIAL STATISTICS ---
     initial_matches = hap_statistics.match_best_vectorised(initial_haps, probs_array, keep_flags=keep_flags)
     initial_error = np.mean(initial_matches[2])
+    del initial_matches
     
-    matches_history = [initial_matches]
-    errors_history = [initial_error]
-    haps_history = [initial_haps]
+    prev_error = initial_error
+    prev_hap_count = len(initial_haps)
+    iteration_count = 1
     
     all_found = False
     cur_haps = initial_haps
@@ -1229,9 +1267,10 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
         # C. Evaluate Improvement
         cur_matches = hap_statistics.match_best_vectorised(cur_haps, probs_array)
         cur_error = np.mean(cur_matches[2])
+        del cur_matches
         
         # D. Convergence Checks
-        if cur_error/errors_history[-1] >= error_reduction_cutoff and len(errors_history) >= 2:
+        if cur_error/prev_error >= error_reduction_cutoff and iteration_count >= 2:
             if len(cur_haps) >= min_num_haps or minimum_strikes >= 3:
                 all_found = True
                 break
@@ -1242,25 +1281,26 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                 current_wrongness += 2.0 
                 striking_up = True
                 
-        if len(cur_haps) == len(haps_history[-1]) and not striking_up: 
+        if len(cur_haps) == prev_hap_count and not striking_up: 
             all_found = True
             break
             
-        if len(errors_history) > max_hapfind_iter + 1:
+        if iteration_count > max_hapfind_iter + 1:
             all_found = True
             
-        matches_history.append(cur_matches)
-        errors_history.append(cur_error)
-        haps_history.append(cur_haps)
+        prev_error = cur_error
+        prev_hap_count = len(cur_haps)
+        iteration_count += 1
         striking_up = False
     
     # --- 5. FINAL CLEANUP STEPS ---
-    candidates_to_filter = haps_history[-1]
+    candidates_to_filter = cur_haps
     
     if len(candidates_to_filter) > 1:
         
         # Step A: Pre-Merge
         merged_haps = consolidate_similar_candidates(candidates_to_filter, diff_threshold_percent=diff_threshold_percent)
+        del candidates_to_filter
         
         # Step B: Viterbi-BIC Selection
         best_keys = select_optimal_haplotype_set_viterbi(
@@ -1271,10 +1311,12 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
         )
         
         selected_haps_dict = {i: merged_haps[k] for i, k in enumerate(best_keys)}
+        del merged_haps
         
         # Step C: Post-Usage Pruning
         final_matches = hap_statistics.match_best_vectorised(selected_haps_dict, probs_array)
         usage_counts = final_matches[1] 
+        del final_matches
         min_samples = max(2, int(probs_array.shape[0] * 0.01))
         
         used_haps = {}
@@ -1283,6 +1325,7 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
             if count >= min_samples:
                 used_haps[new_idx] = selected_haps_dict[h_idx]
                 new_idx += 1
+        del selected_haps_dict
         
         # Step D: Chimera Pruning (uses mean_delta criterion to protect essential haplotypes)
         final_haps = prune_chimeras(
@@ -1292,6 +1335,7 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
             max_mismatch_percent=chimera_max_mismatch_pct,
             min_mean_delta_to_protect=chimera_min_delta_to_protect
         )
+        del used_haps
         
         # Reindex
         final_haps = {i: v for i, v in enumerate(final_haps.values())}
@@ -1299,13 +1343,7 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     else:
         final_haps = candidates_to_filter
 
-    # --- 6. MEMORY CLEANUP ---
-    # Clear intermediate data structures that are no longer needed
-    del matches_history
-    del errors_history
-    del haps_history
-    del candidates_to_filter
-    gc.collect()
+    _malloc_trim()
 
     return BlockResult(positions, final_haps, reads_array, keep_flags=keep_flags, probs_array=probs_array)
 

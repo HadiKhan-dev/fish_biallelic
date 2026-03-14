@@ -302,11 +302,12 @@ def _worker_calculate_single_block_likelihood(args):
         c00 = h0[:, None, :] * h0[None, :, :]
         c11 = h1[:, None, :] * h1[None, :, :]
         c01 = (h0[:, None, :] * h1[None, :, :]) + (h1[:, None, :] * h0[None, :, :])
+        del h0, h1, haps_masked
         
         # Flatten haplotypes for broadcasting
-        c00_flat = c00.reshape(-1, num_active_sites)
-        c01_flat = c01.reshape(-1, num_active_sites)
-        c11_flat = c11.reshape(-1, num_active_sites)
+        c00_flat = c00.reshape(-1, num_active_sites); del c00
+        c01_flat = c01.reshape(-1, num_active_sites); del c01
+        c11_flat = c11.reshape(-1, num_active_sites); del c11
         
         # --- 4. PROBABILISTIC AGREEMENT (MIXTURE MODEL) ---
         
@@ -314,12 +315,15 @@ def _worker_calculate_single_block_likelihood(args):
         term_0 = samples_masked[:, np.newaxis, :, 0] * c00_flat[np.newaxis, :, :]
         term_1 = samples_masked[:, np.newaxis, :, 1] * c01_flat[np.newaxis, :, :]
         term_2 = samples_masked[:, np.newaxis, :, 2] * c11_flat[np.newaxis, :, :]
+        del c00_flat, c01_flat, c11_flat, samples_masked
         
         model_probs = term_0 + term_1 + term_2
+        del term_0, term_1, term_2
         
         # B. Apply Robust Mixture
         uniform_prob = 1.0 / 3.0
         final_probs = (model_probs * (1.0 - epsilon)) + (epsilon * uniform_prob)
+        del model_probs
         
         # --- 5. LOG LIKELIHOOD ---
         # Note: final_probs cannot be 0 if epsilon > 0, but we safety check anyway
@@ -327,29 +331,24 @@ def _worker_calculate_single_block_likelihood(args):
         final_probs[final_probs < min_prob] = min_prob
         
         ll_per_site = np.log(final_probs)
+        del final_probs
         
         # --- APPLY BURST/AFFINE LOGIC UPGRADE ---
         # 1. Apply Hard Floor of -2.0 per site (prevents single-site overkill)
         ll_per_site = np.maximum(ll_per_site, -2.0)
         
         # 2. Reshape for Kernel: (Samples, Haps, Haps, Sites)
-        # Original code flattened this implicitly via sum, we need explicit dimensions
-        # model_probs shape logic: (N, 1, Sites) * (1, K_flat, Sites) -> (N, K_flat, Sites)
-        # where K_flat is (Haps*Haps) flattened
-        
-        # So ll_per_site is currently (N_Samples, K_flat, Sites)
         ll_4d = ll_per_site.reshape(num_samples, num_haps, num_haps, num_active_sites)
+        del ll_per_site
         
         # 3. Burst Aware Summation
-        # gap_open = -10.0 (High penalty to start burst)
-        # gap_extend = 0.0 (No extra penalty beyond uniform)
-        # uniform = -1.1 (ln(1/3))
         total_ll_matrix_4d = calculate_burst_score_vectorized(
             ll_4d, 
             gap_open_penalty=-10.0,
             gap_extend_penalty=0.0, 
             uniform_log_prob=math.log(1.0/3.0)
         )
+        del ll_4d
         
         final_tensor = total_ll_matrix_4d
         
@@ -397,33 +396,35 @@ def generate_all_block_likelihoods(
     else:
         blocks_to_process = haplotype_data
         
-    tasks = []
     params = {
         'log_likelihood_base': log_likelihood_base,
         'robustness_epsilon': robustness_epsilon
     }
-    
-    for block in blocks_to_process:
-        if not hasattr(block, 'positions'):
-             raise ValueError(f"Encountered invalid block object in list. Type: {type(block)}")
 
-        # ROBUST DATA FETCHING:
-        # Instead of slicing (start:end) which fails for sparse/downsampled blocks,
-        # we find the exact indices of the block's positions in the global array.
-        indices = np.searchsorted(global_site_locations, block.positions)
-        
-        # Fancy indexing returns a copy containing only the requested sites.
-        # This works correctly for contiguous blocks (0, 1, 2...) 
-        # AND sparse proxies (0, 10, 20...), ensuring dimension alignment.
-        block_samples = sample_probs_matrix[:, indices, :]
-        
-        tasks.append((block_samples, block, params))
-
-    if num_processes > 1 and len(tasks) > 1:
+    if num_processes > 1 and len(blocks_to_process) > 1:
+        # Parallel: build all tasks upfront (pool needs them)
+        tasks = []
+        for block in blocks_to_process:
+            if not hasattr(block, 'positions'):
+                raise ValueError(f"Encountered invalid block object in list. Type: {type(block)}")
+            indices = np.searchsorted(global_site_locations, block.positions)
+            block_samples = sample_probs_matrix[:, indices, :]
+            tasks.append((block_samples, block, params))
         with Pool(num_processes) as pool:
             results = pool.map(_worker_calculate_single_block_likelihood, tasks)
+        del tasks
     else:
-        results = list(map(_worker_calculate_single_block_likelihood, tasks))
+        # Sequential: process one block at a time, free each before the next
+        results = []
+        for block in blocks_to_process:
+            if not hasattr(block, 'positions'):
+                raise ValueError(f"Encountered invalid block object in list. Type: {type(block)}")
+            indices = np.searchsorted(global_site_locations, block.positions)
+            block_samples = sample_probs_matrix[:, indices, :]
+            result = _worker_calculate_single_block_likelihood((block_samples, block, params))
+            del block_samples
+            _malloc_trim()
+            results.append(result)
 
     if is_single_block:
         return results[0]
