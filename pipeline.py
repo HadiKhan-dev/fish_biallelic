@@ -103,7 +103,7 @@ if __name__ == '__main__':
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_rows', None)
 
-    n_processes=76
+    n_processes=112
 
     # Start the forkserver NOW, before any data is loaded.
     # The forkserver process inherits only the current ~500 MB footprint
@@ -123,15 +123,27 @@ if __name__ == '__main__':
     # Define the regions you want to use for inference.
     regions_config = [
         {"contig": "chr1", "start": 0, "end": 3000},
-        #{"contig": "chr2", "start": 0, "end": 3000},
+        {"contig": "chr2", "start": 0, "end": 3000},
         #{"contig": "chr3", "start": 0, "end": 3000},
-        #{"contig": "chr4", "start": 0, "end": 3000},
-        #{"contig": "chr5", "start": 0, "end": 3000},
-        #{"contig": "chr6", "start": 0, "end": 3000},
+        {"contig": "chr4", "start": 0, "end": 3000},
+        {"contig": "chr5", "start": 0, "end": 3000},
+        {"contig": "chr6", "start": 0, "end": 3000},
         #{"contig": "chr7", "start": 0, "end": 3000},
-        #{"contig": "chr8", "start": 0, "end": 3000},
+        {"contig": "chr8", "start": 0, "end": 3000},
         #{"contig": "chr9", "start": 0, "end": 3000},
         #{"contig": "chr10", "start": 0, "end": 3000},
+        #{"contig": "chr11", "start": 0, "end": 3000},
+        #{"contig": "chr12", "start": 0, "end": 3000},
+        #{"contig": "chr13", "start": 0, "end": 3000},
+        #{"contig": "chr14", "start": 0, "end": 3000},
+        #{"contig": "chr15", "start": 0, "end": 3000},
+        #{"contig": "chr16", "start": 0, "end": 3000},
+        #{"contig": "chr17", "start": 0, "end": 3000},
+        #{"contig": "chr18", "start": 0, "end": 3000},
+        #{"contig": "chr19", "start": 0, "end": 3000},
+        #{"contig": "chr20", "start": 0, "end": 3000},
+        #{"contig": "chr22", "start": 0, "end": 3000},
+        #{"contig": "chr23", "start": 0, "end": 3000},
         ]
 
     block_size = 100000
@@ -190,7 +202,10 @@ if __name__ == '__main__':
 if __name__ == '__main__':
     start = time.time()
     output_dir = "results_simulation"
-    os.makedirs(output_dir, exist_ok=True)
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except OSError:
+        pass
 
     # 1. Prepare Founders and Sites for ALL regions
     founders_list = []
@@ -217,75 +232,51 @@ if __name__ == '__main__':
         mutate_rate = 1e-10
         print(f"Normal mode: Using mutation rate {mutate_rate} (minimal mutations)")
 
+    t0 = time.time()
     all_offspring_lists, truth_pedigree, truth_paintings_lists = simulate_sequences.simulate_pedigree(
         founders_list, 
         sites_list, 
         generation_sizes, 
         recomb_rate=5e-8, 
         mutate_rate=mutate_rate,
-        output_plot=os.path.join(output_dir, "ground_truth_pedigree.png"),
+        output_plot=None,
         parallel=True,
         max_workers=None
     )
-
-    print(f"Pedigree simulation completed in {time.time()-start:.1f}s")
+    print(f"Pedigree simulation: {time.time()-t0:.1f}s")
 
     # 3. Save Truth
-    truth_csv_path = os.path.join(output_dir, "ground_truth_pedigree.csv")
-    truth_pedigree.to_csv(truth_csv_path, index=False)
-    print(f"Ground Truth Pedigree data saved to '{truth_csv_path}'")
+    try:
+        truth_csv_path = os.path.join(output_dir, "ground_truth_pedigree.csv")
+        truth_pedigree.to_csv(truth_csv_path, index=False)
+        print(f"Ground Truth Pedigree data saved to '{truth_csv_path}'")
+    except OSError:
+        print("WARNING: Could not save truth CSV (disk full)")
 
     sample_names = truth_pedigree['Sample'].tolist()
 
-    # 4. Process Each Contig (Sequencing, Chunking)
-    read_depth = 30
-
-    for i, r_name in enumerate(region_keys):
-        print(f"\nProcessing Simulated Data for Region: {r_name}")
-        
-        offspring_haps = all_offspring_lists[i]
-        paintings_raw = truth_paintings_lists[i]
-        sites = sites_list[i]
-        
-        true_biological_painting = simulate_sequences.convert_truth_to_painting_objects(paintings_raw)
-        
-        paint_samples.plot_population_painting(
-            true_biological_painting,
-            output_file=os.path.join(output_dir, f"{r_name}_biological_truth.png"),
-            title=f"Biological Truth - {r_name}",
-            sample_names=sample_names,
-            figsize_width=20,
-            row_height_per_sample=0.25
-        )
-        
-        new_reads_array = simulate_sequences.read_sample_all_individuals(
-            offspring_haps, read_depth, error_rate=0.02
-        )
-        
-        min_pos = sites[0]
-        max_pos = sites[-1] + 1
-        
-        simd_genomic_data = simulate_sequences.chunk_up_data(
-            sites, 
-            new_reads_array,
-            min_pos, max_pos, 
-            0, 0,
-            use_snp_count=True,
-            snps_per_block=200,
-            snp_shift=200
-        )
-        
-        (simd_site_priors, simd_probabalistic_genotypes) = analysis_utils.reads_to_probabilities(new_reads_array)
-        
-        multi_contig_results[r_name]['simulated_reads'] = new_reads_array
-        multi_contig_results[r_name]['simd_genomic_data'] = simd_genomic_data
-        multi_contig_results[r_name]['simd_probs'] = simd_probabalistic_genotypes
-        multi_contig_results[r_name]['simd_priors'] = simd_site_priors
-        multi_contig_results[r_name]['truth_painting'] = true_biological_painting
+    # 4. Process All Contigs in Parallel (read sampling, chunking, probs)
+    t0 = time.time()
+    contig_results = simulate_sequences.process_all_contigs_parallel(
+        region_keys, all_offspring_lists, truth_paintings_lists, sites_list,
+        read_depth=30, error_rate=0.02,
+        snps_per_block=200, snp_shift=200,
+        num_workers=len(region_keys)
+    )
+    
+    for r_name in region_keys:
+        result = contig_results[r_name]
+        multi_contig_results[r_name]['simulated_reads'] = result['simulated_reads']
+        multi_contig_results[r_name]['simd_genomic_data'] = result['simd_genomic_data']
+        multi_contig_results[r_name]['simd_probs'] = result['simd_probs']
+        multi_contig_results[r_name]['simd_priors'] = result['simd_priors']
+        multi_contig_results[r_name]['truth_painting'] = result['truth_painting']
+    
+    print(f"Post-processing ({len(region_keys)} contigs parallel): {time.time()-t0:.1f}s")
 
     print("\nSimulation, Sequencing, and Chunking complete for all regions.")
     print(f"Total time: {time.time()-start:.1f}s")
-
+    
 #%%
 if __name__ == '__main__':
     # ==========================================================================
@@ -1039,21 +1030,11 @@ if __name__ == '__main__':
             recomb_rate=5e-8,
             switch_penalty=10.0,
             absolute_margin=5.0,
-            batch_size=10
+            batch_size=10,
+            num_processes=n_processes
         )
 
         multi_contig_results[r_name]['tolerance_result'] = tol_painting_result
-
-        # 3. Visualization A: Detailed Uncertainty View
-        print(f"  Generating detailed tolerance plots for first 3 samples...")
-        for i in range(3):
-            if i < len(sample_names):
-                detail_filename = os.path.join(output_dir, f"{r_name}_tolerance_detail_{sample_names[i]}.png")
-                paint_samples.plot_viable_paintings(
-                    tol_painting_result,
-                    sample_idx=i,
-                    output_file=detail_filename
-                )
 
         # 4. Visualization B: Population Consensus
         print(f"  Generating Population Consensus Plot...")
@@ -1112,16 +1093,16 @@ if __name__ == '__main__':
             print(f"Warning: Tolerance painting missing for {r_name}")
 
     # 2. Run Inference (16-State HMM with tolerance-aware scoring)
+    #    n_workers uses all available cores
+    #    perform_automatic_cutoff + resolve_cycles called internally
     pedigree_result = pedigree_inference.infer_pedigree_multi_contig_tolerance(
         contig_inputs, 
         sample_ids=sample_names,
-        top_k=20
+        top_k=20,
+        n_workers=n_processes
     )
 
-    # 3. Apply Auto-Cutoff (Crucial for F1 identification)
-    pedigree_result.perform_automatic_cutoff()
-
-    # 4. Save & Visualize
+    # 3. Save & Visualize
     pedigree_df = pedigree_result.relationships
     output_csv = os.path.join(output_dir, "pedigree_inference_discovered.csv")
     pedigree_df.to_csv(output_csv, index=False)
@@ -1130,7 +1111,7 @@ if __name__ == '__main__':
     output_tree = os.path.join(output_dir, "pedigree_tree_discovered.png")
     pedigree_inference.draw_pedigree_tree(pedigree_df, output_file=output_tree)
 
-    # 5. Validate against Truth (if available)
+    # 4. Validate against Truth (if available)
     if 'truth_pedigree' in dir():
         print("\n--- Pedigree Validation ---")
         validation_df = pd.merge(
@@ -1160,7 +1141,6 @@ if __name__ == '__main__':
 
         print(f"Generation Accuracy: {gen_acc:.2f}%")
         print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
-
 #%%
 if __name__ == '__main__':
     # =============================================================================

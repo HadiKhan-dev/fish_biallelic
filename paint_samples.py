@@ -29,8 +29,11 @@ them appear better than founders who were certain but had occasional mismatches.
 converting to deterministic alleles, we treat "I don't know" as a coin flip (unbiased
 noise) rather than as evidence (systematic bias).
 """
-import thread_config
 
+import thread_config
+from thread_config import numba_thread_scope
+
+import os
 import numpy as np
 import math
 import pandas as pd
@@ -38,7 +41,7 @@ import warnings
 from typing import List, Tuple, Dict, NamedTuple, Set, DefaultDict, Counter, Optional, Union
 from collections import defaultdict
 import copy
-from multiprocess import Pool
+import multiprocessing as _mp
 from tqdm import tqdm
 from functools import partial
 
@@ -59,7 +62,7 @@ warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid='ignore')
 
 try:
-    from numba import njit, prange, set_num_threads
+    from numba import njit, prange
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
@@ -68,7 +71,6 @@ except ImportError:
         def decorator(func): return func
         return decorator
     prange = range
-    def set_num_threads(n): pass
 
 # =============================================================================
 # 1. DATA STRUCTURES
@@ -630,7 +632,7 @@ def calculate_binned_emissions(sample_probs_matrix, hap_dict, positions,
 # 6. TOLERANCE VITERBI KERNELS (BINNED VERSION)
 # =============================================================================
 
-@njit(fastmath=True)
+@njit(parallel=True, fastmath=True)
 def run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_definitions, 
                                      n_haps, switch_penalty, double_recomb_factor=1.5):
     """
@@ -647,7 +649,7 @@ def run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_d
     else: 
         log_N_minus_1 = 0.0
 
-    for s in range(n_samples):
+    for s in prange(n_samples):
         for k in range(K): 
             alpha[s, 0, k] = ll_tensor[s, k, 0]
 
@@ -690,7 +692,7 @@ def run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_d
                 
     return alpha
 
-@njit(fastmath=True)
+@njit(parallel=True, fastmath=True)
 def run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_definitions, 
                                       n_haps, switch_penalty, double_recomb_factor=1.5):
     """
@@ -705,7 +707,7 @@ def run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_
     else: 
         log_N_minus_1 = 0.0
 
-    for s in range(n_samples):
+    for s in prange(n_samples):
         for k in range(K): 
             beta[s, n_bins-1, k] = 0.0
 
@@ -751,7 +753,7 @@ def run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_
 # 7. PRE-COMPUTATION KERNEL (BINNED VERSION)
 # =============================================================================
 
-@njit(fastmath=True)
+@njit(parallel=True, fastmath=True)
 def precompute_valid_transitions_binned(alpha, beta, ll_tensor, bin_centers, recomb_rate, 
                                          state_definitions, n_haps, switch_penalty, 
                                          min_total_score, double_recomb_factor=1.5):
@@ -766,7 +768,7 @@ def precompute_valid_transitions_binned(alpha, beta, ll_tensor, bin_centers, rec
     else: 
         log_N_minus_1 = 0.0
     
-    for t in range(1, n_bins):
+    for t in prange(1, n_bins):
         dist_bp = bin_centers[t] - bin_centers[t-1]
         if dist_bp < 1: dist_bp = 1
         theta = float(dist_bp) * recomb_rate
@@ -1060,19 +1062,83 @@ def reconstruct_deduplicated_paths_binned(alpha, beta, ll_tensor, bin_centers, b
 # 9. MULTIPROCESSING DRIVER (BINNED VERSION)
 # =============================================================================
 
+from multiprocessing import shared_memory as _shm
+
+# Worker-local cache for SharedMemory arrays (reconstructed once per worker)
+_PAINT_SHARED = {}
+_PAINT_SHM_REFS = []  # Keep references to prevent garbage collection
+
+def _create_shm_from_array(arr):
+    """Create a SharedMemory block from a numpy array. Returns (shm, name, shape, dtype_str)."""
+    shm = _shm.SharedMemory(create=True, size=arr.nbytes)
+    shm_arr = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
+    shm_arr[:] = arr
+    return shm, shm.name, arr.shape, str(arr.dtype)
+
+def _array_from_shm(name, shape, dtype_str):
+    """Reconstruct a numpy array from SharedMemory. Returns (shm_ref, array)."""
+    shm = _shm.SharedMemory(name=name, create=False)
+    arr = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
+    return shm, arr
+
+def _init_paint_shared(meta):
+    """
+    Pool initializer: reconstruct numpy arrays from SharedMemory.
+    Called once per worker at Pool creation. Only receives metadata (tiny).
+    The actual data lives in SharedMemory (zero-copy across processes).
+    """
+    global _PAINT_SHARED, _PAINT_SHM_REFS
+    _PAINT_SHM_REFS = []
+    
+    # Reconstruct block_samples_data
+    shm, arr = _array_from_shm(meta['samples_name'], meta['samples_shape'], meta['samples_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    _PAINT_SHARED['block_samples_data'] = arr
+    
+    # Reconstruct positions
+    shm, arr = _array_from_shm(meta['positions_name'], meta['positions_shape'], meta['positions_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    _PAINT_SHARED['positions'] = arr
+    
+    # Reconstruct haplotype stack -> rebuild dict
+    shm, arr = _array_from_shm(meta['haps_name'], meta['haps_shape'], meta['haps_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    hap_keys = meta['hap_keys']
+    _PAINT_SHARED['hap_dict'] = {k: arr[i] for i, k in enumerate(hap_keys)}
+    
+    # Reconstruct dense_haps (for founder_data)
+    shm, arr = _array_from_shm(meta['dense_name'], meta['dense_shape'], meta['dense_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    _PAINT_SHARED['dense_haps'] = arr
+    
+    # Reconstruct dense_pos (for founder_data)
+    shm, arr = _array_from_shm(meta['dense_pos_name'], meta['dense_pos_shape'], meta['dense_pos_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    _PAINT_SHARED['dense_pos'] = arr
+    
+    # Store scalar params
+    _PAINT_SHARED['params'] = meta['params']
+
+
 def _worker_paint_tolerance_batch_binned(args):
     """Worker function for parallel painting - BINNED version."""
-    indices, sample_probs_slice, block_result, params = args
-    positions = np.array(block_result.positions, dtype=np.int64)
-    hap_dict = block_result.haplotypes
+    indices, start_idx, end_idx = args
+    
+    # Read from SharedMemory (zero-copy)
+    sample_probs_slice = _PAINT_SHARED['block_samples_data'][start_idx:end_idx]
+    positions = _PAINT_SHARED['positions']
+    hap_dict = _PAINT_SHARED['hap_dict']
+    founder_data = (_PAINT_SHARED['dense_haps'], _PAINT_SHARED['dense_pos'])
+    params = _PAINT_SHARED['params']
+    
     recomb_rate = params['recomb_rate']
     switch_penalty = params['switch_penalty']
     robustness_epsilon = params['robustness_epsilon']
     total_margin = params['total_margin']
-    founder_data = params['founder_data']
     max_active_paths = params.get('max_active_paths', 2000)
     double_recomb_factor = params.get('double_recomb_factor', 1.5)
     snps_per_bin = params.get('snps_per_bin', 100)
+    numba_threads = params.get('numba_threads', 1)
     
     # Calculate BINNED emissions
     ll_tensor, state_defs, hap_keys, bin_centers, bin_edges = calculate_binned_emissions(
@@ -1091,14 +1157,14 @@ def _worker_paint_tolerance_batch_binned(args):
             results.append(sample_obj)
         return results
     
-    if HAS_NUMBA: 
-        set_num_threads(1)
-        
-    # Run forward/backward on BINNED data
-    alpha = run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_defs, 
-                                             num_haps, float(switch_penalty), double_recomb_factor)
-    beta = run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_defs, 
-                                             num_haps, float(switch_penalty), double_recomb_factor)
+    # Control Numba thread count for prange loops in the forward/backward kernels.
+    # Thread count is computed by the caller based on available cores and pool size.
+    with numba_thread_scope(numba_threads):
+        # Run forward/backward on BINNED data
+        alpha = run_forward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_defs, 
+                                                 num_haps, float(switch_penalty), double_recomb_factor)
+        beta = run_backward_pass_max_sum_binned(ll_tensor, bin_centers, recomb_rate, state_defs, 
+                                                 num_haps, float(switch_penalty), double_recomb_factor)
     
     results = []
     for i, global_idx in enumerate(indices):
@@ -1163,28 +1229,89 @@ def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites,
     print(f"Tolerance Painting (BINNED) {num_samples} samples ({n_sites_block} SNPs → {n_bins} bins, "
           f"Margin={total_margin:.2f}, Cap={max_active_paths}) using {num_processes} workers...")
     
-    tasks = []
+    # Compute parallelism split: cap pool size at number of tasks,
+    # then give each worker enough Numba threads to fill spare cores.
+    # Use num_processes (not os.cpu_count) to respect caller's core budget.
+    num_tasks = math.ceil(num_samples / batch_size)
+    actual_pool_size = min(num_tasks, num_processes)
+    numba_threads = max(1, num_processes // max(actual_pool_size, 1))
+    
     params = {
         'recomb_rate': recomb_rate,
         'switch_penalty': switch_penalty,
         'robustness_epsilon': robustness_epsilon,
         'total_margin': total_margin,
-        'founder_data': founder_data,
         'max_active_paths': max_active_paths,
         'double_recomb_factor': double_recomb_factor,
         'snps_per_bin': snps_per_bin,
+        'numba_threads': numba_threads,
     }
     
-    for start_idx in range(0, num_samples, batch_size):
-        end_idx = min(start_idx + batch_size, num_samples)
-        batch_slice = block_samples_data[start_idx:end_idx]
-        indices = list(range(start_idx, end_idx))
-        tasks.append((indices, batch_slice, block_result, params))
+    # Create SharedMemory for all large arrays (zero-copy across processes).
+    # Workers only receive metadata (names, shapes, dtypes) via Pool initializer.
+    # Tasks carry only (indices, start_idx, end_idx) — a few bytes each.
+    shm_blocks = []  # Track for cleanup
+    
+    try:
+        # 1. block_samples_data (the big one: 320 × n_sites × 3 × 8 bytes)
+        samples_c = np.ascontiguousarray(block_samples_data)
+        shm_s, s_name, s_shape, s_dtype = _create_shm_from_array(samples_c)
+        shm_blocks.append(shm_s)
         
-    all_sample_paintings = []
-    with Pool(num_processes) as pool:
-        for batch_result in tqdm(pool.imap(_worker_paint_tolerance_batch_binned, tasks), total=len(tasks)):
-            all_sample_paintings.extend(batch_result)
+        # 2. positions
+        positions_arr = np.ascontiguousarray(np.array(positions, dtype=np.int64))
+        shm_p, p_name, p_shape, p_dtype = _create_shm_from_array(positions_arr)
+        shm_blocks.append(shm_p)
+        
+        # 3. haplotypes — stack into one contiguous array
+        hap_keys_list = sorted(block_result.haplotypes.keys())
+        hap_arrays = [block_result.haplotypes[k] for k in hap_keys_list]
+        hap_stack = np.ascontiguousarray(np.stack(hap_arrays))
+        shm_h, h_name, h_shape, h_dtype = _create_shm_from_array(hap_stack)
+        shm_blocks.append(shm_h)
+        
+        # 4. dense_haps
+        dense_c = np.ascontiguousarray(dense_haps)
+        shm_d, d_name, d_shape, d_dtype = _create_shm_from_array(dense_c)
+        shm_blocks.append(shm_d)
+        
+        # 5. dense_pos
+        dpos_c = np.ascontiguousarray(np.array(dense_pos, dtype=np.int64))
+        shm_dp, dp_name, dp_shape, dp_dtype = _create_shm_from_array(dpos_c)
+        shm_blocks.append(shm_dp)
+        
+        # Metadata for initializer (tiny — just names, shapes, dtypes, scalars)
+        init_meta = {
+            'samples_name': s_name, 'samples_shape': s_shape, 'samples_dtype': s_dtype,
+            'positions_name': p_name, 'positions_shape': p_shape, 'positions_dtype': p_dtype,
+            'haps_name': h_name, 'haps_shape': h_shape, 'haps_dtype': h_dtype,
+            'hap_keys': hap_keys_list,
+            'dense_name': d_name, 'dense_shape': d_shape, 'dense_dtype': d_dtype,
+            'dense_pos_name': dp_name, 'dense_pos_shape': dp_shape, 'dense_pos_dtype': dp_dtype,
+            'params': params,
+        }
+        
+        # Tasks carry only lightweight indices
+        tasks = []
+        for start_idx in range(0, num_samples, batch_size):
+            end_idx = min(start_idx + batch_size, num_samples)
+            indices = list(range(start_idx, end_idx))
+            tasks.append((indices, start_idx, end_idx))
+        
+        all_sample_paintings = []
+        with _mp.Pool(actual_pool_size, initializer=_init_paint_shared,
+                       initargs=(init_meta,)) as pool:
+            for batch_result in tqdm(pool.imap(_worker_paint_tolerance_batch_binned, tasks), total=len(tasks)):
+                all_sample_paintings.extend(batch_result)
+    
+    finally:
+        # Clean up SharedMemory (unlink frees the OS-level shared memory)
+        for shm in shm_blocks:
+            try:
+                shm.close()
+                shm.unlink()
+            except Exception:
+                pass
             
     all_sample_paintings.sort(key=lambda x: x.sample_index)
     range_tuple = (int(positions[0]), int(positions[-1]))
