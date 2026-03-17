@@ -331,8 +331,11 @@ def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
             def _build_one(item):
                 _, ps = item
                 return _build_tensor_from_paths(ps, sub_emissions, num_samples)
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                chunk_tensors = list(executor.map(_build_one, chunk))
+            if num_threads <= 1 or len(chunk) <= 1:
+                chunk_tensors = [_build_one(item) for item in chunk]
+            else:
+                with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                    chunk_tensors = list(executor.map(_build_one, chunk))
             # Pre-allocate and fill to avoid double memory from np.stack
             stacked = np.empty((len(chunk), num_samples, n_pairs, total_b),
                                dtype=np.float64)
@@ -463,6 +466,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                        penalty_override=None,
                        spb_override=None,
                        cc_override=None,
+                       max_bins_for_cr=2000,
                        num_threads=8):
     """
     Sub-block forward selection + top-N swap + BIC prune + chimera resolution.
@@ -483,6 +487,10 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         penalty_override: If set, use this penalty instead of auto-computed.
         spb_override: If set, use this SPB instead of auto-computed.
         cc_override: If set, use this CC instead of auto-computed.
+        max_bins_for_cr: Maximum total bins for CR tensors. If the default spb
+            would produce more bins than this, spb is increased to cap total_bins.
+            Prevents memory/time blowup on large batches (e.g. chr3 L4 with
+            8 blocks × 200k sites = 16000 bins → 2 GB tensors per candidate).
         
     Returns:
         List of resolved beam entries [(dense_path, score), ...] ready for
@@ -496,6 +504,12 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     pen_sel = penalty_override if penalty_override is not None else compute_penalty(batch_blocks)
     spb = spb_override if spb_override is not None else compute_spb(batch_blocks)
     batch_cc = cc_override if cc_override is not None else compute_cc(batch_blocks, num_samples, cc_scale)
+    
+    # --- Cap total bins to prevent memory blowup ---
+    total_sites = sum(len(b.positions) for b in batch_blocks)
+    estimated_bins = math.ceil(total_sites / spb)
+    if estimated_bins > max_bins_for_cr:
+        spb = math.ceil(total_sites / max_bins_for_cr)
     
     # --- Sub-block emissions ---
     sub_em = compute_subblock_emissions(batch_blocks, global_probs, global_sites, spb)
@@ -523,6 +537,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         return np.ascontiguousarray(tensor)
     
     def build_tensors_threaded(subset_list):
+        if num_threads <= 1 or len(subset_list) <= 1:
+            return [build_tensor_sel(s) for s in subset_list]
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             return list(executor.map(build_tensor_sel, subset_list))
     
@@ -566,50 +582,47 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 per_block_sel_haps.append(np.array([], dtype=int))
         
         # Pre-allocate stacked buffer ONCE for this k-iteration.
-        # Reuse across chunks to avoid repeated page faults from alloc/free.
-        # At K=8: each chunk alloc is 1.3 GB with ~48 chunks = 48 page fault cycles.
-        # Pre-alloc: 1 page fault cycle, then reuse via template broadcast.
         stacked = np.empty((max_chunk, num_samples, n_pairs, total_bins),
                            dtype=np.float64)
         
         for cs in range(0, len(remaining), max_chunk):
             chunk = remaining[cs:cs + max_chunk]
             n_chunk = len(chunk)
-            
-            # Use a view of pre-allocated buffer for this chunk
             stacked_view = stacked[:n_chunk]
-            for i in range(n_chunk):
-                stacked_view[i] = template
-            
-            # Fill candidate-specific pairs grouped by unique hap
-            bin_off = 0
             chunk_arr = np.array(chunk)
-            for b_i, em_data in enumerate(sub_em):
-                bin_em = em_data['bin_emissions']
-                nb = em_data['n_bins']
-                sel_haps = per_block_sel_haps[b_i]
-                cand_haps = map_matrix[chunk_arr, b_i]
-                
-                for h_c in np.unique(cand_haps):
-                    c_mask = np.where(cand_haps == h_c)[0]
-                    
+            
+            # Per-candidate threaded fill: copy template + overwrite pairs.
+            # Each candidate writes to stacked_view[local_idx] — independent
+            # memory. Multiple cores drive memory bandwidth simultaneously.
+            def _fill_candidate(local_idx):
+                ci = chunk_arr[local_idx]
+                stacked_view[local_idx] = template  # contiguous memcpy
+                bin_off_t = 0
+                for b_i, em_data in enumerate(sub_em):
+                    bin_em = em_data['bin_emissions']
+                    nb = em_data['n_bins']
+                    sel_haps = per_block_sel_haps[b_i]
+                    h_c = map_matrix[ci, b_i]
                     for ii in range(K_next - 1):
                         pos = ii * K_next + (K_next - 1)
-                        data = bin_em[:, sel_haps[ii], h_c, :]
-                        stacked_view[c_mask, :, pos, bin_off:bin_off + nb] = data[None, :, :]
-                    
+                        stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                            bin_em[:, sel_haps[ii], h_c, :]
                     for jj in range(K_next - 1):
                         pos = (K_next - 1) * K_next + jj
-                        data = bin_em[:, h_c, sel_haps[jj], :]
-                        stacked_view[c_mask, :, pos, bin_off:bin_off + nb] = data[None, :, :]
-                    
+                        stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                            bin_em[:, h_c, sel_haps[jj], :]
                     pos = K_next * K_next - 1
-                    data = bin_em[:, h_c, h_c, :]
-                    stacked_view[c_mask, :, pos, bin_off:bin_off + nb] = data[None, :, :]
-                
-                bin_off += nb
+                    stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                        bin_em[:, h_c, h_c, :]
+                    bin_off_t += nb
             
-            # stacked_view is already contiguous (view of contiguous buffer)
+            if num_threads <= 1 or n_chunk <= 1:
+                for i in range(n_chunk):
+                    _fill_candidate(i)
+            else:
+                with ThreadPoolExecutor(max_workers=min(num_threads, n_chunk)) as executor:
+                    list(executor.map(_fill_candidate, range(n_chunk)))
+            
             scores = _batched_viterbi_score(
                 np.ascontiguousarray(stacked_view), float(pen_sel))
             for j, ci in enumerate(chunk):
@@ -649,8 +662,10 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         
         ~30x faster than calling cheap_score_fn per candidate.
         """
-        candidates_arr = np.array(candidates)
+        candidates_arr = np.array(candidates, dtype=int)
         n_cands_local = len(candidates_arr)
+        if n_cands_local == 0:
+            return {}
         scores = np.zeros(n_cands_local, dtype=np.float64)
         
         for b_i, em_data in enumerate(sub_em):
@@ -695,6 +710,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         
         while True:
             unselected = [x for x in range(n_cands) if x not in selected]
+            if not unselected:
+                break
             best_swap = None; best_swap_gain = 0.0
             for i, remove_idx in enumerate(selected):
                 temp_set = selected[:i] + selected[i + 1:]
@@ -726,36 +743,38 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 for cs in range(0, len(ranked), swap_chunk):
                     chunk = ranked[cs:cs + swap_chunk]
                     n_chunk = len(chunk)
-                    
-                    # Reuse pre-allocated buffer
                     stacked_view = swap_stacked[:n_chunk]
-                    for i in range(n_chunk):
-                        stacked_view[i] = swap_template
-                    
-                    # Fill candidate-specific pairs
-                    bin_off = 0
                     chunk_arr = np.array(chunk)
                     cand_pos = K_sel - 1
-                    for b_i, em_data in enumerate(sub_em):
-                        bin_em = em_data['bin_emissions']
-                        nb = em_data['n_bins']
-                        t_haps = sel_haps_per_block[b_i]
-                        cand_haps = map_matrix[chunk_arr, b_i]
-                        
-                        for h_c in np.unique(cand_haps):
-                            c_mask = np.where(cand_haps == h_c)[0]
+                    
+                    def _fill_swap_candidate(local_idx):
+                        ci = chunk_arr[local_idx]
+                        stacked_view[local_idx] = swap_template
+                        bin_off_t = 0
+                        for b_i, em_data in enumerate(sub_em):
+                            bin_em = em_data['bin_emissions']
+                            nb = em_data['n_bins']
+                            t_haps = sel_haps_per_block[b_i]
+                            h_c = map_matrix[ci, b_i]
                             for ii in range(cand_pos):
                                 pos = ii * K_sel + cand_pos
-                                data = bin_em[:, t_haps[ii], h_c, :]
-                                stacked_view[c_mask, :, pos, bin_off:bin_off + nb] = data[None, :, :]
+                                stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                                    bin_em[:, t_haps[ii], h_c, :]
                             for jj in range(cand_pos):
                                 pos = cand_pos * K_sel + jj
-                                data = bin_em[:, h_c, t_haps[jj], :]
-                                stacked_view[c_mask, :, pos, bin_off:bin_off + nb] = data[None, :, :]
+                                stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                                    bin_em[:, h_c, t_haps[jj], :]
                             pos = cand_pos * K_sel + cand_pos
-                            data = bin_em[:, h_c, h_c, :]
-                            stacked_view[c_mask, :, pos, bin_off:bin_off + nb] = data[None, :, :]
-                        bin_off += nb
+                            stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                                bin_em[:, h_c, h_c, :]
+                            bin_off_t += nb
+                    
+                    if num_threads <= 1 or n_chunk <= 1:
+                        for i in range(n_chunk):
+                            _fill_swap_candidate(i)
+                    else:
+                        with ThreadPoolExecutor(max_workers=min(num_threads, n_chunk)) as executor:
+                            list(executor.map(_fill_swap_candidate, range(n_chunk)))
                     
                     scores = _batched_viterbi_score(
                         np.ascontiguousarray(stacked_view), float(pen_sel))
