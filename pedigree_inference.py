@@ -1153,19 +1153,24 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
         })
         global_total_bins += meta['num_bins']
     
-    # Phase 1b: Score all pairs — parallelize by CHILD ROWS (not by contig)
-    # This gives n_workers tasks instead of num_contigs (7), using all cores.
-    print(f"\n--- Phase 1b: Scoring Parent-Child Pairs ({n_workers} workers) ---")
+    # Phase 1b + Phase 2: Use ONE Pool for both phases to avoid double fork overhead.
+    # Set all shared data before Pool creation — workers see it via fork COW.
+    COMPLEXITY_PENALTY = 0.0
     
-    shared_scoring = {
+    shared_all = {
         'contig_caches': contig_caches,
         'error_pen': error_pen,
         'phase_pen': phase_pen,
         'mismatch_penalty': mismatch_penalty,
         'num_samples': num_samples,
+        # Phase 2 fields (set now so workers have them at fork time)
+        'total_switches': total_switches,
+        'complexity_penalty': COMPLEXITY_PENALTY,
     }
     
-    # Create child-row batches: ~10 children per batch for good load balancing
+    # Phase 1b: Score all pairs — parallelize by CHILD ROWS (not by contig)
+    print(f"\n--- Phase 1b: Scoring Parent-Child Pairs ({n_workers} workers) ---")
+    
     children_per_batch = max(1, num_samples // (n_workers * 2))
     child_batches = []
     for start in range(0, num_samples, children_per_batch):
@@ -1176,62 +1181,49 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     
     with ctx.Pool(processes=min(n_workers, len(child_batches)),
                   initializer=_init_pedigree_shared,
-                  initargs=(shared_scoring,)) as pool:
+                  initargs=(shared_all,)) as pool:
+        
+        # --- Phase 1b ---
         results = list(tqdm(
             pool.imap_unordered(_score_pairs_by_children, child_batches),
             total=len(child_batches),
             desc="Scoring pairs in parallel"
         ))
-    
-    for child_indices, scores_block in results:
-        for ci_local, ci in enumerate(child_indices):
-            total_scores[ci, :] = scores_block[ci_local, :]
-    
-    total_scores[total_scores == -np.inf] = -1e9
-    
-    cand_mask = np.zeros((num_samples, num_samples), dtype=bool)
-    margin = 5
-    for i in range(num_samples):
-        valid_gen = total_switches <= (total_switches[i] + margin)
-        cand_mask[i, :] = valid_gen
-        cand_mask[i, i] = False
+        
+        for child_indices, scores_block in results:
+            for ci_local, ci in enumerate(child_indices):
+                total_scores[ci, :] = scores_block[ci_local, :]
+        
+        total_scores[total_scores == -np.inf] = -1e9
+        
+        cand_mask = np.zeros((num_samples, num_samples), dtype=bool)
+        margin = 5
+        for i in range(num_samples):
+            valid_gen = total_switches <= (total_switches[i] + margin)
+            cand_mask[i, :] = valid_gen
+            cand_mask[i, i] = False
 
-    # Phase 2: Trio Verification — share data via Pool initializer
-    print(f"\n--- Phase 2: Trio Verification (Top {top_k} Pairs, {n_workers} workers) ---")
-    
-    COMPLEXITY_PENALTY = 0.0
-    
-    all_sample_args = []
-    for i in range(num_samples):
-        valid_scores = total_scores[i].copy()
-        valid_scores[~cand_mask[i, :]] = -np.inf
-        for j in range(num_samples):
-            if valid_scores[j] > -1e9:
-                valid_scores[j] -= (total_switches[j] * COMPLEXITY_PENALTY)
-        top_indices = np.argsort(valid_scores)[-top_k:][::-1]
-        top_indices = [x for x in top_indices if valid_scores[x] > -1e10]
-        all_sample_args.append((i, top_indices))
-    
-    # Batch samples and share heavy data via initializer
-    batch_size = max(1, num_samples // (n_workers * 4))
-    batched_args = []
-    for batch_start in range(0, num_samples, batch_size):
-        batch_end = min(batch_start + batch_size, num_samples)
-        batch_sample_args = all_sample_args[batch_start:batch_end]
-        batched_args.append(batch_sample_args)  # Only lightweight indices
-    
-    shared_trio = {
-        'contig_caches': contig_caches,
-        'total_switches': total_switches,
-        'error_pen': error_pen,
-        'phase_pen': phase_pen,
-        'mismatch_penalty': mismatch_penalty,
-        'complexity_penalty': COMPLEXITY_PENALTY,
-    }
-    
-    with ctx.Pool(processes=n_workers,
-                  initializer=_init_pedigree_shared,
-                  initargs=(shared_trio,)) as pool:
+        # --- Phase 2: Trio Verification (same Pool, no re-fork) ---
+        print(f"\n--- Phase 2: Trio Verification (Top {top_k} Pairs, reusing pool) ---")
+        
+        all_sample_args = []
+        for i in range(num_samples):
+            valid_scores = total_scores[i].copy()
+            valid_scores[~cand_mask[i, :]] = -np.inf
+            for j in range(num_samples):
+                if valid_scores[j] > -1e9:
+                    valid_scores[j] -= (total_switches[j] * COMPLEXITY_PENALTY)
+            top_indices = np.argsort(valid_scores)[-top_k:][::-1]
+            top_indices = [x for x in top_indices if valid_scores[x] > -1e10]
+            all_sample_args.append((i, top_indices))
+        
+        batch_size = max(1, num_samples // (n_workers * 4))
+        batched_args = []
+        for batch_start in range(0, num_samples, batch_size):
+            batch_end = min(batch_start + batch_size, num_samples)
+            batch_sample_args = all_sample_args[batch_start:batch_end]
+            batched_args.append(batch_sample_args)
+        
         batch_results = list(tqdm(
             pool.imap_unordered(_score_trios_batch, batched_args),
             total=len(batched_args),
@@ -1241,6 +1233,11 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     trio_results = []
     for batch in batch_results:
         trio_results.extend(batch)
+    
+    # CRITICAL: Sort by sample_idx so DataFrame rows match self.samples order.
+    # imap_unordered returns results in arbitrary order; perform_automatic_cutoff
+    # assumes self.relationships.at[i, ...] corresponds to self.samples[i].
+    trio_results.sort(key=lambda x: x[0])
     
     # Collect results
     relationships = []
