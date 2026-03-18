@@ -2,7 +2,7 @@ import numpy as np
 import math
 import time
 import ctypes
-from multiprocess import Pool
+from multiprocessing import Pool as _StdPool
 from scipy.special import logsumexp
 from functools import partial
 
@@ -17,6 +17,15 @@ try:
 except OSError:
     def _malloc_trim():
         pass
+
+# Fix #3: Shared data for Pool workers (avoids pickling large objects per task)
+_BL_SHARED = {}
+
+def _init_bl_shared(shared_dict):
+    """Pool initializer: store shared data in worker's global scope."""
+    global _BL_SHARED
+    _BL_SHARED.clear()
+    _BL_SHARED.update(shared_dict)
 
 # Define defaults as constants
 DEFAULT_LOG_BASE = math.e
@@ -410,7 +419,7 @@ def generate_all_block_likelihoods(
             indices = np.searchsorted(global_site_locations, block.positions)
             block_samples = sample_probs_matrix[:, indices, :]
             tasks.append((block_samples, block, params))
-        with Pool(num_processes) as pool:
+        with _StdPool(num_processes) as pool:
             results = pool.map(_worker_calculate_single_block_likelihood, tasks)
         del tasks
     else:
@@ -502,7 +511,8 @@ def initial_transition_probabilities(haps_data, space_gap=1):
 def get_full_probs_forward(sample_data, sample_sites, haps_data,
                            bidirectional_transition_probs,
                            sample_block_likelihoods=None,
-                           space_gap=1):
+                           space_gap=1,
+                           hap_keys_cache=None):
     """
     Calculates the Forward Variables (Alpha) for the HMM for a SINGLE sample.
     Computes P(State_t = i, Data_1:t) recursively using log-space matrix multiplication.
@@ -515,6 +525,7 @@ def get_full_probs_forward(sample_data, sample_sites, haps_data,
         bidirectional_transition_probs (list): [forward_dict, backward_dict].
         sample_block_likelihoods (list, optional): Pre-computed emission probabilities for this sample.
         space_gap (int): The stride of the HMM chain.
+        hap_keys_cache (list, optional): Pre-computed sorted hap keys per block.
         
     Returns:
         dict: likelihood_numbers mapping block_index -> { (HapA, HapB): log_prob }
@@ -526,6 +537,10 @@ def get_full_probs_forward(sample_data, sample_sites, haps_data,
         )
         sample_block_likelihoods = [b[0] for b in full_res]
 
+    # Fix #4: Use cached keys if provided
+    if hap_keys_cache is None:
+        hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
+
     transition_probs_dict = bidirectional_transition_probs[0]
     
     likelihood_numbers = {} 
@@ -536,7 +551,7 @@ def get_full_probs_forward(sample_data, sample_sites, haps_data,
         # 1. Load Emission Probabilities (Matrix)
         E = sample_block_likelihoods[i] # (N_Haps, N_Haps)
 
-        hap_keys = sorted(list(haps_data[i].haplotypes.keys()))
+        hap_keys = hap_keys_cache[i]
         n_haps = len(hap_keys)
         
         if i < space_gap:
@@ -585,7 +600,8 @@ def get_full_probs_forward(sample_data, sample_sites, haps_data,
 def get_full_probs_backward(sample_data, sample_sites, haps_data,
                            bidirectional_transition_probs,
                            sample_block_likelihoods=None,
-                           space_gap=1):
+                           space_gap=1,
+                           hap_keys_cache=None):
     """
     Calculates the Backward Variables (Beta) for the HMM for a SINGLE sample.
     Computes P(Data_t+1:T | State_t = i) recursively.
@@ -598,6 +614,7 @@ def get_full_probs_backward(sample_data, sample_sites, haps_data,
         bidirectional_transition_probs (list): [forward_dict, backward_dict].
         sample_block_likelihoods (list, optional): Pre-computed emission probabilities.
         space_gap (int): The stride of the HMM chain.
+        hap_keys_cache (list, optional): Pre-computed sorted hap keys per block.
 
     Returns:
         dict: likelihood_numbers mapping block_index -> { (HapA, HapB): log_prob }
@@ -609,6 +626,10 @@ def get_full_probs_backward(sample_data, sample_sites, haps_data,
         )
         sample_block_likelihoods = [b[0] for b in full_res]
 
+    # Fix #4: Use cached keys if provided
+    if hap_keys_cache is None:
+        hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
+
     transition_probs_dict = bidirectional_transition_probs[1]
     
     likelihood_numbers = {} 
@@ -619,7 +640,7 @@ def get_full_probs_backward(sample_data, sample_sites, haps_data,
         # 1. Load Emission Probabilities (Matrix)
         E = sample_block_likelihoods[i]
 
-        hap_keys = sorted(list(haps_data[i].haplotypes.keys()))
+        hap_keys = hap_keys_cache[i]
         n_haps = len(hap_keys)
         
         if i >= len(haps_data) - space_gap:
@@ -671,7 +692,10 @@ def get_updated_transition_probabilities_unified(
         space_gap=1,
         minimum_transition_log_likelihood=-10,
         BATCH_SIZE=100,
-        use_standard_baum_welch=True): 
+        use_standard_baum_welch=True,
+        uniform_prior=None,
+        hap_keys_cache=None,
+        all_block_likelihoods_by_sample=None): 
     """
     Performs the Expectation-Maximization (EM) update step (Baum-Welch).
 
@@ -691,30 +715,43 @@ def get_updated_transition_probabilities_unified(
         minimum_transition_log_likelihood (float): Floor for probabilities.
         BATCH_SIZE (int): Number of samples to process in a vectorized chunk.
         use_standard_baum_welch (bool): If True, applies standard HMM logic.
+        uniform_prior (list, optional): Pre-computed uniform prior [fwd, bwd].
+        hap_keys_cache (list, optional): Pre-computed sorted hap keys per block.
+        all_block_likelihoods_by_sample (list, optional): Pre-restructured emissions.
 
     Returns:
         tuple: ([new_fwd, new_bwd], total_data_log_likelihood)
     """
 
-    prior_a_posteriori = initial_transition_probabilities(haps_data, space_gap=space_gap)
+    # Fix #2: Use pre-computed uniform prior if provided
+    if uniform_prior is None:
+        prior_a_posteriori = initial_transition_probabilities(haps_data, space_gap=space_gap)
+    else:
+        prior_a_posteriori = uniform_prior
+
+    # Fix #4: Use pre-computed keys cache if provided
+    if hap_keys_cache is None:
+        hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
 
     full_samples_likelihoods = full_samples_data
     num_samples = len(full_samples_likelihoods)
     num_blocks = len(full_blocks_likelihoods)
     
-    # Restructure: blocks[sample] -> sample[block] (matrix based)
-    all_block_likelihoods_by_sample = []
-    for s in range(num_samples):
-        sample_chain = []
-        for b in range(num_blocks):
-            sample_chain.append(full_blocks_likelihoods[b][s])
-        all_block_likelihoods_by_sample.append(sample_chain)
+    # Fix #6: Use pre-restructured emissions if provided
+    if all_block_likelihoods_by_sample is None:
+        all_block_likelihoods_by_sample = []
+        for s in range(num_samples):
+            sample_chain = []
+            for b in range(num_blocks):
+                sample_chain.append(full_blocks_likelihoods[b][s])
+            all_block_likelihoods_by_sample.append(sample_chain)
              
     # 1. E-Step: Forward Pass
     forward_nums = [get_full_probs_forward(
                         full_samples_data[i],
                         sample_sites, haps_data, current_transition_probs, 
-                        all_block_likelihoods_by_sample[i], space_gap=space_gap
+                        all_block_likelihoods_by_sample[i], space_gap=space_gap,
+                        hap_keys_cache=hap_keys_cache
                     ) for i in range(num_samples)]
     
 
@@ -731,7 +768,8 @@ def get_updated_transition_probabilities_unified(
     backward_nums = [get_full_probs_backward(
                         full_samples_data[i],
                         sample_sites, haps_data, current_transition_probs, 
-                        all_block_likelihoods_by_sample[i], space_gap=space_gap
+                        all_block_likelihoods_by_sample[i], space_gap=space_gap,
+                        hap_keys_cache=hap_keys_cache
                     ) for i in range(num_samples)]
     
     
@@ -746,8 +784,8 @@ def get_updated_transition_probabilities_unified(
         for i in indices:
             next_bundle = i + space_gap if is_forward else i - space_gap
             
-            hap_keys_current = sorted(list(haps_data[i].haplotypes.keys()))
-            hap_keys_next    = sorted(list(haps_data[next_bundle].haplotypes.keys()))
+            hap_keys_current = hap_keys_cache[i]
+            hap_keys_next    = hap_keys_cache[next_bundle]
             n_curr = len(hap_keys_current)
             n_next = len(hap_keys_next)
             
@@ -913,14 +951,29 @@ def calculate_hap_transition_probabilities(full_samples_data,
         list: [final_forward_transitions, final_backward_transitions]
     """
     
-    start_probs = initial_transition_probabilities(haps_data, space_gap=space_gap,
-                        )
+    start_probs = initial_transition_probabilities(haps_data, space_gap=space_gap)
     
     if full_blocks_likelihoods is None:
         print("Warning: full_blocks_likelihoods not provided. Calculating.")
         full_blocks_likelihoods = generate_all_block_likelihoods(
             full_samples_data, sample_sites, haps_data
         )
+
+    # Fix #2: Compute uniform prior ONCE before EM loop (never changes)
+    uniform_prior = initial_transition_probabilities(haps_data, space_gap=space_gap)
+    
+    # Fix #4: Cache sorted hap keys ONCE (never change)
+    hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
+    
+    # Fix #6: Restructure emissions ONCE (never change)
+    num_samples = len(full_samples_data)
+    num_blocks = len(full_blocks_likelihoods)
+    all_block_likelihoods_by_sample = []
+    for s in range(num_samples):
+        sample_chain = []
+        for b in range(num_blocks):
+            sample_chain.append(full_blocks_likelihoods[b][s])
+        all_block_likelihoods_by_sample.append(sample_chain)
 
     current_probs = start_probs
     prev_ll = -np.inf
@@ -938,7 +991,10 @@ def calculate_hap_transition_probabilities(full_samples_data,
             space_gap=space_gap,
             minimum_transition_log_likelihood=minimum_transition_log_likelihood,
             BATCH_SIZE=100,
-            use_standard_baum_welch=use_standard_baum_welch
+            use_standard_baum_welch=use_standard_baum_welch,
+            uniform_prior=uniform_prior,
+            hap_keys_cache=hap_keys_cache,
+            all_block_likelihoods_by_sample=all_block_likelihoods_by_sample
         )
         
         current_probs_smoothed = analysis_utils.smoothen_probs_vectorized(current_probs, new_probs_raw, effective_lr)
@@ -968,9 +1024,12 @@ def calculate_hap_transition_probabilities(full_samples_data,
 def _gap_worker(args):
     """
     Unpacks arguments and calls the calculation function for multiprocessing.
+    Reads emissions from _BL_SHARED (set by Pool initializer) to avoid pickle overhead.
     """
-    # Unpack the new flag from the tuple
-    (gap, full_samples, sites, haps, likes, max_iter, min_ll, lr, use_std_bw) = args
+    # Fix #3: Emissions read from shared data, not passed per task
+    (gap, full_samples, sites, haps, max_iter, min_ll, lr, use_std_bw) = args
+    
+    likes = _BL_SHARED.get('full_blocks_likelihoods', None)
     
     return calculate_hap_transition_probabilities(
         full_samples, 
@@ -981,7 +1040,7 @@ def _gap_worker(args):
         space_gap=gap,
         minimum_transition_log_likelihood=min_ll,
         learning_rate=lr,
-        use_standard_baum_welch=use_std_bw  # Pass flag to calculator
+        use_standard_baum_welch=use_std_bw
     )
 
 def generate_transition_probability_mesh(full_samples_data,
@@ -998,6 +1057,9 @@ def generate_transition_probability_mesh(full_samples_data,
     
     This creates a multi-scale view of the haplotype graph, allowing 
     downstream algorithms (like Beam Search) to skip over noisy blocks.
+    
+    Uses Pool initializer to share emissions across workers (Fix #3),
+    avoiding pickling the full_blocks_likelihoods object once per gap task.
     
     Args:
         full_samples_data (list): Sample data.
@@ -1022,6 +1084,7 @@ def generate_transition_probability_mesh(full_samples_data,
     max_gap = len(haps_data) - 1
     gaps = list(range(1, max_gap + 1))
 
+    # Fix #3: Tasks carry only lightweight args — emissions shared via initializer
     worker_args = []
     for gap in gaps:
         worker_args.append((
@@ -1029,24 +1092,27 @@ def generate_transition_probability_mesh(full_samples_data,
             full_samples_data,
             sample_sites,
             haps_data,
-            full_blocks_likelihoods,
             max_num_iterations,
             minimum_transition_log_likelihood,
             learning_rate,
             use_standard_baum_welch
         ))
 
+    shared_data = {'full_blocks_likelihoods': full_blocks_likelihoods}
+
     if num_processes > 1:
-        with Pool(num_processes) as pool:
+        with _StdPool(num_processes, initializer=_init_bl_shared,
+                      initargs=(shared_data,)) as pool:
             results = pool.map(_gap_worker, worker_args)
     else:
-        # Sequential execution — malloc_trim after each gap to release temporaries
+        # Sequential execution — set shared data directly
+        _init_bl_shared(shared_data)
         results = []
         for args in worker_args:
             results.append(_gap_worker(args))
             _malloc_trim()
     
-    del full_blocks_likelihoods, worker_args
+    del full_blocks_likelihoods, worker_args, shared_data
     _malloc_trim()
     
     mesh_dict = dict(zip(gaps, results))

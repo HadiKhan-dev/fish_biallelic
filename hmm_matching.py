@@ -5,7 +5,7 @@ import math
 import os
 import warnings
 import ctypes
-from multiprocess import Pool
+from multiprocessing import Pool
 from concurrent.futures import ThreadPoolExecutor
 from scipy.special import logsumexp
 from functools import partial
@@ -455,6 +455,9 @@ def build_dense_transition_matrix(trans_dict, prev_keys, curr_keys, prev_idx, cu
     chromosomes carry the same haplotype at source and destination (no phase
     ambiguity exists in this case).
     
+    Vectorized: builds haploid log-transition matrix once, then uses numpy
+    broadcasting to assemble the diploid matrix in one operation.
+    
     Args:
         trans_dict: Dictionary {(prev_hap, curr_hap): prob}.
         prev_keys: List of haplotype IDs in previous block.
@@ -468,52 +471,57 @@ def build_dense_transition_matrix(trans_dict, prev_keys, curr_keys, prev_idx, cu
     """
     n_prev = len(prev_keys)
     n_curr = len(curr_keys)
-    K_prev = n_prev * n_prev
-    K_curr = n_curr * n_curr
     
-    T = np.full((K_prev, K_curr), -np.inf)
-    
-    # Optimization: Pre-lookup sparse dict to avoid string/tuple hashing in inner loop
-    log_trans_cache = {}
+    # Step 1: Build haploid log-transition matrix (n_prev, n_curr)
+    hap_log_T = np.full((n_prev, n_curr), -np.inf)
     
     for u_i, u_key in enumerate(prev_keys):
-        log_trans_cache[u_i] = {}
         for x_i, x_key in enumerate(curr_keys):
             key = ((prev_idx, u_key), (curr_idx, x_key))
             if key in trans_dict:
-                log_trans_cache[u_i][x_i] = math.log(trans_dict[key])
-            else:
-                log_trans_cache[u_i][x_i] = -np.inf
-
-    # Fill T: State U=(u1, u2) -> State V=(v1, v2)
-    # Using FULL DIRECTED STATE SPACE
-    for r in range(K_prev):
-        u_idx, v_idx = divmod(r, n_prev)
-        for c in range(K_curr):
-            x_idx, y_idx = divmod(c, n_curr)
-            
-            val_1 = log_trans_cache[u_idx][x_idx]
-            val_2 = log_trans_cache[v_idx][y_idx]
-            
-            if val_1 != -np.inf and val_2 != -np.inf:
-                # For hom->hom (u1==u2 and v1==v2): both chromosomes take
-                # the same edge, so count it once instead of twice.
-                if correct_hom_hom and u_idx == v_idx and x_idx == y_idx:
-                    T[r, c] = val_1  # single copy (val_1 == val_2 here)
-                else:
-                    T[r, c] = val_1 + val_2
-                
+                hap_log_T[u_i, x_i] = math.log(trans_dict[key])
+    
+    # Step 2: Vectorized diploid assembly via broadcasting
+    # T[(u1,u2), (v1,v2)] = hap_log_T[u1,v1] + hap_log_T[u2,v2]
+    # Shape: (n_prev, n_prev, n_curr, n_curr) then reshape to (K_prev, K_curr)
+    T_4d = hap_log_T[:, None, :, None] + hap_log_T[None, :, None, :]
+    # T_4d[u1, u2, v1, v2] = hap_log_T[u1, v1] + hap_log_T[u2, v2]
+    
+    # Step 3: Apply hom->hom correction if needed
+    # For (a,a)->(b,b): use single copy instead of double
+    if correct_hom_hom:
+        # Diagonal entries where u1==u2 and v1==v2
+        for a in range(n_prev):
+            for b in range(n_curr):
+                T_4d[a, a, b, b] = hap_log_T[a, b]
+    
+    # Reshape to (K_prev, K_curr)
+    T = T_4d.reshape(n_prev * n_prev, n_curr * n_curr)
+    
     return T
 
-def global_forward_backward_pass(raw_blocks, block_results, transition_probs, space_gap, recomb_rate):
+def global_forward_backward_pass(raw_blocks, block_results, transition_probs, space_gap, recomb_rate,
+                                 hap_keys_cache=None):
     """
     Orchestrates the genome-wide Forward and Backward passes using the Viterbi Sum kernels.
+    
+    Args:
+        raw_blocks: ViterbiBlockList with per-site emission tensors.
+        block_results: List of BlockResult objects.
+        transition_probs: [forward_dict, backward_dict].
+        space_gap: HMM stride.
+        recomb_rate: Per-bp recombination rate.
+        hap_keys_cache (list, optional): Pre-computed sorted hap keys per block.
     
     Returns:
         tuple: (S_results, R_results, total_log_likelihood)
     """
     num_blocks = len(raw_blocks)
     num_samples = raw_blocks[0].tensor.shape[0]
+    
+    # Fix A: Use cached keys if provided
+    if hap_keys_cache is None:
+        hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in block_results]
     
     S_results = [] # Stores Forward scores for each block
     R_results = [None] * num_blocks # Stores Backward scores
@@ -533,8 +541,8 @@ def global_forward_backward_pass(raw_blocks, block_results, transition_probs, sp
             prev_idx = i - space_gap
             prev_S_internal = S_results[prev_idx] # RAW
             
-            prev_keys = sorted(list(block_results[prev_idx].haplotypes.keys()))
-            curr_keys = sorted(list(block_results[i].haplotypes.keys()))
+            prev_keys = hap_keys_cache[prev_idx]
+            curr_keys = hap_keys_cache[i]
             
             T = build_dense_transition_matrix(transition_probs[0][prev_idx], prev_keys, curr_keys, prev_idx, i)
             
@@ -573,8 +581,8 @@ def global_forward_backward_pass(raw_blocks, block_results, transition_probs, sp
             next_idx = i + space_gap
             next_R_internal = R_results[next_idx] # RAW
             
-            curr_keys = sorted(list(block_results[i].haplotypes.keys()))
-            next_keys = sorted(list(block_results[next_idx].haplotypes.keys()))
+            curr_keys = hap_keys_cache[i]
+            next_keys = hap_keys_cache[next_idx]
             
             # NOTE: For Backward pass, we use T_bwd(Next -> Curr)
             T = build_dense_transition_matrix(transition_probs[1][next_idx], next_keys, curr_keys, next_idx, i)
@@ -591,7 +599,8 @@ def global_forward_backward_pass(raw_blocks, block_results, transition_probs, sp
     return S_results, R_results, total_ll
 
 def update_transitions_layered_hmm(S_results, R_results, block_results, current_trans, 
-                                     space_gap, use_standard_baum_welch=True):
+                                     space_gap, use_standard_baum_welch=True,
+                                     hap_keys_cache=None):
     """
     Calculates expected transition counts (Xi) for the HMM.
     
@@ -599,11 +608,24 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
     1. Always includes T_mat in 'Total' to capture Diploid Partner probability.
     2. Subtracts specific Edge Prior if using Reset/Viterbi EM.
     3. Removes Cross-Edge summation to prevent blurring.
+    
+    Args:
+        S_results: Forward scores from global_forward_backward_pass.
+        R_results: Backward scores from global_forward_backward_pass.
+        block_results: List of BlockResult objects.
+        current_trans: Current transition estimates [fwd, bwd].
+        space_gap: HMM stride.
+        use_standard_baum_welch: If True, applies standard HMM logic.
+        hap_keys_cache (list, optional): Pre-computed sorted hap keys per block.
     """
     new_trans_fwd = {}
     new_trans_bwd = {}
     num_blocks = len(S_results)
     num_samples = S_results[0].shape[0] 
+    
+    # Fix A: Use cached keys if provided
+    if hap_keys_cache is None:
+        hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in block_results]
     
     MIN_LOG_PROB = -10.0
     BATCH = 100
@@ -618,8 +640,8 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         S_earlier = S_results[i]
         R_later = R_results[next_idx]
         
-        curr_keys = sorted(list(block_results[i].haplotypes.keys()))
-        next_keys = sorted(list(block_results[next_idx].haplotypes.keys()))
+        curr_keys = hap_keys_cache[i]
+        next_keys = hap_keys_cache[next_idx]
         
         # Build dense transition matrix with hom->hom correction for M-step.
         # For (a,a)->(b,b) states, uses single prior instead of double.
@@ -747,8 +769,8 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         R_later_source = R_results[i]
         S_earlier_dest = S_results[prev_idx]
         
-        curr_keys = sorted(list(block_results[i].haplotypes.keys()))      
-        prev_keys = sorted(list(block_results[prev_idx].haplotypes.keys())) 
+        curr_keys = hap_keys_cache[i]
+        prev_keys = hap_keys_cache[prev_idx]
         
         T_mat = build_dense_transition_matrix(
             current_trans[1][i], curr_keys, prev_keys, i, prev_idx,
@@ -877,6 +899,9 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
             full_samples_data, sample_sites, haps_data, num_processes=num_processes
         )
     
+    # Fix A: Cache sorted hap keys ONCE (never change across EM iterations)
+    hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
+    
     prev_ll = -np.inf
     
     for it in range(max_num_iterations):
@@ -886,13 +911,15 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
 
         # E-Step
         S_res, R_res, current_ll = global_forward_backward_pass(
-            raw_blocks, haps_data, current_trans, space_gap, recomb_rate
+            raw_blocks, haps_data, current_trans, space_gap, recomb_rate,
+            hap_keys_cache=hap_keys_cache
         )
         
         # M-Step
         new_trans = update_transitions_layered_hmm(
             S_res, R_res, haps_data, current_trans, space_gap, 
-            use_standard_baum_welch=use_standard_baum_welch
+            use_standard_baum_welch=use_standard_baum_welch,
+            hap_keys_cache=hap_keys_cache
         )
         
         # Smoothing
