@@ -1059,14 +1059,15 @@ def reconstruct_deduplicated_paths_binned(alpha, beta, ll_tensor, bin_centers, b
     return final_results
 
 # =============================================================================
-# 9. MULTIPROCESSING DRIVER (BINNED VERSION)
+# 9. MULTIPROCESSING DRIVER (SharedMemory + Persistent Pool)
 # =============================================================================
 
 from multiprocessing import shared_memory as _shm
 
-# Worker-local cache for SharedMemory arrays (reconstructed once per worker)
+# Worker-local cache for SharedMemory arrays
 _PAINT_SHARED = {}
-_PAINT_SHM_REFS = []  # Keep references to prevent garbage collection
+_PAINT_SHM_REFS = []
+_PAINT_CHROM_ID = None
 
 def _create_shm_from_array(arr):
     """Create a SharedMemory block from a numpy array. Returns (shm, name, shape, dtype_str)."""
@@ -1080,44 +1081,6 @@ def _array_from_shm(name, shape, dtype_str):
     shm = _shm.SharedMemory(name=name, create=False)
     arr = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
     return shm, arr
-
-def _init_paint_shared(meta):
-    """
-    Pool initializer: reconstruct numpy arrays from SharedMemory.
-    Called once per worker at Pool creation. Only receives metadata (tiny).
-    The actual data lives in SharedMemory (zero-copy across processes).
-    """
-    global _PAINT_SHARED, _PAINT_SHM_REFS
-    _PAINT_SHM_REFS = []
-    
-    # Reconstruct block_samples_data
-    shm, arr = _array_from_shm(meta['samples_name'], meta['samples_shape'], meta['samples_dtype'])
-    _PAINT_SHM_REFS.append(shm)
-    _PAINT_SHARED['block_samples_data'] = arr
-    
-    # Reconstruct positions
-    shm, arr = _array_from_shm(meta['positions_name'], meta['positions_shape'], meta['positions_dtype'])
-    _PAINT_SHM_REFS.append(shm)
-    _PAINT_SHARED['positions'] = arr
-    
-    # Reconstruct haplotype stack -> rebuild dict
-    shm, arr = _array_from_shm(meta['haps_name'], meta['haps_shape'], meta['haps_dtype'])
-    _PAINT_SHM_REFS.append(shm)
-    hap_keys = meta['hap_keys']
-    _PAINT_SHARED['hap_dict'] = {k: arr[i] for i, k in enumerate(hap_keys)}
-    
-    # Reconstruct dense_haps (for founder_data)
-    shm, arr = _array_from_shm(meta['dense_name'], meta['dense_shape'], meta['dense_dtype'])
-    _PAINT_SHM_REFS.append(shm)
-    _PAINT_SHARED['dense_haps'] = arr
-    
-    # Reconstruct dense_pos (for founder_data)
-    shm, arr = _array_from_shm(meta['dense_pos_name'], meta['dense_pos_shape'], meta['dense_pos_dtype'])
-    _PAINT_SHM_REFS.append(shm)
-    _PAINT_SHARED['dense_pos'] = arr
-    
-    # Store scalar params
-    _PAINT_SHARED['params'] = meta['params']
 
 
 def _worker_paint_tolerance_batch_binned(args):
@@ -1184,138 +1147,216 @@ def _worker_paint_tolerance_batch_binned(args):
         
     return results
 
-def paint_samples_tolerance(block_result, sample_probs_matrix, sample_sites, 
-                            recomb_rate=1e-8, switch_penalty=10.0,
-                            robustness_epsilon=1e-2, absolute_margin=5.0,
-                            margin_per_snp=0.0, batch_size=10, num_processes=16,
-                            max_active_paths=2000, double_recomb_factor=1.5,
-                            snps_per_bin=100):
+
+def _init_persistent_paint_worker():
+    """Bare-bones initializer for persistent pool — just sets up globals."""
+    global _PAINT_SHARED, _PAINT_SHM_REFS, _PAINT_CHROM_ID
+    _PAINT_SHARED = {}
+    _PAINT_SHM_REFS = []
+    _PAINT_CHROM_ID = None
+
+def _load_shm_for_chromosome(chrom_id, meta):
     """
-    Paint samples using tolerance Viterbi to find all paths within margin of optimal.
-    
-    BINNED VERSION: Aggregates SNP-level emissions into bins for ~100x memory reduction.
-    
-    Args:
-        block_result: BlockResult with positions and haplotypes dict
-        sample_probs_matrix: (n_samples, n_sites, 3) genotype probabilities
-        sample_sites: Array of site positions in sample_probs_matrix
-        recomb_rate: Per-bp recombination rate
-        switch_penalty: Additional penalty for haplotype switches
-        robustness_epsilon: Numerical stability term
-        absolute_margin: Log-likelihood margin for accepting paths
-        margin_per_snp: Additional margin per SNP (usually 0)
-        batch_size: Samples per worker batch
-        num_processes: Number of parallel workers
-        max_active_paths: Beam width for traceback
-        double_recomb_factor: Multiplier for double-switch cost (default 1.5)
-        snps_per_bin: Number of SNPs to aggregate per bin (default 100)
-        
-    Returns:
-        BlockTolerancePainting with all samples' tolerance results
+    Lazy-load SharedMemory for a new chromosome. Only re-loads when chrom_id changes.
+    Called by workers on first task for each chromosome.
     """
-    positions = block_result.positions
-    n_sites_block = len(positions)
+    global _PAINT_SHARED, _PAINT_SHM_REFS, _PAINT_CHROM_ID
     
-    # Margin is now per-bin, not per-SNP
-    n_bins = max(1, n_sites_block // snps_per_bin)
-    total_margin = absolute_margin + (margin_per_snp * n_bins)
+    if _PAINT_CHROM_ID == chrom_id:
+        return  # Already loaded
     
-    dense_haps, dense_pos = founder_block_to_dense(block_result)
-    founder_data = (dense_haps, dense_pos)
+    # Close old SharedMemory refs (from previous chromosome)
+    for shm_ref in _PAINT_SHM_REFS:
+        try:
+            shm_ref.close()
+        except Exception:
+            pass
+    _PAINT_SHM_REFS = []
+    _PAINT_SHARED = {}
     
-    block_samples_data = analysis_utils.get_sample_data_at_sites_multiple(sample_probs_matrix, sample_sites, positions)
-    num_samples = block_samples_data.shape[0]
+    # Open new SharedMemory blocks
+    shm, arr = _array_from_shm(meta['samples_name'], meta['samples_shape'], meta['samples_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    _PAINT_SHARED['block_samples_data'] = arr
     
-    print(f"Tolerance Painting (BINNED) {num_samples} samples ({n_sites_block} SNPs → {n_bins} bins, "
-          f"Margin={total_margin:.2f}, Cap={max_active_paths}) using {num_processes} workers...")
+    shm, arr = _array_from_shm(meta['positions_name'], meta['positions_shape'], meta['positions_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    _PAINT_SHARED['positions'] = arr
     
-    # Compute parallelism split: cap pool size at number of tasks,
-    # then give each worker enough Numba threads to fill spare cores.
-    # Use num_processes (not os.cpu_count) to respect caller's core budget.
-    num_tasks = math.ceil(num_samples / batch_size)
-    actual_pool_size = min(num_tasks, num_processes)
-    numba_threads = max(1, num_processes // max(actual_pool_size, 1))
+    shm, arr = _array_from_shm(meta['haps_name'], meta['haps_shape'], meta['haps_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    hap_keys = meta['hap_keys']
+    _PAINT_SHARED['hap_dict'] = {k: arr[i] for i, k in enumerate(hap_keys)}
     
-    params = {
-        'recomb_rate': recomb_rate,
-        'switch_penalty': switch_penalty,
-        'robustness_epsilon': robustness_epsilon,
-        'total_margin': total_margin,
-        'max_active_paths': max_active_paths,
-        'double_recomb_factor': double_recomb_factor,
-        'snps_per_bin': snps_per_bin,
-        'numba_threads': numba_threads,
-    }
+    shm, arr = _array_from_shm(meta['dense_name'], meta['dense_shape'], meta['dense_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    _PAINT_SHARED['dense_haps'] = arr
     
-    # Create SharedMemory for all large arrays (zero-copy across processes).
-    # Workers only receive metadata (names, shapes, dtypes) via Pool initializer.
-    # Tasks carry only (indices, start_idx, end_idx) — a few bytes each.
-    shm_blocks = []  # Track for cleanup
+    shm, arr = _array_from_shm(meta['dense_pos_name'], meta['dense_pos_shape'], meta['dense_pos_dtype'])
+    _PAINT_SHM_REFS.append(shm)
+    _PAINT_SHARED['dense_pos'] = arr
     
-    try:
-        # 1. block_samples_data (the big one: 320 × n_sites × 3 × 8 bytes)
-        samples_c = np.ascontiguousarray(block_samples_data)
-        shm_s, s_name, s_shape, s_dtype = _create_shm_from_array(samples_c)
-        shm_blocks.append(shm_s)
+    _PAINT_SHARED['params'] = meta['params']
+    _PAINT_CHROM_ID = chrom_id
+
+
+def _worker_paint_persistent(args):
+    """
+    Worker for persistent pool. Accepts (chrom_id, meta, indices, start_idx, end_idx).
+    Lazy-loads SharedMemory when chromosome changes — meta is tiny (~500 bytes),
+    so including it in each task adds negligible pickle overhead.
+    """
+    chrom_id, meta, indices, start_idx, end_idx = args
+    _load_shm_for_chromosome(chrom_id, meta)
+    # Delegate to the existing worker logic
+    return _worker_paint_tolerance_batch_binned((indices, start_idx, end_idx))
+
+
+class PaintingPoolManager:
+    """
+    Persistent pool manager for painting multiple chromosomes efficiently.
+    
+    Creates the multiprocessing Pool ONCE and reuses it across chromosomes.
+    SharedMemory is created per chromosome; workers lazy-initialize when they
+    detect a new chromosome ID.
+    
+    Usage:
+        with paint_samples.PaintingPoolManager(num_processes=112) as painter:
+            for r_name in region_keys:
+                result = painter.paint_chromosome(
+                    block_result, sample_probs_matrix, sample_sites, ...
+                )
+    
+    Saves ~10s per chromosome by avoiding repeated Pool creation/teardown.
+    """
+    
+    def __init__(self, num_processes=16):
+        self.num_processes = num_processes
+        self.pool = _mp.Pool(num_processes, initializer=_init_persistent_paint_worker)
+        self._chrom_counter = 0
+    
+    def paint_chromosome(self, block_result, sample_probs_matrix, sample_sites,
+                         recomb_rate=1e-8, switch_penalty=10.0,
+                         robustness_epsilon=1e-2, absolute_margin=5.0,
+                         margin_per_snp=0.0, batch_size=1, 
+                         max_active_paths=2000, double_recomb_factor=1.5,
+                         snps_per_bin=100):
+        """
+        Paint one chromosome using the persistent pool.
         
-        # 2. positions
-        positions_arr = np.ascontiguousarray(np.array(positions, dtype=np.int64))
-        shm_p, p_name, p_shape, p_dtype = _create_shm_from_array(positions_arr)
-        shm_blocks.append(shm_p)
+        Returns:
+            BlockTolerancePainting with all samples' tolerance results
+        """
+        self._chrom_counter += 1
+        chrom_id = self._chrom_counter
         
-        # 3. haplotypes — stack into one contiguous array
-        hap_keys_list = sorted(block_result.haplotypes.keys())
-        hap_arrays = [block_result.haplotypes[k] for k in hap_keys_list]
-        hap_stack = np.ascontiguousarray(np.stack(hap_arrays))
-        shm_h, h_name, h_shape, h_dtype = _create_shm_from_array(hap_stack)
-        shm_blocks.append(shm_h)
+        positions = block_result.positions
+        n_sites_block = len(positions)
         
-        # 4. dense_haps
-        dense_c = np.ascontiguousarray(dense_haps)
-        shm_d, d_name, d_shape, d_dtype = _create_shm_from_array(dense_c)
-        shm_blocks.append(shm_d)
+        n_bins = max(1, n_sites_block // snps_per_bin)
+        total_margin = absolute_margin + (margin_per_snp * n_bins)
         
-        # 5. dense_pos
-        dpos_c = np.ascontiguousarray(np.array(dense_pos, dtype=np.int64))
-        shm_dp, dp_name, dp_shape, dp_dtype = _create_shm_from_array(dpos_c)
-        shm_blocks.append(shm_dp)
+        dense_haps, dense_pos = founder_block_to_dense(block_result)
         
-        # Metadata for initializer (tiny — just names, shapes, dtypes, scalars)
-        init_meta = {
-            'samples_name': s_name, 'samples_shape': s_shape, 'samples_dtype': s_dtype,
-            'positions_name': p_name, 'positions_shape': p_shape, 'positions_dtype': p_dtype,
-            'haps_name': h_name, 'haps_shape': h_shape, 'haps_dtype': h_dtype,
-            'hap_keys': hap_keys_list,
-            'dense_name': d_name, 'dense_shape': d_shape, 'dense_dtype': d_dtype,
-            'dense_pos_name': dp_name, 'dense_pos_shape': dp_shape, 'dense_pos_dtype': dp_dtype,
-            'params': params,
+        block_samples_data = analysis_utils.get_sample_data_at_sites_multiple(
+            sample_probs_matrix, sample_sites, positions
+        )
+        num_samples = block_samples_data.shape[0]
+        
+        num_tasks = math.ceil(num_samples / batch_size)
+        actual_pool_size = min(num_tasks, self.num_processes)
+        numba_threads = max(1, self.num_processes // max(actual_pool_size, 1))
+        
+        print(f"Tolerance Painting (BINNED) {num_samples} samples ({n_sites_block} SNPs → {n_bins} bins, "
+              f"Margin={total_margin:.2f}, Cap={max_active_paths}) using {self.num_processes} workers...")
+        
+        params = {
+            'recomb_rate': recomb_rate,
+            'switch_penalty': switch_penalty,
+            'robustness_epsilon': robustness_epsilon,
+            'total_margin': total_margin,
+            'max_active_paths': max_active_paths,
+            'double_recomb_factor': double_recomb_factor,
+            'snps_per_bin': snps_per_bin,
+            'numba_threads': numba_threads,
         }
         
-        # Tasks carry only lightweight indices
-        tasks = []
-        for start_idx in range(0, num_samples, batch_size):
-            end_idx = min(start_idx + batch_size, num_samples)
-            indices = list(range(start_idx, end_idx))
-            tasks.append((indices, start_idx, end_idx))
+        # Create SharedMemory for this chromosome
+        shm_blocks = []
         
-        all_sample_paintings = []
-        with _mp.Pool(actual_pool_size, initializer=_init_paint_shared,
-                       initargs=(init_meta,)) as pool:
-            for batch_result in tqdm(pool.imap(_worker_paint_tolerance_batch_binned, tasks), total=len(tasks)):
-                all_sample_paintings.extend(batch_result)
-    
-    finally:
-        # Clean up SharedMemory (unlink frees the OS-level shared memory)
-        for shm in shm_blocks:
-            try:
-                shm.close()
-                shm.unlink()
-            except Exception:
-                pass
+        try:
+            samples_c = np.ascontiguousarray(block_samples_data)
+            shm_s, s_name, s_shape, s_dtype = _create_shm_from_array(samples_c)
+            shm_blocks.append(shm_s)
             
-    all_sample_paintings.sort(key=lambda x: x.sample_index)
-    range_tuple = (int(positions[0]), int(positions[-1]))
-    return BlockTolerancePainting(range_tuple, all_sample_paintings)
+            positions_arr = np.ascontiguousarray(np.array(positions, dtype=np.int64))
+            shm_p, p_name, p_shape, p_dtype = _create_shm_from_array(positions_arr)
+            shm_blocks.append(shm_p)
+            
+            hap_keys_list = sorted(block_result.haplotypes.keys())
+            hap_arrays = [block_result.haplotypes[k] for k in hap_keys_list]
+            hap_stack = np.ascontiguousarray(np.stack(hap_arrays))
+            shm_h, h_name, h_shape, h_dtype = _create_shm_from_array(hap_stack)
+            shm_blocks.append(shm_h)
+            
+            dense_c = np.ascontiguousarray(dense_haps)
+            shm_d, d_name, d_shape, d_dtype = _create_shm_from_array(dense_c)
+            shm_blocks.append(shm_d)
+            
+            dpos_c = np.ascontiguousarray(np.array(dense_pos, dtype=np.int64))
+            shm_dp, dp_name, dp_shape, dp_dtype = _create_shm_from_array(dpos_c)
+            shm_blocks.append(shm_dp)
+            
+            meta = {
+                'samples_name': s_name, 'samples_shape': s_shape, 'samples_dtype': s_dtype,
+                'positions_name': p_name, 'positions_shape': p_shape, 'positions_dtype': p_dtype,
+                'haps_name': h_name, 'haps_shape': h_shape, 'haps_dtype': h_dtype,
+                'hap_keys': hap_keys_list,
+                'dense_name': d_name, 'dense_shape': d_shape, 'dense_dtype': d_dtype,
+                'dense_pos_name': dp_name, 'dense_pos_shape': dp_shape, 'dense_pos_dtype': dp_dtype,
+                'params': params,
+            }
+            
+            # Tasks carry chrom_id + meta (meta is ~500 bytes, negligible)
+            tasks = []
+            for start_idx in range(0, num_samples, batch_size):
+                end_idx = min(start_idx + batch_size, num_samples)
+                indices = list(range(start_idx, end_idx))
+                tasks.append((chrom_id, meta, indices, start_idx, end_idx))
+            
+            all_sample_paintings = []
+            for batch_result in tqdm(
+                self.pool.imap_unordered(_worker_paint_persistent, tasks),
+                total=len(tasks)
+            ):
+                all_sample_paintings.extend(batch_result)
+        
+        finally:
+            for shm in shm_blocks:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
+        
+        all_sample_paintings.sort(key=lambda x: x.sample_index)
+        range_tuple = (int(positions[0]), int(positions[-1]))
+        return BlockTolerancePainting(range_tuple, all_sample_paintings)
+    
+    def close(self):
+        """Terminate and join the persistent pool."""
+        try:
+            self.pool.terminate()
+            self.pool.join()
+        except Exception:
+            pass
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        self.close()
+
 
 # =============================================================================
 # 10. VISUALIZATIONS (unchanged)

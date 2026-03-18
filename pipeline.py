@@ -1030,7 +1030,7 @@ if __name__ == '__main__':
             recomb_rate=5e-8,
             switch_penalty=10.0,
             absolute_margin=5.0,
-            batch_size=10,
+            batch_size=1,
             num_processes=n_processes
         )
 
