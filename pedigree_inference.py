@@ -55,6 +55,70 @@ def _init_pedigree_shared(shared_dict):
     _PEDIGREE_SHARED.clear()
     _PEDIGREE_SHARED.update(shared_dict)
 
+
+def _check_trio_consistency_worker(args):
+    """
+    Worker: check one trio's consistency across all chromosomes.
+    Reads tolerance paintings from _PEDIGREE_SHARED (fork COW).
+    Returns (df_idx, child_name, mean_explained).
+    """
+    df_idx, child_name, child_i, p1_i, p2_i = args
+    contig_data_list = _PEDIGREE_SHARED['contig_data_list']
+    step = _PEDIGREE_SHARED['step']
+
+    fracs = []
+    for contig_data in contig_data_list:
+        tol = contig_data['tolerance_painting']
+        child_tol = tol[child_i]
+        p1_tol = tol[p1_i]
+        p2_tol = tol[p2_i]
+
+        child_path = child_tol.paths[0] if child_tol.paths else None
+        p1_path = p1_tol.paths[0] if p1_tol.paths else None
+        p2_path = p2_tol.paths[0] if p2_tol.paths else None
+
+        if child_path and p1_path and p2_path:
+            frac = _check_trio_on_chromosome(child_path, p1_path, p2_path, step=step)
+        else:
+            frac = 0.0
+        fracs.append(frac)
+
+    return df_idx, child_name, float(np.mean(fracs))
+
+
+def _check_trio_on_chromosome(child_painting, p1_painting, p2_painting, step=1000):
+    """Check fraction of child's genome explained by the two parents on one chromosome."""
+    if not child_painting.chunks:
+        return 0.0
+    start = child_painting.chunks[0].start
+    end = child_painting.chunks[-1].end
+    explained = 0
+    total = 0
+    for pos in range(start, end, step):
+        ch1, ch2 = -1, -1
+        for c in child_painting.chunks:
+            if c.start <= pos < c.end:
+                ch1, ch2 = c.hap1, c.hap2
+                break
+        a1, a2 = -1, -1
+        for c in p1_painting.chunks:
+            if c.start <= pos < c.end:
+                a1, a2 = c.hap1, c.hap2
+                break
+        b1, b2 = -1, -1
+        for c in p2_painting.chunks:
+            if c.start <= pos < c.end:
+                b1, b2 = c.hap1, c.hap2
+                break
+        if -1 in (ch1, ch2, a1, a2, b1, b2):
+            continue
+        total += 1
+        from_a = {a1, a2}
+        from_b = {b1, b2}
+        if (ch1 in from_a and ch2 in from_b) or (ch1 in from_b and ch2 in from_a):
+            explained += 1
+    return explained / total if total > 0 else 0.0
+
 # =============================================================================
 # 1. DATA STRUCTURES
 # =============================================================================
@@ -141,6 +205,97 @@ class PedigreeResult:
             self._recalculate_generations()
         except Exception as e:
             print(f"[Auto-Cutoff] Failed: {e}")
+
+    def perform_consistency_cutoff(self, contig_data_list, threshold=0.80, step=1000,
+                                     n_workers=None, verbose=True):
+        """
+        Strip parents from individuals whose trio is not consistently explained
+        across chromosomes.
+
+        For each individual with assigned parents, checks on every chromosome
+        what fraction of the child's genome can be explained as inheriting one
+        haplotype from each parent. Real parent-child trios score ~95-100%.
+        Spurious trios (e.g. siblings misidentified as parents) score ~30-55%.
+
+        Parallelized: each trio is checked by a separate worker across all
+        chromosomes simultaneously.
+
+        Args:
+            contig_data_list: List of dicts with 'tolerance_painting' key
+                              (BlockTolerancePainting objects, one per chromosome)
+            threshold: Minimum mean_explained fraction to keep parents (default 0.80)
+            step: Base-pair sampling interval for the consistency check
+            n_workers: Number of parallel workers (default: all available cores)
+            verbose: Print details
+        """
+        import multiprocessing as mp
+
+        if n_workers is None:
+            n_workers = os.cpu_count() or 4
+
+        name_to_idx = {s: i for i, s in enumerate(self.samples)}
+
+        # Find all individuals with assigned parents
+        trios = []
+        for idx, row in self.relationships.iterrows():
+            p1, p2 = row['Parent1'], row['Parent2']
+            if (pd.notna(p1) and pd.notna(p2) and
+                    p1 in name_to_idx and p2 in name_to_idx):
+                trios.append({
+                    'df_idx': idx,
+                    'child': row['Sample'],
+                    'child_i': name_to_idx[row['Sample']],
+                    'p1_i': name_to_idx[p1],
+                    'p2_i': name_to_idx[p2],
+                })
+
+        if not trios:
+            if verbose:
+                print("[Consistency-Cutoff] No trios to check.")
+            return
+
+        if verbose:
+            print(f"[Consistency-Cutoff] Checking {len(trios)} trios across "
+                  f"{len(contig_data_list)} chromosomes ({n_workers} workers)...")
+
+        # Store tolerance paintings in shared dict for fork COW
+        shared = {
+            'contig_data_list': contig_data_list,
+            'step': step,
+        }
+
+        # Build tasks: one per trio
+        tasks = []
+        for t in trios:
+            tasks.append((t['df_idx'], t['child'], t['child_i'], t['p1_i'], t['p2_i']))
+
+        ctx = mp.get_context('fork')
+        actual_workers = min(n_workers, len(tasks))
+
+        with ctx.Pool(processes=actual_workers,
+                      initializer=_init_pedigree_shared,
+                      initargs=(shared,)) as pool:
+            results = list(tqdm(
+                pool.imap_unordered(_check_trio_consistency_worker, tasks),
+                total=len(tasks),
+                desc="Checking trio consistency"
+            ))
+
+        # Apply threshold
+        stripped = 0
+        for df_idx, child_name, mean_expl in results:
+            if mean_expl < threshold:
+                self.relationships.at[df_idx, 'Parent1'] = None
+                self.relationships.at[df_idx, 'Parent2'] = None
+                stripped += 1
+                if verbose:
+                    print(f"[Consistency-Cutoff] Stripped {child_name}: "
+                          f"mean_explained={mean_expl*100:.1f}%")
+
+        if verbose:
+            print(f"[Consistency-Cutoff] Stripped {stripped}/{len(trios)} trios "
+                  f"(threshold={threshold*100:.0f}%)")
+        self._recalculate_generations()
 
     def resolve_cycles(self, verbose=True):
         G = nx.DiGraph()
@@ -1285,7 +1440,7 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
 
     res = PedigreeResult(sample_ids, rel_df, parent_candidates, None, [], None, None, 
                          trio_scores_map, global_total_bins)
-    res.perform_automatic_cutoff()
+    res.perform_consistency_cutoff(contig_data_list, n_workers=n_workers)
     res.resolve_cycles()
     return res
 

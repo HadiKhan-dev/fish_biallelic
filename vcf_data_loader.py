@@ -3,11 +3,35 @@ import thread_config
 import numpy as np
 import warnings
 from cyvcf2 import VCF
-from multiprocess import Pool
+import multiprocessing as _mp
+import multiprocessing.pool
 from functools import partial
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid="ignore")
+
+# =============================================================================
+# FORKSERVER POOL
+# =============================================================================
+# Workers spawn from a lightweight forkserver process (~500 MB) instead of
+# forking from the parent, which may hold 100+ GB after loading multiple
+# chromosomes.  This eliminates the O(parent_RSS) fork overhead that causes
+# the loader to slow down linearly as chromosomes accumulate in memory.
+#
+# Uses stdlib multiprocessing (not dill-based multiprocess) because
+# multiprocess doesn't properly support forkserver.  All worker arguments
+# (vcf_path, chrom, start, end, etc.) are basic types — no dill needed.
+
+try:
+    _forkserver_ctx = _mp.get_context('forkserver')
+except (ValueError, AttributeError):
+    _forkserver_ctx = _mp.get_context('fork')
+
+class _ForkserverPool(multiprocessing.pool.Pool):
+    """A Pool using forkserver context."""
+    def __init__(self, *args, **kwargs):
+        kwargs['context'] = _forkserver_ctx
+        super().__init__(*args, **kwargs)
 
 class GenomicData:
     """
@@ -219,15 +243,31 @@ def cleanup_block_reads_list(vcf_file_path, contig,
     else:
         selected_coords = all_coords[start_block_idx:end_block_idx]
         
-    # 3. Run Multiprocessing
+    # 3. Run Multiprocessing (forkserver — immune to parent memory growth)
     # Use partial to pass the keyword arguments to the worker
     worker = partial(process_single_block, 
                      min_frequency=min_frequency, 
                      read_error_prob=read_error_prob, 
                      min_total_reads=min_total_reads)
 
-    with Pool(processes=num_processes) as pool:
-        results = pool.starmap(worker, selected_coords)
+    # Prevent forkserver workers from re-executing the entry script
+    import sys as _sys
+    _main_mod = _sys.modules.get('__main__')
+    _saved_main_file = getattr(_main_mod, '__file__', None)
+    _saved_main_spec = getattr(_main_mod, '__spec__', None)
+    if _main_mod is not None:
+        if hasattr(_main_mod, '__file__'):
+            del _main_mod.__file__
+        _main_mod.__spec__ = None
+
+    try:
+        with _ForkserverPool(processes=num_processes) as pool:
+            results = pool.starmap(worker, selected_coords)
+    finally:
+        if _main_mod is not None:
+            if _saved_main_file is not None:
+                _main_mod.__file__ = _saved_main_file
+            _main_mod.__spec__ = _saved_main_spec
     
     # 4. Unpack Results
     # FIX: We NO LONGER filter out empty blocks. 
