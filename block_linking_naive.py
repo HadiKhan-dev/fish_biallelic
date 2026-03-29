@@ -3,8 +3,11 @@ import thread_config
 import numpy as np
 import math
 import copy
-from multiprocess import Pool
+import multiprocessing as _mp
+import multiprocessing.pool
+from multiprocessing import shared_memory as _shm
 import warnings
+from contextlib import contextmanager
 from functools import partial
 
 import analysis_utils
@@ -14,69 +17,165 @@ import block_haplotypes
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
 
-# --- SHARED MEMORY MANAGEMENT ---
+# =============================================================================
+# FORKSERVER POOL
+# =============================================================================
+# Workers spawn from a lightweight forkserver process (~500 MB) instead of
+# forking from the parent, which may hold 100+ GB after loading multiple
+# chromosomes.  This eliminates the O(parent_RSS) fork overhead that caused
+# the naive linker to slow down linearly as chromosomes accumulated.
+#
+# Block data is passed directly as task arguments (~20 KB per block after
+# stripping probs_array), NOT via pool initializer.  This avoids the
+# O(num_workers × data_size) serialization cost that made the first
+# forkserver attempt 10x slower.
+#
+# For pool 6 (get_full_match_probs), large numpy arrays are placed in
+# POSIX SharedMemory (/dev/shm) for zero-copy worker access.
+
+try:
+    _forkserver_ctx = _mp.get_context('forkserver')
+except (ValueError, AttributeError):
+    _forkserver_ctx = _mp.get_context('fork')
+
+class _ForkserverPool(multiprocessing.pool.Pool):
+    """A Pool using forkserver context."""
+    def __init__(self, *args, **kwargs):
+        kwargs['context'] = _forkserver_ctx
+        super().__init__(*args, **kwargs)
+
+@contextmanager
+def _safe_forkserver_pool(processes, initializer=None, initargs=()):
+    """
+    Create a forkserver pool with __main__ safety.
+    
+    Temporarily clears __main__.__file__ so forkserver workers don't
+    re-execute the entry script.  Restores it on exit.
+    """
+    import sys as _sys
+    _main_mod = _sys.modules.get('__main__')
+    _saved_file = getattr(_main_mod, '__file__', None)
+    _saved_spec = getattr(_main_mod, '__spec__', None)
+    if _main_mod is not None:
+        if hasattr(_main_mod, '__file__'):
+            del _main_mod.__file__
+        _main_mod.__spec__ = None
+    try:
+        with _ForkserverPool(processes=processes, initializer=initializer, initargs=initargs) as pool:
+            yield pool
+    finally:
+        if _main_mod is not None:
+            if _saved_file is not None:
+                _main_mod.__file__ = _saved_file
+            _main_mod.__spec__ = _saved_spec
+
+
+def _strip_block(block):
+    """
+    Create a lightweight copy of a BlockResult without probs_array.
+    
+    probs_array is ~1.5 MB per block (320 samples × 200 sites × 3 × 8 bytes)
+    but is never used by the naive linker's workers.  Stripping it reduces
+    each block from ~1.5 MB to ~20 KB, making direct task arguments practical.
+    Keeps reads_count_matrix (used by overlap merge in pools 1-3, 5).
+    """
+    return block_haplotypes.BlockResult(
+        positions=block.positions,
+        haplotypes=block.haplotypes,
+        keep_flags=block.keep_flags,
+        reads_count_matrix=block.reads_count_matrix,  # keep — used by overlap merge
+        probs_array=None,
+    )
+
+
+def _strip_block_light(block):
+    """
+    Create a minimal copy of a BlockResult without probs_array OR reads_count_matrix.
+    
+    Used by Pool 4 where reads are placed in SharedMemory separately.
+    The resulting block is ~5-10 KB (just positions, haplotypes, keep_flags).
+    """
+    return block_haplotypes.BlockResult(
+        positions=block.positions,
+        haplotypes=block.haplotypes,
+        keep_flags=block.keep_flags,
+        reads_count_matrix=None,
+        probs_array=None,
+    )
+
+
+# --- SHARED MEMORY MANAGEMENT (Pools 4 and 6 — large numpy arrays) ---
 
 _SHARED_DATA = {}
+_SHM_REFS = []
 
 def _init_shared_data(data_dict):
     """
-    Initializer for the worker pool.
-    Updates the global _SHARED_DATA dict in the worker process.
+    Initializer for forkserver pool workers.
+    Attaches to POSIX SharedMemory segments for zero-copy numpy access.
+    Non-SharedMemory values are stored directly.
     """
-    global _SHARED_DATA
+    global _SHARED_DATA, _SHM_REFS
     _SHARED_DATA.clear()
-    _SHARED_DATA.update(data_dict)
+    for ref in _SHM_REFS:
+        try: ref.close()
+        except Exception: pass
+    _SHM_REFS = []
 
-# --- WORKER WRAPPERS ---
+    for key, meta in data_dict.items():
+        if isinstance(meta, dict) and 'shm_name' in meta:
+            # SharedMemory-backed array
+            shm = _shm.SharedMemory(name=meta['shm_name'], create=False)
+            _SHM_REFS.append(shm)
+            _SHARED_DATA[key] = np.ndarray(meta['shape'], dtype=np.dtype(meta['dtype']), buffer=shm.buf)
+        else:
+            # Small metadata — passed directly
+            _SHARED_DATA[key] = meta
 
-def _worker_match_overlap(i):
+def _create_shm_array(arr, label=""):
+    """Copy a numpy array into POSIX SharedMemory. Returns (shm_handle, metadata_dict)."""
+    arr = np.ascontiguousarray(arr)
+    shm = _shm.SharedMemory(create=True, size=arr.nbytes)
+    view = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
+    np.copyto(view, arr)
+    meta = {'shm_name': shm.name, 'shape': arr.shape, 'dtype': str(arr.dtype)}
+    return shm, meta
+
+
+# --- DIRECT WORKER FUNCTIONS (Pools 1–5) ---
+# Workers receive block data as task arguments, NOT from shared memory.
+# This works with forkserver because the per-task pickle is small (~20 KB
+# per stripped block), unlike the old initializer approach which pickled
+# ALL blocks for every worker process.
+
+def _worker_match_overlap_direct(args):
     """
-    Worker function to calculate overlap similarity between block[i] and block[i+1].
-    Accesses data from _SHARED_DATA to avoid serialization.
-    
-    If there is no overlap (gap between blocks), returns low-score "bridge" edges
-    to maintain graph connectivity.
+    Pool 1 worker: overlap similarity between block[i] and block[i+1].
+    Receives both blocks directly as arguments.
     """
-    blocks = _SHARED_DATA['blocks']
-    gap_bridge_score = 1.0  # Low score to allow paths through gaps
-    
-    # Get the two blocks
-    curr_block = blocks[i]
-    next_block = blocks[i+1]
-    
-    # Check for empty blocks (Redundant if filtered upstream, but safe)
+    i, curr_block, next_block = args
+    gap_bridge_score = 1.0
+
     if len(curr_block.positions) == 0 or len(next_block.positions) == 0:
         return {}
 
-    # 1. Determine Overlap Region
     start_position_next = next_block.positions[0]
-    
-    # Assuming positions are sorted, find where next starts in current
     overlap_start_idx = np.searchsorted(curr_block.positions, start_position_next)
-    
     overlap_length = len(curr_block.positions) - overlap_start_idx
-    
-    # Handle NO OVERLAP case (gap between blocks)
+
     if overlap_length <= 0:
-        # Create low-score bridge edges to maintain connectivity
         bridge_edges = {}
-        curr_haps = curr_block.haplotypes
-        next_haps = next_block.haplotypes
-        
-        for curr_name in curr_haps.keys():
-            for next_name in next_haps.keys():
+        for curr_name in curr_block.haplotypes.keys():
+            for next_name in next_block.haplotypes.keys():
                 bridge_edges[((i, curr_name), (i+1, next_name))] = gap_bridge_score
-        
         return bridge_edges
 
-    # 2. Extract Haplotype Slices
     curr_haps = curr_block.haplotypes
     next_haps = next_block.haplotypes
-    
+
     cur_ends = {k: curr_haps[k][overlap_start_idx:] for k in curr_haps.keys()}
     next_ends = {k: next_haps[k][:overlap_length] for k in next_haps.keys()}
-    
-    # 3. Handle Keep Flags
+
     if curr_block.keep_flags is not None:
         cur_keep_flags = np.array(curr_block.keep_flags[overlap_start_idx:], dtype=bool)
     else:
@@ -89,82 +188,121 @@ def _worker_match_overlap(i):
         next_keep_flags = np.array(next_block.keep_flags[:overlap_length], dtype=bool)
     else:
         next_keep_flags = np.ones(overlap_length, dtype=bool)
-    
-    # Align lengths
+
     min_len = min(len(cur_keep_flags), len(next_keep_flags))
     cur_keep_flags = cur_keep_flags[:min_len]
     next_keep_flags = next_keep_flags[:min_len]
-    
-    # 4. Calculate Pairwise Similarities
+
     similarities = {}
-    
     for first_name in cur_ends.keys():
         first_new_hap = cur_ends[first_name][:min_len][cur_keep_flags]
-        
         for second_name in next_ends.keys():
             second_new_hap = next_ends[second_name][:min_len][next_keep_flags]
-            
             common_size = len(first_new_hap)
-            
             if common_size > 0:
                 haps_dist = 100 * analysis_utils.calc_distance(
-                    first_new_hap,
-                    second_new_hap,
-                    calc_type="haploid"
-                ) / common_size
+                    first_new_hap, second_new_hap, calc_type="haploid") / common_size
             else:
                 haps_dist = 0
-            
-            # Convert distance to similarity score
-            if haps_dist > 50:
-                similarity = 0
-            else:
-                similarity = 2 * (50 - haps_dist)
-            
+            similarity = 0 if haps_dist > 50 else 2 * (50 - haps_dist)
             similarities[((i, first_name), (i+1, second_name))] = similarity
-            
-    # 5. Transform to final score (Squared)
+
     transform_similarities = {}
     for item, sim_val in similarities.items():
         val = sim_val / 100.0
-        transformed = 100 * (val**2)
-        transform_similarities[item] = transformed
-        
+        transform_similarities[item] = 100 * (val**2)
+
     return transform_similarities
 
-def _worker_combined_best_hap_matches(block_idx):
-    return hap_statistics.combined_best_hap_matches(_SHARED_DATA['blocks'][block_idx])
 
-def _worker_hap_matching_comparison(block_idx_1, block_idx_2):
-    """
-    UPDATED WORKER: Looks up match_results from _SHARED_DATA
-    instead of accepting it as a pickled argument.
-    """
+def _worker_combined_best_hap_matches_direct(args):
+    """Pool 2 worker: best hap matches for a single block."""
+    block_idx, block = args
+    return hap_statistics.combined_best_hap_matches(block)
+
+
+def _worker_hap_matching_comparison_direct(args):
+    """Pool 3 worker: hap matching comparison between two blocks."""
+    block_idx_1, block_idx_2, block_1, block_2, matches_1, matches_2 = args
+    # Build minimal containers that hap_matching_comparison can index into
+    haps_data = {block_idx_1: block_1, block_idx_2: block_2}
+    matches_data = {block_idx_1: matches_1, block_idx_2: matches_2}
+
+    class _IndexableDict:
+        """Allows dict[int] access for hap_matching_comparison."""
+        def __init__(self, d): self._d = d
+        def __getitem__(self, idx): return self._d[idx]
+
     return hap_statistics.hap_matching_comparison(
-        _SHARED_DATA['blocks'], 
-        _SHARED_DATA['match_results'], 
-        block_idx_1, 
+        _IndexableDict(haps_data),
+        _IndexableDict(matches_data),
+        block_idx_1,
         block_idx_2
     )
 
-def _worker_get_similarities(block_idx):
-    return hap_statistics.get_block_hap_similarities(_SHARED_DATA['blocks'][block_idx])
 
-def _worker_combine_chained_blocks(chain_data, read_error_prob, min_total_reads):
+def _worker_combine_chained_blocks_direct(args):
+    """
+    Pool 4 worker: stitch a chain of blocks into one long haplotype.
+    Reads light blocks from _SHARED_DATA, reconstructs reads_count_matrix
+    from SharedMemory on demand.
+    """
+    chain_data, read_error_prob, min_total_reads = args
+    
+    light_blocks = _SHARED_DATA['blocks']
+    reads_index = _SHARED_DATA['reads_index']
+    reads_flat = _SHARED_DATA.get('reads_flat')  # may be None if no reads exist
+    
+    # Reconstruct blocks with reads for the blocks this chain touches
+    # (only ~10-20 blocks per chain, not all 850)
+    needed_indices = set(b[0] for b in chain_data)
+    # Also need adjacent blocks for overlap calculation
+    for b in chain_data:
+        idx = b[0]
+        if idx > 0:
+            needed_indices.add(idx - 1)
+        if idx < len(light_blocks) - 1:
+            needed_indices.add(idx + 1)
+    
+    # Build full block list with reads restored where needed
+    full_blocks = []
+    for i in range(len(light_blocks)):
+        lb = light_blocks[i]
+        if i in needed_indices and reads_index[i] is not None and reads_flat is not None:
+            offset, n_samples, n_sites = reads_index[i]
+            rcm = reads_flat[offset : offset + n_samples * n_sites * 2].reshape(n_samples, n_sites, 2)
+        else:
+            rcm = lb.reads_count_matrix  # None
+        full_blocks.append(block_haplotypes.BlockResult(
+            positions=lb.positions,
+            haplotypes=lb.haplotypes,
+            keep_flags=lb.keep_flags,
+            reads_count_matrix=rcm,
+            probs_array=None,
+        ))
+    
+    reconstituted = block_haplotypes.BlockResults(full_blocks)
     return combine_chained_blocks_to_single_hap(
-        _SHARED_DATA['blocks'], chain_data, 
-        read_error_prob=read_error_prob, 
+        reconstituted, chain_data,
+        read_error_prob=read_error_prob,
         min_total_reads=min_total_reads
     )
 
+
+def _worker_get_similarities_direct(args):
+    """Pool 5 worker: similarity matrix for a single block."""
+    block_idx, block = args
+    return hap_statistics.get_block_hap_similarities(block)
+
+
 def _worker_get_match_probabilities(sample_idx, recomb_rate, value_error_rate):
     """
-    Worker for get_full_match_probs.
-    Fetches specific sample probability matrix and full genotypes from shared memory.
+    Pool 6 worker: match sample to haplotype combinations.
+    Accesses large arrays from POSIX SharedMemory (zero-copy).
     """
     return get_match_probabilities(
         _SHARED_DATA['genotypes'],
-        _SHARED_DATA['sample_probs'][sample_idx], # Access specific sample by index
+        _SHARED_DATA['sample_probs'][sample_idx],
         _SHARED_DATA['locations'],
         keep_flags=_SHARED_DATA.get('keep_flags'),
         recomb_rate=recomb_rate,
@@ -178,7 +316,8 @@ def match_haplotypes_by_overlap_probabalistic(block_level_haps, num_processes=16
     Probabilistic version of match_haplotypes_by_overlap.
     Returns likelihood scores for edges.
     
-    Optimized: Parallelized using shared memory.
+    Forkserver + direct args: each task receives only the two blocks it needs
+    (~20 KB each after stripping probs_array).
     """
     
     # 1. Metadata Setup (Fast, sequential)
@@ -192,19 +331,23 @@ def match_haplotypes_by_overlap_probabalistic(block_level_haps, num_processes=16
     if num_junctions < 1:
         return (block_haps_names, [])
 
-    # 2. Parallel Processing
-    shared_context = {'blocks': block_level_haps}
+    # 2. Parallel Processing — pass stripped block pairs as task arguments
+    task_args = [
+        (i, _strip_block(block_level_haps[i]), _strip_block(block_level_haps[i+1]))
+        for i in range(num_junctions)
+    ]
     
-    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
-        # We process every junction i -> i+1
-        matches = processing_pool.map(_worker_match_overlap, range(num_junctions))
+    with _safe_forkserver_pool(num_processes) as pool:
+        matches = pool.map(_worker_match_overlap_direct, task_args)
             
     return (block_haps_names, matches)
        
 def match_haplotypes_by_samples_probabalistic(full_haps_data, num_processes=16):
     """
     Probabilistic version of match_haplotypes_by_samples.
-    Optimized: Uses shared memory and split pools.
+    
+    Forkserver + direct args: Phase 1 sends one stripped block per task;
+    Phase 2 sends two stripped blocks + their match results per task.
     """
         
     num_blocks = len(full_haps_data)
@@ -215,23 +358,27 @@ def match_haplotypes_by_samples_probabalistic(full_haps_data, num_processes=16):
         for nm in full_haps_data[i].haplotypes.keys():
             block_haps_names[-1].append((i,nm))
     
-    # --- PHASE 1 ---
-    shared_context_1 = {'blocks': full_haps_data}
+    # --- PHASE 1: one block per task ---
+    task_args_1 = [(i, _strip_block(full_haps_data[i])) for i in range(num_blocks)]
 
-    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_1,)) as processing_pool:
-        match_best_results = processing_pool.map(
-            _worker_combined_best_hap_matches,
-            range(num_blocks)
+    with _safe_forkserver_pool(num_processes) as pool:
+        match_best_results = pool.map(
+            _worker_combined_best_hap_matches_direct,
+            task_args_1
         )
         
-    # --- PHASE 2 ---
-    shared_context_2 = {'blocks': full_haps_data, 'match_results': match_best_results}
+    # --- PHASE 2: two adjacent blocks + their match results per task ---
+    task_args_2 = [
+        (i, i+1,
+         _strip_block(full_haps_data[i]), _strip_block(full_haps_data[i+1]),
+         match_best_results[i], match_best_results[i+1])
+        for i in range(num_blocks - 1)
+    ]
     
-    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context_2,)) as processing_pool:
-        args_list = [(i, i+1) for i in range(num_blocks - 1)]
-        neighbouring_usages = processing_pool.starmap(
-            _worker_hap_matching_comparison,
-            args_list
+    with _safe_forkserver_pool(num_processes) as pool:
+        neighbouring_usages = pool.map(
+            _worker_hap_matching_comparison_direct,
+            task_args_2
         )
     
     forward_match_scores = [neighbouring_usages[x][0] for x in range(num_blocks-1)]
@@ -539,19 +686,71 @@ def combine_all_blocks_to_long_haps(all_haps,
                                     num_processes=16):
     """
     Multithreaded stitching of all long haplotypes.
-    Optimized: Uses shared memory for all_haps.
+    
+    Forkserver + POSIX SharedMemory: light blocks (positions, haplotypes,
+    keep_flags) are sent via pool initializer (~5 KB per block).
+    reads_count_matrices are concatenated into a single SharedMemory buffer
+    (~500 KB per block × N blocks) for zero-copy worker access.
+    Only ~6 tasks (one per long hap), each receives just chain_data + scalars.
     """
     if not hap_blocks_list:
         return [[], []]
 
-    shared_context = {'blocks': all_haps}
+    # 1. Strip blocks to light versions (no reads, no probs)
+    light_blocks = [_strip_block_light(b) for b in all_haps]
     
-    worker = partial(_worker_combine_chained_blocks, 
-                     read_error_prob=read_error_prob, 
-                     min_total_reads=min_total_reads)
+    # 2. Concatenate all reads_count_matrices into a single SharedMemory buffer
+    reads_index = []  # block_idx -> (offset, n_samples, n_sites) or None
+    reads_chunks = []
+    offset = 0
+    reads_dtype = None
+    
+    for b in all_haps:
+        if b.reads_count_matrix is not None and b.reads_count_matrix.size > 0:
+            rcm = np.ascontiguousarray(b.reads_count_matrix)
+            if reads_dtype is None:
+                reads_dtype = rcm.dtype
+            reads_index.append((offset, rcm.shape[0], rcm.shape[1]))
+            reads_chunks.append(rcm.ravel())
+            offset += rcm.size
+        else:
+            reads_index.append(None)
+    
+    shm_handles = []
+    try:
+        if reads_chunks:
+            all_reads_flat = np.concatenate(reads_chunks)
+            shm_reads, meta_reads = _create_shm_array(all_reads_flat, "pool4_reads")
+            shm_handles.append(shm_reads)
+        else:
+            meta_reads = None
+        
+        # 3. Build initializer context — light blocks + reads SharedMemory
+        shared_context = {
+            'blocks': light_blocks,          # small — pickle via initializer
+            'reads_index': reads_index,       # small — list of tuples
+        }
+        if meta_reads is not None:
+            shared_context['reads_flat'] = meta_reads  # SharedMemory-backed
+        
+        # 4. Task args are just chain_data + scalars
+        task_args = [
+            (chain_data, read_error_prob, min_total_reads)
+            for chain_data in hap_blocks_list
+        ]
 
-    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
-        processing_results = processing_pool.map(worker, hap_blocks_list)
+        with _safe_forkserver_pool(min(num_processes, len(task_args)),
+                                   initializer=_init_shared_data,
+                                   initargs=(shared_context,)) as pool:
+            processing_results = pool.map(_worker_combine_chained_blocks_direct, task_args)
+    
+    finally:
+        for shm in shm_handles:
+            try:
+                shm.close()
+                shm.unlink()
+            except Exception:
+                pass
     
     # Filter empty results if any path failed completely
     valid_results = [r for r in processing_results if len(r[0]) > 0]
@@ -710,12 +909,12 @@ def generate_long_haplotypes_naive(block_results, num_long_haps,
     # 2. Combine scores
     combined_scores = get_combined_hap_score(hap_matching_overlap, hap_matching_samples[2])
 
-    # 3. Pre-calculate similarity matrices in parallel (Shared Memory Optimized)
-    shared_context = {'blocks': valid_blocks}
-    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as p:
+    # 3. Pre-calculate similarity matrices in parallel (forkserver + direct args)
+    task_args_sim = [(i, _strip_block(valid_blocks[i])) for i in range(len(valid_blocks))]
+    with _safe_forkserver_pool(num_processes) as p:
         similarity_matrices = p.map(
-            _worker_get_similarities,
-            range(len(valid_blocks))
+            _worker_get_similarities_direct,
+            task_args_sim
         )
     
     # 4. Find optimal paths (Chaining) - Sequential logic, fast
@@ -806,25 +1005,47 @@ def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations
                             keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3, num_processes=16):         
     """
     Multithreaded version to match all samples to their haplotype combinations.
-    Optimized: Uses shared memory to avoid pickling the massive genotype tensor and sample probabilities.
+    
+    Forkserver + POSIX SharedMemory: the genotypes tensor (~150 MB) and
+    sample_probs matrix (~1.3 GB) are placed in /dev/shm for zero-copy
+    access by workers.  Small arrays (locations, keep_flags) are passed
+    directly via the pool initializer.
     """
     
-    # Prepare shared context
-    shared_context = {
-        'genotypes': full_combined_genotypes,
-        'sample_probs': all_sample_probs,
-        'locations': site_locations,
-        'keep_flags': keep_flags
-    }
-    
-    worker = partial(_worker_get_match_probabilities, 
-                     recomb_rate=recomb_rate, 
-                     value_error_rate=value_error_rate)
+    # Place large arrays in POSIX SharedMemory
+    shm_handles = []
+    try:
+        shm_geno, meta_geno = _create_shm_array(full_combined_genotypes, "genotypes")
+        shm_handles.append(shm_geno)
+        
+        shm_probs, meta_probs = _create_shm_array(all_sample_probs, "sample_probs")
+        shm_handles.append(shm_probs)
+        
+        # Build initializer dict — large arrays as shm metadata, small arrays directly
+        shared_context = {
+            'genotypes': meta_geno,
+            'sample_probs': meta_probs,
+            'locations': site_locations,           # small — pass directly
+        }
+        if keep_flags is not None:
+            shared_context['keep_flags'] = keep_flags  # small — pass directly
+        
+        worker = partial(_worker_get_match_probabilities, 
+                         recomb_rate=recomb_rate, 
+                         value_error_rate=value_error_rate)
 
-    with Pool(num_processes, initializer=_init_shared_data, initargs=(shared_context,)) as processing_pool:
-        # Pass the indices of samples (0 to N-1)
-        # Workers look up specific sample_probs[i] from shared memory
-        num_samples = len(all_sample_probs)
-        results = processing_pool.map(worker, range(num_samples))
+        with _safe_forkserver_pool(num_processes, initializer=_init_shared_data,
+                                   initargs=(shared_context,)) as pool:
+            num_samples = len(all_sample_probs)
+            results = pool.map(worker, range(num_samples))
+    
+    finally:
+        # Clean up SharedMemory segments
+        for shm in shm_handles:
+            try:
+                shm.close()
+                shm.unlink()
+            except Exception:
+                pass
     
     return results
