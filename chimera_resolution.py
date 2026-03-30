@@ -639,7 +639,13 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             break
     
     # =========================================================================
-    # STEP 2: Top-N Swap Refinement
+    # STEP 2: Top-N Swap Refinement (1-for-1 with 2-for-1 fallback)
+    #
+    # Outer loop:
+    #   Phase A — 1-for-1 swaps (top-N) until no improvement
+    #   Phase B — one round of 2-for-1 swaps (top-N, BIC-aware)
+    #   If Phase B improved → back to Phase A
+    #   If Phase B found nothing → done
     # =========================================================================
     def precompute_base_max(base_set):
         K_base = len(base_set)
@@ -700,11 +706,15 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     K_sel = len(selected)
     
     if K_sel >= 2:
-        swap_chunk = max(4, min(64,
-            int(5e8 / (num_samples * K_sel * K_sel * total_bins * 8))))
+      while True:  # Outer loop: Phase A → Phase B → repeat
+        # =================================================================
+        # Phase A: 1-for-1 swaps until convergence
+        # =================================================================
+        K_sel = len(selected)
         n_pairs_swap = K_sel * K_sel
+        swap_chunk = max(4, min(64,
+            int(5e8 / (num_samples * n_pairs_swap * total_bins * 8))))
         
-        # Pre-allocate swap stacked buffer once (reused across all swap positions)
         swap_stacked = np.empty((swap_chunk, num_samples, n_pairs_swap, total_bins),
                                 dtype=np.float64)
         
@@ -791,6 +801,120 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 break
         del swap_stacked
         _malloc_trim()
+        
+        # =================================================================
+        # Phase B: One round of 2-for-1 swaps (remove 2, add 1, BIC-aware)
+        # =================================================================
+        K_sel = len(selected)
+        if K_sel < 3:
+            break  # Need at least 3 to do 2-for-1
+        
+        current_score = score_subset(selected)
+        current_bic = K_sel * batch_cc - 2 * current_score
+        K_result = K_sel - 1
+        n_pairs_2for1 = K_result * K_result
+        
+        swap_chunk_2 = max(4, min(64,
+            int(5e8 / (num_samples * n_pairs_2for1 * total_bins * 8))))
+        swap_stacked_2 = np.empty(
+            (swap_chunk_2, num_samples, n_pairs_2for1, total_bins),
+            dtype=np.float64)
+        
+        unselected = [x for x in range(n_cands) if x not in selected]
+        best_2for1 = None
+        best_2for1_bic = current_bic
+        
+        for i in range(K_sel):
+            for j in range(i + 1, K_sel):
+                # Remove selected[i] and selected[j]
+                temp_set = [selected[k] for k in range(K_sel)
+                            if k != i and k != j]
+                
+                base_maxes = precompute_base_max(temp_set)
+                cheap_scores = cheap_score_all(base_maxes, temp_set, unselected)
+                ranked = sorted(cheap_scores, key=cheap_scores.get,
+                               reverse=True)[:top_n_swap]
+                
+                # Build template: temp_set (K_sel-2 base) in K_result×K_result grid
+                swap_template = np.zeros(
+                    (num_samples, n_pairs_2for1, total_bins), dtype=np.float64)
+                sel_haps_per_block = {}
+                bin_off = 0
+                K_base = len(temp_set)  # = K_sel - 2
+                for b_i, em_data in enumerate(sub_em):
+                    bin_em = em_data['bin_emissions']
+                    nb = em_data['n_bins']
+                    t_haps = map_matrix[np.array(temp_set), b_i]
+                    sel_haps_per_block[b_i] = t_haps
+                    for ii in range(K_base):
+                        for jj in range(K_base):
+                            pos = ii * K_result + jj
+                            swap_template[:, pos, bin_off:bin_off + nb] = \
+                                bin_em[:, t_haps[ii], t_haps[jj], :]
+                    bin_off += nb
+                
+                cand_pos = K_result - 1  # = K_base
+                
+                for cs in range(0, len(ranked), swap_chunk_2):
+                    chunk = ranked[cs:cs + swap_chunk_2]
+                    n_chunk = len(chunk)
+                    stacked_view = swap_stacked_2[:n_chunk]
+                    chunk_arr = np.array(chunk)
+                    
+                    def _fill_2for1(local_idx):
+                        ci = chunk_arr[local_idx]
+                        stacked_view[local_idx] = swap_template
+                        bin_off_t = 0
+                        for b_i, em_data in enumerate(sub_em):
+                            bin_em = em_data['bin_emissions']
+                            nb = em_data['n_bins']
+                            t_haps = sel_haps_per_block[b_i]
+                            h_c = map_matrix[ci, b_i]
+                            for ii in range(cand_pos):
+                                pos = ii * K_result + cand_pos
+                                stacked_view[local_idx, :, pos,
+                                             bin_off_t:bin_off_t + nb] = \
+                                    bin_em[:, t_haps[ii], h_c, :]
+                            for jj in range(cand_pos):
+                                pos = cand_pos * K_result + jj
+                                stacked_view[local_idx, :, pos,
+                                             bin_off_t:bin_off_t + nb] = \
+                                    bin_em[:, h_c, t_haps[jj], :]
+                            pos = cand_pos * K_result + cand_pos
+                            stacked_view[local_idx, :, pos,
+                                         bin_off_t:bin_off_t + nb] = \
+                                bin_em[:, h_c, h_c, :]
+                            bin_off_t += nb
+                    
+                    if num_threads <= 1 or n_chunk <= 1:
+                        for idx in range(n_chunk):
+                            _fill_2for1(idx)
+                    else:
+                        with ThreadPoolExecutor(
+                                max_workers=min(num_threads, n_chunk)) as exc:
+                            list(exc.map(_fill_2for1, range(n_chunk)))
+                    
+                    scores_2 = _batched_viterbi_score(
+                        np.ascontiguousarray(stacked_view), float(pen_sel))
+                    for k_idx, add_idx in enumerate(chunk):
+                        new_score = float(scores_2[k_idx])
+                        new_bic = K_result * batch_cc - 2 * new_score
+                        if new_bic < best_2for1_bic - 1e-4:
+                            best_2for1_bic = new_bic
+                            best_2for1 = (selected[i], selected[j], add_idx)
+                
+                del swap_template
+        
+        del swap_stacked_2
+        _malloc_trim()
+        
+        if best_2for1:
+            rm1, rm2, add = best_2for1
+            selected = [x for x in selected if x != rm1 and x != rm2] + [add]
+            current_score = score_subset(selected)
+            # Continue outer loop → back to Phase A (1-for-1)
+        else:
+            break  # No 2-for-1 improvement found → done with all swaps
     
     # =========================================================================
     # STEP 3: Force Prune + BIC Prune
