@@ -971,7 +971,8 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
                                                  max_num_iterations=20, recomb_rate=5e-7,
                                                  use_standard_baum_welch=True,
                                                  precalculated_viterbi_emissions=None,
-                                                 num_processes=16):
+                                                 num_processes=16,
+                                                 dynamic_cores_fn=None):
     """
     Generates a full mesh of transition probabilities for all gap sizes using Viterbi-EM.
     
@@ -980,6 +981,12 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
         full_samples_data and sample_sites are IGNORED to prevent memory pickling overhead.
         num_processes: Number of parallel processes. Use 1 for sequential execution
                       (required when called from within a worker process).
+        dynamic_cores_fn: Optional callable returning current core allocation.
+            When provided, gaps are processed sequentially with numba threads
+            updated between each gap. This enables dynamic scaling as peer
+            workers finish — remaining workers automatically use freed cores.
+            Throughput is equivalent to pool-based processing (prange over
+            samples uses the same total cores) but can adapt mid-computation.
     """
     max_gap = len(haps_data) - 1
     gaps = list(range(1, max_gap + 1))
@@ -1016,7 +1023,21 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
     
     # Handle sequential vs parallel execution
     n_gaps = len(gaps)
-    if num_processes == 1 or n_gaps <= 1:
+    if dynamic_cores_fn is not None:
+        # Dynamic scaling: process gaps sequentially, updating numba threads
+        # between each gap. The prange loops in forward/backward scans
+        # parallelize across samples, so N numba threads ≈ N pool workers
+        # with 1 thread each. But sequential can re-check the allocation
+        # between gaps and scale up as peer workers finish.
+        import numba as _numba
+        _init_shared_data(shared_context)
+        results = []
+        for args in worker_args:
+            n_cores = dynamic_cores_fn()
+            _numba.set_num_threads(n_cores)
+            results.append(_gap_worker(args))
+            _malloc_trim()
+    elif num_processes == 1 or n_gaps <= 1:
         # Sequential: either required (within worker) or only 1 gap (L4).
         # For 1 gap, the caller's numba_thread_scope gives full thread count
         # to the prange scans — no need for Pool overhead.

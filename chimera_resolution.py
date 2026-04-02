@@ -24,6 +24,29 @@ except OSError:
     def _malloc_trim():
         pass
 
+
+def _resolve_threads(num_threads):
+    """
+    Resolve num_threads: if callable, call it to get the current value.
+    
+    This enables dynamic thread reallocation — hierarchical_assembly passes
+    a function (e.g. _get_dynamic_threads) instead of a fixed integer.
+    Each time _resolve_threads is called, the function re-checks how many
+    peer workers are active and returns the appropriate thread count.
+    
+    Also updates numba's active thread count to match, so prange loops
+    in scoring functions use the correct number of threads.
+    """
+    if callable(num_threads):
+        n = num_threads()
+        try:
+            import numba
+            numba.set_num_threads(n)
+        except Exception:
+            pass
+        return n
+    return num_threads
+
 # =============================================================================
 # NUMBA JIT FUNCTIONS
 # =============================================================================
@@ -331,10 +354,11 @@ def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
             def _build_one(item):
                 _, ps = item
                 return _build_tensor_from_paths(ps, sub_emissions, num_samples)
-            if num_threads <= 1 or len(chunk) <= 1:
+            nt = _resolve_threads(num_threads)
+            if nt <= 1 or len(chunk) <= 1:
                 chunk_tensors = [_build_one(item) for item in chunk]
             else:
-                with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                with ThreadPoolExecutor(max_workers=nt) as executor:
                     chunk_tensors = list(executor.map(_build_one, chunk))
             # Pre-allocate and fill to avoid double memory from np.stack
             stacked = np.empty((len(chunk), num_samples, n_pairs, total_b),
@@ -537,9 +561,10 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         return np.ascontiguousarray(tensor)
     
     def build_tensors_threaded(subset_list):
-        if num_threads <= 1 or len(subset_list) <= 1:
+        nt = _resolve_threads(num_threads)
+        if nt <= 1 or len(subset_list) <= 1:
             return [build_tensor_sel(s) for s in subset_list]
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        with ThreadPoolExecutor(max_workers=nt) as executor:
             return list(executor.map(build_tensor_sel, subset_list))
     
     def score_subset(subset_indices):
@@ -616,11 +641,12 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         bin_em[:, h_c, h_c, :]
                     bin_off_t += nb
             
-            if num_threads <= 1 or n_chunk <= 1:
+            nt = _resolve_threads(num_threads)
+            if nt <= 1 or n_chunk <= 1:
                 for i in range(n_chunk):
                     _fill_candidate(i)
             else:
-                with ThreadPoolExecutor(max_workers=min(num_threads, n_chunk)) as executor:
+                with ThreadPoolExecutor(max_workers=min(nt, n_chunk)) as executor:
                     list(executor.map(_fill_candidate, range(n_chunk)))
             
             scores = _batched_viterbi_score(
@@ -776,12 +802,13 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         bin_em[:, h_c, h_c, :]
                     bin_off_t += nb
             
-            if num_threads <= 1 or n_chunk <= 1:
+            nt = _resolve_threads(num_threads)
+            if nt <= 1 or n_chunk <= 1:
                 for idx in range(n_chunk):
                     _fill(idx)
             else:
                 with ThreadPoolExecutor(
-                        max_workers=min(num_threads, n_chunk)) as exc:
+                        max_workers=min(nt, n_chunk)) as exc:
                     list(exc.map(_fill, range(n_chunk)))
             
             scores = _batched_viterbi_score(
@@ -894,12 +921,13 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         bin_em[:, h_c, h_c, :]
                     bin_off_t += nb
             
-            if num_threads <= 1 or n_chunk <= 1:
+            nt = _resolve_threads(num_threads)
+            if nt <= 1 or n_chunk <= 1:
                 for idx in range(n_chunk):
                     _fill_2(idx)
             else:
                 with ThreadPoolExecutor(
-                        max_workers=min(num_threads, n_chunk)) as exc:
+                        max_workers=min(nt, n_chunk)) as exc:
                     list(exc.map(_fill_2, range(n_chunk)))
             
             scores = _batched_viterbi_score(

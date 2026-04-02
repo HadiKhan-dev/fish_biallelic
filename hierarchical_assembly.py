@@ -345,9 +345,11 @@ def _process_single_batch(args):
     Dynamically adjusts parallelism between major phases based on how
     many peer workers are still active. Two modes:
     
-      Inner-pool phases (mesh generation):
-        dyn_threads processes in the pool, each with 1 numba thread.
-        Total cores used = dyn_threads × 1 = dyn_threads. ✓
+      Mesh generation (sequential with dynamic numba):
+        Gaps processed one at a time. Between each gap, numba threads
+        are updated to total_cores // active_workers. prange over samples
+        provides equivalent throughput to pool-based processing but can
+        scale up mid-computation as peers finish.
       
       Numba-only phases (beam search, chimera resolution, reconstruction):
         No inner pool, dyn_threads numba threads in this process.
@@ -424,31 +426,38 @@ def _process_single_batch(args):
             beam_max_gap = None
 
         # =================================================================
-        # 4. Generate Mesh — INNER POOL phase
-        #    Use dyn_threads pool processes, each with 1 numba thread.
-        #    Set numba to 1 BEFORE spawning the pool so children inherit it.
+        # 4. Generate Mesh — DYNAMIC SEQUENTIAL phase
+        #    Emissions: ThreadPoolExecutor (pure numpy, fast, no numba).
+        #    Mesh EM: Sequential over gaps with dynamic numba threads.
+        #    Between each gap, _get_dynamic_threads is called to re-check
+        #    the active worker count and scale numba threads up as peers
+        #    finish. prange over 320 samples gives equivalent throughput
+        #    to pool-based processing, but can adapt mid-computation.
         # =================================================================
         dyn_threads = _get_dynamic_threads()
-        dyn_pool_procs = max(inner_num_processes, dyn_threads)
-        numba.set_num_threads(1)
+        pool_budget = max(inner_num_processes, dyn_threads)
         
         if use_hmm_linking:
+            # Emissions: ThreadPoolExecutor (threads, not processes — no numba,
+            # no oversubscription risk, cheap to create/destroy)
             viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
-                batch_probs, batch_sites, portion_proxy, num_processes=dyn_pool_procs
+                batch_probs, batch_sites, portion_proxy, num_processes=pool_budget
             )
+            # Mesh EM: sequential with dynamic numba scaling between gaps
             mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
                 None, None, portion_proxy, 
                 recomb_rate=recomb_rate, 
                 use_standard_baum_welch=False,
                 precalculated_viterbi_emissions=viterbi_emissions,
-                num_processes=dyn_pool_procs
+                num_processes=1,
+                dynamic_cores_fn=_get_dynamic_threads
             )
             del viterbi_emissions
         else:
             mesh = block_linking.generate_transition_probability_mesh(
                 batch_probs, batch_sites, portion_proxy,
                 use_standard_baum_welch=True,
-                num_processes=dyn_pool_procs
+                num_processes=pool_budget
             )
         
         if _MEMORY_DEBUG and b_idx == 0:
@@ -501,7 +510,7 @@ def _process_single_batch(args):
             paint_penalty=paint_penalty,
             min_hotspot_samples=min_hotspot_samples,
             cc_scale=cc_scale,
-            num_threads=max(dyn_threads, 8),
+            num_threads=_get_dynamic_threads,
         )
         
         # Free beam_results and batch data — chimera resolution is done with them
