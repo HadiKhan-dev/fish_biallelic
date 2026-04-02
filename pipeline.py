@@ -125,7 +125,8 @@ if __name__ == '__main__':
     _warmup_pool.join()
     del _warmup_pool
     print("Forkserver started (lightweight, pre-data).")
-
+    print(f"Numba threading layer: {os.environ.get('NUMBA_THREADING_LAYER', 'not set')}")
+    
     # =============================================================================
     # PER-CONTIG CHECKPOINTING
     # =============================================================================
@@ -579,7 +580,7 @@ if __name__ == '__main__':
                             beam_width=200,
                             max_founders=12,
                             max_sites_for_linking=2000,
-                            cc_scale=0.2,
+                            cc_scale=0.5,
                             num_processes=n_processes
                         )
                     return l1_fn
@@ -595,7 +596,7 @@ if __name__ == '__main__':
                             recomb_rate=RECOMB_RATE,
                             beam_width=200,
                             max_founders=12,
-                            cc_scale=0.2,
+                            cc_scale=0.5,
                             num_processes=n_processes,
                             n_generations=N_GENERATIONS,
                             verbose=False
@@ -688,7 +689,7 @@ if __name__ == '__main__':
                 beam_width=200,
                 max_founders=12,
                 max_sites_for_linking=2000,
-                cc_scale=0.2,
+                cc_scale=0.5,
                 num_processes=n_processes
             )
             
@@ -750,7 +751,7 @@ if __name__ == '__main__':
                 recomb_rate=5e-8,
                 beam_width=200,
                 max_founders=12,
-                cc_scale=0.2,
+                cc_scale=0.5,
                 num_processes=n_processes,
                 n_generations=3,
                 verbose=False
@@ -814,7 +815,7 @@ if __name__ == '__main__':
                 recomb_rate=5e-8,
                 beam_width=200,
                 max_founders=12,
-                cc_scale=0.2,
+                cc_scale=0.5,
                 num_processes=n_processes,
                 n_generations=3,
                 verbose=False
@@ -881,7 +882,7 @@ if __name__ == '__main__':
                     recomb_rate=5e-8,
                     beam_width=200,
                     max_founders=12,
-                    cc_scale=0.2,
+                    cc_scale=0.5,
                     num_processes=n_processes,
                     n_generations=3,
                     verbose=False

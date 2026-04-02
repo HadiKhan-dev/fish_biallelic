@@ -75,32 +75,93 @@ class NoDaemonPool(multiprocessing.pool.Pool):
 
 _SHARED_META = {}
 
+# =============================================================================
+# DYNAMIC THREAD REALLOCATION
+# =============================================================================
+# Workers track how many peers are active via a shared atomic counter.
+# Between major phases (mesh → beam → chimera → reconstruction), each
+# worker recalculates its thread allocation as:
+#
+#   threads = total_cores // active_workers
+#
+# This means:
+#   - When all workers run: each gets its normal share (e.g. 1 at L1)
+#   - When 3 workers remain: each gets total_cores // 3 (e.g. 37)
+#   - Last worker standing: gets all total_cores
+#
+# IMPORTANT: Numba threads and inner pools are ALTERNATIVE ways to use
+# cores, not additive. When a phase uses inner pools (mesh generation),
+# numba threads are set to 1 so each inner worker uses 1 thread.
+# When a phase uses numba directly (beam search, chimera resolution),
+# all dynamic threads go to numba. This prevents oversubscription.
+#
+# The numba thread pool ceiling is set to total_cores at worker init,
+# so set_num_threads() can freely scale up. With OMP PASSIVE or TBB,
+# idle threads sleep and cost zero CPU.
 
-def _init_worker_meta(meta_dict, numba_threads=1):
+_ACTIVE_COUNTER = None   # mp.Value('i', 0) — shared across all workers
+_TOTAL_CORES = None       # Total cores available (e.g. 112)
+
+
+def _init_worker_meta(meta_dict, total_cores, active_counter):
     """
     Pool initializer — called once per worker at creation time.
     Stores SharedMemory metadata so workers can attach to the segments.
     
-    Also overrides numba's thread pool size BEFORE it gets created.
-    Numba reads NUMBA_NUM_THREADS at import time (in the forkserver),
-    but the thread pool is created lazily on first parallel function call.
-    Overriding numba.config.NUMBA_NUM_THREADS here ensures the pool
-    is created at the correct size for this worker, not 112.
+    Sets the numba thread pool ceiling to total_cores (not inner_num_processes)
+    so that workers can dynamically scale up their thread count as peers
+    finish. The pool is created lazily on first parallel function call.
+    
+    With OMP PASSIVE or TBB threading layers, idle threads in an oversized
+    pool sleep and consume zero CPU. With workqueue, idle threads spin —
+    avoid using workqueue with dynamic threading.
     """
     import os
-    os.environ['NUMBA_NUM_THREADS'] = str(numba_threads)
+    os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
     try:
         import numba
-        # Override the config that numba read at import time
-        numba.config.NUMBA_NUM_THREADS = numba_threads
-        # If thread pool already exists (shouldn't in forkserver workers),
-        # limit active threads
-        numba.set_num_threads(min(numba_threads, numba.get_num_threads()))
+        # Set ceiling to total_cores so set_num_threads can scale up later
+        numba.config.NUMBA_NUM_THREADS = total_cores
+        # Start conservative — _process_single_batch will set the real value
+        numba.set_num_threads(1)
     except Exception:
         pass
     
-    global _SHARED_META
+    global _SHARED_META, _ACTIVE_COUNTER, _TOTAL_CORES
     _SHARED_META = meta_dict
+    _ACTIVE_COUNTER = active_counter
+    _TOTAL_CORES = total_cores
+
+
+def _get_dynamic_threads():
+    """
+    Compute optimal thread count for this worker based on active peers.
+    
+    Uses total_cores // active_workers, clamped to [1, total_cores].
+    The read of active_counter.value is intentionally lock-free — a
+    slightly stale count (off by 1-2) is fine since we recheck between
+    every major phase. The cost of being briefly wrong is a few seconds
+    of mild over/under-subscription, not correctness.
+    """
+    if _ACTIVE_COUNTER is None or _TOTAL_CORES is None:
+        return 1
+    active = max(_ACTIVE_COUNTER.value, 1)
+    return max(1, _TOTAL_CORES // active)
+
+
+def _apply_dynamic_threads():
+    """
+    Recompute and apply numba thread allocation.
+    Returns the thread count.
+    
+    Use this before phases that use numba directly (beam search,
+    chimera resolution, reconstruction). Do NOT use before phases
+    that spawn inner pools — those should set numba to 1 instead.
+    """
+    import numba
+    n = _get_dynamic_threads()
+    numba.set_num_threads(n)
+    return n
 
 
 def _create_shared_array(array, label):
@@ -281,12 +342,24 @@ def _process_single_batch(args):
     Attaches to POSIX shared memory segments for global_probs and
     global_sites using metadata from _SHARED_META (set by pool initializer).
     
+    Dynamically adjusts parallelism between major phases based on how
+    many peer workers are still active. Two modes:
+    
+      Inner-pool phases (mesh generation):
+        dyn_threads processes in the pool, each with 1 numba thread.
+        Total cores used = dyn_threads × 1 = dyn_threads. ✓
+      
+      Numba-only phases (beam search, chimera resolution, reconstruction):
+        No inner pool, dyn_threads numba threads in this process.
+        Total cores used = 1 × dyn_threads = dyn_threads. ✓
+    
     Explicitly deletes large intermediates and calls malloc_trim between
     steps to release freed pages back to the OS, reducing peak memory.
     
     Returns dict with 'batch_idx', 'super_block', and 'status'.
     """
     import ctypes
+    import numba
     _libc = ctypes.CDLL("libc.so.6")
     
     (b_idx, start_i, end_i, original_blocks_list,
@@ -294,8 +367,6 @@ def _process_single_batch(args):
      max_sites_for_linking, n_generations, recomb_tolerance,
      top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
      cc_scale, inner_num_processes, verbose) = args
-    
-    inner_num_threads = max(inner_num_processes, 8)
     
     # Memory debug logging
     _log = []
@@ -307,150 +378,183 @@ def _process_single_batch(args):
     shm_sites, global_sites = _attach_shared_array(_SHARED_META['sites'])
     
     try:
-        with numba_thread_scope(inner_num_processes):
-            
-            if _MEMORY_DEBUG and b_idx == 0:
-                _log.append(f"b{b_idx}_01_attached: {_get_rss_mb():.0f} MB")
-            
-            original_portion = block_haplotypes.BlockResults(original_blocks_list)
-            
-            if len(original_portion) < 2:
-                return {
-                    'batch_idx': b_idx,
-                    'super_block': original_portion[0],
-                    'status': 'passthrough'
-                }
-
-            # 1. Create Proxies
-            proxy_list = []
-            for b in original_portion:
-                proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
-            portion_proxy = block_haplotypes.BlockResults(proxy_list)
-            
-            # 2. Slice to batch-relevant sites only
-            all_positions = np.concatenate([b.positions for b in original_portion])
-            batch_indices = np.searchsorted(global_sites, all_positions)
-            idx_min, idx_max = batch_indices.min(), batch_indices.max()
-            batch_probs = np.ascontiguousarray(global_probs[:, idx_min:idx_max+1, :])
-            batch_sites = np.ascontiguousarray(global_sites[idx_min:idx_max+1])
-
-            if _MEMORY_DEBUG and b_idx == 0:
-                _log.append(f"b{b_idx}_02_sliced: {_get_rss_mb():.0f} MB")
-
-            # 3. Compute Max Gap
-            if n_generations is not None and recomb_tolerance is not None:
-                beam_max_gap = compute_max_gap(original_blocks_list, recomb_rate, 
-                                                n_generations, recomb_tolerance)
-            else:
-                beam_max_gap = None
-
-            # 4. Generate Mesh — uses batch-sliced data
-            if use_hmm_linking:
-                viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
-                    batch_probs, batch_sites, portion_proxy, num_processes=inner_num_processes
-                )
-                mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
-                    None, None, portion_proxy, 
-                    recomb_rate=recomb_rate, 
-                    use_standard_baum_welch=False,
-                    precalculated_viterbi_emissions=viterbi_emissions,
-                    num_processes=inner_num_processes
-                )
-                del viterbi_emissions
-            else:
-                mesh = block_linking.generate_transition_probability_mesh(
-                    batch_probs, batch_sites, portion_proxy,
-                    use_standard_baum_welch=True,
-                    num_processes=inner_num_processes
-                )
-            
-            if _MEMORY_DEBUG and b_idx == 0:
-                _log.append(f"b{b_idx}_03_mesh: {_get_rss_mb():.0f} MB")
-                
-            # 5. Beam Search on Proxy
-            beam_results = beam_search_core.run_full_mesh_beam_search(
-                portion_proxy, mesh, beam_width=beam_width, 
-                max_gap=beam_max_gap, verbose=verbose
-            )
-            
-            if _MEMORY_DEBUG and b_idx == 0:
-                _log.append(f"b{b_idx}_04_beam: {_get_rss_mb():.0f} MB")
-            
-            if not beam_results:
-                return {
-                    'batch_idx': b_idx,
-                    'super_block': None,
-                    'status': 'beam_search_failed'
-                }
-                
-            fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
-            
-            # Free mesh — fast_mesh has what it needs
-            del mesh
-            _libc.malloc_trim(0)
-            
-            if _MEMORY_DEBUG and b_idx == 0:
-                _log.append(f"b{b_idx}_04b_mesh_freed: {_get_rss_mb():.0f} MB")
-            
-            # 6. Selection + Swap + CR
-            resolved_beam = chimera_resolution.select_and_resolve(
-                beam_results=beam_results,
-                fast_mesh=fast_mesh,
-                batch_blocks=list(original_portion),
-                global_probs=batch_probs,
-                global_sites=batch_sites,
-                max_founders=max_founders,
-                top_n_swap=top_n_swap,
-                max_cr_iterations=max_cr_iterations,
-                paint_penalty=paint_penalty,
-                min_hotspot_samples=min_hotspot_samples,
-                cc_scale=cc_scale,
-                num_threads=inner_num_threads,
-            )
-            
-            # Free beam_results and batch data — chimera resolution is done with them
-            del beam_results
-            _libc.malloc_trim(0)
-            
-            if _MEMORY_DEBUG and b_idx == 0:
-                _log.append(f"b{b_idx}_05_chimera: {_get_rss_mb():.0f} MB")
-            
-            # 7. Reconstruction on Originals
-            reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
-                resolved_beam, fast_mesh, original_portion
-            )
-            
-            # Free resolved_beam and fast_mesh — reconstruction is done
-            del resolved_beam, fast_mesh
-            _libc.malloc_trim(0)
-            
-            # 8. Package
-            super_block = convert_reconstruction_to_superblock(
-                reconstructed_data, original_portion, batch_probs, batch_sites
-            )
-            
-            # Free intermediates — super_block has everything needed
-            del reconstructed_data, batch_probs, batch_sites, portion_proxy, proxy_list
-            _libc.malloc_trim(0)
-            
-            # 9. Structural Chimera Pruning
-            super_block = beam_search_core.prune_superblock_chimeras(super_block)
-            
-            if _MEMORY_DEBUG and b_idx == 0:
-                _log.append(f"b{b_idx}_06_done: {_get_rss_mb():.0f} MB")
-                # Write to temp file since we can't print from forkserver workers
-                import os, tempfile
-                log_path = os.path.join(tempfile.gettempdir(), f"ha_mem_b{b_idx}_{os.getpid()}.log")
-                with open(log_path, 'w') as f:
-                    f.write('\n'.join(_log) + '\n')
-                print(f"  [Memory debug] Worker {b_idx} log: {log_path}")
-            
+        # Register this worker as active
+        if _ACTIVE_COUNTER is not None:
+            with _ACTIVE_COUNTER.get_lock():
+                _ACTIVE_COUNTER.value += 1
+        
+        # Initial dynamic allocation
+        dyn_threads = _get_dynamic_threads()
+        # Start with 1 numba thread — first phase uses inner pools
+        numba.set_num_threads(1)
+        
+        if _MEMORY_DEBUG and b_idx == 0:
+            _log.append(f"b{b_idx}_01_attached: {_get_rss_mb():.0f} MB (dyn_threads={dyn_threads})")
+        
+        original_portion = block_haplotypes.BlockResults(original_blocks_list)
+        
+        if len(original_portion) < 2:
             return {
                 'batch_idx': b_idx,
-                'super_block': super_block,
-                'status': 'success' if super_block else 'reconstruction_failed'
+                'super_block': original_portion[0],
+                'status': 'passthrough'
             }
+
+        # 1. Create Proxies
+        proxy_list = []
+        for b in original_portion:
+            proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
+        portion_proxy = block_haplotypes.BlockResults(proxy_list)
+        
+        # 2. Slice to batch-relevant sites only
+        all_positions = np.concatenate([b.positions for b in original_portion])
+        batch_indices = np.searchsorted(global_sites, all_positions)
+        idx_min, idx_max = batch_indices.min(), batch_indices.max()
+        batch_probs = np.ascontiguousarray(global_probs[:, idx_min:idx_max+1, :])
+        batch_sites = np.ascontiguousarray(global_sites[idx_min:idx_max+1])
+
+        if _MEMORY_DEBUG and b_idx == 0:
+            _log.append(f"b{b_idx}_02_sliced: {_get_rss_mb():.0f} MB")
+
+        # 3. Compute Max Gap
+        if n_generations is not None and recomb_tolerance is not None:
+            beam_max_gap = compute_max_gap(original_blocks_list, recomb_rate, 
+                                            n_generations, recomb_tolerance)
+        else:
+            beam_max_gap = None
+
+        # =================================================================
+        # 4. Generate Mesh — INNER POOL phase
+        #    Use dyn_threads pool processes, each with 1 numba thread.
+        #    Set numba to 1 BEFORE spawning the pool so children inherit it.
+        # =================================================================
+        dyn_threads = _get_dynamic_threads()
+        dyn_pool_procs = max(inner_num_processes, dyn_threads)
+        numba.set_num_threads(1)
+        
+        if use_hmm_linking:
+            viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
+                batch_probs, batch_sites, portion_proxy, num_processes=dyn_pool_procs
+            )
+            mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
+                None, None, portion_proxy, 
+                recomb_rate=recomb_rate, 
+                use_standard_baum_welch=False,
+                precalculated_viterbi_emissions=viterbi_emissions,
+                num_processes=dyn_pool_procs
+            )
+            del viterbi_emissions
+        else:
+            mesh = block_linking.generate_transition_probability_mesh(
+                batch_probs, batch_sites, portion_proxy,
+                use_standard_baum_welch=True,
+                num_processes=dyn_pool_procs
+            )
+        
+        if _MEMORY_DEBUG and b_idx == 0:
+            _log.append(f"b{b_idx}_03_mesh: {_get_rss_mb():.0f} MB")
+
+        # =================================================================
+        # 5. Beam Search — NUMBA-ONLY phase
+        #    No inner pool. Give all dynamic threads to numba.
+        # =================================================================
+        dyn_threads = _apply_dynamic_threads()
+            
+        beam_results = beam_search_core.run_full_mesh_beam_search(
+            portion_proxy, mesh, beam_width=beam_width, 
+            max_gap=beam_max_gap, verbose=verbose
+        )
+        
+        if _MEMORY_DEBUG and b_idx == 0:
+            _log.append(f"b{b_idx}_04_beam: {_get_rss_mb():.0f} MB")
+        
+        if not beam_results:
+            return {
+                'batch_idx': b_idx,
+                'super_block': None,
+                'status': 'beam_search_failed'
+            }
+            
+        fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
+        
+        # Free mesh — fast_mesh has what it needs
+        del mesh
+        _libc.malloc_trim(0)
+        
+        if _MEMORY_DEBUG and b_idx == 0:
+            _log.append(f"b{b_idx}_04b_mesh_freed: {_get_rss_mb():.0f} MB")
+        
+        # =================================================================
+        # 6. Selection + Swap + CR — NUMBA-ONLY phase
+        # =================================================================
+        dyn_threads = _apply_dynamic_threads()
+        
+        resolved_beam = chimera_resolution.select_and_resolve(
+            beam_results=beam_results,
+            fast_mesh=fast_mesh,
+            batch_blocks=list(original_portion),
+            global_probs=batch_probs,
+            global_sites=batch_sites,
+            max_founders=max_founders,
+            top_n_swap=top_n_swap,
+            max_cr_iterations=max_cr_iterations,
+            paint_penalty=paint_penalty,
+            min_hotspot_samples=min_hotspot_samples,
+            cc_scale=cc_scale,
+            num_threads=max(dyn_threads, 8),
+        )
+        
+        # Free beam_results and batch data — chimera resolution is done with them
+        del beam_results
+        _libc.malloc_trim(0)
+        
+        if _MEMORY_DEBUG and b_idx == 0:
+            _log.append(f"b{b_idx}_05_chimera: {_get_rss_mb():.0f} MB")
+        
+        # =================================================================
+        # 7. Reconstruction — NUMBA-ONLY phase
+        # =================================================================
+        dyn_threads = _apply_dynamic_threads()
+        
+        reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
+            resolved_beam, fast_mesh, original_portion
+        )
+        
+        # Free resolved_beam and fast_mesh — reconstruction is done
+        del resolved_beam, fast_mesh
+        _libc.malloc_trim(0)
+        
+        # 8. Package
+        super_block = convert_reconstruction_to_superblock(
+            reconstructed_data, original_portion, batch_probs, batch_sites
+        )
+        
+        # Free intermediates — super_block has everything needed
+        del reconstructed_data, batch_probs, batch_sites, portion_proxy, proxy_list
+        _libc.malloc_trim(0)
+        
+        # 9. Structural Chimera Pruning
+        super_block = beam_search_core.prune_superblock_chimeras(super_block)
+        
+        if _MEMORY_DEBUG and b_idx == 0:
+            _log.append(f"b{b_idx}_06_done: {_get_rss_mb():.0f} MB")
+            # Write to temp file since we can't print from forkserver workers
+            import os, tempfile
+            log_path = os.path.join(tempfile.gettempdir(), f"ha_mem_b{b_idx}_{os.getpid()}.log")
+            with open(log_path, 'w') as f:
+                f.write('\n'.join(_log) + '\n')
+            print(f"  [Memory debug] Worker {b_idx} log: {log_path}")
+        
+        return {
+            'batch_idx': b_idx,
+            'super_block': super_block,
+            'status': 'success' if super_block else 'reconstruction_failed'
+        }
     finally:
+        # Unregister this worker
+        if _ACTIVE_COUNTER is not None:
+            with _ACTIVE_COUNTER.get_lock():
+                _ACTIVE_COUNTER.value -= 1
         # Detach from shared memory (do NOT unlink — parent handles that)
         shm_probs.close()
         shm_sites.close()
@@ -479,7 +583,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           max_cr_iterations=10,
                           paint_penalty=10.0,
                           min_hotspot_samples=5,
-                          cc_scale=0.2,
+                          cc_scale=0.5,
                           # Parallelization
                           num_processes=16,
                           # Output control
@@ -495,6 +599,14 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
       - Workers attach to shared segments by name for zero-copy access
       - batch_probs slicing ensures inner pools only pickle small arrays
       - Workers are non-daemonic, allowing inner child pools at L2+
+    
+    Dynamic thread reallocation:
+      - A shared counter tracks active workers
+      - Between major phases, each worker recalculates its allocation
+        as total_cores // active_workers
+      - Inner-pool phases: dyn_threads pool processes × 1 numba thread
+      - Numba-only phases: 1 process × dyn_threads numba threads
+      - When peers finish, remaining workers scale up to use freed cores
     
     IMPORTANT: The entry script must NOT be named main.py, otherwise
     forkserver workers will re-execute it.
@@ -519,6 +631,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         print(f"Max gap: unlimited (n_generations not specified)")
         print(f"Parallelism: {outer_workers} outer workers x {inner_num_processes} inner cores = {outer_workers * inner_num_processes} total")
     
+    print(f"  Dynamic threading: enabled (ceiling={num_processes} cores)")
+    
     # =====================================================================
     # Create POSIX shared memory for large arrays
     # =====================================================================
@@ -533,6 +647,11 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     
     probs_gb = global_probs.nbytes / (1024**3)
     print(f"  Shared memory created: {probs_gb:.1f} GB probs + sites ({time.time()-t0:.1f}s)")
+    
+    # =====================================================================
+    # Create shared active-worker counter for dynamic thread reallocation
+    # =====================================================================
+    active_counter = _forkserver_ctx.Value('i', 0)
     
     # =====================================================================
     # Prepare worker arguments
@@ -574,7 +693,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             pool = NoDaemonPool(
                 processes=outer_workers,
                 initializer=_init_worker_meta,
-                initargs=(shared_meta, inner_num_processes)
+                initargs=(shared_meta, num_processes, active_counter)
             )
             print(f"  Pool creation ({outer_workers} workers): {time.time()-t0:.1f}s")
             
@@ -596,8 +715,10 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             print(f"  Pool work + result collection: {time.time()-t0:.1f}s")
         else:
             # Sequential execution — set metadata for current process
-            global _SHARED_META
+            global _SHARED_META, _ACTIVE_COUNTER, _TOTAL_CORES
             _SHARED_META = shared_meta
+            _ACTIVE_COUNTER = None  # No counter needed for single process
+            _TOTAL_CORES = num_processes
             results = []
             for args in tqdm(worker_args, desc="Processing Batches"):
                 results.append(_process_single_batch(args))
