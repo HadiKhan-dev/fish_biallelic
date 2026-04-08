@@ -73,9 +73,9 @@ def _check_trio_consistency_worker(args):
         p1_tol = tol[p1_i]
         p2_tol = tol[p2_i]
 
-        child_path = child_tol.paths[0] if child_tol.paths else None
-        p1_path = p1_tol.paths[0] if p1_tol.paths else None
-        p2_path = p2_tol.paths[0] if p2_tol.paths else None
+        child_path = child_tol if child_tol.chunks else None
+        p1_path = p1_tol if p1_tol.chunks else None
+        p2_path = p2_tol if p2_tol.chunks else None
 
         if child_path and p1_path and p2_path:
             frac = _check_trio_on_chromosome(child_path, p1_path, p2_path, step=step)
@@ -1026,8 +1026,11 @@ def score_trio_all_consensus_precomputed(child_grids, p1_grids, p2_grids,
 def _process_contig_batch(args):
     """
     Worker: process a BATCH of samples for one contig in Phase 1.
-    Reads contig data from shared memory, processes only the assigned samples.
+    Uses IBS-aware single Viterbi painting — accesses SamplePainting.chunks
+    directly and derives hom mask from allele identity.
     """
+    from paint_samples import process_contig_for_pedigree
+    
     contig_idx, sample_start, sample_end = args
     contig_data = _PEDIGREE_SHARED['contig_data_list'][contig_idx]
     tol_painting = contig_data['tolerance_painting']
@@ -1036,86 +1039,11 @@ def _process_contig_batch(args):
     recomb_rate = _PEDIGREE_SHARED['recomb_rate']
     max_snps_per_bin = _PEDIGREE_SHARED['max_snps_per_bin']
     
-    start_pos = tol_painting.start_pos
-    end_pos = tol_painting.end_pos
-    total_len = end_pos - start_pos
-    approx_bp_per_bin = snps_per_bin * 100
-    num_bins = int(total_len / approx_bp_per_bin)
-    if num_bins < 100: num_bins = 100
-    bin_edges = np.linspace(start_pos, end_pos, num_bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    
-    bin_width = 10000.0
-    if num_bins > 1:
-        bin_width = bin_centers[1] - bin_centers[0]
-    
-    # Discretize and convert only the assigned sample range
-    sample_allele_grids = []
-    switch_counts = []
-    
-    for i in range(sample_start, sample_end):
-        sample_obj = tol_painting[i]
-        grids_for_sample = []
-        
-        # Discretize this sample's consensus paintings
-        consensus_list = sample_obj.consensus_list
-        id_grids_for_sample = []
-        
-        if consensus_list:
-            for cons in consensus_list:
-                id_grid, hom_mask, _ = discretize_consensus_with_uncertainty(
-                    cons, start_pos, end_pos, snps_per_bin
-                )
-                id_grids_for_sample.append((id_grid, hom_mask, cons.weight))
-        
-        if not id_grids_for_sample and sample_obj.paths:
-            id_grid, hom_mask, _ = discretize_sample_painting_with_hom_mask(
-                sample_obj.paths[0], start_pos, end_pos, snps_per_bin
-            )
-            id_grids_for_sample.append((id_grid, hom_mask, 1.0))
-        
-        if not id_grids_for_sample:
-            id_grid = np.zeros((num_bins, 2), dtype=np.int32) - 1
-            hom_mask = np.ones(num_bins, dtype=np.bool_)
-            id_grids_for_sample.append((id_grid, hom_mask, 1.0))
-        
-        # Convert to allele grids
-        allele_grids = []
-        for id_grid, hom_mask, weight in id_grids_for_sample:
-            if max_snps_per_bin > 1:
-                allele_grid = convert_id_grid_to_allele_grid_multisnp(
-                    id_grid, bin_centers, founder_block, bin_width, max_snps_per_bin
-                )
-            else:
-                allele_grid = convert_id_grid_to_allele_grid(
-                    id_grid, bin_centers, founder_block, bin_width
-                )
-            allele_grids.append((allele_grid, hom_mask, weight))
-        sample_allele_grids.append(allele_grids)
-        
-        # Switch counts from first id_grid
-        first_id_grid = id_grids_for_sample[0][0]
-        switches = (first_id_grid[:-1, :] != first_id_grid[1:, :]) & \
-                  (first_id_grid[:-1, :] != -1) & (first_id_grid[1:, :] != -1)
-        switch_counts.append(np.sum(switches))
-    
-    # Transition costs (same for all samples in this contig)
-    dists = np.zeros(num_bins)
-    dists[1:] = np.diff(bin_centers)
-    theta = np.clip(1.0 - np.exp(-dists * recomb_rate), 1e-15, 0.5)
-    sw_costs = np.log(theta)
-    st_costs = np.log(1.0 - theta)
-    
-    return {
-        'contig_idx': contig_idx,
-        'sample_start': sample_start,
-        'sample_end': sample_end,
-        'sample_allele_grids': sample_allele_grids,
-        'sw_costs': sw_costs,
-        'st_costs': st_costs,
-        'num_bins': num_bins,
-        'switch_counts': np.array(switch_counts),
-    }
+    return process_contig_for_pedigree(
+        contig_idx, sample_start, sample_end,
+        tol_painting, founder_block,
+        snps_per_bin, recomb_rate, max_snps_per_bin
+    )
 
 
 def _score_contig_pairs(contig_idx):

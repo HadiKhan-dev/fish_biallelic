@@ -73,6 +73,49 @@ def _init_shared_data(data_dict):
     _SHARED_DATA.clear()
     _SHARED_DATA.update(data_dict)
 
+
+def _init_block_worker(total_cores, active_counter):
+    """Initializer for block haplotype discovery workers.
+    
+    Sets the numba thread pool ceiling to total_cores so workers can
+    scale up dynamically as peers finish. Starts at 1 thread — the
+    worker function adjusts before each task based on active count.
+    
+    With OMP PASSIVE, idle threads in the oversized pool sleep and
+    cost zero CPU.
+    """
+    global _BH_ACTIVE_COUNTER, _BH_TOTAL_CORES
+    _BH_ACTIVE_COUNTER = active_counter
+    _BH_TOTAL_CORES = total_cores
+    try:
+        import os, numba
+        os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
+        numba.config.NUMBA_NUM_THREADS = total_cores
+        numba.set_num_threads(1)
+    except Exception:
+        pass
+
+_BH_ACTIVE_COUNTER = None
+_BH_TOTAL_CORES = None
+
+
+def _update_dynamic_threads():
+    """Recheck active worker count and update numba threads.
+    
+    Called at the top of scoring loops in select_optimal_haplotype_set_viterbi
+    and prune_chimeras. Only activates inside block haplotype workers where
+    _BH_ACTIVE_COUNTER is set — no-op everywhere else.
+    """
+    if _BH_ACTIVE_COUNTER is None or _BH_TOTAL_CORES is None:
+        return
+    active = max(_BH_ACTIVE_COUNTER.value, 1)
+    n = max(1, _BH_TOTAL_CORES // active)
+    try:
+        import numba
+        numba.set_num_threads(n)
+    except Exception:
+        pass
+
 def _worker_generate_block(block_idx, **kwargs):
     """
     Legacy worker function that retrieves data from shared memory by index.
@@ -91,17 +134,35 @@ def _worker_generate_block_direct(args):
     """
     Forkserver worker function that receives block data directly.
     Returns (block_idx, result) for correct ordering with imap_unordered.
+    
+    Dynamically scales numba threads based on active peer count.
+    When all 112 workers are busy: 1 thread each (parallelism from pool).
+    When 5 workers remain: 22 threads each (Viterbi scoring scales up).
     """
     block_idx, positions, reads, flags, kwargs = args
     
-    result = generate_haplotypes_block_robust(
-        positions, 
-        reads, 
-        keep_flags=flags, 
-        **kwargs
-    )
-    _malloc_trim()
-    return (block_idx, result)
+    # Scale numba threads based on active workers
+    import numba as _numba
+    if _BH_ACTIVE_COUNTER is not None and _BH_TOTAL_CORES is not None:
+        with _BH_ACTIVE_COUNTER.get_lock():
+            _BH_ACTIVE_COUNTER.value += 1
+        active = max(_BH_ACTIVE_COUNTER.value, 1)
+        n_threads = max(1, _BH_TOTAL_CORES // active)
+        _numba.set_num_threads(n_threads)
+    
+    try:
+        result = generate_haplotypes_block_robust(
+            positions, 
+            reads, 
+            keep_flags=flags, 
+            **kwargs
+        )
+        _malloc_trim()
+        return (block_idx, result)
+    finally:
+        if _BH_ACTIVE_COUNTER is not None:
+            with _BH_ACTIVE_COUNTER.get_lock():
+                _BH_ACTIVE_COUNTER.value -= 1
 
 @dataclass
 class FounderBlock:
@@ -497,6 +558,7 @@ def prune_chimeras(hap_dict, probs_array,
     n_sites = next(iter(hap_dict.values())).shape[0]
     
     while len(kept_keys) >= 3:
+        _update_dynamic_threads()
         
         # Build haplotype stack
         H_stack = np.array([np.argmax(hap_dict[k], axis=1) if hap_dict[k].ndim == 2 
@@ -649,6 +711,7 @@ def select_optimal_haplotype_set_viterbi(candidate_haps, probs_array,
     complexity_cost = max(calculated_complexity, min_complexity)
     
     while len(selected_indices) < num_candidates:
+        _update_dynamic_threads()
         
         best_new_index = -1
         best_new_bic = float('inf')
@@ -1517,7 +1580,10 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
         _main_mod.__spec__ = None
     
     try:
-        with _ForkserverPool(processes=num_processes) as pool:
+        active_counter = _forkserver_ctx.Value('i', 0)
+        with _ForkserverPool(processes=num_processes,
+                             initializer=_init_block_worker,
+                             initargs=(num_processes, active_counter)) as pool:
             results = []
             for result in tqdm(
                 pool.imap_unordered(_worker_generate_block_direct, task_args, chunksize=1),

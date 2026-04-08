@@ -1,5 +1,5 @@
 """
-Phase Correction for Tolerance Paintings using Trio + Children Information.
+Phase Correction for Viterbi Paintings using Trio + Children Information.
 REFACTORED: Now operates on BINS (like pedigree_inference) for ~150x speedup.
 
 This module resolves phase ambiguity by considering:
@@ -12,7 +12,7 @@ that minimizes total recombinations across parents AND children.
 Algorithm:
 - Pre-round: Initialize LLs using parent-derivation scores
 - Rounds 1-3: Phase correction using parent + child information
-- Post-rounds: Select best-LL consensus for each sample
+- Post-round: Select best-LL painting for each sample
 """
 import thread_config
 
@@ -238,71 +238,6 @@ def discretize_painting_to_bins(painting: SamplePainting, bin_edges: np.ndarray)
     hom_mask = (id_grid[:, 0] == id_grid[:, 1]) | (id_grid[:, 0] == -1) | (id_grid[:, 1] == -1)
     
     return id_grid, hom_mask
-
-
-def discretize_consensus_to_bins(consensus_painting, bin_edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Discretize a SampleConsensusPainting to fixed bins, using uncertainty info for hom_mask.
-    
-    Args:
-        consensus_painting: SampleConsensusPainting with chunks containing uncertainty sets
-        bin_edges: Array of bin boundaries (n_bins + 1,)
-    
-    Returns:
-        id_grid: (n_bins, 2) array of representative founder IDs
-        potential_hom_mask: (n_bins,) boolean - True where homozygosity is possible
-    """
-    num_bins = len(bin_edges) - 1
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    
-    id_grid = np.full((num_bins, 2), -1, dtype=np.int32)
-    potential_hom_mask = np.ones(num_bins, dtype=np.bool_)
-    
-    cons_chunks = consensus_painting.chunks
-    if not cons_chunks:
-        return id_grid, potential_hom_mask
-    
-    # Get representative path for concrete IDs
-    if consensus_painting.representative_path is not None:
-        rep_chunks = consensus_painting.representative_path.chunks
-    else:
-        rep_chunks = None
-    
-    # Build lookup for consensus chunks
-    c_ends = np.array([c.end for c in cons_chunks], dtype=np.int64)
-    c_starts = np.array([c.start for c in cons_chunks], dtype=np.int64)
-    
-    chunk_indices = np.searchsorted(c_ends, bin_centers, side='right')
-    chunk_indices = np.clip(chunk_indices, 0, len(cons_chunks) - 1)
-    
-    # Check potential homozygosity from uncertainty sets
-    for b in range(num_bins):
-        cidx = chunk_indices[b]
-        chunk = cons_chunks[cidx]
-        
-        if bin_centers[b] < chunk.start or bin_centers[b] >= chunk.end:
-            potential_hom_mask[b] = True
-            continue
-        
-        # Intersection of possible founders non-empty => potentially homozygous
-        intersection = chunk.possible_hap1 & chunk.possible_hap2
-        potential_hom_mask[b] = len(intersection) > 0
-    
-    # Fill IDs from representative path
-    if rep_chunks:
-        rep_ends = np.array([c.end for c in rep_chunks], dtype=np.int64)
-        rep_starts = np.array([c.start for c in rep_chunks], dtype=np.int64)
-        rep_h1 = np.array([c.hap1 for c in rep_chunks], dtype=np.int32)
-        rep_h2 = np.array([c.hap2 for c in rep_chunks], dtype=np.int32)
-        
-        rep_indices = np.searchsorted(rep_ends, bin_centers, side='right')
-        rep_indices = np.clip(rep_indices, 0, len(rep_chunks) - 1)
-        valid_mask = (bin_centers >= rep_starts[rep_indices]) & (bin_centers < rep_ends[rep_indices])
-        
-        id_grid[:, 0] = np.where(valid_mask, rep_h1[rep_indices], -1)
-        id_grid[:, 1] = np.where(valid_mask, rep_h2[rep_indices], -1)
-    
-    return id_grid, potential_hom_mask
 
 
 def compute_bin_edges(start_pos: int, end_pos: int, snps_per_bin: int = 100) -> np.ndarray:
@@ -890,7 +825,7 @@ def compute_parent_derivation_score_binned(
 # =============================================================================
 
 def initialize_correction_states(
-    tolerance_painting,  # BlockTolerancePainting
+    painting,  # BlockPainting
     pedigree_df: pd.DataFrame,
     sample_names: List[str],
     bin_edges: np.ndarray
@@ -917,30 +852,10 @@ def initialize_correction_states(
     states = {}
     
     for i, name in enumerate(sample_names):
-        tol_sample = tolerance_painting[i]
-        
-        consensus_states = []
-        
-        if hasattr(tol_sample, 'paths') and tol_sample.paths:
-            for path in tol_sample.paths:
-                painting = SamplePainting(i, list(path.chunks))
-                consensus_states.append(ConsensusPaintingState(painting=painting, ll=0.0))
-        elif hasattr(tol_sample, 'consensus_list') and tol_sample.consensus_list:
-            for cons in tol_sample.consensus_list:
-                if cons.representative_path:
-                    painting = SamplePainting(i, list(cons.representative_path.chunks))
-                else:
-                    chunks = []
-                    for cc in cons.chunks:
-                        h1 = next(iter(cc.possible_hap1)) if cc.possible_hap1 else -1
-                        h2 = next(iter(cc.possible_hap2)) if cc.possible_hap2 else -1
-                        chunks.append(PaintedChunk(cc.start, cc.end, h1, h2))
-                    painting = SamplePainting(i, chunks)
-                consensus_states.append(ConsensusPaintingState(painting=painting, ll=0.0))
-        else:
-            chunks = tol_sample.chunks if hasattr(tol_sample, 'chunks') else []
-            painting = SamplePainting(i, list(chunks))
-            consensus_states.append(ConsensusPaintingState(painting=painting, ll=0.0))
+        sample_painting = painting[i]
+        chunks = sample_painting.chunks if hasattr(sample_painting, 'chunks') else []
+        painting_copy = SamplePainting(i, list(chunks))
+        consensus_states = [ConsensusPaintingState(painting=painting_copy, ll=0.0)]
         
         p1_name, p2_name = parent_map.get(name, (None, None))
         children_names = children_map.get(name, [])
@@ -1137,7 +1052,13 @@ def _process_contig_worker(r_name):
     """Worker function for processing a single contig."""
     global _PARALLEL_DATA
     
-    data = _PARALLEL_DATA['multi_contig_results'][r_name]
+    # Load data: use load_fn if provided, otherwise read from multi_contig_results
+    load_fn = _PARALLEL_DATA.get('load_fn')
+    if load_fn is not None:
+        data = load_fn(r_name)
+    else:
+        data = _PARALLEL_DATA['multi_contig_results'][r_name]
+    
     pedigree_df = _PARALLEL_DATA['pedigree_df']
     sample_names = _PARALLEL_DATA['sample_names']
     num_rounds = _PARALLEL_DATA['num_rounds']
@@ -1195,7 +1116,9 @@ def _process_contig_worker(r_name):
     
     multi_consensus = sum(1 for s in states.values() if len(s.consensus_states) > 1)
     
-    return (r_name, final_painting, multi_consensus, final_round)
+    # Return founder_block so main process can store it for greedy refinement
+    founder_block = data.get('founder_block')
+    return (r_name, final_painting, multi_consensus, final_round, founder_block)
 
 
 def correct_phase_all_contigs(
@@ -1209,7 +1132,8 @@ def correct_phase_all_contigs(
     min_diff_sites: int = 2,
     verbose: bool = True,
     max_workers: Optional[int] = None,
-    parallel: bool = True
+    parallel: bool = True,
+    load_fn=None
 ) -> Dict:
     """
     Correct phase for all contigs using BINNED data (~150x faster than per-SNP).
@@ -1219,8 +1143,9 @@ def correct_phase_all_contigs(
     
     Args:
         multi_contig_results: Dict mapping region_name -> data dict containing:
-            - 'tolerance_result': BlockTolerancePainting
+            - 'tolerance_result': BlockPainting
             - 'founder_block': BlockResult with founder haplotypes (optional but recommended)
+            If load_fn is provided, this dict only needs the contig names as keys.
         pedigree_df: DataFrame with Sample, Parent1, Parent2 columns
         sample_names: List of sample names
         num_rounds: Number of correction rounds (default 3)
@@ -1231,6 +1156,8 @@ def correct_phase_all_contigs(
         verbose: Print progress
         max_workers: Maximum parallel workers (default: num contigs)
         parallel: Use parallel processing
+        load_fn: Optional callable(r_name) -> dict with 'tolerance_result' and 'founder_block'.
+                 If provided, workers load their own data (parallelizes I/O).
     
     Returns:
         Updated multi_contig_results with 'corrected_painting' key added
@@ -1239,10 +1166,14 @@ def correct_phase_all_contigs(
     import os
     import multiprocessing as mp
     
-    contig_names = [
-        r_name for r_name, data in multi_contig_results.items()
-        if 'tolerance_result' in data
-    ]
+    if load_fn is not None:
+        # With load_fn, workers load their own data — keys just need contig names
+        contig_names = list(multi_contig_results.keys())
+    else:
+        contig_names = [
+            r_name for r_name, data in multi_contig_results.items()
+            if 'tolerance_result' in data
+        ]
     n_contigs = len(contig_names)
     
     if max_workers is None:
@@ -1253,6 +1184,8 @@ def correct_phase_all_contigs(
         print(f"Phase Correction (BINNED, {snps_per_bin} SNPs/bin, {num_rounds} rounds)")
         if parallel and n_contigs > 1:
             print(f"Using {max_workers} parallel workers")
+            if load_fn is not None:
+                print(f"Workers will load data from checkpoints (parallel I/O)")
         print(f"{'='*60}")
     
     if parallel and n_contigs > 1:
@@ -1264,7 +1197,8 @@ def correct_phase_all_contigs(
             'snps_per_bin': snps_per_bin,
             'recomb_rate': recomb_rate,
             'max_diff_fraction': max_diff_fraction,
-            'min_diff_sites': min_diff_sites
+            'min_diff_sites': min_diff_sites,
+            'load_fn': load_fn
         }
         
         if verbose:
@@ -1273,8 +1207,10 @@ def correct_phase_all_contigs(
         with mp.Pool(processes=max_workers) as pool:
             results = pool.map(_process_contig_worker, contig_names)
         
-        for r_name, final_painting, multi_cons, final_round in results:
-            multi_contig_results[r_name]['corrected_painting'] = final_painting
+        for r_name, final_painting, multi_cons, final_round, founder_block in results:
+            multi_contig_results.setdefault(r_name, {})['corrected_painting'] = final_painting
+            if founder_block is not None:
+                multi_contig_results[r_name]['founder_block'] = founder_block
             if verbose:
                 print(f"  {r_name}: converged round {final_round}, multi-consensus: {multi_cons}")
         
@@ -1282,7 +1218,10 @@ def correct_phase_all_contigs(
     
     else:
         for r_name in contig_names:
-            data = multi_contig_results[r_name]
+            if load_fn is not None:
+                data = load_fn(r_name)
+            else:
+                data = multi_contig_results[r_name]
             
             if verbose:
                 print(f"\nProcessing {r_name}...")
@@ -1347,7 +1286,10 @@ def correct_phase_all_contigs(
                     break
             
             final_painting = build_final_painting(states, sample_names, start_pos, end_pos)
-            data['corrected_painting'] = final_painting
+            multi_contig_results.setdefault(r_name, {})['corrected_painting'] = final_painting
+            # Also keep founder_block for greedy refinement
+            if 'founder_block' in data:
+                multi_contig_results[r_name]['founder_block'] = data['founder_block']
             
             if verbose:
                 multi_consensus = sum(1 for s in states.values() if len(s.consensus_states) > 1)
@@ -2007,6 +1949,76 @@ def post_process_phase_greedy(
     return BlockPainting((start_pos, end_pos), refined_samples)
 
 
+def _greedy_contig_worker(r_name):
+    """Worker function for parallel greedy refinement of a single contig."""
+    global _PARALLEL_DATA
+    
+    data = _PARALLEL_DATA['multi_contig_results'][r_name]
+    pedigree_df = _PARALLEL_DATA['pedigree_df']
+    sample_names = _PARALLEL_DATA['sample_names']
+    snps_per_bin = _PARALLEL_DATA['snps_per_bin']
+    recomb_rate = _PARALLEL_DATA['recomb_rate']
+    mismatch_cost = _PARALLEL_DATA['mismatch_cost']
+    max_diff_fraction = _PARALLEL_DATA.get('max_diff_fraction', 0.02)
+    min_diff_sites = _PARALLEL_DATA.get('min_diff_sites', 2)
+    
+    corrected_painting = data['corrected_painting']
+    
+    # Get region
+    if hasattr(corrected_painting, 'region'):
+        start_pos = corrected_painting.region[0]
+        end_pos = corrected_painting.region[1]
+    elif hasattr(corrected_painting, 'samples') and corrected_painting.samples:
+        start_pos = min(s.chunks[0].start for s in corrected_painting.samples if s.chunks)
+        end_pos = max(s.chunks[-1].end for s in corrected_painting.samples if s.chunks)
+    else:
+        start_pos = corrected_painting.start_pos
+        end_pos = corrected_painting.end_pos
+    
+    bin_edges = compute_bin_edges(start_pos, end_pos, snps_per_bin=snps_per_bin)
+    
+    # Compute founder equivalence matrix
+    if 'founder_block' in data:
+        dense_haps, positions = founder_block_to_dense(data['founder_block'])
+        equiv = compute_founder_equivalence_matrix(
+            dense_haps, positions, bin_edges,
+            max_diff_fraction=max_diff_fraction,
+            min_diff_sites=min_diff_sites
+        )
+        n_founders = dense_haps.shape[0]
+    else:
+        n_bins = len(bin_edges) - 1
+        equiv = np.zeros((n_bins, 8, 8), dtype=np.bool_)
+        for b in range(n_bins):
+            for f in range(8):
+                equiv[b, f, f] = True
+        n_founders = 0
+    
+    refined_painting = post_process_phase_greedy(
+        corrected_painting,
+        pedigree_df,
+        sample_names,
+        bin_edges,
+        equiv,
+        recomb_rate=recomb_rate,
+        mismatch_cost=mismatch_cost,
+        verbose=False  # Workers don't print (avoids interleaved output)
+    )
+    
+    # Collect stats for summary
+    n_bins = len(bin_edges) - 1
+    sample_grids_before = {}
+    sample_grids_after = {}
+    for i, name in enumerate(sample_names):
+        gb, _ = discretize_painting_to_bins(corrected_painting.samples[i], bin_edges)
+        ga, _ = discretize_painting_to_bins(refined_painting.samples[i], bin_edges)
+        if not np.array_equal(gb, ga):
+            sample_grids_before[name] = gb
+            sample_grids_after[name] = ga
+    
+    return (r_name, refined_painting, n_founders, len(sample_grids_before))
+
+
 def post_process_phase_greedy_all_contigs(
     multi_contig_results: Dict,
     pedigree_df: pd.DataFrame,
@@ -2016,7 +2028,9 @@ def post_process_phase_greedy_all_contigs(
     mismatch_cost: float = 4.6,
     max_diff_fraction: float = 0.02,
     min_diff_sites: int = 2,
-    verbose: bool = True
+    verbose: bool = True,
+    max_workers: Optional[int] = None,
+    parallel: bool = True
 ) -> Dict:
     """
     Apply greedy phase refinement to all contigs.
@@ -2038,82 +2052,603 @@ def post_process_phase_greedy_all_contigs(
         max_diff_fraction: Max fraction of differing sites for founder equivalence (default 2%)
         min_diff_sites: Min absolute number of differing sites for equivalence (default 2)
         verbose: Print progress
+        max_workers: Maximum parallel workers (default: num contigs)
+        parallel: Use parallel processing
     
     Returns:
         Updated multi_contig_results with 'refined_painting' key added
     """
-    if verbose:
-        print(f"\n{'='*60}")
-        print(f"Greedy Phase Refinement Post-Processing")
-        print(f"{'='*60}")
+    global _PARALLEL_DATA
+    import os
+    import multiprocessing as mp
     
     contig_names = [
         r_name for r_name, data in multi_contig_results.items()
         if 'corrected_painting' in data
     ]
+    n_contigs = len(contig_names)
     
-    for r_name in contig_names:
-        data = multi_contig_results[r_name]
-        corrected_painting = data['corrected_painting']
+    if max_workers is None:
+        max_workers = min(os.cpu_count() or 4, n_contigs)
+    
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"Greedy Phase Refinement Post-Processing")
+        if parallel and n_contigs > 1:
+            print(f"Using {max_workers} parallel workers")
+        print(f"{'='*60}")
+    
+    if parallel and n_contigs > 1:
+        _PARALLEL_DATA = {
+            'multi_contig_results': multi_contig_results,
+            'pedigree_df': pedigree_df,
+            'sample_names': sample_names,
+            'snps_per_bin': snps_per_bin,
+            'recomb_rate': recomb_rate,
+            'mismatch_cost': mismatch_cost,
+            'max_diff_fraction': max_diff_fraction,
+            'min_diff_sites': min_diff_sites
+        }
         
         if verbose:
-            print(f"\n{r_name}:")
+            print(f"\nProcessing {n_contigs} contigs in parallel...")
         
-        # Get region from the painting - try different access patterns
-        if hasattr(corrected_painting, 'region'):
-            start_pos = corrected_painting.region[0]
-            end_pos = corrected_painting.region[1]
-        elif hasattr(corrected_painting, 'samples') and corrected_painting.samples:
-            # Compute from sample chunks
-            start_pos = min(s.chunks[0].start for s in corrected_painting.samples if s.chunks)
-            end_pos = max(s.chunks[-1].end for s in corrected_painting.samples if s.chunks)
-        else:
-            # Try tuple-like access
-            try:
-                start_pos = corrected_painting[0][0]
-                end_pos = corrected_painting[0][1]
-            except:
-                print(f"  WARNING: Could not determine region for {r_name}, skipping")
-                continue
+        with mp.Pool(processes=max_workers) as pool:
+            results = pool.map(_greedy_contig_worker, contig_names)
         
-        bin_edges = compute_bin_edges(start_pos, end_pos, snps_per_bin=snps_per_bin)
+        for r_name, refined_painting, n_founders, n_refined in results:
+            multi_contig_results[r_name]['refined_painting'] = refined_painting
+            if verbose:
+                print(f"  {r_name}: {n_founders} founders, {n_refined} samples refined")
         
-        # Compute founder equivalence matrix
-        if 'founder_block' in data:
-            dense_haps, positions = founder_block_to_dense(data['founder_block'])
-            equiv = compute_founder_equivalence_matrix(
-                dense_haps, positions, bin_edges,
-                max_diff_fraction=max_diff_fraction,
-                min_diff_sites=min_diff_sites
+        _PARALLEL_DATA = {}
+    
+    else:
+        for r_name in contig_names:
+            data = multi_contig_results[r_name]
+            corrected_painting = data['corrected_painting']
+            
+            if verbose:
+                print(f"\n{r_name}:")
+            
+            # Get region from the painting - try different access patterns
+            if hasattr(corrected_painting, 'region'):
+                start_pos = corrected_painting.region[0]
+                end_pos = corrected_painting.region[1]
+            elif hasattr(corrected_painting, 'samples') and corrected_painting.samples:
+                # Compute from sample chunks
+                start_pos = min(s.chunks[0].start for s in corrected_painting.samples if s.chunks)
+                end_pos = max(s.chunks[-1].end for s in corrected_painting.samples if s.chunks)
+            else:
+                # Try tuple-like access
+                try:
+                    start_pos = corrected_painting[0][0]
+                    end_pos = corrected_painting[0][1]
+                except:
+                    print(f"  WARNING: Could not determine region for {r_name}, skipping")
+                    continue
+            
+            bin_edges = compute_bin_edges(start_pos, end_pos, snps_per_bin=snps_per_bin)
+            
+            # Compute founder equivalence matrix
+            if 'founder_block' in data:
+                dense_haps, positions = founder_block_to_dense(data['founder_block'])
+                equiv = compute_founder_equivalence_matrix(
+                    dense_haps, positions, bin_edges,
+                    max_diff_fraction=max_diff_fraction,
+                    min_diff_sites=min_diff_sites
+                )
+                if verbose:
+                    n_founders = dense_haps.shape[0]
+                    print(f"  Computed founder equivalence matrix ({n_founders} founders)")
+            else:
+                # Fallback: no equivalence (identity only)
+                n_bins = len(bin_edges) - 1
+                # Assume at most 8 founders
+                equiv = np.zeros((n_bins, 8, 8), dtype=np.bool_)
+                for b in range(n_bins):
+                    for f in range(8):
+                        equiv[b, f, f] = True
+                if verbose:
+                    print(f"  WARNING: No founder_block found, using identity equivalence only")
+            
+            refined_painting = post_process_phase_greedy(
+                corrected_painting,
+                pedigree_df,
+                sample_names,
+                bin_edges,
+                equiv,
+                recomb_rate=recomb_rate,
+                mismatch_cost=mismatch_cost,
+                verbose=verbose
             )
-            if verbose:
-                n_founders = dense_haps.shape[0]
-                print(f"  Computed founder equivalence matrix ({n_founders} founders)")
-        else:
-            # Fallback: no equivalence (identity only)
-            n_bins = len(bin_edges) - 1
-            # Assume at most 8 founders
-            equiv = np.zeros((n_bins, 8, 8), dtype=np.bool_)
-            for b in range(n_bins):
-                for f in range(8):
-                    equiv[b, f, f] = True
-            if verbose:
-                print(f"  WARNING: No founder_block found, using identity equivalence only")
-        
-        refined_painting = post_process_phase_greedy(
-            corrected_painting,
-            pedigree_df,
-            sample_names,
-            bin_edges,
-            equiv,
-            recomb_rate=recomb_rate,
-            mismatch_cost=mismatch_cost,
-            verbose=verbose
-        )
-        
-        data['refined_painting'] = refined_painting
+            
+            data['refined_painting'] = refined_painting
     
     if verbose:
         print(f"\nGreedy refinement complete.")
     
     return multi_contig_results
+
+
+# =============================================================================
+# PARSIMONIOUS F1 RECOLORING
+# =============================================================================
+
+def _compute_founder_ibs_in_region(founder_block, f1, f2, start_pos, end_pos,
+                                    max_mismatch_rate=0.02):
+    """
+    Check if two founders are effectively identical (IBS) in a genomic region.
+    
+    Uses argmax alleles from the founder block. Two founders are considered
+    equivalent if their mismatch rate is below max_mismatch_rate in the region.
+    
+    Args:
+        founder_block: BlockResult with .positions and .haplotypes
+        f1, f2: Founder IDs to compare
+        start_pos, end_pos: Genomic region boundaries (bp)
+        max_mismatch_rate: Maximum fraction of mismatching sites (default 2%)
+    
+    Returns:
+        True if founders are effectively identical in the region
+    """
+    if f1 == f2:
+        return True
+    if f1 == -1 or f2 == -1:
+        return True
+    
+    positions = founder_block.positions
+    haplotypes = founder_block.haplotypes
+    
+    if f1 not in haplotypes or f2 not in haplotypes:
+        return False
+    
+    # Find sites in region
+    idx_start = np.searchsorted(positions, start_pos, side='left')
+    idx_end = np.searchsorted(positions, end_pos, side='right')
+    
+    if idx_end <= idx_start:
+        # No sites in region — assume equivalent (no evidence to distinguish)
+        return True
+    
+    # Get alleles via argmax
+    h1 = haplotypes[f1]
+    h2 = haplotypes[f2]
+    
+    if h1.ndim == 2:
+        a1 = np.argmax(h1[idx_start:idx_end], axis=1)
+    else:
+        a1 = h1[idx_start:idx_end]
+    
+    if h2.ndim == 2:
+        a2 = np.argmax(h2[idx_start:idx_end], axis=1)
+    else:
+        a2 = h2[idx_start:idx_end]
+    
+    n_sites = len(a1)
+    n_mismatches = np.sum(a1 != a2)
+    mismatch_rate = n_mismatches / n_sites
+    
+    return mismatch_rate <= max_mismatch_rate
+
+
+def _parsimonious_track_dp(segments, founder_block, all_founder_ids,
+                            max_mismatch_rate=0.02):
+    """
+    DP to find the founder assignment that minimizes switches along one track.
+    
+    For each segment, computes which founders are IBS-equivalent to the
+    originally assigned founder. Then finds the assignment sequence that
+    minimizes the number of founder transitions.
+    
+    Args:
+        segments: List of (start, end, original_founder_id) tuples
+        founder_block: BlockResult for IBS checking
+        all_founder_ids: List of all valid founder IDs
+        max_mismatch_rate: Threshold for IBS equivalence
+    
+    Returns:
+        List of (start, end, chosen_founder_id) tuples — same length as segments
+    """
+    n_segs = len(segments)
+    if n_segs == 0:
+        return []
+    
+    # For each segment, compute the set of compatible (IBS-equivalent) founders
+    compatible = []
+    for start, end, orig_fid in segments:
+        equiv_set = set()
+        for fid in all_founder_ids:
+            if _compute_founder_ibs_in_region(founder_block, orig_fid, fid,
+                                               start, end, max_mismatch_rate):
+                equiv_set.add(fid)
+        # Always include the original as fallback
+        equiv_set.add(orig_fid)
+        compatible.append(equiv_set)
+    
+    # DP: cost[seg][fid] = minimum switches to reach segment seg with founder fid
+    # Use dict since founder IDs may be sparse
+    INF = float('inf')
+    
+    # Initialize first segment
+    prev_costs = {}
+    for fid in compatible[0]:
+        prev_costs[fid] = 0  # No switches needed at first segment
+    
+    # Backpointers: backptr[seg] = {fid: best_prev_fid}
+    backptrs = [None] * n_segs
+    backptrs[0] = {fid: None for fid in compatible[0]}
+    
+    # Forward pass
+    for seg_idx in range(1, n_segs):
+        curr_costs = {}
+        curr_backptr = {}
+        
+        for fid in compatible[seg_idx]:
+            best_cost = INF
+            best_prev = None
+            
+            for prev_fid, prev_cost in prev_costs.items():
+                cost = prev_cost + (0 if fid == prev_fid else 1)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_prev = prev_fid
+            
+            curr_costs[fid] = best_cost
+            curr_backptr[fid] = best_prev
+        
+        prev_costs = curr_costs
+        backptrs[seg_idx] = curr_backptr
+    
+    # Traceback: find best final founder
+    best_final_fid = min(prev_costs, key=prev_costs.get)
+    
+    chosen = [None] * n_segs
+    chosen[n_segs - 1] = best_final_fid
+    
+    for seg_idx in range(n_segs - 2, -1, -1):
+        chosen[seg_idx] = backptrs[seg_idx + 1][chosen[seg_idx + 1]]
+    
+    # Build result
+    result = []
+    for i, (start, end, _orig) in enumerate(segments):
+        result.append((start, end, chosen[i]))
+    
+    return result
+
+
+def apply_parsimonious_f1_recoloring(
+    block_painting,
+    founder_block,
+    pedigree_df: pd.DataFrame,
+    sample_names: List[str],
+    max_mismatch_rate: float = 0.02,
+    verbose: bool = True
+) -> BlockPainting:
+    """
+    Recolor F1 (top-level parent) paintings for parsimony.
+    
+    For each F1 individual (no parents in the discovered pedigree), examines
+    each haplotype track independently and replaces founder assignments with
+    IBS-equivalent founders that minimize the total number of recombination
+    switches along the track.
+    
+    Example:
+        Original:  H1(0-5Mb) → H3(5-9Mb) → H4(9-10Mb)
+        If H4 ≈ H1 in 9-10Mb region:
+        Recolored: H1(0-5Mb) → H3(5-9Mb) → H1(9-10Mb)  (one fewer distinct founder)
+    
+    This makes the painting consistent with a simpler recombination history
+    and helps downstream analysis (e.g., IBD detection, haplotype sharing).
+    
+    Args:
+        block_painting: BlockPainting with SamplePainting objects
+        founder_block: BlockResult with .positions and .haplotypes for IBS checking
+        pedigree_df: DataFrame with Sample, Parent1, Parent2 columns
+        sample_names: List of sample names (order matches block_painting)
+        max_mismatch_rate: Maximum allele mismatch rate for IBS equivalence (default 2%)
+        verbose: Print progress
+    
+    Returns:
+        New BlockPainting with F1 samples recolored for parsimony
+    """
+    # Identify F1 samples (no parents in pedigree)
+    f1_names = set()
+    for _, row in pedigree_df.iterrows():
+        if pd.isna(row.get('Parent1')) and pd.isna(row.get('Parent2')):
+            f1_names.add(row['Sample'])
+    
+    if not f1_names:
+        if verbose:
+            print("  No F1 samples found — nothing to recolor")
+        return block_painting
+    
+    # Get all founder IDs from the founder block
+    all_founder_ids = sorted(list(founder_block.haplotypes.keys()))
+    
+    name_to_idx = {name: i for i, name in enumerate(sample_names)}
+    
+    total_switches_saved = 0
+    total_samples_changed = 0
+    
+    new_samples = list(block_painting.samples)  # shallow copy
+    
+    for f1_name in sorted(f1_names):
+        if f1_name not in name_to_idx:
+            continue
+        idx = name_to_idx[f1_name]
+        sample_painting = block_painting[idx]
+        
+        if not sample_painting.chunks:
+            continue
+        
+        # Extract track segments from chunks
+        # Track 0 (hap1): merge consecutive chunks with same founder
+        # Track 1 (hap2): same
+        def extract_track_segments(chunks, track):
+            """Extract merged segments for one track from painting chunks."""
+            if not chunks:
+                return []
+            segments = []
+            curr_start = chunks[0].start
+            curr_end = chunks[0].end
+            curr_fid = chunks[0].hap1 if track == 0 else chunks[0].hap2
+            
+            for c in chunks[1:]:
+                fid = c.hap1 if track == 0 else c.hap2
+                if fid == curr_fid:
+                    curr_end = c.end  # extend
+                else:
+                    segments.append((curr_start, curr_end, curr_fid))
+                    curr_start = c.start
+                    curr_end = c.end
+                    curr_fid = fid
+            
+            segments.append((curr_start, curr_end, curr_fid))
+            return segments
+        
+        track0_segs = extract_track_segments(sample_painting.chunks, 0)
+        track1_segs = extract_track_segments(sample_painting.chunks, 1)
+        
+        # Count original switches
+        orig_switches_0 = sum(1 for i in range(1, len(track0_segs))
+                              if track0_segs[i][2] != track0_segs[i-1][2])
+        orig_switches_1 = sum(1 for i in range(1, len(track1_segs))
+                              if track1_segs[i][2] != track1_segs[i-1][2])
+        
+        # Run DP for each track
+        new_track0 = _parsimonious_track_dp(track0_segs, founder_block,
+                                             all_founder_ids, max_mismatch_rate)
+        new_track1 = _parsimonious_track_dp(track1_segs, founder_block,
+                                             all_founder_ids, max_mismatch_rate)
+        
+        # Count new switches
+        new_switches_0 = sum(1 for i in range(1, len(new_track0))
+                             if new_track0[i][2] != new_track0[i-1][2])
+        new_switches_1 = sum(1 for i in range(1, len(new_track1))
+                             if new_track1[i][2] != new_track1[i-1][2])
+        
+        saved = (orig_switches_0 + orig_switches_1) - (new_switches_0 + new_switches_1)
+        
+        if saved <= 0:
+            continue  # No improvement
+        
+        total_switches_saved += saved
+        total_samples_changed += 1
+        
+        if verbose:
+            print(f"  {f1_name}: track1 {orig_switches_0}→{new_switches_0} switches, "
+                  f"track2 {orig_switches_1}→{new_switches_1} switches "
+                  f"(saved {saved})")
+        
+        # Rebuild painting from the two recolored tracks
+        # Collect all breakpoints from both tracks
+        breakpoints = set()
+        for start, end, _ in new_track0:
+            breakpoints.add(start)
+            breakpoints.add(end)
+        for start, end, _ in new_track1:
+            breakpoints.add(start)
+            breakpoints.add(end)
+        sorted_bp = sorted(breakpoints)
+        
+        new_chunks = []
+        for bp_idx in range(len(sorted_bp) - 1):
+            seg_start = sorted_bp[bp_idx]
+            seg_end = sorted_bp[bp_idx + 1]
+            mid = (seg_start + seg_end) // 2
+            
+            # Find track0 founder at this position
+            h1 = -1
+            for s, e, fid in new_track0:
+                if s <= mid < e:
+                    h1 = fid
+                    break
+            
+            # Find track1 founder at this position
+            h2 = -1
+            for s, e, fid in new_track1:
+                if s <= mid < e:
+                    h2 = fid
+                    break
+            
+            # Merge with previous chunk if same founders
+            if new_chunks and new_chunks[-1].hap1 == h1 and new_chunks[-1].hap2 == h2:
+                prev = new_chunks[-1]
+                new_chunks[-1] = PaintedChunk(prev.start, seg_end, h1, h2)
+            else:
+                new_chunks.append(PaintedChunk(seg_start, seg_end, h1, h2))
+        
+        new_samples[idx] = SamplePainting(idx, new_chunks)
+    
+    if verbose:
+        print(f"  Recolored {total_samples_changed} F1 samples, "
+              f"saved {total_switches_saved} total switches")
+    
+    return BlockPainting((block_painting.start_pos, block_painting.end_pos), new_samples)
+
+
+def propagate_recoloring_to_offspring(
+    block_painting,
+    founder_block,
+    pedigree_df: pd.DataFrame,
+    sample_names: List[str],
+    max_mismatch_rate: float = 0.02,
+    verbose: bool = True
+) -> BlockPainting:
+    """
+    Propagate parsimonious founder IDs from parents to offspring.
+    
+    After F1 recoloring, parents use the most parsimonious founder IDs.
+    But their children may still use IBS-equivalent but different founder IDs
+    for the same inherited segment (because the Viterbi painting chose
+    independently). This function walks the pedigree top-down and replaces
+    each child segment's founder ID with the matching parent's founder ID
+    when they are IBS-equivalent.
+    
+    This does not change alleles (IBS-equivalent founders have the same alleles
+    by definition) — it only makes founder ID labels consistent across the
+    pedigree for cleaner visualization and downstream analysis.
+    
+    Args:
+        block_painting: BlockPainting with all samples (F1s already recolored)
+        founder_block: BlockResult with .positions and .haplotypes
+        pedigree_df: DataFrame with Sample, Parent1, Parent2, Generation columns
+        sample_names: List of sample names (order matches block_painting)
+        max_mismatch_rate: IBS equivalence threshold (default 2%)
+        verbose: Print progress
+    
+    Returns:
+        New BlockPainting with offspring founder IDs propagated from parents
+    """
+    name_to_idx = {name: i for i, name in enumerate(sample_names)}
+    
+    # Build parent lookup
+    parent_map = {}
+    for _, row in pedigree_df.iterrows():
+        sample = row['Sample']
+        p1 = row.get('Parent1')
+        p2 = row.get('Parent2')
+        if pd.notna(p1) and pd.notna(p2):
+            parent_map[sample] = (p1, p2)
+    
+    # Sort by generation so parents are processed before children
+    gen_order = {'F1': 0, 'F2': 1, 'F3': 2, 'F4': 3, 'F5': 4}
+    samples_by_gen = []
+    for _, row in pedigree_df.iterrows():
+        gen = row.get('Generation', 'F1')
+        gen_num = gen_order.get(gen, int(gen[1:]) if gen.startswith('F') else 99)
+        samples_by_gen.append((gen_num, gen, row['Sample']))
+    samples_by_gen.sort(key=lambda x: x[0])
+    
+    # Work on a mutable copy of paintings
+    new_samples = list(block_painting.samples)
+    
+    total_replacements = 0
+    total_samples_changed = 0
+    
+    for gen_num, gen, sample_name in samples_by_gen:
+        # Skip F1s — they have no parents, already recolored
+        if sample_name not in parent_map:
+            continue
+        if sample_name not in name_to_idx:
+            continue
+        
+        p1_name, p2_name = parent_map[sample_name]
+        if p1_name not in name_to_idx or p2_name not in name_to_idx:
+            continue
+        
+        child_idx = name_to_idx[sample_name]
+        p1_idx = name_to_idx[p1_name]
+        p2_idx = name_to_idx[p2_name]
+        
+        child_painting = new_samples[child_idx]
+        p1_painting = new_samples[p1_idx]
+        p2_painting = new_samples[p2_idx]
+        
+        if not child_painting.chunks:
+            continue
+        
+        # Build parent track segment lookups for fast midpoint queries
+        def build_track_lookup(painting, track):
+            """Build list of (start, end, founder_id) for one track."""
+            if not painting.chunks:
+                return []
+            segs = []
+            for c in painting.chunks:
+                fid = c.hap1 if track == 0 else c.hap2
+                segs.append((c.start, c.end, fid))
+            return segs
+        
+        def find_founder_at_pos(track_segs, pos):
+            """Find founder ID at a given position in a track."""
+            for start, end, fid in track_segs:
+                if start <= pos < end:
+                    return fid
+            return -1
+        
+        p1_track0 = build_track_lookup(p1_painting, 0)
+        p1_track1 = build_track_lookup(p1_painting, 1)
+        p2_track0 = build_track_lookup(p2_painting, 0)
+        p2_track1 = build_track_lookup(p2_painting, 1)
+        
+        replacements = 0
+        new_chunks = []
+        
+        for chunk in child_painting.chunks:
+            new_h1 = chunk.hap1
+            new_h2 = chunk.hap2
+            mid = (chunk.start + chunk.end) // 2
+            
+            # For track 0 (hap1): find which parent track has an IBS-equivalent founder
+            if chunk.hap1 != -1:
+                # Check all 4 parent tracks for IBS match
+                best_replacement = chunk.hap1
+                for parent_tracks in [p1_track0, p1_track1, p2_track0, p2_track1]:
+                    parent_fid = find_founder_at_pos(parent_tracks, mid)
+                    if parent_fid != -1 and parent_fid != chunk.hap1:
+                        if _compute_founder_ibs_in_region(
+                            founder_block, chunk.hap1, parent_fid,
+                            chunk.start, chunk.end, max_mismatch_rate
+                        ):
+                            best_replacement = parent_fid
+                            break  # Take first IBS match from parents
+                
+                if best_replacement != chunk.hap1:
+                    new_h1 = best_replacement
+                    replacements += 1
+            
+            # For track 1 (hap2): same logic
+            if chunk.hap2 != -1:
+                best_replacement = chunk.hap2
+                for parent_tracks in [p1_track0, p1_track1, p2_track0, p2_track1]:
+                    parent_fid = find_founder_at_pos(parent_tracks, mid)
+                    if parent_fid != -1 and parent_fid != chunk.hap2:
+                        if _compute_founder_ibs_in_region(
+                            founder_block, chunk.hap2, parent_fid,
+                            chunk.start, chunk.end, max_mismatch_rate
+                        ):
+                            best_replacement = parent_fid
+                            break
+                
+                if best_replacement != chunk.hap2:
+                    new_h2 = best_replacement
+                    replacements += 1
+            
+            # Merge with previous chunk if same founders
+            if new_chunks and new_chunks[-1].hap1 == new_h1 and new_chunks[-1].hap2 == new_h2:
+                prev = new_chunks[-1]
+                new_chunks[-1] = PaintedChunk(prev.start, chunk.end, new_h1, new_h2)
+            else:
+                new_chunks.append(PaintedChunk(chunk.start, chunk.end, new_h1, new_h2))
+        
+        if replacements > 0:
+            new_samples[child_idx] = SamplePainting(child_idx, new_chunks)
+            total_replacements += replacements
+            total_samples_changed += 1
+    
+    if verbose:
+        print(f"  Propagated to {total_samples_changed} offspring, "
+              f"{total_replacements} total segment replacements")
+    
+    return BlockPainting((block_painting.start_pos, block_painting.end_pos), new_samples)

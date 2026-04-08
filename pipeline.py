@@ -92,6 +92,7 @@ if __name__ == '__main__':
     import paint_samples
     import pedigree_inference
     import phase_correction
+    import residual_discovery
 
 
     warnings.filterwarnings("ignore")
@@ -204,7 +205,8 @@ if __name__ == '__main__':
 
     # Which stage checkpoint holds each per-contig key.
     # Values can be a single stage string or a list (tried in order, first hit wins).
-    # simd_block_results lives in 03 before refinement and 04 after.
+    # simd_block_results lives in 03 before refinement, 04 after refinement,
+    # and 04b after residual discovery.
     _KEY_SOURCE = {
         'naive_long_haps':    '01_vcf_discovery',
         'simulated_reads':    '02_simulation',
@@ -212,12 +214,12 @@ if __name__ == '__main__':
         'simd_probs':         '02_simulation',
         'simd_priors':        '02_simulation',
         'truth_painting':     '02_simulation',
-        'simd_block_results': ['04_refinement', '03_block_haplotypes'],
-        'super_blocks_L1':    '05_assembly_L1',
-        'super_blocks_L2':    '06_assembly_L2',
-        'super_blocks_L3':    '07_assembly_L3',
-        'super_blocks_L4':    '08_assembly_L4',
-        'tolerance_result':   '09_tolerance_painting',
+        'simd_block_results': ['05_residual_discovery', '04_refinement', '03_block_haplotypes'],
+        'super_blocks_L1':    '06_assembly_L1',
+        'super_blocks_L2':    '07_assembly_L2',
+        'super_blocks_L3':    '08_assembly_L3',
+        'super_blocks_L4':    '09_assembly_L4',
+        'tolerance_result':   '10_viterbi_painting',
     }
 
     def _ensure_key(r_name, key):
@@ -652,11 +654,63 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE 5: Hierarchical Assembly (Level 1)
+    # STAGE 5: Residual Discovery (find missing founders HDBSCAN missed)
     # =========================================================================
-    STAGE_5 = "05_assembly_L1"
+    STAGE_5 = "05_residual_discovery"
 
     if stage_complete(STAGE_5):
+        print(f"\n[RESUME] Skipping residual discovery (checkpoint found)")
+    else:
+        print(f"\n{'='*60}")
+        print("Residual Discovery (Missing Founder Recovery)")
+        print(f"{'='*60}")
+
+        start = time.time()
+
+        for r_name in region_keys:
+            if contig_done(STAGE_5, r_name):
+                print(f"  [RESUME] {r_name} already done")
+                continue
+            print(f"\n  Processing {r_name}...")
+
+            _ensure_key(r_name, 'simd_block_results')
+            _ensure_key(r_name, 'simd_probs')
+            _ensure_key(r_name, 'naive_long_haps')
+            blocks = multi_contig_results[r_name]['simd_block_results']
+            global_probs = multi_contig_results[r_name]['simd_probs']
+            global_sites = multi_contig_results[r_name]['naive_long_haps'][0]
+
+            print(f"    Input: {len(blocks)} blocks, "
+                  f"avg haps: {np.mean([len(b.haplotypes) for b in blocks]):.1f}")
+
+            blocks_out = residual_discovery.discover_missing_haplotypes(
+                blocks, global_probs, global_sites,
+                min_residual_reduction=0.10,
+                num_processes=n_processes,
+                verbose=True
+            )
+
+            multi_contig_results[r_name]['simd_block_results'] = blocks_out
+            save_contig(STAGE_5, r_name, {'simd_block_results': blocks_out})
+
+            print(f"    Output: {len(blocks_out)} blocks, "
+                  f"avg haps: {np.mean([len(b.haplotypes) for b in blocks_out]):.1f}")
+
+            # Free this contig's data immediately
+            for _k in ('simd_probs', 'simd_block_results'):
+                multi_contig_results[r_name].pop(_k, None)
+
+        print(f"\nResidual discovery complete in {time.time()-start:.1f}s")
+        mark_stage_complete(STAGE_5)
+
+#%%
+if __name__ == '__main__':
+    # =========================================================================
+    # STAGE 6: Hierarchical Assembly (Level 1)
+    # =========================================================================
+    STAGE_6 = "06_assembly_L1"
+
+    if stage_complete(STAGE_6):
         print(f"\n[RESUME] Skipping L1 assembly (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -666,7 +720,7 @@ if __name__ == '__main__':
         start = time.time()
 
         for r_name in region_keys:
-            if contig_done(STAGE_5, r_name):
+            if contig_done(STAGE_6, r_name):
                 print(f"  [RESUME] {r_name} already done")
                 continue
             print(f"\n  Processing {r_name}...")
@@ -694,7 +748,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L1'] = super_blocks
-            save_contig(STAGE_5, r_name, {'super_blocks_L1': super_blocks})
+            save_contig(STAGE_6, r_name, {'super_blocks_L1': super_blocks})
             
             hap_counts = [len(b.haplotypes) for b in super_blocks]
             total_sites = sum(len(b.positions) for b in super_blocks)
@@ -709,16 +763,16 @@ if __name__ == '__main__':
 
         print(f"\nHierarchical Assembly (Level 1) complete in {time.time()-start:.1f}s")
         _prune_key('simd_block_results')
-        mark_stage_complete(STAGE_5)
+        mark_stage_complete(STAGE_6)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE 6: Hierarchical Assembly (Level 2)
+    # STAGE 7: Hierarchical Assembly (Level 2)
     # =========================================================================
-    STAGE_6 = "06_assembly_L2"
+    STAGE_7 = "07_assembly_L2"
 
-    if stage_complete(STAGE_6):
+    if stage_complete(STAGE_7):
         print(f"\n[RESUME] Skipping L2 assembly (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -728,7 +782,7 @@ if __name__ == '__main__':
         start_time = time.time()
 
         for r_name in region_keys:
-            if contig_done(STAGE_6, r_name):
+            if contig_done(STAGE_7, r_name):
                 print(f"  [RESUME] {r_name} already done")
                 continue
             print(f"\n  Processing {r_name}...")
@@ -758,7 +812,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L2'] = super_blocks_L2
-            save_contig(STAGE_6, r_name, {'super_blocks_L2': super_blocks_L2})
+            save_contig(STAGE_7, r_name, {'super_blocks_L2': super_blocks_L2})
             
             haps_per_block = [len(b.haplotypes) for b in super_blocks_L2]
             total_sites = sum(len(b.positions) for b in super_blocks_L2)
@@ -773,16 +827,16 @@ if __name__ == '__main__':
 
         print(f"\nHierarchical Assembly (Level 2) complete in {time.time()-start_time:.1f}s")
         _prune_key('super_blocks_L1')
-        mark_stage_complete(STAGE_6)
+        mark_stage_complete(STAGE_7)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE 7: Hierarchical Assembly (Level 3)
+    # STAGE 8: Hierarchical Assembly (Level 3)
     # =========================================================================
-    STAGE_7 = "07_assembly_L3"
+    STAGE_8 = "08_assembly_L3"
 
-    if stage_complete(STAGE_7):
+    if stage_complete(STAGE_8):
         print(f"\n[RESUME] Skipping L3 assembly (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -792,7 +846,7 @@ if __name__ == '__main__':
         start_time = time.time()
 
         for r_name in region_keys:
-            if contig_done(STAGE_7, r_name):
+            if contig_done(STAGE_8, r_name):
                 print(f"  [RESUME] {r_name} already done")
                 continue
             print(f"\n  Processing {r_name}...")
@@ -822,7 +876,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L3'] = super_blocks_L3
-            save_contig(STAGE_7, r_name, {'super_blocks_L3': super_blocks_L3})
+            save_contig(STAGE_8, r_name, {'super_blocks_L3': super_blocks_L3})
             
             haps_per_block = [len(b.haplotypes) for b in super_blocks_L3]
             print(f"\n    Output: {len(super_blocks_L3)} L3 super-blocks")
@@ -835,16 +889,16 @@ if __name__ == '__main__':
 
         print(f"\nHierarchical Assembly (Level 3) complete in {time.time()-start_time:.1f}s")
         _prune_key('super_blocks_L2')
-        mark_stage_complete(STAGE_7)
+        mark_stage_complete(STAGE_8)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE 8: Hierarchical Assembly (Level 4)
+    # STAGE 9: Hierarchical Assembly (Level 4)
     # =========================================================================
-    STAGE_8 = "08_assembly_L4"
+    STAGE_9 = "09_assembly_L4"
 
-    if stage_complete(STAGE_8):
+    if stage_complete(STAGE_9):
         print(f"\n[RESUME] Skipping L4 assembly (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -854,7 +908,7 @@ if __name__ == '__main__':
         start_time = time.time()
 
         for r_name in region_keys:
-            if contig_done(STAGE_8, r_name):
+            if contig_done(STAGE_9, r_name):
                 print(f"  [RESUME] {r_name} already done")
                 continue
             print(f"\n  Processing {r_name}...")
@@ -895,7 +949,7 @@ if __name__ == '__main__':
                 print(f"    Sites per block: {[len(b.positions) for b in super_blocks_L4]}")
                 print(f"    Haps per super-block: {haps_per_block}")
 
-            save_contig(STAGE_8, r_name, {
+            save_contig(STAGE_9, r_name, {
                 'super_blocks_L4': multi_contig_results[r_name]['super_blocks_L4']
             })
 
@@ -905,7 +959,7 @@ if __name__ == '__main__':
 
         print(f"\nHierarchical Assembly (Level 4) complete in {time.time()-start_time:.1f}s")
         _prune_key('super_blocks_L3')
-        mark_stage_complete(STAGE_8)
+        mark_stage_complete(STAGE_9)
 
 #%%
 if __name__ == '__main__':
@@ -1345,25 +1399,25 @@ if __name__ == '__main__':
     gc.collect()
 
     # =============================================================================
-    # STAGE 9: TOLERANCE PAINTING (using DISCOVERED haplotypes from L4 assembly)
+    # STAGE 10: VITERBI PAINTING (using DISCOVERED haplotypes from L4 assembly)
     # =============================================================================
-    STAGE_9 = "09_tolerance_painting"
+    STAGE_10 = "10_viterbi_painting"
 
-    if stage_complete(STAGE_9):
-        print(f"\n[RESUME] Skipping tolerance painting (checkpoint found)")
+    if stage_complete(STAGE_10):
+        print(f"\n[RESUME] Skipping Viterbi painting (checkpoint found)")
     else:
         print("\n" + "="*60)
-        print("RUNNING: Tolerance Painting (Discovered Haplotypes)")
+        print("RUNNING: Viterbi Painting (Discovered Haplotypes)")
         print("="*60)
 
         with paint_samples.PaintingPoolManager(num_processes=n_processes) as painter:
             for r_name in region_keys:
-                if contig_done(STAGE_9, r_name):
+                if contig_done(STAGE_10, r_name):
                     print(f"  [RESUME] {r_name} already done")
                     continue
-                print(f"\n[Tolerance Painting] Processing Region: {r_name}")
+                print(f"\n[Viterbi Painting] Processing Region: {r_name}")
 
-                # 1. Retrieve Data — use L4 discovered super-block instead of ground truth
+                # Retrieve Data — use L4 discovered super-block
                 _ensure_key(r_name, 'super_blocks_L4')
                 _ensure_key(r_name, 'simd_probs')
                 _ensure_key(r_name, 'naive_long_haps')
@@ -1376,67 +1430,51 @@ if __name__ == '__main__':
                 global_probs = multi_contig_results[r_name]['simd_probs']
                 sites, _ = multi_contig_results[r_name]['naive_long_haps']
 
-                # 2. Run Tolerance Painting
-                tol_painting_result = painter.paint_chromosome(
+                # Run Viterbi Painting (single best path, no tolerance margin)
+                painting_result = painter.paint_chromosome(
                     discovered_block,
                     global_probs,
                     sites,
                     recomb_rate=5e-8,
                     switch_penalty=10.0,
-                    absolute_margin=5.0,
                     batch_size=1
                 )
 
-                multi_contig_results[r_name]['tolerance_result'] = tol_painting_result
+                multi_contig_results[r_name]['tolerance_result'] = painting_result
 
-                # 4. Visualization B: Population Consensus
-                print(f"  Generating Population Consensus Plot...")
-
-                dense_haps, dense_pos = paint_samples.founder_block_to_dense(discovered_block)
-                founder_data = (dense_haps, dense_pos)
-
-                consensus_samples = []
-                for i in range(len(sample_names)):
-                    best_rep = tol_painting_result[i].get_best_representative_path(founder_data=founder_data)
-                    consensus_samples.append(best_rep)
-
-                consensus_block = paint_samples.BlockPainting(
-                    (int(sites[0]), int(sites[-1])), 
-                    consensus_samples
-                )
-
-                cons_filename = os.path.join(output_dir, f"{r_name}_tolerance_consensus_population.png")
-                
+                # Population painting visualization
+                print(f"  Generating Population Painting Plot...")
+                plot_filename = os.path.join(output_dir, f"{r_name}_viterbi_population.png")
                 paint_samples.plot_population_painting(
-                    consensus_block,
-                    output_file=cons_filename,
-                    title=f"Tolerance Consensus (Discovered Haplotypes) - {r_name}",
+                    painting_result,
+                    output_file=plot_filename,
+                    title=f"Viterbi Painting (Discovered Haplotypes) - {r_name}",
                     sample_names=sample_names,
                     figsize_width=20,
                     row_height_per_sample=0.25
                 )
 
-                save_contig(STAGE_9, r_name, {'tolerance_result': tol_painting_result})
+                save_contig(STAGE_10, r_name, {'tolerance_result': painting_result})
 
                 # Free this contig's data immediately
                 for _k in ('simd_probs', 'tolerance_result', 'super_blocks_L4'):
                     multi_contig_results[r_name].pop(_k, None)
 
-        print("\nTolerance Painting complete.")
+        print("\nViterbi Painting complete.")
         _prune_key('simd_probs')
         _prune_key('simd_priors')
-        mark_stage_complete(STAGE_9)
+        mark_stage_complete(STAGE_10)
 
 #%%
 if __name__ == '__main__':
     # =============================================================================
-    # STAGE 10: MULTI-CONTIG PEDIGREE INFERENCE (using DISCOVERED haplotypes)
+    # STAGE 11: MULTI-CONTIG PEDIGREE INFERENCE (using DISCOVERED haplotypes)
     # =============================================================================
-    STAGE_10 = "10_pedigree_inference"
+    STAGE_11 = "11_pedigree_inference"
 
-    if stage_complete(STAGE_10):
+    if stage_complete(STAGE_11):
         print(f"\n[RESUME] Skipping pedigree inference (checkpoint found)")
-        pedigree_df = load_global(STAGE_10)['pedigree_df']
+        pedigree_df = load_global(STAGE_11)['pedigree_df']
     else:
         print("\n" + "="*60)
         print("RUNNING: Multi-Contig Pedigree Inference (Discovered Haplotypes)")
@@ -1513,51 +1551,56 @@ if __name__ == '__main__':
             print(f"Generation Accuracy: {gen_acc:.2f}%")
             print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
 
-        save_global(STAGE_10, {'pedigree_df': pedigree_df})
-        mark_stage_complete(STAGE_10)
+        save_global(STAGE_11, {'pedigree_df': pedigree_df})
+        mark_stage_complete(STAGE_11)
 
 #%%
 if __name__ == '__main__':
     # =============================================================================
-    # STAGE 11: PHASE CORRECTION (using DISCOVERED haplotypes)
+    # STAGE 12: PHASE CORRECTION (using DISCOVERED haplotypes)
     # =============================================================================
-    STAGE_11 = "11_phase_correction"
+    STAGE_12 = "12_phase_correction"
 
-    if stage_complete(STAGE_11):
+    if stage_complete(STAGE_12):
         print(f"\n[RESUME] Skipping phase correction (checkpoint found)")
         # Load per-contig phase correction results for validation
         for r_name in region_keys:
-            s11 = load_contig(STAGE_11, r_name)
-            for k, v in s11.items():
+            s12 = load_contig(STAGE_12, r_name)
+            for k, v in s12.items():
                 multi_contig_results.setdefault(r_name, {})[k] = v
-            del s11
+            del s12
     else:
         print("\n" + "="*60)
         print("RUNNING: Phase Correction (Discovered Haplotypes)")
         print("="*60)
 
-        # Ensure all data phase_correction needs is loaded
-        for r_name in region_keys:
+        # Define loader callback — workers call this to load their own contig data
+        # (parallelizes I/O across all worker processes)
+        def _load_contig_for_phase_correction(r_name):
+            """Load tolerance_result and founder_block for one contig from checkpoints."""
+            data = {}
             _ensure_key(r_name, 'super_blocks_L4')
             _ensure_key(r_name, 'tolerance_result')
-            _ensure_key(r_name, 'naive_long_haps')
-            _ensure_key(r_name, 'truth_painting')
-
-        # Set founder_block to discovered L4 super-block
-        for r_name in multi_contig_results:
+            data['tolerance_result'] = multi_contig_results[r_name]['tolerance_result']
             if 'super_blocks_L4' in multi_contig_results[r_name]:
-                multi_contig_results[r_name]['founder_block'] = multi_contig_results[r_name]['super_blocks_L4'][0]
+                data['founder_block'] = multi_contig_results[r_name]['super_blocks_L4'][0]
             elif 'super_blocks_L3' in multi_contig_results[r_name]:
-                multi_contig_results[r_name]['founder_block'] = multi_contig_results[r_name]['super_blocks_L3'][0]
+                data['founder_block'] = multi_contig_results[r_name]['super_blocks_L3'][0]
+            return data
+
+        # Ensure contig names exist in multi_contig_results (load_fn needs keys)
+        for r_name in region_keys:
+            multi_contig_results.setdefault(r_name, {})
 
         start = time.time()
-        # Run phase correction on all contigs
+        # Run phase correction — workers load their own data via load_fn
         multi_contig_results = phase_correction.correct_phase_all_contigs(
             multi_contig_results,
             pedigree_df,
             sample_names,
             num_rounds=3,
-            verbose=True
+            verbose=True,
+            load_fn=_load_contig_for_phase_correction
         )
         print(f"Phase correction time: {time.time()-start:.1f}s")
 
@@ -1580,18 +1623,68 @@ if __name__ == '__main__':
         )
         print(f"Greedy refinement time: {time.time()-start_refine:.1f}s")
 
+        # =============================================================================
+        # PARSIMONIOUS F1 RECOLORING
+        # =============================================================================
+        print("\n" + "="*60)
+        print("RUNNING: Parsimonious F1 Recoloring")
+        print("="*60)
+
+        for r_name in region_keys:
+            if r_name not in multi_contig_results:
+                continue
+            data = multi_contig_results[r_name]
+            painting_key = 'refined_painting' if 'refined_painting' in data else 'corrected_painting'
+            if painting_key not in data or 'founder_block' not in data:
+                continue
+
+            recolored = phase_correction.apply_parsimonious_f1_recoloring(
+                data[painting_key],
+                data['founder_block'],
+                pedigree_df,
+                sample_names,
+                max_mismatch_rate=0.02,
+                verbose=True
+            )
+            data['final_painting'] = recolored
+
+        # =============================================================================
+        # PROPAGATE RECOLORING TO OFFSPRING
+        # =============================================================================
+        print("\n" + "="*60)
+        print("RUNNING: Propagate Recoloring to Offspring")
+        print("="*60)
+
+        for r_name in region_keys:
+            if r_name not in multi_contig_results:
+                continue
+            data = multi_contig_results[r_name]
+            if 'final_painting' not in data or 'founder_block' not in data:
+                continue
+
+            propagated = phase_correction.propagate_recoloring_to_offspring(
+                data['final_painting'],
+                data['founder_block'],
+                pedigree_df,
+                sample_names,
+                max_mismatch_rate=0.02,
+                verbose=True
+            )
+            data['final_painting'] = propagated
+
         # Save per-contig phase correction results
         for r_name in region_keys:
             d = {k: multi_contig_results[r_name][k]
-                 for k in ('corrected_painting', 'refined_painting', 'founder_block')
+                 for k in ('corrected_painting', 'refined_painting',
+                           'final_painting', 'founder_block')
                  if k in multi_contig_results[r_name]}
-            save_contig(STAGE_11, r_name, d)
+            save_contig(STAGE_12, r_name, d)
 
         # Free everything — phase validation reloads from checkpoints
         multi_contig_results = {r: {'naive_long_haps': multi_contig_results[r].get('naive_long_haps')}
                                 for r in region_keys if 'naive_long_haps' in multi_contig_results.get(r, {})}
         gc.collect()
-        mark_stage_complete(STAGE_11)
+        mark_stage_complete(STAGE_12)
 
 #%%
 if __name__ == '__main__':
@@ -1603,18 +1696,28 @@ if __name__ == '__main__':
     print("  (Using DISCOVERED haplotypes for painting, TRUE founders for validation)")
     print("="*60)
 
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Reload paintings from stage 12 checkpoints (freed during save)
+    def _load_stage12(r_name):
+        if contig_done(STAGE_12, r_name):
+            s12 = load_contig(STAGE_12, r_name)
+            for k, v in s12.items():
+                multi_contig_results.setdefault(r_name, {})[k] = v
+            del s12
+        return r_name
+
+    print("\nLoading phase correction + validation data from checkpoints...")
+    load_start = time.time()
+    with ThreadPoolExecutor(max_workers=min(8, len(region_keys))) as executor:
+        list(executor.map(_load_stage12, region_keys))
+    print(f"Stage 12 reload: {time.time()-load_start:.1f}s")
 
     def extract_founder_ids_at_positions(painting, positions):
         n_pos = len(positions)
         hap1_ids = np.full(n_pos, -1, dtype=np.int32)
         hap2_ids = np.full(n_pos, -1, dtype=np.int32)
-        if hasattr(painting, 'chunks'):
-            chunks = painting.chunks
-        elif hasattr(painting, 'paths') and painting.paths:
-            chunks = painting.paths[0].chunks
-        else:
-            return hap1_ids, hap2_ids
+        chunks = painting.chunks if hasattr(painting, 'chunks') else []
         if not chunks:
             return hap1_ids, hap2_ids
         n_chunks = len(chunks)
@@ -1691,11 +1794,22 @@ if __name__ == '__main__':
     print("  Paintings use DISCOVERED haplotypes")
     print("  Validation converts to alleles using TRUE founders")
 
-    eval_args = []
-    for r_name in region_keys:
+    # Build shared data for each contig (truth, positions, dense haps)
+    # Pre-load any missing keys in parallel
+    def _load_validation_keys(r_name):
         _ensure_key(r_name, 'truth_painting')
         _ensure_key(r_name, 'super_blocks_L4')
         _ensure_key(r_name, 'naive_long_haps')
+        _ensure_key(r_name, 'tolerance_result')
+        return r_name
+    
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=min(8, len(region_keys))) as executor:
+        list(executor.map(_load_validation_keys, region_keys))
+    print(f"  Validation data loaded in {time.time()-t0:.1f}s")
+    
+    contig_shared = {}
+    for r_name in region_keys:
         if 'truth_painting' not in multi_contig_results[r_name]:
             continue
         truth = multi_contig_results[r_name]['truth_painting']
@@ -1705,20 +1819,65 @@ if __name__ == '__main__':
             discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
         positions = discovered_block.positions
         dense_haps, _ = phase_correction.founder_block_to_dense(discovered_block)
-        if 'refined_painting' in multi_contig_results[r_name]:
-            painting = multi_contig_results[r_name]['refined_painting']
-        elif 'corrected_painting' in multi_contig_results[r_name]:
-            painting = multi_contig_results[r_name]['corrected_painting']
-        else:
-            continue
         
-        # Build true founder alleles at discovered positions
-        # Truth painting IDs (0..n_founders-1) map to naive_long_haps founders
         orig_sites, orig_haps = multi_contig_results[r_name]['naive_long_haps']
         orig_haps_concrete = simulate_sequences.concretify_haps(orig_haps)
         site_indices = np.searchsorted(orig_sites, positions)
         site_indices = np.clip(site_indices, 0, len(orig_sites) - 1)
         true_dense_haps = np.array([h[site_indices] for h in orig_haps_concrete], dtype=np.int8)
+        
+        contig_shared[r_name] = (truth, positions, dense_haps, true_dense_haps)
+
+    # --- BEFORE: evaluate uncorrected painting (raw Viterbi output) ---
+    print("\n" + "-"*60)
+    print("BEFORE phase correction (raw Viterbi painting):")
+    print("-"*60)
+
+    before_args = []
+    for r_name in region_keys:
+        if r_name not in contig_shared:
+            continue
+        truth, positions, dense_haps, true_dense_haps = contig_shared[r_name]
+        raw_painting = multi_contig_results[r_name].get('tolerance_result')
+        if raw_painting is None:
+            continue
+        before_args.append((r_name, raw_painting, truth, positions, dense_haps,
+                            true_dense_haps, sample_names))
+
+    before_contig_results = []
+    with ThreadPoolExecutor(max_workers=len(region_keys)) as executor:
+        for r_name, contig_eval in executor.map(evaluate_contig_dual_founders, before_args):
+            mean_acc = contig_eval['Accuracy'].mean()*100
+            mean_t1 = contig_eval['Track1_accuracy'].mean()*100
+            mean_t2 = contig_eval['Track2_accuracy'].mean()*100
+            print(f"  {r_name}: Allele={mean_acc:.2f}%, Track1={mean_t1:.2f}%, Track2={mean_t2:.2f}%")
+            before_contig_results.append(contig_eval)
+
+    if before_contig_results:
+        before_df = pd.concat(before_contig_results, ignore_index=True)
+        before_df['Generation'] = before_df['Sample'].apply(
+            lambda x: 'F1' if x.startswith('F1') else ('F2' if x.startswith('F2') else 'F3'))
+    else:
+        before_df = pd.DataFrame()
+
+    # --- AFTER: evaluate corrected painting ---
+    print("\n" + "-"*60)
+    print("AFTER phase correction (corrected + greedy + F1 recoloring):")
+    print("-"*60)
+
+    eval_args = []
+    for r_name in region_keys:
+        if r_name not in contig_shared:
+            continue
+        truth, positions, dense_haps, true_dense_haps = contig_shared[r_name]
+        if 'final_painting' in multi_contig_results[r_name]:
+            painting = multi_contig_results[r_name]['final_painting']
+        elif 'refined_painting' in multi_contig_results[r_name]:
+            painting = multi_contig_results[r_name]['refined_painting']
+        elif 'corrected_painting' in multi_contig_results[r_name]:
+            painting = multi_contig_results[r_name]['corrected_painting']
+        else:
+            continue
         
         eval_args.append((r_name, painting, truth, positions, dense_haps, 
                           true_dense_haps, sample_names))
@@ -1745,8 +1904,48 @@ if __name__ == '__main__':
             lambda x: 'F1' if x.startswith('F1') else ('F2' if x.startswith('F2') else 'F3')
         )
         
+        # ============================================================
+        # BEFORE vs AFTER COMPARISON
+        # ============================================================
         print("\n" + "="*60)
-        print("PHASE CORRECTION RESULTS (DISCOVERED HAPLOTYPES)")
+        print("PHASE CORRECTION: BEFORE vs AFTER COMPARISON")
+        print("="*60)
+        
+        if len(before_df) > 0:
+            print("\nBy Generation:")
+            print(f"  {'Gen':<4s}  {'Before Allele':>14s}  {'After Allele':>13s}  {'Before Track1':>14s}  {'After Track1':>13s}  {'Improvement':>12s}")
+            for gen in ['F1', 'F2', 'F3']:
+                b_gen = before_df[before_df['Generation'] == gen]
+                a_gen = full_eval_df[full_eval_df['Generation'] == gen]
+                if len(b_gen) > 0 and len(a_gen) > 0:
+                    b_acc = b_gen['Accuracy'].mean()*100
+                    a_acc = a_gen['Accuracy'].mean()*100
+                    b_t1 = b_gen['Track1_accuracy'].mean()*100
+                    a_t1 = a_gen['Track1_accuracy'].mean()*100
+                    diff = a_t1 - b_t1
+                    print(f"  {gen:<4s}  {b_acc:>13.2f}%  {a_acc:>12.2f}%  {b_t1:>13.2f}%  {a_t1:>12.2f}%  {diff:>+11.2f}%")
+            
+            b_overall_acc = before_df['Accuracy'].mean()*100
+            a_overall_acc = full_eval_df['Accuracy'].mean()*100
+            b_overall_t1 = before_df['Track1_accuracy'].mean()*100
+            a_overall_t1 = full_eval_df['Track1_accuracy'].mean()*100
+            diff_overall = a_overall_t1 - b_overall_t1
+            print(f"  {'All':<4s}  {b_overall_acc:>13.2f}%  {a_overall_acc:>12.2f}%  {b_overall_t1:>13.2f}%  {a_overall_t1:>12.2f}%  {diff_overall:>+11.2f}%")
+            
+            # Perfect phasing comparison
+            perfect_threshold = 0.999
+            b_perfect = len(before_df[before_df['Track1_accuracy'] >= perfect_threshold])
+            a_perfect = len(full_eval_df[full_eval_df['Track1_accuracy'] >= perfect_threshold])
+            n_total = len(full_eval_df)
+            print(f"\n  Perfect phasing (>=99.9% Track1):")
+            print(f"    Before: {b_perfect}/{n_total} ({100*b_perfect/n_total:.1f}%)")
+            print(f"    After:  {a_perfect}/{n_total} ({100*a_perfect/n_total:.1f}%)")
+        
+        # ============================================================
+        # DETAILED AFTER RESULTS
+        # ============================================================
+        print("\n" + "="*60)
+        print("PHASE CORRECTION RESULTS (AFTER)")
         print("="*60)
         
         print("\nAccuracy by Generation:")
