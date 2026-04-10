@@ -24,6 +24,12 @@ except OSError:
     def _malloc_trim():
         pass
 
+# Maximum samples to process at once in emission scoring tensors.
+# Bounds peak memory per worker: (n_candidates, _SAMPLE_CHUNK, K², n_bins).
+# Each sample is independent, so chunking is mathematically exact.
+# 50 samples keeps the largest tensors under ~100 MB regardless of K.
+_SAMPLE_CHUNK = 10
+
 
 def _resolve_threads(num_threads):
     """
@@ -312,12 +318,19 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites, snps_pe
 # TENSOR BUILDING AND SCORING
 # =============================================================================
 
-def _build_tensor_from_paths(path_set, sub_emissions, num_samples):
-    """Build Viterbi scoring tensor from a set of key-paths."""
+def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=None):
+    """Build Viterbi scoring tensor from a set of key-paths.
+    If sample_range=(s0, s1) is given, only builds for those samples."""
     K = len(path_set)
     n_pairs = K * K
     total_bins = sum(e['n_bins'] for e in sub_emissions)
-    tensor = np.zeros((num_samples, n_pairs, total_bins), dtype=np.float64)
+    if sample_range is not None:
+        s0, s1 = sample_range
+        n_s = s1 - s0
+    else:
+        s0, s1 = 0, num_samples
+        n_s = num_samples
+    tensor = np.zeros((n_s, n_pairs, total_bins), dtype=np.float64)
     bin_offset = 0
     for b_idx, em_data in enumerate(sub_emissions):
         n_bins_b = em_data['n_bins']
@@ -326,7 +339,7 @@ def _build_tensor_from_paths(path_set, sub_emissions, num_samples):
         local_indices = np.array([hap_keys.index(path[b_idx]) for path in path_set])
         grid_i = np.repeat(local_indices, K)
         grid_j = np.tile(local_indices, K)
-        tensor[:, :, bin_offset:bin_offset + n_bins_b] = bin_em[:, grid_i, grid_j, :]
+        tensor[:, :, bin_offset:bin_offset + n_bins_b] = bin_em[s0:s1, grid_i, grid_j, :]
         bin_offset += n_bins_b
     return np.ascontiguousarray(tensor)
 
@@ -339,7 +352,8 @@ def score_path_set(path_set, sub_emissions, penalty, num_samples):
 
 def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
                              chunk_size=64, num_threads=8):
-    """Score multiple path sets, grouped by size for batched Viterbi."""
+    """Score multiple path sets, grouped by size for batched Viterbi.
+    Processes samples in chunks of _SAMPLE_CHUNK to bound memory."""
     groups = defaultdict(list)
     for i, ps in enumerate(path_sets):
         groups[len(ps)].append((i, ps))
@@ -347,29 +361,40 @@ def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
     for K, group_items in groups.items():
         n_pairs = K * K
         total_b = sum(e['n_bins'] for e in sub_emissions)
-        adaptive_cs = max(4, min(64, int(5e8 / (num_samples * n_pairs * total_b * 8))))
+        _sc = min(num_samples, _SAMPLE_CHUNK)
+        adaptive_cs = max(4, min(64, int(5e8 / (_sc * n_pairs * total_b * 8))))
         cs = min(adaptive_cs, chunk_size)
         for chunk_start in range(0, len(group_items), cs):
             chunk = group_items[chunk_start:chunk_start + cs]
-            def _build_one(item):
-                _, ps = item
-                return _build_tensor_from_paths(ps, sub_emissions, num_samples)
-            nt = _resolve_threads(num_threads)
-            if nt <= 1 or len(chunk) <= 1:
-                chunk_tensors = [_build_one(item) for item in chunk]
-            else:
-                with ThreadPoolExecutor(max_workers=nt) as executor:
-                    chunk_tensors = list(executor.map(_build_one, chunk))
-            # Pre-allocate and fill to avoid double memory from np.stack
-            stacked = np.empty((len(chunk), num_samples, n_pairs, total_b),
-                               dtype=np.float64)
-            for j, t in enumerate(chunk_tensors):
-                stacked[j] = t
-            del chunk_tensors
-            chunk_scores = _batched_viterbi_score(stacked, float(penalty)); del stacked
+            n_chunk = len(chunk)
+            
+            # Accumulate scores across sample chunks
+            accum_scores = np.zeros(n_chunk, dtype=np.float64)
+            for _s0 in range(0, num_samples, _SAMPLE_CHUNK):
+                _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
+                
+                def _build_one(item, _s0=_s0, _s1=_s1):
+                    _, ps = item
+                    return _build_tensor_from_paths(ps, sub_emissions, num_samples,
+                                                    sample_range=(_s0, _s1))
+                nt = _resolve_threads(num_threads)
+                if nt <= 1 or n_chunk <= 1:
+                    chunk_tensors = [_build_one(item) for item in chunk]
+                else:
+                    with ThreadPoolExecutor(max_workers=nt) as executor:
+                        chunk_tensors = list(executor.map(_build_one, chunk))
+                # Pre-allocate and fill to avoid double memory from np.stack
+                stacked = np.empty((n_chunk, _s1 - _s0, n_pairs, total_b),
+                                   dtype=np.float64)
+                for j, t in enumerate(chunk_tensors):
+                    stacked[j] = t
+                del chunk_tensors
+                partial = _batched_viterbi_score(stacked, float(penalty))
+                accum_scores += partial
+                del stacked
             _malloc_trim()
             for j, (orig_idx, _) in enumerate(chunk):
-                results[orig_idx] = float(chunk_scores[j])
+                results[orig_idx] = float(accum_scores[j])
     return results
 
 
@@ -573,7 +598,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             block_haplotypes.viterbi_score_selection(tensor, float(pen_sel))))
     
     # =========================================================================
-    # STEP 1: Forward Selection
+    # STEP 1: Forward Selection (sample-chunked)
     # =========================================================================
     selected = []
     current_best_bic = float('inf')
@@ -583,11 +608,13 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             break
         K_next = len(selected) + 1
         n_pairs = K_next * K_next
+        # Size max_chunk using _SAMPLE_CHUNK to bound stacked tensor
+        _sc = min(num_samples, _SAMPLE_CHUNK)
         max_chunk = max(4, min(64,
-            int(5e8 / (num_samples * n_pairs * total_bins * 8))))
+            int(5e8 / (_sc * n_pairs * total_bins * 8))))
         all_scores = {}
         
-        # Build template with base pairs
+        # Build template with base pairs (full samples — moderate size)
         template = np.zeros((num_samples, n_pairs, total_bins), dtype=np.float64)
         per_block_sel_haps = []
         if selected:
@@ -606,54 +633,60 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             for b_i in range(len(sub_em)):
                 per_block_sel_haps.append(np.array([], dtype=int))
         
-        # Pre-allocate stacked buffer ONCE for this k-iteration.
-        stacked = np.empty((max_chunk, num_samples, n_pairs, total_bins),
-                           dtype=np.float64)
-        
         for cs in range(0, len(remaining), max_chunk):
             chunk = remaining[cs:cs + max_chunk]
             n_chunk = len(chunk)
-            stacked_view = stacked[:n_chunk]
             chunk_arr = np.array(chunk)
             
-            # Per-candidate threaded fill: copy template + overwrite pairs.
-            # Each candidate writes to stacked_view[local_idx] — independent
-            # memory. Multiple cores drive memory bandwidth simultaneously.
-            def _fill_candidate(local_idx):
-                ci = chunk_arr[local_idx]
-                stacked_view[local_idx] = template  # contiguous memcpy
-                bin_off_t = 0
-                for b_i, em_data in enumerate(sub_em):
-                    bin_em = em_data['bin_emissions']
-                    nb = em_data['n_bins']
-                    sel_haps = per_block_sel_haps[b_i]
-                    h_c = map_matrix[ci, b_i]
-                    for ii in range(K_next - 1):
-                        pos = ii * K_next + (K_next - 1)
-                        stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
-                            bin_em[:, sel_haps[ii], h_c, :]
-                    for jj in range(K_next - 1):
-                        pos = (K_next - 1) * K_next + jj
-                        stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
-                            bin_em[:, h_c, sel_haps[jj], :]
-                    pos = K_next * K_next - 1
-                    stacked_view[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
-                        bin_em[:, h_c, h_c, :]
-                    bin_off_t += nb
+            # Accumulate scores across sample chunks
+            accum_scores = np.zeros(n_chunk, dtype=np.float64)
+            for _s0 in range(0, num_samples, _SAMPLE_CHUNK):
+                _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
+                _sn = _s1 - _s0
+                
+                stacked_chunk = np.empty((n_chunk, _sn, n_pairs, total_bins),
+                                         dtype=np.float64)
+                _tmpl_slice = template[_s0:_s1]
+                
+                # Per-candidate fill: copy template slice + overwrite candidate pairs
+                def _fill_candidate(local_idx, _sv=stacked_chunk, _ts=_tmpl_slice,
+                                    _s0=_s0, _s1=_s1):
+                    ci = chunk_arr[local_idx]
+                    _sv[local_idx] = _ts
+                    bin_off_t = 0
+                    for b_i, em_data in enumerate(sub_em):
+                        bin_em = em_data['bin_emissions']
+                        nb = em_data['n_bins']
+                        sel_haps = per_block_sel_haps[b_i]
+                        h_c = map_matrix[ci, b_i]
+                        for ii in range(K_next - 1):
+                            pos = ii * K_next + (K_next - 1)
+                            _sv[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                                bin_em[_s0:_s1, sel_haps[ii], h_c, :]
+                        for jj in range(K_next - 1):
+                            pos = (K_next - 1) * K_next + jj
+                            _sv[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                                bin_em[_s0:_s1, h_c, sel_haps[jj], :]
+                        pos = K_next * K_next - 1
+                        _sv[local_idx, :, pos, bin_off_t:bin_off_t + nb] = \
+                            bin_em[_s0:_s1, h_c, h_c, :]
+                        bin_off_t += nb
+                
+                nt = _resolve_threads(num_threads)
+                if nt <= 1 or n_chunk <= 1:
+                    for i in range(n_chunk):
+                        _fill_candidate(i)
+                else:
+                    with ThreadPoolExecutor(max_workers=min(nt, n_chunk)) as executor:
+                        list(executor.map(_fill_candidate, range(n_chunk)))
+                
+                partial = _batched_viterbi_score(
+                    np.ascontiguousarray(stacked_chunk), float(pen_sel))
+                accum_scores += partial
+                del stacked_chunk
             
-            nt = _resolve_threads(num_threads)
-            if nt <= 1 or n_chunk <= 1:
-                for i in range(n_chunk):
-                    _fill_candidate(i)
-            else:
-                with ThreadPoolExecutor(max_workers=min(nt, n_chunk)) as executor:
-                    list(executor.map(_fill_candidate, range(n_chunk)))
-            
-            scores = _batched_viterbi_score(
-                np.ascontiguousarray(stacked_view), float(pen_sel))
             for j, ci in enumerate(chunk):
-                all_scores[ci] = float(scores[j])
-        del stacked
+                all_scores[ci] = float(accum_scores[j])
         del template
         _malloc_trim()
         best_idx = max(all_scores, key=all_scores.get)
@@ -665,7 +698,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             break
     
     # =========================================================================
-    # STEP 2: Swap Refinement
+    # STEP 2: Swap Refinement (sample-chunked)
     #
     # Outer loop:
     #   Phase A — 1-for-1 swaps (top-N, batched) until no improvement
@@ -713,14 +746,14 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         return {cand: scores[i] for i, cand in enumerate(candidates)}
     
     # -----------------------------------------------------------------
-    # Batched 1-for-1 swap round
+    # Batched 1-for-1 swap round (sample-chunked)
     # -----------------------------------------------------------------
     def _run_1for1_round(selected, get_candidates_fn, cur_score):
         """One round of batched 1-for-1 swaps across all positions.
         
-        Precomputes templates for all K swap positions, builds a flat task
-        list from get_candidates_fn per position, then fills and scores
-        in chunks (ThreadPoolExecutor fill + batched numba score).
+        Processes each swap position independently — only ONE template slice
+        exists at a time, avoiding the K × (num_samples, K², bins) memory
+        explosion from precomputing all K templates simultaneously.
         
         Returns:
             (remove_idx, add_idx, score_gain) or None
@@ -733,98 +766,99 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         if not unselected:
             return None
         
-        # Precompute templates for all K positions
-        pos_templates = []
-        pos_haps = []
         K_base = K - 1
-        for i in range(K):
-            temp_set = selected[:i] + selected[i + 1:]
-            tmpl = np.zeros((num_samples, n_pairs, total_bins), dtype=np.float64)
-            hpb = {}
-            bin_off = 0
-            for b_i, em_data in enumerate(sub_em):
-                bin_em = em_data['bin_emissions']
-                nb = em_data['n_bins']
-                t_haps = map_matrix[np.array(temp_set), b_i]
-                hpb[b_i] = t_haps
-                for ii in range(K_base):
-                    for jj in range(K_base):
-                        pos = ii * K + jj
-                        tmpl[:, pos, bin_off:bin_off + nb] = \
-                            bin_em[:, t_haps[ii], t_haps[jj], :]
-                bin_off += nb
-            pos_templates.append(tmpl)
-            pos_haps.append(hpb)
+        cand_pos = K - 1
+        _sc = min(num_samples, _SAMPLE_CHUNK)
+        sc = max(4, min(64, int(5e8 / (_sc * n_pairs * total_bins * 8))))
+        best_swap = None
+        best_gain = 0.0
         
-        # Get candidates per position, build flat task list
-        all_tasks = []
+        # Process each swap position independently — only 1 template alive at a time
         for i in range(K):
             temp_set = selected[:i] + selected[i + 1:]
             cands = get_candidates_fn(temp_set, unselected)
-            for ci in cands:
-                all_tasks.append((i, ci))
-        
-        if not all_tasks:
-            del pos_templates
-            return None
-        
-        # Process in chunks
-        sc = max(4, min(64, int(5e8 / (num_samples * n_pairs * total_bins * 8))))
-        stacked = np.empty((sc, num_samples, n_pairs, total_bins), dtype=np.float64)
-        best_swap = None
-        best_gain = 0.0
-        cand_pos = K - 1
-        
-        for cs in range(0, len(all_tasks), sc):
-            chunk_tasks = all_tasks[cs:cs + sc]
-            n_chunk = len(chunk_tasks)
-            sv = stacked[:n_chunk]
+            if not cands:
+                continue
             
-            def _fill(local_idx):
-                pi, ci = chunk_tasks[local_idx]
-                sv[local_idx] = pos_templates[pi]
-                bin_off_t = 0
-                for b_i, em_data in enumerate(sub_em):
-                    bin_em = em_data['bin_emissions']
-                    nb = em_data['n_bins']
-                    t_haps = pos_haps[pi][b_i]
-                    h_c = map_matrix[ci, b_i]
-                    for ii in range(cand_pos):
-                        p = ii * K + cand_pos
-                        sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
-                            bin_em[:, t_haps[ii], h_c, :]
-                    for jj in range(cand_pos):
-                        p = cand_pos * K + jj
-                        sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
-                            bin_em[:, h_c, t_haps[jj], :]
-                    p = cand_pos * K + cand_pos
-                    sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
-                        bin_em[:, h_c, h_c, :]
-                    bin_off_t += nb
+            # Store hap indices for this position (tiny — just integer arrays)
+            hpb = {}
+            for b_i, em_data in enumerate(sub_em):
+                hpb[b_i] = map_matrix[np.array(temp_set), b_i]
             
-            nt = _resolve_threads(num_threads)
-            if nt <= 1 or n_chunk <= 1:
-                for idx in range(n_chunk):
-                    _fill(idx)
-            else:
-                with ThreadPoolExecutor(
-                        max_workers=min(nt, n_chunk)) as exc:
-                    list(exc.map(_fill, range(n_chunk)))
-            
-            scores = _batched_viterbi_score(
-                np.ascontiguousarray(sv), float(pen_sel))
-            for j, (pi, ci) in enumerate(chunk_tasks):
-                gain = float(scores[j]) - cur_score
-                if gain > 1e-4 and gain > best_gain:
-                    best_gain = gain
-                    best_swap = (selected[pi], ci)
+            # Process candidates in chunks
+            for cs in range(0, len(cands), sc):
+                chunk_cands = cands[cs:cs + sc]
+                n_chunk = len(chunk_cands)
+                
+                # Accumulate scores across sample chunks
+                accum_scores = np.zeros(n_chunk, dtype=np.float64)
+                for _s0 in range(0, num_samples, _SAMPLE_CHUNK):
+                    _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
+                    _sn = _s1 - _s0
+                    
+                    # Build template slice for this position + sample chunk
+                    tmpl_slice = np.zeros((_sn, n_pairs, total_bins), dtype=np.float64)
+                    bin_off = 0
+                    for b_i, em_data in enumerate(sub_em):
+                        bin_em = em_data['bin_emissions']
+                        nb = em_data['n_bins']
+                        t_haps = hpb[b_i]
+                        for ii in range(K_base):
+                            for jj in range(K_base):
+                                pos = ii * K + jj
+                                tmpl_slice[:, pos, bin_off:bin_off + nb] = \
+                                    bin_em[_s0:_s1, t_haps[ii], t_haps[jj], :]
+                        bin_off += nb
+                    
+                    sv = np.empty((n_chunk, _sn, n_pairs, total_bins), dtype=np.float64)
+                    
+                    def _fill(local_idx, _sv=sv, _ts=tmpl_slice, _s0=_s0, _s1=_s1):
+                        ci = chunk_cands[local_idx]
+                        _sv[local_idx] = _ts
+                        bin_off_t = 0
+                        for b_i, em_data in enumerate(sub_em):
+                            bin_em = em_data['bin_emissions']
+                            nb = em_data['n_bins']
+                            t_haps = hpb[b_i]
+                            h_c = map_matrix[ci, b_i]
+                            for ii in range(cand_pos):
+                                p = ii * K + cand_pos
+                                _sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
+                                    bin_em[_s0:_s1, t_haps[ii], h_c, :]
+                            for jj in range(cand_pos):
+                                p = cand_pos * K + jj
+                                _sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
+                                    bin_em[_s0:_s1, h_c, t_haps[jj], :]
+                            p = cand_pos * K + cand_pos
+                            _sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
+                                bin_em[_s0:_s1, h_c, h_c, :]
+                            bin_off_t += nb
+                    
+                    nt = _resolve_threads(num_threads)
+                    if nt <= 1 or n_chunk <= 1:
+                        for idx in range(n_chunk):
+                            _fill(idx)
+                    else:
+                        with ThreadPoolExecutor(
+                                max_workers=min(nt, n_chunk)) as exc:
+                            list(exc.map(_fill, range(n_chunk)))
+                    
+                    partial = _batched_viterbi_score(
+                        np.ascontiguousarray(sv), float(pen_sel))
+                    accum_scores += partial
+                    del sv, tmpl_slice
+                
+                for j, ci in enumerate(chunk_cands):
+                    gain = float(accum_scores[j]) - cur_score
+                    if gain > 1e-4 and gain > best_gain:
+                        best_gain = gain
+                        best_swap = (selected[i], ci)
         
-        del stacked, pos_templates
         _malloc_trim()
         return (best_swap[0], best_swap[1], best_gain) if best_swap else None
     
     # -----------------------------------------------------------------
-    # Batched 2-for-1 swap round
+    # Batched 2-for-1 swap round (sample-chunked)
     # -----------------------------------------------------------------
     def _run_2for1_round(selected, cur_score):
         """One round of batched 2-for-1 swaps (BIC-aware).
@@ -847,103 +881,101 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         if not unselected:
             return None
         
-        # Precompute templates for all C(K,2) pairs
-        pair_info = []  # list of (i, j, template, haps_per_block)
         K_base = K - 2
+        cand_pos = K_result - 1
+        _sc = min(num_samples, _SAMPLE_CHUNK)
+        sc = max(4, min(64, int(5e8 / (_sc * n_pairs_r * total_bins * 8))))
+        best_2for1 = None
+        best_bic = current_bic
+        
+        # Process each pair independently — only 1 template slice alive at a time
+        # (avoids C(K,2) × full-sample templates = 22 GB for K=12)
         for i in range(K):
             for j in range(i + 1, K):
                 temp_set = [selected[k] for k in range(K) if k != i and k != j]
-                tmpl = np.zeros((num_samples, n_pairs_r, total_bins),
-                                dtype=np.float64)
+                
+                # Get candidates for this pair via cheap scoring
+                bm = precompute_base_max(temp_set)
+                cs_scores = cheap_score_all(bm, temp_set, unselected)
+                ranked = sorted(cs_scores, key=cs_scores.get, reverse=True)[:top_n_swap]
+                if not ranked:
+                    continue
+                
+                # Store hap indices for this pair (tiny)
                 hpb = {}
-                bin_off = 0
                 for b_i, em_data in enumerate(sub_em):
-                    bin_em = em_data['bin_emissions']
-                    nb = em_data['n_bins']
-                    t_haps = map_matrix[np.array(temp_set), b_i]
-                    hpb[b_i] = t_haps
-                    for ii in range(K_base):
-                        for jj in range(K_base):
-                            pos = ii * K_result + jj
-                            tmpl[:, pos, bin_off:bin_off + nb] = \
-                                bin_em[:, t_haps[ii], t_haps[jj], :]
-                    bin_off += nb
-                pair_info.append((i, j, tmpl, hpb))
+                    hpb[b_i] = map_matrix[np.array(temp_set), b_i]
+                
+                # Process candidates in chunks
+                for cs_start in range(0, len(ranked), sc):
+                    chunk_cands = ranked[cs_start:cs_start + sc]
+                    n_chunk = len(chunk_cands)
+                    
+                    # Accumulate scores across sample chunks
+                    accum_scores = np.zeros(n_chunk, dtype=np.float64)
+                    for _s0 in range(0, num_samples, _SAMPLE_CHUNK):
+                        _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
+                        _sn = _s1 - _s0
+                        
+                        # Build template slice for this pair + sample chunk
+                        tmpl_slice = np.zeros((_sn, n_pairs_r, total_bins), dtype=np.float64)
+                        bin_off = 0
+                        for b_i, em_data in enumerate(sub_em):
+                            bin_em = em_data['bin_emissions']
+                            nb = em_data['n_bins']
+                            t_haps = hpb[b_i]
+                            for ii in range(K_base):
+                                for jj in range(K_base):
+                                    pos = ii * K_result + jj
+                                    tmpl_slice[:, pos, bin_off:bin_off + nb] = \
+                                        bin_em[_s0:_s1, t_haps[ii], t_haps[jj], :]
+                            bin_off += nb
+                        
+                        sv = np.empty((n_chunk, _sn, n_pairs_r, total_bins), dtype=np.float64)
+                        
+                        def _fill_2(local_idx, _sv=sv, _ts=tmpl_slice, _s0=_s0, _s1=_s1):
+                            ci = chunk_cands[local_idx]
+                            _sv[local_idx] = _ts
+                            bin_off_t = 0
+                            for b_i, em_data in enumerate(sub_em):
+                                bin_em = em_data['bin_emissions']
+                                nb = em_data['n_bins']
+                                t_haps = hpb[b_i]
+                                h_c = map_matrix[ci, b_i]
+                                for ii in range(cand_pos):
+                                    p = ii * K_result + cand_pos
+                                    _sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
+                                        bin_em[_s0:_s1, t_haps[ii], h_c, :]
+                                for jj in range(cand_pos):
+                                    p = cand_pos * K_result + jj
+                                    _sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
+                                        bin_em[_s0:_s1, h_c, t_haps[jj], :]
+                                p = cand_pos * K_result + cand_pos
+                                _sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
+                                    bin_em[_s0:_s1, h_c, h_c, :]
+                                bin_off_t += nb
+                        
+                        nt = _resolve_threads(num_threads)
+                        if nt <= 1 or n_chunk <= 1:
+                            for idx in range(n_chunk):
+                                _fill_2(idx)
+                        else:
+                            with ThreadPoolExecutor(
+                                    max_workers=min(nt, n_chunk)) as exc:
+                                list(exc.map(_fill_2, range(n_chunk)))
+                        
+                        partial = _batched_viterbi_score(
+                            np.ascontiguousarray(sv), float(pen_sel))
+                        accum_scores += partial
+                        del sv, tmpl_slice
+                    
+                    for j_idx, ci in enumerate(chunk_cands):
+                        new_score = float(accum_scores[j_idx])
+                        new_bic = K_result * batch_cc - 2 * new_score
+                        if new_bic < best_bic - 1e-4:
+                            best_bic = new_bic
+                            best_2for1 = (selected[i], selected[j], ci)
         
-        # Get candidates per pair, build flat task list
-        all_tasks = []  # (pair_idx, candidate_beam_idx)
-        for p_idx, (i, j, tmpl, hpb) in enumerate(pair_info):
-            temp_set = [selected[k] for k in range(K) if k != i and k != j]
-            bm = precompute_base_max(temp_set)
-            cs = cheap_score_all(bm, temp_set, unselected)
-            ranked = sorted(cs, key=cs.get, reverse=True)[:top_n_swap]
-            for ci in ranked:
-                all_tasks.append((p_idx, ci))
-        
-        if not all_tasks:
-            for _, _, tmpl, _ in pair_info:
-                del tmpl
-            return None
-        
-        # Process in chunks
-        sc = max(4, min(64, int(5e8 / (num_samples * n_pairs_r * total_bins * 8))))
-        stacked = np.empty((sc, num_samples, n_pairs_r, total_bins),
-                           dtype=np.float64)
-        best_2for1 = None
-        best_bic = current_bic
-        cand_pos = K_result - 1
-        
-        for cs_start in range(0, len(all_tasks), sc):
-            chunk_tasks = all_tasks[cs_start:cs_start + sc]
-            n_chunk = len(chunk_tasks)
-            sv = stacked[:n_chunk]
-            
-            def _fill_2(local_idx):
-                p_idx, ci = chunk_tasks[local_idx]
-                _, _, tmpl, hpb = pair_info[p_idx]
-                sv[local_idx] = tmpl
-                bin_off_t = 0
-                for b_i, em_data in enumerate(sub_em):
-                    bin_em = em_data['bin_emissions']
-                    nb = em_data['n_bins']
-                    t_haps = hpb[b_i]
-                    h_c = map_matrix[ci, b_i]
-                    for ii in range(cand_pos):
-                        p = ii * K_result + cand_pos
-                        sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
-                            bin_em[:, t_haps[ii], h_c, :]
-                    for jj in range(cand_pos):
-                        p = cand_pos * K_result + jj
-                        sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
-                            bin_em[:, h_c, t_haps[jj], :]
-                    p = cand_pos * K_result + cand_pos
-                    sv[local_idx, :, p, bin_off_t:bin_off_t + nb] = \
-                        bin_em[:, h_c, h_c, :]
-                    bin_off_t += nb
-            
-            nt = _resolve_threads(num_threads)
-            if nt <= 1 or n_chunk <= 1:
-                for idx in range(n_chunk):
-                    _fill_2(idx)
-            else:
-                with ThreadPoolExecutor(
-                        max_workers=min(nt, n_chunk)) as exc:
-                    list(exc.map(_fill_2, range(n_chunk)))
-            
-            scores = _batched_viterbi_score(
-                np.ascontiguousarray(sv), float(pen_sel))
-            for j_idx, (p_idx, ci) in enumerate(chunk_tasks):
-                new_score = float(scores[j_idx])
-                new_bic = K_result * batch_cc - 2 * new_score
-                if new_bic < best_bic - 1e-4:
-                    best_bic = new_bic
-                    i_sel, j_sel = pair_info[p_idx][0], pair_info[p_idx][1]
-                    best_2for1 = (selected[i_sel], selected[j_sel], ci)
-        
-        del stacked
-        for _, _, tmpl, _ in pair_info:
-            del tmpl
-        del pair_info
         _malloc_trim()
         return best_2for1
     

@@ -106,7 +106,10 @@ if __name__ == '__main__':
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_rows', None)
 
-    n_processes=112
+    n_processes = 112
+    # Recycle workers after each batch to prevent memory accumulation
+    # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
+    WORKER_MAXTASKS = 1
 
     # -------------------------------------------------------------------------
     # REPRODUCIBILITY: Set a master seed for the simulation.
@@ -583,7 +586,8 @@ if __name__ == '__main__':
                             max_founders=12,
                             max_sites_for_linking=2000,
                             cc_scale=0.5,
-                            num_processes=n_processes
+                            num_processes=n_processes,
+                            maxtasksperchild=WORKER_MAXTASKS
                         )
                     return l1_fn
                 
@@ -601,7 +605,8 @@ if __name__ == '__main__':
                             cc_scale=0.5,
                             num_processes=n_processes,
                             n_generations=N_GENERATIONS,
-                            verbose=False
+                            verbose=False,
+                            maxtasksperchild=WORKER_MAXTASKS
                         )
                     return l2_fn
                 
@@ -744,7 +749,8 @@ if __name__ == '__main__':
                 max_founders=12,
                 max_sites_for_linking=2000,
                 cc_scale=0.5,
-                num_processes=n_processes
+                num_processes=n_processes,
+                maxtasksperchild=WORKER_MAXTASKS
             )
             
             multi_contig_results[r_name]['super_blocks_L1'] = super_blocks
@@ -807,6 +813,7 @@ if __name__ == '__main__':
                 max_founders=12,
                 cc_scale=0.5,
                 num_processes=n_processes,
+                maxtasksperchild=WORKER_MAXTASKS,
                 n_generations=3,
                 verbose=False
             )
@@ -871,6 +878,7 @@ if __name__ == '__main__':
                 max_founders=12,
                 cc_scale=0.5,
                 num_processes=n_processes,
+                maxtasksperchild=WORKER_MAXTASKS,
                 n_generations=3,
                 verbose=False
             )
@@ -938,6 +946,7 @@ if __name__ == '__main__':
                     max_founders=12,
                     cc_scale=0.5,
                     num_processes=n_processes,
+                    maxtasksperchild=WORKER_MAXTASKS,
                     n_generations=3,
                     verbose=False
                 )
