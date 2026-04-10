@@ -32,6 +32,10 @@ DEFAULT_LOG_BASE = math.e
 # Robustness parameter: 1e-2 means 1% chance any read is random noise/error.
 # This prevents high-depth outliers from forcing incorrect recombinations.
 DEFAULT_ROBUSTNESS_EPSILON = 1e-2
+# Sample chunk size for emission scoring. Bounds peak memory per block to
+# O(chunk × K² × sites) instead of O(n_samples × K² × sites). Each sample's
+# likelihood is independent, so chunking has zero computational overhead.
+SAMPLE_CHUNK_SIZE = 10
 
 try:
     from numba import njit, prange
@@ -302,12 +306,11 @@ def _worker_calculate_single_block_likelihood(args):
     
     if num_active_sites > 0:
         # --- 3. GENERATE DIPLOID COMBINATIONS ---
+        # These are sample-independent: only depend on haplotype pairs.
+        # Shape: (N_Haps, N_Haps, Sites) — small, computed once.
         h0 = haps_masked[:, :, 0]
         h1 = haps_masked[:, :, 1]
         
-        # Calculate Genotype Probabilities implied by Haplotypes
-        # Outer product to get all pairs (Full Grid)
-        # Shape: (N_Haps, N_Haps, Sites)
         c00 = h0[:, None, :] * h0[None, :, :]
         c11 = h1[:, None, :] * h1[None, :, :]
         c01 = (h0[:, None, :] * h1[None, :, :]) + (h1[:, None, :] * h0[None, :, :])
@@ -318,48 +321,56 @@ def _worker_calculate_single_block_likelihood(args):
         c01_flat = c01.reshape(-1, num_active_sites); del c01
         c11_flat = c11.reshape(-1, num_active_sites); del c11
         
-        # --- 4. PROBABILISTIC AGREEMENT (MIXTURE MODEL) ---
-        
-        # A. Calculate "Pure" Model Likelihood
-        term_0 = samples_masked[:, np.newaxis, :, 0] * c00_flat[np.newaxis, :, :]
-        term_1 = samples_masked[:, np.newaxis, :, 1] * c01_flat[np.newaxis, :, :]
-        term_2 = samples_masked[:, np.newaxis, :, 2] * c11_flat[np.newaxis, :, :]
-        del c00_flat, c01_flat, c11_flat, samples_masked
-        
-        model_probs = term_0 + term_1 + term_2
-        del term_0, term_1, term_2
-        
-        # B. Apply Robust Mixture
+        # --- 4-5. CHUNKED EMISSION SCORING ---
+        # Process samples in chunks to bound peak memory at
+        # O(chunk × K² × sites) instead of O(n_samples × K² × sites).
+        # Each sample's likelihood is independent — zero overhead from chunking.
         uniform_prob = 1.0 / 3.0
-        final_probs = (model_probs * (1.0 - epsilon)) + (epsilon * uniform_prob)
-        del model_probs
-        
-        # --- 5. LOG LIKELIHOOD ---
-        # Note: final_probs cannot be 0 if epsilon > 0, but we safety check anyway
         min_prob = 1e-300
-        final_probs[final_probs < min_prob] = min_prob
+        _log_uniform = math.log(1.0 / 3.0)
         
-        ll_per_site = np.log(final_probs)
-        del final_probs
+        final_tensor = np.empty((num_samples, num_haps, num_haps), dtype=np.float64)
         
-        # --- APPLY BURST/AFFINE LOGIC UPGRADE ---
-        # 1. Apply Hard Floor of -2.0 per site (prevents single-site overkill)
-        ll_per_site = np.maximum(ll_per_site, -2.0)
+        for s_start in range(0, num_samples, SAMPLE_CHUNK_SIZE):
+            s_end = min(s_start + SAMPLE_CHUNK_SIZE, num_samples)
+            chunk_samples = samples_masked[s_start:s_end]
+            chunk_n = s_end - s_start
+            
+            # A. Calculate "Pure" Model Likelihood for this sample chunk
+            term_0 = chunk_samples[:, np.newaxis, :, 0] * c00_flat[np.newaxis, :, :]
+            term_1 = chunk_samples[:, np.newaxis, :, 1] * c01_flat[np.newaxis, :, :]
+            term_2 = chunk_samples[:, np.newaxis, :, 2] * c11_flat[np.newaxis, :, :]
+            
+            model_probs = term_0 + term_1 + term_2
+            del term_0, term_1, term_2
+            
+            # B. Apply Robust Mixture
+            final_probs = (model_probs * (1.0 - epsilon)) + (epsilon * uniform_prob)
+            del model_probs
+            
+            # --- 5. LOG LIKELIHOOD ---
+            final_probs[final_probs < min_prob] = min_prob
+            ll_per_site = np.log(final_probs)
+            del final_probs
+            
+            # --- APPLY BURST/AFFINE LOGIC UPGRADE ---
+            # 1. Apply Hard Floor of -2.0 per site (prevents single-site overkill)
+            ll_per_site = np.maximum(ll_per_site, -2.0)
+            
+            # 2. Reshape for Kernel: (ChunkSamples, Haps, Haps, Sites)
+            ll_4d = ll_per_site.reshape(chunk_n, num_haps, num_haps, num_active_sites)
+            del ll_per_site
+            
+            # 3. Burst Aware Summation
+            final_tensor[s_start:s_end] = calculate_burst_score_vectorized(
+                ll_4d, 
+                gap_open_penalty=-10.0,
+                gap_extend_penalty=0.0, 
+                uniform_log_prob=_log_uniform
+            )
+            del ll_4d
         
-        # 2. Reshape for Kernel: (Samples, Haps, Haps, Sites)
-        ll_4d = ll_per_site.reshape(num_samples, num_haps, num_haps, num_active_sites)
-        del ll_per_site
-        
-        # 3. Burst Aware Summation
-        total_ll_matrix_4d = calculate_burst_score_vectorized(
-            ll_4d, 
-            gap_open_penalty=-10.0,
-            gap_extend_penalty=0.0, 
-            uniform_log_prob=math.log(1.0/3.0)
-        )
-        del ll_4d
-        
-        final_tensor = total_ll_matrix_4d
+        del c00_flat, c01_flat, c11_flat, samples_masked
         
     else:
         final_tensor = np.zeros((num_samples, num_haps, num_haps))

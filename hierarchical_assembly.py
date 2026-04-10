@@ -3,6 +3,7 @@ from thread_config import numba_thread_scope
 
 import numpy as np
 import math
+import gc
 import time
 from tqdm import tqdm
 import multiprocessing as mp
@@ -595,6 +596,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           cc_scale=0.5,
                           # Parallelization
                           num_processes=16,
+                          maxtasksperchild=None,
+                          min_gb_per_worker=4.0,
                           # Output control
                           verbose=False): 
     """
@@ -608,6 +611,10 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
       - Workers attach to shared segments by name for zero-copy access
       - batch_probs slicing ensures inner pools only pickle small arrays
       - Workers are non-daemonic, allowing inner child pools at L2+
+      - maxtasksperchild recycles workers after N batches, releasing
+        accumulated memory (Python doesn't return freed pages to OS)
+      - global_probs downcast to float32 (halves shared memory + all tensors)
+      - Worker count auto-capped based on available RAM / min_gb_per_worker
     
     Dynamic thread reallocation:
       - A shared counter tracks active workers
@@ -617,30 +624,81 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
       - Numba-only phases: 1 process × dyn_threads numba threads
       - When peers finish, remaining workers scale up to use freed cores
     
+    Args:
+      num_processes: Maximum total cores to use. Acts as a strict ceiling for both
+          concurrent workers AND total thread allocation. The function may use fewer
+          workers if available RAM is insufficient, but thread allocation across
+          workers will sum to at most num_processes. Typically set to os.cpu_count()
+          or the number of cores allocated by a job scheduler.
+      maxtasksperchild: Recycle workers after this many batches (default None).
+          Set to 1 to prevent memory accumulation from glibc malloc fragmentation.
+      min_gb_per_worker: Minimum GB of RAM to budget per concurrent worker.
+          Used to auto-cap worker count: max_workers = available_ram / min_gb_per_worker.
+          Increase if blocks have many haplotypes (>15); decrease if RAM is tight
+          but blocks are small. Default 4.0 (appropriate for float32 with typical data).
+    
     IMPORTANT: The entry script must NOT be named main.py, otherwise
     forkserver workers will re-execute it.
     """
     total_blocks = len(input_blocks)
     num_batches = math.ceil(total_blocks / batch_size)
     
-    outer_workers = min(num_batches, num_processes)
-    inner_num_processes = max(1, num_processes // outer_workers)
+    # num_processes is the user's ceiling — never exceed it for either
+    # concurrent workers or total thread allocation.
+    total_cores = num_processes
     
-    # Preview
+    print(f"\n--- Starting Hierarchical Step ---")
+    print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
     if n_generations is not None:
         preview_max_gap = compute_max_gap(list(input_blocks), recomb_rate, 
                                            n_generations, recomb_tolerance)
-        print(f"\n--- Starting Hierarchical Step ---")
-        print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
         print(f"Max gap: {preview_max_gap} (n_gen={n_generations}, tol={recomb_tolerance}, rate={recomb_rate})")
-        print(f"Parallelism: {outer_workers} outer workers x {inner_num_processes} inner cores = {outer_workers * inner_num_processes} total")
     else:
-        print(f"\n--- Starting Hierarchical Step ---")
-        print(f"Input: {total_blocks} blocks -> Target: ~{num_batches} Super-Blocks")
         print(f"Max gap: unlimited (n_generations not specified)")
-        print(f"Parallelism: {outer_workers} outer workers x {inner_num_processes} inner cores = {outer_workers * inner_num_processes} total")
     
-    print(f"  Dynamic threading: enabled (ceiling={num_processes} cores)")
+    # =====================================================================
+    # Strip redundant probs_array from input blocks
+    # =====================================================================
+    # Each BlockResult carries probs_array — shape (n_samples, ~200, 3)
+    # per block. Across a full chromosome, this totals the same size as
+    # global_probs (~5 GB for 290 samples × 1.5M sites). Workers access
+    # sample data via global_probs in shared memory, so probs_array in
+    # blocks is redundant. Stripping it reduces:
+    #   - Parent process memory (fewer live arrays)
+    #   - Pickle size when sending blocks to workers as task arguments
+    import ctypes as _ctypes
+    _stripped_bytes = 0
+    for block in input_blocks:
+        if hasattr(block, 'probs_array') and block.probs_array is not None:
+            _stripped_bytes += block.probs_array.nbytes
+            block.probs_array = None
+    if _stripped_bytes > 0:
+        gc.collect()
+        try:
+            _ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+        print(f"  Stripped probs_array from blocks ({_stripped_bytes / (1024**3):.1f} GB freed)")
+    
+    # =====================================================================
+    # Downcast to float32 for memory efficiency
+    # =====================================================================
+    # global_probs is float64 from R01 (HDBSCAN needs float64) but
+    # assembly only uses it for emission scoring where float32 precision
+    # is more than sufficient. Casting halves:
+    #   - Shared memory (10 GB → 5 GB for chr3)
+    #   - Per-worker batch_probs slices
+    #   - All downstream emission/chimera tensors (they inherit dtype)
+    # Numba auto-specializes @njit functions for float32.
+    if global_probs.dtype == np.float64:
+        global_probs = global_probs.astype(np.float32)
+        print(f"  Downcast global_probs to float32 ({global_probs.nbytes / (1024**3):.1f} GB)")
+    
+    # Also downcast block haplotypes (soft probabilities) if float64
+    for block in input_blocks:
+        for k, h in block.haplotypes.items():
+            if h.dtype == np.float64:
+                block.haplotypes[k] = h.astype(np.float32)
     
     # =====================================================================
     # Create POSIX shared memory for large arrays
@@ -656,6 +714,40 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     
     probs_gb = global_probs.nbytes / (1024**3)
     print(f"  Shared memory created: {probs_gb:.1f} GB probs + sites ({time.time()-t0:.1f}s)")
+    
+    # =====================================================================
+    # Auto-size worker count based on available RAM
+    # =====================================================================
+    # Read MemAvailable AFTER shared memory creation — it already accounts
+    # for the parent process, loaded data, and the shared memory segment.
+    # This gives the most accurate picture of what's left for workers.
+    max_by_ram = num_processes  # fallback: no capping
+    try:
+        with open('/proc/meminfo') as _f:
+            for _line in _f:
+                if _line.startswith('MemAvailable:'):
+                    mem_available_gb = int(_line.split()[1]) / (1024 * 1024)
+                    max_by_ram = max(1, int(mem_available_gb / min_gb_per_worker))
+                    break
+    except Exception:
+        pass  # non-Linux or /proc unavailable — use num_processes as-is
+    
+    outer_workers = min(num_batches, num_processes, max_by_ram)
+    inner_num_processes = max(1, total_cores // outer_workers)
+    
+    # Preview
+    print(f"Parallelism: {outer_workers} outer workers x {inner_num_processes} inner cores "
+          f"= {outer_workers * inner_num_processes} total")
+    if outer_workers < num_processes and outer_workers < num_batches:
+        print(f"  Workers capped by RAM: {mem_available_gb:.0f} GB available / "
+              f"{min_gb_per_worker} GB per worker = {max_by_ram} max")
+    print(f"  Dynamic threading: enabled (ceiling={total_cores} cores)")
+    
+    if maxtasksperchild is not None:
+        tasks_per_worker = math.ceil(num_batches / outer_workers)
+        n_recycles = max(0, tasks_per_worker // maxtasksperchild - 1)
+        print(f"  Worker recycling: every {maxtasksperchild} batches "
+              f"(~{tasks_per_worker} tasks/worker, ~{n_recycles} recycles each)")
     
     # =====================================================================
     # Create shared active-worker counter for dynamic thread reallocation
@@ -702,7 +794,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             pool = NoDaemonPool(
                 processes=outer_workers,
                 initializer=_init_worker_meta,
-                initargs=(shared_meta, num_processes, active_counter)
+                initargs=(shared_meta, total_cores, active_counter),
+                maxtasksperchild=maxtasksperchild
             )
             print(f"  Pool creation ({outer_workers} workers): {time.time()-t0:.1f}s")
             
@@ -727,7 +820,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             global _SHARED_META, _ACTIVE_COUNTER, _TOTAL_CORES
             _SHARED_META = shared_meta
             _ACTIVE_COUNTER = None  # No counter needed for single process
-            _TOTAL_CORES = num_processes
+            _TOTAL_CORES = total_cores
             results = []
             for args in tqdm(worker_args, desc="Processing Batches"):
                 results.append(_process_single_batch(args))

@@ -70,6 +70,9 @@ if __name__ == '__main__':
         print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
     n_processes = 112
+    # Recycle workers after each batch to prevent memory accumulation
+    # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
+    WORKER_MAXTASKS = 1
 
     # Start forkserver before data loading
     _warmup_pool = hierarchical_assembly.NoDaemonPool(1)
@@ -157,6 +160,36 @@ if __name__ == '__main__':
         path = os.path.join(_stage_dir(stage), '_global.pkl')
         with open(path, 'rb') as f:
             return pickle.load(f)
+
+    def strip_block_probs(blocks):
+        """Strip redundant probs_array from blocks to save memory.
+        Workers access sample data via global_probs in shared memory."""
+        for block in blocks:
+            if hasattr(block, 'probs_array') and block.probs_array is not None:
+                block.probs_array = None
+        return blocks
+
+    def load_global_arrays(r_name):
+        """Load only global_probs and global_sites from R01, freeing block_results immediately.
+        R01 checkpoints are huge (20 GB for chr3) because they contain block_results
+        with probs_array. This extracts just what's needed and frees the rest.
+        Downcasts global_probs to float32 (float64 only needed for HDBSCAN in R01)."""
+        import ctypes
+        r1 = load_contig(STAGE_R1, r_name)
+        global_probs = r1['global_probs']
+        global_sites = r1['global_sites']
+        # Drop the heavy block_results (with redundant probs_array)
+        del r1
+        gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+        # Downcast: float64 only needed for HDBSCAN (R01). Assembly, painting,
+        # pedigree, phase correction all work fine with float32 precision.
+        if global_probs.dtype == np.float64:
+            global_probs = global_probs.astype(np.float32)
+        return global_probs, global_sites
 
     region_keys = [r['contig'] for r in regions_config]
 
@@ -284,8 +317,11 @@ if __name__ == '__main__':
             avg_depth = r1['avg_depth']
             global_probs = r1['global_probs']
             global_sites = r1['global_sites']
-            block_results = r1['block_results']
+            block_results = strip_block_probs(r1['block_results'])
             del r1
+            # Downcast: float64 only needed for HDBSCAN (R01)
+            if global_probs.dtype == np.float64:
+                global_probs = global_probs.astype(np.float32)
 
             print(f"\n  {r_name}: average read depth = {avg_depth:.1f}x")
 
@@ -300,7 +336,8 @@ if __name__ == '__main__':
                             input_blocks=input_blocks, global_probs=gp, global_sites=gs,
                             batch_size=REFINEMENT_BATCH_SIZE, use_hmm_linking=False,
                             beam_width=200, max_founders=12, max_sites_for_linking=2000,
-                            cc_scale=0.2, num_processes=n_processes)
+                            cc_scale=0.2, num_processes=n_processes,
+                            maxtasksperchild=WORKER_MAXTASKS)
                     return l1_fn
 
                 def make_l2_fn(gp, gs):
@@ -310,7 +347,8 @@ if __name__ == '__main__':
                             batch_size=REFINEMENT_BATCH_SIZE, use_hmm_linking=True,
                             recomb_rate=RECOMB_RATE, beam_width=200, max_founders=12,
                             cc_scale=0.2, num_processes=n_processes,
-                            n_generations=N_GENERATIONS, verbose=False)
+                            n_generations=N_GENERATIONS, verbose=False,
+                            maxtasksperchild=WORKER_MAXTASKS)
                     return l2_fn
 
                 t0 = time.time()
@@ -326,11 +364,12 @@ if __name__ == '__main__':
                 l2_refined = refinement_results['l2_refined']
                 l2_refined_dd = block_haplotype_refinement.dedup_blocks(l2_refined, verbose=True)
                 save_contig(STAGE_R2, r_name, {'block_results': l2_refined_dd})
+                del refinement_results, l2_refined, l2_refined_dd
             else:
                 print(f"  Depth >= {REFINEMENT_DEPTH_THRESHOLD}x -> Skipping refinement")
                 save_contig(STAGE_R2, r_name, {'block_results': block_results})
 
-            del block_results, global_probs
+            del block_results, global_probs, global_sites
             gc.collect()
 
         print(f"\nRefinement stage complete in {time.time()-start:.1f}s")
@@ -358,13 +397,10 @@ if __name__ == '__main__':
             print(f"\n  Processing {r_name}...")
 
             r2 = load_contig(STAGE_R2, r_name)
-            blocks = r2['block_results']
+            blocks = strip_block_probs(r2['block_results'])
             del r2
 
-            r1 = load_contig(STAGE_R1, r_name)
-            global_probs = r1['global_probs']
-            global_sites = r1['global_sites']
-            del r1
+            global_probs, global_sites = load_global_arrays(r_name)
 
             print(f"    Input: {len(blocks)} blocks, "
                   f"avg haps: {np.mean([len(b.haplotypes) for b in blocks]):.1f}")
@@ -408,13 +444,10 @@ if __name__ == '__main__':
             print(f"\n  Processing {r_name}...")
 
             r3 = load_contig(STAGE_R3, r_name)
-            block_results = r3['block_results']
+            block_results = strip_block_probs(r3['block_results'])
             del r3
 
-            r1 = load_contig(STAGE_R1, r_name)
-            global_probs = r1['global_probs']
-            global_sites = r1['global_sites']
-            del r1
+            global_probs, global_sites = load_global_arrays(r_name)
 
             print(f"    Input: {len(block_results)} blocks")
 
@@ -422,7 +455,8 @@ if __name__ == '__main__':
                 block_results, global_probs, global_sites,
                 batch_size=10, use_hmm_linking=False, beam_width=200,
                 max_founders=12, max_sites_for_linking=2000, cc_scale=0.2,
-                num_processes=n_processes, verbose=False)
+                num_processes=n_processes, maxtasksperchild=WORKER_MAXTASKS,
+                verbose=False)
 
             hap_counts = [len(b.haplotypes) for b in super_blocks]
             print(f"    Output: {len(super_blocks)} L1 super-blocks, "
@@ -458,13 +492,10 @@ if __name__ == '__main__':
             print(f"\n  Processing {r_name}...")
 
             r4 = load_contig(STAGE_R4, r_name)
-            l1_blocks = r4['super_blocks_L1']
+            l1_blocks = strip_block_probs(r4['super_blocks_L1'])
             del r4
 
-            r1 = load_contig(STAGE_R1, r_name)
-            global_probs = r1['global_probs']
-            global_sites = r1['global_sites']
-            del r1
+            global_probs, global_sites = load_global_arrays(r_name)
 
             print(f"    Input: {len(l1_blocks)} L1 super-blocks")
 
@@ -472,7 +503,8 @@ if __name__ == '__main__':
                 l1_blocks, global_probs, global_sites,
                 batch_size=10, use_hmm_linking=True, recomb_rate=5e-8,
                 beam_width=200, max_founders=12, cc_scale=0.2,
-                num_processes=n_processes, n_generations=3, verbose=False)
+                num_processes=n_processes, maxtasksperchild=WORKER_MAXTASKS,
+                n_generations=3, verbose=False)
 
             hap_counts = [len(b.haplotypes) for b in l2_blocks]
             print(f"    Output: {len(l2_blocks)} L2 super-blocks, haps: {hap_counts}")
@@ -506,13 +538,10 @@ if __name__ == '__main__':
             print(f"\n  Processing {r_name}...")
 
             r5 = load_contig(STAGE_R5, r_name)
-            l2_blocks = r5['super_blocks_L2']
+            l2_blocks = strip_block_probs(r5['super_blocks_L2'])
             del r5
 
-            r1 = load_contig(STAGE_R1, r_name)
-            global_probs = r1['global_probs']
-            global_sites = r1['global_sites']
-            del r1
+            global_probs, global_sites = load_global_arrays(r_name)
 
             print(f"    Input: {len(l2_blocks)} L2 super-blocks")
 
@@ -520,7 +549,8 @@ if __name__ == '__main__':
                 l2_blocks, global_probs, global_sites,
                 batch_size=10, use_hmm_linking=True, recomb_rate=5e-8,
                 beam_width=200, max_founders=12, cc_scale=0.2,
-                num_processes=n_processes, n_generations=3, verbose=False)
+                num_processes=n_processes, maxtasksperchild=WORKER_MAXTASKS,
+                n_generations=3, verbose=False)
 
             hap_counts = [len(b.haplotypes) for b in l3_blocks]
             print(f"    Output: {len(l3_blocks)} L3 super-blocks, haps: {hap_counts}")
@@ -554,17 +584,14 @@ if __name__ == '__main__':
             print(f"\n  Processing {r_name}...")
 
             r6 = load_contig(STAGE_R6, r_name)
-            l3_blocks = r6['super_blocks_L3']
+            l3_blocks = strip_block_probs(r6['super_blocks_L3'])
             del r6
 
             if len(l3_blocks) < 2:
                 print("    Only 1 L3 block -- no L4 needed.")
                 l4_blocks = l3_blocks
             else:
-                r1 = load_contig(STAGE_R1, r_name)
-                global_probs = r1['global_probs']
-                global_sites = r1['global_sites']
-                del r1
+                global_probs, global_sites = load_global_arrays(r_name)
 
                 print(f"    Input: {len(l3_blocks)} L3 super-blocks")
 
@@ -572,7 +599,8 @@ if __name__ == '__main__':
                     l3_blocks, global_probs, global_sites,
                     batch_size=10, use_hmm_linking=True, recomb_rate=5e-8,
                     beam_width=200, max_founders=12, cc_scale=0.2,
-                    num_processes=n_processes, n_generations=3, verbose=False)
+                    num_processes=n_processes, maxtasksperchild=WORKER_MAXTASKS,
+                    n_generations=3, verbose=False)
                 del global_probs
 
             hap_counts = [len(b.haplotypes) for b in l4_blocks]
@@ -610,12 +638,10 @@ if __name__ == '__main__':
 
                 r7 = load_contig(STAGE_R7, r_name)
                 discovered_block = r7['super_blocks_L4'][0]
+                discovered_block.probs_array = None  # reconstructible from global_probs
                 del r7
 
-                r1 = load_contig(STAGE_R1, r_name)
-                global_probs = r1['global_probs']
-                global_sites = r1['global_sites']
-                del r1
+                global_probs, global_sites = load_global_arrays(r_name)
 
                 painting_result = painter.paint_chromosome(
                     discovered_block, global_probs, global_sites,
@@ -656,9 +682,11 @@ if __name__ == '__main__':
         for r_name in region_keys:
             r8 = load_contig(STAGE_R8, r_name)
             r7 = load_contig(STAGE_R7, r_name)
+            founder_block = r7['super_blocks_L4'][0]
+            founder_block.probs_array = None  # not needed for pedigree inference
             entry = {
                 'tolerance_painting': r8['tolerance_result'],
-                'founder_block': r7['super_blocks_L4'][0]
+                'founder_block': founder_block
             }
             contig_inputs.append(entry)
             del r8, r7
@@ -691,7 +719,7 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE R10: Phase Correction + Greedy Refinement + F1 Recoloring
+    # STAGE R10: Phase Correction + Greedy Refinement + F1 Recoloring + Propagation
     # =========================================================================
     STAGE_R10 = "R10_phase_correction"
 
@@ -705,20 +733,27 @@ if __name__ == '__main__':
         if 'pedigree_df' not in dir():
             pedigree_df = load_global(STAGE_R9)['pedigree_df']
 
-        mcr = {}
-        for r_name in region_keys:
+        # Define loader callback — workers load their own contig data
+        def _load_contig_for_phase_correction(r_name):
             r7 = load_contig(STAGE_R7, r_name)
             r8 = load_contig(STAGE_R8, r_name)
-            mcr[r_name] = {
+            founder_block = r7['super_blocks_L4'][0]
+            founder_block.probs_array = None  # not needed for phase correction
+            data = {
                 'tolerance_result': r8['tolerance_result'],
-                'founder_block': r7['super_blocks_L4'][0],
+                'founder_block': founder_block,
             }
             del r7, r8
+            return data
 
-        # Step 1: Viterbi phase correction (3 rounds)
+        # Lightweight dict — just contig names, workers load their own data
+        mcr = {r_name: {} for r_name in region_keys}
+
+        # Step 1: Viterbi phase correction (3 rounds, workers load via load_fn)
         start = time.time()
         mcr = phase_correction.correct_phase_all_contigs(
-            mcr, pedigree_df, sample_names, num_rounds=3, verbose=True)
+            mcr, pedigree_df, sample_names, num_rounds=3, verbose=True,
+            load_fn=_load_contig_for_phase_correction)
         print(f"Phase correction time: {time.time()-start:.1f}s")
 
         # Step 2: Greedy phase refinement
@@ -750,6 +785,24 @@ if __name__ == '__main__':
                 pedigree_df, sample_names,
                 max_mismatch_rate=0.02, verbose=True)
             data['final_painting'] = recolored
+
+        # Step 4: Propagate recoloring to offspring
+        print("\n" + "="*60)
+        print("Propagate Recoloring to Offspring")
+        print("="*60)
+
+        for r_name in region_keys:
+            if r_name not in mcr:
+                continue
+            data = mcr[r_name]
+            if 'final_painting' not in data or 'founder_block' not in data:
+                continue
+
+            propagated = phase_correction.propagate_recoloring_to_offspring(
+                data['final_painting'], data['founder_block'],
+                pedigree_df, sample_names,
+                max_mismatch_rate=0.02, verbose=True)
+            data['final_painting'] = propagated
 
         # Save per-contig results
         for r_name in region_keys:

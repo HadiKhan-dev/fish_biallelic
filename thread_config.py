@@ -103,6 +103,25 @@ except (AttributeError, RuntimeError):
     # already started — safe to ignore
     pass
 
+# =========================================================================
+# Numba caching — inject cache=True into all @njit decorators
+# =========================================================================
+# Workers recycled via maxtasksperchild lose compiled numba code.
+# cache=True persists compiled functions to disk (__pycache__), so
+# respawned workers load in ~0.1s instead of recompiling in 5-15s.
+# setdefault respects explicit cache=False if ever needed.
+try:
+    import numba as _numba
+    _original_njit = _numba.njit
+
+    def _caching_njit(*args, **kwargs):
+        kwargs.setdefault('cache', True)
+        return _original_njit(*args, **kwargs)
+
+    _numba.njit = _caching_njit
+except ImportError:
+    pass
+
 
 @contextmanager
 def numba_thread_scope(n_threads):
