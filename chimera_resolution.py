@@ -336,7 +336,7 @@ def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=
         n_bins_b = em_data['n_bins']
         bin_em = em_data['bin_emissions']
         hap_keys = em_data['hap_keys']
-        local_indices = np.array([hap_keys.index(path[b_idx]) for path in path_set])
+        local_indices = np.array([hap_keys.index(path[b_idx]) for path in path_set], dtype=np.intp)
         grid_i = np.repeat(local_indices, K)
         grid_j = np.tile(local_indices, K)
         tensor[:, :, bin_offset:bin_offset + n_bins_b] = bin_em[s0:s1, grid_i, grid_j, :]
