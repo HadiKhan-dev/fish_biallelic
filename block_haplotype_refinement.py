@@ -14,7 +14,376 @@ import thread_config
 import numpy as np
 import math
 import time
+import warnings
 import block_haplotypes
+
+
+# =============================================================================
+# NUMBA JIT KERNELS (parallelize over samples)
+# =============================================================================
+# paint_viterbi and deconvolve both have hot Python loops over samples/carriers
+# that were running single-threaded despite being embarrassingly parallel.
+# These numba kernels move those loops into prange-parallel code so they use
+# all available cores.  Fallback to pure Python if numba is unavailable --
+# matches the style of block_haplotypes.py's numba guard.
+
+try:
+    from numba import njit, prange
+    _HAS_NUMBA = True
+except ImportError:
+    _HAS_NUMBA = False
+    warnings.warn("Numba not found. Refinement will be extremely slow.",
+                  ImportWarning)
+    # Dummy decorators so the @njit-decorated defs below still import cleanly
+    def njit(*args, **kwargs):
+        def decorator(func): return func
+        return decorator
+    prange = range
+
+
+@njit(parallel=True, fastmath=False)
+def _paint_viterbi_samples_numba(block_emissions, switch_penalties):
+    """Per-sample Viterbi over all samples in parallel.
+
+    Mathematically equivalent to the original pure-Python per-sample loop in
+    paint_viterbi.  The only algorithmic change is computing
+    max/argmax(scores[:, t-1]) ONCE per t rather than inside the inner-p loop
+    (the original recomputes it n_pairs times per t, which is wasteful but
+    not incorrect since scores[:, t-1] is not modified during the inner
+    loop).  Tie-breaking matches np.argmax's first-occurrence semantics via
+    strict `>` comparison.
+
+    Args:
+        block_emissions: (num_samples, n_pairs, n_raw_local) float64 --
+            per-sample, per-pair, per-raw-block log-emissions.
+        switch_penalties: (n_raw_local - 1,) float64 -- distance-based
+            switching penalty between consecutive raw blocks.
+
+    Returns:
+        sample_paths: (num_samples, n_raw_local) int32 -- best pair-index
+            (into the pair_indices list) at each raw-block position per sample.
+    """
+    num_samples, n_pairs, n_raw_local = block_emissions.shape
+    sample_paths = np.zeros((num_samples, n_raw_local), dtype=np.int32)
+
+    for s in prange(num_samples):
+        # Thread-local working arrays (allocated per-sample inside prange)
+        scores = np.full((n_pairs, n_raw_local), -np.inf)
+        backptr = np.zeros((n_pairs, n_raw_local), dtype=np.int32)
+
+        # Initialize t=0
+        for p in range(n_pairs):
+            scores[p, 0] = block_emissions[s, p, 0]
+
+        # Forward pass
+        for t in range(1, n_raw_local):
+            pen_t = switch_penalties[t - 1]
+
+            # Compute max and first-argmax of scores[:, t-1] once per t
+            # (scores[:, t-1] is not modified during the inner p loop)
+            best_prev = -np.inf
+            best_prev_idx = 0
+            for p in range(n_pairs):
+                if scores[p, t - 1] > best_prev:
+                    best_prev = scores[p, t - 1]
+                    best_prev_idx = p
+
+            for p in range(n_pairs):
+                stay = scores[p, t - 1] + block_emissions[s, p, t]
+                best_switch = best_prev - pen_t + block_emissions[s, p, t]
+                if stay >= best_switch:
+                    scores[p, t] = stay
+                    backptr[p, t] = p
+                else:
+                    scores[p, t] = best_switch
+                    backptr[p, t] = best_prev_idx
+
+        # Traceback (first-argmax over final column)
+        best_final = -np.inf
+        best_final_idx = 0
+        for p in range(n_pairs):
+            if scores[p, n_raw_local - 1] > best_final:
+                best_final = scores[p, n_raw_local - 1]
+                best_final_idx = p
+        sample_paths[s, n_raw_local - 1] = best_final_idx
+
+        for t in range(n_raw_local - 1, 0, -1):
+            sample_paths[s, t - 1] = backptr[sample_paths[s, t], t]
+
+    return sample_paths
+
+
+@njit(parallel=True, fastmath=False)
+def _deconvolve_one_block_numba(sample_probs_raw, haps_raw_alleles,
+                                 sample_pair_a, sample_pair_b):
+    """Deconvolve a single raw block -- parallelized over haps.
+
+    Mathematically equivalent to the original per-hap/per-carrier Python
+    loop in deconvolve.  The original builds a `carriers[ki]` list per hap
+    then iterates.  Here we loop over all samples for each hap (parallel
+    across haps via prange) and conditionally accumulate; since carriers
+    are determined by sample_pair_a/sample_pair_b equality with ki, the
+    effective set of accumulated samples is identical.
+
+    The 1e-300 floor -> math.log pattern preserves the NaN-fix behaviour of
+    casting to float64 before clamping (sample_probs_raw is passed in as
+    float64 from the caller, which handles the cast once rather than
+    per-site as the original did).
+
+    Args:
+        sample_probs_raw: (num_samples, n_raw_sites, 3) float64 -- genotype
+            probabilities for this raw block's sites only.  Caller MUST pass
+            this already cast to float64 (critical for the 1e-300 floor to
+            not underflow as it would in float32).
+        haps_raw_alleles: (K, n_raw_sites) int8 -- the super-block's concrete
+            allele (0 or 1) at each raw-block site, indexed by hap.
+        sample_pair_a: (num_samples,) int32 -- hap index "a" of painted pair
+            per sample at this raw block.
+        sample_pair_b: (num_samples,) int32 -- hap index "b" of painted pair
+            per sample.  For homozygous paintings, a == b.
+
+    Returns:
+        new_haps: (K, n_raw_sites, 2) float64 -- posterior (P[allele=0],
+            P[allele=1]) per hap per site after carrier-based deconvolution.
+            Normalizes to sum 1.0 along axis=2.
+    """
+    num_samples = sample_probs_raw.shape[0]
+    n_raw_sites = sample_probs_raw.shape[1]
+    K = haps_raw_alleles.shape[0]
+
+    new_haps = np.zeros((K, n_raw_sites, 2), dtype=np.float64)
+
+    # Count carriers per hap (matches original: each sample contributes to
+    # one hap if homozygous, two haps if heterozygous)
+    carrier_count = np.zeros(K, dtype=np.int64)
+    for s in range(num_samples):
+        a = sample_pair_a[s]
+        b = sample_pair_b[s]
+        if a == b:
+            carrier_count[a] += 1
+        else:
+            carrier_count[a] += 1
+            carrier_count[b] += 1
+
+    # Parallelize over haps: each hap's log_p0/log_p1 accumulation is
+    # independent of other haps', so no race conditions.
+    for ki in prange(K):
+        if carrier_count[ki] == 0:
+            # No carriers: use super-block alleles as fallback (matches original)
+            for j in range(n_raw_sites):
+                allele = haps_raw_alleles[ki, j]
+                new_haps[ki, j, 0] = 1.0 - allele
+                new_haps[ki, j, 1] = float(allele)
+            continue
+
+        # Thread-local log-prob accumulators for this hap
+        log_p0 = np.zeros(n_raw_sites, dtype=np.float64)
+        log_p1 = np.zeros(n_raw_sites, dtype=np.float64)
+
+        # Iterate all samples; accumulate if sample is a carrier of hap ki.
+        # This mirrors the original carrier-list-iterating behavior: the
+        # selection condition replaces the carriers[ki] membership test.
+        for s in range(num_samples):
+            a = sample_pair_a[s]
+            b = sample_pair_b[s]
+
+            if a == b:
+                if a == ki:
+                    # Homozygous carrier of hap ki -- use p[0] and p[2]
+                    # (matches original `is_hom=True` branch)
+                    for j in range(n_raw_sites):
+                        p0_val = sample_probs_raw[s, j, 0]
+                        if p0_val < 1e-300:
+                            p0_val = 1e-300
+                        p2_val = sample_probs_raw[s, j, 2]
+                        if p2_val < 1e-300:
+                            p2_val = 1e-300
+                        log_p0[j] += math.log(p0_val)
+                        log_p1[j] += math.log(p2_val)
+                # else: this sample is homozygous for a different hap, skip
+            else:
+                # Heterozygous: sample s carries both haps a and b
+                if a == ki:
+                    # Partner hap is b -- use haps_raw_alleles[b, :] as template
+                    # (matches original `carriers[a].append((s, b, False))`)
+                    for j in range(n_raw_sites):
+                        pa = haps_raw_alleles[b, j]
+                        p0_val = sample_probs_raw[s, j, pa]
+                        if p0_val < 1e-300:
+                            p0_val = 1e-300
+                        p1_val = sample_probs_raw[s, j, pa + 1]
+                        if p1_val < 1e-300:
+                            p1_val = 1e-300
+                        log_p0[j] += math.log(p0_val)
+                        log_p1[j] += math.log(p1_val)
+                elif b == ki:
+                    # Partner hap is a -- use haps_raw_alleles[a, :] as template
+                    # (matches original `carriers[b].append((s, a, False))`)
+                    for j in range(n_raw_sites):
+                        pa = haps_raw_alleles[a, j]
+                        p0_val = sample_probs_raw[s, j, pa]
+                        if p0_val < 1e-300:
+                            p0_val = 1e-300
+                        p1_val = sample_probs_raw[s, j, pa + 1]
+                        if p1_val < 1e-300:
+                            p1_val = 1e-300
+                        log_p0[j] += math.log(p0_val)
+                        log_p1[j] += math.log(p1_val)
+                # else: neither a nor b equals ki, skip
+
+        # Normalize to posterior probabilities for this hap
+        # (log-sum-exp with max-subtraction for numerical stability)
+        for j in range(n_raw_sites):
+            lp0 = log_p0[j]
+            lp1 = log_p1[j]
+            if lp0 > lp1:
+                ml = lp0
+            else:
+                ml = lp1
+            p0 = math.exp(lp0 - ml)
+            p1 = math.exp(lp1 - ml)
+            total = p0 + p1
+            new_haps[ki, j, 0] = p0 / total
+            new_haps[ki, j, 1] = p1 / total
+
+    return new_haps
+
+
+@njit(parallel=True, fastmath=False)
+def _deconvolve_super_block_numba(sample_probs_sb_f64, haps_sb,
+                                   paintings_arr, raw_block_starts):
+    """Deconvolve ALL raw blocks of a super-block in a single kernel call.
+
+    Supersedes _deconvolve_one_block_numba for the common case where we
+    have a full super-block's paintings in hand.  The math per (raw_block,
+    hap) pair is identical to _deconvolve_one_block_numba -- the only
+    difference is parallelism topology:
+      - _deconvolve_one_block_numba: prange over K haps (K~7 parallel units)
+      - _deconvolve_super_block_numba: prange over (n_raw_local * K) pairs
+        (70-700 parallel units), filling 112 cores much more completely.
+
+    Also hoists the sample_probs_sb float64 cast out of the per-raw-block
+    loop -- caller does it once per super-block.
+
+    Args:
+        sample_probs_sb_f64: (num_samples, n_sb_sites, 3) float64 -- super-
+            block-level genotype probabilities, already cast to float64 by
+            the caller (critical for the 1e-300 floor not to underflow).
+        haps_sb: (K, n_sb_sites) int8 -- super-block's concrete alleles at
+            every super-block site.
+        paintings_arr: (num_samples, n_raw_local, 2) int32 -- per-sample
+            painted (hap_a, hap_b) pair at each raw-block position.  Comes
+            directly from paint_viterbi's new array output.
+        raw_block_starts: (n_raw_local + 1,) int32 -- cumulative site offsets.
+            raw_block_starts[ri] is the first super-block-site index of raw
+            block ri; raw_block_starts[n_raw_local] == n_sb_sites.  This
+            encoding handles variable raw-block sizes naturally.
+
+    Returns:
+        new_haps_flat: (K, n_sb_sites, 2) float64 -- concatenated posterior
+            for every (hap, super-block-site) pair.  Caller slices by
+            raw_block_starts to recover per-raw-block (K, n_raw_sites, 2).
+    """
+    num_samples = sample_probs_sb_f64.shape[0]
+    n_sb_sites = sample_probs_sb_f64.shape[1]
+    K = haps_sb.shape[0]
+    n_raw_local = raw_block_starts.shape[0] - 1
+
+    new_haps_flat = np.zeros((K, n_sb_sites, 2), dtype=np.float64)
+
+    # Parallelize over (ri_local, ki) pairs -- flat index idx = ri_local * K + ki
+    # This gives n_raw_local * K parallel units, much more than the K-only
+    # parallelism of the per-raw-block kernel.
+    total_units = n_raw_local * K
+    for idx in prange(total_units):
+        ri_local = idx // K
+        ki = idx % K
+
+        site_start = raw_block_starts[ri_local]
+        site_end = raw_block_starts[ri_local + 1]
+        n_raw_sites = site_end - site_start
+
+        # Count carriers of ki at this raw block
+        carrier_count = 0
+        for s in range(num_samples):
+            a = paintings_arr[s, ri_local, 0]
+            b = paintings_arr[s, ri_local, 1]
+            if a == ki or b == ki:
+                carrier_count += 1
+
+        if carrier_count == 0:
+            # No carriers: fallback to super-block's allele (matches original)
+            for j in range(n_raw_sites):
+                allele = haps_sb[ki, site_start + j]
+                new_haps_flat[ki, site_start + j, 0] = 1.0 - allele
+                new_haps_flat[ki, site_start + j, 1] = float(allele)
+            continue
+
+        # Thread-local log-prob accumulators for this (ri_local, ki) pair
+        log_p0 = np.zeros(n_raw_sites, dtype=np.float64)
+        log_p1 = np.zeros(n_raw_sites, dtype=np.float64)
+
+        # Accumulate contributions from all carriers.  Same three branches
+        # as _deconvolve_one_block_numba: homozygous / het-as-a / het-as-b.
+        for s in range(num_samples):
+            a = paintings_arr[s, ri_local, 0]
+            b = paintings_arr[s, ri_local, 1]
+
+            if a == b:
+                if a == ki:
+                    # Homozygous carrier of hap ki -- p[0] and p[2]
+                    for j in range(n_raw_sites):
+                        p0_val = sample_probs_sb_f64[s, site_start + j, 0]
+                        if p0_val < 1e-300:
+                            p0_val = 1e-300
+                        p2_val = sample_probs_sb_f64[s, site_start + j, 2]
+                        if p2_val < 1e-300:
+                            p2_val = 1e-300
+                        log_p0[j] += math.log(p0_val)
+                        log_p1[j] += math.log(p2_val)
+                # else: homozygous for a different hap, skip
+            else:
+                if a == ki:
+                    # Partner hap is b -- template against haps_sb[b, ...]
+                    for j in range(n_raw_sites):
+                        pa = haps_sb[b, site_start + j]
+                        p0_val = sample_probs_sb_f64[s, site_start + j, pa]
+                        if p0_val < 1e-300:
+                            p0_val = 1e-300
+                        p1_val = sample_probs_sb_f64[s, site_start + j, pa + 1]
+                        if p1_val < 1e-300:
+                            p1_val = 1e-300
+                        log_p0[j] += math.log(p0_val)
+                        log_p1[j] += math.log(p1_val)
+                elif b == ki:
+                    # Partner hap is a -- template against haps_sb[a, ...]
+                    for j in range(n_raw_sites):
+                        pa = haps_sb[a, site_start + j]
+                        p0_val = sample_probs_sb_f64[s, site_start + j, pa]
+                        if p0_val < 1e-300:
+                            p0_val = 1e-300
+                        p1_val = sample_probs_sb_f64[s, site_start + j, pa + 1]
+                        if p1_val < 1e-300:
+                            p1_val = 1e-300
+                        log_p0[j] += math.log(p0_val)
+                        log_p1[j] += math.log(p1_val)
+                # else: neither a nor b is ki, skip
+
+        # Normalize to posterior probabilities via log-sum-exp
+        for j in range(n_raw_sites):
+            lp0 = log_p0[j]
+            lp1 = log_p1[j]
+            if lp0 > lp1:
+                ml = lp0
+            else:
+                ml = lp1
+            p0 = math.exp(lp0 - ml)
+            p1 = math.exp(lp1 - ml)
+            total = p0 + p1
+            new_haps_flat[ki, site_start + j, 0] = p0 / total
+            new_haps_flat[ki, site_start + j, 1] = p1 / total
+
+    return new_haps_flat
 
 
 # =============================================================================
@@ -101,8 +470,12 @@ def paint_viterbi(super_blocks, raw_blocks, raw_per_super,
                 geno = pair_genos[pi, s_start:s_end]
                 site_idx = np.arange(s_start, s_end)
                 probs = sample_probs[:, site_idx, geno]
+                # Cast to float64 before the 1e-300 floor: global_probs is
+                # float32 in the pipeline (downcast in hierarchical_assembly),
+                # and 1e-300 underflows to 0.0 in float32, defeating the floor
+                # and producing -inf log values that cascade to NaN downstream.
                 block_emissions[:, pi, ri_local] = np.sum(
-                    np.log(np.maximum(probs, 1e-300)), axis=1)
+                    np.log(np.maximum(probs.astype(np.float64), 1e-300)), axis=1)
         
         # Switching penalties based on physical distance
         switch_penalties = np.zeros(n_raw_local - 1)
@@ -119,35 +492,61 @@ def paint_viterbi(super_blocks, raw_blocks, raw_per_super,
                     base_pen = 20.0
                 switch_penalties[ri_local] = base_pen * penalty_scale
         
-        # Viterbi per sample
-        sample_paintings = []
-        for s in range(num_samples):
-            scores = np.full((n_pairs, n_raw_local), -np.inf)
-            backptr = np.zeros((n_pairs, n_raw_local), dtype=np.int32)
-            
-            scores[:, 0] = block_emissions[s, :, 0]
-            
-            for t in range(1, n_raw_local):
-                pen_t = switch_penalties[t - 1]
-                for p in range(n_pairs):
-                    stay = scores[p, t - 1] + block_emissions[s, p, t]
-                    best_switch = (np.max(scores[:, t - 1]) - pen_t
-                                   + block_emissions[s, p, t])
-                    if stay >= best_switch:
-                        scores[p, t] = stay
-                        backptr[p, t] = p
-                    else:
-                        scores[p, t] = best_switch
-                        backptr[p, t] = np.argmax(scores[:, t - 1])
-            
-            # Traceback
-            path = np.zeros(n_raw_local, dtype=np.int32)
-            path[-1] = np.argmax(scores[:, -1])
-            for t in range(n_raw_local - 1, 0, -1):
-                path[t - 1] = backptr[path[t], t]
-            
-            sample_path = [pair_indices[path[t]] for t in range(n_raw_local)]
-            sample_paintings.append(sample_path)
+        # Viterbi per sample -- parallelized via numba prange over samples.
+        # Mathematically equivalent to the original per-sample loop (see the
+        # _paint_viterbi_samples_numba kernel docstring for the one
+        # optimization: computing max/argmax of scores[:, t-1] once per t
+        # rather than recomputing inside the p loop, which is equivalent
+        # because scores[:, t-1] isn't modified during the inner p loop).
+        #
+        # Output format: (num_samples, n_raw_local, 2) int32 array.  This
+        # replaces the earlier list-of-lists-of-tuples format (which forced
+        # a 320*n_raw_local Python tuple-unpack loop in deconvolve per raw
+        # block).  All internal consumers -- deconvolve and refine_at_level's
+        # switch counter -- use the array directly.  pair_indices_arr is
+        # built once here so the fancy-index conversion is a single numpy op.
+        pair_indices_arr = np.array(pair_indices, dtype=np.int32)  # (n_pairs, 2)
+        if _HAS_NUMBA:
+            sample_paths_int = _paint_viterbi_samples_numba(
+                block_emissions, switch_penalties)
+            # Fancy index: pair_indices_arr[sample_paths_int] gives
+            # (num_samples, n_raw_local, 2) -- one numpy op, no Python loop.
+            sample_paintings = pair_indices_arr[sample_paths_int]
+        else:
+            # Pure-Python fallback (original code path, with array output)
+            sample_paintings = np.empty((num_samples, n_raw_local, 2),
+                                        dtype=np.int32)
+            for s in range(num_samples):
+                scores = np.full((n_pairs, n_raw_local), -np.inf)
+                backptr = np.zeros((n_pairs, n_raw_local), dtype=np.int32)
+                
+                scores[:, 0] = block_emissions[s, :, 0]
+                
+                for t in range(1, n_raw_local):
+                    pen_t = switch_penalties[t - 1]
+                    for p in range(n_pairs):
+                        stay = scores[p, t - 1] + block_emissions[s, p, t]
+                        best_switch = (np.max(scores[:, t - 1]) - pen_t
+                                       + block_emissions[s, p, t])
+                        if stay >= best_switch:
+                            scores[p, t] = stay
+                            backptr[p, t] = p
+                        else:
+                            scores[p, t] = best_switch
+                            backptr[p, t] = np.argmax(scores[:, t - 1])
+                
+                # Traceback
+                path = np.zeros(n_raw_local, dtype=np.int32)
+                path[-1] = np.argmax(scores[:, -1])
+                for t in range(n_raw_local - 1, 0, -1):
+                    path[t - 1] = backptr[path[t], t]
+                
+                # Write into the (num_samples, n_raw_local, 2) array rather
+                # than appending tuples to a list (array is the new format)
+                for t in range(n_raw_local):
+                    a, b = pair_indices[path[t]]
+                    sample_paintings[s, t, 0] = a
+                    sample_paintings[s, t, 1] = b
         
         all_paintings.append({
             'raw_start': raw_start_idx,
@@ -219,61 +618,129 @@ def deconvolve(super_blocks, viterbi_paintings, raw_blocks,
         indices = np.searchsorted(global_sites, sb_positions)
         sample_probs_sb = global_probs[:, indices, :]
         
-        # Process each raw block
-        site_offset = 0
+        # Build raw_block_starts array -- cumulative site offsets for each
+        # raw block in this super-block.  raw_block_starts[ri_local] is the
+        # first super-block-site index of raw block ri_local; the sentinel
+        # raw_block_starts[n_raw_local] == total_sb_sites_in_paint_data.
+        # This encoding handles variable raw-block sizes naturally (raw
+        # blocks at chromosome ends may be shorter than the standard 200
+        # SNPs) and is shared by both the numba and fallback deconvolve
+        # paths so per-raw-block BlockResult construction can slice it
+        # cheaply at the end.
+        n_raw_local = raw_end - raw_start
+        raw_block_starts = np.zeros(n_raw_local + 1, dtype=np.int32)
+        _offset = 0
+        for _ri in range(raw_start, raw_end):
+            raw_block_starts[_ri - raw_start] = _offset
+            _offset += len(raw_blocks[_ri].positions)
+        raw_block_starts[n_raw_local] = _offset
+        n_sb_sites_total = int(raw_block_starts[n_raw_local])
+
+        # Deconvolve all raw blocks in this super-block -- parallelized via
+        # numba prange over (raw_block, hap) pairs in a single kernel call.
+        # Previously deconvolve made n_raw_local separate kernel calls (one
+        # per raw block), each with only K-way (~7) parallelism; now it
+        # makes one call with n_raw_local * K (~70 for L1, ~700 for L2)
+        # parallelism, filling the 112-core pool much more completely.
+        # Preserves the NaN-fix by casting sample_probs_sb to float64 ONCE
+        # per super-block (previously done n_raw_local times per super-block).
+        if _HAS_NUMBA:
+            sample_probs_sb_f64 = sample_probs_sb.astype(np.float64)
+            new_haps_flat = _deconvolve_super_block_numba(
+                sample_probs_sb_f64, haps_sb,
+                sample_paintings, raw_block_starts)
+        else:
+            # Pure-Python fallback (original code path, per-raw-block).
+            # Writes into the same new_haps_flat buffer the numba branch
+            # produces, so the downstream BlockResult construction below is
+            # shared between both branches.
+            new_haps_flat = np.zeros((K, n_sb_sites_total, 2), dtype=np.float64)
+            for ri in range(raw_start, raw_end):
+                ri_local = ri - raw_start
+                site_start = int(raw_block_starts[ri_local])
+                site_end = int(raw_block_starts[ri_local + 1])
+                n_raw_sites = site_end - site_start
+                site_slice = slice(site_start, site_end)
+                site_idx_local = np.arange(site_start, site_end)
+                
+                # Build per-haplotype carrier list for this raw block
+                carriers = {ki: [] for ki in range(K)}
+                for s in range(num_samples):
+                    # sample_paintings is now an int32 array of shape
+                    # (num_samples, n_raw_local, 2); explicit int() casts
+                    # ensure numpy scalar dict keys interoperate cleanly
+                    # with the Python-int ki keys in the carriers dict.
+                    a = int(sample_paintings[s, ri_local, 0])
+                    b = int(sample_paintings[s, ri_local, 1])
+                    if a == b:
+                        carriers[a].append((s, a, True))
+                    else:
+                        carriers[a].append((s, b, False))
+                        carriers[b].append((s, a, False))
+                
+                # Deconvolve each haplotype
+                new_haps_block = np.zeros((K, n_raw_sites, 2), dtype=np.float64)
+                
+                for ki in range(K):
+                    if not carriers[ki]:
+                        # No carriers: use super-block alleles as fallback
+                        alleles = haps_sb[ki, site_slice]
+                        new_haps_block[ki, :, 0] = 1.0 - alleles
+                        new_haps_block[ki, :, 1] = alleles.astype(np.float64)
+                        continue
+                    
+                    log_p0 = np.zeros(n_raw_sites, dtype=np.float64)
+                    log_p1 = np.zeros(n_raw_sites, dtype=np.float64)
+                    
+                    for s, partner_ki, is_hom in carriers[ki]:
+                        # Cast to float64 before the 1e-300 floor: global_probs
+                        # (and thus sample_probs_sb) is float32 in the pipeline,
+                        # and 1e-300 underflows to 0.0 in float32.  Without the
+                        # cast, sites where a sample's genotype prob rounds to
+                        # float32-zero produce -inf log values, which accumulate
+                        # to -inf log_p0/log_p1 and cascade to NaN downstream via
+                        # max_log = -inf → log_p - max_log = -inf - -inf = NaN.
+                        if is_hom:
+                            log_p0 += np.log(np.maximum(
+                                sample_probs_sb[s, site_idx_local, 0].astype(np.float64),
+                                1e-300))
+                            log_p1 += np.log(np.maximum(
+                                sample_probs_sb[s, site_idx_local, 2].astype(np.float64),
+                                1e-300))
+                        else:
+                            pa = haps_sb[partner_ki, site_slice]
+                            log_p0 += np.log(np.maximum(
+                                sample_probs_sb[s, site_idx_local, pa].astype(np.float64),
+                                1e-300))
+                            log_p1 += np.log(np.maximum(
+                                sample_probs_sb[s, site_idx_local, pa + 1].astype(np.float64),
+                                1e-300))
+                    
+                    max_log = np.maximum(log_p0, log_p1)
+                    p0 = np.exp(log_p0 - max_log)
+                    p1 = np.exp(log_p1 - max_log)
+                    total = p0 + p1
+                    new_haps_block[ki, :, 0] = p0 / total
+                    new_haps_block[ki, :, 1] = p1 / total
+                
+                # Write this raw block's result into the flat output so the
+                # downstream BlockResult construction below handles it the
+                # same way as the numba branch.
+                new_haps_flat[:, site_start:site_end, :] = new_haps_block
+        
+        # Split new_haps_flat into per-raw-block BlockResults (common path
+        # for both numba and fallback branches).  .copy() ensures each
+        # BlockResult owns an independent (K, n_raw_sites, 2) array rather
+        # than a view into new_haps_flat (which would keep the big array
+        # alive and share storage between unrelated raw blocks).
         for ri in range(raw_start, raw_end):
             ri_local = ri - raw_start
             raw_block = raw_blocks[ri]
-            n_raw_sites = len(raw_block.positions)
-            site_slice = slice(site_offset, site_offset + n_raw_sites)
-            site_idx_local = np.arange(site_offset, site_offset + n_raw_sites)
+            site_start = int(raw_block_starts[ri_local])
+            site_end = int(raw_block_starts[ri_local + 1])
             
-            # Build per-haplotype carrier list for this raw block
-            carriers = {ki: [] for ki in range(K)}
-            for s in range(num_samples):
-                a, b = sample_paintings[s][ri_local]
-                if a == b:
-                    carriers[a].append((s, a, True))
-                else:
-                    carriers[a].append((s, b, False))
-                    carriers[b].append((s, a, False))
-            
-            # Deconvolve each haplotype
-            new_haps = np.zeros((K, n_raw_sites, 2), dtype=np.float64)
-            
-            for ki in range(K):
-                if not carriers[ki]:
-                    # No carriers: use super-block alleles as fallback
-                    alleles = haps_sb[ki, site_slice]
-                    new_haps[ki, :, 0] = 1.0 - alleles
-                    new_haps[ki, :, 1] = alleles.astype(np.float64)
-                    continue
-                
-                log_p0 = np.zeros(n_raw_sites, dtype=np.float64)
-                log_p1 = np.zeros(n_raw_sites, dtype=np.float64)
-                
-                for s, partner_ki, is_hom in carriers[ki]:
-                    if is_hom:
-                        log_p0 += np.log(np.maximum(
-                            sample_probs_sb[s, site_idx_local, 0], 1e-300))
-                        log_p1 += np.log(np.maximum(
-                            sample_probs_sb[s, site_idx_local, 2], 1e-300))
-                    else:
-                        pa = haps_sb[partner_ki, site_slice]
-                        log_p0 += np.log(np.maximum(
-                            sample_probs_sb[s, site_idx_local, pa], 1e-300))
-                        log_p1 += np.log(np.maximum(
-                            sample_probs_sb[s, site_idx_local, pa + 1],
-                            1e-300))
-                
-                max_log = np.maximum(log_p0, log_p1)
-                p0 = np.exp(log_p0 - max_log)
-                p1 = np.exp(log_p1 - max_log)
-                total = p0 + p1
-                new_haps[ki, :, 0] = p0 / total
-                new_haps[ki, :, 1] = p1 / total
-            
-            refined_haps = {ki: new_haps[ki].copy() for ki in range(K)}
+            block_new_haps = new_haps_flat[:, site_start:site_end, :]
+            refined_haps = {ki: block_new_haps[ki].copy() for ki in range(K)}
             refined_block = block_haplotypes.BlockResult(
                 positions=raw_block.positions.copy(),
                 haplotypes=refined_haps,
@@ -281,7 +748,6 @@ def deconvolve(super_blocks, viterbi_paintings, raw_blocks,
                 probs_array=raw_block.probs_array
             )
             refined_blocks[ri] = refined_block
-            site_offset += n_raw_sites
     
     # Fill any gaps (safety net for rounding in last super-block)
     for ri in range(n_raw):
@@ -415,15 +881,24 @@ def refine_at_level(assembly_blocks, raw_blocks,
     )
     
     if verbose:
+        # Count painting switches (consecutive-position pair changes) for
+        # the progress stat.  paintings now stores arrays of shape
+        # (num_samples, n_raw_local, 2) int32 rather than list-of-lists of
+        # tuples, so this reduces to a vectorized numpy comparison.  A
+        # switch at position t for sample s is any change in the (a, b)
+        # pair relative to position t-1 -- np.any over axis=2 captures
+        # "either hap_a or hap_b changed", matching the original
+        # `if path[t] != path[t - 1]` tuple-inequality semantics.
         total_switches = 0
         total_positions = 0
         for pd in paintings:
-            for s in range(num_samples):
-                path = pd['paintings'][s]
-                for t in range(1, len(path)):
-                    if path[t] != path[t - 1]:
-                        total_switches += 1
-                total_positions += len(path) - 1
+            paintings_arr = pd['paintings']  # (num_samples, n_raw_local, 2) int32
+            if paintings_arr.shape[1] > 1:
+                diffs = np.any(
+                    paintings_arr[:, 1:, :] != paintings_arr[:, :-1, :],
+                    axis=2)  # (num_samples, n_raw_local - 1) bool
+                total_switches += int(np.sum(diffs))
+                total_positions += (paintings_arr.shape[1] - 1) * paintings_arr.shape[0]
         pct = 100 * total_switches / max(total_positions, 1)
         print(f"  Switches: {total_switches}/{total_positions} ({pct:.2f}%)")
         print(f"  Painting done in {time.time() - t0:.1f}s")
