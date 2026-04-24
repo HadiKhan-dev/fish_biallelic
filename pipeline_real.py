@@ -85,7 +85,7 @@ if __name__ == '__main__':
     # =========================================================================
     # Configuration
     # =========================================================================
-    vcf_path = "./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz"
+    vcf_path = "./fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz"
 
     regions_config = [
         {"contig": "chr1"},  {"contig": "chr2"},  {"contig": "chr3"},

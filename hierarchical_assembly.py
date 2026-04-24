@@ -77,6 +77,99 @@ class NoDaemonPool(multiprocessing.pool.Pool):
 _SHARED_META = {}
 
 # =============================================================================
+# DEBUG INSTRUMENTATION (opt-in via HIERARCHICAL_DEBUG_DIR env var)
+# =============================================================================
+# When the env var HIERARCHICAL_DEBUG_DIR is set to a writable path, this
+# module will:
+#   - Save the worker_args tuple for each batch to <dir>/batch_NNNNN_args.pkl
+#     at the start of _process_single_batch (before any numba code runs), so
+#     a segfaulted batch's exact input can be replayed offline.
+#   - Append a phase marker to <dir>/batch_NNNNN_phases.log at every major
+#     phase transition (mesh/beam/chimera/reconstruction/etc.), line-buffered.
+#     After a hang, the last marker in a batch's log tells us which phase
+#     segfaulted.
+#   - Write an empty <dir>/batch_NNNNN_done file when the batch returns
+#     normally, so the crashed batch is the one with an _args.pkl and a
+#     _phases.log but NO _done file.
+#   - Save contig-level context (global_probs, global_sites, all kwargs) to
+#     <dir>/context.pkl once at the start of run_hierarchical_step, so
+#     replay can reconstruct the shared-memory state.
+# When the env var is empty/unset, all of these are no-ops.
+# This instrumentation is ALWAYS safe to leave in — it never affects the
+# pipeline output, only emits diagnostic files.
+import os as _os_dbg
+import pickle as _pickle_dbg
+
+def _debug_dir():
+    """Return HIERARCHICAL_DEBUG_DIR if set, else empty string (disabled)."""
+    return _os_dbg.environ.get('HIERARCHICAL_DEBUG_DIR', '')
+
+def _debug_save_args(args):
+    """Pickle the worker_args tuple for this batch.  Blocks inside args have
+    already been stripped of probs_array by run_hierarchical_step, so the
+    pickle is light (tens of MB typical)."""
+    d = _debug_dir()
+    if not d:
+        return
+    try:
+        _os_dbg.makedirs(d, exist_ok=True)
+        b_idx = args[0]
+        path = _os_dbg.path.join(d, f'batch_{b_idx:05d}_args.pkl')
+        with open(path, 'wb') as f:
+            _pickle_dbg.dump(args, f, protocol=_pickle_dbg.HIGHEST_PROTOCOL)
+    except Exception:
+        pass  # never let instrumentation crash the worker
+
+def _debug_mark_phase(b_idx, phase, extra=""):
+    """Append a phase marker to this batch's log file.  Line-buffered so the
+    file is readable in real time from another terminal while the worker
+    runs (`tail -f batch_NNNNN_phases.log`)."""
+    d = _debug_dir()
+    if not d:
+        return
+    try:
+        path = _os_dbg.path.join(d, f'batch_{b_idx:05d}_phases.log')
+        with open(path, 'a', buffering=1) as f:
+            f.write(f"{time.time():.6f} {phase} pid={_os_dbg.getpid()} {extra}\n")
+    except Exception:
+        pass
+
+def _debug_mark_done(b_idx):
+    """Write the batch's completion marker.  A batch with _args.pkl and
+    _phases.log but NO _done file is the one that died."""
+    d = _debug_dir()
+    if not d:
+        return
+    try:
+        path = _os_dbg.path.join(d, f'batch_{b_idx:05d}_done')
+        with open(path, 'w') as f:
+            f.write(f"{time.time():.6f} pid={_os_dbg.getpid()}\n")
+    except Exception:
+        pass
+
+def _debug_save_context(context_dict):
+    """Save contig-level context so replay can reconstruct shared memory.
+    Called once at the start of run_hierarchical_step.  Saves ~1-5 GB per
+    contig (global_probs is the bulk)."""
+    d = _debug_dir()
+    if not d:
+        return
+    try:
+        _os_dbg.makedirs(d, exist_ok=True)
+        # Clean out any previous run's batch files so a fresh hang is
+        # unambiguous (only the current run's batches present)
+        import glob as _glob
+        for old in _glob.glob(_os_dbg.path.join(d, 'batch_*')):
+            try: _os_dbg.unlink(old)
+            except OSError: pass
+        path = _os_dbg.path.join(d, 'context.pkl')
+        with open(path, 'wb') as f:
+            _pickle_dbg.dump(context_dict, f, protocol=_pickle_dbg.HIGHEST_PROTOCOL)
+        print(f"  [DEBUG] context saved: {path}")
+    except Exception as e:
+        print(f"  [DEBUG] WARNING: failed to save context: {e}")
+
+# =============================================================================
 # DYNAMIC THREAD REALLOCATION
 # =============================================================================
 # Workers track how many peers are active via a shared atomic counter.
@@ -365,6 +458,10 @@ def _process_single_batch(args):
     import numba
     _libc = ctypes.CDLL("libc.so.6")
     
+    # DIAGNOSTIC: capture input for replay BEFORE any numba code runs
+    _debug_save_args(args)
+    _debug_mark_phase(args[0], "start")
+    
     (b_idx, start_i, end_i, original_blocks_list,
      use_hmm_linking, recomb_rate, beam_width, max_founders,
      max_sites_for_linking, n_generations, recomb_tolerance,
@@ -377,8 +474,10 @@ def _process_single_batch(args):
         _log.append(f"b{b_idx}_00_start: {_get_rss_mb():.0f} MB")
     
     # Attach to shared memory segments (zero-copy)
+    _debug_mark_phase(b_idx, "shm_attach_start")
     shm_probs, global_probs = _attach_shared_array(_SHARED_META['probs'])
     shm_sites, global_sites = _attach_shared_array(_SHARED_META['sites'])
+    _debug_mark_phase(b_idx, "shm_attach_done")
     
     try:
         # Register this worker as active
@@ -397,6 +496,8 @@ def _process_single_batch(args):
         original_portion = block_haplotypes.BlockResults(original_blocks_list)
         
         if len(original_portion) < 2:
+            _debug_mark_phase(b_idx, "passthrough_single_block")
+            _debug_mark_done(b_idx)
             return {
                 'batch_idx': b_idx,
                 'super_block': original_portion[0],
@@ -404,27 +505,36 @@ def _process_single_batch(args):
             }
 
         # 1. Create Proxies
+        _debug_mark_phase(b_idx, "create_proxies_start",
+                         f"n_blocks={len(original_portion)} max_sites={max_sites_for_linking}")
         proxy_list = []
         for b in original_portion:
             proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
         portion_proxy = block_haplotypes.BlockResults(proxy_list)
+        _debug_mark_phase(b_idx, "create_proxies_done",
+                         f"hap_counts={[len(b.haplotypes) for b in portion_proxy]}")
         
         # 2. Slice to batch-relevant sites only
+        _debug_mark_phase(b_idx, "slice_sites_start")
         all_positions = np.concatenate([b.positions for b in original_portion])
         batch_indices = np.searchsorted(global_sites, all_positions)
         idx_min, idx_max = batch_indices.min(), batch_indices.max()
         batch_probs = np.ascontiguousarray(global_probs[:, idx_min:idx_max+1, :])
         batch_sites = np.ascontiguousarray(global_sites[idx_min:idx_max+1])
+        _debug_mark_phase(b_idx, "slice_sites_done",
+                         f"n_sites={len(batch_sites)} batch_probs_shape={batch_probs.shape}")
 
         if _MEMORY_DEBUG and b_idx == 0:
             _log.append(f"b{b_idx}_02_sliced: {_get_rss_mb():.0f} MB")
 
         # 3. Compute Max Gap
+        _debug_mark_phase(b_idx, "compute_max_gap_start")
         if n_generations is not None and recomb_tolerance is not None:
             beam_max_gap = compute_max_gap(original_blocks_list, recomb_rate, 
                                             n_generations, recomb_tolerance)
         else:
             beam_max_gap = None
+        _debug_mark_phase(b_idx, "compute_max_gap_done", f"beam_max_gap={beam_max_gap}")
 
         # =================================================================
         # 4. Generate Mesh — DYNAMIC SEQUENTIAL phase
@@ -441,10 +551,13 @@ def _process_single_batch(args):
         if use_hmm_linking:
             # Emissions: ThreadPoolExecutor (threads, not processes — no numba,
             # no oversubscription risk, cheap to create/destroy)
+            _debug_mark_phase(b_idx, "viterbi_emissions_start", f"pool_budget={pool_budget}")
             viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
                 batch_probs, batch_sites, portion_proxy, num_processes=pool_budget
             )
+            _debug_mark_phase(b_idx, "viterbi_emissions_done")
             # Mesh EM: sequential with dynamic numba scaling between gaps
+            _debug_mark_phase(b_idx, "transition_mesh_hmm_start")
             mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
                 None, None, portion_proxy, 
                 recomb_rate=recomb_rate, 
@@ -453,13 +566,16 @@ def _process_single_batch(args):
                 num_processes=1,
                 dynamic_cores_fn=_get_dynamic_threads
             )
+            _debug_mark_phase(b_idx, "transition_mesh_hmm_done")
             del viterbi_emissions
         else:
+            _debug_mark_phase(b_idx, "transition_mesh_nohmm_start", f"pool_budget={pool_budget}")
             mesh = block_linking.generate_transition_probability_mesh(
                 batch_probs, batch_sites, portion_proxy,
                 use_standard_baum_welch=True,
                 num_processes=pool_budget
             )
+            _debug_mark_phase(b_idx, "transition_mesh_nohmm_done")
         
         if _MEMORY_DEBUG and b_idx == 0:
             _log.append(f"b{b_idx}_03_mesh: {_get_rss_mb():.0f} MB")
@@ -470,22 +586,30 @@ def _process_single_batch(args):
         # =================================================================
         dyn_threads = _apply_dynamic_threads()
             
+        _debug_mark_phase(b_idx, "beam_search_start",
+                         f"beam_width={beam_width} max_gap={beam_max_gap}")
         beam_results = beam_search_core.run_full_mesh_beam_search(
             portion_proxy, mesh, beam_width=beam_width, 
             max_gap=beam_max_gap, verbose=verbose
         )
+        _debug_mark_phase(b_idx, "beam_search_done",
+                         f"n_results={len(beam_results) if beam_results else 0}")
         
         if _MEMORY_DEBUG and b_idx == 0:
             _log.append(f"b{b_idx}_04_beam: {_get_rss_mb():.0f} MB")
         
         if not beam_results:
+            _debug_mark_phase(b_idx, "early_return_no_beam")
+            _debug_mark_done(b_idx)
             return {
                 'batch_idx': b_idx,
                 'super_block': None,
                 'status': 'beam_search_failed'
             }
-            
+        
+        _debug_mark_phase(b_idx, "fast_mesh_build_start")
         fast_mesh = beam_search_core.FastMesh(portion_proxy, mesh)
+        _debug_mark_phase(b_idx, "fast_mesh_build_done")
         
         # Free mesh — fast_mesh has what it needs
         del mesh
@@ -499,6 +623,8 @@ def _process_single_batch(args):
         # =================================================================
         dyn_threads = _apply_dynamic_threads()
         
+        _debug_mark_phase(b_idx, "chimera_resolution_start",
+                         f"max_founders={max_founders} top_n_swap={top_n_swap}")
         resolved_beam = chimera_resolution.select_and_resolve(
             beam_results=beam_results,
             fast_mesh=fast_mesh,
@@ -513,6 +639,7 @@ def _process_single_batch(args):
             cc_scale=cc_scale,
             num_threads=_get_dynamic_threads,
         )
+        _debug_mark_phase(b_idx, "chimera_resolution_done")
         
         # Free beam_results and batch data — chimera resolution is done with them
         del beam_results
@@ -526,25 +653,31 @@ def _process_single_batch(args):
         # =================================================================
         dyn_threads = _apply_dynamic_threads()
         
+        _debug_mark_phase(b_idx, "reconstruction_start")
         reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
             resolved_beam, fast_mesh, original_portion
         )
+        _debug_mark_phase(b_idx, "reconstruction_done")
         
         # Free resolved_beam and fast_mesh — reconstruction is done
         del resolved_beam, fast_mesh
         _libc.malloc_trim(0)
         
         # 8. Package
+        _debug_mark_phase(b_idx, "superblock_convert_start")
         super_block = convert_reconstruction_to_superblock(
             reconstructed_data, original_portion, batch_probs, batch_sites
         )
+        _debug_mark_phase(b_idx, "superblock_convert_done")
         
         # Free intermediates — super_block has everything needed
         del reconstructed_data, batch_probs, batch_sites, portion_proxy, proxy_list
         _libc.malloc_trim(0)
         
         # 9. Structural Chimera Pruning
+        _debug_mark_phase(b_idx, "prune_chimeras_start")
         super_block = beam_search_core.prune_superblock_chimeras(super_block)
+        _debug_mark_phase(b_idx, "prune_chimeras_done")
         
         if _MEMORY_DEBUG and b_idx == 0:
             _log.append(f"b{b_idx}_06_done: {_get_rss_mb():.0f} MB")
@@ -555,6 +688,7 @@ def _process_single_batch(args):
                 f.write('\n'.join(_log) + '\n')
             print(f"  [Memory debug] Worker {b_idx} log: {log_path}")
         
+        _debug_mark_done(b_idx)
         return {
             'batch_idx': b_idx,
             'super_block': super_block,
@@ -714,6 +848,29 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     
     probs_gb = global_probs.nbytes / (1024**3)
     print(f"  Shared memory created: {probs_gb:.1f} GB probs + sites ({time.time()-t0:.1f}s)")
+    
+    # DIAGNOSTIC: save contig-level context for offline replay (opt-in via
+    # HIERARCHICAL_DEBUG_DIR env var).  Also clears any previous run's batch
+    # files from the debug dir so the next hang is unambiguous.
+    _debug_save_context({
+        'global_probs': global_probs,  # final form (downcast to float32 above)
+        'global_sites': global_sites,
+        # All params that could affect _process_single_batch behaviour:
+        'batch_size': batch_size,
+        'use_hmm_linking': use_hmm_linking,
+        'recomb_rate': recomb_rate,
+        'beam_width': beam_width,
+        'max_founders': max_founders,
+        'max_sites_for_linking': max_sites_for_linking,
+        'n_generations': n_generations,
+        'recomb_tolerance': recomb_tolerance,
+        'top_n_swap': top_n_swap,
+        'max_cr_iterations': max_cr_iterations,
+        'paint_penalty': paint_penalty,
+        'min_hotspot_samples': min_hotspot_samples,
+        'cc_scale': cc_scale,
+        'num_processes': num_processes,
+    })
     
     # =====================================================================
     # Auto-size worker count based on available RAM

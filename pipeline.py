@@ -253,10 +253,9 @@ if __name__ == '__main__':
         if n > 0:
             gc.collect()
             print(f"  [Prune] Dropped '{key}' from {n} contigs")
-
 #%%
 if __name__ == '__main__':
-    vcf_path = "./fish_vcf/AsAc.AulStuGenome.biallelic.bcf.gz"
+    vcf_path = "./fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz"
 
     # Define the regions you want to use for inference.
     regions_config = [
