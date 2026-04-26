@@ -498,6 +498,138 @@ def viterbi_chimera_check_free_recombs(ll_tensor, max_recombs):
     
     return min_mismatches, best_recombs
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _compute_best_pair_errors_kernel(H_stack, sample_geno_stack):
+    """JIT inner kernel for compute_best_pair_errors (used by prune_chimeras).
+    
+    For each sample s:
+      sample_geno = sample_geno_stack[s]  (n_sites,) int8 in {0,1,2}
+      best_error = min over (i, j) with j>=i of:
+          mean(H_stack[i] + H_stack[j] != sample_geno) * 100
+    
+    Strict < for tie-breaking matches the original: on a tie the FIRST
+    pair (lexicographically lowest) wins, since we iterate i outer, j>=i inner.
+    
+    Args:
+        H_stack: (K, n_sites) int8 — concretised haplotypes (caller has
+            already converted any 2D probabilistic haps via np.argmax).
+        sample_geno_stack: (num_samples, n_sites) int8 — caller has already
+            done np.argmax(probs_array[s], axis=1) for each sample.
+    
+    Returns:
+        sample_errors: (num_samples,) float64 — per-sample best-pair error
+            in percent (0.0 to 100.0).
+    """
+    K, n_sites = H_stack.shape
+    num_samples = sample_geno_stack.shape[0]
+    
+    sample_errors = np.empty(num_samples, dtype=np.float64)
+    
+    # Per-sample parallelism: each thread fully processes its samples
+    # (lock-free; sample_errors[si] is each thread's exclusive slot).
+    # The within-sample iteration order matches the original Python:
+    # i outer (0..K-1), j inner (i..K-1), so on a tie the lower (i,j) wins.
+    for si in prange(num_samples):
+        best_error = 100.0  # match the original initial value
+        
+        for i in range(K):
+            for j in range(i, K):
+                # Count mismatches between (H_stack[i] + H_stack[j]) and sample_geno
+                mismatches = 0
+                for s in range(n_sites):
+                    g = H_stack[i, s] + H_stack[j, s]
+                    if g != sample_geno_stack[si, s]:
+                        mismatches += 1
+                # mean(...)*100 == (count/n_sites)*100
+                error = (mismatches / n_sites) * 100.0
+                # Strict < to match original tie-break (first pair wins)
+                if error < best_error:
+                    best_error = error
+        
+        sample_errors[si] = best_error
+    
+    return sample_errors
+
+
+@njit(cache=True, parallel=True, fastmath=False)
+def _compute_pair_errors_matrix_kernel(H_stack, sample_geno_stack):
+    """JIT kernel returning the FULL per-sample, per-pair error matrix.
+    
+    Computes M[s, i, j] = (mismatch_count[s, i, j] / n_sites) * 100 for
+    every sample s and every pair (i, j) with j >= i.  Entries with j < i
+    are filled with +inf so they're effectively ignored by min operations.
+    
+    Used by prune_chimeras' refactored outer loop, which builds M once per
+    iteration and then derives both the "baseline best error" (min over
+    all pairs) and the "best error excluding hap k" (min over pairs not
+    involving k) from the same matrix — saving the K-fold redundant work
+    that the original closure-per-call structure incurred.
+    
+    Asymptotic improvement: prune_chimeras' inner loop went from K+1
+    calls of O(num_samples * K^2 * n_sites) to a single matrix build of
+    O(num_samples * K^2 * n_sites) plus K+1 O(num_samples * K^2) min
+    operations.  Net speedup factor ~K when many candidates pass the
+    structural chimera test.
+    
+    Args:
+        H_stack: (K, n_sites) int8 — concretised haplotypes.
+        sample_geno_stack: (num_samples, n_sites) int8 — pre-computed
+            argmax of probs_array along the allele axis.
+    
+    Returns:
+        M: (num_samples, K, K) float64 — error percent for each (s, i, j)
+            with j >= i; M[s, i, j] = +inf for j < i.
+    """
+    K, n_sites = H_stack.shape
+    num_samples = sample_geno_stack.shape[0]
+    
+    M = np.full((num_samples, K, K), np.inf, dtype=np.float64)
+    
+    # Per-sample parallelism: each thread writes to its own (s, :, :) slab.
+    for si in prange(num_samples):
+        for i in range(K):
+            for j in range(i, K):
+                mismatches = 0
+                for s in range(n_sites):
+                    g = H_stack[i, s] + H_stack[j, s]
+                    if g != sample_geno_stack[si, s]:
+                        mismatches += 1
+                M[si, i, j] = (mismatches / n_sites) * 100.0
+    
+    return M
+
+
+@njit(cache=True, parallel=True, fastmath=False)
+def _min_pair_error_excluding(M, excluded_idx):
+    """Compute, for each sample, the min over (i, j) pairs with j >= i and
+    neither i nor j equal to excluded_idx.
+    
+    If excluded_idx < 0, returns the unrestricted min (used for baseline).
+    
+    Strict < tie-breaking matches the original (earliest-encountered pair
+    wins on ties).  The iteration order (i outer 0..K-1, j inner i..K-1)
+    matches _compute_best_pair_errors_kernel's order, so when excluded_idx
+    is -1 this function returns exactly the same per-sample errors as
+    _compute_best_pair_errors_kernel applied to the same H_stack.
+    """
+    num_samples, K, _ = M.shape
+    out = np.empty(num_samples, dtype=np.float64)
+    
+    for si in prange(num_samples):
+        best_error = 100.0
+        for i in range(K):
+            if i == excluded_idx:
+                continue
+            for j in range(i, K):
+                if j == excluded_idx:
+                    continue
+                e = M[si, i, j]
+                if e < best_error:
+                    best_error = e
+        out[si] = best_error
+    return out
+
+
 def prune_chimeras(hap_dict, probs_array, 
                    max_recombs=1,
                    max_mismatch_percent=0.5,
@@ -530,17 +662,48 @@ def prune_chimeras(hap_dict, probs_array,
     if probs_array is None:
         return hap_dict
     
-    def compute_best_pair_errors(hap_dict_local, probs_array_local):
-        """For each sample, compute error of best haplotype pair (no recomb within block)."""
+    # Pre-compute sample genotype stack once.  In the original code this
+    # was done inside compute_best_pair_errors per call (and per sample),
+    # but probs_array is invariant during the prune loop — only the hap
+    # subset changes — so we hoist the argmax out.  Caller's probs_array
+    # is typically (num_samples, num_sites, 3) float32 in production.
+    num_samples_outer = probs_array.shape[0]
+    num_sites_outer = probs_array.shape[1]
+    # np.argmax over axis=2 returns int64 by default; cast to int8 to match
+    # the JIT kernel's expected dtype.  Values are always in {0, 1, 2}.
+    sample_geno_stack = np.argmax(probs_array, axis=2).astype(np.int8)
+    
+    def compute_best_pair_errors(hap_dict_local, sample_geno_stack_local):
+        """For each sample, compute error of best haplotype pair (no recomb within block).
+        
+        Uses the JIT kernel when numba is available; falls back to the
+        original pure-Python triply-nested loop otherwise.  The two
+        paths are byte-identical because the inner work is integer-only
+        (concretised haps + integer sample genotypes, integer mismatch
+        count, then a single float64 division).
+        """
+        # Convert the hap_dict's values to a stacked (K, n_sites) int8 array
+        # matching what the kernel (and the original Python loop) expects.
         hap_list = [np.argmax(h, axis=1) if h.ndim > 1 else h for h in hap_dict_local.values()]
-        num_samples = probs_array_local.shape[0]
-        num_sites = probs_array_local.shape[1]
         num_haps = len(hap_list)
         
+        if HAS_NUMBA:
+            # Build H_stack as int8 (values in {0, 1}).  hap_list elements
+            # may already be int8 (if 1D) or int64 (from np.argmax of 2D);
+            # vstack-then-cast unifies to int8.
+            H_stack = np.vstack(hap_list).astype(np.int8)
+            return _compute_best_pair_errors_kernel(H_stack, sample_geno_stack_local)
+        
+        # ---- Pure-Python fallback ----
+        # Identical math to the JIT kernel and to the original
+        # implementation (just reads from the pre-computed sample_geno_stack
+        # rather than recomputing argmax per sample).
+        num_samples = sample_geno_stack_local.shape[0]
+        num_sites = sample_geno_stack_local.shape[1]
         sample_errors = np.zeros(num_samples)
         
         for s in range(num_samples):
-            sample_geno = np.argmax(probs_array_local[s], axis=1)
+            sample_geno = sample_geno_stack_local[s]
             best_error = 100.0
             
             for i in range(num_haps):
@@ -565,9 +728,25 @@ def prune_chimeras(hap_dict, probs_array,
                            else hap_dict[k] for k in kept_keys])
         n_haps = len(kept_keys)
         
-        # Compute baseline errors with current haplotype set
-        current_dict = {k: hap_dict[k] for k in kept_keys}
-        baseline_errors = compute_best_pair_errors(current_dict, probs_array)
+        # ----------------------------------------------------------------
+        # Build the full per-sample, per-pair error matrix M[s, i, j] once
+        # for the current hap set.  baseline_errors and every reduced_errors
+        # (one per chimera candidate) are derived from M via cheap O(K^2)
+        # min operations, eliminating the K-fold redundant work that the
+        # original closure-per-call structure incurred.
+        # 
+        # When numba is unavailable, fall back to calling the closure
+        # baseline call only and computing reduced calls per candidate
+        # later (slow path; preserves correctness).
+        # ----------------------------------------------------------------
+        if HAS_NUMBA:
+            H_stack_i8 = H_stack.astype(np.int8) if H_stack.dtype != np.int8 else H_stack
+            pair_error_matrix = _compute_pair_errors_matrix_kernel(H_stack_i8, sample_geno_stack)
+            baseline_errors = _min_pair_error_excluding(pair_error_matrix, -1)
+        else:
+            pair_error_matrix = None
+            current_dict = {k: hap_dict[k] for k in kept_keys}
+            baseline_errors = compute_best_pair_errors(current_dict, sample_geno_stack)
         
         # Find candidate chimeras
         candidate_chimeras = []
@@ -595,8 +774,13 @@ def prune_chimeras(hap_dict, probs_array,
             
             if is_chimera:
                 # Compute mean_delta: how much does removing this haplotype hurt?
-                reduced_dict = {k: hap_dict[k] for k in kept_keys if k != target_key}
-                reduced_errors = compute_best_pair_errors(reduced_dict, probs_array)
+                if HAS_NUMBA:
+                    # Cheap O(K^2 * num_samples) min over the precomputed matrix.
+                    reduced_errors = _min_pair_error_excluding(pair_error_matrix, i)
+                else:
+                    # Slow fallback: rebuild from scratch (matches original behaviour).
+                    reduced_dict = {k: hap_dict[k] for k in kept_keys if k != target_key}
+                    reduced_errors = compute_best_pair_errors(reduced_dict, sample_geno_stack)
                 delta_errors = reduced_errors - baseline_errors
                 mean_delta = np.mean(delta_errors)
                 
