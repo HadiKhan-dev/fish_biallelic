@@ -80,7 +80,7 @@ if __name__ == '__main__':
 
     import thread_config
     import vcf_data_loader
-    import block_haplotypes
+    import block_haplotypes_new as block_haplotypes
     import block_haplotype_refinement
     import residual_discovery
     import hierarchical_assembly

@@ -10,10 +10,13 @@ Main entry point: select_and_resolve()
 import numpy as np
 import math
 import ctypes
+import heapq
 import os as _os_cr
 import time as _time_cr
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
+
+from scipy.optimize import linear_sum_assignment
 
 import block_haplotypes
 
@@ -688,6 +691,230 @@ def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
 
 
 # =============================================================================
+# BEAM WARMSTART INITIALISATION (seeds Step 1's selected set)
+# =============================================================================
+
+def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
+                          penalty, num_samples, batch_cc,
+                          max_K_cap=20, num_threads=None):
+    """Greedy beam-warmstart that produces an initial `selected` list
+    to seed select_and_resolve's Step 1 forward selection.
+
+    Walks the beam in score order (best LL first), trying to ADD each
+    candidate to the current selected set; if the addition lowers BIC
+    it is committed.  After every successful add, runs a DROP-LOOP that
+    tests removing each currently-selected member; any drop that
+    further lowers BIC is committed, and the loop repeats until no
+    single drop improves further.
+
+    The output seeds Step 1's `selected` and `current_best_bic` so
+    Step 1's per-set-best-add greedy starts from a non-empty set rather
+    than from K=0.  Step 1 still runs on top (warmstart and Step 1 use
+    different acceptance criteria — warmstart is "first improvement
+    in beam order", Step 1 is "best improvement across all candidates"
+    — so Step 1 can still find additions warmstart missed).
+
+    Motivation: the original Step 1, starting from empty, committed to
+    splice paths at K=1 in cases where the data has within-sub-block
+    recombinations (chr23 SB 129).  No 1-for-1 or 2-for-1 swap in the
+    outer loop could escape the splice basin afterwards (basin-shape
+    verification: requires >=4 simultaneous swaps).  Seeding Step 1
+    with a beam-walk-derived set avoids the basin entirely because
+    the beam-walk considers each high-LL beam path as an independent
+    candidate add rather than only the per-set winner at each k.
+
+    Mathematical equivalence with the rest of the resolver: the BIC
+    used here (K * batch_cc - 2 * LL) is the same one Step 2's swap
+    acceptance, Step 3's prune, and Step 4's adj_gain all use.  LL is
+    obtained from score_path_set / score_path_sets_parallel, which
+    dispatch the same _batched_viterbi_score / viterbi_score_selection
+    kernels used everywhere else in this module.  The penalty argument
+    matches pen_sel inside select_and_resolve, so warmstart's
+    `current_best_bic = bic_S` returned to Step 1 is byte-identical to
+    what Step 1 would compute for that same selected set.
+
+    Threading: score_path_set is called O(beam_size) times for the add
+    step; score_path_sets_parallel is called once per accept for the
+    drop loop (K candidate (K-1)-sets in one batched dispatch).  Both
+    accept num_threads as int OR callable, so passing a callable (e.g.
+    hierarchical_assembly._get_dynamic_threads) enables dynamic thread
+    reallocation as peer workers finish — same convention as the rest
+    of select_and_resolve.
+
+    Args:
+        beam_results: list of (dense_path, score) tuples, sorted best
+            score first (the order returned by run_full_mesh_beam_search).
+        fast_mesh: FastMesh object — used to decode dense paths to
+            key-paths via fast_mesh.reverse_mappings[b][d].
+        sub_emissions: per-sub-block emission cache from
+            compute_subblock_emissions.
+        penalty: per-bin Viterbi recomb penalty (== pen_sel inside
+            select_and_resolve).
+        num_samples: number of samples in the batch.
+        batch_cc: per-founder BIC complexity penalty (== batch_cc
+            inside select_and_resolve).
+        max_K_cap: hard upper bound on K reached by warmstart.  The
+            beam-walk stops attempting further adds once K hits this
+            cap.  Default 20; in practice the BIC criterion stops
+            growth far below this on realistic data (K typically 5-8
+            on L1 super-blocks).  Caller in select_and_resolve passes
+            its step1_max_iters argument so the two phases scale
+            together if the user adjusts that parameter.
+        num_threads: int or callable; passed through to score_path_set
+            and score_path_sets_parallel.
+
+    Returns:
+        (selected_beam_indices, final_bic)
+            selected_beam_indices: list of indices into beam_results
+                (== indices into map_matrix in select_and_resolve, since
+                 map_matrix is built by row-aligned iteration over
+                 beam_results).  May be empty if the beam is empty;
+                 in that case Step 1 starts from K=0 just like the
+                 original behaviour.
+            final_bic: float, BIC of the final selected set; assigned
+                to current_best_bic at Step 1 entry so Step 1's accept
+                criterion compares against the warmstart baseline.
+                float('inf') for empty selected (matches original
+                behaviour).
+    """
+    n_cands = len(beam_results)
+    _cr_mark("CR_warmstart_start",
+             f"n_cands={n_cands} batch_cc={batch_cc} pen={penalty} "
+             f"max_K_cap={max_K_cap}")
+    if n_cands == 0:
+        _cr_mark("CR_warmstart_done", "empty beam -> empty selected")
+        return [], float('inf')
+
+    # Decode every beam path's dense_path to a key-path once.
+    # score_path_set / score_path_sets_parallel both expect key-paths
+    # (lists of stage-3 hap keys), not dense fast_mesh indices.
+    decoded = []
+    for dp, _score in beam_results:
+        keys = [int(fast_mesh.reverse_mappings[b][int(d)])
+                for b, d in enumerate(dp)]
+        decoded.append(keys)
+
+    # Deduplicate by key-path tuple.  Two beam paths can in principle
+    # decode identically even if their dense paths differ (FastMesh can
+    # have duplicate local-index slots for the same key in some sub-
+    # block).  Keep the first occurrence (best LL).  Original Step 1
+    # implicitly avoided duplicates because at each k it skipped indices
+    # already in selected; we replicate that effect explicitly here.
+    seen = set()
+    unique_beam_idx = []
+    unique_keypaths = []
+    for bi, kp in enumerate(decoded):
+        kt = tuple(kp)
+        if kt in seen:
+            continue
+        seen.add(kt)
+        unique_beam_idx.append(bi)
+        unique_keypaths.append(kp)
+    _cr_mark("CR_warmstart_dedup_done",
+             f"unique={len(unique_keypaths)} of {n_cands}")
+
+    selected_keypaths = []          # list of key-paths (parallel to ...)
+    selected_beam_idx = []          # ... this list of beam-row indices
+    selected_tuples = set()         # for O(1) "is path in S?" checks
+    bic_S = float('inf')            # empty set has +inf BIC; any K>=1
+                                    # set with finite LL strictly improves
+    n_adds = 0
+    n_drops = 0
+    n_rejects = 0
+
+    for beam_idx, kp in zip(unique_beam_idx, unique_keypaths):
+        kt = tuple(kp)
+        if kt in selected_tuples:
+            continue                # already in selected, skip
+        if len(selected_keypaths) >= max_K_cap:
+            _cr_mark("CR_warmstart_cap",
+                     f"hit max_K_cap={max_K_cap} at beam_idx={beam_idx}")
+            break
+
+        # ------ Try ADD ------
+        candidate_set = selected_keypaths + [list(kp)]
+        ll_cand = score_path_set(
+            candidate_set, sub_emissions, penalty, num_samples,
+            num_threads=num_threads)
+        bic_cand = len(candidate_set) * batch_cc - 2.0 * ll_cand
+
+        if bic_cand < bic_S:
+            # Accept: bind in the new path, update BIC.
+            selected_keypaths = candidate_set
+            selected_beam_idx.append(beam_idx)
+            selected_tuples.add(kt)
+            bic_S = bic_cand
+            n_adds += 1
+            _cr_mark("CR_warmstart_add",
+                     f"beam_idx={beam_idx} K={len(selected_keypaths)} "
+                     f"BIC={bic_S:.2f}")
+
+            # ------ DROP LOOP ------
+            # After each successful add, check whether any current
+            # member can be dropped for further BIC improvement.  An
+            # earlier drop may expose a later one (e.g. once path X is
+            # gone, path Y becomes redundant), so we loop until no
+            # single drop improves further.
+            #
+            # All K candidate (K-1)-sets are evaluated in ONE call to
+            # score_path_sets_parallel, which batches them into a
+            # single _batched_viterbi_score dispatch with batch dim K
+            # and sample dim num_samples — gives K * num_samples
+            # parallel work units, fully utilising whatever thread
+            # count _resolve_threads(num_threads) returns.
+            while len(selected_keypaths) > 1:
+                K_cur = len(selected_keypaths)
+                cand_sets = [
+                    [selected_keypaths[j] for j in range(K_cur) if j != i]
+                    for i in range(K_cur)
+                ]
+                lls = score_path_sets_parallel(
+                    cand_sets, sub_emissions, penalty, num_samples,
+                    num_threads=num_threads)
+                bics = [(K_cur - 1) * batch_cc - 2.0 * ll for ll in lls]
+
+                best_drop_i = -1
+                best_drop_bic = bic_S
+                for i, b in enumerate(bics):
+                    if b < best_drop_bic:
+                        best_drop_bic = b
+                        best_drop_i = i
+
+                if best_drop_i < 0:
+                    break                       # no drop improves; done
+
+                # Commit drop.  Remove from all parallel structures so
+                # selected_beam_idx[i] continues to align with
+                # selected_keypaths[i].  Also remove from
+                # selected_tuples — defensive: lets the path become
+                # eligible for re-addition later if some future accept
+                # exposes it as optimal again.  (Doesn't fire on
+                # well-behaved blocks; pathological beams only.)
+                dropped_kp = selected_keypaths[best_drop_i]
+                dropped_bidx = selected_beam_idx[best_drop_i]
+                dropped_kt = tuple(dropped_kp)
+                selected_tuples.discard(dropped_kt)
+                selected_keypaths = [selected_keypaths[i]
+                                     for i in range(K_cur)
+                                     if i != best_drop_i]
+                selected_beam_idx = [selected_beam_idx[i]
+                                     for i in range(K_cur)
+                                     if i != best_drop_i]
+                bic_S = best_drop_bic
+                n_drops += 1
+                _cr_mark("CR_warmstart_drop",
+                         f"beam_idx={dropped_bidx} "
+                         f"K={len(selected_keypaths)} BIC={bic_S:.2f}")
+        else:
+            n_rejects += 1
+
+    _cr_mark("CR_warmstart_done",
+             f"K={len(selected_beam_idx)} BIC={bic_S:.2f} "
+             f"adds={n_adds} drops={n_drops} rejects={n_rejects}")
+    return selected_beam_idx, bic_S
+
+
+# =============================================================================
 # SAMPLE PAINTING AND HOTSPOT DETECTION
 # =============================================================================
 
@@ -808,6 +1035,236 @@ def find_hotspots(sample_paths, K, num_blocks, sub_emissions, path_set,
 
 
 # =============================================================================
+# STEP 5 HELPERS: Painter-Guided Escape (V10 + V11)
+# =============================================================================
+# When Step 4's hotspot-guided 1-for-1 splicing converges with hotspots
+# remaining at a single boundary, the resolver may be stuck in a "splice
+# basin" — a cyclic permutation of suffixes across paths where no 2-path
+# swap improves BIC even though a coordinated k-path permutation would
+# (k>=4 for the chr23 SB 129 case we verified).
+#
+# Step 5 escapes the basin by reading the painter's per-strand transitions
+# at hotspot boundaries: each strand's switch i->j at the boundary votes
+# for sigma(i)=j in the suffix-permutation we apply.  Aggregated across
+# samples, this yields a vote matrix W[i, j].  We then:
+#
+#   1. Identify "active" paths — those with off-diagonal weight >= threshold
+#      in either their row or column of W.  Inactive paths get sigma(i)=i
+#      forced (they have no painter signal suggesting they should change).
+#
+#   2. V10: Hungarian on the active sub-matrix (after zeroing its diagonal
+#      so stay-votes don't drown out switch-votes).  One BIC eval.
+#
+#   3. V11: if V10 doesn't help, fall back to Murty's top-N permutations
+#      restricted to the active sub-matrix.  Up to step5_top_k BIC evals.
+#
+# Each candidate is BIC-tested; the best improving (boundary, sigma) across
+# all hotspot boundaries is applied.  Iterate until no boundary improves.
+#
+# Verified on six synthetic basin structures (cycles of size 2, 3, 4, 5,
+# two disjoint 3-cycles, and a cycle at a non-default boundary): all
+# converge to the truth-clean path set in 1 iteration with <=6 BIC evals
+# each.  See test_step45_active_variants.py for the verification.
+# =============================================================================
+def _step5_find_active_paths(W, threshold):
+    """Active path: any path whose row OR column off-diagonal max is
+    >= threshold.  Inactive paths are forced sigma(i)=i.
+
+    The threshold matches min_hotspot_samples (default 5) so we use
+    the same "noteworthy" criterion as find_hotspots.
+    """
+    K_ = W.shape[0]
+    if K_ <= 1:
+        return list(range(K_))
+    W_off = W.copy()
+    np.fill_diagonal(W_off, 0)
+    active = []
+    for i in range(K_):
+        row_max = W_off[i, :].max()
+        col_max = W_off[:, i].max()
+        if row_max >= threshold or col_max >= threshold:
+            active.append(i)
+    return active
+
+
+def _step5_solve_constrained_assignment(W, must_assign, must_not_assign):
+    """Maximize sum W[i, sigma(i)] subject to:
+        must_assign: dict {i: j} -- sigma(i) must equal j
+        must_not_assign: set/iterable of (i, j) -- sigma(i) must not equal j
+
+    Returns (sigma, total_weight) or (None, -inf) if infeasible.
+    Used by Murty's top-N enumeration (V11).
+    """
+    K_ = W.shape[0]
+    BIG = 1e9
+    cost = -W.copy()
+    for i, j in must_not_assign:
+        cost[i, j] = BIG
+    locked_rows = list(must_assign.keys())
+    locked_cols = [must_assign[i] for i in locked_rows]
+    free_rows = [i for i in range(K_) if i not in locked_rows]
+    free_cols = [j for j in range(K_) if j not in locked_cols]
+    if len(free_rows) != len(free_cols):
+        return None, float('-inf')
+    if len(free_rows) == 0:
+        sigma = np.zeros(K_, dtype=np.int64)
+        for i, j in must_assign.items():
+            sigma[i] = j
+        for i, j in must_not_assign:
+            if sigma[i] == j:
+                return None, float('-inf')
+        total = float(sum(W[i, sigma[i]] for i in range(K_)))
+        return sigma, total
+    sub_cost = cost[np.ix_(free_rows, free_cols)]
+    try:
+        ri, ci = linear_sum_assignment(sub_cost)
+    except ValueError:
+        return None, float('-inf')
+    sigma = np.zeros(K_, dtype=np.int64)
+    for i, j in must_assign.items():
+        sigma[i] = j
+    for fr, fc in zip(ri, ci):
+        sigma[free_rows[fr]] = free_cols[fc]
+    total_cost = float(sum(cost[i, sigma[i]] for i in range(K_)))
+    if total_cost > BIG / 2:
+        return None, float('-inf')
+    total = float(sum(W[i, sigma[i]] for i in range(K_)))
+    return sigma, total
+
+
+def _step5_murty_top_n(W, N):
+    """Top-N permutations of {0..K-1} by descending sum W[i, sigma(i)].
+
+    Murty's algorithm: at each pop, the partition node yields its
+    optimal sigma_P; spawn children that exclude sigma_P's edges one
+    by one (force prior positions to sigma_P's value, forbid current
+    position from sigma_P's value).  Verified against brute force on
+    3x3 and 6x6 random matrices (matches sorted order exactly).
+    """
+    K_ = W.shape[0]
+    sigma_1, w_1 = _step5_solve_constrained_assignment(W, {}, set())
+    if sigma_1 is None:
+        return []
+    results = [(sigma_1, w_1)]
+    counter = [0]
+
+    def make_node(must_assign, must_not_assign):
+        sigma, w = _step5_solve_constrained_assignment(
+            W, must_assign, must_not_assign)
+        if sigma is None:
+            return None
+        counter[0] += 1
+        return (-w, counter[0], must_assign, must_not_assign,
+                tuple(int(x) for x in sigma))
+
+    heap = []
+    n0 = make_node({}, set())
+    if n0 is None:
+        return [(sigma_1, w_1)]
+    heapq.heappush(heap, n0)
+    while len(results) < N and heap:
+        neg_w, _, ma, mna, sigma_t = heapq.heappop(heap)
+        sigma_P = np.array(sigma_t, dtype=np.int64)
+        already = any(
+            tuple(int(x) for x in sigma_P) == tuple(int(x) for x in s)
+            for s, _ in results)
+        if not already:
+            results.append((sigma_P, -neg_w))
+            if len(results) >= N:
+                break
+        free_positions = [i for i in range(K_) if i not in ma]
+        running_ma = dict(ma)
+        for pos in free_positions:
+            new_mna = set(mna)
+            new_mna.add((pos, int(sigma_P[pos])))
+            child = make_node(dict(running_ma), new_mna)
+            if child is not None:
+                heapq.heappush(heap, child)
+            running_ma[pos] = int(sigma_P[pos])
+    return results[:N]
+
+
+def _step5_hungarian_active(W, threshold):
+    """V10: Hungarian on the active sub-matrix only.  Inactive paths
+    get sigma(i)=i forced.  Returns (sigma, active_set).
+
+    The active sub-matrix has its diagonal zeroed so stay-votes (which
+    dominate the row sums for all paths -- the painter often prefers
+    to stay) don't drown out the switch-votes that actually carry
+    structural information about the suffix permutation.
+    """
+    K_ = W.shape[0]
+    active = _step5_find_active_paths(W, threshold)
+    sigma = np.arange(K_, dtype=np.int64)         # identity baseline
+    if len(active) == 0:
+        return sigma, active
+    W_active = W[np.ix_(active, active)].copy()
+    np.fill_diagonal(W_active, 0)
+    row_ind, col_ind = linear_sum_assignment(-W_active)
+    for r, c in zip(row_ind, col_ind):
+        sigma[active[r]] = active[c]
+    return sigma, active
+
+
+def _step5_murty_active(W, N, threshold):
+    """V11: Murty top-N restricted to the active sub-matrix.  Inactive
+    paths get sigma(i)=i fixed across all returned candidates.
+    Returns list of (sigma, vote_sum).
+
+    Useful when the active sub-matrix has tied or near-tied solutions
+    (e.g. when degenerate suffixes — like T0 == T5 over a sub-block —
+    create multiple permutations with the same vote sum).  Cost is
+    bounded by N BIC evals (caller iterates over the returned list).
+    """
+    K_ = W.shape[0]
+    active = _step5_find_active_paths(W, threshold)
+    if len(active) == 0:
+        return [(np.arange(K_, dtype=np.int64), 0.0)]
+    W_active = W[np.ix_(active, active)].copy()
+    np.fill_diagonal(W_active, 0)
+    top_active = _step5_murty_top_n(W_active, N)
+    results = []
+    for sigma_a, w_a in top_active:
+        sigma = np.arange(K_, dtype=np.int64)
+        for r in range(len(active)):
+            sigma[active[r]] = active[int(sigma_a[r])]
+        results.append((sigma, w_a))
+    return results
+
+
+def _step5_build_W_at_boundary(sample_paths, boundary_bin, K):
+    """Vote matrix at given absolute bin index.  W[i, j] counts strand-
+    units that were on path i at bin (boundary_bin - 1) and on path j
+    at bin boundary_bin.  Each sample contributes 2 strand votes (one
+    per diploid strand) per boundary.
+    """
+    W = np.zeros((K, K), dtype=np.float64)
+    n_samples_, _ = sample_paths.shape
+    for s in range(n_samples_):
+        pre = int(sample_paths[s, boundary_bin - 1])
+        post = int(sample_paths[s, boundary_bin])
+        pre_a, pre_b = pre // K, pre % K
+        post_a, post_b = post // K, post % K
+        W[pre_a, post_a] += 1
+        W[pre_b, post_b] += 1
+    return W
+
+
+def _step5_apply_sigma(paths, sigma, boundary_sb):
+    """Construct the candidate path set obtained by applying suffix
+    permutation sigma at sub-block boundary boundary_sb:
+
+        new_paths[i] = paths[i][:boundary_sb] + paths[sigma[i]][boundary_sb:]
+
+    Identity sigma yields paths unchanged.
+    """
+    K_ = len(paths)
+    return [list(paths[i][:boundary_sb]) +
+            list(paths[int(sigma[i])][boundary_sb:])
+            for i in range(K_)]
+
+
+# =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
@@ -817,6 +1274,9 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                        max_founders=12,
                        top_n_swap=20,
                        max_cr_iterations=10,
+                       step1_max_iters=20,
+                       step5_max_iters=10,
+                       step5_top_k=6,
                        paint_penalty=10.0,
                        min_hotspot_samples=5,
                        cc_scale=0.5,
@@ -838,6 +1298,31 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         max_founders: Maximum founders to keep.
         top_n_swap: Number of candidates to evaluate per swap position.
         max_cr_iterations: Maximum chimera resolution iterations.
+        step1_max_iters: Maximum number of forward-selection iterations
+            in Step 1 (i.e. maximum number of additional `selected.append`
+            calls Step 1 can make above whatever warmstart produced).
+            Default 20 matches the original hard-coded `for k in range(20)`
+            cap.  Also passed as warmstart's `max_K_cap` so the two
+            phases scale together when this parameter is adjusted.
+        step5_max_iters: Maximum number of Step 5 painter-guided escape
+            iterations.  Each iteration paints samples on the current
+            path set, scans every sub-block boundary for hotspot
+            structure, and proposes a suffix-permutation via V10
+            (Hungarian on active sub-matrix, 1 BIC eval per boundary)
+            with V11 (Murty top-K on active sub-matrix, up to step5_top_k
+            BIC evals per boundary) as fallback.  The best improving
+            (boundary, sigma) across all boundaries is applied and
+            iteration repeats.  Default 10 — in practice convergence is
+            reached in 1-2 iterations on every basin we've verified.
+        step5_top_k: Number of top permutations to try via V11 (Murty)
+            as the fallback when V10 (single-shot Hungarian on the
+            active sub-matrix) doesn't yield improvement at a boundary.
+            Higher values explore more candidates near the linear-vote
+            optimum at the cost of more BIC evals (each iteration is
+            bounded by step5_top_k * num_hotspot_boundaries evals).
+            Default 6 sufficed for the L=3 cycle test case (which V10
+            alone missed because of T5/T0 sub-block degeneracy creating
+            tied permutations); harder cases may benefit from larger.
         paint_penalty: Viterbi penalty for sample painting in CR.
         min_hotspot_samples: Minimum samples for a hotspot to be actionable.
         cc_scale: Complexity cost scaling factor.
@@ -983,12 +1468,48 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             block_haplotypes.viterbi_score_selection(tensor, float(pen_sel))))
     
     # =========================================================================
+    # STEP 0: Beam Warmstart (seeds Step 1's selected set)
+    #
+    # Before Step 1 runs, walk the beam in score order (best LL first)
+    # and accept any candidate whose addition lowers BIC; after every
+    # accept run a drop-loop that removes any current member whose
+    # removal further lowers BIC.  The result becomes the starting
+    # `selected` list for Step 1 (instead of starting from empty).
+    #
+    # Step 1 still runs on top: its per-set-best-add greedy can find
+    # additions that warmstart's beam-order walk missed.  Warmstart's
+    # acceptance criterion is "first improvement in beam order"; Step 1's
+    # is "best improvement across all candidates" — different criteria,
+    # so Step 1 still adds value after warmstart.  On a converged
+    # warmstart, Step 1 typically breaks on the first iteration with
+    # no further improvement.
+    #
+    # Motivation: the original Step 1, starting from empty, committed
+    # to splice paths at K=1 in cases where the data has within-sub-
+    # block recombinations (chr23 SB 129).  No 1-for-1 or 2-for-1 swap
+    # in the outer loop could escape the splice basin afterwards (basin-
+    # shape verification: requires >=4 simultaneous swaps).  Seeding
+    # Step 1 with a beam-walk-derived set avoids the basin entirely.
+    # See beam_warmstart_select's docstring for full details.
+    # =========================================================================
+    _warmstart_selected, _warmstart_bic = beam_warmstart_select(
+        beam_results=beam_results,
+        fast_mesh=fast_mesh,
+        sub_emissions=sub_em,
+        penalty=pen_sel,
+        num_samples=num_samples,
+        batch_cc=batch_cc,
+        max_K_cap=step1_max_iters,
+        num_threads=num_threads,
+    )
+    
+    # =========================================================================
     # STEP 1: Forward Selection (sample-chunked)
     # =========================================================================
     _cr_mark("CR_step1_start")
-    selected = []
-    current_best_bic = float('inf')
-    for k in range(20):
+    selected = list(_warmstart_selected)
+    current_best_bic = _warmstart_bic
+    for k in range(step1_max_iters):
         remaining = [x for x in range(n_cands) if x not in selected]
         if not remaining:
             break
@@ -1896,9 +2417,10 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     _cr_mark("CR_outer_loop_done",
              f"final_K={len(selected)} final_n_cands={n_cands}")
 
-    # Rebuild current_paths from the final selected one more time so Step 5
-    # sees a consistent key-path list (map_matrix rows cover both original
-    # beam entries and any splice-extension indices added during the loop).
+    # Rebuild current_paths from the final selected one more time so Steps
+    # 5 and 6 see a consistent key-path list (map_matrix rows cover both
+    # original beam entries and any splice-extension indices added during
+    # the loop).
     current_paths = [
         [fast_mesh.reverse_mappings[b][int(d)]
          for b, d in enumerate(map_matrix[_bi])]
@@ -1906,15 +2428,168 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     ]
 
     # =========================================================================
-    # STEP 5: Convert resolved key-paths back to beam format
+    # STEP 5: Painter-Guided Escape (V10 + V11)
+    #
+    # Step 4's hotspot-guided 1-for-1 splicing (the 7-option machinery) can
+    # converge with hotspots remaining — a "splice basin" of cyclic suffix
+    # permutations across paths that no 2-path swap can escape (k>=4
+    # simultaneous changes required for the chr23 SB 129 case we verified).
+    # Step 5 escapes such basins using only the input path set.
+    #
+    # Mechanism: paint samples; for each sub-block boundary, build a vote
+    # matrix W[i,j] from per-strand transitions; identify "active" paths
+    # (off-diagonal weight >= min_hotspot_samples in row or column);
+    # propose sigma via Hungarian on the active sub-matrix (V10) with
+    # Murty top-K fallback (V11).  Each candidate is BIC-tested; the best
+    # improving (boundary, sigma) across all hotspot boundaries is applied.
+    # Iterate until no boundary improves.
+    #
+    # Math identical to existing steps: BIC = K * batch_cc - 2 * LL via
+    # score_path_set; pen_sel and num_threads semantics identical.  Inactive
+    # paths get sigma(i)=i forced, so the search space is bounded by the
+    # active-set size — never K! enumeration even for large K.
     # =========================================================================
-    _cr_mark("CR_step5_start", f"n_paths={len(current_paths)}")
+    _cr_mark("CR_step5_start",
+             f"K={len(current_paths)} step5_max_iters={step5_max_iters} "
+             f"step5_top_k={step5_top_k}")
+
+    # Need at least 2 paths to permute meaningfully (and score_path_set
+    # would segfault on K=0 — _build_tensor_from_paths produces a
+    # (num_samples, 0, total_bins) tensor and viterbi_score_selection
+    # is undefined for n_pairs=0).  K=1 is a no-op via the threshold
+    # check (W is 1x1 with no off-diagonal mass) but we skip it explicitly
+    # to avoid one wasted painting + score_path_set call per empty case.
+    if len(current_paths) < 2:
+        _cr_mark("CR_step5_skip_too_few_paths",
+                 f"K={len(current_paths)}")
+    else:
+        # Bin offsets per sub-block (translates sub-block index to bin index)
+        _step5_bin_offsets = [0]
+        for _step5_e in sub_em:
+            _step5_bin_offsets.append(
+                _step5_bin_offsets[-1] + _step5_e['n_bins'])
+
+        for _step5_iter in range(step5_max_iters):
+            _cr_mark("CR_step5_iter_start", f"step5_iter={_step5_iter}")
+            K_s5 = len(current_paths)
+
+            # Paint samples on current state
+            _step5_sample_paths, _step5_K_check = paint_samples_viterbi(
+                current_paths, sub_em, pen_sel, num_samples,
+                num_threads=num_threads)
+
+            # Current BIC
+            _step5_cur_ll = score_path_set(
+                current_paths, sub_em, pen_sel, num_samples,
+                num_threads=num_threads)
+            _step5_cur_bic = K_s5 * batch_cc - 2 * _step5_cur_ll
+
+            _step5_best_bic = _step5_cur_bic
+            _step5_best_paths = current_paths
+            _step5_best_method = None
+            _step5_best_boundary = None
+            _step5_best_sigma = None
+            _step5_best_active = None
+            _step5_n_evals = 0
+
+            # Scan every internal sub-block boundary.  sb_idx 1..N_SUB-1 are
+            # the boundaries between adjacent sub-blocks; sb_idx=0 is the start
+            # of the region (no boundary), sb_idx=N_SUB is the end.
+            for _step5_sb in range(1, len(_step5_bin_offsets)):
+                _step5_b_bin = _step5_bin_offsets[_step5_sb]
+                if _step5_b_bin == 0 or \
+                        _step5_b_bin >= _step5_bin_offsets[-1]:
+                    continue
+                _step5_W = _step5_build_W_at_boundary(
+                    _step5_sample_paths, _step5_b_bin, K_s5)
+                _step5_n_switches = float(
+                    _step5_W.sum() - np.diag(_step5_W).sum())
+                # Skip boundaries with too few strand-switches (no signal)
+                if _step5_n_switches < min_hotspot_samples:
+                    continue
+
+                # ---- V10: Hungarian on active sub-matrix ----
+                _step5_sigma_v10, _step5_active = _step5_hungarian_active(
+                    _step5_W, min_hotspot_samples)
+                if len(_step5_active) == 0:
+                    continue
+                if not np.array_equal(_step5_sigma_v10, np.arange(K_s5)):
+                    _step5_new_paths = _step5_apply_sigma(
+                        current_paths, _step5_sigma_v10, _step5_sb)
+                    _step5_new_ll = score_path_set(
+                        _step5_new_paths, sub_em, pen_sel, num_samples,
+                        num_threads=num_threads)
+                    _step5_new_bic = K_s5 * batch_cc - 2 * _step5_new_ll
+                    _step5_n_evals += 1
+                    if _step5_new_bic < _step5_best_bic:
+                        _step5_best_bic = _step5_new_bic
+                        _step5_best_paths = _step5_new_paths
+                        _step5_best_method = "V10"
+                        _step5_best_boundary = _step5_sb
+                        _step5_best_sigma = _step5_sigma_v10.copy()
+                        _step5_best_active = list(_step5_active)
+
+                # ---- V11: Murty top-K on active sub-matrix (fallback) ----
+                # Murty's first candidate is V10's sigma; we skip it to avoid
+                # double-evaluation.  Up to (step5_top_k - 1) further evals
+                # per boundary.
+                _step5_v11_candidates = _step5_murty_active(
+                    _step5_W, step5_top_k, min_hotspot_samples)
+                for _step5_sig_v11, _ in _step5_v11_candidates:
+                    if np.array_equal(_step5_sig_v11, np.arange(K_s5)):
+                        continue
+                    if np.array_equal(_step5_sig_v11, _step5_sigma_v10):
+                        continue              # already V10-evaluated
+                    _step5_new_paths = _step5_apply_sigma(
+                        current_paths, _step5_sig_v11, _step5_sb)
+                    _step5_new_ll = score_path_set(
+                        _step5_new_paths, sub_em, pen_sel, num_samples,
+                        num_threads=num_threads)
+                    _step5_new_bic = K_s5 * batch_cc - 2 * _step5_new_ll
+                    _step5_n_evals += 1
+                    if _step5_new_bic < _step5_best_bic:
+                        _step5_best_bic = _step5_new_bic
+                        _step5_best_paths = _step5_new_paths
+                        _step5_best_method = "V11"
+                        _step5_best_boundary = _step5_sb
+                        _step5_best_sigma = _step5_sig_v11.copy()
+                        _step5_best_active = list(_step5_active)
+
+            if _step5_best_method is None:
+                _cr_mark("CR_step5_iter_done",
+                         f"step5_iter={_step5_iter} no_improvement "
+                         f"n_evals={_step5_n_evals}")
+                break
+
+            _step5_sigma_str = ','.join(
+                str(int(s)) for s in _step5_best_sigma)
+            _cr_mark("CR_step5_iter_done",
+                     f"step5_iter={_step5_iter} "
+                     f"method={_step5_best_method} "
+                     f"sb={_step5_best_boundary} "
+                     f"active={_step5_best_active} "
+                     f"sigma=({_step5_sigma_str}) "
+                     f"bic_before={_step5_cur_bic:.2f} "
+                     f"bic_after={_step5_best_bic:.2f} "
+                     f"n_evals={_step5_n_evals}")
+            current_paths = _step5_best_paths
+        else:
+            # Loop didn't break — hit step5_max_iters
+            _cr_mark("CR_step5_max_iters_reached",
+                     f"max_iters={step5_max_iters}")
+
+    _cr_mark("CR_step5_done", f"K={len(current_paths)}")
+
+    # =========================================================================
+    # STEP 6: Convert resolved key-paths back to beam format
+    # =========================================================================
+    _cr_mark("CR_step6_start", f"n_paths={len(current_paths)}")
     resolved_beam = []
     for path_keys in current_paths:
         dense_path = [fast_mesh.reverse_mappings[b].index(key)
                       for b, key in enumerate(path_keys)]
         resolved_beam.append((dense_path, 0.0))
-    _cr_mark("CR_step5_done", f"n_resolved={len(resolved_beam)}")
+    _cr_mark("CR_step6_done", f"n_resolved={len(resolved_beam)}")
     _cr_mark("CR_return", f"returning {len(resolved_beam)} beam entries")
     
     return resolved_beam

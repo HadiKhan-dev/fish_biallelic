@@ -79,7 +79,7 @@ if __name__ == '__main__':
     import vcf_data_loader
     import analysis_utils
     import hap_statistics
-    import block_haplotypes
+    import block_haplotypes_discrete as block_haplotypes  # Discrete coordinate descent w/ wildcard founder (drop-in for block_haplotypes)
     import block_linking_naive
     import block_linking
     import simulate_sequences
@@ -117,7 +117,7 @@ if __name__ == '__main__':
     # deterministic sub-seeds from this value.  Set to None for non-reproducible
     # runs using system entropy.
     # -------------------------------------------------------------------------
-    SIMULATION_SEED = 42
+    SIMULATION_SEED = 50
 
     # Start the forkserver NOW, before any data is loaded.
     # The forkserver process inherits only the current ~500 MB footprint
@@ -429,7 +429,7 @@ if __name__ == '__main__':
         t0 = time.time()
         contig_results = simulate_sequences.process_all_contigs_parallel(
             region_keys, all_offspring_lists, truth_paintings_lists, sites_list,
-            read_depth=5, error_rate=0.02,
+            read_depth=20, error_rate=0.02,
             snps_per_block=200, snp_shift=200,
             num_processes=n_processes,
             seed=(SIMULATION_SEED + 1_000_000) if SIMULATION_SEED is not None else None
