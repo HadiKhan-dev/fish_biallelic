@@ -533,6 +533,34 @@ def merge_short_chunks_emission_aware(
     sd_arr = np.asarray(state_definitions)
     n_bins_total = int(ll_arr.shape[0])
 
+    # ---- SHAPE SANITY CHECK ----
+    # binned_log_likelihoods MUST be (n_bins, K) -- bins along axis 0,
+    # states along axis 1.  Callers wiring this up from
+    # calculate_binned_emissions's output (which returns shape
+    # (n_samples, K, n_bins)) must transpose [i].T before passing.
+    # If the axes are swapped here, every per-bin LL lookup reads
+    # garbage state values and the threshold check makes meaningless
+    # decisions (in particular, the bin range usually exceeds K so the
+    # slice [b_start:b_end_excl, s_idx] is empty and sums to 0, making
+    # ll_baseline == ll_after == 0 and "always merge" for some cases
+    # while spuriously "never merge" for others).  We can't always
+    # detect axis swaps (since K could equal n_bins coincidentally),
+    # but the most common failure mode -- K << n_bins -- is caught by
+    # comparing the state-axis size to state_definitions.shape[0].
+    expected_K = int(sd_arr.shape[0])
+    if ll_arr.ndim != 2:
+        raise ValueError(
+            f"binned_log_likelihoods must be 2-D (n_bins, K); "
+            f"got shape {ll_arr.shape}")
+    if ll_arr.shape[1] != expected_K:
+        raise ValueError(
+            f"binned_log_likelihoods axis 1 (states) has size "
+            f"{ll_arr.shape[1]} but state_definitions has "
+            f"{expected_K} states.  Axes may be swapped -- expected "
+            f"shape is (n_bins, K), got {ll_arr.shape}.  If you have "
+            f"(K, n_bins) output from calculate_binned_emissions, "
+            f"transpose with `.T` before passing.")
+
     # ---- Build state lookup: (founder_id_1, founder_id_2) -> state_idx ----
     # state_definitions stores HAP INDICES (positions in hap_keys); chunks
     # store FOUNDER IDs (values in hap_keys).  Cache the inverse map once
@@ -1378,6 +1406,14 @@ def _worker_paint_batch_binned(args):
         # edge case already returned above with empty chunks) or when
         # both min_chunk_bp == 0 and merge_wildcard is False / no W
         # chunks exist.
+        #
+        # AXIS ORDER: calculate_binned_emissions returns ll_tensor with
+        # shape (n_samples, K, n_bins) -- STATES first, then bins.  The
+        # cleaner expects (n_bins, K) -- BINS first, then states (so
+        # that slicing along axis 0 selects a bin range and column
+        # indexing selects one state's LL across those bins).  We
+        # transpose ll_tensor[i] from (K, n_bins) to (n_bins, K) on the
+        # way in.  numpy's .T is a strided view and does not copy.
         if enable_emission_aware_cleanup and len(painting.chunks) > 0:
             raw_chunks_list = painting.chunks
             cleaned_chunks = merge_short_chunks_emission_aware(
@@ -1385,7 +1421,7 @@ def _worker_paint_batch_binned(args):
                 min_chunk_bp=cleanup_min_chunk_bp,
                 n_real_founders=n_real_founders_for_cleanup,
                 bin_edges=bin_edges,
-                binned_log_likelihoods=ll_tensor[i],
+                binned_log_likelihoods=ll_tensor[i].T,
                 state_definitions=state_defs,
                 hap_keys=hap_keys,
                 snps_per_bin=snps_per_bin,
