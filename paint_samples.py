@@ -380,7 +380,7 @@ def merge_short_chunks_emission_aware(
     hap_keys,
     snps_per_bin,
     threshold_short_nats_per_snp=0.02,
-    threshold_wildcard_nats_per_snp=0.20,
+    threshold_wildcard_nats_per_snp=float('inf'),
     merge_wildcard=True,
 ):
     """
@@ -456,11 +456,23 @@ def merge_short_chunks_emission_aware(
         than any real founder's LL, which is precisely why the
         painter chose W there.  Resolving W to the locally-best real
         founder therefore has a per-SNP LL DROP of (real_LL - W_LL)
-        > 0.  Diagnostic from chr3 problem regions gives that drop
-        as ~0.037 nats/SNP for the best-alt real founder, so the
-        default threshold_wildcard_nats_per_snp = 0.20 comfortably
-        passes wildcard resolution in those regions while remaining
-        a sanity cap for cases where no real founder fits at all.
+        > 0.
+        DESIGN INTENT: W is a Viterbi-INTERNAL intermediate state.
+        It exists to keep the forward pass from flickering through
+        wrong real founders in chimeric regions during dynamic
+        programming, but the output painting that flows downstream
+        (pedigree inference, phase correction, allele-level
+        reconstruction, the topology validator) must contain ONLY
+        real-founder pairs.  The default for this threshold is
+        therefore float('inf') -- every W chunk that has at least
+        one neighbour is unconditionally resolved to the best LL
+        combination of (left's tuple, right's tuple) via the DP
+        best-split (or to the same-ordered-tuple collapse when
+        applicable), regardless of how poor the resulting real-
+        founder fit is.  Set this to a finite value (e.g. 0.20
+        nats/SNP) to instead keep "exceptional" W chunks that
+        genuinely have no real-founder neighbour fit, at the cost
+        of leaving W in the output.
 
       * Threshold gates EVEN SAME-TUPLE COLLAPSES.  The data within
         a short chunk might be strongly explained by the chunk's own
@@ -513,9 +525,15 @@ def merge_short_chunks_emission_aware(
         Maximum acceptable per-SNP LL worsening for merging a SHORT
         REAL chunk.  Smaller = more conservative (closer to Viterbi's
         original choice).
-    threshold_wildcard_nats_per_snp : float, default 0.20
+    threshold_wildcard_nats_per_snp : float, default float('inf')
         Maximum acceptable per-SNP LL worsening for resolving a
-        WILDCARD chunk.  Set to np.inf for unconditional resolution.
+        WILDCARD chunk to the neighbour-DP-split result.  Default
+        is float('inf'), which means every W chunk is resolved
+        unconditionally to a real-founder combination.  W is a
+        Viterbi-internal intermediate state and should never appear
+        in the output painting unless the caller explicitly wants
+        "exceptional" W chunks kept (in which case set this to a
+        finite value, e.g. 0.20).
     merge_wildcard : bool, default True
         If True, wildcards are candidates for removal regardless of
         length.
@@ -764,7 +782,7 @@ def clean_block_painting_emission_aware(
     hap_keys,
     snps_per_bin,
     threshold_short_nats_per_snp=0.02,
-    threshold_wildcard_nats_per_snp=0.20,
+    threshold_wildcard_nats_per_snp=float('inf'),
     merge_wildcard=True,
 ):
     """
@@ -1339,7 +1357,7 @@ def _worker_paint_batch_binned(args):
     cleanup_threshold_short_nats_per_snp = params.get(
         'cleanup_threshold_short_nats_per_snp', 0.02)
     cleanup_threshold_wildcard_nats_per_snp = params.get(
-        'cleanup_threshold_wildcard_nats_per_snp', 0.20)
+        'cleanup_threshold_wildcard_nats_per_snp', float('inf'))
     cleanup_merge_wildcard = params.get('cleanup_merge_wildcard', True)
     
     # Calculate BINNED emissions
@@ -1555,7 +1573,7 @@ class PaintingPoolManager:
                          enable_emission_aware_cleanup=True,
                          cleanup_min_chunk_bp=10000,
                          cleanup_threshold_short_nats_per_snp=0.02,
-                         cleanup_threshold_wildcard_nats_per_snp=0.20,
+                         cleanup_threshold_wildcard_nats_per_snp=float('inf'),
                          cleanup_merge_wildcard=True):
         """
         Paint one chromosome using the persistent pool.
