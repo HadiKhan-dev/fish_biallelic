@@ -439,7 +439,38 @@ def run_phase_correction_viterbi_binned(
     parent_assignment: int,       # 0: P1→Hap1, P2→Hap2; 1: P1→Hap2, P2→Hap1
     recomb_rate: float = 5e-8,    # Per-bp recombination rate
     phase_switch_cost: float = 20.0,  # Cost for illegal phase switch
-    mismatch_cost: float = 4.6    # Soft mismatch penalty per bin
+    mismatch_cost: float = 4.6,   # Soft mismatch penalty per bin
+    phase_zero_preference: float = 0.0,  # Per-bin penalty for choosing phase=1.
+                                        # DISABLED by default (0.0).  A non-zero
+                                        # value adds an arbitrary asymmetric
+                                        # prior toward the input painting; A/B
+                                        # testing showed this trades one set of
+                                        # failures for another (fixes F3_103
+                                        # chr1, breaks F3_114 chr1 and ~35
+                                        # other samples) with no net accuracy
+                                        # gain.  See docstring below for the
+                                        # full justification.  Kept as a
+                                        # parameter for experimentation; do
+                                        # not enable without a principled
+                                        # reason.
+    use_xor_child_recomb: bool = True   # If True, child recombination cost
+                                        # depends on whether the sample's
+                                        # phase ALSO flipped at the same bin
+                                        # (XOR formulation).  This is the
+                                        # principled formulation that lets
+                                        # child information actually
+                                        # influence phase decisions.  The
+                                        # historical (False) behavior makes
+                                        # child cost state-independent, which
+                                        # is provably a no-op for the argmax
+                                        # over states — child info is
+                                        # computed but ignored.  See the
+                                        # docstring below ("Child
+                                        # recombination cost — XOR
+                                        # formulation") for the full
+                                        # analysis.  Default True (the fix).
+                                        # Set False to A/B-test against the
+                                        # historical (buggy) behavior.
 ) -> Tuple[np.ndarray, float]:
     """
     Run phase correction Viterbi on BINS.
@@ -452,11 +483,121 @@ def run_phase_correction_viterbi_binned(
     Uses founder equivalence matrix to handle aliasing - two different founder IDs
     that are equivalent in a bin do not incur a mismatch penalty.
     
-    IMPORTANT: Child recombination costs are computed INDEPENDENTLY of the parent's
-    phase state. A child switching which track they inherit is a biological 
-    recombination event that must be paid for regardless of how the parent's
-    phase is labeled. This prevents the algorithm from "hiding" real child
-    recombinations by flipping the parent's phase at the same location.
+    Child recombination cost — XOR formulation (May 2026 fix):
+        The previous implementation made child recombination cost
+        INDEPENDENT of the parent's phase state, with the rationale that
+        "a child's recombination is a biological event that happens
+        regardless of how we label the parent's phase".  This was a
+        misdiagnosis.  The cost then depends ONLY on whether
+        child_sources[c, k] != child_sources[c, k-1], which is a fixed
+        boolean computed before the Viterbi runs (via the 8-state
+        transmission Viterbi).  That makes the child contribution to
+        trans_cost identical for every (prev_state, curr_state) pair at
+        bin k -- a constant offset that is invisible to the inner argmax
+        over prev_state and to the outer argmax over the final state.
+        Child information has zero effect on phase decisions despite
+        being computed.  Verified by direct synthetic test: with sample
+        = (0,1), parents = (0,1), all HET, running the Viterbi with
+        child_sources = [[0,0,0,0,0]] vs [[0,1,0,1,0]] vs four children
+        all of [[0,1,0,1,0]] (each scenario implying very different
+        recombination patterns) produces THE SAME phase sequence
+        [1,1,1,1,1] in all three cases, with scores differing by exactly
+        n_recombs * (log_switch - log_stay), confirming the cost is a
+        pure additive constant.
+        
+        Correct formulation: an APPARENT child track switch at bin k
+        (child_sources[c, k] != child_sources[c, k-1]) is either a real
+        biological recombination OR a labeling artifact resolved by the
+        parent's phase flipping at the same bin.  Both possibilities
+        produce the same observation (the painting's child_sources
+        sequence), so the algorithm must choose between them.  The two
+        cases combine as:
+        
+            apparent_recomb   = child_sources[c, k] != child_sources[c, k-1]
+            phase_flipped     = curr_phase != prev_phase
+            biological_recomb = apparent_recomb XOR phase_flipped
+        
+        Only biological_recomb pays log_switch; apparent recombs that
+        coincide with a parent phase flip pay log_stay (the algorithm
+        interprets them as labeling artifacts, not biological events).
+        With this formulation the child cost now DEPENDS on
+        (curr_phase, prev_phase), so it varies across (prev_state,
+        curr_state) pairs and informs the phase decision.
+        
+        On the prior author's concern ("XOR allowed parent phase
+        switches to hide child recombinations"): with phase_switch_cost
+        = 20 and log_switch ≈ -7.6, the algorithm prefers the
+        "labeling artifact" interpretation when 3+ children appear to
+        recombine simultaneously at the same bin (breakeven:
+        20 / 7.6 ≈ 2.63).  Three independent recombs at the same bin
+        have prior probability ~theta^3 ≈ 1e-10 (with theta = 5e-4 for
+        10 kb bins); a parent labeling artifact has prior probability
+        ~e^(-phase_switch_cost) ≈ 2e-9, about 20x more likely.  So
+        choosing the "labeling artifact" interpretation when 3+
+        children coincide IS Bayesian-correct, not a bug.  The
+        "hiding" the author worried about is the algorithm doing the
+        right thing.
+        
+        The use_xor_child_recomb toggle (default True) controls this:
+            - True:  XOR formulation (the fix).  Child info actually
+                     informs phase decisions.
+            - False: Historical state-independent cost.  Child info is
+                     a constant offset, no effect on argmax.  Kept as a
+                     toggle for direct A/B comparison against the
+                     buggy behavior.
+
+    phase_zero_preference (May 2026 — DISABLED by default, kept for reference):
+        Without this term, the Viterbi has a fundamental symmetry: for any
+        state (phase=X, p1=A, p2=B) under parent_assignment=0, the state
+        (phase=1-X, p1=A, p2=B) under parent_assignment=1 has IDENTICAL
+        emission and transition costs (both check
+        sample[k,X] vs p1[k,A] and sample[k,1-X] vs p2[k,B], just in a
+        different order).  This means score_0 == score_1 exactly, and the
+        two phase_seqs are global complements of each other -- producing
+        paintings that are global flips.  The orchestrator's >= tie-break
+        in correct_sample_phase_binned picks PA=0 arbitrarily.
+
+        Locally, the same symmetry shows up wherever the equivalence
+        matrix declares a parent's two founders to be aliasing in a bin:
+        emission is exactly tied between phase=0 and phase=1.  When the
+        Viterbi enters such a tied stretch in phase=1 (from a correctly-
+        flipped region upstream), it has no local evidence to switch
+        back, so it propagates phase=1 -- sometimes through entire chunks
+        that didn't need flipping.  This produced the F3_103 chr1 failure
+        (36-42 Mb chunk with sample = founders {2, 5} and aliasing
+        parents incorrectly flipped, dropping Track1 from 97.76% to
+        95.15%).
+
+        Adding a small per-bin penalty for phase=1 was meant to give a
+        soft prior toward "stay close to tolerance" (since tolerance is
+        usually mostly right -- Track1 acc >> 50% for any sample worth
+        phase correction):
+            - Mismatch_cost = 4.6 nats per mismatch.  preference = 0.1
+              is 46x smaller -- single real mismatches always dominate.
+            - phase_switch_cost = 20.  A tied region of length L flips
+              from phase=1 back to phase=0 if L * preference > 20, i.e.
+              L > 200 bins.
+
+        **A/B-tested at 0.1 vs 0.0 on the full pipeline (320 samples,
+        22 contigs).  The result was a wash:**
+            - F3_103 chr1 fixed (Track1 95.15% -> ~99.9%)
+            - F3_114 chr1 BROKEN (Track1 dropped to 96.85%)
+            - ~35 other samples regressed slightly at the margin
+            - Net: 6,763 perfect phasers -> 6,728 perfect phasers (-35)
+            - Net Track1: 99.95% -> 99.95% (unchanged)
+        The bias is symmetric: it helps samples whose Viterbi
+        over-flipped against tolerance, and equally hurts samples whose
+        Viterbi correctly flipped against tolerance.  Since both happen
+        in roughly equal numbers across the cohort, the net effect on
+        cohort accuracy is zero.
+
+        Conclusion: this is a one-sided tie-break, not a principled fix.
+        Disabled by default.  Kept as a parameter so it can be re-enabled
+        for sample-specific debugging or comparison runs.  The real fix
+        for tied-emission regions needs information the per-sample
+        Viterbi doesn't currently see -- sibling agreement, multi-
+        consensus / beam search, or allele-level evidence at sites where
+        aliased founders actually diverge.
     
     Returns:
         phase_sequence: (n_bins,) array of phase values (0 or 1)
@@ -499,7 +640,16 @@ def run_phase_correction_viterbi_binned(
         if corr_h2 != -1 and expect_h2 != -1:
             if not check_equiv(equiv, 0, corr_h2, expect_h2):
                 cost -= mismatch_cost
-        
+
+        # Phase-zero preference: small per-bin penalty for choosing phase=1
+        # (= flipping this bin from the input/tolerance painting).  See
+        # function docstring for full justification.  At bin 0 this is a
+        # one-off prior favoring "start in phase=0"; combined with the
+        # same penalty at every subsequent bin (forward pass below), it
+        # accumulates over the trajectory and breaks symmetry ties in
+        # favor of the painting closer to tolerance.
+        cost -= phase_zero_preference * phase
+
         scores[state] = cost
     
     prev_hom = hom_mask[0]
@@ -551,15 +701,57 @@ def run_phase_correction_viterbi_binned(
                 else:
                     trans_cost += log_stay
                 
-                # Child recombination costs - independent of parent phase
-                # A child's recombination is a biological event that happens regardless
-                # of how we label the parent's phase. The XOR trick was WRONG because
-                # it allowed parent phase switches to "hide" child recombinations.
-                for c_idx in range(n_children):
-                    if child_sources[c_idx, k-1] != child_sources[c_idx, k]:
-                        trans_cost += log_switch
-                    else:
-                        trans_cost += log_stay
+                # Child recombination costs.
+                #
+                # Two modes, controlled by use_xor_child_recomb:
+                #
+                #   True (default, the FIX):
+                #     XOR formulation -- a child's APPARENT track switch at
+                #     bin k (child_sources[c,k] != child_sources[c,k-1]) is
+                #     interpreted as a biological recombination ONLY if the
+                #     sample's phase didn't also flip at this bin; otherwise
+                #     it is treated as a labeling artifact resolved by the
+                #     phase flip.  This makes the child cost depend on
+                #     (curr_phase XOR prev_phase) so it varies across
+                #     (prev_state, curr_state) pairs and INFORMS the phase
+                #     decision.  This is the principled formulation.
+                #
+                #   False (historical, BUG-COMPATIBLE):
+                #     Cost depends only on apparent_recomb.  Because
+                #     apparent_recomb is fixed per bin (not state-dependent),
+                #     the cost adds the same constant to every transition at
+                #     bin k.  Invisible to the argmax over prev_state, and
+                #     also invisible to the final argmax over states because
+                #     it adds the same total per bin to every path -- child
+                #     info has ZERO effect on phase decisions.  Kept as a
+                #     toggle so the fix can be A/B tested against the prior
+                #     behavior directly.
+                #
+                # See module docstring for the full Bayesian justification
+                # ("phase_switch_cost = 20 vs log_switch ≈ -7.6 means the
+                # algorithm flips parent phase only when 3+ coincident
+                # apparent recombs occur, which IS the Bayesian-correct
+                # prior comparison: ~theta^3 ≈ 1e-10 vs ~e^-20 ≈ 2e-9").
+                if use_xor_child_recomb:
+                    phase_flipped = (prev_phase != curr_phase)
+                    for c_idx in range(n_children):
+                        apparent_recomb = (
+                            child_sources[c_idx, k-1] != child_sources[c_idx, k]
+                        )
+                        # XOR of two bools via inequality.  biological_recomb
+                        # is True iff (apparent ⊕ phase_flipped).
+                        biological_recomb = apparent_recomb != phase_flipped
+                        if biological_recomb:
+                            trans_cost += log_switch
+                        else:
+                            trans_cost += log_stay
+                else:
+                    # Historical state-independent path (kept for A/B test).
+                    for c_idx in range(n_children):
+                        if child_sources[c_idx, k-1] != child_sources[c_idx, k]:
+                            trans_cost += log_switch
+                        else:
+                            trans_cost += log_stay
                 
                 score = scores[prev_state] + trans_cost
                 if score > best_score:
@@ -589,7 +781,16 @@ def run_phase_correction_viterbi_binned(
             if corr_h2 != -1 and expect_h2 != -1:
                 if not check_equiv(equiv, k, corr_h2, expect_h2):
                     emit_cost -= mismatch_cost
-            
+
+            # Phase-zero preference: small per-bin penalty for choosing
+            # phase=1 (= flipping this bin from tolerance).  Applied at
+            # every bin in the forward pass; cumulative effect is what
+            # breaks the PA0/PA1 symmetry and avoids global-flip outputs
+            # in samples where parents have ambiguous orientation in
+            # large regions (e.g. F3_103's 36-42 Mb chunk on chr1).
+            # See function docstring for the full analysis.
+            emit_cost -= phase_zero_preference * curr_phase
+
             new_scores[curr_state] = best_score + emit_cost
             backpointers[k, curr_state] = best_prev
         
@@ -691,7 +892,25 @@ def correct_sample_phase_binned(
     sample_idx: int,
     recomb_rate: float = 5e-8,
     phase_switch_cost: float = 20.0,
-    mismatch_cost: float = 4.6
+    mismatch_cost: float = 4.6,
+    phase_zero_preference: float = 0.0,  # See run_phase_correction_viterbi_binned
+                                        # docstring for full justification.
+                                        # Per-bin penalty for choosing phase=1
+                                        # (flipping from tolerance).  DISABLED
+                                        # by default (0.0) -- A/B testing on
+                                        # the full cohort showed it trades one
+                                        # set of failures for another with no
+                                        # net accuracy gain.  Kept as a
+                                        # parameter for experimentation only.
+    use_xor_child_recomb: bool = True   # Whether the child recombination cost
+                                        # in the phase-correction Viterbi
+                                        # should depend on the sample's phase
+                                        # (XOR formulation, the fix) or be
+                                        # state-independent (historical, no-op
+                                        # for argmax).  Default True (the
+                                        # fix).  See
+                                        # run_phase_correction_viterbi_binned
+                                        # docstring for full analysis.
 ) -> Tuple[SamplePainting, float, np.ndarray]:
     """
     Correct phase for a single consensus painting using BINNED data.
@@ -744,14 +963,18 @@ def correct_sample_phase_binned(
         n_bins, sample_grid, p1_grid, p2_grid, hom_mask, child_sources,
         bin_widths, equiv, parent_assignment=0,
         recomb_rate=recomb_rate, phase_switch_cost=phase_switch_cost,
-        mismatch_cost=mismatch_cost
+        mismatch_cost=mismatch_cost,
+        phase_zero_preference=phase_zero_preference,
+        use_xor_child_recomb=use_xor_child_recomb
     )
     
     phase_seq_1, score_1 = run_phase_correction_viterbi_binned(
         n_bins, sample_grid, p1_grid, p2_grid, hom_mask, child_sources,
         bin_widths, equiv, parent_assignment=1,
         recomb_rate=recomb_rate, phase_switch_cost=phase_switch_cost,
-        mismatch_cost=mismatch_cost
+        mismatch_cost=mismatch_cost,
+        phase_zero_preference=phase_zero_preference,
+        use_xor_child_recomb=use_xor_child_recomb
     )
     
     # Choose better assignment
@@ -910,6 +1133,25 @@ def run_correction_round(
     recomb_rate: float = 5e-8,
     phase_switch_cost: float = 20.0,
     mismatch_cost: float = 4.6,
+    phase_zero_preference: float = 0.0,  # Forwarded to correct_sample_phase_binned
+                                          # and ultimately to the Viterbi.  See
+                                          # run_phase_correction_viterbi_binned
+                                          # for full justification.  DISABLED
+                                          # by default; see that docstring for
+                                          # the A/B-test result that motivated
+                                          # the disabling.
+    use_xor_child_recomb: bool = True,    # Forwarded to correct_sample_phase_binned
+                                          # and to run_phase_correction_viterbi_binned.
+                                          # Controls whether child recomb cost
+                                          # in the phase-correction Viterbi
+                                          # actually informs phase decisions
+                                          # (True, default, the May 2026 fix)
+                                          # or is state-independent and
+                                          # therefore a no-op for the argmax
+                                          # (False, historical buggy
+                                          # behavior).  See
+                                          # run_phase_correction_viterbi_binned
+                                          # for the full analysis.
     verbose: bool = True
 ) -> int:
     """
@@ -995,7 +1237,9 @@ def run_correction_round(
                 sample_idx=state.sample_idx,
                 recomb_rate=recomb_rate,
                 phase_switch_cost=phase_switch_cost,
-                mismatch_cost=mismatch_cost
+                mismatch_cost=mismatch_cost,
+                phase_zero_preference=phase_zero_preference,
+                use_xor_child_recomb=use_xor_child_recomb
             )
             
             # Check if anything changed
@@ -1066,6 +1310,24 @@ def _process_contig_worker(r_name):
     recomb_rate = _PARALLEL_DATA['recomb_rate']
     max_diff_fraction = _PARALLEL_DATA.get('max_diff_fraction', 0.02)
     min_diff_sites = _PARALLEL_DATA.get('min_diff_sites', 2)
+    # phase_zero_preference: defaults to 0.0 if not present in _PARALLEL_DATA
+    # (back-compat for any caller that pickled an older _PARALLEL_DATA dict).
+    # The 0.0 default matches the per-call default in correct_phase_all_contigs,
+    # so a missing key means "use the disabled-by-default bias", not a stale
+    # 0.1 value from a prior implementation.
+    phase_zero_preference = _PARALLEL_DATA.get('phase_zero_preference', 0.0)
+    # Match the run_correction_round defaults for phase_switch_cost /
+    # mismatch_cost (forwarded via _PARALLEL_DATA when set) so the workers
+    # use a consistent set of Viterbi hyperparameters.
+    phase_switch_cost = _PARALLEL_DATA.get('phase_switch_cost', 20.0)
+    mismatch_cost = _PARALLEL_DATA.get('mismatch_cost', 4.6)
+    # use_xor_child_recomb: defaults to True if not present in _PARALLEL_DATA
+    # (back-compat for any caller that pickled an older _PARALLEL_DATA dict).
+    # The True default matches the per-call default in correct_phase_all_contigs
+    # -- it is the May 2026 XOR fix that makes child info actually influence
+    # the phase decision.  A missing key therefore means "use the fix", not
+    # "fall back to the buggy state-independent behavior".
+    use_xor_child_recomb = _PARALLEL_DATA.get('use_xor_child_recomb', True)
     
     tolerance_painting = data['tolerance_result']
     
@@ -1104,7 +1366,12 @@ def _process_contig_worker(r_name):
     for round_idx in range(num_rounds):
         corrections = run_correction_round(
             states, pedigree_df, sample_names, bin_edges, equiv,
-            recomb_rate=recomb_rate, verbose=False
+            recomb_rate=recomb_rate,
+            phase_switch_cost=phase_switch_cost,
+            mismatch_cost=mismatch_cost,
+            phase_zero_preference=phase_zero_preference,
+            use_xor_child_recomb=use_xor_child_recomb,
+            verbose=False
         )
         
         if corrections == 0:
@@ -1130,6 +1397,30 @@ def correct_phase_all_contigs(
     recomb_rate: float = 5e-8,
     max_diff_fraction: float = 0.02,
     min_diff_sites: int = 2,
+    phase_switch_cost: float = 20.0,
+    mismatch_cost: float = 4.6,
+    phase_zero_preference: float = 0.0,  # Per-bin penalty for choosing phase=1
+                                          # (= flipping from tolerance).
+                                          # DISABLED by default.  See
+                                          # run_phase_correction_viterbi_binned
+                                          # docstring for the A/B-test result
+                                          # showing this is a wash on cohort
+                                          # accuracy.  Kept as a parameter for
+                                          # debugging / comparison runs only.
+    use_xor_child_recomb: bool = True,    # Whether the child recombination cost
+                                          # in the phase-correction Viterbi
+                                          # depends on the sample's phase (XOR
+                                          # formulation, the May 2026 fix) or
+                                          # is state-independent (historical
+                                          # buggy behavior).  Default True (the
+                                          # fix).  Set False to A/B-test
+                                          # against the historical behavior in
+                                          # which child information was
+                                          # computed but did not influence
+                                          # phase decisions.  See
+                                          # run_phase_correction_viterbi_binned
+                                          # for the full analysis and proof
+                                          # via synthetic test.
     verbose: bool = True,
     max_workers: Optional[int] = None,
     parallel: bool = True,
@@ -1153,6 +1444,30 @@ def correct_phase_all_contigs(
         recomb_rate: Per-bp recombination rate (default 5e-8)
         max_diff_fraction: Max fraction of differing sites for founder equivalence (default 2%)
         min_diff_sites: Min absolute number of differing sites for equivalence (default 2)
+        phase_switch_cost: Penalty for illegal phase switches in Viterbi (default 20.0)
+        mismatch_cost: Soft mismatch penalty per bin in Viterbi (default 4.6)
+        phase_zero_preference: Per-bin penalty for choosing phase=1 (default 0.0).
+            DISABLED by default after A/B testing.  When set to a non-zero
+            value (e.g. 0.1), adds a soft prior toward the input painting in
+            tied-emission regions.  This was found to be a one-sided
+            tie-break: it helps some samples while hurting others by an
+            equal amount, with no net accuracy gain.  See
+            run_phase_correction_viterbi_binned docstring for the full
+            analysis.  Kept as a parameter for experimentation.
+        use_xor_child_recomb: Whether the child recombination cost in the
+            phase-correction Viterbi uses the XOR formulation that lets
+            child information actually influence phase decisions (True,
+            default, the May 2026 fix), or the historical state-independent
+            formulation that makes child cost a no-op for the argmax
+            (False).  Verified by synthetic test: with the historical
+            formulation, three scenarios with very different child_sources
+            (no apparent recombs vs alternating recombs vs 4 children all
+            alternating) produce the IDENTICAL phase sequence, with scores
+            differing only by an additive constant equal to n_recombs
+            * (log_switch - log_stay) — proving child info is dead weight
+            under that formulation.  Set False to A/B-test against the
+            historical behavior.  See run_phase_correction_viterbi_binned
+            docstring for the full analysis and Bayesian justification.
         verbose: Print progress
         max_workers: Maximum parallel workers (default: num contigs)
         parallel: Use parallel processing
@@ -1198,6 +1513,11 @@ def correct_phase_all_contigs(
             'recomb_rate': recomb_rate,
             'max_diff_fraction': max_diff_fraction,
             'min_diff_sites': min_diff_sites,
+            # Viterbi hyperparameters forwarded to workers
+            'phase_switch_cost': phase_switch_cost,
+            'mismatch_cost': mismatch_cost,
+            'phase_zero_preference': phase_zero_preference,
+            'use_xor_child_recomb': use_xor_child_recomb,
             'load_fn': load_fn
         }
         
@@ -1274,7 +1594,12 @@ def correct_phase_all_contigs(
                 
                 corrections = run_correction_round(
                     states, pedigree_df, sample_names, bin_edges, equiv,
-                    recomb_rate=recomb_rate, verbose=verbose
+                    recomb_rate=recomb_rate,
+                    phase_switch_cost=phase_switch_cost,
+                    mismatch_cost=mismatch_cost,
+                    phase_zero_preference=phase_zero_preference,
+                    use_xor_child_recomb=use_xor_child_recomb,
+                    verbose=verbose
                 )
                 
                 if verbose:
@@ -1421,37 +1746,109 @@ def apply_phase_flip_to_grid(
 def check_mendelian_consistency(
     sample_grid: np.ndarray,
     p1_grid: np.ndarray,
-    p2_grid: np.ndarray
+    p2_grid: np.ndarray,
+    equiv: np.ndarray
 ) -> bool:
     """
     Check if sample_grid is Mendelian-consistent with parents.
-    
-    For each bin, each founder in the sample must be present in at least one parent.
+
+    For each bin, each (non -1) founder in the sample must be EQUIVALENT to at
+    least one parent founder at that bin under the founder equivalence matrix.
     Returns True if consistent, False otherwise.
+
+    Why use the equivalence matrix here?
+    The previous implementation did plain set membership on raw founder IDs
+    (s_h1 in {p1_grid[k,0], p1_grid[k,1], p2_grid[k,0], p2_grid[k,1]}).  Every
+    OTHER scoring path in this module -- run_phase_correction_viterbi_binned,
+    run_8state_transmission_viterbi_binned, compute_parent_matching_score_-
+    fixed_phase -- uses check_equiv to grant zero mismatch cost when two
+    different founder IDs are equivalent at a bin (i.e. their alleles match
+    closely under the founder_equivalence threshold).  The old Mendelian
+    check did not, so a greedy candidate that the rest of the algorithm
+    would happily score as fully consistent could be rejected here before
+    its score was even computed.  Using check_equiv aligns the Mendelian
+    pre-filter with what the scoring functions actually treat as a match.
+
+    Handling of -1 (uncertain) founders:
+    check_equiv returns True when either operand is -1 (see its docstring).
+    The semantics are therefore:
+      - Sample fully -1 at bin k:                   skip the bin entirely.
+      - Sample known, all four parent slots are -1: passes (-1 is wildcard;
+                                                    parents provide no info).
+      - Sample known, parents partially -1:         passes if the known
+                                                    sample matches any of the
+                                                    parent slots (a -1 slot
+                                                    counts as a potential
+                                                    match via check_equiv).
+      - Sample known, parents all known but no
+        equivalent parent slot exists for s_h1
+        (or s_h2):                                  fails (true conflict).
+
+    NOTE on the "partially -1 parents" case: the previous implementation was
+    STRICTER here -- it would fail unless the sample matched one of the
+    *known* parent slots, treating -1 as "no constraint from this slot but
+    don't let it whitewash a mismatch elsewhere".  The new implementation
+    treats -1 as a wildcard, matching what check_equiv does and what the
+    Viterbi assumes (the Viterbi pays no mismatch cost when comparing
+    against -1).  This is intentional: the entire point of this change is
+    to align with the scoring functions, and the scoring functions assume
+    wildcard -1.  In practice this case is rare (parents are usually fully
+    painted) and the relaxation only matters when -1 actually appears.
+
+    Args:
+        sample_grid: (n_bins, 2) array of sample founder IDs
+        p1_grid:     (n_bins, 2) array of parent 1 founder IDs
+        p2_grid:     (n_bins, 2) array of parent 2 founder IDs
+        equiv:       (n_bins, n_founders, n_founders) bool equivalence matrix
+                     where equiv[k, f1, f2] is True iff founders f1 and f2
+                     are equivalent at bin k under the equivalence threshold.
     """
     n_bins = sample_grid.shape[0]
-    
+
     for k in range(n_bins):
         s_h1, s_h2 = sample_grid[k, 0], sample_grid[k, 1]
-        p1_founders = {p1_grid[k, 0], p1_grid[k, 1]}
-        p2_founders = {p2_grid[k, 0], p2_grid[k, 1]}
-        all_parent_founders = p1_founders | p2_founders
-        
-        # Skip if uncertain
+
+        # Skip if sample fully uncertain at this bin -- no constraint to
+        # check.  Matches the previous "if s_h1 == -1 and s_h2 == -1: continue"
+        # short-circuit.
         if s_h1 == -1 and s_h2 == -1:
             continue
-        
-        # Check each sample founder
-        if s_h1 != -1 and s_h1 not in all_parent_founders:
-            # Allow if all parent values are -1 (uncertain)
-            if -1 not in all_parent_founders or len(all_parent_founders - {-1}) > 0:
-                if s_h1 not in all_parent_founders:
-                    return False
-        if s_h2 != -1 and s_h2 not in all_parent_founders:
-            if -1 not in all_parent_founders or len(all_parent_founders - {-1}) > 0:
-                if s_h2 not in all_parent_founders:
-                    return False
-    
+
+        # Collect parent founder slots at this bin.  Use a 4-tuple (rather
+        # than a set as the previous implementation did) so we can iterate
+        # in a fixed order and call check_equiv on each slot individually.
+        # Sets would also work, but the asymmetric wildcard semantics of
+        # check_equiv make per-slot iteration clearer.
+        parent_founders = (p1_grid[k, 0], p1_grid[k, 1],
+                           p2_grid[k, 0], p2_grid[k, 1])
+
+        # s_h1 must be equivalent to at least one parent founder slot.
+        # check_equiv handles all -1 cases:
+        #   - s_h1 == -1 is already short-circuited by the outer skip when
+        #     both s_h1 and s_h2 are -1; if only s_h1 is -1 we still need
+        #     to check s_h2, but we don't need to check s_h1 against parents
+        #     because -1 trivially matches everything.  The `if s_h1 != -1`
+        #     guard below makes this explicit (matching the previous code's
+        #     `if s_h1 != -1 and ...` structure).
+        #   - pf == -1 is treated as wildcard match by check_equiv.
+        if s_h1 != -1:
+            matched = False
+            for pf in parent_founders:
+                if check_equiv(equiv, k, s_h1, pf):
+                    matched = True
+                    break
+            if not matched:
+                return False
+
+        if s_h2 != -1:
+            matched = False
+            for pf in parent_founders:
+                if check_equiv(equiv, k, s_h2, pf):
+                    matched = True
+                    break
+            if not matched:
+                return False
+
     return True
 
 
@@ -1710,7 +2107,7 @@ def greedy_phase_refinement_single_sample(
             
             # Check Mendelian consistency if we have parents
             if p1_grid is not None and p2_grid is not None:
-                if not check_mendelian_consistency(candidate_grid, p1_grid, p2_grid):
+                if not check_mendelian_consistency(candidate_grid, p1_grid, p2_grid, equiv):
                     continue
             
             candidate_score = compute_total_score_for_grid(
@@ -1735,7 +2132,7 @@ def greedy_phase_refinement_single_sample(
                 
                 # Check Mendelian consistency if we have parents
                 if p1_grid is not None and p2_grid is not None:
-                    if not check_mendelian_consistency(candidate_grid, p1_grid, p2_grid):
+                    if not check_mendelian_consistency(candidate_grid, p1_grid, p2_grid, equiv):
                         continue
                 
                 candidate_score = compute_total_score_for_grid(

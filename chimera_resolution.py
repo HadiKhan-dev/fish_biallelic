@@ -945,90 +945,427 @@ def paint_samples_viterbi(path_set, sub_emissions, penalty, num_samples,
     return _viterbi_traceback(tensor, float(penalty)), K
 
 
+@njit(cache=True, parallel=True)
+def _compute_all_pair_diffs_kernel(bin_em, pair_si_idx, pair_sj_idx,
+                                     out_mean_diffs, out_offset):
+    """Per-block mean-diff computation for all hap-pairs in one block.
+
+    For each pair p, computes:
+        out_mean_diffs[p, out_offset + t] = (1 / (n_haps * num_samples)) *
+            sum_{s, k} | bin_em[s, pair_si_idx[p], k, t]
+                       - bin_em[s, pair_sj_idx[p], k, t] |
+
+    Mathematically equivalent to the original numpy chain that lived in
+    find_hotspots._compute_block_diffs():
+
+        diff = np.zeros((num_samples, n_bins))
+        for k in range(n_haps):
+            diff += np.abs(bin_em[:, si_idx, k, :] - bin_em[:, sj_idx, k, :])
+        diff /= n_haps
+        return np.mean(diff, axis=0)
+
+    The kernel's outer loop ordering (k, then s, then t) matches the original
+    numpy chain's per-k broadcast addition into diff[s, t], so the final
+    per-t accumulation differs from numpy only by 1-ULP-class floating-
+    point rounding (validated via end-to-end hotspot equivalence).
+
+    Args:
+        bin_em: (num_samples, n_haps, n_haps, n_bins) float64 -- block's
+            per-pair bin emission tensor.  n_haps here is the number of
+            haplotypes in this block; pair_si_idx / pair_sj_idx index into
+            that axis.
+        pair_si_idx: (n_pairs,) int64 -- for each pair, the hap index in
+            this block corresponding to the pair's si-side path.
+        pair_sj_idx: (n_pairs,) int64 -- for each pair, the hap index in
+            this block corresponding to the pair's sj-side path.
+        out_mean_diffs: (n_pairs, total_bins) float64 -- preallocated by
+            caller.  Written in place; only the column slice [:, out_offset
+            : out_offset + n_bins] is modified.
+        out_offset: int64 -- column offset (== global bin_offsets[block_idx]).
+    """
+    n_pairs = pair_si_idx.shape[0]
+    num_samples = bin_em.shape[0]
+    n_haps_dim = bin_em.shape[1]
+    n_bins = bin_em.shape[3]
+    inv_norm = 1.0 / (n_haps_dim * num_samples)
+
+    for p in prange(n_pairs):
+        si = pair_si_idx[p]
+        sj = pair_sj_idx[p]
+        # Per-pair scratch: sum-over-(s, k)-of-abs(diff) per t.  Allocated
+        # inside prange so each parallel iteration has its own buffer.
+        scratch = np.zeros(n_bins, dtype=np.float64)
+        # Match numpy's per-k broadcast accumulation order: outer k loop,
+        # inner s loop, innermost t loop (contiguous memory walk).
+        for k in range(n_haps_dim):
+            for s in range(num_samples):
+                for t in range(n_bins):
+                    d = bin_em[s, si, k, t] - bin_em[s, sj, k, t]
+                    if d < 0.0:
+                        d = -d
+                    scratch[t] += d
+        # Apply the combined 1/(n_haps * num_samples) factor when writing
+        # back (uniform scale, so it commutes with the sum order).
+        for t in range(n_bins):
+            out_mean_diffs[p, out_offset + t] = scratch[t] * inv_norm
+
+
+@njit(cache=True)
+def _find_hotspots_kernel(mean_diffs_flat, bin_offsets, sample_paths,
+                            K, num_samples, num_blocks,
+                            ambiguity_threshold, min_samples,
+                            pair_si, pair_sj,
+                            out_count, out_boundary,
+                            out_hap_out, out_hap_in,
+                            out_left_zone, out_right_zone):
+    """Hotspot detection kernel.  Replaces the Python triple-nested loop
+    that lived in find_hotspots (zone extension + swap counting).
+
+    Iterates over every (boundary b, pair p) combination.  For each, walks
+    left and right of the boundary through ambiguous-mean_diff bins to
+    establish a zone, then counts how many samples switch between the
+    pair (si, sj) within that zone.  Emits a hotspot record if the count
+    meets min_samples.
+
+    Mathematically identical to the original (verified end-to-end byte-
+    equivalent on the hotspot list, modulo 1-ULP class differences in
+    mean_diffs that don't cross threshold boundaries).  The original
+    Python logic is preserved verbatim as a comment block inside
+    find_hotspots() above.
+
+    Args:
+        mean_diffs_flat: (n_pairs, total_bins) float64 -- per-pair per-bin
+            mean diff (output of _compute_all_pair_diffs_kernel calls).
+        bin_offsets: (num_blocks + 1,) int64 -- cumulative bin offsets.
+        sample_paths: (num_samples, total_bins) int32 -- per-sample
+            per-bin Viterbi-decoded state index (in 0..K**2 - 1).
+        K: int -- number of haplotypes (state space is K * K).
+        num_samples, num_blocks: ints.
+        ambiguity_threshold: float -- bins with mean_diff < threshold are
+            "ambiguous" and contribute to zone extension.
+        min_samples: int -- minimum swap count to emit a hotspot.
+        pair_si, pair_sj: (n_pairs,) int64 -- pair indices (0 <= si < sj < K).
+        out_count, out_boundary, out_hap_out, out_hap_in,
+        out_left_zone, out_right_zone: preallocated int64 output buffers
+            of size at least n_pairs * (num_blocks - 1).
+
+    Returns:
+        n_found: number of hotspot records written to the output buffers.
+    """
+    n_pairs = pair_si.shape[0]
+    n_found = 0
+    max_pos = sample_paths.shape[1]
+
+    for b in range(1, num_blocks):
+        boundary_bin = bin_offsets[b]
+
+        for p in range(n_pairs):
+            si = pair_si[p]
+            sj = pair_sj[p]
+
+            # ----- Left ambiguity zone -----
+            # Walks blocks right-to-left from b-1.  Within each block,
+            # walks bins right-to-left until hitting a non-ambiguous bin.
+            # Continues to the previous block only if (a) at least one bin
+            # in this block was ambiguous (extended) AND (b) the leftmost
+            # bin of this block is still ambiguous (so a contiguous-zone
+            # crossing is still possible).
+            left_zone = 0
+            for blk in range(b - 1, -1, -1):
+                blk_start = bin_offsets[blk]
+                blk_end = bin_offsets[blk + 1]
+                blk_n_bins = blk_end - blk_start
+                extended = False
+                # Right-to-left bin walk
+                for t in range(blk_n_bins - 1, -1, -1):
+                    if mean_diffs_flat[p, blk_start + t] < ambiguity_threshold:
+                        left_zone += 1
+                        extended = True
+                    else:
+                        break
+                # Decide whether to continue to the previous block
+                if (not extended) or \
+                   mean_diffs_flat[p, blk_start] >= ambiguity_threshold:
+                    break
+
+            # ----- Right ambiguity zone -----
+            # Mirror of the left walk.  Walks blocks left-to-right from b;
+            # within each block, walks bins left-to-right; continues only
+            # if extended AND the rightmost bin of this block is ambiguous.
+            right_zone = 0
+            for blk in range(b, num_blocks):
+                blk_start = bin_offsets[blk]
+                blk_end = bin_offsets[blk + 1]
+                blk_n_bins = blk_end - blk_start
+                extended = False
+                for t in range(blk_n_bins):
+                    if mean_diffs_flat[p, blk_start + t] < ambiguity_threshold:
+                        right_zone += 1
+                        extended = True
+                    else:
+                        break
+                if (not extended) or \
+                   mean_diffs_flat[p, blk_end - 1] >= ambiguity_threshold:
+                    break
+
+            # ----- Determine scan range -----
+            # Matches the original:
+            #   if left_zone == 0 and right_zone == 0:
+            #       zone_start = boundary_bin - 1
+            #       zone_end = boundary_bin
+            #   else:
+            #       zone_start = boundary_bin - left_zone
+            #       zone_end = max(boundary_bin, boundary_bin + right_zone - 1)
+            if left_zone == 0 and right_zone == 0:
+                zone_start = boundary_bin - 1
+                zone_end = boundary_bin
+            else:
+                zone_start = boundary_bin - left_zone
+                ze_candidate = boundary_bin + right_zone - 1
+                if ze_candidate > boundary_bin:
+                    zone_end = ze_candidate
+                else:
+                    zone_end = boundary_bin
+
+            # ----- Count swapping samples within zone -----
+            # Per sample, walk timesteps within zone; on the first
+            # state-transition that matches the (si <-> sj) pattern,
+            # increment swap_count and break to next sample.
+            #
+            # Set ops `{pb//K, pb%K} - {pa//K, pa%K}` unrolled to scalar
+            # comparisons; preserves behaviour for homozygous-pair states
+            # (where pb//K == pb%K, set is a singleton, contains-check is
+            # equivalent to two scalar equality checks).
+            t_start = zone_start if zone_start > 1 else 1
+            t_end = zone_end + 1
+            if t_end > max_pos:
+                t_end = max_pos
+            swap_count = 0
+            if t_end > t_start:
+                for s in range(num_samples):
+                    for t in range(t_start, t_end):
+                        pb = sample_paths[s, t - 1]
+                        pa = sample_paths[s, t]
+                        if pb != pa:
+                            pb_a = pb // K
+                            pb_b = pb % K
+                            pa_a = pa // K
+                            pa_b = pa % K
+                            si_in_pb = (si == pb_a) or (si == pb_b)
+                            si_in_pa = (si == pa_a) or (si == pa_b)
+                            sj_in_pb = (sj == pb_a) or (sj == pb_b)
+                            sj_in_pa = (sj == pa_a) or (sj == pa_b)
+                            si_in_out = si_in_pb and (not si_in_pa)
+                            sj_in_inn = sj_in_pa and (not sj_in_pb)
+                            sj_in_out = sj_in_pb and (not sj_in_pa)
+                            si_in_inn = si_in_pa and (not si_in_pb)
+                            if (si_in_out and sj_in_inn) or \
+                               (sj_in_out and si_in_inn):
+                                swap_count += 1
+                                break
+
+            if swap_count >= min_samples:
+                out_count[n_found] = swap_count
+                out_boundary[n_found] = b
+                out_hap_out[n_found] = si
+                out_hap_in[n_found] = sj
+                out_left_zone[n_found] = left_zone
+                out_right_zone[n_found] = right_zone
+                n_found += 1
+
+    return n_found
+
+
 def find_hotspots(sample_paths, K, num_blocks, sub_emissions, path_set,
                   num_samples, min_samples=5, ambiguity_threshold=1.0):
     """Find recombination hotspots between path pairs at block boundaries.
     
     Zone-based detection: extends scan range into ambiguous (low-diff) bins,
     then counts samples switching between the pair within the zone.
-    """
-    hotspots = []
-    bin_offsets = [0]
-    for e in sub_emissions:
-        bin_offsets.append(bin_offsets[-1] + e['n_bins'])
 
-    def _compute_block_diffs(block_idx, si, sj):
+    Numba-accelerated reimplementation: precomputes per-(pair, bin) mean-diff
+    values via _compute_all_pair_diffs_kernel (one call per block), then
+    runs _find_hotspots_kernel which does zone extension + swap counting
+    in a tight C-level loop.  Mathematically equivalent to the original
+    pure-python implementation (max-error ULP-class on mean_diffs;
+    end-to-end hotspot output validated byte-equivalent except at the
+    pathological case of mean_diff values exactly equal to the threshold,
+    which is a measure-zero event for floating-point data).
+
+    The original python implementation is preserved verbatim below as
+    reference -- both the inner `_compute_block_diffs` nested function and
+    the triple-nested boundary/pair/zone+swap loop -- so the math intent
+    is fully documented at this call site:
+
+        hotspots = []
+        bin_offsets = [0]
+        for e in sub_emissions:
+            bin_offsets.append(bin_offsets[-1] + e['n_bins'])
+
+        def _compute_block_diffs(block_idx, si, sj):
+            em = sub_emissions[block_idx]
+            hap_keys = em['hap_keys']
+            si_idx = hap_keys.index(path_set[si][block_idx])
+            sj_idx = hap_keys.index(path_set[sj][block_idx])
+            bin_em = em['bin_emissions']
+            n_haps = len(hap_keys)
+            diff = np.zeros((num_samples, em['n_bins']))
+            for k in range(n_haps):
+                diff += np.abs(bin_em[:, si_idx, k, :] - bin_em[:, sj_idx, k, :])
+            diff /= n_haps
+            return np.mean(diff, axis=0)
+
+        for b in range(1, num_blocks):
+            boundary_bin = bin_offsets[b]
+            for si in range(K):
+                for sj in range(si + 1, K):
+                    # Compute left ambiguity zone
+                    left_zone = 0
+                    for blk in range(b - 1, -1, -1):
+                        mean_diff = _compute_block_diffs(blk, si, sj)
+                        extended = False
+                        for t in range(len(mean_diff) - 1, -1, -1):
+                            if mean_diff[t] < ambiguity_threshold:
+                                left_zone += 1; extended = True
+                            else:
+                                break
+                        if not extended or mean_diff[0] >= ambiguity_threshold:
+                            break
+
+                    # Compute right ambiguity zone
+                    right_zone = 0
+                    for blk in range(b, num_blocks):
+                        mean_diff = _compute_block_diffs(blk, si, sj)
+                        extended = False
+                        for t in range(len(mean_diff)):
+                            if mean_diff[t] < ambiguity_threshold:
+                                right_zone += 1; extended = True
+                            else:
+                                break
+                        if not extended or mean_diff[-1] >= ambiguity_threshold:
+                            break
+
+                    # Determine scan range (zone_end always includes boundary_bin)
+                    if left_zone == 0 and right_zone == 0:
+                        zone_start = boundary_bin - 1
+                        zone_end = boundary_bin
+                    else:
+                        zone_start = boundary_bin - left_zone
+                        zone_end = max(boundary_bin, boundary_bin + right_zone - 1)
+
+                    # Count samples switching between si and sj in zone
+                    swap_count = 0
+                    for s in range(num_samples):
+                        for t in range(max(zone_start, 1),
+                                       min(zone_end + 1, sample_paths.shape[1])):
+                            pb, pa = sample_paths[s, t - 1], sample_paths[s, t]
+                            if pb != pa:
+                                out = {pb // K, pb % K} - {pa // K, pa % K}
+                                inn = {pa // K, pa % K} - {pb // K, pb % K}
+                                if (si in out and sj in inn) or (sj in out and si in inn):
+                                    swap_count += 1
+                                    break
+
+                    if swap_count >= min_samples:
+                        hotspots.append({
+                            'count': swap_count,
+                            'boundary': b,
+                            'hap_out': si,
+                            'hap_in': sj,
+                            'zone': (left_zone, right_zone)
+                        })
+
+        hotspots.sort(key=lambda x: -x['count'])
+        return hotspots
+    """
+    # Trivial-case fast paths.  K < 2 means no pairs; num_blocks < 2 means
+    # no boundaries to scan.  Either way, no hotspots are possible -- match
+    # the original by returning an empty list.
+    if K < 2 or num_blocks < 2:
+        return []
+
+    # Step 1: bin offsets (cumulative).  Matches the original `bin_offsets =
+    # [0]; for e in sub_emissions: bin_offsets.append(...)` pattern, but as
+    # an int64 numpy array that the kernel can index.
+    bin_offsets = np.zeros(num_blocks + 1, dtype=np.int64)
+    for i in range(num_blocks):
+        bin_offsets[i + 1] = bin_offsets[i] + sub_emissions[i]['n_bins']
+    total_bins = int(bin_offsets[num_blocks])
+
+    # Step 2: enumerate pairs (si < sj) once.
+    n_pairs = K * (K - 1) // 2
+    pair_si = np.empty(n_pairs, dtype=np.int64)
+    pair_sj = np.empty(n_pairs, dtype=np.int64)
+    idx = 0
+    for si in range(K):
+        for sj in range(si + 1, K):
+            pair_si[idx] = si
+            pair_sj[idx] = sj
+            idx += 1
+
+    # Step 3: precompute mean_diffs for every (pair, bin) via a per-block
+    # kernel call.  Dict lookups (hap_keys.index) live in Python because
+    # hap_keys can contain arbitrary objects; per-block kernel call then
+    # vectorises the per-pair work across the prange.
+    mean_diffs_flat = np.empty((n_pairs, total_bins), dtype=np.float64)
+    for block_idx in range(num_blocks):
         em = sub_emissions[block_idx]
         hap_keys = em['hap_keys']
-        si_idx = hap_keys.index(path_set[si][block_idx])
-        sj_idx = hap_keys.index(path_set[sj][block_idx])
         bin_em = em['bin_emissions']
-        n_haps = len(hap_keys)
-        diff = np.zeros((num_samples, em['n_bins']))
-        for k in range(n_haps):
-            diff += np.abs(bin_em[:, si_idx, k, :] - bin_em[:, sj_idx, k, :])
-        diff /= n_haps
-        return np.mean(diff, axis=0)
+        # Build per-block per-pair hap-index arrays from the path_set view
+        # of this block.
+        pair_si_idx_block = np.empty(n_pairs, dtype=np.int64)
+        pair_sj_idx_block = np.empty(n_pairs, dtype=np.int64)
+        for p in range(n_pairs):
+            pair_si_idx_block[p] = hap_keys.index(
+                path_set[pair_si[p]][block_idx])
+            pair_sj_idx_block[p] = hap_keys.index(
+                path_set[pair_sj[p]][block_idx])
+        # bin_em is sourced from compute_subblock_emissions which produces
+        # float64 contiguous tensors.  Pass-through (no copy) is the common
+        # path; np.ascontiguousarray is a defensive no-op if the caller
+        # already supplied contiguous float64 data.
+        bin_em_c = np.ascontiguousarray(bin_em, dtype=np.float64)
+        _compute_all_pair_diffs_kernel(
+            bin_em_c, pair_si_idx_block, pair_sj_idx_block,
+            mean_diffs_flat, int(bin_offsets[block_idx]))
 
-    for b in range(1, num_blocks):
-        boundary_bin = bin_offsets[b]
-        for si in range(K):
-            for sj in range(si + 1, K):
-                # Compute left ambiguity zone
-                left_zone = 0
-                for blk in range(b - 1, -1, -1):
-                    mean_diff = _compute_block_diffs(blk, si, sj)
-                    extended = False
-                    for t in range(len(mean_diff) - 1, -1, -1):
-                        if mean_diff[t] < ambiguity_threshold:
-                            left_zone += 1; extended = True
-                        else:
-                            break
-                    if not extended or mean_diff[0] >= ambiguity_threshold:
-                        break
+    # Step 4: hotspot detection kernel.  Preallocate output buffers sized
+    # to the worst case (every (pair, boundary) qualifies as a hotspot).
+    max_hotspots = n_pairs * (num_blocks - 1)
+    if max_hotspots < 1:
+        max_hotspots = 1
+    out_count = np.empty(max_hotspots, dtype=np.int64)
+    out_boundary = np.empty(max_hotspots, dtype=np.int64)
+    out_hap_out = np.empty(max_hotspots, dtype=np.int64)
+    out_hap_in = np.empty(max_hotspots, dtype=np.int64)
+    out_left_zone = np.empty(max_hotspots, dtype=np.int64)
+    out_right_zone = np.empty(max_hotspots, dtype=np.int64)
 
-                # Compute right ambiguity zone
-                right_zone = 0
-                for blk in range(b, num_blocks):
-                    mean_diff = _compute_block_diffs(blk, si, sj)
-                    extended = False
-                    for t in range(len(mean_diff)):
-                        if mean_diff[t] < ambiguity_threshold:
-                            right_zone += 1; extended = True
-                        else:
-                            break
-                    if not extended or mean_diff[-1] >= ambiguity_threshold:
-                        break
+    # sample_paths may arrive as int32 from _viterbi_traceback or as int64
+    # from other paths; the kernel accesses scalars and uses pb // K / pb % K
+    # so any integer dtype is fine.  Ensure contiguity.
+    sample_paths_c = np.ascontiguousarray(sample_paths)
 
-                # Determine scan range (zone_end always includes boundary_bin)
-                if left_zone == 0 and right_zone == 0:
-                    zone_start = boundary_bin - 1
-                    zone_end = boundary_bin
-                else:
-                    zone_start = boundary_bin - left_zone
-                    zone_end = max(boundary_bin, boundary_bin + right_zone - 1)
+    n_found = _find_hotspots_kernel(
+        mean_diffs_flat, bin_offsets, sample_paths_c,
+        int(K), int(num_samples), int(num_blocks),
+        float(ambiguity_threshold), int(min_samples),
+        pair_si, pair_sj,
+        out_count, out_boundary, out_hap_out, out_hap_in,
+        out_left_zone, out_right_zone)
 
-                # Count samples switching between si and sj in zone
-                swap_count = 0
-                for s in range(num_samples):
-                    for t in range(max(zone_start, 1),
-                                   min(zone_end + 1, sample_paths.shape[1])):
-                        pb, pa = sample_paths[s, t - 1], sample_paths[s, t]
-                        if pb != pa:
-                            out = {pb // K, pb % K} - {pa // K, pa % K}
-                            inn = {pa // K, pa % K} - {pb // K, pb % K}
-                            if (si in out and sj in inn) or (sj in out and si in inn):
-                                swap_count += 1
-                                break
-
-                if swap_count >= min_samples:
-                    hotspots.append({
-                        'count': swap_count,
-                        'boundary': b,
-                        'hap_out': si,
-                        'hap_in': sj,
-                        'zone': (left_zone, right_zone)
-                    })
+    # Step 5: convert kernel output back to the production list-of-dicts
+    # format and sort by -count to match the original return value.
+    hotspots = []
+    for i in range(n_found):
+        hotspots.append({
+            'count': int(out_count[i]),
+            'boundary': int(out_boundary[i]),
+            'hap_out': int(out_hap_out[i]),
+            'hap_in': int(out_hap_in[i]),
+            'zone': (int(out_left_zone[i]), int(out_right_zone[i]))
+        })
 
     hotspots.sort(key=lambda x: -x['count'])
     return hotspots

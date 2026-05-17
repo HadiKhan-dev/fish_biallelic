@@ -74,7 +74,7 @@ def _init_shared_data(data_dict):
     _SHARED_DATA.update(data_dict)
 
 
-def _init_block_worker(total_cores, active_counter):
+def _init_block_worker(total_cores, active_counter, extra_counter=None):
     """Initializer for block haplotype discovery workers.
     
     Sets the numba thread pool ceiling to total_cores so workers can
@@ -83,10 +83,29 @@ def _init_block_worker(total_cores, active_counter):
     
     With OMP PASSIVE, idle threads in the oversized pool sleep and
     cost zero CPU.
+
+    Args:
+        total_cores: int — the original num_processes budget.
+        active_counter: multiprocessing.Value('i', 0) shared across
+            workers, used by _update_dynamic_threads.
+        extra_counter: optional multiprocessing.Value('i', 0) for
+            remainder distribution.  When total_cores is not evenly
+            divisible by active workers (e.g. total=112, active=76:
+            remainder=36), this counter tracks how many workers
+            currently hold a +1 thread.  Workers atomically
+            claim/release from this pool via _try_claim_extra_bh /
+            _try_release_extra_bh so that exactly `remainder` workers
+            get ceil and the rest get floor — keeping total threads
+            in use equal to total_cores with zero idle.  When None
+            (legacy callers), falls back to floor-only allocation.
+            Mirrors block_linking._BL_EXTRA_COUNTER.
     """
-    global _BH_ACTIVE_COUNTER, _BH_TOTAL_CORES
+    global _BH_ACTIVE_COUNTER, _BH_TOTAL_CORES, _BH_EXTRA_COUNTER, _BH_I_HAVE_EXTRA
     _BH_ACTIVE_COUNTER = active_counter
     _BH_TOTAL_CORES = total_cores
+    _BH_EXTRA_COUNTER = extra_counter
+    # Defensive: ensure no stale claim from a previous worker recycle.
+    _BH_I_HAVE_EXTRA = False
     try:
         import os, numba
         os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
@@ -98,6 +117,78 @@ def _init_block_worker(total_cores, active_counter):
 _BH_ACTIVE_COUNTER = None
 _BH_TOTAL_CORES = None
 
+# ---------------------------------------------------------------------------
+# Remainder distribution (mirrors block_linking._BL_EXTRA_COUNTER and
+# hmm_matching._HM_EXTRA_COUNTER).
+#
+# When total_cores is not evenly divisible by active workers,
+# floor(total/active) leaves `remainder = total % active` idle cores.
+# E.g. total=112, active=76: floor=1, remainder=36 — 36 cores sit
+# idle until floor jumps to 2 (at active=56).
+#
+# This is exactly the scenario stage 1 hits — block_haplotypes is
+# typically run with one task per genomic block (often hundreds), but
+# only `num_processes` of them can be in flight at any moment.  As
+# fast blocks finish, the remaining active count walks down through
+# every value, spending substantial time in just-above-threshold
+# regimes (active=76, 60, 40) where floor-only allocation wastes many
+# cores.  The extras counter tracks how many workers hold +1 threads
+# so that exactly `remainder` workers get ceil and the rest get floor.
+#
+# _BH_EXTRA_COUNTER: pool-wide atomic int.
+# _BH_I_HAVE_EXTRA: per-worker-process bool.
+# Both are None / False outside a properly-initialised pool.  See
+# _try_claim_extra_bh and _try_release_extra_bh.
+# ---------------------------------------------------------------------------
+_BH_EXTRA_COUNTER = None
+_BH_I_HAVE_EXTRA = False
+
+
+def _try_claim_extra_bh(remainder):
+    """Atomically attempt to claim an extra thread from the remainder pool.
+
+    Returns True if successfully claimed (and sets _BH_I_HAVE_EXTRA).
+    Returns False if exhausted or counter not set up.  Idempotent.
+
+    Mirrors block_linking._try_claim_extra exactly — see that for
+    the full race-analysis discussion.
+    """
+    global _BH_I_HAVE_EXTRA
+    if _BH_I_HAVE_EXTRA:
+        return True
+    if _BH_EXTRA_COUNTER is None:
+        return False
+    try:
+        with _BH_EXTRA_COUNTER.get_lock():
+            if _BH_EXTRA_COUNTER.value < remainder:
+                _BH_EXTRA_COUNTER.value += 1
+                _BH_I_HAVE_EXTRA = True
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _try_release_extra_bh():
+    """Atomically release this worker's extra claim, if held.
+
+    Mirrors block_linking._try_release_extra.
+    """
+    global _BH_I_HAVE_EXTRA
+    if not _BH_I_HAVE_EXTRA:
+        return False
+    if _BH_EXTRA_COUNTER is None:
+        _BH_I_HAVE_EXTRA = False
+        return False
+    try:
+        with _BH_EXTRA_COUNTER.get_lock():
+            _BH_EXTRA_COUNTER.value -= 1
+            _BH_I_HAVE_EXTRA = False
+            return True
+    except Exception:
+        _BH_I_HAVE_EXTRA = False
+        return False
+
 
 def _update_dynamic_threads():
     """Recheck active worker count and update numba threads.
@@ -105,11 +196,44 @@ def _update_dynamic_threads():
     Called at the top of scoring loops in select_optimal_haplotype_set_viterbi
     and prune_chimeras. Only activates inside block haplotype workers where
     _BH_ACTIVE_COUNTER is set — no-op everywhere else.
+
+    Computes the EXACT fair share with remainder distribution:
+        floor     = total_cores // active_workers
+        remainder = total_cores % active_workers
+        my_share  = floor + (1 if I hold an extra-claim else 0)
+
+    On each recheck, claims or releases extras based on current
+    `remainder` so that the total extras-in-circulation tracks the
+    remainder as active changes.  At any time exactly `remainder`
+    workers hold +1 and total threads in use equals total_cores.
+
+    When _BH_EXTRA_COUNTER is None (legacy callers that didn't pass
+    extra_counter through _init_block_worker), falls back to the
+    original floor-only behavior — which leaves up to active-1 cores
+    idle in worst case but preserves backwards compatibility.
     """
     if _BH_ACTIVE_COUNTER is None or _BH_TOTAL_CORES is None:
         return
     active = max(_BH_ACTIVE_COUNTER.value, 1)
-    n = max(1, _BH_TOTAL_CORES // active)
+    floor = _BH_TOTAL_CORES // active
+    remainder = _BH_TOTAL_CORES - floor * active
+
+    # Adjust extra-claim based on current remainder.  See block_linking
+    # ._update_dynamic_threads for full discussion of the lock-free
+    # current_extras read and the claim/release semantics.
+    if _BH_EXTRA_COUNTER is not None:
+        try:
+            current_extras = _BH_EXTRA_COUNTER.value
+        except Exception:
+            current_extras = 0
+        if not _BH_I_HAVE_EXTRA:
+            if current_extras < remainder:
+                _try_claim_extra_bh(remainder)
+        else:
+            if current_extras > remainder:
+                _try_release_extra_bh()
+
+    n = max(1, floor + (1 if _BH_I_HAVE_EXTRA else 0))
     try:
         import numba
         numba.set_num_threads(n)
@@ -138,6 +262,13 @@ def _worker_generate_block_direct(args):
     Dynamically scales numba threads based on active peer count.
     When all 112 workers are busy: 1 thread each (parallelism from pool).
     When 5 workers remain: 22 threads each (Viterbi scoring scales up).
+
+    Remainder distribution: when total_cores % active != 0, exactly
+    `remainder` workers receive ceil(total/active) threads and the
+    rest receive floor — see _try_claim_extra_bh / _update_dynamic_threads.
+    This eliminates the idle cores that occur in floor-only allocation
+    just above each `total // k` threshold (e.g. active=76 on 112
+    cores: 36 cores would be idle without remainder distribution).
     """
     block_idx, positions, reads, flags, kwargs = args
     
@@ -147,7 +278,12 @@ def _worker_generate_block_direct(args):
         with _BH_ACTIVE_COUNTER.get_lock():
             _BH_ACTIVE_COUNTER.value += 1
         active = max(_BH_ACTIVE_COUNTER.value, 1)
-        n_threads = max(1, _BH_TOTAL_CORES // active)
+        floor = _BH_TOTAL_CORES // active
+        remainder = _BH_TOTAL_CORES - floor * active
+        # Try to claim an extra thread from the remainder pool.
+        # No-op when _BH_EXTRA_COUNTER is None (legacy callers).
+        _try_claim_extra_bh(remainder)
+        n_threads = max(1, floor + (1 if _BH_I_HAVE_EXTRA else 0))
         _numba.set_num_threads(n_threads)
     
     try:
@@ -160,6 +296,9 @@ def _worker_generate_block_direct(args):
         _malloc_trim()
         return (block_idx, result)
     finally:
+        # Release any held extra FIRST, then decrement active counter.
+        # Mirrors block_linking._gap_worker ordering invariant.
+        _try_release_extra_bh()
         if _BH_ACTIVE_COUNTER is not None:
             with _BH_ACTIVE_COUNTER.get_lock():
                 _BH_ACTIVE_COUNTER.value -= 1
@@ -1765,9 +1904,14 @@ def generate_all_block_haplotypes(genomic_data, # Accepts GenomicData object
     
     try:
         active_counter = _forkserver_ctx.Value('i', 0)
+        # Extra-thread counter for remainder distribution.  See
+        # _try_claim_extra_bh / _try_release_extra_bh and
+        # _update_dynamic_threads.  Same forkserver context as
+        # active_counter for shared-memory consistency.
+        extra_counter = _forkserver_ctx.Value('i', 0)
         with _ForkserverPool(processes=num_processes,
                              initializer=_init_block_worker,
-                             initargs=(num_processes, active_counter)) as pool:
+                             initargs=(num_processes, active_counter, extra_counter)) as pool:
             results = []
             for result in tqdm(
                 pool.imap_unordered(_worker_generate_block_direct, task_args, chunksize=1),

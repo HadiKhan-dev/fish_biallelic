@@ -49,11 +49,221 @@ except ImportError:
 
 _PEDIGREE_SHARED = {}
 
-def _init_pedigree_shared(shared_dict):
-    """Pool initializer: store shared data in worker's global scope."""
+# ---------------------------------------------------------------------------
+# Two-step dynamic thread reallocation for straggler tasks.
+#
+# Adapted from the same pattern in block_haplotypes.py and block_linking.py
+# (May 2026).  The setup:
+#   - When a worker enters a task, it atomically increments
+#     _PEDIGREE_ACTIVE_COUNTER; on exit it decrements.  At any moment the
+#     counter holds the number of workers currently processing a task.
+#   - Each worker computes its fair-share thread budget as
+#         floor     = total_cores // active
+#         remainder = total_cores % active
+#         my_share  = floor + (1 if I hold an "extra" else 0)
+#     and calls numba.set_num_threads(my_share).
+#   - At most `remainder` workers can hold an extra at any time; they
+#     claim/release atomically via _PEDIGREE_EXTRA_COUNTER.  This makes
+#     the per-worker allocation EXACTLY total_cores in total -- no idle
+#     cores -- even when total_cores % active != 0.
+#   - As peer workers finish (active drops), in-flight stragglers can
+#     re-check at periodic hooks (`_update_dynamic_threads()`) inserted
+#     inside long-running task bodies, claim newly-available extras, and
+#     scale up.  The reverse also works: if active grows, holders that
+#     are now over-budget release their extras.
+#
+# All four globals are None outside a pool worker (or in a pool that
+# wasn't initialized with counters) -- in that case the helpers and the
+# worker entry/exit wrapping are no-ops, preserving the pre-existing
+# behavior exactly for any legacy caller.  The batched HMM kernels work
+# regardless: they use prange but with numba.set_num_threads(1) they
+# behave as a single-threaded for-loop (numba's prange tolerates a
+# single-thread schedule with no measurable overhead vs. range).
+# ---------------------------------------------------------------------------
+_PEDIGREE_ACTIVE_COUNTER = None
+_PEDIGREE_EXTRA_COUNTER = None
+_PEDIGREE_TOTAL_CORES = None
+_PEDIGREE_I_HAVE_EXTRA = False
+
+
+def _try_claim_extra(remainder):
+    """Atomically attempt to claim an extra thread from the remainder pool.
+
+    Returns True if successfully claimed (and sets _PEDIGREE_I_HAVE_EXTRA
+    True as a side effect).  Returns False if the remainder pool is
+    already exhausted (current extra-count >= remainder).
+
+    Atomicity is provided by _PEDIGREE_EXTRA_COUNTER.get_lock(); without
+    the lock, two workers could both pass the "< remainder" check and
+    over-claim, oversubscribing CPU.
+
+    Idempotent: returns True without re-claiming if _PEDIGREE_I_HAVE_EXTRA
+    is already True (each worker holds at most one extra at any time).
+    """
+    global _PEDIGREE_I_HAVE_EXTRA
+    if _PEDIGREE_I_HAVE_EXTRA:
+        return True
+    if _PEDIGREE_EXTRA_COUNTER is None:
+        return False
+    try:
+        with _PEDIGREE_EXTRA_COUNTER.get_lock():
+            if _PEDIGREE_EXTRA_COUNTER.value < remainder:
+                _PEDIGREE_EXTRA_COUNTER.value += 1
+                _PEDIGREE_I_HAVE_EXTRA = True
+                return True
+    except Exception:
+        # Lock acquisition or counter mutation failed -- fall back to
+        # floor-only.  Same robustness posture as _update_dynamic_threads.
+        pass
+    return False
+
+
+def _try_release_extra():
+    """Atomically release this worker's extra claim, if held.
+
+    Returns True if a claim was released.  Used (a) at worker exit via
+    try/finally (release on the way out so the pool stays accurate)
+    and (b) in _update_dynamic_threads when active grew and the
+    remainder shrank below the current extras-in-circulation count.
+    """
+    global _PEDIGREE_I_HAVE_EXTRA
+    if not _PEDIGREE_I_HAVE_EXTRA:
+        return False
+    if _PEDIGREE_EXTRA_COUNTER is None:
+        _PEDIGREE_I_HAVE_EXTRA = False  # defensive
+        return False
+    try:
+        with _PEDIGREE_EXTRA_COUNTER.get_lock():
+            _PEDIGREE_EXTRA_COUNTER.value -= 1
+            _PEDIGREE_I_HAVE_EXTRA = False
+            return True
+    except Exception:
+        # Defensive: still clear the local flag even if counter mutation
+        # failed.  Otherwise the worker thinks it holds an extra forever,
+        # leading to under-claim by peers on subsequent rechecks.
+        _PEDIGREE_I_HAVE_EXTRA = False
+        return False
+
+
+def _update_dynamic_threads():
+    """Recheck active worker count and rescale this worker's numba threads.
+
+    Called from inside long-running task bodies (top of the contig
+    loop in `_score_trios_batch`, `_score_pairs_by_children`, and
+    `_check_trio_consistency_worker`) so that stragglers re-evaluate
+    their thread budget as peers finish.
+
+    Computes:
+        floor     = total_cores // active
+        remainder = total_cores % active
+        my_share  = floor + (1 if I currently hold an extra else 0)
+    and calls numba.set_num_threads(my_share).
+
+    Also adjusts the extra-claim status:
+      - If I don't hold an extra and the pool has room
+        (current_extras < remainder), try to claim one.
+      - If I hold an extra but extras-in-circulation already exceeds
+        the current remainder budget, release it.
+
+    Behavior:
+      - Outside a pool worker, or in a pool not initialized with
+        counters: silent no-op.
+      - Inside a properly-initialized worker: rebalances live as peer
+        activity changes.
+
+    The counter read for `active` is intentionally lock-free.  A torn
+    read can only return a stale value; either over- or under-allocate
+    by 1, both harmless (extra threads sleep on OMP PASSIVE / next call
+    corrects).  The extra-claim lock IS acquired briefly because the
+    extras counter must be mutated atomically.
+    """
+    if _PEDIGREE_ACTIVE_COUNTER is None or _PEDIGREE_TOTAL_CORES is None:
+        return
+    active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
+    floor = _PEDIGREE_TOTAL_CORES // active
+    remainder = _PEDIGREE_TOTAL_CORES - floor * active
+
+    # Adjust extra-claim if needed.  Lock-free read first to avoid the
+    # lock when no action is plausibly required.
+    if _PEDIGREE_EXTRA_COUNTER is not None:
+        try:
+            current_extras = _PEDIGREE_EXTRA_COUNTER.value
+        except Exception:
+            current_extras = 0
+        if not _PEDIGREE_I_HAVE_EXTRA:
+            if current_extras < remainder:
+                _try_claim_extra(remainder)
+        else:
+            if current_extras > remainder:
+                _try_release_extra()
+
+    n = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
+    try:
+        import numba
+        numba.set_num_threads(n)
+    except Exception:
+        # Numba import or set_num_threads failure -- silently ignore.
+        # Same robustness posture as the helpers above; the next call
+        # will retry.
+        pass
+
+
+def _init_pedigree_shared(shared_dict, active_counter=None, total_cores=None,
+                          extra_counter=None):
+    """Pool initializer: store shared data in worker's global scope.
+
+    Args:
+        shared_dict: dict of large objects to share across workers via
+            fork-COW (e.g. contig_caches, contig_data_list, total_switches).
+            Stored in module-global _PEDIGREE_SHARED.
+        active_counter: optional multiprocessing.Value('i', 0) shared
+            across workers.  When provided, workers increment on task
+            entry and decrement on task exit, and _update_dynamic_threads
+            uses it to compute fair-share allocation.  Default None
+            (preserves the pre-existing behavior bit-identically).
+        total_cores: optional int -- the original n_workers budget for
+            the entire pool.  When provided alongside active_counter,
+            configures the per-worker numba pool ceiling to total_cores
+            and starts the worker at 1 thread; subsequent
+            _update_dynamic_threads() calls scale up to total_cores
+            when peers free their share.  Default None.
+        extra_counter: optional multiprocessing.Value('i', 0) shared
+            across workers, used for remainder distribution (see the
+            module-level globals comment).  Default None, in which
+            case workers fall back to floor-only allocation.
+
+    Backwards-compatible: callers passing only shared_dict get the
+    original pre-counter behavior exactly.
+    """
     global _PEDIGREE_SHARED
+    global _PEDIGREE_ACTIVE_COUNTER, _PEDIGREE_EXTRA_COUNTER
+    global _PEDIGREE_TOTAL_CORES, _PEDIGREE_I_HAVE_EXTRA
     _PEDIGREE_SHARED.clear()
     _PEDIGREE_SHARED.update(shared_dict)
+    _PEDIGREE_ACTIVE_COUNTER = active_counter
+    _PEDIGREE_TOTAL_CORES = total_cores
+    _PEDIGREE_EXTRA_COUNTER = extra_counter
+    # Defensive: ensure no stale claim carries into the new worker context.
+    # fork() copies the parent's globals; if the parent had set
+    # _PEDIGREE_I_HAVE_EXTRA=True before forking (shouldn't happen, but
+    # defensive), the child must start with a clean slate.
+    _PEDIGREE_I_HAVE_EXTRA = False
+
+    # When dynamic threads are wired up, configure the per-worker numba
+    # pool ceiling to total_cores so set_num_threads() can later scale
+    # freely.  Starting at 1 thread is the safe default -- the first
+    # worker entry into a task will immediately rescale to floor+extra
+    # based on the live active count.  Mirrors block_linking._init_bl_shared.
+    if total_cores is not None:
+        try:
+            import os as _os, numba as _numba
+            _os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
+            _numba.config.NUMBA_NUM_THREADS = total_cores
+            _numba.set_num_threads(1)
+        except Exception:
+            # Numba unavailable or thread-set failure -- silently ignore,
+            # same robustness posture as _update_dynamic_threads.
+            pass
 
 
 def _check_trio_consistency_worker(args):
@@ -61,63 +271,196 @@ def _check_trio_consistency_worker(args):
     Worker: check one trio's consistency across all chromosomes.
     Reads tolerance paintings from _PEDIGREE_SHARED (fork COW).
     Returns (df_idx, child_name, mean_explained).
+
+    Dynamic thread reallocation (when the pool was initialized with
+    counters): on entry, atomically increment _PEDIGREE_ACTIVE_COUNTER
+    and claim an extra thread if remainder allows; rescale numba
+    threads to floor+extra.  On exit, release the extra and decrement.
+    Inside the per-contig loop, _update_dynamic_threads() lets the
+    worker rebalance as peers finish.
+
+    Math is unchanged: the per-contig _check_trio_on_chromosome call
+    and the final np.mean(fracs) are identical to the pre-wrapping
+    implementation.  The counter-management adds wall-clock work but
+    no numerical effect.
     """
-    df_idx, child_name, child_i, p1_i, p2_i = args
-    contig_data_list = _PEDIGREE_SHARED['contig_data_list']
-    step = _PEDIGREE_SHARED['step']
+    # Track whether we successfully incremented so the finally clause
+    # only decrements if the increment actually happened.  This avoids
+    # a spurious decrement if counters are None (legacy path).
+    counter_inc = False
+    if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
+        try:
+            import numba as _numba
+            with _PEDIGREE_ACTIVE_COUNTER.get_lock():
+                _PEDIGREE_ACTIVE_COUNTER.value += 1
+            counter_inc = True
+            active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
+            floor = _PEDIGREE_TOTAL_CORES // active
+            remainder = _PEDIGREE_TOTAL_CORES - floor * active
+            _try_claim_extra(remainder)
+            n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
+            _numba.set_num_threads(n_threads)
+        except Exception:
+            # Numba unavailable or any other transient issue -- fall
+            # through and run the task without dynamic scaling.
+            pass
 
-    fracs = []
-    for contig_data in contig_data_list:
-        tol = contig_data['tolerance_painting']
-        child_tol = tol[child_i]
-        p1_tol = tol[p1_i]
-        p2_tol = tol[p2_i]
+    try:
+        df_idx, child_name, child_i, p1_i, p2_i = args
+        contig_data_list = _PEDIGREE_SHARED['contig_data_list']
+        step = _PEDIGREE_SHARED['step']
 
-        child_path = child_tol if child_tol.chunks else None
-        p1_path = p1_tol if p1_tol.chunks else None
-        p2_path = p2_tol if p2_tol.chunks else None
+        fracs = []
+        for contig_data in contig_data_list:
+            # In-loop rebalance hook: as peer workers finish, this
+            # straggler picks up their freed-share by reclaiming
+            # extras.  Cost is one atomic counter read (~ns) per
+            # contig iteration.
+            _update_dynamic_threads()
 
-        if child_path and p1_path and p2_path:
-            frac = _check_trio_on_chromosome(child_path, p1_path, p2_path, step=step)
-        else:
-            frac = 0.0
-        fracs.append(frac)
+            tol = contig_data['tolerance_painting']
+            child_tol = tol[child_i]
+            p1_tol = tol[p1_i]
+            p2_tol = tol[p2_i]
 
-    return df_idx, child_name, float(np.mean(fracs))
+            child_path = child_tol if child_tol.chunks else None
+            p1_path = p1_tol if p1_tol.chunks else None
+            p2_path = p2_tol if p2_tol.chunks else None
+
+            if child_path and p1_path and p2_path:
+                frac = _check_trio_on_chromosome(child_path, p1_path, p2_path, step=step)
+            else:
+                frac = 0.0
+            fracs.append(frac)
+
+        return df_idx, child_name, float(np.mean(fracs))
+    finally:
+        # Always release any held extra and decrement active count,
+        # regardless of whether the body succeeded.  Release-first so
+        # peers see the freed extra-slot before the decremented active.
+        _try_release_extra()
+        if counter_inc and _PEDIGREE_ACTIVE_COUNTER is not None:
+            try:
+                with _PEDIGREE_ACTIVE_COUNTER.get_lock():
+                    _PEDIGREE_ACTIVE_COUNTER.value -= 1
+            except Exception:
+                # Counter lock acquisition failed -- very unlikely.
+                # Silently ignore; the lost decrement only causes peers
+                # to slightly under-scale on their next rebalance call,
+                # benign perf issue rather than a correctness issue.
+                pass
 
 
 def _check_trio_on_chromosome(child_painting, p1_painting, p2_painting, step=1000):
-    """Check fraction of child's genome explained by the two parents on one chromosome."""
+    """Check fraction of child's genome explained by the two parents on one chromosome.
+
+    Public signature preserved for backward compatibility.  The hot inner loop
+    is delegated to the numba kernel `_check_trio_kernel` after converting each
+    painting's chunk list (Python objects with .start/.end/.hap1/.hap2 attrs)
+    into four flat numpy arrays.
+
+    The math is bit-identical to the previous pure-Python implementation:
+      - same step-based position iteration `range(start, end, step)`
+      - same chunk lookup semantics (first chunk containing pos, -1 if none)
+      - same skip-on-missing rule (continue if any of 6 alleles is -1)
+      - same "from_a/from_b set membership" inheritance check
+      - same `explained / total` (with total > 0 guard) return
+    """
     if not child_painting.chunks:
         return 0.0
-    start = child_painting.chunks[0].start
-    end = child_painting.chunks[-1].end
+    c_starts, c_ends, c_h1, c_h2 = _painting_to_arrays(child_painting)
+    a_starts, a_ends, a_h1, a_h2 = _painting_to_arrays(p1_painting)
+    b_starts, b_ends, b_h1, b_h2 = _painting_to_arrays(p2_painting)
+    start = int(c_starts[0])
+    end = int(c_ends[-1])
+    return float(_check_trio_kernel(
+        c_starts, c_ends, c_h1, c_h2,
+        a_starts, a_ends, a_h1, a_h2,
+        b_starts, b_ends, b_h1, b_h2,
+        start, end, int(step),
+    ))
+
+
+def _painting_to_arrays(painting):
+    """Convert a painting's chunk list to four parallel numpy arrays
+    (starts, ends, hap1, hap2) suitable for numba kernels.
+
+    A zero-chunk painting yields four empty arrays; the kernel handles that
+    case (the inner chunk-search loops simply find no match and the position
+    is skipped via the -1 sentinel).
+    """
+    n = len(painting.chunks)
+    starts = np.empty(n, dtype=np.int64)
+    ends = np.empty(n, dtype=np.int64)
+    h1 = np.empty(n, dtype=np.int64)
+    h2 = np.empty(n, dtype=np.int64)
+    for i in range(n):
+        c = painting.chunks[i]
+        starts[i] = c.start
+        ends[i] = c.end
+        h1[i] = c.hap1
+        h2[i] = c.hap2
+    return starts, ends, h1, h2
+
+
+@njit(fastmath=True, cache=True)
+def _check_trio_kernel(
+    c_starts, c_ends, c_h1, c_h2,
+    a_starts, a_ends, a_h1, a_h2,
+    b_starts, b_ends, b_h1, b_h2,
+    start, end, step,
+):
+    """Numba inner loop for _check_trio_on_chromosome.
+
+    Iterates positions `pos in range(start, end, step)`.  At each position,
+    performs a linear scan over each parent's chunk list to find the chunk
+    containing `pos`; if found, records (hap1, hap2) into local scalars,
+    else sentinel -1.  Positions with any -1 are skipped.  Otherwise:
+      `from_a = {a1, a2}`, `from_b = {b1, b2}`
+      explained iff (ch1 in from_a and ch2 in from_b) or (ch1 in from_b and ch2 in from_a)
+    Returns explained / total (0.0 if total == 0).
+    """
     explained = 0
     total = 0
+    n_c = c_starts.shape[0]
+    n_a = a_starts.shape[0]
+    n_b = b_starts.shape[0]
     for pos in range(start, end, step):
-        ch1, ch2 = -1, -1
-        for c in child_painting.chunks:
-            if c.start <= pos < c.end:
-                ch1, ch2 = c.hap1, c.hap2
+        ch1 = -1
+        ch2 = -1
+        for k in range(n_c):
+            if c_starts[k] <= pos < c_ends[k]:
+                ch1 = c_h1[k]
+                ch2 = c_h2[k]
                 break
-        a1, a2 = -1, -1
-        for c in p1_painting.chunks:
-            if c.start <= pos < c.end:
-                a1, a2 = c.hap1, c.hap2
+        a1 = -1
+        a2 = -1
+        for k in range(n_a):
+            if a_starts[k] <= pos < a_ends[k]:
+                a1 = a_h1[k]
+                a2 = a_h2[k]
                 break
-        b1, b2 = -1, -1
-        for c in p2_painting.chunks:
-            if c.start <= pos < c.end:
-                b1, b2 = c.hap1, c.hap2
+        b1 = -1
+        b2 = -1
+        for k in range(n_b):
+            if b_starts[k] <= pos < b_ends[k]:
+                b1 = b_h1[k]
+                b2 = b_h2[k]
                 break
-        if -1 in (ch1, ch2, a1, a2, b1, b2):
+        if ch1 < 0 or ch2 < 0 or a1 < 0 or a2 < 0 or b1 < 0 or b2 < 0:
             continue
         total += 1
-        from_a = {a1, a2}
-        from_b = {b1, b2}
-        if (ch1 in from_a and ch2 in from_b) or (ch1 in from_b and ch2 in from_a):
+        # from_a = {a1, a2}, from_b = {b1, b2}; explained iff
+        # (ch1 in from_a and ch2 in from_b) or (ch1 in from_b and ch2 in from_a)
+        ch1_in_a = (ch1 == a1) or (ch1 == a2)
+        ch1_in_b = (ch1 == b1) or (ch1 == b2)
+        ch2_in_a = (ch2 == a1) or (ch2 == a2)
+        ch2_in_b = (ch2 == b1) or (ch2 == b2)
+        if (ch1_in_a and ch2_in_b) or (ch1_in_b and ch2_in_a):
             explained += 1
-    return explained / total if total > 0 else 0.0
+    if total > 0:
+        return explained / total
+    return 0.0
 
 # =============================================================================
 # 1. DATA STRUCTURES
@@ -206,7 +549,7 @@ class PedigreeResult:
         except Exception as e:
             print(f"[Auto-Cutoff] Failed: {e}")
 
-    def perform_consistency_cutoff(self, contig_data_list, threshold=0.80, step=1000,
+    def perform_consistency_cutoff(self, contig_data_list, threshold=0.90, step=1000,
                                      n_workers=None, verbose=True):
         """
         Strip parents from individuals whose trio is not consistently explained
@@ -223,7 +566,18 @@ class PedigreeResult:
         Args:
             contig_data_list: List of dicts with 'tolerance_painting' key
                               (BlockTolerancePainting objects, one per chromosome)
-            threshold: Minimum mean_explained fraction to keep parents (default 0.80)
+            threshold: Minimum mean_explained fraction to keep parents
+                       (default 0.90).  Raised from the historical 0.80 in
+                       May 2026 based on threshold_diagnostic.py findings:
+                       on the 320-sample dataset under union mode, CORRECT
+                       trios scored 99.62-99.99% (min/max), while WRONG_ROOT
+                       trios (F1s with Founder parents getting decoy F2/F2
+                       assignments) scored 67.82-80.65% (min/max).  The 19%
+                       gap between the two distributions makes 0.90 (midpoint)
+                       a safe choice with zero false negatives and zero false
+                       positives on this dataset; the previous 0.80 default
+                       kept F1_17 at 80.65% as a wrong-direction assignment
+                       that had to be cleaned up post-hoc by cycle resolution.
             step: Base-pair sampling interval for the consistency check
             n_workers: Number of parallel workers (default: all available cores)
             verbose: Print details
@@ -271,10 +625,17 @@ class PedigreeResult:
 
         ctx = mp.get_context('fork')
         actual_workers = min(n_workers, len(tasks))
+        # Counters for the two-step dynamic-thread reallocation pattern
+        # (see module-level _PEDIGREE_ACTIVE_COUNTER docstring).  Fresh
+        # mp.Value('i', 0) per pool so stale state from previous pools
+        # doesn't leak in.  total_cores=actual_workers tells worker
+        # processes the maximum thread budget they can ever request.
+        active_counter = ctx.Value('i', 0)
+        extra_counter = ctx.Value('i', 0)
 
         with ctx.Pool(processes=actual_workers,
                       initializer=_init_pedigree_shared,
-                      initargs=(shared,)) as pool:
+                      initargs=(shared, active_counter, actual_workers, extra_counter)) as pool:
             results = list(tqdm(
                 pool.imap_unordered(_check_trio_consistency_worker, tasks),
                 total=len(tasks),
@@ -679,7 +1040,7 @@ def calculate_ibd_matrices(grid):
 # 4. HMM KERNELS (8-STATE FILTER & 16-STATE VERIFIER)
 # =============================================================================
 
-@njit(fastmath=True)
+@njit(fastmath=True, cache=True)
 def run_phase_agnostic_hmm(child_dip_alleles, child_potential_hom_mask, parent_dip_alleles, 
                            switch_costs, stay_costs, error_penalty, phase_penalty,
                            mismatch_penalty=-4.6):
@@ -738,7 +1099,7 @@ def run_phase_agnostic_hmm(child_dip_alleles, child_potential_hom_mask, parent_d
     return best_final
 
 
-@njit(fastmath=True)
+@njit(fastmath=True, cache=True)
 def run_trio_phase_aware_hmm(child_dip_alleles, child_potential_hom_mask, 
                              p1_dip_alleles, p2_dip_alleles, 
                              switch_costs, stay_costs, error_penalty, phase_penalty,
@@ -814,7 +1175,7 @@ def run_trio_phase_aware_hmm(child_dip_alleles, child_potential_hom_mask,
 # 4b. MULTI-SNP HMM KERNELS (k samples per bin)
 # =============================================================================
 
-@njit(fastmath=True)
+@njit(fastmath=True, cache=True)
 def run_phase_agnostic_hmm_multisnp(child_dip_alleles, child_potential_hom_mask, parent_dip_alleles, 
                                      switch_costs, stay_costs, error_penalty, phase_penalty,
                                      mismatch_penalty=-4.6):
@@ -876,7 +1237,7 @@ def run_phase_agnostic_hmm_multisnp(child_dip_alleles, child_potential_hom_mask,
     return best_final
 
 
-@njit(fastmath=True)
+@njit(fastmath=True, cache=True)
 def run_trio_phase_aware_hmm_multisnp(child_dip_alleles, child_potential_hom_mask, 
                                        p1_dip_alleles, p2_dip_alleles, 
                                        switch_costs, stay_costs, error_penalty, phase_penalty,
@@ -1019,6 +1380,153 @@ def score_trio_all_consensus_precomputed(child_grids, p1_grids, p2_grids,
     return best_score
 
 
+# -----------------------------------------------------------------------------
+# Batched HMM-call kernels (optimization #4 from May 2026 numba pass).
+#
+# These wrap the per-(child, parent[, parent2]) HMM kernels in a numba outer
+# loop so that, given an array of parent indices, an entire contig's worth of
+# pair- or trio- scores can be computed in a single Python-to-numba call.  The
+# math is bit-identical to looping in Python and calling
+# run_phase_agnostic_hmm[_multisnp] or run_trio_phase_aware_hmm[_multisnp] per
+# pair -- the per-bin Viterbi state, transition costs, emission costs and
+# final max-over-states are unchanged.
+#
+# Inputs are arranged as a stacked array of shape (N, n_bins, 2, k_snps) for
+# the multisnp variants or (N, n_bins, 2) for the non-multisnp variants, built
+# once at cache-construction time in infer_pedigree_multi_contig_tolerance.
+# Only the CHILD slot needs a hom_mask -- parents do not (the trio HMM uses
+# the child's hom_mask to decide whether the phase_penalty applies on each
+# bin, and the pair HMM is phase-agnostic).
+#
+# A separate kernel exists for each (multisnp y/n) × (pair / trio) combination
+# because numba cannot dispatch on array ndim at runtime within a single
+# jitted function -- but at the Python level we pick the right kernel based on
+# stacked_alleles.ndim (4 = multisnp, 3 = non-multisnp).
+# -----------------------------------------------------------------------------
+
+@njit(fastmath=True, cache=True, parallel=True)
+def score_pair_batch_kernel_multisnp(
+    child_alleles, child_hom_mask, stacked_alleles, parent_indices,
+    switch_costs, stay_costs, error_penalty, phase_penalty, mismatch_penalty,
+):
+    """Score (child, parent) pairs for one contig in a single numba call.
+
+    Args:
+        child_alleles: (n_bins, 2, k_snps) int8 -- the fixed child's grid
+        child_hom_mask: (n_bins,) -- the fixed child's hom mask
+        stacked_alleles: (N, n_bins, 2, k_snps) int8 -- all samples stacked
+        parent_indices: (n_parents,) int64 -- indices into stacked_alleles
+        switch_costs, stay_costs: (n_bins,) per-bin transition costs
+        error_penalty, phase_penalty, mismatch_penalty: scalars
+    Returns:
+        out: (n_parents,) float64 -- one score per parent index
+
+    parallel=True + prange: each iteration is independent (writes to
+    out[k], reads from disjoint slices of stacked_alleles), so this is
+    safely parallelisable across the worker's allocated numba threads.
+    Math is identical to the per-iteration loop: each k computes the
+    same run_phase_agnostic_hmm_multisnp(...) call with the same args.
+    """
+    n_parents = parent_indices.shape[0]
+    out = np.empty(n_parents, dtype=np.float64)
+    for k in prange(n_parents):
+        out[k] = run_phase_agnostic_hmm_multisnp(
+            child_alleles, child_hom_mask,
+            stacked_alleles[parent_indices[k]],
+            switch_costs, stay_costs,
+            error_penalty, phase_penalty, mismatch_penalty,
+        )
+    return out
+
+
+@njit(fastmath=True, cache=True, parallel=True)
+def score_pair_batch_kernel(
+    child_alleles, child_hom_mask, stacked_alleles, parent_indices,
+    switch_costs, stay_costs, error_penalty, phase_penalty, mismatch_penalty,
+):
+    """Non-multisnp variant of score_pair_batch_kernel_multisnp.
+
+    Args:
+        child_alleles: (n_bins, 2) int8 -- the fixed child's grid
+        stacked_alleles: (N, n_bins, 2) int8 -- all samples stacked
+        (other args as in score_pair_batch_kernel_multisnp)
+
+    parallel=True + prange: same safety argument as the multisnp variant.
+    """
+    n_parents = parent_indices.shape[0]
+    out = np.empty(n_parents, dtype=np.float64)
+    for k in prange(n_parents):
+        out[k] = run_phase_agnostic_hmm(
+            child_alleles, child_hom_mask,
+            stacked_alleles[parent_indices[k]],
+            switch_costs, stay_costs,
+            error_penalty, phase_penalty, mismatch_penalty,
+        )
+    return out
+
+
+@njit(fastmath=True, cache=True, parallel=True)
+def score_trio_batch_kernel_multisnp(
+    child_alleles, child_hom_mask, stacked_alleles, p1_indices, p2_indices,
+    switch_costs, stay_costs, error_penalty, phase_penalty, mismatch_penalty,
+):
+    """Score (child, p1, p2) trios for one contig in a single numba call.
+
+    Args:
+        child_alleles: (n_bins, 2, k_snps) int8 -- the fixed child's grid
+        child_hom_mask: (n_bins,) -- the fixed child's hom mask
+        stacked_alleles: (N, n_bins, 2, k_snps) int8 -- all samples stacked
+        p1_indices, p2_indices: (n_pairs,) int64 -- pair indices into stacked
+        switch_costs, stay_costs: (n_bins,) per-bin transition costs
+        error_penalty, phase_penalty, mismatch_penalty: scalars
+    Returns:
+        out: (n_pairs,) float64 -- one trio score per (p1, p2) pair
+
+    parallel=True + prange: each iteration is independent (writes out[k],
+    reads disjoint slices of stacked_alleles).  Math identical to the
+    per-iteration loop -- each k computes the same trio HMM with the
+    same arguments.
+    """
+    n_pairs = p1_indices.shape[0]
+    out = np.empty(n_pairs, dtype=np.float64)
+    for k in prange(n_pairs):
+        out[k] = run_trio_phase_aware_hmm_multisnp(
+            child_alleles, child_hom_mask,
+            stacked_alleles[p1_indices[k]],
+            stacked_alleles[p2_indices[k]],
+            switch_costs, stay_costs,
+            error_penalty, phase_penalty, mismatch_penalty,
+        )
+    return out
+
+
+@njit(fastmath=True, cache=True, parallel=True)
+def score_trio_batch_kernel(
+    child_alleles, child_hom_mask, stacked_alleles, p1_indices, p2_indices,
+    switch_costs, stay_costs, error_penalty, phase_penalty, mismatch_penalty,
+):
+    """Non-multisnp variant of score_trio_batch_kernel_multisnp.
+
+    Args:
+        child_alleles: (n_bins, 2) int8 -- the fixed child's grid
+        stacked_alleles: (N, n_bins, 2) int8 -- all samples stacked
+        (other args as in score_trio_batch_kernel_multisnp)
+
+    parallel=True + prange: same safety argument as the multisnp variant.
+    """
+    n_pairs = p1_indices.shape[0]
+    out = np.empty(n_pairs, dtype=np.float64)
+    for k in prange(n_pairs):
+        out[k] = run_trio_phase_aware_hmm(
+            child_alleles, child_hom_mask,
+            stacked_alleles[p1_indices[k]],
+            stacked_alleles[p2_indices[k]],
+            switch_costs, stay_costs,
+            error_penalty, phase_penalty, mismatch_penalty,
+        )
+    return out
+
+
 # =============================================================================
 # 6. MULTI-CONTIG INFERENCE LOGIC (PARALLELIZED WITH SHARED DATA)
 # =============================================================================
@@ -1079,84 +1587,266 @@ def _score_pairs_by_children(child_indices):
     
     Parallelizes by child rows instead of by contig, giving many more tasks
     (e.g. 32-64 batches of 5-10 children) to fill all available cores.
+
+    Uses the batched kernels score_pair_batch_kernel[_multisnp] (optimization
+    #4 from the May 2026 numba pass) so each (child, contig) combination
+    incurs one Python-to-numba call instead of num_samples calls.  Math is
+    bit-identical to the previous per-pair Python loop:
+      - For each parent index in [0, num_samples), the kernel calls the same
+        underlying HMM (run_phase_agnostic_hmm[_multisnp]) with the same args.
+      - The self-pair score (ci == j) is computed by the kernel then
+        overwritten to 0.0 to match the legacy skip-on-self semantics.
+      - Contig sums are accumulated identically (total += s, but now in numpy
+        rather than scalar Python).
+
+    Dynamic thread reallocation (when the pool was initialized with
+    counters): on entry, atomically increment _PEDIGREE_ACTIVE_COUNTER
+    and claim an extra thread; rescale numba threads to floor+extra.
+    On exit, release the extra and decrement.  Inside the per-contig
+    loop, _update_dynamic_threads() lets the worker rebalance as peers
+    finish.  When parallel=True is enabled on the batched kernels, this
+    gives stragglers a dynamic share of the freed cores.
     """
-    contig_caches = _PEDIGREE_SHARED['contig_caches']
-    error_pen = _PEDIGREE_SHARED['error_pen']
-    phase_pen = _PEDIGREE_SHARED['phase_pen']
-    mismatch_penalty = _PEDIGREE_SHARED['mismatch_penalty']
-    num_samples = _PEDIGREE_SHARED['num_samples']
-    
-    n_children = len(child_indices)
-    scores = np.zeros((n_children, num_samples))
-    
-    for ci_local, ci in enumerate(child_indices):
-        for j in range(num_samples):
-            if ci == j:
-                continue
-            total = 0.0
+    # Counter inc/threads-up on entry.  See _check_trio_consistency_worker
+    # for the full rationale; this is the same pattern.
+    counter_inc = False
+    if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
+        try:
+            import numba as _numba
+            with _PEDIGREE_ACTIVE_COUNTER.get_lock():
+                _PEDIGREE_ACTIVE_COUNTER.value += 1
+            counter_inc = True
+            active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
+            floor = _PEDIGREE_TOTAL_CORES // active
+            remainder = _PEDIGREE_TOTAL_CORES - floor * active
+            _try_claim_extra(remainder)
+            n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
+            _numba.set_num_threads(n_threads)
+        except Exception:
+            pass
+
+    try:
+        contig_caches = _PEDIGREE_SHARED['contig_caches']
+        error_pen = _PEDIGREE_SHARED['error_pen']
+        phase_pen = _PEDIGREE_SHARED['phase_pen']
+        mismatch_penalty = _PEDIGREE_SHARED['mismatch_penalty']
+        num_samples = _PEDIGREE_SHARED['num_samples']
+
+        n_children = len(child_indices)
+        scores = np.zeros((n_children, num_samples))
+
+        # All-parents index vector reused across (child, contig) calls.
+        all_parent_indices = np.arange(num_samples, dtype=np.int64)
+
+        for ci_local, ci in enumerate(child_indices):
             for cache in contig_caches:
-                s = score_parent_child_all_consensus_precomputed(
-                    cache['sample_allele_grids'][ci],
-                    cache['sample_allele_grids'][j],
-                    cache['sw_costs'], cache['st_costs'],
-                    error_pen, phase_pen,
-                    mismatch_penalty
-                )
-                total += s
-            scores[ci_local, j] = total
-    
-    return child_indices, scores
+                # In-loop rebalance hook: as peer workers finish their
+                # tasks, this worker re-checks the active count and may
+                # claim newly-available extras (or release if active
+                # grew).  Cost is one atomic counter read (~ns).
+                _update_dynamic_threads()
+
+                stacked = cache['stacked_alleles']
+                hom = cache['stacked_hom_mask']
+                if stacked.ndim == 4:
+                    # multisnp path: (N, n_bins, 2, k_snps)
+                    contig_scores = score_pair_batch_kernel_multisnp(
+                        stacked[ci], hom[ci], stacked, all_parent_indices,
+                        cache['sw_costs'], cache['st_costs'],
+                        error_pen, phase_pen, mismatch_penalty,
+                    )
+                else:
+                    # non-multisnp path: (N, n_bins, 2)
+                    contig_scores = score_pair_batch_kernel(
+                        stacked[ci], hom[ci], stacked, all_parent_indices,
+                        cache['sw_costs'], cache['st_costs'],
+                        error_pen, phase_pen, mismatch_penalty,
+                    )
+                scores[ci_local] += contig_scores
+            # Restore the legacy skip-on-self semantics: scores[ci_local, ci] = 0.
+            # In the previous code path the inner `if ci == j: continue` skipped
+            # the self-pair entirely, leaving the np.zeros-initialised value of 0.
+            # The batched kernel computes a (typically very high) self-similarity
+            # score that we must overwrite to preserve identical output.
+            scores[ci_local, ci] = 0.0
+
+        return child_indices, scores
+    finally:
+        _try_release_extra()
+        if counter_inc and _PEDIGREE_ACTIVE_COUNTER is not None:
+            try:
+                with _PEDIGREE_ACTIVE_COUNTER.get_lock():
+                    _PEDIGREE_ACTIVE_COUNTER.value -= 1
+            except Exception:
+                pass
 
 
 def _score_trios_batch(batch_sample_args):
-    """Worker: score trios for a batch of samples. Reads from shared data."""
-    contig_caches = _PEDIGREE_SHARED['contig_caches']
-    total_switches = _PEDIGREE_SHARED['total_switches']
-    error_pen = _PEDIGREE_SHARED['error_pen']
-    phase_pen = _PEDIGREE_SHARED['phase_pen']
-    mismatch_penalty = _PEDIGREE_SHARED['mismatch_penalty']
-    complexity_penalty = _PEDIGREE_SHARED['complexity_penalty']
-    
-    results = []
-    for sample_idx, top_indices in batch_sample_args:
-        if len(top_indices) < 1:
-            results.append((sample_idx, None, -1e9, []))
-            continue
-        pairs = [(p1, p2) for p1 in top_indices for p2 in top_indices if p1 != p2]
-        if not pairs:
-            pairs = [(top_indices[0], top_indices[0])]
-        best_trio = None
-        best_trio_score = -np.inf
-        for p1, p2 in pairs:
-            trio_ll = 0.0
+    """Worker: score trios for a batch of samples. Reads from shared data.
+
+    Dynamic thread reallocation (when the pool was initialized with
+    counters): on entry, atomically increment _PEDIGREE_ACTIVE_COUNTER
+    and claim an extra thread; rescale numba threads to floor+extra.
+    On exit, release the extra and decrement.  Inside the per-contig
+    loop, _update_dynamic_threads() lets the worker rebalance as peers
+    finish -- the major Phase 2 win because that's where the bulk of
+    pipeline time is spent and where the work-distribution tail is.
+    """
+    # Counter inc/threads-up on entry.  See _check_trio_consistency_worker
+    # for the full rationale; this is the same pattern.
+    counter_inc = False
+    if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
+        try:
+            import numba as _numba
+            with _PEDIGREE_ACTIVE_COUNTER.get_lock():
+                _PEDIGREE_ACTIVE_COUNTER.value += 1
+            counter_inc = True
+            active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
+            floor = _PEDIGREE_TOTAL_CORES // active
+            remainder = _PEDIGREE_TOTAL_CORES - floor * active
+            _try_claim_extra(remainder)
+            n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
+            _numba.set_num_threads(n_threads)
+        except Exception:
+            pass
+
+    try:
+        contig_caches = _PEDIGREE_SHARED['contig_caches']
+        total_switches = _PEDIGREE_SHARED['total_switches']
+        error_pen = _PEDIGREE_SHARED['error_pen']
+        phase_pen = _PEDIGREE_SHARED['phase_pen']
+        mismatch_penalty = _PEDIGREE_SHARED['mismatch_penalty']
+        complexity_penalty = _PEDIGREE_SHARED['complexity_penalty']
+
+        results = []
+        for args in batch_sample_args:
+            # Tuple format depends on caller in infer_pedigree_multi_contig_tolerance:
+            #   (sample_idx, top_indices)              -- legacy enumeration
+            #                                             (use_anchor_union=False);
+            #                                             worker builds pairs as
+            #                                             unordered top_indices
+            #                                             pairs (dedup #1 from
+            #                                             May 2026 numba pass --
+            #                                             run_trio_phase_aware_hmm
+            #                                             is symmetric in (p1, p2)
+            #                                             so (p2, p1) was redundant).
+            #   (sample_idx, top_indices, pairs_list)  -- new union enumeration
+            #                                             (use_anchor_union=True);
+            #                                             pairs_list is the
+            #                                             deduplicated union of
+            #                                             (top_indices × top_indices)
+            #                                             and (anchor × all-N),
+            #                                             stored as canonical
+            #                                             (min, max) ordering.
+            if len(args) == 3:
+                sample_idx, top_indices, pairs = args
+            else:
+                sample_idx, top_indices = args
+                pairs = None
+            if len(top_indices) < 1:
+                results.append((sample_idx, None, -1e9, []))
+                continue
+            if pairs is None:
+                # Legacy enumeration with symmetric-pair dedup: enumerate only
+                # i < j unordered pairs.  The trio HMM is bit-identical under
+                # (p1, p2) swap (verified empirically May 2026 -- 100/100 random
+                # trios match exactly), so the previous
+                #     [(p1, p2) for p1 in top for p2 in top if p1 != p2]
+                # double-counted each unordered pair: 380 → 190 for top_k=20.
+                top_list = list(top_indices)
+                pairs = [(top_list[i], top_list[j])
+                         for i in range(len(top_list))
+                         for j in range(i + 1, len(top_list))]
+            if not pairs:
+                pairs = [(top_indices[0], top_indices[0])]
+            # Build int64 index arrays for the batched kernel.
+            n_pairs = len(pairs)
+            p1_arr = np.empty(n_pairs, dtype=np.int64)
+            p2_arr = np.empty(n_pairs, dtype=np.int64)
+            for k_idx in range(n_pairs):
+                p1_arr[k_idx] = pairs[k_idx][0]
+                p2_arr[k_idx] = pairs[k_idx][1]
+            # Sum trio_ll across contigs using the batched kernel.  Math is
+            # bit-identical to the old per-pair, per-contig Python loop that
+            # called score_trio_all_consensus_precomputed (which calls
+            # run_trio_phase_aware_hmm[_multisnp]) inside.  The kernel just
+            # wraps the same per-pair HMM call in a numba outer loop, so each
+            # entry of `contig_scores` is exactly what `score` was before.
+            trio_lls = np.zeros(n_pairs, dtype=np.float64)
             for cache in contig_caches:
-                sample_allele_grids = cache['sample_allele_grids']
+                # In-loop rebalance hook: as peer workers finish their
+                # tasks, this worker re-checks the active count and may
+                # claim newly-available extras (or release if active
+                # grew).  This is the most impactful hook in the file --
+                # Phase 2 tail dynamics depend on it.
+                _update_dynamic_threads()
+
+                stacked = cache['stacked_alleles']
+                hom = cache['stacked_hom_mask']
                 sw_costs = cache['sw_costs']
                 st_costs = cache['st_costs']
-                score = score_trio_all_consensus_precomputed(
-                    sample_allele_grids[sample_idx],
-                    sample_allele_grids[p1],
-                    sample_allele_grids[p2],
-                    sw_costs, st_costs,
-                    error_pen, phase_pen,
-                    mismatch_penalty
-                )
-                trio_ll += score
-            final = trio_ll - (total_switches[p1] + total_switches[p2]) * complexity_penalty
-            if final > best_trio_score:
-                best_trio_score = final
-                best_trio = (p1, p2)
-        results.append((sample_idx, best_trio, best_trio_score, top_indices))
-    return results
+                if stacked.ndim == 4:
+                    contig_scores = score_trio_batch_kernel_multisnp(
+                        stacked[sample_idx], hom[sample_idx], stacked,
+                        p1_arr, p2_arr,
+                        sw_costs, st_costs,
+                        error_pen, phase_pen, mismatch_penalty,
+                    )
+                else:
+                    contig_scores = score_trio_batch_kernel(
+                        stacked[sample_idx], hom[sample_idx], stacked,
+                        p1_arr, p2_arr,
+                        sw_costs, st_costs,
+                        error_pen, phase_pen, mismatch_penalty,
+                    )
+                trio_lls += contig_scores
+            # Apply complexity penalty per pair and find argmax.  This matches
+            # the legacy
+            #     final = trio_ll - (total_switches[p1] + total_switches[p2]) * complexity_penalty
+            # exactly (vectorised here).
+            cp = (total_switches[p1_arr] + total_switches[p2_arr]) * complexity_penalty
+            final_scores = trio_lls - cp
+            best_k = int(np.argmax(final_scores))
+            best_trio = (int(p1_arr[best_k]), int(p2_arr[best_k]))
+            best_trio_score = float(final_scores[best_k])
+            results.append((sample_idx, best_trio, best_trio_score, top_indices))
+        return results
+    finally:
+        _try_release_extra()
+        if counter_inc and _PEDIGREE_ACTIVE_COUNTER is not None:
+            try:
+                with _PEDIGREE_ACTIVE_COUNTER.get_lock():
+                    _PEDIGREE_ACTIVE_COUNTER.value -= 1
+            except Exception:
+                pass
 
 
 def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20,
                                           snps_per_bin=100, recomb_rate=5e-8,
                                           mismatch_penalty=DEFAULT_MISMATCH_PENALTY,
                                           max_snps_per_bin=10,
-                                          n_workers=None):
+                                          n_workers=None,
+                                          anchor_k=5,
+                                          use_anchor_union=True):
     """
     Multi-contig pedigree inference using tolerance paintings with multi-SNP voting.
+
+    Phase 2 candidate-pair enumeration:
+      use_anchor_union=False  (legacy):
+          For each child i, enumerate trios from top_k × top_k candidates
+          where the candidate set is filtered by the +5 margin generation
+          filter (cand_mask: parent_switches <= child_switches + 5).
+      use_anchor_union=True   (default, new):
+          For each child i, enumerate trios from the UNION of:
+            (a) top_k × top_k (same as legacy but with cand_mask filter
+                NOT applied -- the filter was found to spuriously exclude
+                high-switch true parents in May 2026 diagnostic work),
+            (b) top_anchor_k × all-N -- each of the top anchor_k candidates
+                is paired with every other valid sample (both orderings).
+          This catches asymmetric cases where one true parent dominates
+          Phase 1b scoring so much that the other true parent falls outside
+          top-K.  Cost: ~17-18x current Phase 2; mathematically a strict
+          superset of the legacy candidate pair set.
     """
     import multiprocessing as mp
     
@@ -1164,7 +1854,15 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     num_contigs = len(contig_data_list)
     
     if n_workers is None:
-        n_workers = min(os.cpu_count() or 4, 16)
+        # Use all available cores by default.  The historical
+        #   min(os.cpu_count() or 4, 16)
+        # cap was a leftover from earlier development on smaller hardware
+        # and silently bottlenecked any caller passing n_workers=None to
+        # 16 workers regardless of cpu_count -- inconsistent with
+        # perform_consistency_cutoff (line 234) which defaults to all
+        # cores.  Mathematical results are deterministic across worker
+        # counts; only batching granularity and wall-clock time change.
+        n_workers = os.cpu_count() or 4
     
     # Phase 1: Discretize and convert allele grids — parallelize across
     # (contig, sample_batch) pairs to use all cores, not just 7.
@@ -1229,10 +1927,38 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     contig_caches = []
     for c_idx in range(num_contigs):
         meta = contig_meta[c_idx]
+        # Build stacked arrays for the batched HMM-call kernels.
+        # paint_samples.process_contig_for_pedigree (line ~1170) always emits
+        # a single-element list [(allele_grid, hom_mask, 1.0)] per sample, so
+        # we can stack across samples into a single contiguous array.  This is
+        # the input format expected by score_*_batch_kernel[_multisnp] above.
+        # The legacy 'sample_allele_grids' list is kept so the unused
+        # score_*_precomputed wrappers (and any external callers) still work.
+        grids_list = contig_sample_grids[c_idx]
+        assert all(len(g) == 1 for g in grids_list), (
+            "Expected exactly one allele grid per sample per contig "
+            "(paint_samples emits length-1 lists with weight 1.0); "
+            "found a multi-grid sample.  Batched kernels assume single-grid.")
+        first_alleles = grids_list[0][0][0]
+        first_hom = grids_list[0][0][1]
+        stacked_alleles = np.stack(
+            [grids_list[i][0][0] for i in range(len(grids_list))], axis=0,
+        )
+        stacked_hom_mask = np.stack(
+            [grids_list[i][0][1] for i in range(len(grids_list))], axis=0,
+        )
+        # Sanity-check the resulting shapes match the per-sample grids
+        assert stacked_alleles.shape[0] == len(grids_list)
+        assert stacked_alleles.shape[1:] == first_alleles.shape
+        assert stacked_hom_mask.shape[0] == len(grids_list)
+        assert stacked_hom_mask.shape[1:] == first_hom.shape
         contig_caches.append({
             'sample_allele_grids': contig_sample_grids[c_idx],
             'sw_costs': meta['sw_costs'],
             'st_costs': meta['st_costs'],
+            # New stacked arrays for batched kernels (optimization #4):
+            'stacked_alleles': stacked_alleles,
+            'stacked_hom_mask': stacked_hom_mask,
         })
         global_total_bins += meta['num_bins']
     
@@ -1261,10 +1987,21 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
         child_batches.append(list(range(start, end)))
     
     total_scores = np.zeros((num_samples, num_samples))
-    
-    with ctx.Pool(processes=min(n_workers, len(child_batches)),
+
+    # Counters for the two-step dynamic-thread reallocation pattern
+    # (see module-level _PEDIGREE_ACTIVE_COUNTER docstring).  Fresh
+    # mp.Value('i', 0) per pool.  This pool services BOTH Phase 1b
+    # and Phase 2, so the same counters tracking active workers carry
+    # across the two phases -- by design, since at the boundary between
+    # the phases all workers have decremented (Phase 1b finishes) before
+    # the Phase 2 dispatch starts, so the counter is naturally back at 0.
+    pool_active_counter = ctx.Value('i', 0)
+    pool_extra_counter = ctx.Value('i', 0)
+    pool_workers = min(n_workers, len(child_batches))
+
+    with ctx.Pool(processes=pool_workers,
                   initializer=_init_pedigree_shared,
-                  initargs=(shared_all,)) as pool:
+                  initargs=(shared_all, pool_active_counter, n_workers, pool_extra_counter)) as pool:
         
         # --- Phase 1b ---
         results = list(tqdm(
@@ -1287,29 +2024,88 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
             cand_mask[i, i] = False
 
         # --- Phase 2: Trio Verification (same Pool, no re-fork) ---
-        print(f"\n--- Phase 2: Trio Verification (Top {top_k} Pairs, reusing pool) ---")
-        
+        # cand_mask above is preserved in both paths: the legacy path applies
+        # it to gate top_indices, while the anchor-union path no longer
+        # applies it for gating (the +5 margin spuriously excluded high-
+        # switch true parents in May 2026 diagnostic work; the 80%
+        # consistency cutoff in perform_consistency_cutoff is the real
+        # correctness gate).  cand_mask is still computed because
+        # investigate_phase1b_coverage.py captures it via stack-frame spy
+        # for diagnostic purposes.
+        if use_anchor_union:
+            print(f"\n--- Phase 2: Trio Verification "
+                  f"(UNION: top-{top_k} × top-{top_k} ∪ top-{anchor_k} anchors × all-N, "
+                  f"reusing pool) ---")
+        else:
+            print(f"\n--- Phase 2: Trio Verification (Top {top_k} Pairs, reusing pool) ---")
+
         all_sample_args = []
         for i in range(num_samples):
             valid_scores = total_scores[i].copy()
-            valid_scores[~cand_mask[i, :]] = -np.inf
+            if use_anchor_union:
+                # ANCHOR-UNION PATH: cand_mask NOT applied; only exclude
+                # self-pair.  See doc-comment on use_anchor_union above.
+                valid_scores[i] = -np.inf
+            else:
+                # LEGACY PATH: apply +5 margin generation filter.
+                valid_scores[~cand_mask[i, :]] = -np.inf
             for j in range(num_samples):
                 if valid_scores[j] > -1e9:
                     valid_scores[j] -= (total_switches[j] * COMPLEXITY_PENALTY)
             top_indices = np.argsort(valid_scores)[-top_k:][::-1]
             top_indices = [x for x in top_indices if valid_scores[x] > -1e10]
-            all_sample_args.append((i, top_indices))
+
+            if use_anchor_union:
+                # Build the union pair set per child:
+                #   (a) top-K × top-K (no self) -- legacy semantics
+                #   (b) top-anchor_k × all-N (no self/anchor)
+                # Pairs are stored as canonical (min, max) tuples to dedupe
+                # symmetric duplicates.  The trio HMM
+                # (run_trio_phase_aware_hmm[_multisnp]) is bit-identical under
+                # (p1, p2) swap -- verified empirically May 2026 (100/100
+                # random trios match exactly).  The earlier version stored
+                # both (a, j) and (j, a), doubling Phase 2 cost.
+                pair_set = set()
+                # (a) top-K × top-K (unordered i<j)
+                top_list_int = [int(p) for p in top_indices]
+                for ii in range(len(top_list_int)):
+                    for jj in range(ii + 1, len(top_list_int)):
+                        pair_set.add((top_list_int[ii], top_list_int[jj]))
+                # (b) anchors × all-N (single canonical ordering)
+                anchor_list_int = top_list_int[:anchor_k] if anchor_k > 0 else []
+                for a_int in anchor_list_int:
+                    for j in range(num_samples):
+                        if j == i or j == a_int:
+                            continue
+                        if valid_scores[j] <= -1e10:
+                            continue
+                        j_int = int(j)
+                        if a_int < j_int:
+                            pair_set.add((a_int, j_int))
+                        else:
+                            pair_set.add((j_int, a_int))
+                pairs_list = list(pair_set)
+                all_sample_args.append((i, top_indices, pairs_list))
+            else:
+                # LEGACY PATH: worker enumerates pairs from top_indices.
+                all_sample_args.append((i, top_indices))
         
-        batch_size = max(1, num_samples // (n_workers * 4))
-        batched_args = []
-        for batch_start in range(0, num_samples, batch_size):
-            batch_end = min(batch_start + batch_size, num_samples)
-            batch_sample_args = all_sample_args[batch_start:batch_end]
-            batched_args.append(batch_sample_args)
-        
+        # Per-sample tasks for finer progress granularity.  The previous
+        # heuristic `batch_size = max(1, num_samples // (n_workers * 4))`
+        # was a generic "4 batches per worker" load-balancing trick, but
+        # imap_unordered already does dynamic task scheduling, and each
+        # per-sample trio enumeration is heavy enough that IPC overhead
+        # is negligible compared to compute (sub-1% even at 112 workers).
+        # At 112 workers the old heuristic clamped batch_size to 1 anyway
+        # (so this is functionally identical there); at lower worker
+        # counts the IPC overhead is still negligible.  Wrapping each
+        # arg in a single-element list preserves the worker function's
+        # signature (it accepts a list of sample args).
+        single_arg_batches = [[arg] for arg in all_sample_args]
+
         batch_results = list(tqdm(
-            pool.imap_unordered(_score_trios_batch, batched_args),
-            total=len(batched_args),
+            pool.imap_unordered(_score_trios_batch, single_arg_batches),
+            total=num_samples,
             desc="Inferring Trios in parallel"
         ))
     
@@ -1329,7 +2125,13 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     
     for sample_idx, best_trio, best_trio_score, top_indices in trio_results:
         valid_scores = total_scores[sample_idx].copy()
-        valid_scores[~cand_mask[sample_idx, :]] = -np.inf
+        # Match the filter behaviour used in Phase 2 args construction so
+        # the scores reported in parent_candidates correspond to what Phase 2
+        # actually saw at trio-scoring time.
+        if use_anchor_union:
+            valid_scores[sample_idx] = -np.inf  # self-pair only
+        else:
+            valid_scores[~cand_mask[sample_idx, :]] = -np.inf
         parent_candidates[sample_ids[sample_idx]] = [
             (sample_ids[x], valid_scores[x]) for x in top_indices
         ]
