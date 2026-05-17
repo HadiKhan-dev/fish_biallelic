@@ -196,8 +196,85 @@ def _debug_save_context(context_dict):
 _ACTIVE_COUNTER = None   # mp.Value('i', 0) — shared across all workers
 _TOTAL_CORES = None       # Total cores available (e.g. 112)
 
+# ---------------------------------------------------------------------------
+# Remainder distribution for the OUTER batch pool.
+#
+# When total_cores is not evenly divisible by active workers,
+# floor(total/active) leaves `remainder = total % active` idle cores.
+# E.g. total=112, active=76: floor=1, remainder=36 — 36 cores sit idle
+# until enough peers finish to push floor up to 2 (active=56).  This is
+# the same pattern that block_haplotypes / block_linking / hmm_matching
+# now address via their respective EXTRA_COUNTER globals; here we wire
+# the equivalent into the OUTER hierarchical_assembly pool, which is
+# the most production-impactful site because its counter is the one
+# read by inner stage-4 sequential paths via the `dynamic_cores_fn`
+# callback (e.g. _get_dynamic_threads passed into
+# hmm_matching.generate_transition_probability_mesh_double_hmm with
+# num_processes=1).
+#
+# _EXTRA_COUNTER: pool-wide atomic int.  Reflects the number of
+#     workers currently holding +1 threads (ceil = floor + 1).  At any
+#     time at most `remainder` workers hold extras.
+# _I_HAVE_EXTRA: per-worker-process bool.  True iff this worker
+#     currently holds a claim.
+#
+# Both are None / False outside a properly-initialised pool worker.
+# See _try_claim_extra and _try_release_extra below for atomicity.
+# ---------------------------------------------------------------------------
+_EXTRA_COUNTER = None
+_I_HAVE_EXTRA = False
 
-def _init_worker_meta(meta_dict, total_cores, active_counter):
+
+def _try_claim_extra(remainder):
+    """Atomically attempt to claim an extra thread from the remainder pool.
+
+    Returns True if successfully claimed (and sets _I_HAVE_EXTRA).
+    Returns False if exhausted or counter not set up.  Idempotent.
+
+    Mirrors block_linking._try_claim_extra / block_haplotypes
+    ._try_claim_extra_bh / hmm_matching._try_claim_extra_hm exactly.
+    See block_linking._try_claim_extra for the full race-analysis
+    discussion.
+    """
+    global _I_HAVE_EXTRA
+    if _I_HAVE_EXTRA:
+        return True
+    if _EXTRA_COUNTER is None:
+        return False
+    try:
+        with _EXTRA_COUNTER.get_lock():
+            if _EXTRA_COUNTER.value < remainder:
+                _EXTRA_COUNTER.value += 1
+                _I_HAVE_EXTRA = True
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _try_release_extra():
+    """Atomically release this worker's extra claim, if held.
+
+    Mirrors block_linking._try_release_extra.  Defensive: clears the
+    local flag even if shared counter mutation fails.
+    """
+    global _I_HAVE_EXTRA
+    if not _I_HAVE_EXTRA:
+        return False
+    if _EXTRA_COUNTER is None:
+        _I_HAVE_EXTRA = False
+        return False
+    try:
+        with _EXTRA_COUNTER.get_lock():
+            _EXTRA_COUNTER.value -= 1
+            _I_HAVE_EXTRA = False
+            return True
+    except Exception:
+        _I_HAVE_EXTRA = False
+        return False
+
+
+def _init_worker_meta(meta_dict, total_cores, active_counter, extra_counter=None):
     """
     Pool initializer — called once per worker at creation time.
     Stores SharedMemory metadata so workers can attach to the segments.
@@ -209,6 +286,18 @@ def _init_worker_meta(meta_dict, total_cores, active_counter):
     With OMP PASSIVE or TBB threading layers, idle threads in an oversized
     pool sleep and consume zero CPU. With workqueue, idle threads spin —
     avoid using workqueue with dynamic threading.
+
+    Args:
+        meta_dict: SharedMemory metadata dict.
+        total_cores: int — total cores available to the pool.
+        active_counter: mp.Value('i', 0) shared across workers.
+        extra_counter: optional mp.Value('i', 0) for remainder
+            distribution.  When provided, workers atomically
+            claim/release from this pool so that exactly `remainder =
+            total % active` workers hold ceil(total/active) threads
+            and the rest hold floor — keeping total threads in use
+            equal to total_cores with zero idle.  When None (legacy
+            callers), falls back to floor-only allocation.
     """
     import os
     os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
@@ -222,25 +311,64 @@ def _init_worker_meta(meta_dict, total_cores, active_counter):
         pass
     
     global _SHARED_META, _ACTIVE_COUNTER, _TOTAL_CORES
+    global _EXTRA_COUNTER, _I_HAVE_EXTRA
     _SHARED_META = meta_dict
     _ACTIVE_COUNTER = active_counter
     _TOTAL_CORES = total_cores
+    _EXTRA_COUNTER = extra_counter
+    # Defensive: ensure no stale claim from worker recycling
+    # (maxtasksperchild > 1 spawns a fresh process when recycling, so
+    # this is technically redundant — but it's a cheap safety net).
+    _I_HAVE_EXTRA = False
 
 
 def _get_dynamic_threads():
     """
     Compute optimal thread count for this worker based on active peers.
     
-    Uses total_cores // active_workers, clamped to [1, total_cores].
+    Uses floor(total_cores / active_workers) + (1 if this worker holds
+    an extra-claim else 0), clamped to [1, total_cores].
+
+    Remainder distribution: when total_cores is not evenly divisible
+    by active workers, exactly `remainder = total % active` workers
+    hold a +1 thread.  This call may attempt to claim or release an
+    extra based on the current `remainder`, just like
+    block_linking._update_dynamic_threads.  The net effect: total
+    threads in use = total_cores at all times, with no idle cores.
+
     The read of active_counter.value is intentionally lock-free — a
     slightly stale count (off by 1-2) is fine since we recheck between
     every major phase. The cost of being briefly wrong is a few seconds
-    of mild over/under-subscription, not correctness.
+    of mild over/under-subscription, not correctness.  The
+    extra-counter lock IS acquired briefly during claim/release because
+    those mutations must be atomic to avoid over-claim.
+
+    Backwards-compatible: when _EXTRA_COUNTER is None (legacy callers
+    that didn't pass extra_counter through _init_worker_meta), this
+    function returns floor only — exactly the pre-remainder-distribution
+    behavior, preserving the original semantics.
     """
     if _ACTIVE_COUNTER is None or _TOTAL_CORES is None:
         return 1
     active = max(_ACTIVE_COUNTER.value, 1)
-    return max(1, _TOTAL_CORES // active)
+    floor = _TOTAL_CORES // active
+    remainder = _TOTAL_CORES - floor * active
+
+    # Adjust extra-claim based on current remainder.  See
+    # block_linking._update_dynamic_threads for the full discussion.
+    if _EXTRA_COUNTER is not None:
+        try:
+            current_extras = _EXTRA_COUNTER.value
+        except Exception:
+            current_extras = 0
+        if not _I_HAVE_EXTRA:
+            if current_extras < remainder:
+                _try_claim_extra(remainder)
+        else:
+            if current_extras > remainder:
+                _try_release_extra()
+
+    return max(1, floor + (1 if _I_HAVE_EXTRA else 0))
 
 
 def _apply_dynamic_threads():
@@ -695,6 +823,13 @@ def _process_single_batch(args):
             'status': 'success' if super_block else 'reconstruction_failed'
         }
     finally:
+        # Release any held extra FIRST, then decrement the active
+        # counter.  Same ordering invariant as block_linking._gap_worker:
+        # peers see the freed extra-slot before they see the decremented
+        # active count.  _try_release_extra is a no-op when this worker
+        # doesn't currently hold an extra OR when _EXTRA_COUNTER isn't
+        # set up (legacy single-process path).
+        _try_release_extra()
         # Unregister this worker
         if _ACTIVE_COUNTER is not None:
             with _ACTIVE_COUNTER.get_lock():
@@ -910,6 +1045,20 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     # Create shared active-worker counter for dynamic thread reallocation
     # =====================================================================
     active_counter = _forkserver_ctx.Value('i', 0)
+    # Extra-thread counter for remainder distribution.  When
+    # total_cores is not evenly divisible by active workers, exactly
+    # `remainder = total % active` workers will hold +1 threads via
+    # claim/release through this counter.  Same forkserver context as
+    # active_counter for shared-memory consistency.  See
+    # _try_claim_extra / _try_release_extra / _get_dynamic_threads
+    # for the full mechanism.  This is the most production-impactful
+    # of the four extras-counter implementations because
+    # _get_dynamic_threads is passed as `dynamic_cores_fn` into inner
+    # stage-4 sequential paths (block_linking with num_processes=1,
+    # hmm_matching with num_processes=1) — so the outer batch pool's
+    # remainder distribution propagates down to those inner workers'
+    # in-flight thread rescaling.
+    extra_counter = _forkserver_ctx.Value('i', 0)
     
     # =====================================================================
     # Prepare worker arguments
@@ -951,7 +1100,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             pool = NoDaemonPool(
                 processes=outer_workers,
                 initializer=_init_worker_meta,
-                initargs=(shared_meta, total_cores, active_counter),
+                initargs=(shared_meta, total_cores, active_counter, extra_counter),
                 maxtasksperchild=maxtasksperchild
             )
             print(f"  Pool creation ({outer_workers} workers): {time.time()-t0:.1f}s")
@@ -975,9 +1124,17 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         else:
             # Sequential execution — set metadata for current process
             global _SHARED_META, _ACTIVE_COUNTER, _TOTAL_CORES
+            global _EXTRA_COUNTER, _I_HAVE_EXTRA
             _SHARED_META = shared_meta
             _ACTIVE_COUNTER = None  # No counter needed for single process
             _TOTAL_CORES = total_cores
+            # Sequential path: only one "worker" running, so no extras
+            # mechanism applies (a single worker holding all cores is
+            # the trivial case — _get_dynamic_threads returns 1 when
+            # _ACTIVE_COUNTER is None, but real usage in this path
+            # should call numba.set_num_threads(total_cores) directly).
+            _EXTRA_COUNTER = None
+            _I_HAVE_EXTRA = False
             results = []
             for args in tqdm(worker_args, desc="Processing Batches"):
                 results.append(_process_single_batch(args))

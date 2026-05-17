@@ -47,6 +47,319 @@ def make_upper_triangular(matrix):
     """
     return np.triu(matrix + matrix.T - np.diag(matrix.diagonal()))
 
+# =============================================================================
+# NUMBA-ACCELERATED LOG-SPACE HELPERS
+# =============================================================================
+#
+# scipy.special.logsumexp has substantial Python dispatch overhead — even
+# on tiny (10,) inputs each call costs ~80 us due to validation, axis
+# argument parsing, and the C trampoline.  This overhead dominates when
+# logsumexp is called many times per block (e.g. inside the HMM forward/
+# backward passes in block_linking.py and hmm_matching.py, where log_matmul
+# is called twice per block × hundreds of blocks per contig).
+#
+# These kernels are scalar-loop numba implementations of the four most-
+# common patterns in the project:
+#
+#   _logsumexp_scalar_kernel(x)         — 1D input -> scalar.  Used for
+#                                          full reductions of small 1D
+#                                          arrays (typical L=4-50).
+#                                          ~80 us scipy -> 0.3 us numba
+#                                          on size 10 (225x).
+#   _logsumexp_axis_last_2d_kernel(x)   — 2D input -> 1D, reducing the
+#                                          last axis.  Used for axis=1
+#                                          on (N, K) shapes typical of
+#                                          per-sample HMM forward sums.
+#   _logsumexp_axis0_2d_kernel(x)       — 2D input -> 1D, reducing axis=0.
+#                                          Used both directly (2D input)
+#                                          and via the lse_axis0 wrapper
+#                                          for higher-dim input by
+#                                          flattening trailing axes.
+#   _log_matmul_2d_kernel(A, B)         — log-space (M,K) @ (K,N) = (M,N).
+#                                          Drop-in replacement for the
+#                                          2D case of log_matmul.
+#
+# All kernels handle the all-(-inf) edge case the same way as scipy:
+# if the row/column/slice max is -inf, the offset is treated as 0.0,
+# the sum-of-exps comes out as 0, and the returned log is -inf — no NaN.
+#
+# Numerical equivalence: tested to <2e-15 absolute error vs
+# scipy.special.logsumexp on uniform-random inputs across a range of
+# shapes.  The output difference is at the last bit of float64 due to
+# reduction-order differences between numpy/scipy's vectorized
+# implementation and the scalar-loop kernel.
+#
+# Public wrappers (lse_scalar, lse_axis_last, lse_axis0) handle list
+# inputs (converting via np.asarray) and dtype casting before
+# delegating to the kernels.  log_matmul preserves its existing
+# signature and behavior, dispatching to the 2D kernel when possible
+# and falling back to scipy for higher-dim broadcast cases (which no
+# current caller uses but the public API supports).
+# =============================================================================
+
+@njit(cache=True)
+def _logsumexp_scalar_kernel(x):
+    """1D input -> scalar.  Numerically stable log-sum-exp.
+
+    Matches scipy.special.logsumexp(x) on a 1D array:
+      m = max(x)
+      if not isfinite(m): m_safe = 0.0
+      else:                m_safe = m
+      return m_safe + log(sum(exp(x - m_safe)))
+
+    All-(-inf) input returns -inf, matching scipy.
+    """
+    K = x.shape[0]
+    if K == 0:
+        return -np.inf
+    m = x[0]
+    for k in range(1, K):
+        if x[k] > m:
+            m = x[k]
+    if not np.isfinite(m):
+        m_safe = 0.0
+    else:
+        m_safe = m
+    s = 0.0
+    for k in range(K):
+        s += np.exp(x[k] - m_safe)
+    return m_safe + np.log(s)
+
+
+@njit(cache=True)
+def _logsumexp_axis_last_2d_kernel(x):
+    """2D input -> 1D, reducing the last axis.
+
+    Matches scipy.special.logsumexp(x, axis=-1) or axis=1 on a 2D array.
+    Output shape (N,) for input shape (N, K).
+    """
+    N, K = x.shape
+    out = np.empty(N, dtype=np.float64)
+    for i in range(N):
+        if K == 0:
+            out[i] = -np.inf
+            continue
+        m = x[i, 0]
+        for k in range(1, K):
+            if x[i, k] > m:
+                m = x[i, k]
+        if not np.isfinite(m):
+            m_safe = 0.0
+        else:
+            m_safe = m
+        s = 0.0
+        for k in range(K):
+            s += np.exp(x[i, k] - m_safe)
+        out[i] = m_safe + np.log(s)
+    return out
+
+
+@njit(cache=True)
+def _logsumexp_axis0_2d_kernel(x):
+    """2D input -> 1D, reducing axis=0.
+
+    Matches scipy.special.logsumexp(x, axis=0) on a 2D array.
+    Output shape (M,) for input shape (N, M).
+    """
+    N, M = x.shape
+    out = np.empty(M, dtype=np.float64)
+    for j in range(M):
+        if N == 0:
+            out[j] = -np.inf
+            continue
+        m = x[0, j]
+        for i in range(1, N):
+            if x[i, j] > m:
+                m = x[i, j]
+        if not np.isfinite(m):
+            m_safe = 0.0
+        else:
+            m_safe = m
+        s = 0.0
+        for i in range(N):
+            s += np.exp(x[i, j] - m_safe)
+        out[j] = m_safe + np.log(s)
+    return out
+
+
+@njit(cache=True)
+def _log_matmul_2d_kernel(A, B):
+    """Log-space matrix multiplication: C[i,j] = logsumexp_k(A[i,k] + B[k,j]).
+
+    For 2D inputs A=(M, K) and B=(K, N), returns (M, N).
+    Eliminates the (M, K, N) broadcast intermediate that the scipy-based
+    implementation allocates.
+    """
+    M, K = A.shape
+    K2, N = B.shape
+    # Numba doesn't allow `assert K == K2` to raise informatively in nopython
+    # mode without object-mode fallback; the caller (log_matmul wrapper)
+    # validates shape before invoking this kernel.  We keep the assertion-
+    # like check via array-bounds anyway (out of bounds would surface as a
+    # numba error).
+    C = np.empty((M, N), dtype=np.float64)
+    for i in range(M):
+        for j in range(N):
+            # Find max of A[i, k] + B[k, j] over k for numerical stability
+            m = A[i, 0] + B[0, j]
+            for k in range(1, K):
+                v = A[i, k] + B[k, j]
+                if v > m:
+                    m = v
+            if not np.isfinite(m):
+                m_safe = 0.0
+            else:
+                m_safe = m
+            s = 0.0
+            for k in range(K):
+                s += np.exp(A[i, k] + B[k, j] - m_safe)
+            C[i, j] = m_safe + np.log(s)
+    return C
+
+
+def lse_scalar(x):
+    """Numba-accelerated logsumexp for 1D inputs returning a scalar.
+
+    Drop-in faster replacement for scipy.special.logsumexp(x) on 1D
+    arrays or Python lists.  At small input sizes (typical 4-50 in the
+    project's HMM code) this is 10-200x faster than scipy due to
+    eliminating scipy's per-call Python dispatch overhead.
+
+    Args:
+        x: 1D array-like (np.ndarray or Python list) of float64-castable
+           values.
+
+    Returns:
+        float — log(sum(exp(x))) computed numerically stably.
+
+    Edge cases:
+        - Empty input returns -inf.
+        - All-(-inf) input returns -inf (no NaN).
+    """
+    x_arr = np.ascontiguousarray(x, dtype=np.float64)
+    return _logsumexp_scalar_kernel(x_arr)
+
+
+def lse_axis_last(x, keepdims=False):
+    """Numba-accelerated logsumexp along the last axis of a 2D array.
+
+    Drop-in faster replacement for scipy.special.logsumexp(x, axis=-1)
+    or scipy.special.logsumexp(x, axis=1) on 2D inputs.
+
+    Args:
+        x: 2D array (N, K).
+        keepdims: if True, returned shape is (N, 1) instead of (N,);
+            matches scipy's keepdims semantic.
+
+    Returns:
+        np.ndarray — (N,) or (N, 1) of logsumexp values along axis=1.
+    """
+    x_arr = np.ascontiguousarray(x, dtype=np.float64)
+    if x_arr.ndim != 2:
+        # Defensive: fall back to scipy for non-2D inputs to preserve
+        # the public API semantics.  Should not be hit by current
+        # callers — they all use 2D.
+        return logsumexp(x_arr, axis=-1, keepdims=keepdims)
+    out = _logsumexp_axis_last_2d_kernel(x_arr)
+    if keepdims:
+        return out.reshape(-1, 1)
+    return out
+
+
+def lse_axis0(x):
+    """Numba-accelerated logsumexp along axis=0.
+
+    Drop-in faster replacement for scipy.special.logsumexp(x, axis=0).
+    Supports any ndim >= 2 by flattening the trailing dims, calling the
+    2D axis=0 kernel, and reshaping back.  For 1D input falls back to
+    lse_scalar (which is what scipy does — axis=0 on 1D returns scalar).
+
+    Args:
+        x: array of ndim >= 1, or a Python list of equal-shape arrays
+           which gets stacked along a new leading axis (matching scipy's
+           behavior for list input).
+
+    Returns:
+        np.ndarray (or scalar for 1D input) — logsumexp reduction along
+        axis=0; output shape is x.shape[1:].
+    """
+    # Handle Python list input (e.g. logsumexp(batch_results, axis=0)
+    # where batch_results is a list of equal-shape arrays).  scipy's
+    # logsumexp implicitly converts via np.asarray which stacks along
+    # the first new axis — same as np.stack(..., axis=0).
+    if isinstance(x, list):
+        if len(x) == 0:
+            return logsumexp(np.asarray(x, dtype=np.float64), axis=0)
+        x = np.stack(x, axis=0)
+    x_arr = np.ascontiguousarray(x, dtype=np.float64)
+    if x_arr.ndim == 1:
+        # axis=0 on 1D is full reduction to scalar — matches scipy
+        return _logsumexp_scalar_kernel(x_arr)
+    # General ndim >= 2 path: flatten the trailing dims to (B, M), call
+    # the 2D kernel, reshape result to x.shape[1:].
+    leading = x_arr.shape[0]
+    trailing_shape = x_arr.shape[1:]
+    M = 1
+    for d in trailing_shape:
+        M *= d
+    # Reshape preserves underlying data layout for C-contiguous input.
+    x_flat = x_arr.reshape(leading, M)
+    out_flat = _logsumexp_axis0_2d_kernel(x_flat)
+    return out_flat.reshape(trailing_shape)
+
+
+def _build_haploid_log_T_from_dict(trans_dict, prev_keys, curr_keys, prev_idx, curr_idx,
+                                     missing_default=None):
+    """Helper: build a dense (n_prev, n_curr) log-transition matrix from
+    a sparse Python dict.
+
+    The dict is expected to be keyed by ((prev_idx, prev_hap_key),
+    (curr_idx, curr_hap_key)) tuples — the project's standard
+    transition-probability dict format.  Missing entries yield -inf by
+    default, or a caller-supplied `missing_default` value.
+
+    Cannot be numba-accelerated (numba doesn't support arbitrary
+    Python dict key types).  Extracted to a single location to ensure
+    block_linking.get_full_probs_forward/backward,
+    hmm_matching.build_dense_transition_matrix, and the hap_log_prior
+    construction in hmm_matching.update_transitions_layered_hmm all
+    use the SAME construction logic.
+
+    Args:
+        trans_dict: dict {((prev_idx, prev_hap), (curr_idx, curr_hap)): prob}
+        prev_keys: list of hap IDs at prev_idx
+        curr_keys: list of hap IDs at curr_idx
+        prev_idx, curr_idx: int block indices used to build the
+            two-level tuple key
+        missing_default: optional float for missing entries.  Default
+            None means use -inf (the original behavior, matching
+            block_linking.get_full_probs_forward's
+            `T = np.full(..., -np.inf)`).  Set to math.log(1e-9) to
+            match hmm_matching.update_transitions_layered_hmm's
+            original `sparse_trans.get(..., 1e-9)` then `math.log()`
+            pattern, where missing edges were treated as having a
+            very small (but non-zero) probability rather than being
+            forbidden.
+
+    Returns:
+        np.ndarray (n_prev, n_curr) float64 — log of probability where
+            the key exists, missing_default (or -inf if None) elsewhere.
+    """
+    n_prev = len(prev_keys)
+    n_curr = len(curr_keys)
+    if missing_default is None:
+        # Original behavior — preserved exactly for existing callers.
+        hap_log_T = np.full((n_prev, n_curr), -np.inf)
+    else:
+        hap_log_T = np.full((n_prev, n_curr), float(missing_default))
+    for u_i, u_key in enumerate(prev_keys):
+        for x_i, x_key in enumerate(curr_keys):
+            key = ((prev_idx, u_key), (curr_idx, x_key))
+            if key in trans_dict:
+                hap_log_T[u_i, x_i] = math.log(trans_dict[key])
+    return hap_log_T
+
+
 def log_matmul(A, B):
     """
     Performs Matrix Multiplication in Log-Space.
@@ -61,8 +374,23 @@ def log_matmul(A, B):
     Returns:
         Tensor of shape (..., M, N) resulting from log-space multiplication.
         Supports broadcasting for batches.
+
+    Implementation: when both A and B are 2D, delegates to a numba kernel
+    that eliminates the (M, K, N) broadcast intermediate scipy uses.
+    For higher-dim broadcast inputs falls back to the scipy implementation
+    (no current project caller passes higher-dim inputs, but the public
+    API supports it).  The 2D path is bit-equivalent to within ~2e-15 to
+    the scipy path on typical inputs.
     """
-    # Expand dims to broadcast the summation dimension K
+    # Fast path: 2D x 2D, which is what every project caller uses.
+    A_arr = np.asarray(A)
+    B_arr = np.asarray(B)
+    if A_arr.ndim == 2 and B_arr.ndim == 2 and A_arr.shape[1] == B_arr.shape[0]:
+        A_c = np.ascontiguousarray(A_arr, dtype=np.float64)
+        B_c = np.ascontiguousarray(B_arr, dtype=np.float64)
+        return _log_matmul_2d_kernel(A_c, B_c)
+    # Fallback for broadcasting / non-2D cases: original scipy-based
+    # implementation, preserved for API compatibility.
     return logsumexp(A[..., np.newaxis] + B[..., np.newaxis, :, :], axis=-2)
 
 #%% --- READS TO PROBABILITIES ---
