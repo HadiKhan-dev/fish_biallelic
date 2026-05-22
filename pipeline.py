@@ -1,4 +1,72 @@
 #%%
+# =============================================================================
+# Module-level definitions (PICKLABLE by forkserver workers)
+# =============================================================================
+# Functions defined inside `if __name__ == '__main__':` are closures
+# that cannot be pickled by multiprocessing.  Forkserver workers receive
+# their initargs (including any callback functions) via pickle, so any
+# function that needs to cross the worker boundary MUST live at module
+# top level here.  Keep this section small -- imports here run in every
+# forkserver worker at startup.
+
+CHECKPOINT_DIR = ".pipeline_checkpoints"
+
+
+def _load_contig_for_phase_correction(r_name):
+    """
+    Load tolerance_result and founder_block for one contig from
+    checkpoint files on disk.
+
+    Top-level (picklable) version used by forkserver workers in
+    phase_correction.  Reads checkpoints DIRECTLY rather than
+    going through main's `multi_contig_results` cache, because
+    forkserver workers do not inherit main's process state.
+
+    The stage->key mapping mirrors `_KEY_SOURCE` inside the
+    `__main__` block:
+        tolerance_result -> 10_viterbi_painting
+        super_blocks_L4  -> 09_assembly_L4    (preferred)
+        super_blocks_L3  -> 08_assembly_L3    (fallback)
+    If a checkpoint file is missing the corresponding data key is
+    simply omitted from the returned dict; the worker handles
+    missing keys by falling back to an identity equivalence matrix.
+    """
+    import os
+    import pickle as _pickle
+
+    data = {}
+
+    # tolerance_result lives in stage 10 (Viterbi painting)
+    tol_path = os.path.join(CHECKPOINT_DIR, "10_viterbi_painting", f"{r_name}.pkl")
+    if os.path.exists(tol_path):
+        with open(tol_path, 'rb') as f:
+            ckpt = _pickle.load(f)
+        if 'tolerance_result' in ckpt:
+            data['tolerance_result'] = ckpt['tolerance_result']
+        del ckpt
+
+    # founder_block lives in stage 9 (L4 assembly), falling back to
+    # stage 8 (L3 assembly) when L4 is absent.  We take element [0]
+    # because super_blocks is a list of BlockResults; in the
+    # phase-correction flow there is exactly one block per contig
+    # (the whole-chromosome merged block).
+    for stage, list_key in [("09_assembly_L4", "super_blocks_L4"),
+                             ("08_assembly_L3", "super_blocks_L3")]:
+        if 'founder_block' in data:
+            break
+        path = os.path.join(CHECKPOINT_DIR, stage, f"{r_name}.pkl")
+        if not os.path.exists(path):
+            continue
+        with open(path, 'rb') as f:
+            ckpt = _pickle.load(f)
+        if list_key in ckpt and ckpt[list_key]:
+            data['founder_block'] = ckpt[list_key][0]
+        del ckpt
+
+    return data
+
+
+#%%
 if __name__ == '__main__':
     import os
     import sys
@@ -63,13 +131,34 @@ if __name__ == '__main__':
     # =============================================================================
     # RUN-TIME TOGGLES
     # =============================================================================
-    # SKIP_VALIDATIONS: when True, the five ground-truth validation cells
-    # (Block Haplotypes, L1 / L2 / L3 / L4 Super Blocks) are skipped at run
-    # time.  Those validations are read-only diagnostics (they don't affect
-    # any downstream stage) but they take ~5-6 minutes when reloading
-    # checkpoints.  Set to False to re-enable them, e.g. when investigating
-    # an upstream-stage regression.
-    SKIP_VALIDATIONS = False
+    # Validation toggles -- each gates a group of ground-truth diagnostic cells
+    # that are read-only (they do not affect any downstream stage) but take
+    # non-trivial wall time when reloading checkpoints.  Set any flag to True
+    # to skip its group; set to False to re-enable, e.g. when investigating
+    # a regression in the corresponding upstream stage.
+    #
+    #   SKIP_VALIDATIONS_BLOCK_HAPS         -- 5 cells:
+    #       * Block Haplotypes vs Ground Truth
+    #       * Level 1 / 2 / 3 / 4 Super Blocks vs Ground Truth
+    #     These all compare DISCOVERED haplotypes against the simulation's
+    #     true founder haplotypes at increasingly aggregated granularities.
+    #     Combined runtime: ~5-6 min when reloading checkpoints.
+    #
+    #   SKIP_VALIDATIONS_PAINTING           -- 1 cell:
+    #       * Painted Samples Output vs Ground Truth (topology-based)
+    #     Per-sample, per-contig assessment of the Stage 10 Viterbi painting
+    #     before any phase correction.  Includes the disc->true founder
+    #     relabelling bijection search; the slowest single validation.
+    #
+    #   SKIP_VALIDATIONS_PHASE_CORRECTION   -- 1 cell:
+    #       * Phase Correction vs Ground Truth (allele-level)
+    #     The final BEFORE/AFTER comparison run after Stage 12.  Reports
+    #     Track1/Track2 accuracy by generation and the perfect-phasing rate.
+    #
+    # All three default to False (run all validations).
+    SKIP_VALIDATIONS_BLOCK_HAPS = True
+    SKIP_VALIDATIONS_PAINTING = True
+    SKIP_VALIDATIONS_PHASE_CORRECTION = False
 
 
     import numpy as np
@@ -981,7 +1070,7 @@ if __name__ == '__main__':
         mark_stage_complete(STAGE_9)
 
 #%%
-if __name__ == '__main__' and not SKIP_VALIDATIONS:
+if __name__ == '__main__' and not SKIP_VALIDATIONS_BLOCK_HAPS:
     # ==========================================================================
     # VALIDATE: Block Haplotypes Against Ground Truth
     # ==========================================================================
@@ -1110,7 +1199,7 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS:
     print(f"{'='*60}")
 
 #%%
-if __name__ == '__main__' and not SKIP_VALIDATIONS:
+if __name__ == '__main__' and not SKIP_VALIDATIONS_BLOCK_HAPS:
     # ==========================================================================
     # VALIDATE: Level 1 Super Blocks
     # ==========================================================================
@@ -1183,7 +1272,7 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS:
         multi_contig_results[r_name].pop('super_blocks_L1', None)
 
 #%%
-if __name__ == '__main__' and not SKIP_VALIDATIONS:
+if __name__ == '__main__' and not SKIP_VALIDATIONS_BLOCK_HAPS:
     # ==========================================================================
     # VALIDATE: Level 2 Super Blocks
     # ==========================================================================
@@ -1244,7 +1333,7 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS:
         multi_contig_results[r_name].pop('super_blocks_L2', None)
 
 #%%
-if __name__ == '__main__' and not SKIP_VALIDATIONS:
+if __name__ == '__main__' and not SKIP_VALIDATIONS_BLOCK_HAPS:
     # ==========================================================================
     # VALIDATE: Level 3 Super Blocks
     # ==========================================================================
@@ -1320,7 +1409,7 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS:
         multi_contig_results[r_name].pop('super_blocks_L3', None)
 
 #%%
-if __name__ == '__main__' and not SKIP_VALIDATIONS:
+if __name__ == '__main__' and not SKIP_VALIDATIONS_BLOCK_HAPS:
     # ==========================================================================
     # VALIDATE: Final (Level 4) Super Blocks
     # ==========================================================================
@@ -1486,7 +1575,7 @@ if __name__ == '__main__':
         mark_stage_complete(STAGE_10)
 
 #%%
-if __name__ == '__main__' and not SKIP_VALIDATIONS:
+if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
     # ==========================================================================
     # VALIDATE: Painted Samples Output Against Ground Truth (topology-based)
     # ==========================================================================
@@ -2124,19 +2213,14 @@ if __name__ == '__main__':
         print("RUNNING: Phase Correction (Discovered Haplotypes)")
         print("="*60)
 
-        # Define loader callback — workers call this to load their own contig data
-        # (parallelizes I/O across all worker processes)
-        def _load_contig_for_phase_correction(r_name):
-            """Load tolerance_result and founder_block for one contig from checkpoints."""
-            data = {}
-            _ensure_key(r_name, 'super_blocks_L4')
-            _ensure_key(r_name, 'tolerance_result')
-            data['tolerance_result'] = multi_contig_results[r_name]['tolerance_result']
-            if 'super_blocks_L4' in multi_contig_results[r_name]:
-                data['founder_block'] = multi_contig_results[r_name]['super_blocks_L4'][0]
-            elif 'super_blocks_L3' in multi_contig_results[r_name]:
-                data['founder_block'] = multi_contig_results[r_name]['super_blocks_L3'][0]
-            return data
+        # `_load_contig_for_phase_correction` is now defined at MODULE
+        # top level (above the `if __name__ == '__main__':` block) so
+        # the forkserver workers can pickle a reference to it.  The
+        # previous closure here -- defined inside __main__ and using
+        # main's `_ensure_key` + `multi_contig_results` -- would not
+        # have survived pickling under the forkserver start method.
+        # See the docstring of the top-level function for the stage
+        # mapping it uses.
 
         # Ensure contig names exist in multi_contig_results (load_fn needs keys)
         for r_name in region_keys:
@@ -2144,12 +2228,24 @@ if __name__ == '__main__':
 
         start = time.time()
         # Run phase correction — workers load their own data via load_fn
+        # num_rounds=6 (was 3): under Jacobi iteration (introduced with
+        # the May 2026 within-contig per-sample threading in
+        # phase_correction.run_correction_round), the round count to
+        # reach `corrections == 0` is typically 1-2 higher than under
+        # Gauss-Seidel.  Setting num_rounds=3 left every contig
+        # hitting the limit without full convergence, which caused a
+        # measurable accuracy regression (perfect-phasing rate dropped
+        # ~11pp).  Bumping the ceiling to 6 gives Jacobi room to
+        # actually finish; the early-exit on `corrections == 0` means
+        # genuinely-converged contigs incur no extra work.  Look for
+        # "HIT MAX ROUNDS" in the worker output if even 6 is too low.
         multi_contig_results = phase_correction.correct_phase_all_contigs(
             multi_contig_results,
             pedigree_df,
             sample_names,
-            num_rounds=3,
+            num_rounds=6,
             verbose=True,
+            max_workers=n_processes,
             load_fn=_load_contig_for_phase_correction
         )
         print(f"Phase correction time: {time.time()-start:.1f}s")
@@ -2161,6 +2257,15 @@ if __name__ == '__main__':
         print("RUNNING: Greedy Phase Refinement (HOM→HET boundary flips)")
         print("="*60)
 
+        # Same load_fn that phase correction used.  Greedy workers
+        # now load founder_block themselves rather than expecting it
+        # in main's multi_contig_results -- this is the
+        # complement of the May 2026 IPC-cost fix in
+        # phase_correction.py (`_process_contig_worker` no longer
+        # returns founder_block).  Parallel disk I/O across 22
+        # worker processes ~ same speed as the previous mechanism
+        # (each worker was also loading founder_block) without the
+        # ~40s pickle/pipe overhead of returning it.
         start_refine = time.time()
         multi_contig_results = phase_correction.post_process_phase_greedy_all_contigs(
             multi_contig_results,
@@ -2169,6 +2274,8 @@ if __name__ == '__main__':
             snps_per_bin=100,
             recomb_rate=5e-8,
             mismatch_cost=4.6,
+            max_workers=n_processes,
+            load_fn=_load_contig_for_phase_correction,
             verbose=True
         )
         print(f"Greedy refinement time: {time.time()-start_refine:.1f}s")
@@ -2176,6 +2283,32 @@ if __name__ == '__main__':
         # =============================================================================
         # PARSIMONIOUS F1 RECOLORING
         # =============================================================================
+        # F1 recoloring and the propagation step that follows both run
+        # in the MAIN process (sequentially across contigs).  They
+        # access founder_block from main's multi_contig_results, which
+        # no longer has it after the IPC-cost fix removed founder_block
+        # from the phase correction worker return tuple.  Pre-load it
+        # here in parallel via threads (parallel disk I/O across 22
+        # contigs, typical ~5-15s) so the F1 + propagation loops see
+        # the data they expect.  RAM cost is ~30-40 GB for the full
+        # set of founder_blocks; HPC nodes typically have plenty.
+        print("\n" + "="*60)
+        print("LOADING founder_blocks for F1 recoloring + propagation")
+        print("="*60)
+        from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+        _t0 = time.time()
+        def _load_founder_block_for_main(r_name):
+            _ensure_key(r_name, 'super_blocks_L4')
+            if 'super_blocks_L4' in multi_contig_results[r_name]:
+                multi_contig_results[r_name]['founder_block'] = \
+                    multi_contig_results[r_name]['super_blocks_L4'][0]
+            elif 'super_blocks_L3' in multi_contig_results[r_name]:
+                multi_contig_results[r_name]['founder_block'] = \
+                    multi_contig_results[r_name]['super_blocks_L3'][0]
+        with _ThreadPoolExecutor(max_workers=min(n_processes, len(region_keys))) as _ex:
+            list(_ex.map(_load_founder_block_for_main, region_keys))
+        print(f"Founder block parallel load: {time.time()-_t0:.1f}s")
+
         print("\n" + "="*60)
         print("RUNNING: Parsimonious F1 Recoloring")
         print("="*60)
@@ -2193,6 +2326,7 @@ if __name__ == '__main__':
                 data['founder_block'],
                 pedigree_df,
                 sample_names,
+                max_workers=n_processes,
                 max_mismatch_rate=0.02,
                 verbose=False
             )
@@ -2217,6 +2351,7 @@ if __name__ == '__main__':
                 data['founder_block'],
                 pedigree_df,
                 sample_names,
+                max_workers=n_processes,
                 max_mismatch_rate=0.02,
                 verbose=False
             )
@@ -2237,7 +2372,7 @@ if __name__ == '__main__':
         mark_stage_complete(STAGE_12)
 
 #%%
-if __name__ == '__main__':
+if __name__ == '__main__' and not SKIP_VALIDATIONS_PHASE_CORRECTION:
     # =============================================================================
     # VALIDATE PHASE CORRECTION AGAINST GROUND TRUTH (ALLELE-LEVEL)
     # =============================================================================
@@ -2283,62 +2418,158 @@ if __name__ == '__main__':
         return hap1_ids, hap2_ids
 
     def evaluate_contig_dual_founders(args):
-        r_name, painting, truth, positions, disc_dense_haps, true_dense_haps, sample_names = args
+        """
+        Per-contig evaluator -- kept as a thin wrapper around the
+        new per-sample evaluator `_evaluate_one_sample` so that any
+        external code paths still see this name.  The actual BEFORE /
+        AFTER evaluation loops below bypass this wrapper and submit
+        per-sample tasks directly to a ThreadPoolExecutor with
+        max_workers=n_processes, which gives ~5x more parallelism
+        on a 22-contig / 320-sample workload (22 contigs only used
+        22 cores; per-sample dispatch uses all 112).
+        """
+        r_name, painting, truth, positions, disc_dense_haps, true_dense_haps, sample_names_local = args
         results = []
-        for i, name in enumerate(sample_names):
-            corrected_sample = painting[i]
-            truth_sample = truth[i]
-            corr_hap1, corr_hap2 = extract_founder_ids_at_positions(corrected_sample, positions)
-            true_hap1, true_hap2 = extract_founder_ids_at_positions(truth_sample, positions)
-            n_pos = len(positions)
-            pos_indices = np.arange(n_pos)
-            max_disc = disc_dense_haps.shape[0]
-            corr_allele1 = np.full(n_pos, -1, dtype=np.int8)
-            corr_allele2 = np.full(n_pos, -1, dtype=np.int8)
-            v1 = (corr_hap1 >= 0) & (corr_hap1 < max_disc)
-            v2 = (corr_hap2 >= 0) & (corr_hap2 < max_disc)
-            corr_allele1[v1] = disc_dense_haps[corr_hap1[v1], pos_indices[v1]]
-            corr_allele2[v2] = disc_dense_haps[corr_hap2[v2], pos_indices[v2]]
-            max_true = true_dense_haps.shape[0]
-            true_allele1 = np.full(n_pos, -1, dtype=np.int8)
-            true_allele2 = np.full(n_pos, -1, dtype=np.int8)
-            v3 = (true_hap1 >= 0) & (true_hap1 < max_true)
-            v4 = (true_hap2 >= 0) & (true_hap2 < max_true)
-            true_allele1[v3] = true_dense_haps[true_hap1[v3], pos_indices[v3]]
-            true_allele2[v4] = true_dense_haps[true_hap2[v4], pos_indices[v4]]
-            direct_match = (corr_allele1 == true_allele1) & (corr_allele2 == true_allele2)
-            flipped_match = (corr_allele1 == true_allele2) & (corr_allele2 == true_allele1)
-            correct_either = direct_match | flipped_match
-            n_direct = np.sum(direct_match)
-            n_flipped = np.sum(flipped_match)
-            if n_direct >= n_flipped:
-                track1_correct = (corr_allele1 == true_allele1)
-                track2_correct = (corr_allele2 == true_allele2)
-                dominant_phase = "Direct"
-            else:
-                track1_correct = (corr_allele1 == true_allele2)
-                track2_correct = (corr_allele2 == true_allele1)
-                dominant_phase = "Flipped"
-            valid_mask = (corr_allele1 != -1) & (corr_allele2 != -1) & (true_allele1 != -1) & (true_allele2 != -1)
-            n_valid = np.sum(valid_mask)
-            if n_valid > 0:
-                accuracy = np.sum(correct_either & valid_mask) / n_valid
-                track1_acc = np.sum(track1_correct & valid_mask) / n_valid
-                track2_acc = np.sum(track2_correct & valid_mask) / n_valid
-            else:
-                accuracy = 0.0
-                track1_acc = 0.0
-                track2_acc = 0.0
-            results.append({
-                'Sample': name, 'Total_sites': n_pos, 'Valid_sites': int(n_valid),
-                'Correct_sites': int(np.sum(correct_either & valid_mask)),
-                'Accuracy': accuracy, 'Track1_accuracy': track1_acc,
-                'Track2_accuracy': track2_acc, 'Direct_matches': int(n_direct),
-                'Flipped_matches': int(n_flipped), 'Dominant_phase': dominant_phase
-            })
+        for i, name in enumerate(sample_names_local):
+            _r, _name, sample_result = _evaluate_one_sample(
+                (r_name, i, name, painting[i], truth[i],
+                 positions, disc_dense_haps, true_dense_haps)
+            )
+            results.append(sample_result)
         contig_eval = pd.DataFrame(results)
         contig_eval['Contig'] = r_name
         return r_name, contig_eval
+
+
+    def _evaluate_one_sample(args):
+        """
+        Per-sample dual-founders evaluator.  Safe to call concurrently
+        across threads -- it only reads from its arg tuple and the
+        shared `disc_dense_haps` / `true_dense_haps` arrays (which are
+        read-only after construction in the calling site).  Returns
+        (r_name, sample_name, result_dict) so the caller can group
+        results by contig for the per-contig summary print.
+
+        The numerical body is byte-identical to the original inner
+        loop of evaluate_contig_dual_founders -- only the wrapping
+        changed (single sample per call instead of looping over all
+        samples in a contig).
+        """
+        (r_name, sample_idx, sample_name, corrected_sample, truth_sample,
+         positions, disc_dense_haps, true_dense_haps) = args
+        corr_hap1, corr_hap2 = extract_founder_ids_at_positions(corrected_sample, positions)
+        true_hap1, true_hap2 = extract_founder_ids_at_positions(truth_sample, positions)
+        n_pos = len(positions)
+        pos_indices = np.arange(n_pos)
+        max_disc = disc_dense_haps.shape[0]
+        corr_allele1 = np.full(n_pos, -1, dtype=np.int8)
+        corr_allele2 = np.full(n_pos, -1, dtype=np.int8)
+        v1 = (corr_hap1 >= 0) & (corr_hap1 < max_disc)
+        v2 = (corr_hap2 >= 0) & (corr_hap2 < max_disc)
+        corr_allele1[v1] = disc_dense_haps[corr_hap1[v1], pos_indices[v1]]
+        corr_allele2[v2] = disc_dense_haps[corr_hap2[v2], pos_indices[v2]]
+        max_true = true_dense_haps.shape[0]
+        true_allele1 = np.full(n_pos, -1, dtype=np.int8)
+        true_allele2 = np.full(n_pos, -1, dtype=np.int8)
+        v3 = (true_hap1 >= 0) & (true_hap1 < max_true)
+        v4 = (true_hap2 >= 0) & (true_hap2 < max_true)
+        true_allele1[v3] = true_dense_haps[true_hap1[v3], pos_indices[v3]]
+        true_allele2[v4] = true_dense_haps[true_hap2[v4], pos_indices[v4]]
+        direct_match = (corr_allele1 == true_allele1) & (corr_allele2 == true_allele2)
+        flipped_match = (corr_allele1 == true_allele2) & (corr_allele2 == true_allele1)
+        correct_either = direct_match | flipped_match
+        n_direct = np.sum(direct_match)
+        n_flipped = np.sum(flipped_match)
+        if n_direct >= n_flipped:
+            track1_correct = (corr_allele1 == true_allele1)
+            track2_correct = (corr_allele2 == true_allele2)
+            dominant_phase = "Direct"
+        else:
+            track1_correct = (corr_allele1 == true_allele2)
+            track2_correct = (corr_allele2 == true_allele1)
+            dominant_phase = "Flipped"
+        valid_mask = (corr_allele1 != -1) & (corr_allele2 != -1) & (true_allele1 != -1) & (true_allele2 != -1)
+        n_valid = np.sum(valid_mask)
+        if n_valid > 0:
+            accuracy = np.sum(correct_either & valid_mask) / n_valid
+            track1_acc = np.sum(track1_correct & valid_mask) / n_valid
+            track2_acc = np.sum(track2_correct & valid_mask) / n_valid
+        else:
+            accuracy = 0.0
+            track1_acc = 0.0
+            track2_acc = 0.0
+        return (r_name, sample_name, {
+            'Sample': sample_name, 'Total_sites': n_pos, 'Valid_sites': int(n_valid),
+            'Correct_sites': int(np.sum(correct_either & valid_mask)),
+            'Accuracy': accuracy, 'Track1_accuracy': track1_acc,
+            'Track2_accuracy': track2_acc, 'Direct_matches': int(n_direct),
+            'Flipped_matches': int(n_flipped), 'Dominant_phase': dominant_phase
+        })
+
+
+    def _evaluate_paintings_per_sample(painting_by_contig, contig_shared_local,
+                                       sample_names_local, region_keys_local,
+                                       max_workers):
+        """
+        Driver: flatten all (contig, sample) pairs into a single task
+        list, dispatch to a ThreadPoolExecutor with `max_workers`
+        workers, and group the per-sample results back by contig.
+
+        Per-contig summary lines are printed in region_keys order
+        after ALL samples complete (the previous per-contig dispatch
+        printed each contig's summary as the contig finished; the new
+        scheme has to wait for all samples to finish first because
+        the workload is interleaved across contigs).  This is a minor
+        UX trade-off; the per-sample work is so fast that the print
+        block lands within a fraction of a second of the last sample.
+
+        Returns a list of per-contig DataFrames in region_keys order.
+        """
+        # Build flat per-sample arg list.  All large arrays
+        # (disc_dense_haps, true_dense_haps, positions) are shared
+        # by reference across all sample tasks within a contig --
+        # ThreadPoolExecutor preserves shared memory semantics so
+        # there's no pickling cost.
+        all_args = []
+        for r_name in region_keys_local:
+            painting = painting_by_contig.get(r_name)
+            if painting is None:
+                continue
+            if r_name not in contig_shared_local:
+                continue
+            truth, positions, disc_dense_haps, true_dense_haps = contig_shared_local[r_name]
+            for i, name in enumerate(sample_names_local):
+                all_args.append((r_name, i, name, painting[i], truth[i],
+                                  positions, disc_dense_haps, true_dense_haps))
+
+        if not all_args:
+            return []
+
+        # Group results by contig as they come back.  Using a dict
+        # keyed by r_name so we can iterate region_keys at the end
+        # for ordered printing.
+        results_by_contig = {r: [] for r in region_keys_local}
+        effective_workers = max(1, min(len(all_args), max_workers))
+
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            for r_name, sample_name, sample_result in executor.map(_evaluate_one_sample, all_args):
+                results_by_contig[r_name].append(sample_result)
+
+        # Build per-contig DataFrames + print summary in region_keys order
+        contig_dfs = []
+        for r_name in region_keys_local:
+            sample_results = results_by_contig.get(r_name, [])
+            if not sample_results:
+                continue
+            contig_eval = pd.DataFrame(sample_results)
+            contig_eval['Contig'] = r_name
+            mean_acc = contig_eval['Accuracy'].mean() * 100
+            mean_t1 = contig_eval['Track1_accuracy'].mean() * 100
+            mean_t2 = contig_eval['Track2_accuracy'].mean() * 100
+            print(f"  {r_name}: Allele={mean_acc:.2f}%, Track1={mean_t1:.2f}%, Track2={mean_t2:.2f}%")
+            contig_dfs.append(contig_eval)
+
+        return contig_dfs
 
     print("Evaluating phase correction accuracy (allele-level)...")
     print("  Paintings use DISCOVERED haplotypes")
@@ -2379,29 +2610,27 @@ if __name__ == '__main__':
         contig_shared[r_name] = (truth, positions, dense_haps, true_dense_haps)
 
     # --- BEFORE: evaluate uncorrected painting (raw Viterbi output) ---
+    # Per-sample parallelism: flatten the 22-contig x 320-sample
+    # workload into 7040 independent sample tasks and dispatch via a
+    # single ThreadPoolExecutor with max_workers=n_processes.  See
+    # the docstring of `_evaluate_paintings_per_sample` for details.
     print("\n" + "-"*60)
     print("BEFORE phase correction (raw Viterbi painting):")
     print("-"*60)
 
-    before_args = []
+    before_painting_by_contig = {}
     for r_name in region_keys:
         if r_name not in contig_shared:
             continue
-        truth, positions, dense_haps, true_dense_haps = contig_shared[r_name]
         raw_painting = multi_contig_results[r_name].get('tolerance_result')
         if raw_painting is None:
             continue
-        before_args.append((r_name, raw_painting, truth, positions, dense_haps,
-                            true_dense_haps, sample_names))
+        before_painting_by_contig[r_name] = raw_painting
 
-    before_contig_results = []
-    with ThreadPoolExecutor(max_workers=len(region_keys)) as executor:
-        for r_name, contig_eval in executor.map(evaluate_contig_dual_founders, before_args):
-            mean_acc = contig_eval['Accuracy'].mean()*100
-            mean_t1 = contig_eval['Track1_accuracy'].mean()*100
-            mean_t2 = contig_eval['Track2_accuracy'].mean()*100
-            print(f"  {r_name}: Allele={mean_acc:.2f}%, Track1={mean_t1:.2f}%, Track2={mean_t2:.2f}%")
-            before_contig_results.append(contig_eval)
+    before_contig_results = _evaluate_paintings_per_sample(
+        before_painting_by_contig, contig_shared, sample_names,
+        region_keys, max_workers=n_processes
+    )
 
     if before_contig_results:
         before_df = pd.concat(before_contig_results, ignore_index=True)
@@ -2411,15 +2640,17 @@ if __name__ == '__main__':
         before_df = pd.DataFrame()
 
     # --- AFTER: evaluate corrected painting ---
+    # Per-sample parallelism: same flatten-and-dispatch pattern as
+    # the BEFORE block above.  See `_evaluate_paintings_per_sample`
+    # for the rationale.
     print("\n" + "-"*60)
     print("AFTER phase correction (corrected + greedy + F1 recoloring):")
     print("-"*60)
 
-    eval_args = []
+    after_painting_by_contig = {}
     for r_name in region_keys:
         if r_name not in contig_shared:
             continue
-        truth, positions, dense_haps, true_dense_haps = contig_shared[r_name]
         if 'final_painting' in multi_contig_results[r_name]:
             painting = multi_contig_results[r_name]['final_painting']
         elif 'refined_painting' in multi_contig_results[r_name]:
@@ -2428,18 +2659,12 @@ if __name__ == '__main__':
             painting = multi_contig_results[r_name]['corrected_painting']
         else:
             continue
-        
-        eval_args.append((r_name, painting, truth, positions, dense_haps, 
-                          true_dense_haps, sample_names))
+        after_painting_by_contig[r_name] = painting
 
-    all_contig_results = []
-    with ThreadPoolExecutor(max_workers=len(region_keys)) as executor:
-        for r_name, contig_eval in executor.map(evaluate_contig_dual_founders, eval_args):
-            mean_acc = contig_eval['Accuracy'].mean()*100
-            mean_t1 = contig_eval['Track1_accuracy'].mean()*100
-            mean_t2 = contig_eval['Track2_accuracy'].mean()*100
-            print(f"  {r_name}: Allele={mean_acc:.2f}%, Track1={mean_t1:.2f}%, Track2={mean_t2:.2f}%")
-            all_contig_results.append(contig_eval)
+    all_contig_results = _evaluate_paintings_per_sample(
+        after_painting_by_contig, contig_shared, sample_names,
+        region_keys, max_workers=n_processes
+    )
 
     if all_contig_results:
         full_eval_df = pd.concat(all_contig_results, ignore_index=True)
