@@ -2300,14 +2300,29 @@ def correct_phase_all_contigs(
         # `initargs`.  Under the OLD fork-based code path this was
         # set as a module-level global (`_PARALLEL_DATA = {...}`) and
         # inherited by workers via COW; forkserver doesn't have that
-        # luxury so the payload travels by pickle.  Total size is
-        # small (small DataFrames + small lists + a few scalars +
-        # picklable function references); `multi_contig_results` is
-        # only used by the worker if `load_fn` is None, but we
-        # include it unconditionally for simplicity (an empty
-        # multi_contig_results pickles to ~bytes).
+        # luxury so the payload travels by pickle.
+        #
+        # CRITICAL (May 2026 hot-fix):  `multi_contig_results` MUST
+        # be omitted from the payload when `load_fn` is set.  At this
+        # point in the pipeline -- after pedigree inference (Stage 11)
+        # has populated multi_contig_results with stage-9 founder
+        # blocks (~30-50 GB across 22 contigs) and stage-10
+        # tolerance_result paintings (~5+ GB per chr3) -- the dict can
+        # hold tens of GB of data.  Pickling it into initargs for
+        # 22 workers blows main-process RAM (the pickle byte string
+        # alone is tens of GB, peak ~2x during serialization) and
+        # hangs the pipeline before any worker is spawned.
+        #
+        # When `load_fn` is set, the worker uses load_fn exclusively
+        # (see `_process_contig_worker`: the `multi_contig_results`
+        # lookup is in the `else` branch of `if load_fn is not None`)
+        # so omitting it costs us nothing.  When `load_fn` is None,
+        # the worker DOES need multi_contig_results to find its
+        # tolerance_result, so we still include it on that path; that
+        # path is the historical in-memory (no-checkpoint) flow which
+        # is only used in tests / small datasets where the dict is
+        # small.
         parallel_data = {
-            'multi_contig_results': multi_contig_results,
             'pedigree_df': pedigree_df,
             'sample_names': sample_names,
             'num_rounds': num_rounds,
@@ -2320,8 +2335,13 @@ def correct_phase_all_contigs(
             'mismatch_cost': mismatch_cost,
             'phase_zero_preference': phase_zero_preference,
             'use_xor_child_recomb': use_xor_child_recomb,
-            'load_fn': load_fn
+            'load_fn': load_fn,
         }
+        if load_fn is None:
+            # In-memory mode -- worker needs multi_contig_results to
+            # locate its tolerance_result.  Include the FULL dict
+            # (no checkpoints available to load from).
+            parallel_data['multi_contig_results'] = multi_contig_results
         
         if verbose:
             print(f"\nProcessing {n_contigs} contigs in parallel...")
@@ -3438,11 +3458,50 @@ def post_process_phase_greedy(
     return BlockPainting((start_pos, end_pos), refined_samples)
 
 
-def _greedy_contig_worker(r_name):
-    """Worker function for parallel greedy refinement of a single contig."""
+def _greedy_contig_worker(task):
+    """
+    Worker function for parallel greedy refinement of a single contig.
+
+    Receives a per-task tuple:
+        task = (r_name, corrected_painting, founder_block_or_None)
+
+    DESIGN PRINCIPLE (May 2026 follow-up):  per-contig data flows via
+    TASK ARGS (the argument to `pool.map`), not via INITARGS.  The two
+    channels have different semantics:
+
+      - INITARGS is pickled ONCE per worker at Pool creation and held
+        for the lifetime of the pool.  Putting per-contig data here
+        means the pickle payload scales with N_contigs and is
+        replicated across all worker processes -- which on a warm
+        pipeline (multi_contig_results holding tens of GB of stage-9
+        founder_blocks + stage-10 paintings) causes the main process
+        to spend minutes serialising tens of GB of pickle bytes
+        before any worker can start.
+
+      - TASK ARGS are pickled per call to `pool.map`'s consumer, one
+        task at a time as workers free up.  Peak in-flight memory is
+        bounded by num_workers * one_task's_size, not by
+        N_contigs * payload.  This is what `pool.map` is for.
+
+    So this worker reads:
+      * Stable static config (pedigree_df, sample_names, hyperparameters,
+        load_fn) from `_PARALLEL_DATA`, populated by `_init_phase_worker`
+        from the small config dict passed via `initargs`.
+      * Per-contig data (corrected_painting, optionally founder_block)
+        from the task arg.
+
+    founder_block_or_None handling:
+      * If not None, used directly (in-memory test path, no load_fn).
+      * If None, the worker calls load_fn(r_name) to fetch from disk
+        -- this is the pipeline.py path, where load_fn is always
+        supplied and founder_blocks live on the rds checkpoint store
+        rather than in main's RAM (so we don't pickle them through the
+        process boundary at all).
+    """
     global _PARALLEL_DATA, _PHASE_ACTIVE_COUNTER
-    
-    data = _PARALLEL_DATA['multi_contig_results'][r_name]
+
+    r_name, corrected_painting, founder_block_from_task = task
+
     pedigree_df = _PARALLEL_DATA['pedigree_df']
     sample_names = _PARALLEL_DATA['sample_names']
     snps_per_bin = _PARALLEL_DATA['snps_per_bin']
@@ -3451,26 +3510,18 @@ def _greedy_contig_worker(r_name):
     max_diff_fraction = _PARALLEL_DATA.get('max_diff_fraction', 0.02)
     min_diff_sites = _PARALLEL_DATA.get('min_diff_sites', 2)
 
-    # ------------------------------------------------------------------
-    # founder_block sourcing.  In the May 2026 IPC-cost fix, the phase
-    # correction worker stopped returning founder_block (saving 40+s
-    # of pickle/pipe transfer across 22 contigs).  As a result, main
-    # process's multi_contig_results may not contain founder_block at
-    # this point.  If a `load_fn` is provided, this worker loads
-    # founder_block itself from checkpoint (parallel disk I/O across
-    # the 22 worker processes, similar to phase correction's load_fn
-    # pattern).  Otherwise we fall through to data.get('founder_block')
-    # which preserves backward compatibility with any caller that DID
-    # populate it.
-    # ------------------------------------------------------------------
+    # Build the local `data` dict from task args.  founder_block is
+    # filled either from the task arg (in-memory case) or load_fn (disk
+    # case).  The dict shape matches what the rest of this function
+    # expects so the downstream code is untouched.
+    data = {'corrected_painting': corrected_painting}
+    if founder_block_from_task is not None:
+        data['founder_block'] = founder_block_from_task
+
     load_fn = _PARALLEL_DATA.get('load_fn')
     if 'founder_block' not in data and load_fn is not None:
         loaded = load_fn(r_name)
         if loaded is not None and 'founder_block' in loaded:
-            # Build a new local dict view to avoid mutating the
-            # inherited multi_contig_results (which is shared across
-            # all sibling workers under fork/forkserver semantics).
-            data = dict(data)
             data['founder_block'] = loaded['founder_block']
 
     corrected_painting = data['corrected_painting']
@@ -3659,11 +3710,35 @@ def post_process_phase_greedy_all_contigs(
         print(f"{'='*60}")
     
     if parallel and n_contigs > 1:
-        # See the equivalent block in correct_phase_all_contigs for the
-        # forkserver/initargs design.  parallel_data is pickled into
-        # each worker by the Pool initializer.
+        # PRINCIPLE: initargs holds stable static config that every
+        # worker shares; per-contig data flows via TASK ARGS
+        # (pool.map's tasks list).
+        #
+        # The two pickle channels have very different semantics:
+        #
+        #   initargs is pickled ONCE per worker at Pool creation and
+        #     held for the lifetime of the pool.  Putting per-contig
+        #     data here means total pickle volume scales with
+        #     N_workers * (full per-contig payload).  Pickling
+        #     multi_contig_results -- which on a warm pipeline holds
+        #     stage-9 founder_blocks (~30-50 GB) and stage-10
+        #     tolerance_result (~5+ GB on chr3, more with wildcard
+        #     enabled) -- into 22 worker initargs is a guaranteed
+        #     OOM.  This was the May 2026 phase-correction hang.
+        #
+        #   task args are pickled per dispatch to a worker, ONE TASK
+        #     AT A TIME as workers free up.  Peak in-flight pickle
+        #     memory is bounded by N_workers * one task's payload,
+        #     regardless of N_contigs.  This is the channel
+        #     `pool.map` was designed for.
+        #
+        # So we send only the stable config via initargs, and dispatch
+        # the per-contig corrected_painting (the only in-memory data
+        # the greedy worker actually needs from main) via the task
+        # tuple.  founder_block is fetched from disk via load_fn
+        # inside the worker -- no need to pickle it through the
+        # process boundary at all.
         parallel_data = {
-            'multi_contig_results': multi_contig_results,
             'pedigree_df': pedigree_df,
             'sample_names': sample_names,
             'snps_per_bin': snps_per_bin,
@@ -3675,7 +3750,29 @@ def post_process_phase_greedy_all_contigs(
             # IPC-cost fix in `_greedy_contig_worker`'s docstring.
             'load_fn': load_fn,
         }
-        
+
+        # Per-contig task data.  Each task is a tuple
+        # `(r_name, corrected_painting, founder_block_or_None)`.
+        # founder_block is passed through ONLY when load_fn is None
+        # (in-memory test path with no checkpoints) -- in the pipeline
+        # flow load_fn is always set and the worker fetches
+        # founder_block from disk, so we set the slot to None and
+        # avoid pickling that ~1-2 GB structure into the task stream.
+        if load_fn is not None:
+            tasks = [
+                (r_name,
+                 multi_contig_results[r_name]['corrected_painting'],
+                 None)
+                for r_name in contig_names
+            ]
+        else:
+            tasks = [
+                (r_name,
+                 multi_contig_results[r_name]['corrected_painting'],
+                 multi_contig_results[r_name].get('founder_block'))
+                for r_name in contig_names
+            ]
+
         if verbose:
             print(f"\nProcessing {n_contigs} contigs in parallel...")
 
@@ -3690,7 +3787,7 @@ def post_process_phase_greedy_all_contigs(
             initializer=_init_phase_worker,
             initargs=(total_cores, active_counter, parallel_data),
         ) as pool:
-            results = pool.map(_greedy_contig_worker, contig_names)
+            results = pool.map(_greedy_contig_worker, tasks)
         
         for r_name, refined_painting, n_founders, n_refined in results:
             multi_contig_results[r_name]['refined_painting'] = refined_painting

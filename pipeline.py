@@ -157,7 +157,7 @@ if __name__ == '__main__':
     #
     # All three default to False (run all validations).
     SKIP_VALIDATIONS_BLOCK_HAPS = True
-    SKIP_VALIDATIONS_PAINTING = True
+    SKIP_VALIDATIONS_PAINTING = False
     SKIP_VALIDATIONS_PHASE_CORRECTION = False
 
 
