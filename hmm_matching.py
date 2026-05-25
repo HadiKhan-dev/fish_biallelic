@@ -2,17 +2,13 @@ import thread_config
 
 import numpy as np
 import math
-import os
 import warnings
 import ctypes
-from multiprocessing import Pool
-import multiprocessing as _mp
-import multiprocessing.pool as _mpp
 from concurrent.futures import ThreadPoolExecutor
-from scipy.special import logsumexp
-from functools import partial
 
-import analysis_utils 
+from numba import njit, prange
+
+import analysis_utils
 import block_linking
 
 # glibc malloc_trim — releases freed pages back to OS
@@ -24,411 +20,127 @@ except OSError:
     def _malloc_trim():
         pass
 
-# Suppress divide by zero warnings in log-space calculations
+# Suppress divide-by-zero warnings in log-space calculations
 np.seterr(divide='ignore', invalid='ignore')
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # Standard robustness parameter to prevent zero-probability crashes
 DEFAULT_ROBUSTNESS_EPSILON = 1e-2
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    print("WARNING: Numba not found. Computations will be extremely slow.")
-    def njit(*args, **kwargs):
-        def decorator(func): return func
-        return decorator
-    prange = range
-
-# ---------------------------------------------------------------------------
-# Forkserver pool for generate_transition_probability_mesh_double_hmm's
-# parallel-pool path.  Required when the parent process has JIT-compiled
-# parallel=True numba kernels before forking workers — GNU OpenMP (used
-# by numba's prange on the OMP threading layer) attaches per-process
-# state that is unsafe to inherit across fork().  Forkserver workers
-# spawn from a clean intermediate process that never touched OpenMP, so
-# they're safe even after the parent has used parallel kernels.
-#
-# Mirrors block_linking.py's _ForkserverPool exactly.  Preloads are
-# configured in thread_config.py (hmm_matching is already in the list).
-# Falls back to fork context on platforms without forkserver.
-# ---------------------------------------------------------------------------
-try:
-    _forkserver_ctx = _mp.get_context('forkserver')
-except ValueError:
-    _forkserver_ctx = _mp.get_context('fork')
-
-
-class _ForkserverPool(_mpp.Pool):
-    """A Pool that uses the forkserver context.  Mirrors
-    block_haplotypes._ForkserverPool and block_linking._ForkserverPool.
-    """
-    def __init__(self, *args, **kwargs):
-        kwargs['context'] = _forkserver_ctx
-        super().__init__(*args, **kwargs)
-
-
 # =============================================================================
 # SHARED MEMORY MANAGEMENT
 # =============================================================================
-
+#
+# Worker processes retrieve the per-block emission tensors (~1 GB at
+# production shape) from this dict to avoid re-pickling them per task.
+# Populated by _init_shared_data before the gap loop.
 _SHARED_DATA = {}
 
-# ---------------------------------------------------------------------------
-# Dynamic thread reallocation for the pool path in
-# generate_transition_probability_mesh_double_hmm.
-#
-# These mirror block_linking.py's _BL_ACTIVE_COUNTER / _BL_TOTAL_CORES
-# globals, with one difference: the rest of hmm_matching uses a
-# `dynamic_cores_fn` *callback* (passed in via the public API) for
-# dynamic rescaling.  When the parallel-pool path is taken (else branch
-# of generate_transition_probability_mesh_double_hmm), no external
-# caller-supplied callback is available, so workers build one INTERNALLY
-# from these globals via _get_pool_dynamic_cores_fn().  The callback is
-# then plumbed down through _gap_worker ->
-# calculate_hap_transition_probabilities -> update_transitions_layered_hmm
-# the same way an external dynamic_cores_fn is plumbed in the
-# sequential-with-callback path.
-#
-# Both globals are None outside a properly-initialised pool worker.  All
-# code that reads them checks for None first.
-# ---------------------------------------------------------------------------
-_HM_ACTIVE_COUNTER = None
-_HM_TOTAL_CORES = None
 
-# ---------------------------------------------------------------------------
-# Remainder distribution (mirrors block_linking._BL_EXTRA_COUNTER).
-# When total_cores is not evenly divisible by active workers,
-# floor(total/active) leaves `remainder = total % active` idle cores.
-# E.g. total=112, active=76: floor=1, remainder=36 — 36 cores sit idle
-# until floor jumps to 2 (at active=56).  The extra-counter mechanism
-# tracks how many workers hold +1 threads so that exactly `remainder`
-# workers get ceil and the rest get floor — keeping total threads in
-# use equal to total_cores with zero idle.
-#
-# _HM_EXTRA_COUNTER: pool-wide atomic int.  Reflects the current
-#     number of workers holding +1 threads.
-# _HM_I_HAVE_EXTRA: per-worker-process bool.  True iff this worker
-#     currently holds a claim from _HM_EXTRA_COUNTER's pool.
-#
-# Both are None / False outside a properly-initialised pool.  See
-# _try_claim_extra_hm and _try_release_extra_hm for atomicity details.
-# ---------------------------------------------------------------------------
-_HM_EXTRA_COUNTER = None
-_HM_I_HAVE_EXTRA = False
+def _init_shared_data(data_dict):
+    """Populate the module-global _SHARED_DATA dict.
 
-
-def _try_claim_extra_hm(remainder):
-    """Atomically attempt to claim an extra thread from the remainder pool.
-
-    Returns True if successfully claimed (and sets _HM_I_HAVE_EXTRA).
-    Returns False if the pool is exhausted or the counter isn't set up.
-    Idempotent: re-calling while already holding does not double-claim.
-
-    Mirrors block_linking._try_claim_extra — see that function's
-    docstring for the full atomicity/race-analysis discussion.
+    Called once before the gap loop in
+    generate_transition_probability_mesh_double_hmm so _gap_worker can
+    retrieve the (large) viterbi emissions list by key without
+    re-receiving it through the worker args.
     """
-    global _HM_I_HAVE_EXTRA
-    if _HM_I_HAVE_EXTRA:
-        return True
-    if _HM_EXTRA_COUNTER is None:
-        return False
-    try:
-        with _HM_EXTRA_COUNTER.get_lock():
-            if _HM_EXTRA_COUNTER.value < remainder:
-                _HM_EXTRA_COUNTER.value += 1
-                _HM_I_HAVE_EXTRA = True
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _try_release_extra_hm():
-    """Atomically release this worker's extra claim, if held.
-
-    Returns True if released, False if nothing to release.  Defensive:
-    clears the local flag even if the shared counter mutation failed.
-
-    Mirrors block_linking._try_release_extra.
-    """
-    global _HM_I_HAVE_EXTRA
-    if not _HM_I_HAVE_EXTRA:
-        return False
-    if _HM_EXTRA_COUNTER is None:
-        _HM_I_HAVE_EXTRA = False
-        return False
-    try:
-        with _HM_EXTRA_COUNTER.get_lock():
-            _HM_EXTRA_COUNTER.value -= 1
-            _HM_I_HAVE_EXTRA = False
-            return True
-    except Exception:
-        _HM_I_HAVE_EXTRA = False
-        return False
-
-
-def _init_shared_data(data_dict, numba_threads=None,
-                       active_counter=None, total_cores=None,
-                       extra_counter=None):
-    """
-    Initializer for the worker pool.
-    Updates the global _SHARED_DATA dict in the worker process.
-
-    Args:
-        data_dict: shared payload (e.g. viterbi_emissions).  Stored in
-            module-global _SHARED_DATA.
-        numba_threads: optional initial numba thread count for this
-            worker.  Legacy parameter, preserved for backwards
-            compatibility.  If provided, calls numba.set_num_threads.
-        active_counter: optional multiprocessing.Value('i', 0) shared
-            across workers, used for dynamic thread reallocation in the
-            parallel-pool path.  When None (default — preserving the
-            original signature), no counter wiring is set up.
-        total_cores: optional int — the original num_processes budget.
-            When provided alongside active_counter, sets up the numba
-            pool ceiling and stores both in module globals so
-            _get_pool_dynamic_cores_fn() works.  When None, no pool
-            ceiling change.
-        extra_counter: optional multiprocessing.Value('i', 0) for
-            remainder distribution.  When provided, workers atomically
-            claim/release from this pool so that exactly `remainder =
-            total % active` workers hold ceil(total/active) threads
-            and the rest hold floor — keeping total threads in use
-            equal to total_cores with zero idle.  When None (default),
-            falls back to floor-only allocation.  Mirrors
-            block_linking's extras-counter mechanism.
-
-    Backwards-compatible: callers passing only `data_dict` (or
-    `data_dict, numba_threads`) get the original behavior — counter
-    globals stay None, no dynamic reallocation.
-    """
-    global _SHARED_DATA, _HM_ACTIVE_COUNTER, _HM_TOTAL_CORES
-    global _HM_EXTRA_COUNTER, _HM_I_HAVE_EXTRA
+    global _SHARED_DATA
     _SHARED_DATA.clear()
     _SHARED_DATA.update(data_dict)
-    if numba_threads is not None:
-        try:
-            import numba
-            numba.set_num_threads(numba_threads)
-        except Exception:
-            pass
 
-    _HM_ACTIVE_COUNTER = active_counter
-    _HM_TOTAL_CORES = total_cores
-    _HM_EXTRA_COUNTER = extra_counter
-    # Defensive: ensure no stale claim from a previous worker recycle.
-    _HM_I_HAVE_EXTRA = False
-
-    # Mirror block_linking._init_bl_shared: when dynamic-thread wiring
-    # is set up, configure the numba pool ceiling for this worker so
-    # set_num_threads() can scale freely up to total_cores later.
-    # Starting at 1 thread is the safe default — _gap_worker will
-    # rescale immediately based on the live active count when it picks
-    # up its first task.
-    if total_cores is not None:
-        try:
-            import os as _os, numba as _numba
-            _os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
-            _numba.config.NUMBA_NUM_THREADS = total_cores
-            _numba.set_num_threads(1)
-        except Exception:
-            pass
-
-
-def _get_pool_dynamic_cores_fn():
-    """Build a dynamic_cores_fn callback from the pool worker's globals.
-
-    Returns a callable that reads _HM_ACTIVE_COUNTER (live count of
-    active peers) and computes the worker's fair share including
-    remainder distribution: floor + (1 if this worker holds an extra
-    else 0).  The callback may attempt to claim or release an extra
-    on each call based on the current `remainder`, just like
-    block_linking._update_dynamic_threads.
-
-    Returns None when the globals aren't set up (i.e. this worker
-    wasn't initialised by a counter-wired pool), so callers can fall
-    back to no-op behavior.
-
-    The closure captures the globals by reference via module attribute
-    lookup, so subsequent updates to _HM_ACTIVE_COUNTER.value and
-    _HM_EXTRA_COUNTER.value are visible to every call of the returned
-    callable.
-    """
-    if _HM_ACTIVE_COUNTER is None or _HM_TOTAL_CORES is None:
-        return None
-
-    def _callback():
-        try:
-            active = max(_HM_ACTIVE_COUNTER.value, 1)
-            floor = _HM_TOTAL_CORES // active
-            remainder = _HM_TOTAL_CORES - floor * active
-
-            # Adjust extra-claim based on current remainder (same logic
-            # as block_linking._update_dynamic_threads):
-            #   - If I don't hold extra and remainder has room, try to claim.
-            #   - If I hold extra but extras-in-circulation exceeds
-            #     current remainder, release.
-            if _HM_EXTRA_COUNTER is not None:
-                try:
-                    current_extras = _HM_EXTRA_COUNTER.value
-                except Exception:
-                    current_extras = 0
-                if not _HM_I_HAVE_EXTRA:
-                    if current_extras < remainder:
-                        _try_claim_extra_hm(remainder)
-                else:
-                    if current_extras > remainder:
-                        _try_release_extra_hm()
-
-            return max(1, floor + (1 if _HM_I_HAVE_EXTRA else 0))
-        except Exception:
-            return 1
-    return _callback
 
 # =============================================================================
 # 1. OPTIMIZED NUMBA KERNELS (O(N^2) Single-Switch)
 # =============================================================================
 
-@njit(fastmath=True)
-def log_add_exp(a, b):
-    """
-    Numerically stable log-add-exp helper for scalars.
-    Calculates log(exp(a) + exp(b)).
-    """
-    if a == -np.inf: return b
-    if b == -np.inf: return a
-    
-    if a > b:
-        return a + math.log(1.0 + math.exp(b - a))
-    else:
-        return b + math.log(1.0 + math.exp(a - b))
-
 @njit(parallel=True, fastmath=True)
 def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definitions, incoming_priors, n_haps):
-    """
-    Performs the 'Micro-HMM' Forward Scan (Log-Sum-Exp) inside a single block.
-    
-    OPTIMIZATION:
-    Uses the Single-Switch Assumption (at most one chromosome recombines per site).
-    This reduces complexity from O(Sites * Haps^4) to O(Sites * Haps^2).
-    
-    Includes BURST LOGIC:
-    Maintains parallel 'Normal' and 'Burst' states to handle gene conversions/errors.
+    """'Micro-HMM' Forward Scan (Log-Sum-Exp) inside a single block.
 
-    Tier-A1/A2/A3/A4/B1/B5/B10 optimisations (vs. the original kernel
-    from before this round of L2 work):
-      A1 — Allocation hoisting.  All per-site scratch buffers
-           (next_normal, next_burst, hap_max, hap_exp_sum, hap_sums)
-           are allocated ONCE per sample, outside the site loop.  At
-           2000 sites × 320 samples that's 1.9M+ small-array
-           allocations eliminated per scan call.
-      A2 — Buffer swap via reference assignment.  The previous
-           kernel did K-wide element copies at the end of each site
-           iteration; we now swap the array references (numba
-           supports tuple unpacking for array swap, which is O(1)).
-      A3 — Max-subtract logsumexp for the hap aggregation AND the
-           per-state 3-term combine.  log() and exp() are the slow
-           ops; this replaces ~2 log + 2 exp per state-update step
-           with 1 log + 3 exp.
-      A4 — State-space collapse to undirected pairs.  The diploid
-           HMM has a swap symmetry: α(h1, h2) = α(h2, h1) by the
-           symmetry of (a) the emission (genotype likelihood depends
-           only on the unordered allele pair); (b) the macro-
-           transition T((u1,u2)→(v1,v2)) = T((u2,u1)→(v2,v1))
-           (from hap_log_T[u1,v1] + hap_log_T[u2,v2] in
-           _build_dense_transition_matrix_kernel); (c) the
-           intra-block recombination costs (cost_0, cost_1 don't
-           distinguish chr 1 vs chr 2).  The base case (zero priors
-           for the first block) is symmetric, and the inductive step
-           is preserved by matmul + scan.  Verified byte-exact on
-           production-scale chained inputs.
-           
-           We therefore collapse the n_haps² directed-pair state
-           space to K_fold = n_haps(n_haps+1)/2 unordered states
-           (h1 ≤ h2), doing about half the per-site work.  Public
-           interface (incoming_priors, end_probs of shape
-           (n_samples, n_haps²)) is unchanged; the kernel reads the
-           unfolded h1·n+h2 cell from inputs (equal to h2·n+h1 by
-           symmetry) and writes the same scalar to both (h1,h2) and
-           (h2,h1) cells of the output (giving an exactly-symmetric
-           result).
-           
-           In the folded representation, row_sums and col_sums of
-           the original kernel are mathematically equal (both = LSE
-           over the same n values of α at h-fixed) and collapse to
-           a single hap_sums[h] array.
-      B1 — Cache per-site transition costs.  Pre-A4 the costs
-           dist_bp, theta, log_switch, log_stay, cost_0, cost_1 were
-           recomputed inside the prange(n_samples) loop — n_samples
-           × n_sites redundant log/division ops per scan call (640k
-           at production shape).  Now precomputed once outside
-           prange, read from short n_sites-sized arrays inside the
-           per-sample loop.  Bit-identical (same scalars, just
-           computed earlier).
-      B5 — Transposed ll_tensor layout: (Samples, Sites, K_States)
-           instead of (Samples, K_States, Sites).  Per-site reads of
-           all K_fold cells are now contiguous in memory (one
-           cache-line chunk for K=21..78) instead of scattered
-           across K cache lines.  Transposition happens once per
-           block in _worker_generate_viterbi_emissions; this kernel
-           just reads from the new layout.  See ViterbiBlockLikelihood
-           docstring for the rationale.  Bit-identical.
-      B10— Fold cost_1 into hap_sums once per site.  The unfolded
-           kernel's state update added cost_1 to hap_sums[h1] and
-           hap_sums[h2] separately for each of K_fold states.  We
-           now compute hap_sums_plus_cost1[h] = hap_sums[h] + cost_1
-           once per site (n_haps adds), and the state update reads
-           the precomputed value.  Saves K_fold - n_haps adds per
-           site per sample (~15 at K_fold=21).  Bit-identical (just
-           hoisted arithmetic).
-    
+    Single-Switch Assumption: at most one chromosome recombines per
+    site.  Reduces complexity from O(Sites * Haps^4) to O(Sites *
+    Haps^2).
+
+    Includes burst logic: parallel 'Normal' and 'Burst' states handle
+    gene conversions / errors.
+
+    Optimisation tiers:
+      A1  Allocation hoisting — per-sample scratch buffers
+          (current/next_normal, current/next_burst, hap_max,
+          hap_exp_sum, hap_sums) allocated once outside the site loop.
+          At 2000 sites × 320 samples eliminates ~1.9M small allocs
+          per scan call.
+      A2  Buffer swap via reference assignment.  Replace K-wide element
+          copies at end of each site iteration with O(1) numba tuple-
+          unpack swap of array references.
+      A3  Max-subtract logsumexp for the hap aggregation AND the per-
+          state 3-term combine.  Replaces ~2 log + 2 exp per state-
+          update step with 1 log + 3 exp.
+      A4  State-space collapse to undirected pairs.
+          Diploid swap symmetry α(h1,h2) = α(h2,h1) holds because:
+            (a) emission depends only on the unordered allele pair;
+            (b) macro-transition T((u1,u2)→(v1,v2)) =
+                T((u2,u1)→(v2,v1)) (sum of hap_log_T[u1,v1] +
+                hap_log_T[u2,v2] in _build_dense_transition_matrix_kernel);
+            (c) intra-block recombination costs (cost_0, cost_1) don't
+                distinguish chr1 vs chr2.
+          The first-block prior is symmetric and the inductive step
+          (matmul + scan) preserves symmetry.  Verified byte-exact on
+          production-scale chained inputs.
+          Collapse n_haps² directed-pair states to K_fold =
+          n_haps(n_haps+1)/2 unordered states (h1 ≤ h2) — about half
+          the per-site work.  Public interface keeps (n_samples, K=
+          n_haps²) shape: reads the unfolded h1·n+h2 cell (equal to
+          h2·n+h1 by symmetry) and writes the same scalar to both
+          (h1,h2) and (h2,h1) of the output.
+          In the folded view, row_sums and col_sums of the unfolded
+          kernel coincide and collapse to a single hap_sums[h] array.
+      B1  Cache per-site transition costs.  cost_0_arr / cost_1_arr
+          depend only on site i; hoist outside the prange.
+      B5  Transposed ll_tensor layout: (Samples, Sites, K) — per-site
+          K reads are contiguous (3 cache lines at K=36 vs 36).
+          Transpose done once per block in
+          _worker_generate_viterbi_emissions.
+      B10 Fold cost_1 into hap_sums once per site
+          (hap_sums_plus_cost1[h] = hap_sums[h] + cost_1), saving
+          K_fold - n_haps adds per site per sample.
+
     Args:
-        ll_tensor (np.ndarray): Shape (Samples, Sites, K) — log-likelihood
-            of data given state, in the B5 cache-friendly layout.
-        positions (np.ndarray): Genomic positions of sites in this block.
-        recomb_rate (float): Probability of recombination per base pair.
-        state_definitions (np.ndarray): Shape (K, 2). Maps state index to (Hap1, Hap2).
-            Unused by the folded kernel (h1, h2 are recovered from the
-            k_fold unpack tables); retained in the signature for caller
-            compatibility.
-        incoming_priors (np.ndarray): Shape (Samples, K). The accumulated probability 
-                                      mass arriving at the *start* of this block.
-        n_haps (int): Number of haplotypes in this block.
-        
+        ll_tensor: (Samples, Sites, K) float32 — log-likelihood of data
+            given state, in the B5 cache-friendly layout (B7 float32).
+        positions: (Sites,) int64 — genomic positions of sites.
+        recomb_rate: float — probability of recombination per base pair.
+        state_definitions: (K, 2) int — unused by the folded kernel
+            (h1, h2 are recovered from unpack tables); retained in the
+            signature for caller compatibility.
+        incoming_priors: (Samples, K) float64 — accumulated probability
+            mass arriving at the start of this block.
+        n_haps: int — number of haplotypes in this block.
+
     Returns:
-        np.ndarray: End probabilities (Samples, K).
+        (Samples, K) float64 end probabilities.
     """
-    # B5: ll_tensor is now (n_samples, n_sites, K) — n_sites is the
-    # middle axis to make per-site K reads contiguous.  Extract dims
-    # accordingly; derive K from n_haps (it equals n_haps²).
+    # B5: ll_tensor is (n_samples, n_sites, K) — derive K from n_haps.
     n_samples = ll_tensor.shape[0]
     n_sites = ll_tensor.shape[1]
     K = n_haps * n_haps
     end_probs = np.full((n_samples, K), -np.inf, dtype=np.float64)
-    min_prob = 1e-15 
-    
+    min_prob = 1e-15
+
     # --- BURST PARAMETERS ---
-    GAP_OPEN = -10.0 
-    GAP_EXTEND = 0.0 
-    UNIFORM_LOG_PROB = -1.0986 
+    GAP_OPEN = -10.0
+    GAP_EXTEND = 0.0
+    UNIFORM_LOG_PROB = -1.0986
     BURST_STEP = UNIFORM_LOG_PROB + GAP_EXTEND
-    
+
     if n_haps > 1:
         log_N_minus_1 = math.log(float(n_haps - 1))
     else:
         log_N_minus_1 = 0.0
 
-    # ---- B1: precompute per-site transition costs ----
-    # The cost computation (positions[i] - positions[i-1] → theta → log
-    # → cost_0, cost_1) depends only on site i, not on sample s.  Pre-
-    # A1 these were recomputed once per (sample, site) pair (n_samples
-    # × n_sites log/div ops per scan call).  Now done once outside the
-    # prange and read by all sample workers.  Bit-identical: same
-    # scalars, different evaluation site.  cost_0_arr[0] and
-    # cost_1_arr[0] are unused (the site loop starts at i=1).
+    # B1: precompute per-site transition costs (depend only on site i,
+    # not on sample).  cost_*_arr[0] is unused (site loop starts at 1).
     cost_0_arr = np.empty(n_sites, dtype=np.float64)
     cost_1_arr = np.empty(n_sites, dtype=np.float64)
     for i in range(1, n_sites):
@@ -447,28 +159,16 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
         cost_0_arr[i] = 2.0 * log_stay
         cost_1_arr[i] = log_switch + log_stay - log_N_minus_1
 
-    # ---- A4: folded-state index tables ----
-    # K_fold = n(n+1)/2 unordered pairs (h1, h2) with h1 ≤ h2.
-    # Packing: enumerate (h1, h2) lexicographically with h1 outer,
-    # h2 ≥ h1 inner.  We don't use a closed-form fold index inside the
-    # hot loop; instead we precompute unpack/unfold tables once here.
-    # The fold packing maps:
-    #   (0,0) → 0, (0,1) → 1, ..., (0, n-1) → n-1,
-    #   (1,1) → n, (1,2) → n+1, ..., (1, n-1) → 2n-2,
-    #   ...
-    #   (n-1, n-1) → K_fold-1
-    # These tables are written here (in the main thread) and read by
-    # all sample workers below.  They're tiny (≤ 4 * K_fold int32 +
-    # K_fold ints) so allocation cost is negligible.
+    # A4: folded-state index tables.  K_fold = n(n+1)/2 unordered
+    # pairs (h1, h2) with h1 ≤ h2, enumerated lexicographically:
+    #   (0,0)→0, (0,1)→1, ..., (0,n-1)→n-1, (1,1)→n, ..., (n-1,n-1)→K_fold-1
+    # Built once outside the prange; shared by all sample workers.
+    # unfold_a[k_fold] = h1*n + h2 (canonical unfolded index);
+    # unfold_b[k_fold] = h2*n + h1 (mirror, equal to a for diagonal).
     K_fold = n_haps * (n_haps + 1) // 2
     unpack_h1 = np.empty(K_fold, dtype=np.int32)
     unpack_h2 = np.empty(K_fold, dtype=np.int32)
-    # unfold_a[k_fold] = h1*n + h2 (canonical unfolded index; reading
-    # incoming_priors / ll_tensor here gives the symmetric pair's value
-    # by swap-symmetry of those inputs at production scale).
     unfold_a = np.empty(K_fold, dtype=np.int32)
-    # unfold_b[k_fold] = h2*n + h1 (the "mirror" unfolded index;
-    # equal to unfold_a for diagonal states, different for off-diagonal).
     unfold_b = np.empty(K_fold, dtype=np.int32)
     kk = 0
     for h1 in range(n_haps):
@@ -1005,116 +705,57 @@ def _worker_generate_viterbi_emissions(args):
     h0 = haps_masked[:, :, 0]
     h1 = haps_masked[:, :, 1]
     
-    # Calculate implied genotype probabilities for each pair, mix with
-    # uniform for robustness, and convert to log-likelihood -- all in a
-    # single fused numba kernel.  Mathematically identical to the original
-    # numpy chain reproduced here for reference:
+    # Fused per-site emission likelihood in a single numba kernel:
+    # for each (sample s, state kk = k1*K+k2, site l):
+    #   c0 = h0[k1,l]*h0[k2,l]
+    #   c1 = h0[k1,l]*h1[k2,l] + h1[k1,l]*h0[k2,l]
+    #   c2 = h1[k1,l]*h1[k2,l]
+    #   model_p = samples[s,l,0]*c0 + samples[s,l,1]*c1 + samples[s,l,2]*c2
+    #   final_p = max(model_p*(1-eps) + eps/3, 1e-300)
+    #   ll[s,kk,l] = max(log(final_p), -2.0)
     #
-    #   # Calculate implied genotype probabilities for each pair
-    #   # Shape: (K, Sites, 3)
-    #   c00 = h0[:, None, :] * h0[None, :, :]
-    #   c11 = h1[:, None, :] * h1[None, :, :]
-    #   c01 = (h0[:, None, :] * h1[None, :, :]) + (h1[:, None, :] * h0[None, :, :])
+    # The fusion eliminates the (N, K**2, L) c00/c01/c11 + term_0/1/2 +
+    # model_probs + final_probs intermediates of the old numpy chain.
+    # At K=36, 200-site blocks: ~3.2 GB peak → ~650 MB.  Single-thread
+    # CPU speedup grows with K: 1.3x at K=5, 2.6x at K=36 (memory-
+    # bandwidth limited; intermediate is K**2 * sites per sample).
     #
-    #   # Flatten to (K, Sites) per genotype channel
-    #   combos_flat_0 = c00.reshape(num_haps**2, -1)
-    #   combos_flat_1 = c01.reshape(num_haps**2, -1)
-    #   combos_flat_2 = c11.reshape(num_haps**2, -1)
-    #
-    #   # Calculate Model Probability: Sum_g P(Data|g) * P(g|Model)
-    #   # Samples: (N, Sites, 3) -> Extract columns (N, Sites)
-    #   # Broadcasting: (N, 1, Sites) * (1, K, Sites)
-    #
-    #   # Term 0: Read=0 * Genotype=0
-    #   term_0 = samples_masked[:, np.newaxis, :, 0] * combos_flat_0[np.newaxis, :, :]
-    #   term_1 = samples_masked[:, np.newaxis, :, 1] * combos_flat_1[np.newaxis, :, :]
-    #   term_2 = samples_masked[:, np.newaxis, :, 2] * combos_flat_2[np.newaxis, :, :]
-    #
-    #   model_probs = term_0 + term_1 + term_2 # (N, K, Sites)
-    #
-    #   # Robustness Mixture: (1-eps)*Model + eps*Uniform
-    #   # Uniform for 3 genotype states is 1/3
-    #   uniform_prob = 1.0 / 3.0
-    #
-    #   final_probs = (model_probs * (1.0 - epsilon)) + (epsilon * uniform_prob)
-    #
-    #   # Safety floor for log (avoids -inf)
-    #   min_prob = 1e-300
-    #   final_probs[final_probs < min_prob] = min_prob
-    #
-    #   ll_per_site = np.log(final_probs)
-    #
-    #   # FIX: Apply Hard Floor of -2.0 per site
-    #   ll_per_site = np.maximum(ll_per_site, -2.0)
-    #
-    # The kernel eliminates the (N, K**2, Sites) intermediate tensors
-    # (term_0, term_1, term_2, model_probs, final_probs), dropping peak
-    # working memory from ~5x output size to 1x output size.  At K=36 with
-    # 200-site blocks this is the difference between ~3.2 GB peak (which
-    # OOMs the pool worker) and ~650 MB.  CPU benchmarks (single-thread,
-    # the relevant case in ThreadPoolExecutor workers) show 1.3x speedup
-    # at K=5, 1.7x at K=10, 2.1x at K=20, 2.6x at K=36 -- growing with K
-    # because the win is memory-bandwidth (eliminated intermediate
-    # traffic), and the intermediate is K**2 * sites per sample.
-    # See _viterbi_emission_kernel for the math expressed as inline loops.
-    #
-    # np.result_type(...) picks the same dtype numpy's broadcasting chain
-    # would have produced (the highest-precision input among h0/h1/
-    # samples_masked).  np.ascontiguousarray then guarantees both contiguity
-    # (h0/h1 are non-contiguous views from haps_masked[:, :, 0/1]) and
-    # the chosen dtype, so the kernel sees aligned, typed inputs.  The
-    # kernel's output dtype matches samples.dtype (== the common dtype),
-    # preserving the original chain's dtype-promotion semantics exactly.
+    # np.result_type picks the same dtype numpy's broadcasting chain
+    # would have, np.ascontiguousarray gives the kernel aligned typed
+    # inputs (h0/h1 are non-contiguous slice views).
     _common_dtype = np.result_type(h0, h1, samples_masked)
     _h0_c = np.ascontiguousarray(h0, dtype=_common_dtype)
     _h1_c = np.ascontiguousarray(h1, dtype=_common_dtype)
     _samples_c = np.ascontiguousarray(samples_masked, dtype=_common_dtype)
-    # Constants: 1e-300 is the safety floor used by the original
-    # final_probs[final_probs < min_prob] = min_prob clip; -2.0 is the
-    # hard per-site LL floor introduced by the "FIX: Apply Hard Floor"
-    # change above.
     ll_per_site = _viterbi_emission_kernel(
         _h0_c, _h1_c, _samples_c,
         float(epsilon), 1e-300, -2.0,
     )
 
-    # B5: transpose to (Samples, Sites, K_States) layout for cache-
-    # friendly per-site reads in the F-B scan kernels.  See
-    # ViterbiBlockLikelihood docstring.  The transpose is one-time
-    # per block; amortised across all F-B iterations + 10-block-batch
-    # scan calls within the L2 step, the overhead is sub-1%.  The
-    # kernel's native output is (N, K, L); we transpose to (N, L, K)
-    # and call ascontiguousarray to materialise the new strides as a
-    # contiguous buffer (no zero-copy view; we need contiguity for the
-    # scan kernel's vectorised inner loop).  The original (N, K, L)
-    # tensor is dropped (no longer referenced after the assignment),
-    # so peak memory remains 1x the tensor size, not 2x.
+    # B5+B7: transpose to (Samples, Sites, K_States) layout and downcast
+    # to float32.
     #
-    # B7: downcast to float32 (from the kernel's native float64).
-    # The scan kernels read ll_tensor[s, i, k] and add it to a
-    # float64 scratch buffer; numba auto-promotes the float32 read
-    # to float64 for the addition, so internal compute precision is
-    # unchanged.  What changes is the memory footprint and bandwidth
-    # for the ll_tensor reads: 184 MB → 92 MB at production shape
-    # (N=320, K=36, L=2000), halving the bytes that have to cross
-    # the memory hierarchy per scan call.  At multi-thread this
-    # tends to be the dominant cost (each worker reads its own slice
-    # of ll_tensor on every F-B iteration), so the win compounds
-    # with thread count.
+    # B5 — Sites becomes the middle axis so per-site reads of all K_fold
+    # cells inside the F-B scan kernels are contiguous (~3 cache lines
+    # at K=36 vs 36 cache lines).  Transposition + ascontiguousarray
+    # materialises new strides (no zero-copy view).  Done once per block
+    # and amortised across ~140 scan calls per L2 batch — sub-1%.
     #
-    # Precision impact: ll_tensor cells are clipped to [-2.0, 0]
-    # by the emission kernel's hard floor; float32 ulp at magnitude
-    # 1 is ~1.2e-7, so the per-cell relative error from the cast is
-    # at most ~1e-7.  Across 2000 sites in one scan, accumulated
-    # error in the log-state is ~sqrt(2000)*1e-7 ≈ 5e-6 absolute —
-    # well below downstream tolerance (the L1→L2 step decided a
-    # hap match at 1% hamming distance, and the typical log-state
-    # magnitudes are ~10^3, so 5e-6 absolute log-state error
-    # corresponds to <1e-8 relative — negligible).  Cumulative
-    # error across 71 F-B iterations does not grow indefinitely
-    # because emissions are read fresh each iteration (the iteration
-    # loop is over transitions, not emissions).  NOT bit-identical
-    # to the pre-B7 kernel.
+    # B7 — float32 storage with float64 internal compute.  The scan
+    # kernels add ll_tensor[s,i,k] (float32) to a float64 scratch
+    # buffer; numba auto-promotes the read, so log-state precision is
+    # preserved.  Memory bandwidth halved (184 MB → 92 MB at production
+    # shape) — most valuable at multi-thread where bandwidth is the
+    # shared bottleneck.
+    #
+    # Precision impact: ll cells are in [-2.0, 0] (hard floor in
+    # kernel); float32 ulp at magnitude 1 is ~1.2e-7, so per-cell error
+    # is ≤1e-7.  Accumulated across 2000 sites: ~sqrt(2000)*1e-7 ≈ 5e-6
+    # absolute against log-state magnitudes of ~10^3 — <1e-8 relative,
+    # far below the 1% Hamming downstream tolerance.  Error doesn't
+    # compound across F-B iterations because emissions are read fresh
+    # each iteration.  NOT bit-identical to the pre-B7 kernel; metric-
+    # equivalent at production validation.
     ll_per_site = np.ascontiguousarray(ll_per_site.transpose(0, 2, 1)).astype(np.float32)
 
     return ViterbiBlockLikelihood(ll_per_site, valid_positions, state_defs, num_haps)
@@ -1816,118 +1457,54 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         
         numerators = np.full((len(curr_keys)**2, len(next_keys)**2), -np.inf)
         
-        # Numba-fused replacement of the original per-batch numpy
-        # operations.  The original code allocated a 3D Total array of
-        # shape (B, K_curr_sq, K_next_sq) per batch (8 MB at K=10,
-        # 1.3 GB at K=36) and ran scipy.logsumexp / numpy elementwise
-        # ops on it.  The kernel processes ALL samples in one call
-        # without materialising the 3D intermediate — only an
-        # O(num_samples) sample_total array of working memory.
-        # See _batched_posterior_aggregation_kernel for the algorithm
-        # and numerical-equivalence argument.
+        # Fused E-step accumulation: numerators[r, c] = logsumexp over
+        # all samples of (S[s,r] + R[s,c] + T[r,c] - sample_total[s]).
+        # See _batched_posterior_aggregation_kernel for the two-pass
+        # algorithm; the wrapper pre-transposes S and R for cache-
+        # friendly per-cell access.
         _batched_posterior_aggregation(
             S_earlier, R_later, T_mat, numerators
         )
 
-        # Collapse Diploid States -> Haplotype Transitions.
-        # The kernel does the equivalent of:
-        #   for each (r, c) with r = u1*n_c + u2 and c = v1*n_n + v2:
-        #     hap_masses[(u1, v1)] += [mass - log(prior_u1_v1)]   (if subtract)
-        #     hap_masses[(u2, v2)] += [mass - log(prior_u2_v2)]   (if subtract)
-        #   data_log_count[u, v] = logsumexp(hap_masses[(u, v)])
-        # ...as a single tight numba loop with inlined logaddexp,
-        # avoiding the per-cell Python dict + list allocations that
-        # dominated the original loop's cost.
+        # Collapse diploid mass -> haploid edge counts (with optional
+        # prior-subtract for Reset/Viterbi EM).  See
+        # _diploid_collapse_kernel for the per-edge logsumexp algorithm.
         n_c = len(curr_keys)
         n_n = len(next_keys)
         sparse_trans = current_trans[0][i]
         if use_standard_baum_welch:
-            # No prior subtraction needed; pass a zero-filled hap_log_prior.
+            # No prior subtraction; pass a zero-filled prior.
             hap_log_prior = np.zeros((n_c, n_n), dtype=np.float64)
             subtract_prior = False
         else:
-            # Build the (n_c, n_n) haploid prior matrix from the sparse
-            # dict via the shared analysis_utils helper.  missing_default
-            # = log(1e-9) matches the original's sparse_trans.get(..., 1e-9)
-            # then math.log() pattern, where missing edges are treated as
-            # having a very small (but non-zero) probability rather than
-            # being forbidden.  The helper is the same one used by
-            # block_linking.get_full_probs_forward/backward (with its
-            # default missing_default=-inf) and by hmm_matching's
-            # build_dense_transition_matrix — keeps the dict-to-dense
-            # logic in one place.
+            # Build (n_c, n_n) haploid log-prior from the sparse dict.
+            # missing_default=log(1e-9) treats missing edges as having
+            # a tiny but non-zero probability (matches the original
+            # sparse_trans.get(..., 1e-9) → math.log pattern).
             hap_log_prior = analysis_utils._build_haploid_log_T_from_dict(
                 sparse_trans, curr_keys, next_keys, i, next_idx,
                 missing_default=math.log(1e-9))
             subtract_prior = True
 
-        # data_log_count[u_i, v_i] is what the original loop produces in
-        # one go.  Cells with no contribution remain -inf.
+        # data_log_count[u_i, v_i] = logsumexp(hap_masses[(u_i, v_i)])
+        # in dense form, with -inf for missing cells.
         data_log_count = _diploid_collapse_kernel(
             numerators, hap_log_prior, n_c, n_n, subtract_prior)
 
-        # Apply Smoothing and Normalize.  data_log_count is now an
-        # (n_c, n_n) dense matrix with -inf for missing cells, equivalent
-        # to logsumexp(hap_masses[(u_i, v_i)]) in the original.
-        #
-        # The smoothing + per-row normalize + robust-mixture computation
-        # is delegated to _smooth_normalize_kernel, which produces a
-        # dense (n_c, n_n) final_p matrix.  Mathematically identical
-        # (byte-equivalent at 1 ULP) to the original numpy/python chain
-        # reproduced below for reference:
-        #
-        #   fwd_raw_edges = {u: {} for u in curr_keys}
-        #
-        #   for u_i in range(n_c):
-        #       for v_i in range(n_n):
-        #           data_lc = data_log_count[u_i, v_i]
-        #           # Add Pseudocounts (prevents death spiral).  Note:
-        #           # np.logaddexp(-inf, x) returns x, so missing cells get
-        #           # smoothed_val = LOG_PSEUDO, matching the original.
-        #           smoothed_val = np.logaddexp(data_lc, LOG_PSEUDO)
-        #
-        #           src = curr_keys[u_i]
-        #           dst = next_keys[v_i]
-        #           fwd_raw_edges[src][dst] = smoothed_val
-        #
-        #   # Row Normalization
-        #   final_fwd = {}
-        #   for src, targets in fwd_raw_edges.items():
-        #       if not targets: continue
-        #       row_vals = list(targets.values())
-        #       row_total = analysis_utils.lse_scalar(row_vals)
-        #
-        #       renorm_sum = 0.0
-        #       temp_probs = {}
-        #       for dst, log_val in targets.items():
-        #           log_p = log_val - row_total if row_total != -np.inf else -np.inf
-        #           if log_p < MIN_LOG_PROB: log_p = MIN_LOG_PROB
-        #           p = math.exp(log_p)
-        #           temp_probs[dst] = p
-        #           renorm_sum += p
-        #
-        #       if renorm_sum == 0: renorm_sum = 1.0
-        #
-        #       # Robust Mixture (1% Uniform)
-        #       uniform_val = 1.0 / len(temp_probs)
-        #       mix_rate = 0.01
-        #
-        #       for dst, p in temp_probs.items():
-        #           norm_p = p / renorm_sum
-        #           final_p = (norm_p * (1.0 - mix_rate)) + (uniform_val * mix_rate)
-        #           key = ((i, src), (next_idx, dst))
-        #           final_fwd[key] = final_p
-        #
-        # The kernel collapses the per-cell python overhead -- ~27x speedup
-        # at K=5, ~78x at K=36 (measured) -- on what becomes hot at high K.
+        # Smoothing + per-row normalize + robust-mixture, delegated to a
+        # numba kernel.  Mathematically: for each row u_i,
+        #   smoothed[v] = logaddexp(data_log_count[u_i, v], LOG_PSEUDO)
+        #   row_total   = logsumexp(smoothed)
+        #   log_p[v]    = max(smoothed[v] - row_total, MIN_LOG_PROB)
+        #   norm_p[v]   = exp(log_p[v]) / sum(exp(log_p))
+        #   final[u_i, v] = norm_p[v] * (1 - mix_rate) + (1/n_n) * mix_rate
+        # See _smooth_normalize_kernel for details.
         final_p_mat = _smooth_normalize_kernel(
             data_log_count, LOG_PSEUDO, MIN_LOG_PROB, 0.01)
 
-        # Dict-write back to the production {((i, src), (next_idx, dst)):
-        # final_p} format.  Keys are arbitrary tuples that numba can't
-        # construct, so this stays in Python; the per-cell work here is
-        # just a dict insertion (negligible vs the math the kernel just
-        # finished).
+        # Dict-write back to {((i, src), (next_idx, dst)): final_p}.
+        # Keys are arbitrary tuples that numba can't construct, so this
+        # stays in Python; per-cell work is just a dict insertion.
         final_fwd = {}
         for u_i in range(n_c):
             src = curr_keys[u_i]
@@ -1964,26 +1541,14 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         
         numerators = np.full((len(curr_keys)**2, len(prev_keys)**2), -np.inf)
         
-        # Numba-fused replacement of the per-batch numpy operations.
-        # Same kernel as LOOP 1's forward case — the semantics are
-        # symmetric:
-        #   LOOP 1 (forward):  Total = S_earlier + R_later + T_fwd
-        #   LOOP 2 (backward): Total = R_later  + S_earlier + T_bwd
-        # The kernel takes (S, R, T_mat) positionally; for the backward
-        # pass we pass (R_later_source, S_earlier_dest, T_mat) so that
-        # the kernel's "S" axis indexes states at block i (curr_keys²)
-        # and the "R" axis indexes states at block prev_idx (prev_keys²),
-        # matching the original (R_batch on first newaxis, S_batch on
-        # second newaxis) order.  T_mat is built with i,prev_idx and
-        # correct_hom_hom=True, exactly as the original.
+        # Fused E-step accumulation (backward).  Same semantics as the
+        # forward branch with (S, R) → (R_later, S_earlier); T is built
+        # with i,prev_idx and correct_hom_hom=True.
         _batched_posterior_aggregation(
             R_later_source, S_earlier_dest, T_mat, numerators
         )
 
         # Collapse Diploid States -> Haplotype Transitions (backward).
-        # Same algorithm as the forward case, with prev_keys playing the
-        # role of next_keys.  See the forward block's comment block for
-        # the algorithmic details and numerical-equivalence argument.
         n_c = len(curr_keys)
         n_p = len(prev_keys)
         sparse_trans = current_trans[1][i]
@@ -1991,9 +1556,8 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
             hap_log_prior = np.zeros((n_c, n_p), dtype=np.float64)
             subtract_prior = False
         else:
-            # Same helper-based prior construction as LOOP 1, but for
-            # the backward direction (key tuple uses prev_idx for the
-            # second element).
+            # Same helper-based prior construction as the forward loop;
+            # second key-tuple element is prev_idx here.
             hap_log_prior = analysis_utils._build_haploid_log_T_from_dict(
                 sparse_trans, curr_keys, prev_keys, i, prev_idx,
                 missing_default=math.log(1e-9))
@@ -2002,17 +1566,12 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         data_log_count = _diploid_collapse_kernel(
             numerators, hap_log_prior, n_c, n_p, subtract_prior)
 
-        # Normalize Backward.  Same data_log_count -> smoothed_val
-        # transformation as in the forward pass.  See LOOP 1's comment
-        # block above for the full numpy/python reference; this is the
-        # backward-direction equivalent, differing only in that the
-        # second key tuple element is prev_idx (not next_idx) and the
-        # destination keys come from prev_keys (not next_keys).
+        # Normalize Backward (same smoothing + row-normalize + robust-
+        # mixture as the forward branch).
         final_p_mat = _smooth_normalize_kernel(
             data_log_count, LOG_PSEUDO, MIN_LOG_PROB, 0.01)
 
-        # Dict-write back to the production {((i, src), (prev_idx, dst)):
-        # final_p} format.  See LOOP 1's matching comment for rationale.
+        # Dict-write back to {((i, src), (prev_idx, dst)): final_p}.
         final_bwd = {}
         for u_i in range(n_c):
             src = curr_keys[u_i]
@@ -2035,83 +1594,59 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
                                            num_processes=16,
                                            ll_improvement_cutoff=5e-4,
                                            use_standard_baum_welch=True,
-                                           precalculated_viterbi_emissions=None, # NEW ARGUMENT
+                                           precalculated_viterbi_emissions=None,
                                            dynamic_cores_fn=None):
-    """
-    Main driver for HMM-EM transition calculation.
-    Supports pre-calculated emissions to avoid passing massive raw data to workers.
+    """Driver for HMM-EM transition calculation.
 
-    B6: ll_improvement_cutoff was relaxed from 1e-4 to 5e-4 (5x looser
-    convergence criterion).  The L2 chr1 profile showed ~8 Baum-Welch
-    iterations per gap on average at 1e-4; at 5e-4 we expect ~5-6
-    iterations per gap (the per-iteration log-likelihood improvement
-    decays approximately geometrically, so 5x looser ≈ log₂(5) ≈ 2.3
-    fewer iterations).  Downstream beam-search is fairly insensitive
-    to small transition perturbations (the max-likelihood path is
-    determined by score gaps that are typically much larger than the
-    transition probability noise this cutoff introduces), but this is
-    a non-bit-equivalent change and should be validated against the
-    full L2 metric suite.  To revert: set ll_improvement_cutoff=1e-4
-    in the caller (generate_transition_probability_mesh_double_hmm
-    passes max_num_iterations but not ll_improvement_cutoff, so the
-    default here is what's used in production).
+    Runs Baum-Welch (E-step = global_forward_backward_pass, M-step =
+    update_transitions_layered_hmm) for up to max_num_iterations or
+    until the relative log-likelihood improvement drops below
+    ll_improvement_cutoff.
+
+    B6: ll_improvement_cutoff defaults to 5e-4 (was 1e-4).  At the
+    looser threshold, ~5-6 EM iterations per gap on average suffice
+    where ~8 were used at 1e-4.  Downstream beam-search is insensitive
+    to the resulting small transition-probability perturbations
+    (validated metric-equivalent against the L2 reference run).  NOT
+    bit-identical to pre-B6.
 
     Args:
-        dynamic_cores_fn (callable, optional): If provided, called at the top
-            of each EM iteration to obtain the current core allocation for
-            this worker.  The returned value is passed to
-            numba.set_num_threads(), so parallel=True kernels (notably
-            scan_distance_aware_forward/backward inside
-            global_forward_backward_pass) use the live thread count.  This
-            extends the existing "between-gaps" rescaling pattern in
-            generate_transition_probability_mesh_double_hmm to ALSO rescale
-            between EM iterations within a single gap — long stragglers
-            mid-EM now pick up cores freed by peer workers finishing,
-            instead of waiting until the next gap boundary.
-
-            Mirrors the design block_linking.py uses for stage-4 dynamic
-            scaling (Portion 4) — in-flight hooks at top of EM iteration
-            and top of M-step block loop.
-
-            When None, no dynamic rescaling is performed within this
-            function — preserves the original behavior exactly.
+        precalculated_viterbi_emissions: Required ViterbiBlockList.
+            full_samples_data / sample_sites are kept in the signature
+            for upstream symmetry but unused.
+        dynamic_cores_fn: Optional callable returning the current core
+            allocation for this worker.  Called at the top of each EM
+            iteration (here) and the top of each M-step block loop (in
+            update_transitions_layered_hmm); the returned value is
+            passed to numba.set_num_threads so parallel kernels pick
+            up the live thread count.  Mirrors the in-flight rescaling
+            design used in block_linking.  No-op when None.
     """
-    current_trans = block_linking.initial_transition_probabilities(haps_data, space_gap)
-    
-    # Use pre-calculated emissions if provided, otherwise calculate them here
-    if precalculated_viterbi_emissions is not None:
-        raw_blocks = precalculated_viterbi_emissions
-    else:
-        # Fallback to internal calculation (High Memory usage if data is large)
-        raw_blocks = generate_viterbi_block_emissions(
-            full_samples_data, sample_sites, haps_data, num_processes=num_processes
+    del full_samples_data, sample_sites, num_processes  # unused
+
+    if precalculated_viterbi_emissions is None:
+        raise ValueError(
+            "precalculated_viterbi_emissions is required (pass a "
+            "ViterbiBlockList from generate_viterbi_block_emissions)"
         )
-    
-    # Fix A: Cache sorted hap keys ONCE (never change across EM iterations)
+    raw_blocks = precalculated_viterbi_emissions
+
+    # Cache sorted hap keys once (never change across EM iterations).
     hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
-    
+
+    current_trans = block_linking.initial_transition_probabilities(haps_data, space_gap)
     prev_ll = -np.inf
-    
+
     for it in range(max_num_iterations):
-        # Dynamic thread reallocation: re-check the current core
-        # allocation and rescale numba threads.  When this worker is a
-        # straggler (peer workers have finished their gaps and freed
-        # cores), the callback's return value drops and this call
-        # scales us up accordingly.  parallel=True kernels (the prange
-        # in scan_distance_aware_forward/backward) will then use the
-        # new thread count on their next invocation.
-        #
-        # No-op when dynamic_cores_fn is None (no caller-supplied
-        # callback) — preserves the original behavior exactly.
+        # Dynamic thread rescaling: pick up freed cores from peer
+        # workers that have finished.  No-op when dynamic_cores_fn is
+        # None.  Errors are silently absorbed (matches the robustness
+        # posture in block_haplotypes._update_dynamic_threads).
         if dynamic_cores_fn is not None:
             try:
                 import numba as _numba
-                n_cores = dynamic_cores_fn()
-                _numba.set_num_threads(n_cores)
+                _numba.set_num_threads(dynamic_cores_fn())
             except Exception:
-                # Numba unavailable or callback errored — silently
-                # ignore, same robustness posture as
-                # block_haplotypes._update_dynamic_threads.
                 pass
 
         # Match decay schedule
@@ -2123,363 +1658,130 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
             raw_blocks, haps_data, current_trans, space_gap, recomb_rate,
             hap_keys_cache=hap_keys_cache
         )
-        
+
         # M-Step
         new_trans = update_transitions_layered_hmm(
-            S_res, R_res, haps_data, current_trans, space_gap, 
+            S_res, R_res, haps_data, current_trans, space_gap,
             use_standard_baum_welch=use_standard_baum_welch,
             hap_keys_cache=hap_keys_cache,
             dynamic_cores_fn=dynamic_cores_fn
         )
-        
+
         # Smoothing
         smoothed = analysis_utils.smoothen_probs_vectorized(current_trans, new_trans, effective_lr)
-        
-        if isinstance(smoothed, dict): 
+        if isinstance(smoothed, dict):
             current_trans = [smoothed[0], smoothed[1]]
-        else: 
+        else:
             current_trans = smoothed
-            
-        # Convergence Check
-        rel_improvement = 0.0
+
+        # Convergence check (B6: cutoff defaults to 5e-4)
         if prev_ll != -np.inf and prev_ll != 0:
             rel_improvement = (current_ll - prev_ll) / abs(prev_ll)
-        elif prev_ll == -np.inf:
-            rel_improvement = float('inf') 
-            
+        else:
+            rel_improvement = float('inf')
         if it > 0 and 0 <= rel_improvement < ll_improvement_cutoff:
             break
-            
+
         prev_ll = current_ll
-            
+
     return current_trans
 
 def _gap_worker(args):
-    """Worker for multiprocessing gap calculations.
+    """Worker for one gap of generate_transition_probability_mesh_double_hmm.
 
-    The args tuple is one of two lengths:
-      - 8 elements: legacy signature (no dynamic_cores_fn).  Falls
-        through to calculate_hap_transition_probabilities with no
-        in-flight rescaling.
-      - 9 elements: extended signature with dynamic_cores_fn as the
-        9th element.  The callback is forwarded down to
-        calculate_hap_transition_probabilities so the EM iteration
-        loop and the M-step's per-block loop can rescale numba
-        threads mid-gap.  When the callback is None, behavior is
-        identical to the 8-element path.
-
-    Supporting both lengths keeps backwards compatibility with any
-    pre-existing pickled task tuples or external test harnesses that
-    might call this with the original 8-element form.
-
-    Dynamic thread reallocation in the parallel-pool path: when
-    _HM_ACTIVE_COUNTER and _HM_TOTAL_CORES are set (by an
-    appropriately-configured _init_shared_data call), this worker
-      - atomically increments the counter on entry and sets initial
-        numba threads to max(1, total // active)
-      - builds an internal dynamic_cores_fn (via
-        _get_pool_dynamic_cores_fn) and passes it to
-        calculate_hap_transition_probabilities so the in-flight hooks
-        also use the live counter
-      - atomically decrements the counter on exit (via try/finally so
-        crashes still decrement)
-    When the globals aren't set (sequential path or 8-element args),
-    none of this fires and behavior is the original.
+    Unpacks the 9-element args tuple and delegates to
+    calculate_hap_transition_probabilities.  In production this is
+    called sequentially (num_processes=1), with dynamic_cores_fn driving
+    in-flight numba thread rescaling at the top of each EM iteration
+    and each M-step block loop.
     """
-    # Unpack the new flag from the arguments tuple (now includes emissions)
-    if len(args) == 9:
-        (gap, samples, sites, haps, max_iter, rate, use_std_bw,
-         use_shared_emissions, dynamic_cores_fn) = args
+    (gap, samples, sites, haps, max_iter, rate, use_std_bw,
+     use_shared_emissions, dynamic_cores_fn) = args
+
+    if use_shared_emissions:
+        precalc_ems = _SHARED_DATA['viterbi_emissions']
     else:
-        gap, samples, sites, haps, max_iter, rate, use_std_bw, use_shared_emissions = args
-        dynamic_cores_fn = None
+        precalc_ems = None
 
-    # Pool-path dynamic-thread setup: when the worker globals are
-    # wired (i.e. _init_shared_data was called with active_counter +
-    # total_cores), increment the counter and build an internal
-    # callback that the downstream EM loop will use for in-flight
-    # rescaling.
-    counter_inc = False
-    if _HM_ACTIVE_COUNTER is not None and _HM_TOTAL_CORES is not None:
-        try:
-            import numba as _numba
-            # Increment under the counter's lock — required because
-            # two workers picking up tasks near-simultaneously could
-            # otherwise race on the read-modify-write.  Mirrors
-            # block_linking._gap_worker exactly.
-            with _HM_ACTIVE_COUNTER.get_lock():
-                _HM_ACTIVE_COUNTER.value += 1
-            counter_inc = True
-            active = max(_HM_ACTIVE_COUNTER.value, 1)
-            floor = _HM_TOTAL_CORES // active
-            remainder = _HM_TOTAL_CORES - floor * active
-            # Try to claim an extra thread from the remainder pool.
-            # No-op when _HM_EXTRA_COUNTER is None (legacy callers
-            # without remainder distribution).  Mirrors
-            # block_linking._gap_worker.
-            _try_claim_extra_hm(remainder)
-            n_threads = max(1, floor + (1 if _HM_I_HAVE_EXTRA else 0))
-            _numba.set_num_threads(n_threads)
-        except Exception:
-            # Transient issue — fall through and run the task without
-            # dynamic scaling.  Counter still decremented (if
-            # incremented) so peers see correct activity.
-            pass
-
-        # Build/replace the dynamic_cores_fn with the pool-internal
-        # callback so in-flight EM hooks read the counter too.  This
-        # overrides any externally-supplied callback in the
-        # parallel-pool path because the pool's counter is the
-        # authoritative source of "active workers" within this pool.
-        # External callbacks (e.g. from hierarchical_assembly) are
-        # only meaningful in the sequential path where there's no
-        # internal counter.
-        pool_callback = _get_pool_dynamic_cores_fn()
-        if pool_callback is not None:
-            dynamic_cores_fn = pool_callback
-
-    try:
-        if use_shared_emissions:
-            # Retrieve the massive emissions object from Shared Memory
-            precalc_ems = _SHARED_DATA['viterbi_emissions']
-        else:
-            # If not using shared memory, this argument would have been passed directly (or None)
-            # But in our new architecture, we aim to rely on shared memory for the large object.
-            precalc_ems = None
-
-        return calculate_hap_transition_probabilities(
-            samples, sites, haps, 
-            max_num_iterations=max_iter, 
-            space_gap=gap, 
-            recomb_rate=rate, 
-            num_processes=1, # No nested pool
-            use_standard_baum_welch=use_std_bw,
-            precalculated_viterbi_emissions=precalc_ems,
-            dynamic_cores_fn=dynamic_cores_fn
-        )
-    finally:
-        # Always release any held extra and decrement the active
-        # counter, regardless of whether the body succeeded.  Order:
-        # release the extra FIRST so peers see the freed extra-slot
-        # before the active-count decrement (cleanest invariant; see
-        # block_linking._gap_worker for the longer rationale).
-        _try_release_extra_hm()
-        if counter_inc and _HM_ACTIVE_COUNTER is not None:
-            try:
-                with _HM_ACTIVE_COUNTER.get_lock():
-                    _HM_ACTIVE_COUNTER.value -= 1
-            except Exception:
-                pass
+    return calculate_hap_transition_probabilities(
+        samples, sites, haps,
+        max_num_iterations=max_iter,
+        space_gap=gap,
+        recomb_rate=rate,
+        num_processes=1,
+        use_standard_baum_welch=use_std_bw,
+        precalculated_viterbi_emissions=precalc_ems,
+        dynamic_cores_fn=dynamic_cores_fn,
+    )
 
 
-def _gap_worker_tagged(args):
-    """Wraps _gap_worker for use with pool.imap_unordered.
-
-    imap_unordered returns results in completion order, not input
-    order, so we tag each result with its gap-size.  The parent
-    re-assembles results by gap-size to restore the {gap: result}
-    mapping that downstream code expects.
-
-    args[0] is the gap-size (the same convention used in
-    generate_transition_probability_mesh_double_hmm's worker_args
-    construction).  Used ONLY by the pool path — the sequential paths
-    call _gap_worker directly and rely on positional ordering.
-    """
-    gap = args[0]
-    return (gap, _gap_worker(args))
-
-
-def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_sites, haps_data, 
+def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_sites, haps_data,
                                                  max_num_iterations=20, recomb_rate=5e-7,
                                                  use_standard_baum_welch=True,
                                                  precalculated_viterbi_emissions=None,
-                                                 num_processes=16,
+                                                 num_processes=1,
                                                  dynamic_cores_fn=None):
-    """
-    Generates a full mesh of transition probabilities for all gap sizes using Viterbi-EM.
-    
+    """Generate a full mesh of transition probabilities for all gap sizes
+    via sequential Viterbi-EM, one gap at a time.
+
     Args:
-        precalculated_viterbi_emissions: Optional ViterbiBlockList. If provided, 
-        full_samples_data and sample_sites are IGNORED to prevent memory pickling overhead.
-        num_processes: Number of parallel processes. Use 1 for sequential execution
-                      (required when called from within a worker process).
-        dynamic_cores_fn: Optional callable returning current core allocation.
-            When provided, gaps are processed sequentially with numba threads
-            updated between each gap. This enables dynamic scaling as peer
-            workers finish — remaining workers automatically use freed cores.
-            Throughput is equivalent to pool-based processing (prange over
-            samples uses the same total cores) but can adapt mid-computation.
+        precalculated_viterbi_emissions: Required ViterbiBlockList of
+            per-block emission tensors.  full_samples_data /
+            sample_sites are ignored (placed here for signature
+            symmetry with other mesh APIs).  Emissions live in shared
+            memory so they aren't pickled to inner machinery.
+        num_processes: kept for signature compatibility; production
+            uses 1 (the prange-over-samples in the scan kernels is the
+            real parallelism, scaled by numba's thread count).
+        dynamic_cores_fn: Optional callable returning current core
+            allocation.  When provided, numba threads are reset before
+            each gap (coarse-grained) AND the callback is forwarded
+            into the EM loop and per-block M-step (fine-grained
+            rescaling between EM iterations and within the M-step).
+            See calculate_hap_transition_probabilities and
+            update_transitions_layered_hmm for the in-flight hooks.
+
+    Returns:
+        block_linking.TransitionMesh keyed by gap (1..max_gap).
     """
+    if precalculated_viterbi_emissions is None:
+        raise ValueError(
+            "precalculated_viterbi_emissions is required; pass a "
+            "ViterbiBlockList from generate_viterbi_block_emissions"
+        )
+    del full_samples_data, sample_sites, num_processes  # unused
+
     max_gap = len(haps_data) - 1
     gaps = list(range(1, max_gap + 1))
-    
-    use_shared_emissions = False
-    
-    # CRITICAL MEMORY FIX:
-    # If using pre-calculated emissions, we MUST put them in Shared Memory
-    # rather than passing them as arguments to the worker.
-    # Passing as args duplicates the object (pickles) for every worker task.
-    shared_context = {}
-    
-    if precalculated_viterbi_emissions is not None:
-        data_arg = None
-        sites_arg = None
-        use_shared_emissions = True
-        shared_context['viterbi_emissions'] = precalculated_viterbi_emissions
-    else:
-        data_arg = full_samples_data
-        sites_arg = sample_sites
-    
-    # Build the per-task args.  Each task carries:
-    #   - the standard 8-element payload (gap, data, sites, haps, ...,
-    #     use_shared_emissions)
-    #   - the dynamic_cores_fn callback as a 9th element, used by
-    #     _gap_worker to enable in-flight (per-EM-iteration and
-    #     per-block) numba thread rescaling.
-    # In the sequential-with-callback path, the callback is the caller-
-    # supplied function (typically hierarchical_assembly's
-    # _get_dynamic_threads, which reads its OWN active_counter).  In
-    # the sequential-no-callback path, it's None — no rescaling.  In
-    # the parallel-pool path, the args carry None at construction time
-    # (callbacks can't be pickled to workers); each worker BUILDS its
-    # own callback locally from the module-global counter that's set
-    # up by _init_shared_data — see _gap_worker for the wiring.
-    worker_args = []
-    for gap in gaps:
-        worker_args.append((
-            gap, 
-            data_arg, 
-            sites_arg, 
-            haps_data, 
-            max_num_iterations, 
-            recomb_rate, 
-            use_standard_baum_welch,
-            use_shared_emissions, # Flag to tell worker to check shared memory
-            dynamic_cores_fn      # In-flight rescaling callback (or None)
-        ))
-    
-    # Handle sequential vs parallel execution
-    n_gaps = len(gaps)
+
+    # Put emissions in module-global shared memory so _gap_worker can
+    # retrieve them without re-pickling per task (the ll-tensor list
+    # is ~1 GB at production shape).
+    _init_shared_data({'viterbi_emissions': precalculated_viterbi_emissions})
+
+    # Each task carries:
+    #   - the 8-element payload (gap, ..., use_shared_emissions=True)
+    #   - the dynamic_cores_fn callback (9th element) used by the EM
+    #     loop and M-step to rescale numba threads in-flight
+    worker_args = [
+        (gap, None, None, haps_data, max_num_iterations, recomb_rate,
+         use_standard_baum_welch, True, dynamic_cores_fn)
+        for gap in gaps
+    ]
+
+    results = []
     if dynamic_cores_fn is not None:
-        # Dynamic scaling: process gaps sequentially, updating numba threads
-        # between each gap.  The prange loops in forward/backward scans
-        # parallelize across samples, so N numba threads ≈ N pool workers
-        # with 1 thread each.  Sequential can re-check the allocation
-        # between gaps and scale up as peer workers finish.
-        #
-        # Improvement A: the callback is now ALSO passed inside the
-        # worker args (worker_args[i][8] above), so the in-flight hooks
-        # inside calculate_hap_transition_probabilities (top of EM
-        # iteration loop) and update_transitions_layered_hmm (top of
-        # per-block loops) ALSO rescale during a single gap.  The
-        # between-gap rescale below remains as a coarse-grained reset.
         import numba as _numba
-        _init_shared_data(shared_context)
-        results = []
         for args in worker_args:
-            n_cores = dynamic_cores_fn()
-            _numba.set_num_threads(n_cores)
-            results.append(_gap_worker(args))
-            _malloc_trim()
-    elif num_processes == 1 or n_gaps <= 1:
-        # Sequential: either required (within worker) or only 1 gap (L4).
-        # For 1 gap, the caller's numba_thread_scope gives full thread count
-        # to the prange scans — no need for Pool overhead.
-        _init_shared_data(shared_context)
-        results = []
-        for args in worker_args:
+            # Coarse-grained between-gap reset.  Fine-grained rescaling
+            # happens inside the EM loop via the same callback.
+            _numba.set_num_threads(dynamic_cores_fn())
             results.append(_gap_worker(args))
             _malloc_trim()
     else:
-        # Parallel pool path with full dynamic-thread reallocation.
-        # Mirrors the architecture block_linking.py uses for its
-        # generate_transition_probability_mesh:
-        #
-        #   - active_counter: _forkserver_ctx.Value('i', 0) shared across
-        #     workers.  Workers atomically increment on task entry and
-        #     decrement on exit (in _gap_worker).  The counter's live
-        #     value drives an internal dynamic_cores_fn callback built
-        #     by each worker via _get_pool_dynamic_cores_fn, which the
-        #     EM iteration and per-block hooks call to rescale threads.
-        #
-        #   - _ForkserverPool: required because the parent process may
-        #     have JIT-compiled parallel=True numba kernels before
-        #     reaching here (e.g.  scan_distance_aware_forward), which
-        #     initialises GNU OpenMP.  Forking workers from such a
-        #     parent crashes them with "fork() called from a process
-        #     already using GNU OpenMP, this is unsafe."  Forkserver
-        #     spawns workers from a clean intermediate process.
-        #     set_forkserver_preload (in thread_config.py) ensures
-        #     hmm_matching and deps are pre-imported in the forkserver,
-        #     so worker startup is sub-second.
-        #
-        #   - imap_unordered(chunksize=1): dispatches tasks one at a
-        #     time from the master queue.  Fast gaps finish, decrement
-        #     the counter, and stragglers' next in-flight hook sees the
-        #     lower count and scales up immediately.  pool.map's chunk
-        #     pre-division would defeat this by leaving idle workers.
-        #
-        #   - _gap_worker_tagged: wraps results with their gap-size so
-        #     completion-order output from imap_unordered can be
-        #     re-keyed by gap.
-        #
-        #   - __main__.__file__ / __main__.__spec__ clearing: belt-and-
-        #     suspenders to prevent the forkserver process from re-
-        #     running the user's entry script during its bootstrap.
-        #     Mirrors block_haplotypes and block_linking.
+        for args in worker_args:
+            results.append(_gap_worker(args))
+            _malloc_trim()
 
-        # Use the original num_processes as the total_cores budget.
-        # We do NOT subdivide num_processes into n_pool ×
-        # threads_per_worker the way the original parallel branch did,
-        # because the dynamic-scaling mechanism handles that
-        # automatically: workers start at 1 thread each and scale up
-        # to num_processes // active as peers finish.  Caller's
-        # original intent of "use up to num_processes total cores" is
-        # preserved.
-        n_pool = min(num_processes, n_gaps)
-        total_cores = num_processes
-
-        active_counter = _forkserver_ctx.Value('i', 0)
-        # Extra-thread counter for remainder distribution.  See
-        # _try_claim_extra_hm / _try_release_extra_hm and
-        # _get_pool_dynamic_cores_fn's docstrings.  Mirrors
-        # block_linking's extra_counter — same forkserver context as
-        # active_counter for shared-memory consistency.
-        extra_counter = _forkserver_ctx.Value('i', 0)
-
-        # Belt-and-suspenders __main__ clearing — see block_linking and
-        # block_haplotypes for rationale.
-        import sys as _sys
-        _main_mod = _sys.modules.get('__main__')
-        _saved_main_file = getattr(_main_mod, '__file__', None)
-        _saved_main_spec = getattr(_main_mod, '__spec__', None)
-        if _main_mod is not None:
-            if hasattr(_main_mod, '__file__'):
-                del _main_mod.__file__
-            _main_mod.__spec__ = None
-
-        try:
-            results_by_gap = {}
-            with _ForkserverPool(n_pool, initializer=_init_shared_data,
-                                 initargs=(shared_context, None,
-                                           active_counter, total_cores,
-                                           extra_counter)) as pool:
-                for gap_key, gap_result in pool.imap_unordered(
-                        _gap_worker_tagged, worker_args, chunksize=1):
-                    results_by_gap[gap_key] = gap_result
-        finally:
-            # Restore __main__ attributes (paired with the deletion above).
-            if _main_mod is not None:
-                if _saved_main_file is not None:
-                    _main_mod.__file__ = _saved_main_file
-                _main_mod.__spec__ = _saved_main_spec
-
-        # Re-order results to match gaps list (positional order
-        # expected by dict(zip(gaps, results)) below).
-        results = [results_by_gap[g] for g in gaps]
-
-    del worker_args, shared_context
     _malloc_trim()
-    
-    mesh_dict = dict(zip(gaps, results))
-    return block_linking.TransitionMesh(mesh_dict)
+    return block_linking.TransitionMesh(dict(zip(gaps, results)))
