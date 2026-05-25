@@ -41,6 +41,8 @@ import warnings
 import gc
 import ctypes
 
+from numba import njit, prange
+
 import thread_config
 
 import analysis_utils
@@ -69,6 +71,7 @@ from bhd_kernels import (
     _fit_at_fixed_K,
     _compute_cc,
     _compute_bic,
+    PoolEmissionCache,
 )
 from bhd_recovery import (
     RECOVERY_HAPS_EQUAL_EPS_PCT,
@@ -740,51 +743,210 @@ def _kmedoids_pam(D, K, max_iter=MEDOID_PAM_MAX_ITER):
     if K <= 0:
         return []
 
+    # Delegate the BUILD + SWAP phases to a single njit kernel.  Reduces
+    # the O(N*K) Python-list `in medoids` membership tests to O(1)
+    # boolean lookups per candidate, and lets the inner loops over N
+    # (which dominate at N=320) run at compiled speed.
+    D_c = np.ascontiguousarray(D, dtype=np.float64)
+    medoid_arr = _kmedoids_pam_kernel(D_c, int(K), int(max_iter))
+    # Return as a Python sorted list (matches original signature).
+    return sorted([int(m) for m in medoid_arr])
+
+
+@njit(cache=True)
+def _pairwise_hamming_kernel(X):
+    """Compute pairwise normalised Hamming distance for binary seed
+    matrix X.  D[i, j] = (# positions where X[i] != X[j]) / L.
+
+    Output is dense (N, N), symmetric with zero diagonal.  Walks only
+    the upper triangle (j > i) and mirrors to (j, i).
+
+    For N=320, L=200 this saves ~20 MB of (N, L) bool temporaries and
+    roughly halves the comparisons vs the naive (i, j) full square loop.
+
+    Numerical note: we divide by L explicitly (not by multiplying by
+    1/L) so the result matches np.mean's accumulator-sum-then-divide
+    convention exactly.  Multiplying by a precomputed reciprocal would
+    differ by 1 ULP for integer counts that don't divide L evenly.
+    """
+    N = X.shape[0]
+    L = X.shape[1]
+    D = np.zeros((N, N), dtype=np.float64)
+    L_f = float(L)
+    for i in range(N):
+        for j in range(i + 1, N):
+            count = 0
+            for l in range(L):
+                if X[i, l] != X[j, l]:
+                    count += 1
+            d = count / L_f
+            D[i, j] = d
+            D[j, i] = d
+    return D
+
+
+@njit(cache=True)
+def _kmedoids_pam_kernel(D, K, max_iter):
+    """njit BUILD + SWAP phases of PAM.  Drop-in replacement for the
+    Python implementation.
+
+    Returns the medoid set as a (K,) int64 array (UNSORTED — the
+    Python wrapper sorts the result).  Order within the returned array
+    reflects the BUILD-phase insertion order modified by SWAP-phase
+    replacements; sorting in Python keeps the public API identical
+    to the original `sorted(medoids)` return.
+
+    Key data-structure change vs Python: instead of a Python list of
+    medoid indices with O(K) `in` membership tests, we keep a
+    (N,) bool `is_medoid` array — membership tests are O(1).  This
+    matters in the SWAP phase's tight `for c in range(N): if c in
+    medoids: continue` inner loop, which the Python version paid O(K)
+    for per c (so O(N*K) per swap attempt).
+    """
+    N = D.shape[0]
+    is_medoid = np.zeros(N, dtype=np.bool_)
+    medoids = np.empty(K, dtype=np.int64)
+
     # ---- BUILD phase ----
     # First medoid minimises total distance to all points.
-    sum_d = D.sum(axis=1)
-    first = int(sum_d.argmin())
-    medoids = [first]
+    sum_d = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        s = 0.0
+        for j in range(N):
+            s += D[i, j]
+        sum_d[i] = s
+    first = 0
+    best_first = sum_d[0]
+    for i in range(1, N):
+        if sum_d[i] < best_first:
+            best_first = sum_d[i]
+            first = i
+    medoids[0] = first
+    is_medoid[first] = True
+    n_med = 1
 
-    for k in range(1, K):
-        # current_min[i] = min over m in medoids of D[m, i]
-        current_min = np.min(D[medoids], axis=0)               # (N,)
-        # For each non-medoid candidate c, total cost would be
-        # sum_i min(current_min[i], D[c, i]).  We want the c that
-        # minimises this.
-        best_cost = float('inf')
+    # current_min[i] = min over m in medoids of D[m, i]
+    current_min = np.empty(N, dtype=np.float64)
+    for i in range(N):
+        current_min[i] = D[first, i]
+
+    for _ in range(1, K):
+        best_cost = np.inf
         best_idx = -1
         for c in range(N):
-            if c in medoids:
+            if is_medoid[c]:
                 continue
-            new_min = np.minimum(current_min, D[c])
-            cost = float(new_min.sum())
+            cost = 0.0
+            for i in range(N):
+                d_ci = D[c, i]
+                if d_ci < current_min[i]:
+                    cost += d_ci
+                else:
+                    cost += current_min[i]
             if cost < best_cost - 1e-9:
                 best_cost = cost
                 best_idx = c
         if best_idx < 0:
             break
-        medoids.append(best_idx)
+        medoids[n_med] = best_idx
+        is_medoid[best_idx] = True
+        # Update current_min with the new medoid's distances
+        for i in range(N):
+            d_bi = D[best_idx, i]
+            if d_bi < current_min[i]:
+                current_min[i] = d_bi
+        n_med += 1
 
-    medoids = sorted(medoids)
+    # If BUILD failed to add K medoids (shouldn't happen for K <= N
+    # with non-degenerate D, but guard defensively to match the
+    # Python version), truncate.
+    if n_med < K:
+        # Return what we have; caller sorts and converts to list.
+        # This path is reached when best_idx == -1 in the BUILD loop;
+        # the Python version did `break` out of the for-k loop and
+        # ended up with len(medoids) < K, so we mirror that.
+        out = np.empty(n_med, dtype=np.int64)
+        for kk in range(n_med):
+            out[kk] = medoids[kk]
+        return out
+
+    # Sort medoids ascending before SWAP.  This is essential for
+    # behavioural parity with the Python version, which does
+    # `medoids = sorted(medoids)` between BUILD and SWAP.  SWAP is
+    # greedy ("accept the first improving swap"), so the iteration
+    # order of `mi` (offsets into the medoid array) affects which
+    # swap is found and accepted first.  Without this sort the
+    # njit kernel's SWAP can diverge from the Python version's
+    # SWAP starting from K >= 5 (verified at K=5 with N=30 random
+    # data, May 2026).  current_min is invariant under medoid
+    # relabelling, so it does not need to be recomputed after sort.
+    # Use insertion sort (small K, ascending).
+    for ii in range(1, n_med):
+        key = medoids[ii]
+        jj = ii - 1
+        while jj >= 0 and medoids[jj] > key:
+            medoids[jj + 1] = medoids[jj]
+            jj -= 1
+        medoids[jj + 1] = key
 
     # ---- SWAP phase ----
-    def total_cost(m_list):
-        return float(np.min(D[m_list], axis=0).sum())
+    # Current total cost: sum over i of min_m D[m, i].
+    # current_min already holds these per-point minima from BUILD.
+    cur_cost = 0.0
+    for i in range(N):
+        cur_cost += current_min[i]
 
-    cur_cost = total_cost(medoids)
+    # Buffer for the per-mi "drop-one-medoid" minima: drop_min[i] =
+    # min over medoids excluding medoids[mi] of D[m, i].  Allocated
+    # once outside the SWAP loop, reused for each (max_iter, mi).
+    drop_min = np.empty(N, dtype=np.float64)
+
     for _ in range(max_iter):
         improved = False
-        for mi in range(len(medoids)):
+        for mi in range(n_med):
+            # Precompute drop_min[i] for this mi.  Then each candidate
+            # swap with c has new_cost = sum_i min(drop_min[i], D[c, i]),
+            # which is O(N) per c (vs the naive O(N*K)).  At N=320
+            # K=5 this is a ~5x reduction in SWAP-evaluation work.
+            for i in range(N):
+                bd = np.inf
+                for mj in range(n_med):
+                    if mj == mi:
+                        continue
+                    d_mji = D[medoids[mj], i]
+                    if d_mji < bd:
+                        bd = d_mji
+                drop_min[i] = bd
+
             for c in range(N):
-                if c in medoids:
+                if is_medoid[c]:
                     continue
-                candidate_medoids = list(medoids)
-                candidate_medoids[mi] = c
-                new_cost = total_cost(candidate_medoids)
+                # Compute new_cost = sum_i min(drop_min[i], D[c, i]).
+                new_cost = 0.0
+                for i in range(N):
+                    d_ci = D[c, i]
+                    if d_ci < drop_min[i]:
+                        new_cost += d_ci
+                    else:
+                        new_cost += drop_min[i]
                 if new_cost < cur_cost - 1e-9:
-                    medoids = candidate_medoids
+                    # Accept the swap.
+                    m_drop = medoids[mi]
+                    is_medoid[m_drop] = False
+                    is_medoid[c] = True
+                    medoids[mi] = c
                     cur_cost = new_cost
+                    # Rebuild current_min from the new medoid set so
+                    # subsequent swap evaluations reflect reality.
+                    # We could rebuild incrementally but at N=320 the
+                    # full rebuild is cheap and avoids accumulated error.
+                    for i in range(N):
+                        bd = D[medoids[0], i]
+                        for mj in range(1, n_med):
+                            d_mji = D[medoids[mj], i]
+                            if d_mji < bd:
+                                bd = d_mji
+                        current_min[i] = bd
                     improved = True
                     break
             if improved:
@@ -792,7 +954,7 @@ def _kmedoids_pam(D, K, max_iter=MEDOID_PAM_MAX_ITER):
         if not improved:
             break
 
-    return sorted(medoids)
+    return medoids
 
 
 def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
@@ -988,9 +1150,16 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
 
     # Compute pairwise Hamming distance matrix (in [0, 1] units).
     # D[i, j] = mean over l of (seed[i, l] != seed[j, l])
-    D = np.zeros((N, N), dtype=np.float64)
-    for i in range(N):
-        D[i] = np.mean(seed_array != seed_array[i], axis=1)
+    # The numpy version was:
+    #   for i in range(N):
+    #       D[i] = np.mean(seed_array != seed_array[i], axis=1)
+    # which allocates a (N, L) temporary boolean array per row (N rows,
+    # so N*N*L bytes peak — for N=320, L=200 that's ~20 MB just in
+    # temporaries, hit once per block per _initial_kgrowth_with_medoids
+    # call).  The njit kernel fuses the comparison + accumulator into
+    # one pass with no temporary, and exploits symmetry (D[i, j] =
+    # D[j, i]) to halve the work.
+    D = _pairwise_hamming_kernel(np.ascontiguousarray(seed_array, dtype=np.int64))
 
     # Run PAM to pick diverse seed samples
     medoid_indices = _kmedoids_pam(D, n_medoid_starts,
@@ -1245,8 +1414,17 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
             # AND use_log_bic as the K-growth that follows, so trim and
             # grow share an identical BIC criterion.  Each accepted hap
             # strictly improves BIC; rejected haps are dropped.
+            #
+            # Build a PoolEmissionCache wrapping the combined trio +
+            # pairwise candidate pool.  _greedy_bic_select makes
+            # O(|cand_list|² / 2) calls to _compute_nll_for_subset
+            # internally (forward selection trials each remaining
+            # candidate at each K step), and the cache amortises the
+            # Viterbi emission build across all those calls.
+            seed_cache = PoolEmissionCache(cand_list, probs_k,
+                                            lam=lam)
             sel_indices, sel_haps, _trim_nll = _greedy_bic_select(
-                cand_list, probs_k, lam,
+                seed_cache,
                 cc_scale=cc_scale,
                 max_k=K_max,
                 use_log_bic=use_log_bic,
@@ -1445,63 +1623,142 @@ def _compute_per_site_confidence(probs_k, H_k, A, lam, min_supporters=2):
         n_supporters: (K, L_kept) int
     """
     K, L = H_k.shape
+    if K == 0:
+        return (np.zeros((0, L), dtype=np.float64),
+                np.zeros((0, L), dtype=np.int64))
+    # Hand off to the njit kernel.  The kernel replaces the original
+    # Python `for k in range(K): for l in range(L):` double loop with
+    # per-site numpy slicing.  Same pattern as bhd_kernels'
+    # _update_one_founder rewrite (which gave 22x on the same shape of
+    # work); expect comparable speedup here.
+    probs_c = np.ascontiguousarray(probs_k, dtype=np.float64)
+    H_c = np.ascontiguousarray(H_k, dtype=np.int64)
+    A_c = np.ascontiguousarray(A, dtype=np.int64)
+    return _compute_per_site_confidence_kernel(
+        probs_c, H_c, A_c, float(lam), int(min_supporters))
+
+
+@njit(cache=True, parallel=True, fastmath=False)
+def _compute_per_site_confidence_kernel(probs_k, H_k, A, lam, min_supporters):
+    """njit version of _compute_per_site_confidence.
+
+    For each (k, l), determine which samples are "supporting" k at l
+    (via their pair-assignment bucket) and how many of those samples'
+    data is "consistent" with the founder's allele.  Three buckets:
+
+      Bucket H (k, k): consistent iff argmax of P(g | s, l) == 2*H_k[k, l]
+      Bucket J (k, j) with j != k, j real: consistent iff argmax of
+                                            P(g | s, l) == H_k[k, l] + H_k[j, l]
+      Bucket P (k, W): consistent iff per-site real-pair cost <
+                       per-site wildcard cost (so the real founder
+                       actually contributed information, not just letting
+                       the wildcard absorb)
+
+    Same arithmetic as the Python version.  `prange` over founders
+    because samples-in-pair-assignment are unevenly distributed across
+    founders (some founders dominate carriers; parallelising over k
+    balances out via the global sample-mask scan inside each k).
+
+    Floors -log(p) at LOG_EPS_LOCAL = 1e-12 to match _safe_neg_log's
+    behaviour.
+
+    Returns:
+        confidence:   (K, L) float64
+        n_supporters: (K, L) int64
+    """
+    LOG_EPS_LOCAL = 1e-12
+
     N = probs_k.shape[0]
+    K = H_k.shape[0]
+    L = H_k.shape[1]
     W = K
 
     confidence = np.zeros((K, L), dtype=np.float64)
     n_supporters = np.zeros((K, L), dtype=np.int64)
 
-    for k in range(K):
-        is_kk = (A[:, 0] == k) & (A[:, 1] == k)
-        is_kW = (A[:, 0] == k) & (A[:, 1] == W)
-        has_k = (A[:, 0] == k) | (A[:, 1] == k)
-        is_kj = has_k & ~is_kk & ~is_kW
-
+    for k in prange(K):
+        # Walk samples once to classify each into bucket H, J, P, or
+        # not-supporting.  We don't pre-materialise the bucket masks
+        # (the Python version did) because numba prefers explicit loops
+        # over fancy mask indexing in the inner kernel — and at typical
+        # N=320 a single sample-walk per (k, l) inner site is cheap.
         for l in range(L):
             cur_val = H_k[k, l]
             n_supp = 0
             n_consistent = 0
 
-            # Bucket (k, k): consistent if data prefers genotype = 2*cur_val
-            if is_kk.any():
-                p = probs_k[is_kk, l, :]
-                consistent_mask = (p.argmax(axis=1) == 2 * cur_val)
-                n_supp += int(is_kk.sum())
-                n_consistent += int(consistent_mask.sum())
-
-            # Bucket (k, j): consistent if data prefers genotype = cur_val + H_k[j, l]
-            if is_kj.any():
-                idx = np.where(is_kj)[0]
-                a0 = A[idx, 0]; a1 = A[idx, 1]
-                partner = np.where(a0 == k, a1, a0)
-                expected_dosage = cur_val + H_k[partner, l]
-                p = probs_k[idx, l, :]
-                consistent_mask = (p.argmax(axis=1) == expected_dosage)
-                n_supp += len(idx)
-                n_consistent += int(consistent_mask.sum())
-
-            # Bucket (k, W): consistent if real-pair fit beats wildcard
-            #  (since the wildcard might mask any data, "consistent" here
-            #   means the real founder's allele actually contributed
-            #   information rather than just letting the wildcard absorb)
-            if is_kW.any():
-                p = probs_k[is_kW, l, :]                   # (n_P, 3)
-                # Cost under real-(k,W) at this site:
-                #   -log max(p[:, cur_val], p[:, cur_val+1]) + λ
-                best_real = np.maximum(p[:, cur_val], p[:, cur_val + 1])
-                cost_real = _safe_neg_log(best_real) + lam
-                # Cost under (W, W):
-                cost_WW = _safe_neg_log(p.max(axis=1)) + 2.0 * lam
-                # Sample is "consistent" with the real founder at this site
-                # if the real-pair cost is meaningfully better than (W, W).
-                consistent_mask = cost_real < cost_WW
-                n_supp += int(is_kW.sum())
-                n_consistent += int(consistent_mask.sum())
+            for s in range(N):
+                a0 = A[s, 0]
+                a1 = A[s, 1]
+                # Check whether sample s supports founder k under any
+                # bucket.  Bucket-H test first since it's the cheapest.
+                if a0 == k and a1 == k:
+                    # Bucket H (k, k): consistent iff argmax P(g) == 2*cur_val
+                    p0 = probs_k[s, l, 0]
+                    p1 = probs_k[s, l, 1]
+                    p2 = probs_k[s, l, 2]
+                    # argmax of (p0, p1, p2).  Tie-break: first-max
+                    # matches np.argmax's behaviour (which the Python
+                    # version used).
+                    if p0 >= p1 and p0 >= p2:
+                        amax = 0
+                    elif p1 >= p2:
+                        amax = 1
+                    else:
+                        amax = 2
+                    n_supp += 1
+                    if amax == 2 * cur_val:
+                        n_consistent += 1
+                elif a0 == k and a1 == W:
+                    # Bucket P (k, W): consistent iff real-(k,W) cost <
+                    # (W, W) cost at site l.
+                    p0 = probs_k[s, l, 0]
+                    p1 = probs_k[s, l, 1]
+                    p2 = probs_k[s, l, 2]
+                    # best_real = max(p[cur_val], p[cur_val+1])
+                    if cur_val == 0:
+                        best_real = p0 if p0 > p1 else p1
+                    else:
+                        best_real = p1 if p1 > p2 else p2
+                    pmax = p0
+                    if p1 > pmax:
+                        pmax = p1
+                    if p2 > pmax:
+                        pmax = p2
+                    if best_real < LOG_EPS_LOCAL:
+                        best_real = LOG_EPS_LOCAL
+                    if pmax < LOG_EPS_LOCAL:
+                        pmax = LOG_EPS_LOCAL
+                    cost_real = -math.log(best_real) + lam
+                    cost_WW = -math.log(pmax) + 2.0 * lam
+                    n_supp += 1
+                    if cost_real < cost_WW:
+                        n_consistent += 1
+                elif (a0 == k or a1 == k) and a0 != a1 and a0 != W and a1 != W:
+                    # Bucket J (k, j) with j != k, j real.  Find
+                    # partner founder index j.
+                    j = a1 if a0 == k else a0
+                    partner_h = H_k[j, l]
+                    expected_dosage = cur_val + partner_h
+                    p0 = probs_k[s, l, 0]
+                    p1 = probs_k[s, l, 1]
+                    p2 = probs_k[s, l, 2]
+                    if p0 >= p1 and p0 >= p2:
+                        amax = 0
+                    elif p1 >= p2:
+                        amax = 1
+                    else:
+                        amax = 2
+                    n_supp += 1
+                    if amax == expected_dosage:
+                        n_consistent += 1
+                # else: sample s does not support founder k at this
+                # site under any bucket; skip.
 
             n_supporters[k, l] = n_supp
             if n_supp >= min_supporters:
                 confidence[k, l] = n_consistent / n_supp
-            # else: confidence stays 0 (low-support site)
+            # else: confidence stays 0 (low-support site).
 
     return confidence, n_supporters
 

@@ -1545,7 +1545,6 @@ if __name__ == '__main__':
                     sites,
                     recomb_rate=5e-8,
                     switch_penalty_per_snp=1.0,
-                    wildcard_per_snp_penalty=0.05,
                     batch_size=1
                 )
 
@@ -1715,67 +1714,14 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
         """
         rows = []
 
-        # Number of REAL discovered founders, equal to len(M).  Chunks
-        # whose hap1 or hap2 is >= this value are wildcard (W) chunks
-        # produced by paint_samples when wildcard_per_snp_penalty is
-        # enabled (W_idx is appended to hap_keys at index num_real_haps,
-        # one past the real range).  We detect W chunks BEFORE the
-        # M-mapping so we can distinguish them from genuine "unmappable
-        # real founder" cases (M[disc_id] == -1, which would happen if
-        # a disc founder failed to find a matching truth founder -- a
-        # different, more concerning, failure mode that the bijection
-        # assumption usually rules out).
-        n_disc_founders = int(len(M))
-
         for i, name in enumerate(sample_names):
             painted_sample = painting[i]
             truth_sample = truth[i]
 
             painted_chunks = painted_sample.chunks if hasattr(painted_sample, 'chunks') else []
-            # `raw_chunks`: the painter's UNCLEANED Viterbi output.
-            # paint_samples' emission-aware cleanup (default ON) removes
-            # wildcard and short chunks from `chunks` but preserves the
-            # original list in `raw_chunks`.  W-chunk diagnostics MUST
-            # read from `raw_chunks` because after cleanup the cleaned
-            # `chunks` contains no W slots (downstream stages would
-            # otherwise see 0 W footprint everywhere even when the
-            # painter actually emitted W heavily in problem regions).
-            # For paintings produced without cleanup (or by older code
-            # paths that did not set raw_chunks), the SamplePainting
-            # constructor defaults raw_chunks to the same list as
-            # chunks, so this still works as a single-source read.
-            painted_raw_chunks = (painted_sample.raw_chunks
-                                  if hasattr(painted_sample, 'raw_chunks')
-                                  else painted_chunks)
             truth_chunks = truth_sample.chunks if hasattr(truth_sample, 'chunks') else []
             n_painted = len(painted_chunks)
             n_truth = len(truth_chunks)
-
-            # ---- Wildcard chunk detection (before M-mapping) ----
-            # A chunk is a "wildcard chunk" if EITHER track holds the W
-            # slot index (i.e. hap1 or hap2 >= n_disc_founders).  These
-            # are regions where the painter explicitly said "no real
-            # founder fits well here" -- they are diagnostic of locally-
-            # chimeric discovered haplotypes, not painting errors per
-            # se.  Reported separately from the spurious-real tuple
-            # count below so that the metric for "actual painting
-            # errors" doesn't conflate these two qualitatively different
-            # failure modes.
-            #
-            # Sourced from `painted_raw_chunks` so that the
-            # paint_samples emission-aware cleanup (which resolves W
-            # chunks to real-founder neighbours in `painted_chunks`)
-            # does NOT erase the W footprint diagnostic.
-            wildcard_chunks = [
-                c for c in painted_raw_chunks
-                if (c.hap1 >= n_disc_founders) or (c.hap2 >= n_disc_founders)
-            ]
-            n_wildcard_chunks = len(wildcard_chunks)
-            total_wildcard_bp = int(sum(
-                (c.end - c.start) for c in wildcard_chunks))
-            wildcard_locations = [
-                (int(c.start), int(c.end)) for c in wildcard_chunks
-            ]
 
             # ---- Raw chunk-size distribution (no mapping/collapsing) ----
             if n_painted > 0:
@@ -1813,29 +1759,15 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
             n_spurious_tuples = len(spurious_tuples)
             n_missing_tuples = len(missing_tuples)
 
-            # ---- Split spurious tuples by wildcard provenance ----
-            # After M-mapping, W chunks contribute tuples that contain
-            # -1 (because M_idx maps to -1 via the bounds check in
-            # _topology_from_chunks).  Splitting the spurious set into
-            # "tuples containing -1" (W-marked uncertainty regions, an
-            # acknowledged diagnostic) vs "tuples not containing -1"
-            # (real founder pairs not present in truth -- genuine
-            # painting errors) lets us read off "how much of the
-            # spurious-tuple count is real over-painting" at a glance.
-            spurious_tuples_wildcard = {
-                t for t in spurious_tuples if (-1 in t)
-            }
-            spurious_tuples_real = spurious_tuples - spurious_tuples_wildcard
-            n_spurious_tuples_real = len(spurious_tuples_real)
-            n_spurious_tuples_wildcard = len(spurious_tuples_wildcard)
-
             # Sequence-level extra transitions (signed; positive = disc
             # over-segments at the topology level, negative = disc under-
             # segments).
             extra_transitions = n_topo_disc - n_topo_truth
 
             # Did the painting have any unmappable founder IDs?  These show
-            # up as -1 in the mapped topology; flag if so.
+            # up as -1 in the mapped topology and indicate a discovered
+            # founder that failed to find a matching truth founder under
+            # the greedy bijection M.
             unmappable_in_topology = any(
                 (a == -1 or b == -1) for a, b in disc_topo)
 
@@ -1848,22 +1780,13 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
                 'N_topology_truth': n_topo_truth,
                 'Topology_exact_match': topology_exact_match,
                 'N_spurious_tuples': n_spurious_tuples,
-                'N_spurious_tuples_real': n_spurious_tuples_real,
-                'N_spurious_tuples_wildcard': n_spurious_tuples_wildcard,
                 'N_missing_tuples': n_missing_tuples,
                 'Extra_transitions': extra_transitions,
                 'Has_unmappable_founder': unmappable_in_topology,
                 'Spurious_tuples': sorted(spurious_tuples),
-                'Spurious_tuples_real': sorted(spurious_tuples_real),
-                'Spurious_tuples_wildcard': sorted(spurious_tuples_wildcard),
                 'Missing_tuples': sorted(missing_tuples),
                 'Topology_painted_mapped': disc_topo,
                 'Topology_truth': truth_topo,
-                # Wildcard-specific diagnostics (W chunks emitted by the
-                # painter; see calculate_binned_emissions docstring):
-                'N_wildcard_chunks': n_wildcard_chunks,
-                'Total_wildcard_bp': total_wildcard_bp,
-                'Wildcard_locations': wildcard_locations,
                 # Raw-chunk-size diagnostics (independent of topology):
                 'N_chunks_lt_10kb': n_lt_10kb,
                 'N_chunks_lt_100kb': n_lt_100kb,
@@ -1937,18 +1860,11 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
         mean_n_topo_truth = contig_df['N_topology_truth'].mean()
         match_rate = 100.0 * contig_df['Topology_exact_match'].mean()
         mean_spurious = contig_df['N_spurious_tuples'].mean()
-        mean_spurious_real = contig_df['N_spurious_tuples_real'].mean()
-        mean_wildcard = contig_df['N_wildcard_chunks'].mean()
-        # Wildcard footprint per sample (bp), averaged across samples on
-        # this contig.  Reported in kbp for readability; 0 if wildcard
-        # is disabled in paint_samples.
-        mean_wildcard_kbp = contig_df['Total_wildcard_bp'].mean() / 1000.0
         mean_extra = contig_df['Extra_transitions'].mean()
         print(f"  {r_name}: raw chunks {mean_n_painted:5.1f} (truth {mean_n_truth:4.1f}), "
               f"topology {mean_n_topo_disc:4.1f} (truth {mean_n_topo_truth:4.1f}), "
               f"exact_match={match_rate:5.1f}%, "
-              f"spurious={mean_spurious:.2f} (real={mean_spurious_real:.2f}), "
-              f"wildcard={mean_wildcard:.2f} chunks ({mean_wildcard_kbp:.0f} kbp), "
+              f"spurious={mean_spurious:.2f}, "
               f"extra_trans={mean_extra:+.2f}")
 
         all_dfs.append(contig_df)
@@ -1985,21 +1901,14 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
         # the truth topology, after M-mapping and collapsing) and the mean
         # extra-transitions count (how many extra topology segments does
         # the discovered painting introduce on average).
-        #
-        # We also break out "spur_real" (spurious tuples in truth space
-        # NOT containing -1: genuine wrong-founder painting that survives
-        # M-mapping) from "wild" (wildcard chunks emitted by the painter
-        # in regions where no real founder fit well).  The latter is
-        # informational rather than an error metric -- it tells us how
-        # often the painter declared local uncertainty.
         print(f"\n{'-'*92}")
         print(f"Paint_samples topology summary by generation:")
         print(f"{'-'*92}")
         hdr = (f"  {'Gen':>4s}  {'N':>5s}  "
                f"{'raw_pt':>6s}  {'raw_th':>6s}  "
                f"{'topo_pt':>7s}  {'topo_th':>7s}  "
-               f"{'match%':>7s}  {'spur':>5s}  {'spur_real':>9s}  "
-               f"{'wild':>5s}  {'miss':>5s}  "
+               f"{'match%':>7s}  {'spur':>5s}  "
+               f"{'miss':>5s}  "
                f"{'xtra_trans':>10s}")
         print(hdr)
         print("  " + "-" * (len(hdr) - 2))
@@ -2012,8 +1921,6 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
                   f"{sub['N_topology_truth'].mean():>7.2f}  "
                   f"{100.0*sub['Topology_exact_match'].mean():>6.2f}%  "
                   f"{sub['N_spurious_tuples'].mean():>5.2f}  "
-                  f"{sub['N_spurious_tuples_real'].mean():>9.2f}  "
-                  f"{sub['N_wildcard_chunks'].mean():>5.2f}  "
                   f"{sub['N_missing_tuples'].mean():>5.2f}  "
                   f"{sub['Extra_transitions'].mean():>+10.2f}")
 
@@ -2047,57 +1954,24 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
                             'N_topology_truth',
                             'Topology_exact_match',
                             'N_spurious_tuples',
-                            'N_spurious_tuples_real',
-                            'N_wildcard_chunks',
                             'Extra_transitions']].to_string(index=False))
 
         # Also show cases with spurious tuples (tuples present in discovered
         # that don't appear anywhere in truth's topology), since these are
         # the clearest signal of WRONG painting (vs simply over-segmented).
-        # Filter to REAL spurious tuples (W-marked uncertainty is reported
-        # separately below): real spurious tuples are the actual painting
-        # errors that survive M-mapping.
-        has_spurious_real = full_df[full_df['N_spurious_tuples_real'] > 0]
-        if len(has_spurious_real) > 0:
-            n_top2 = min(20, len(has_spurious_real))
-            spur = has_spurious_real.sort_values(
-                'N_spurious_tuples_real', ascending=False).head(n_top2)
-            print(f"\nTop {n_top2} cases with REAL SPURIOUS TUPLES "
-                  f"(wrong-founder painting not in truth, excluding "
-                  f"wildcard-marked regions):")
+        has_spurious = full_df[full_df['N_spurious_tuples'] > 0]
+        if len(has_spurious) > 0:
+            n_top2 = min(20, len(has_spurious))
+            spur = has_spurious.sort_values(
+                'N_spurious_tuples', ascending=False).head(n_top2)
+            print(f"\nTop {n_top2} cases with SPURIOUS TUPLES "
+                  f"(wrong-founder painting not in truth):")
             print(spur[['Sample', 'Contig', 'Generation',
                          'N_chunks_painted', 'N_topology_painted_mapped',
-                         'N_spurious_tuples_real',
-                         'Spurious_tuples_real']].to_string(index=False))
+                         'N_spurious_tuples',
+                         'Spurious_tuples']].to_string(index=False))
         else:
-            print(f"\nNo (sample, contig) cases have REAL spurious tuples -- "
-                  f"all spurious-topology entries are wildcard-marked.")
-
-        # Wildcard chunks: which samples have the most W-painted regions?
-        # High wildcard footprint flags samples/contigs where the disc-haps
-        # are locally chimeric for the sample's truth founders -- these
-        # regions are good candidates for downstream hap-refinement work.
-        has_wildcard = full_df[full_df['N_wildcard_chunks'] > 0]
-        if len(has_wildcard) > 0:
-            n_top3 = min(20, len(has_wildcard))
-            wild = has_wildcard.sort_values(
-                'Total_wildcard_bp', ascending=False).head(n_top3)
-            print(f"\nTop {n_top3} cases by WILDCARD CHUNK FOOTPRINT "
-                  f"(regions where painter said 'no real founder fits'):")
-            # Show kbp instead of bp for readability
-            wild_show = wild[['Sample', 'Contig', 'Generation',
-                              'N_wildcard_chunks',
-                              'Total_wildcard_bp',
-                              'Wildcard_locations']].copy()
-            wild_show['Total_wildcard_kbp'] = (
-                wild_show['Total_wildcard_bp'] / 1000.0).round(1)
-            print(wild_show[['Sample', 'Contig', 'Generation',
-                              'N_wildcard_chunks',
-                              'Total_wildcard_kbp',
-                              'Wildcard_locations']].to_string(index=False))
-        else:
-            print(f"\nNo wildcard chunks emitted -- wildcard slot either "
-                  f"disabled or never fired.")
+            print(f"\nNo (sample, contig) cases have spurious tuples.")
     else:
         print("\nNo paint_samples evaluation data available -- "
               "tolerance_result missing for all contigs?")
