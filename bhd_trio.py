@@ -167,15 +167,36 @@ TRIO_MIN_SITES = 50                 # too few sites makes XOR matching
 
 # Recovered-haplotype clustering parameters (production blind recovery,
 # no ground-truth comparison).  Each group-trio yields 3 candidate
-# haplotypes; across all trios this gives ~3*G^3 candidates, and the
-# same true founder appears in many of them.  We cluster by Hamming
+# haplotypes; across all trios this gives ~G(G-1)(G-2)/2 candidates
+# (canonical g1<g2<g3 enumeration in _find_grouped_trios_kernel), and
+# the same true founder appears in many of them.  We cluster by Hamming
 # similarity and emit per-cluster majority-vote consensus.
 TRIO_HAP_DEDUP_PCT = 2.0            # Hamming pct below which two haps
                                     # are considered the same founder
-TRIO_MIN_HAP_CLUSTER_SIZE = 3       # drop hap clusters with fewer than
+TRIO_MIN_HAP_CLUSTER_SIZE = 1       # drop hap clusters with fewer than
                                     # this many supporting candidates
                                     # (likely noise rather than real
-                                    # founder)
+                                    # founder).  HISTORY: prior to the
+                                    # canonical-enumeration fix in
+                                    # _find_grouped_trios_kernel, each
+                                    # unordered triangle was enumerated
+                                    # 3 times under different (g1,g2,g3)
+                                    # role assignments, so each
+                                    # underlying triangle contributed
+                                    # 9 pool haps that clustered into
+                                    # groups of size 3 per founder.
+                                    # A threshold of 3 was therefore a
+                                    # no-op (no cluster could be
+                                    # smaller).  After the fix, each
+                                    # underlying triangle contributes
+                                    # exactly 3 pool haps (one per
+                                    # founder), so cluster size now
+                                    # equals the number of supporting
+                                    # triangles.  Default lowered from
+                                    # 3 to 1 to preserve the prior
+                                    # "no filter" effective behavior;
+                                    # set to 2+ to require multiple
+                                    # supporting triangles per founder.
 
 
 @njit(cache=True)
@@ -582,9 +603,26 @@ def _find_grouped_trios_kernel(centroids, match_thresh_bits,
                     d12 += 1
             if d12 <= distinct_thresh_bits:
                 continue
-            for g3 in range(G):
-                if g3 == g1 or g3 == g2:
-                    continue
+            # g3 > g2 enforces canonical ordering g1 < g2 < g3 — each
+            # unordered triangle enumerated exactly once.  Previously
+            # g3 ranged over all G groups (excluding g1, g2), which
+            # enumerated every unordered triangle 3 times under
+            # different (g1, g2, g3) role assignments.  The algebra
+            # is symmetric under permutation of (g1, g2, g3) — XOR
+            # is commutative for the match check, pairwise Hamming is
+            # symmetric for the distinct check, and h_sum/slot output
+            # values are independent of role assignment — so all 3
+            # orderings produced identical candidate haplotype sets
+            # (just permuted across the 3 slot positions).  Each
+            # underlying triangle therefore contributed 9 candidate
+            # haps to the recovery pool that were really only 3
+            # unique haps repeated 3x.  After this canonicalization,
+            # each unordered triangle contributes exactly 3 candidate
+            # haps (one per founder), so recovered-hap cluster sizes
+            # now equal the number of supporting underlying triangles
+            # (not 3x that count).  NOTE: TRIO_MIN_HAP_CLUSTER_SIZE
+            # semantics change accordingly — see its comment.
+            for g3 in range(g2 + 1, G):
                 d_pred = 0
                 for l in range(L):
                     pred_l = centroids[g1, l] ^ centroids[g2, l]
@@ -617,9 +655,10 @@ def _find_grouped_trios_kernel(centroids, match_thresh_bits,
                     d12 += 1
             if d12 <= distinct_thresh_bits:
                 continue
-            for g3 in range(G):
-                if g3 == g1 or g3 == g2:
-                    continue
+            # Canonical g3 > g2 — see Pass 1 commentary above for the
+            # rationale (3-fold enumeration of identical triangles
+            # eliminated; each unordered triangle enumerated once).
+            for g3 in range(g2 + 1, G):
                 d_pred = 0
                 for l in range(L):
                     pred_l = centroids[g1, l] ^ centroids[g2, l]

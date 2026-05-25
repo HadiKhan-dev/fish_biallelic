@@ -8,7 +8,7 @@ import warnings
 
 # Try to import Numba, provide dummy decorators if missing
 try:
-    from numba import njit
+    from numba import njit, prange
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
@@ -20,6 +20,8 @@ except ImportError:
         def decorator(func):
             return func
         return decorator
+    # Fallback prange == range when numba is unavailable
+    prange = range
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid="ignore")
@@ -78,6 +80,21 @@ def make_upper_triangular(matrix):
 #   _log_matmul_2d_kernel(A, B)         — log-space (M,K) @ (K,N) = (M,N).
 #                                          Drop-in replacement for the
 #                                          2D case of log_matmul.
+#   _log_matmul_3d_2d_kernel(A_b, B)    — batched log-matmul with shared
+#                                          B: A_b shape (S,M,K), B shape
+#                                          (K,N) -> (S,M,N).  Per-slice
+#                                          identical to _log_matmul_2d_kernel
+#                                          (A_b[s], B); used to eliminate
+#                                          per-sample dispatch overhead in
+#                                          block_linking's F/B passes
+#                                          (~2.5M tiny matmul calls per L1
+#                                          batch, 320× reduction).
+#   _log_matmul_2d_3d_kernel(A, B_b)    — batched log-matmul with shared
+#                                          A: A shape (M,K), B_b shape
+#                                          (S,K,N) -> (S,M,N).  Per-slice
+#                                          identical to _log_matmul_2d_kernel
+#                                          (A, B_b[s]); used for the
+#                                          T.T @ Z step of the F/B recurrence.
 #
 # All kernels handle the all-(-inf) edge case the same way as scipy:
 # if the row/column/slice max is -inf, the offset is treated as 0.0,
@@ -214,6 +231,86 @@ def _log_matmul_2d_kernel(A, B):
             for k in range(K):
                 s += np.exp(A[i, k] + B[k, j] - m_safe)
             C[i, j] = m_safe + np.log(s)
+    return C
+
+
+@njit(cache=True, parallel=True)
+def _log_matmul_3d_2d_kernel(A_batch, B):
+    """Batched log-space matrix multiplication with shared B.
+
+    A_batch: (S, M, K) float64.
+    B:       (K, N)    float64 — shared across all S slices.
+    Returns: (S, M, N) float64, where
+        C[s, i, j] = logsumexp_k(A_batch[s, i, k] + B[k, j])
+
+    Per-slice (any fixed s) the scalar math and iteration order are
+    IDENTICAL to _log_matmul_2d_kernel(A_batch[s], B), so the output is
+    bit-equivalent to looping
+        for s in range(S): C[s] = _log_matmul_2d_kernel(A_batch[s], B)
+    The win is amortising the numba dispatch / array-prep overhead across
+    S calls (typically S=320 in block_linking's F/B passes, where the
+    inner matmul shape is tiny — 6×6 × 6×6).  prange over s lets numba
+    parallelise across samples when the worker has more than one thread.
+    """
+    S, M, K = A_batch.shape
+    K2, N = B.shape
+    C = np.empty((S, M, N), dtype=np.float64)
+    for s in prange(S):
+        for i in range(M):
+            for j in range(N):
+                # Find max of A_batch[s, i, k] + B[k, j] over k for stability
+                m = A_batch[s, i, 0] + B[0, j]
+                for k in range(1, K):
+                    v = A_batch[s, i, k] + B[k, j]
+                    if v > m:
+                        m = v
+                if not np.isfinite(m):
+                    m_safe = 0.0
+                else:
+                    m_safe = m
+                ssum = 0.0
+                for k in range(K):
+                    ssum += np.exp(A_batch[s, i, k] + B[k, j] - m_safe)
+                C[s, i, j] = m_safe + np.log(ssum)
+    return C
+
+
+@njit(cache=True, parallel=True)
+def _log_matmul_2d_3d_kernel(A, B_batch):
+    """Batched log-space matrix multiplication with shared A.
+
+    A:       (M, K)    float64 — shared across all S slices.
+    B_batch: (S, K, N) float64.
+    Returns: (S, M, N) float64, where
+        C[s, i, j] = logsumexp_k(A[i, k] + B_batch[s, k, j])
+
+    Per-slice (any fixed s) the scalar math and iteration order are
+    IDENTICAL to _log_matmul_2d_kernel(A, B_batch[s]) so the output is
+    bit-equivalent to looping
+        for s in range(S): C[s] = _log_matmul_2d_kernel(A, B_batch[s])
+    Used for the T.T @ Z step of block_linking's F/B recurrence, where
+    Z is the per-sample batched (S, K_prev, K_curr) tensor.
+    """
+    M, K = A.shape
+    S, K2, N = B_batch.shape
+    C = np.empty((S, M, N), dtype=np.float64)
+    for s in prange(S):
+        for i in range(M):
+            for j in range(N):
+                # Find max of A[i, k] + B_batch[s, k, j] over k for stability
+                m = A[i, 0] + B_batch[s, 0, j]
+                for k in range(1, K):
+                    v = A[i, k] + B_batch[s, k, j]
+                    if v > m:
+                        m = v
+                if not np.isfinite(m):
+                    m_safe = 0.0
+                else:
+                    m_safe = m
+                ssum = 0.0
+                for k in range(K):
+                    ssum += np.exp(A[i, k] + B_batch[s, k, j] - m_safe)
+                C[s, i, j] = m_safe + np.log(ssum)
     return C
 
 
@@ -375,21 +472,44 @@ def log_matmul(A, B):
         Tensor of shape (..., M, N) resulting from log-space multiplication.
         Supports broadcasting for batches.
 
-    Implementation: when both A and B are 2D, delegates to a numba kernel
-    that eliminates the (M, K, N) broadcast intermediate scipy uses.
+    Implementation: dispatches to a numba kernel for the three common
+    shape combinations used by the project:
+      - 2D × 2D     -> _log_matmul_2d_kernel    (eliminates scipy's
+                                                  (M, K, N) intermediate).
+      - 3D × 2D     -> _log_matmul_3d_2d_kernel (batched-A, shared-B;
+                                                  bit-equivalent to looping
+                                                  the 2D kernel per slice).
+      - 2D × 3D     -> _log_matmul_2d_3d_kernel (shared-A, batched-B;
+                                                  same equivalence).
     For higher-dim broadcast inputs falls back to the scipy implementation
     (no current project caller passes higher-dim inputs, but the public
-    API supports it).  The 2D path is bit-equivalent to within ~2e-15 to
-    the scipy path on typical inputs.
+    API supports it).  The numba paths are bit-equivalent to within ~2e-15
+    of the scipy path on typical inputs.
     """
-    # Fast path: 2D x 2D, which is what every project caller uses.
     A_arr = np.asarray(A)
     B_arr = np.asarray(B)
+
+    # 2D × 2D fast path — what every original caller uses.
     if A_arr.ndim == 2 and B_arr.ndim == 2 and A_arr.shape[1] == B_arr.shape[0]:
         A_c = np.ascontiguousarray(A_arr, dtype=np.float64)
         B_c = np.ascontiguousarray(B_arr, dtype=np.float64)
         return _log_matmul_2d_kernel(A_c, B_c)
-    # Fallback for broadcasting / non-2D cases: original scipy-based
+
+    # 3D × 2D: batched A with shared B — block_linking's per-sample
+    # forward/backward step `log_matmul(prev_matrix_batched, T)`.
+    if A_arr.ndim == 3 and B_arr.ndim == 2 and A_arr.shape[2] == B_arr.shape[0]:
+        A_c = np.ascontiguousarray(A_arr, dtype=np.float64)
+        B_c = np.ascontiguousarray(B_arr, dtype=np.float64)
+        return _log_matmul_3d_2d_kernel(A_c, B_c)
+
+    # 2D × 3D: shared A with batched B — block_linking's
+    # `log_matmul(T.T, Z_batched)` step.
+    if A_arr.ndim == 2 and B_arr.ndim == 3 and A_arr.shape[1] == B_arr.shape[1]:
+        A_c = np.ascontiguousarray(A_arr, dtype=np.float64)
+        B_c = np.ascontiguousarray(B_arr, dtype=np.float64)
+        return _log_matmul_2d_3d_kernel(A_c, B_c)
+
+    # Fallback for broadcasting / non-2D-or-3D cases: original scipy-based
     # implementation, preserved for API compatibility.
     return logsumexp(A[..., np.newaxis] + B[..., np.newaxis, :, :], axis=-2)
 

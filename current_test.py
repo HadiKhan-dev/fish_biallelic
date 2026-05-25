@@ -1,445 +1,690 @@
 """
-chr1 L1 -> L2 hierarchical assembly: timing + ground-truth validation.
+Consolidated parameter sweep for bhd_trio.
 
-This is the L2 analogue of current_test.py, focused on the pipeline step
-that takes L1 super-blocks (the output of stage 6: 06_assembly_L1) and
-links them into L2 super-blocks via `hierarchical_assembly.run_-
-hierarchical_step` with HMM linking enabled — exactly the call made by
-pipeline.py's STAGE_7.
+Runs one-at-a-time (OAT) sweeps over all 5 tunable trio parameters in
+a single script invocation, sharing the loaded contig data + test
+block set across sweeps for ~5x speedup vs running 5 separate scripts.
 
-Loads from existing pipeline checkpoints:
-  .pipeline_checkpoints/06_assembly_L1/chr1.pkl
-        -> super_blocks_L1  (a block_haplotypes.BlockResults)
-        Input to the L2 assembly step.
+Parameters swept (in this order):
 
-  .pipeline_checkpoints/02_simulation/chr1.pkl
-        -> simd_probs       (global_probs: contig-wide (N, n_total_sites, 3))
-        Sample-level genotype posteriors that the L2 step reads from
-        shared memory.
+  1. cluster_fraction       — clustering threshold = cluster_fraction*D
+                              (controls how aggressively samples merge
+                              into pair-type groups before trio
+                              enumeration).  KEY LEVER for chr6:1006
+                              because F0/F1 and F1/F5 differ by only
+                              (F0+F5) mod 2 = 12 bits, so a loose
+                              cluster_fraction merges them.
 
-  .pipeline_checkpoints/01_vcf_discovery/chr1.pkl
-        -> naive_long_haps  ((global_sites, haps_data))
-        global_sites is the contig-wide SNP position array; haps_data is
-        the K=6 probabilistic founder haps from which the simulation
-        sampled — these are the GROUND TRUTH for validation.
+  2. match_fraction         — triangle match threshold = match_fraction*D
+                              (controls how loose the
+                              X(g1) XOR X(g2) ≈ X(g3) check is).
+                              Tighter values reject more candidate
+                              trios including some tetragons.
 
-For each L2 super-block produced, we compare its discovered haplotypes
-against the K=6 truth founders' bit patterns at the super-block's SNP
-positions, computing hamming-% over positions that are (a) kept by the
-super-block (super_block.keep_flags, which is the concatenation of the
-constituent L1 blocks' keep_flags) and (b) NOT wildcard in the
-discovered hap (the (0.5, 0.5) prob-pair convention).
+  3. distinct_fraction      — pairwise distinct threshold = distinct_fraction*D
+                              (rejects trios where any two of the
+                              three group centroids are too close).
+                              Tighter values reject more spurious
+                              same-pair-type trios.
 
-Reports (mirroring current_test.py's format so the two are directly
-comparable):
-  - Assembly timing (STAGE_7 equivalent wall-clock)
-  - haps/L2-super-block summary
-  - Total RECALL: fraction of (super-block, truth-founder) pairs whose
-    best discovered hap is within <= RECOVERY_THRESHOLD_PCT hamming.
-  - Total PRECISION: fraction of (super-block, disc-hap) pairs whose
-    best truth founder is within the same threshold.
-  - Per-block recall distribution (100%, 80-99%, 50-79%, <50%).
-  - Best-disc-match hamming-% distribution across all (block, truth)
-    pairs.
-  - Worst-recall L2 super-blocks for inspection.
+  4. hap_dedup_pct          — Hamming-% threshold below which two
+                              candidate haplotypes are considered the
+                              same founder for output clustering.
 
-The entry-script-name caveat from hierarchical_assembly.py applies:
-this file is intentionally NOT named main.py so that forkserver workers
-do not re-execute it.  See `run_hierarchical_step`'s docstring for the
-rationale.
+  5. min_hap_cluster_size   — minimum cluster size to emit (drop noise).
+                              AFTER the canonical-enumeration fix in
+                              bhd_trio, this maps directly to "minimum
+                              number of supporting underlying
+                              triangles" per emitted founder.
+
+For each parameter:
+  - Focal block (chr6:1006 F4 by default) status at each swept value
+  - Aggregate stats across all 253+ test blocks
+  - Fixes/breaks vs default with per-founder block listings
+
+Then a cross-parameter summary highlighting the value(s) that
+recover the focal founder + their cost in regressions.
+
+Run as:
+  python sweep_trio_all_params.py
+  python sweep_trio_all_params.py --focal chr6:1006:4
+  python sweep_trio_all_params.py --skip distinct_fraction,hap_dedup_pct
+  python sweep_trio_all_params.py --healthy-sample 100   # fewer regression blocks
+
+Env vars:
+  CHECKPOINT_DIR=...
+  RECOVERY_THRESH=1.0
+  STAGE=03_block_haplotypes
 """
-
 import os
-import time
+import sys
 import pickle
+import argparse
+import random
+import time
 import numpy as np
 
-import hierarchical_assembly
-# Import block_haplotypes so the unpickled BlockResults/BlockResult
-# classes resolve.  Side effect of import: registers the class names
-# in sys.modules so pickle.load can find them.
-import block_haplotypes  # noqa: F401
-
-# ---------------------------------------------------------------------------
-# Config — matches pipeline.py STAGE_7's run_hierarchical_step call.
-# ---------------------------------------------------------------------------
-CHECKPOINT_DIR = '.pipeline_checkpoints'
-CONTIG = 'chr1'
-
-# Total cores available to the L2 step.  Mirrors pipeline.py's n_processes
-# (which is typically os.cpu_count() / the scheduler's allocation).
-N_PROCESSES = 112
-
-# Worker-recycling cadence from pipeline.py (WORKER_MAXTASKS = 1).  Set
-# to 1 to prevent glibc fragmentation memory accumulation across batches.
-WORKER_MAXTASKS = 1
-
-# Recovery threshold for the validation step — same convention as
-# current_test.py.  A discovered L2 hap "matches" a truth founder iff
-# their hamming-% over (kept AND non-wildcard) positions is <= this.
-RECOVERY_THRESHOLD_PCT = 1.0
-
-# STAGE_7's exact run_hierarchical_step parameters (verbatim from
-# pipeline.py:904-918).  Keep these in sync with the pipeline if it
-# changes upstream.
-L2_PARAMS = dict(
-    batch_size=10,
-    use_hmm_linking=True,
-    recomb_rate=5e-8,
-    beam_width=200,
-    max_founders=12,
-    cc_scale=0.5,
-    n_generations=3,
-    verbose=False,
-)
+import simulate_sequences
+import bhd_trio
 
 
-# ---------------------------------------------------------------------------
-# Truth helpers (copied verbatim from current_test.py so the two scripts
-# share the same validation semantics without coupling via import — this
-# script is self-contained for portability).
-# ---------------------------------------------------------------------------
+CHECKPOINT_DIR = os.environ.get('CHECKPOINT_DIR', '.pipeline_checkpoints')
+STAGE          = os.environ.get('STAGE', '03_block_haplotypes')
 
-def _concretify_haps(haps_list):
-    """Mirror of simulate_sequences.concretify_haps without the heavy
-    import.  Each prob-hap (n_sites, 2) -> (n_sites,) int8 bit array
-    via argmax along the allele axis."""
-    return [np.argmax(h, axis=1).astype(np.int8) for h in haps_list]
+_KEY_SOURCE = {
+    'naive_long_haps':    ['01_vcf_discovery'],
+    'simd_probs':         ['02_simulation'],
+    'simd_block_results': ['05_residual_discovery', '04_refinement', '03_block_haplotypes'],
+}
 
-
-def load_truth(checkpoint_dir, contig):
-    """Returns (contig_sites, truth_haploid_bits) where truth_haploid_-
-    bits is a list of K (n_total_sites,) int8 arrays — the founder bit
-    patterns over the full contig."""
-    path = os.path.join(checkpoint_dir, '01_vcf_discovery', f'{contig}.pkl')
-    with open(path, 'rb') as f:
-        d = pickle.load(f)
-    sites, haps_data = d['naive_long_haps']
-    return np.asarray(sites), _concretify_haps(haps_data)
+# Order in which we sweep — putting the one most likely to fix chr6:1006
+# (cluster_fraction) first so the most actionable result lands at the
+# top of the report rather than buried at the bottom.
+SWEEP_ORDER = [
+    'cluster_fraction',
+    'match_fraction',
+    'distinct_fraction',
+    'hap_dedup_pct',
+    'min_hap_cluster_size',
+]
 
 
-def load_global_probs(checkpoint_dir, contig):
-    """Returns the contig-wide (N, n_total_sites, 3) genotype-posterior
-    tensor used by the L2 assembly step (placed in shared memory by
-    run_hierarchical_step)."""
-    path = os.path.join(checkpoint_dir, '02_simulation', f'{contig}.pkl')
-    with open(path, 'rb') as f:
-        d = pickle.load(f)
-    return d['simd_probs']
+# -----------------------------------------------------------------------------
+# Loading
+# -----------------------------------------------------------------------------
+def _resolve_key(key, contig, stage_override=None):
+    stages = ([stage_override] if stage_override else _KEY_SOURCE[key])
+    for stage in stages:
+        path = os.path.join(CHECKPOINT_DIR, stage, f'{contig}.pkl')
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                blob = pickle.load(f)
+            if key in blob:
+                return blob[key]
+    return None
 
 
-def load_super_blocks_L1(checkpoint_dir, contig):
-    """Returns the L1 BlockResults (output of stage 6)."""
-    path = os.path.join(checkpoint_dir, '06_assembly_L1', f'{contig}.pkl')
-    with open(path, 'rb') as f:
-        d = pickle.load(f)
-    return d['super_blocks_L1']
+def _discover_contigs():
+    vcf_dir = os.path.join(CHECKPOINT_DIR, '01_vcf_discovery')
+    return sorted(f[:-4] for f in os.listdir(vcf_dir) if f.endswith('.pkl'))
 
 
-# ---------------------------------------------------------------------------
-# Per-block validation (lifted from current_test.py — same logic, applies
-# unchanged to L2 super-blocks because BlockResult exposes the same
-# (positions, haplotypes, keep_flags) interface for L1 200-SNP blocks
-# and L2 multi-thousand-SNP super-blocks).
-# ---------------------------------------------------------------------------
+class ContigCache:
+    """Hold the per-contig data we need to score blocks."""
+    def __init__(self, contig):
+        self.contig = contig
+        nlh = _resolve_key('naive_long_haps', contig)
+        orig_sites, orig_haps = nlh
+        self.orig_sites = np.asarray(orig_sites)
+        self.site_to_idx = {int(s): i for i, s in enumerate(self.orig_sites)}
+        self.truth_haps = simulate_sequences.concretify_haps(orig_haps)
+        self.K_truth = len(self.truth_haps)
 
-def _block_true_haps(positions, contig_sites, truth_haploid_bits):
-    """At the block's SNP positions, gather each founder's truth bits.
+        # Block results from the requested inspection stage (default
+        # 03_block_haplotypes — that's what we want to compare against
+        # for the "did trio recovery have the chance to find it"
+        # question).
+        self.simd_block_results = _resolve_key(
+            'simd_block_results', contig, stage_override=STAGE)
+        if self.simd_block_results is None:
+            # Fall through to the normal fallback chain
+            self.simd_block_results = _resolve_key(
+                'simd_block_results', contig)
+        if self.simd_block_results is None:
+            raise FileNotFoundError(
+                f"No simd_block_results for {contig} at any stage.")
 
-    positions: (n_block_sites,) — block's SNP positions (sorted)
-    contig_sites: (n_total_sites,) — full-contig SNP positions (sorted)
-    truth_haploid_bits: list of K (n_total_sites,) int arrays
+        self.simd_probs = _resolve_key('simd_probs', contig)
+        if self.simd_probs is None:
+            raise FileNotFoundError(f"No simd_probs for {contig}.")
 
-    Returns: (K, n_block_sites) int8.  Raises if any block position
-    fails to map exactly into contig_sites — that would indicate the
-    truth and the block data are from different VCF runs.
+    def get_block_input(self, block_idx):
+        """Return (probs_k, truth_bits) for one L0 block, in kept-site space."""
+        block = self.simd_block_results[block_idx]
+        positions = np.asarray(block.positions)
+        keep_flags = (np.asarray(block.keep_flags, dtype=bool)
+                      if block.keep_flags is not None
+                      else np.ones(len(positions), dtype=bool))
+        kept_positions = positions[keep_flags]
+        if len(kept_positions) == 0:
+            return None, None
+        try:
+            site_idx_kept = np.array(
+                [self.site_to_idx[int(p)] for p in kept_positions])
+        except KeyError:
+            return None, None
+        probs_k = self.simd_probs[:, site_idx_kept, :].astype(np.float64)
+        truth_bits = np.stack(
+            [self.truth_haps[f][site_idx_kept] for f in range(self.K_truth)]
+        ).astype(np.int64)
+        return probs_k, truth_bits
+
+
+def _build_all_contig_caches():
+    """Load every contig's cache once, return dict[contig] -> ContigCache.
+    Shared across find_failure_blocks, sample_healthy_blocks, and the
+    sweep itself — avoids ~3x redundant disk I/O.
     """
-    idx = np.searchsorted(contig_sites, positions)
-    if idx.max() >= len(contig_sites) or not np.array_equal(
-            contig_sites[idx], positions):
-        raise ValueError(
-            "Block positions do not all map into contig_sites; the "
-            "ground-truth file and the simulation checkpoint appear to "
-            "be from different runs.")
-    K = len(truth_haploid_bits)
-    out = np.empty((K, len(positions)), dtype=np.int8)
-    for k in range(K):
-        out[k] = truth_haploid_bits[k][idx]
+    contigs = _discover_contigs()
+    print(f"Loading {len(contigs)} contig caches ...", flush=True)
+    t0 = time.time()
+    out = {}
+    for c in contigs:
+        out[c] = ContigCache(c)
+    print(f"  loaded in {time.time() - t0:.1f}s")
     return out
 
 
-def _disc_haps_bits(block_haplotypes_dict, n_block_sites):
-    """Extract (bits, wildcard_mask) from a block's haplotypes dict.
-
-    The dict has values of shape (n_block_sites, 2): (1.0, 0.0) -> bit 0,
-    (0.0, 1.0) -> bit 1, (0.5, 0.5) -> wildcard (no information).
-    """
-    hap_ids = list(block_haplotypes_dict.keys())
-    K = len(hap_ids)
-    bits = np.empty((K, n_block_sites), dtype=np.int8)
-    wc = np.empty((K, n_block_sites), dtype=bool)
-    for i, hid in enumerate(hap_ids):
-        prob = block_haplotypes_dict[hid]
-        bits[i] = np.argmax(prob, axis=1)
-        # Wildcard: both probabilities are exactly 0.5 (the legacy
-        # convention).  Any other case is informative.
-        wc[i] = (prob[:, 0] == 0.5) & (prob[:, 1] == 0.5)
-    return bits, wc
-
-
-def _hamming_pct(disc_bit, disc_wc, true_bit, kept_mask):
-    """Hamming% over (kept AND non-wildcard) positions; -1 if no
-    comparable sites."""
-    valid = kept_mask & (~disc_wc)
-    n_valid = int(valid.sum())
-    if n_valid == 0:
-        return -1.0
-    return 100.0 * float(np.sum(disc_bit[valid] != true_bit[valid])) / n_valid
-
-
-def validate_block(block, contig_sites, truth_haploid_bits, threshold_pct):
-    """Per-block validation stats.
-
-    Returns a dict with:
-        K_true         — number of truth founders (= len(truth_haploid_-
-                          bits); same for every block)
-        K_disc         — number of discovered haps
-        n_kept_sites   — block.keep_flags.sum()
-        n_truth_recovered — count of truth founders whose best-discovered
-                            match has hamming-% <= threshold_pct
-        n_disc_matched    — count of discovered haps whose best-truth
-                            match has hamming-% <= threshold_pct
-        truth_min_hammings — list of len K_true (best disc hamming per truth)
-        disc_min_hammings  — list of len K_disc (best truth hamming per disc)
+# -----------------------------------------------------------------------------
+# Block list construction (using pre-loaded caches)
+# -----------------------------------------------------------------------------
+def _block_failure_check(block, truth_haps, site_to_idx, threshold_pct):
+    """Return list of truth-founder indices whose best disc-hap Hamming-%
+    is >= threshold_pct.  Empty list = perfect block.  Uses argmax-based
+    Hamming (matches L1 test + the previous diagnostic scripts).
     """
     positions = np.asarray(block.positions)
-    n_block_sites = len(positions)
-    if block.keep_flags is not None:
-        kept_mask = np.asarray(block.keep_flags, dtype=bool)
+    K_truth = len(truth_haps)
+    try:
+        site_idx = np.array([site_to_idx[int(p)] for p in positions])
+    except KeyError:
+        return list(range(K_truth))   # treat as all-missing
+    truth_at_block = [truth_haps[f][site_idx] for f in range(K_truth)]
+    disc_concrete = []
+    for h in block.haplotypes.values():
+        disc_concrete.append(np.argmax(h, axis=1) if h.ndim > 1 else h)
+    if not disc_concrete:
+        return list(range(K_truth))
+    missing = []
+    for f in range(K_truth):
+        best = min(np.mean(d != truth_at_block[f]) * 100.0
+                   for d in disc_concrete)
+        if best >= threshold_pct:
+            missing.append(f)
+    return missing
+
+
+def find_failure_blocks(contig_caches, threshold_pct):
+    """Discover all (contig, block_idx) where some truth founder is
+    missing from the discovery output.
+    """
+    out = []
+    print(f"Scanning failure blocks across {len(contig_caches)} contigs ...",
+          flush=True)
+    for contig, cache in contig_caches.items():
+        n_blocks = len(cache.simd_block_results)
+        for bi in range(n_blocks):
+            missing = _block_failure_check(
+                cache.simd_block_results[bi],
+                cache.truth_haps,
+                cache.site_to_idx,
+                threshold_pct,
+            )
+            if missing:
+                out.append((contig, bi, missing))
+    print(f"  Found {len(out)} failure blocks across all contigs.")
+    return out
+
+
+def sample_healthy_blocks(contig_caches, failure_set, n_total, seed=42):
+    """Random sample of (contig, block_idx) NOT in failure_set, spread
+    across contigs proportional to block count.
+    """
+    failure_keys = {(c, b) for (c, b, _) in failure_set}
+    rng = random.Random(seed)
+    per_contig = max(1, n_total // len(contig_caches))
+    out = []
+    for contig, cache in contig_caches.items():
+        n_blocks = len(cache.simd_block_results)
+        candidates = [bi for bi in range(n_blocks)
+                      if (contig, bi) not in failure_keys]
+        if not candidates:
+            continue
+        k = min(per_contig, len(candidates))
+        sampled = rng.sample(candidates, k)
+        for bi in sampled:
+            out.append((contig, bi, []))
+    print(f"  Sampled {len(out)} healthy blocks (target {n_total}).")
+    return out
+
+
+# -----------------------------------------------------------------------------
+# Scoring trio output
+# -----------------------------------------------------------------------------
+def _score_trio_output(candidate_haps, truth_bits, threshold_pct):
+    """Return (recovered_set, n_candidates, n_spurious).
+
+    recovered_set: set of truth-founder indices f for which some
+        candidate has Hamming-% to truth_bits[f] below threshold_pct.
+    n_candidates: total candidate haps produced.
+    n_spurious: candidates whose best-truth Hamming-% is >= threshold_pct.
+    """
+    K_truth = truth_bits.shape[0]
+    if candidate_haps.shape[0] == 0:
+        return set(), 0, 0
+    n_cand = candidate_haps.shape[0]
+    ham = np.zeros((n_cand, K_truth), dtype=np.float64)
+    for c in range(n_cand):
+        for f in range(K_truth):
+            ham[c, f] = 100.0 * float((candidate_haps[c] != truth_bits[f]).mean())
+    truth_best = ham.min(axis=0)
+    recovered = {int(f) for f in range(K_truth)
+                 if truth_best[f] < threshold_pct}
+    cand_best = ham.min(axis=1)
+    n_spurious = int((cand_best >= threshold_pct).sum())
+    return recovered, n_cand, n_spurious
+
+
+# -----------------------------------------------------------------------------
+# One-parameter sweep
+# -----------------------------------------------------------------------------
+def run_sweep(test_blocks, param_name, param_values,
+              contig_caches, threshold_pct, focal=None):
+    """Run trio recovery for each block × param value combination."""
+    results = {}
+    n_total = len(test_blocks) * len(param_values)
+    n_done = 0
+    print()
+    print(f"Running {param_name} sweep: "
+          f"{len(test_blocks)} blocks × {len(param_values)} values "
+          f"= {n_total} runs",
+          flush=True)
+    t_start = time.time()
+
+    for (contig, block_idx, _missing) in test_blocks:
+        cache = contig_caches[contig]
+        probs_k, truth_bits = cache.get_block_input(block_idx)
+        if probs_k is None:
+            n_done += len(param_values)
+            continue
+        per_pv = {}
+        for pv in param_values:
+            kwargs = {param_name: pv}
+            try:
+                candidate_haps = bhd_trio._trio_recovery_candidate_haps(
+                    probs_k, verbose=False, **kwargs)
+            except Exception as e:
+                # Print so we can see real errors, but don't crash the whole sweep
+                print(f"    WARNING: {param_name}={pv} at "
+                      f"{contig}:{block_idx} raised {type(e).__name__}: {e}")
+                per_pv[pv] = (set(), 0, 0)
+                n_done += 1
+                continue
+            recovered, n_cand, n_spur = _score_trio_output(
+                candidate_haps, truth_bits, threshold_pct)
+            per_pv[pv] = (recovered, n_cand, n_spur)
+            n_done += 1
+        results[(contig, block_idx)] = per_pv
+        if (n_done % max(1, n_total // 10) < len(param_values)
+                or n_done == n_total):
+            elapsed = time.time() - t_start
+            print(f"  {n_done}/{n_total} runs "
+                  f"({100.0*n_done/n_total:.0f}%), {elapsed:.0f}s elapsed",
+                  flush=True)
+    return results
+
+
+# -----------------------------------------------------------------------------
+# Per-parameter report
+# -----------------------------------------------------------------------------
+def report_parameter(results, test_blocks, param_values, default_value,
+                     param_name, focal, threshold_pct):
+    print()
+    print("=" * 78)
+    print(f"  RESULTS:  {param_name}")
+    print("=" * 78)
+
+    # Focal block status per param
+    if focal is not None:
+        focal_contig, focal_bi, focal_f = focal
+        print()
+        print(f"FOCAL BLOCK: {focal_contig}:{focal_bi}, founder F{focal_f}")
+        print("-" * 78)
+        key = (focal_contig, focal_bi)
+        if key not in results:
+            print(f"  (no results for focal block — block_idx may be "
+                  f"out of range)")
+        else:
+            print(f"  {param_name:<22s}  F{focal_f} recov?   "
+                  f"n_cand   n_spur")
+            for pv in param_values:
+                rec, n_cand, n_spur = results[key][pv]
+                marker = ""
+                if pv == default_value:
+                    marker = " (default)"
+                status = "YES" if focal_f in rec else "NO"
+                print(f"  {pv:<22.4f}  {status:<8s}  "
+                      f"{n_cand:>6d}   {n_spur:>5d}{marker}")
+
+    # Aggregate stats per param value
+    print()
+    print(f"AGGREGATE across {len(test_blocks)} test blocks")
+    print("-" * 78)
+    if focal is not None:
+        print(f"  {param_name:<22s}  recov    cand    spur   "
+              f"blocks_w_F{focal[2]}")
     else:
-        kept_mask = np.ones(n_block_sites, dtype=bool)
-    n_kept = int(kept_mask.sum())
+        print(f"  {param_name:<22s}  recov    cand    spur")
 
-    K_true = len(truth_haploid_bits)
-    K_disc = len(block.haplotypes)
+    total_recov = {pv: 0 for pv in param_values}
+    total_cand  = {pv: 0 for pv in param_values}
+    total_spur  = {pv: 0 for pv in param_values}
+    focal_recov_count = {pv: 0 for pv in param_values}
 
-    # Empty discoveries / empty kept-mask -> nothing comparable
-    if K_disc == 0 or n_kept == 0:
-        return {
-            'K_true': K_true,
-            'K_disc': K_disc,
-            'n_kept_sites': n_kept,
-            'n_block_sites': n_block_sites,
-            'n_truth_recovered': 0,
-            'n_disc_matched': 0,
-            'truth_min_hammings': [float('inf')] * K_true,
-            'disc_min_hammings': [],
-        }
+    for key, per_pv in results.items():
+        for pv in param_values:
+            rec, n_cand, n_spur = per_pv[pv]
+            total_recov[pv] += len(rec)
+            total_cand[pv]  += n_cand
+            total_spur[pv]  += n_spur
+            if focal is not None and focal[2] in rec:
+                focal_recov_count[pv] += 1
 
-    true_haps = _block_true_haps(positions, contig_sites, truth_haploid_bits)
-    disc_bits, disc_wc = _disc_haps_bits(block.haplotypes, n_block_sites)
+    for pv in param_values:
+        marker = " (default)" if pv == default_value else ""
+        focal_str = ""
+        if focal is not None:
+            focal_str = f"   {focal_recov_count[pv]:>4d}"
+        print(f"  {pv:<22.4f}  {total_recov[pv]:>5d}   "
+              f"{total_cand[pv]:>5d}   {total_spur[pv]:>5d}"
+              f"{focal_str}{marker}")
 
-    # Pairwise hamming-% matrix
-    ham = np.empty((K_true, K_disc), dtype=np.float64)
-    for ti in range(K_true):
-        for di in range(K_disc):
-            ham[ti, di] = _hamming_pct(
-                disc_bits[di], disc_wc[di], true_haps[ti], kept_mask)
-    # Sentinel -1.0 (no comparable sites) -> +inf so min reductions ignore it
-    ham_clean = np.where(ham < 0.0, np.inf, ham)
-    truth_min = ham_clean.min(axis=1)
-    disc_min = ham_clean.min(axis=0)
+    # Fixes / breaks per non-default param value
+    print()
+    print(f"FIXES/BREAKS vs default {param_name}={default_value}")
+    print("-" * 78)
+    print(f"  {param_name:<22s}  net   fixes   breaks")
 
-    n_truth_recovered = int(np.sum(truth_min <= threshold_pct))
-    n_disc_matched = int(np.sum(disc_min <= threshold_pct))
+    fixes_by_pv = {}
+    breaks_by_pv = {}
+    for pv in param_values:
+        if pv == default_value:
+            continue
+        fixes  = []
+        breaks = []
+        for (contig, bi), per_pv in results.items():
+            rec_default = per_pv[default_value][0]
+            rec_pv      = per_pv[pv][0]
+            for f in rec_pv - rec_default:
+                fixes.append((contig, bi, f))
+            for f in rec_default - rec_pv:
+                breaks.append((contig, bi, f))
+        net = len(fixes) - len(breaks)
+        sign = "+" if net >= 0 else ""
+        print(f"  {pv:<22.4f}  {sign}{net:>3d}   "
+              f"{len(fixes):>4d}    {len(breaks):>4d}")
+        fixes_by_pv[pv] = fixes
+        breaks_by_pv[pv] = breaks
 
-    return {
-        'K_true': K_true,
-        'K_disc': K_disc,
-        'n_kept_sites': n_kept,
-        'n_block_sites': n_block_sites,
-        'n_truth_recovered': n_truth_recovered,
-        'n_disc_matched': n_disc_matched,
-        'truth_min_hammings': truth_min.tolist(),
-        'disc_min_hammings': disc_min.tolist(),
+    # Detail at each non-default PV (founder x block listings)
+    for pv in param_values:
+        if pv == default_value:
+            continue
+        if not fixes_by_pv[pv] and not breaks_by_pv[pv]:
+            continue
+        print()
+        print(f"  --- detail at {param_name}={pv} ---")
+        if fixes_by_pv[pv]:
+            print(f"  FIXES ({len(fixes_by_pv[pv])}):")
+            by_founder = {}
+            for c, b, f in fixes_by_pv[pv]:
+                by_founder.setdefault(f, []).append((c, b))
+            for f in sorted(by_founder):
+                items = by_founder[f][:8]
+                more = len(by_founder[f]) - len(items)
+                items_str = ", ".join(f"{c}:{b}" for c, b in items)
+                if more:
+                    items_str += f", ...(+{more} more)"
+                print(f"    F{f}: {items_str}")
+        if breaks_by_pv[pv]:
+            print(f"  BREAKS ({len(breaks_by_pv[pv])}):")
+            by_founder = {}
+            for c, b, f in breaks_by_pv[pv]:
+                by_founder.setdefault(f, []).append((c, b))
+            for f in sorted(by_founder):
+                items = by_founder[f][:8]
+                more = len(by_founder[f]) - len(items)
+                items_str = ", ".join(f"{c}:{b}" for c, b in items)
+                if more:
+                    items_str += f", ...(+{more} more)"
+                print(f"    F{f}: {items_str}")
+
+    return total_recov, total_cand, total_spur, focal_recov_count
+
+
+# -----------------------------------------------------------------------------
+# Cross-parameter summary
+# -----------------------------------------------------------------------------
+def print_cross_summary(all_results, focal):
+    """Across all swept parameters, identify which (parameter, value)
+    combinations recover the focal founder + their aggregate cost.
+    """
+    print()
+    print("=" * 78)
+    print("  CROSS-PARAMETER SUMMARY")
+    print("=" * 78)
+
+    if focal is None:
+        print("  (no focal block specified)")
+        return
+
+    focal_contig, focal_bi, focal_f = focal
+    focal_key = (focal_contig, focal_bi)
+
+    print()
+    print(f"FOCAL: {focal_contig}:{focal_bi} F{focal_f}")
+    print(f"Values that recover the focal founder, sorted by net "
+          f"impact on aggregate recovery:")
+    print()
+    print(f"  {'parameter':<22s}  {'value':>8s}  "
+          f"{'focal':<6s}  {'agg_recov':>9s}  "
+          f"{'spur':>5s}  {'vs_def':>7s}")
+    print("  " + "-" * 70)
+
+    rows = []
+    for param_name, info in all_results.items():
+        per_pv_totals = info['totals']
+        per_pv_focal  = info['focal']
+        default_value = info['default']
+        for pv in info['values']:
+            focal_ok = per_pv_focal.get(pv, 0) > 0 if False else None
+            # Get focal status for THIS block from raw results
+            raw = info['raw_results']
+            if focal_key in raw:
+                focal_rec_pv = raw[focal_key][pv][0]
+                focal_ok = focal_f in focal_rec_pv
+            else:
+                focal_ok = None
+            total_recov, _, _ = per_pv_totals[pv]
+            total_spur = info['totals_spur'][pv]
+            default_recov = per_pv_totals[default_value][0]
+            delta = total_recov - default_recov
+            rows.append({
+                'param': param_name,
+                'value': pv,
+                'focal_ok': focal_ok,
+                'agg_recov': total_recov,
+                'spur': total_spur,
+                'delta_vs_default': delta,
+                'is_default': pv == default_value,
+            })
+
+    # Filter to those that recover focal, sort by delta desc
+    focal_recovered_rows = [r for r in rows if r['focal_ok'] is True]
+    focal_recovered_rows.sort(key=lambda r: -r['delta_vs_default'])
+
+    if focal_recovered_rows:
+        for r in focal_recovered_rows:
+            tag = "YES"
+            sign = "+" if r['delta_vs_default'] >= 0 else ""
+            default_marker = " (default)" if r['is_default'] else ""
+            print(f"  {r['param']:<22s}  {r['value']:>8.4f}  "
+                  f"{tag:<6s}  {r['agg_recov']:>9d}  "
+                  f"{r['spur']:>5d}  {sign}{r['delta_vs_default']:>5d}"
+                  f"{default_marker}")
+    else:
+        print(f"  NONE — no swept parameter value recovers F{focal_f} at "
+              f"{focal_contig}:{focal_bi} alone.  May require combining "
+              f"parameter changes (grid sweep), or a structural change "
+              f"to the algorithm.")
+
+    # Defaults for comparison
+    print()
+    print("DEFAULTS (for comparison):")
+    print(f"  {'parameter':<22s}  {'value':>8s}  "
+          f"{'focal':<6s}  {'agg_recov':>9s}  {'spur':>5s}")
+    print("  " + "-" * 60)
+    for r in rows:
+        if not r['is_default']:
+            continue
+        tag = "YES" if r['focal_ok'] else "NO"
+        print(f"  {r['param']:<22s}  {r['value']:>8.4f}  "
+              f"{tag:<6s}  {r['agg_recov']:>9d}  {r['spur']:>5d}")
+
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser(
+        description="Consolidated bhd_trio parameter sweep (all params, OAT)")
+    ap.add_argument('--focal', default='chr6:1006:4',
+                    help="Focal block:founder, e.g. chr6:1006:4 or none")
+    ap.add_argument('--healthy-sample', type=int, default=200,
+                    help="Random healthy blocks for regression test")
+    ap.add_argument('--threshold', type=float,
+                    default=float(os.environ.get('RECOVERY_THRESH', '1.0')),
+                    help="Hamming%% threshold for 'recovered'")
+    ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--skip', default='',
+                    help="Comma-separated parameters to skip")
+    # Per-parameter overrides for the value list
+    ap.add_argument('--values-cluster_fraction', default=None,
+                    help="Override default value list for cluster_fraction")
+    ap.add_argument('--values-match_fraction', default=None,
+                    help="Override default value list for match_fraction")
+    ap.add_argument('--values-distinct_fraction', default=None,
+                    help="Override default value list for distinct_fraction")
+    ap.add_argument('--values-hap_dedup_pct', default=None,
+                    help="Override default value list for hap_dedup_pct")
+    ap.add_argument('--values-min_hap_cluster_size', default=None,
+                    help="Override default value list for min_hap_cluster_size")
+    args = ap.parse_args()
+
+    # Defaults pulled from the bhd_trio module (so they reflect any
+    # post-patch defaults, e.g. TRIO_MIN_HAP_CLUSTER_SIZE = 1 after the
+    # canonical-enumeration fix).
+    defaults = {
+        'cluster_fraction':       bhd_trio.TRIO_CLUSTER_FRACTION,
+        'match_fraction':         bhd_trio.TRIO_MATCH_FRACTION,
+        'distinct_fraction':      bhd_trio.TRIO_DISTINCT_FRACTION,
+        'hap_dedup_pct':          bhd_trio.TRIO_HAP_DEDUP_PCT,
+        'min_hap_cluster_size':   bhd_trio.TRIO_MIN_HAP_CLUSTER_SIZE,
     }
 
+    default_value_sets = {
+        'cluster_fraction':       [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.60],
+        'match_fraction':         [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50],
+        'distinct_fraction':      [0.30, 0.40, 0.50, 0.60, 0.70],
+        'hap_dedup_pct':          [1.0, 2.0, 3.0, 5.0],
+        'min_hap_cluster_size':   [1, 2, 3, 4, 5],
+    }
 
-# ---------------------------------------------------------------------------
-# Main driver
-# ---------------------------------------------------------------------------
+    # Apply per-parameter overrides
+    overrides = {
+        'cluster_fraction':       args.values_cluster_fraction,
+        'match_fraction':         args.values_match_fraction,
+        'distinct_fraction':      args.values_distinct_fraction,
+        'hap_dedup_pct':          args.values_hap_dedup_pct,
+        'min_hap_cluster_size':   args.values_min_hap_cluster_size,
+    }
+    for pname, override in overrides.items():
+        if override:
+            if pname == 'min_hap_cluster_size':
+                default_value_sets[pname] = [int(v) for v in override.split(',')]
+            else:
+                default_value_sets[pname] = [float(v) for v in override.split(',')]
 
-def main():
+    # Ensure default is in each sweep set
+    for pname in default_value_sets:
+        if defaults[pname] not in default_value_sets[pname]:
+            default_value_sets[pname] = sorted(
+                default_value_sets[pname] + [defaults[pname]])
+
+    # Skipped params
+    skip_set = {s.strip() for s in args.skip.split(',') if s.strip()}
+    sweep_params = [p for p in SWEEP_ORDER if p not in skip_set]
+
+    # Parse focal
+    focal = None
+    if args.focal.lower() not in ('', 'none'):
+        parts = args.focal.split(':')
+        if len(parts) != 3:
+            print(f"ERROR: --focal must be CONTIG:BLOCK:FOUNDER, got {args.focal}")
+            sys.exit(1)
+        focal = (parts[0], int(parts[1]), int(parts[2]))
+
+    # ---- Header ------------------------------------------------------------
     print("=" * 78)
-    print(f"L1 -> L2 hierarchical assembly + validation on {CONTIG}")
-    print(f"  checkpoint_dir:      {CHECKPOINT_DIR}")
-    print(f"  n_processes:         {N_PROCESSES}")
-    print(f"  WORKER_MAXTASKS:     {WORKER_MAXTASKS}")
-    print(f"  recovery threshold:  <= {RECOVERY_THRESHOLD_PCT:.2f}% hamming")
-    print(f"  L2 params:           {L2_PARAMS}")
+    print("Consolidated trio parameter sweep")
+    print(f"  stage:            {STAGE}")
+    print(f"  recovery thresh:  < {args.threshold}% Hamming")
+    print(f"  healthy sample:   {args.healthy_sample} blocks")
+    if focal:
+        print(f"  focal:            {focal[0]}:{focal[1]} F{focal[2]}")
+    print(f"  params to sweep:  {', '.join(sweep_params)}")
+    if skip_set:
+        print(f"  skipped:          {', '.join(sorted(skip_set))}")
+    print(f"  bhd_trio defaults (read from module):")
+    for p in SWEEP_ORDER:
+        marker = " (will sweep)" if p in sweep_params else " (skipped)"
+        print(f"    {p:<22s} = {defaults[p]}{marker}")
     print("=" * 78)
 
-    # -----------------------------------------------------------------------
-    # Load inputs
-    # -----------------------------------------------------------------------
-    t0 = time.time()
-    super_blocks_L1 = load_super_blocks_L1(CHECKPOINT_DIR, CONTIG)
-    global_probs = load_global_probs(CHECKPOINT_DIR, CONTIG)
-    contig_sites, truth_haploid = load_truth(CHECKPOINT_DIR, CONTIG)
-    load_time = time.time() - t0
-
-    # global_sites for the assembly step (the same array as contig_sites
-    # — they both come from naive_long_haps[0]).
-    global_sites = contig_sites
-
-    n_L1 = len(super_blocks_L1)
-    n_L1_haps = [len(b.haplotypes) for b in super_blocks_L1]
-    print(f"\nLoaded checkpoints in {load_time:.1f}s")
-    print(f"  L1 super-blocks (input):  {n_L1}")
-    print(f"  L1 haps/block:            min={min(n_L1_haps)}, "
-          f"max={max(n_L1_haps)}, mean={np.mean(n_L1_haps):.2f}")
-    print(f"  global_probs shape:       {global_probs.shape}, dtype={global_probs.dtype}")
-    print(f"  K_truth:                  {len(truth_haploid)}")
-    print(f"  n_contig_sites:           {len(contig_sites)}")
-
-    # -----------------------------------------------------------------------
-    # Run L1 -> L2 hierarchical assembly (STAGE_7 equivalent)
-    # -----------------------------------------------------------------------
-    print(f"\nRunning hierarchical_assembly.run_hierarchical_step "
-          f"(L1 -> L2, n_processes={N_PROCESSES}) ...")
-    t0 = time.time()
-    super_blocks_L2 = hierarchical_assembly.run_hierarchical_step(
-        super_blocks_L1,
-        global_probs,
-        global_sites,
-        num_processes=N_PROCESSES,
-        maxtasksperchild=WORKER_MAXTASKS,
-        **L2_PARAMS,
-    )
-    assembly_time = time.time() - t0
-
-    n_L2 = len(super_blocks_L2)
-    n_L2_haps = [len(b.haplotypes) for b in super_blocks_L2]
-    n_L2_sites = [len(b.positions) for b in super_blocks_L2]
+    # ---- Load data once ----------------------------------------------------
     print()
-    print("=" * 78)
-    print("L2 ASSEMBLY RESULT")
-    print("=" * 78)
-    print(f"  contig:                  {CONTIG}")
-    print(f"  n_L1_super_blocks:       {n_L1}")
-    print(f"  n_L2_super_blocks:       {n_L2}")
-    print(f"  L2 haps/super-block:     min={min(n_L2_haps)}, "
-          f"max={max(n_L2_haps)}, mean={np.mean(n_L2_haps):.2f}")
-    print(f"  L2 sites/super-block:    min={min(n_L2_sites)}, "
-          f"max={max(n_L2_sites)}, mean={np.mean(n_L2_sites):.0f}")
-    print(f"  total sites covered:     {sum(n_L2_sites)}")
-    print(f"  assembly time:           {assembly_time:.2f} s "
-          f"({assembly_time/60:.2f} min)")
+    contig_caches = _build_all_contig_caches()
+    failure_blocks = find_failure_blocks(contig_caches, args.threshold)
+    healthy_blocks = sample_healthy_blocks(
+        contig_caches, failure_blocks, args.healthy_sample, seed=args.seed)
+    test_blocks = list(failure_blocks) + list(healthy_blocks)
+    if focal is not None:
+        focal_key = (focal[0], focal[1])
+        already = any((c, b) == focal_key for (c, b, _) in test_blocks)
+        if not already:
+            test_blocks.append((focal[0], focal[1], [focal[2]]))
+            print(f"  Added focal block to test set: {focal[0]}:{focal[1]}")
+    print(f"  Total test set: {len(test_blocks)} blocks")
 
-    # -----------------------------------------------------------------------
-    # Validation
-    # -----------------------------------------------------------------------
+    # ---- Run each sweep ----------------------------------------------------
+    all_results = {}
+    t_grand = time.time()
+    for pname in sweep_params:
+        param_values = default_value_sets[pname]
+        default_value = defaults[pname]
+        results = run_sweep(
+            test_blocks, pname, param_values,
+            contig_caches, args.threshold, focal=focal)
+        total_recov, total_cand, total_spur, focal_recov_count = \
+            report_parameter(
+                results, test_blocks, param_values, default_value,
+                pname, focal, args.threshold)
+        # Pack per-pv totals into 3-tuples for the cross-summary
+        per_pv_totals = {pv: (total_recov[pv], total_cand[pv], total_spur[pv])
+                         for pv in param_values}
+        all_results[pname] = {
+            'values':       param_values,
+            'default':      default_value,
+            'totals':       per_pv_totals,
+            'totals_spur':  total_spur,
+            'focal':        focal_recov_count,
+            'raw_results':  results,
+        }
     print()
-    print("=" * 78)
-    print("VALIDATION (L2 discovered haps vs ground-truth founders)")
-    print("=" * 78)
+    print(f"Total sweep time: {time.time() - t_grand:.1f}s")
 
-    t0 = time.time()
-    stats = []
-    for b in super_blocks_L2:
-        stats.append(validate_block(
-            b, contig_sites, truth_haploid, RECOVERY_THRESHOLD_PCT))
-    val_time = time.time() - t0
-    print(f"Validation took {val_time:.1f}s")
-
-    # Aggregates
-    n_blocks = len(stats)
-    total_truth = sum(s['K_true'] for s in stats)
-    total_recov = sum(s['n_truth_recovered'] for s in stats)
-    total_disc  = sum(s['K_disc'] for s in stats)
-    total_matched = sum(s['n_disc_matched'] for s in stats)
-
-    print()
-    print(f"  RECALL    (truth founders matched by some disc hap):")
-    print(f"             {total_recov} / {total_truth} "
-          f"= {100.0 * total_recov / max(total_truth, 1):.3f}%")
-    print(f"  PRECISION (disc haps that match some truth founder):")
-    print(f"             {total_matched} / {total_disc} "
-          f"= {100.0 * total_matched / max(total_disc, 1):.3f}%")
-
-    # Per-block recall distribution
-    per_block_recall = np.array([
-        s['n_truth_recovered'] / s['K_true'] if s['K_true'] else 1.0
-        for s in stats])
-    perfect = int(np.sum(per_block_recall == 1.0))
-    near    = int(np.sum((per_block_recall >= 0.8) & (per_block_recall < 1.0)))
-    mid     = int(np.sum((per_block_recall >= 0.5) & (per_block_recall < 0.8)))
-    low     = int(np.sum(per_block_recall < 0.5))
-    print()
-    print(f"  Per-block recall distribution (out of {n_blocks} L2 super-blocks):")
-    print(f"     100% (all truth founders recovered): "
-          f"{perfect:>5d} ({100*perfect/n_blocks:5.1f}%)")
-    print(f"     80-99%:                              "
-          f"{near:>5d} ({100*near/n_blocks:5.1f}%)")
-    print(f"     50-79%:                              "
-          f"{mid:>5d} ({100*mid/n_blocks:5.1f}%)")
-    print(f"     <50%:                                "
-          f"{low:>5d} ({100*low/n_blocks:5.1f}%)")
-
-    # Histogram of best-truth-to-disc hamming
-    all_truth_min = np.concatenate([
-        np.array(s['truth_min_hammings']) for s in stats
-        if s['truth_min_hammings']])
-    if len(all_truth_min) > 0:
-        finite = all_truth_min[np.isfinite(all_truth_min)]
-        print()
-        print(f"  Best-disc-match hamming-% across all (L2-block, truth) pairs "
-              f"(n={len(finite)} finite):")
-        bins = [0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0]
-        for lo, hi in zip(bins[:-1], bins[1:]):
-            cnt = int(np.sum((finite >= lo) & (finite < hi)))
-            print(f"    [{lo:>5.1f}%, {hi:>5.1f}%): "
-                  f"{cnt:>6d} ({100*cnt/len(finite):5.2f}%)")
-        cnt_over = int(np.sum(finite >= bins[-1]))
-        if cnt_over > 0:
-            print(f"    [{bins[-1]:>5.1f}%, +inf):  "
-                  f"{cnt_over:>6d} ({100*cnt_over/len(finite):5.2f}%)")
-        n_inf = int(np.sum(~np.isfinite(all_truth_min)))
-        if n_inf > 0:
-            print(f"    (uncomparable: {n_inf})")
-        print(f"    median: {np.median(finite):.3f}%   "
-              f"mean: {np.mean(finite):.3f}%   "
-              f"p95: {np.percentile(finite, 95):.3f}%   "
-              f"p99: {np.percentile(finite, 99):.3f}%")
-
-    # Worst blocks by missing-founder count
-    block_recall_with_idx = [
-        (i, s['K_true'], s['K_disc'], s['n_truth_recovered'],
-         s['K_true'] - s['n_truth_recovered'], s['n_block_sites'],
-         s['n_kept_sites'])
-        for i, s in enumerate(stats)]
-    block_recall_with_idx.sort(key=lambda x: (-x[4], -x[1]))
-    n_show = min(10, sum(1 for e in block_recall_with_idx if e[4] > 0))
-    if n_show > 0:
-        print()
-        print(f"  Worst {n_show} L2 super-blocks by missing-truth count:")
-        for entry in block_recall_with_idx[:n_show]:
-            idx, kt, kd, nr, missing, nsites, nkept = entry
-            h = stats[idx]['truth_min_hammings']
-            h_str = ', '.join(
-                f'{x:5.2f}' if np.isfinite(x) else '  inf' for x in h)
-            print(f"    L2-block {idx:>4d}: K_true={kt}, K_disc={kd}, "
-                  f"n_recov={nr} ({missing} missing), "
-                  f"n_sites={nsites}, n_kept={nkept}.")
-            print(f"        per-truth min-disc-hamming-%: [{h_str}]")
-    else:
-        print()
-        print(f"  No L2 super-blocks with missing truth founders — all "
-              f"{n_blocks} super-blocks recovered all "
-              f"K_truth={len(truth_haploid)} founders.")
-
-    print()
-    print("=" * 78)
+    # ---- Cross-parameter summary ------------------------------------------
+    print_cross_summary(all_results, focal)
 
 
 if __name__ == '__main__':

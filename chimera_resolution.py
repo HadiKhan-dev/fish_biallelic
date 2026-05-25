@@ -11,8 +11,6 @@ import numpy as np
 import math
 import ctypes
 import heapq
-import os as _os_cr
-import time as _time_cr
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
@@ -27,30 +25,6 @@ try:
         _libc.malloc_trim(0)
 except OSError:
     def _malloc_trim():
-        pass
-
-# =============================================================================
-# DEBUG INSTRUMENTATION (opt-in via HIERARCHICAL_DEBUG_DIR env var)
-# =============================================================================
-# Same mechanism as the phase markers in hierarchical_assembly.py, but writes
-# fine-grained progress inside select_and_resolve() so we can pinpoint which
-# sub-step of chimera resolution is where the silent failure / segfault lives.
-# Each worker writes to its own file: cr_pid<PID>_phases.log (since select_
-# and_resolve doesn't know which batch_idx it's inside — that info is one
-# stack frame up).  When the crash happens, the worker's most recent
-# cr_pid<PID>_phases.log line tells us exactly where it died.
-def _cr_debug_dir():
-    return _os_cr.environ.get('HIERARCHICAL_DEBUG_DIR', '')
-
-def _cr_mark(phase, extra=""):
-    d = _cr_debug_dir()
-    if not d:
-        return
-    try:
-        path = _os_cr.path.join(d, f'cr_pid{_os_cr.getpid()}_phases.log')
-        with open(path, 'a', buffering=1) as f:
-            f.write(f"{_time_cr.time():.6f} {phase} {extra}\n")
-    except Exception:
         pass
 
 # Maximum samples to process at once in emission scoring tensors.
@@ -136,6 +110,325 @@ def _batched_viterbi_score(stacked_tensor, penalty):
         scores[b] = total
     return scores
 
+
+@njit(parallel=True, fastmath=True)
+def _batched_viterbi_score_split(tmpl_slice, cand_sv, cand_idx_for_p, penalty):
+    """Score multiple candidate sets via Viterbi, reading emissions from
+    a SPLIT layout (shared template + per-candidate cand cells) instead
+    of one big single-source sv tensor.
+
+    A single-source layout would duplicate the per-position template
+    into n_chunk separate slabs of sv (`sv[local_idx, s, p, b] =
+    tmpl[s, p, b]` for non-cand pairs), so a fill on n_chunk = 50
+    candidates would write ~1.8 GB per call.  At K=6 1for1, more than
+    69% of those cells are identical across all n_chunk slabs.  The
+    split layout avoids the duplication by storing the shared portion
+    once.
+
+    Split layout:
+      - tmpl_slice  shape (n_samples, n_pairs, total_bins): the shared
+        template, allocated once per swap position.  Used for the
+        ~70% of pair indices that don't involve the candidate row or
+        column.
+      - cand_sv     shape (n_chunk, n_samples, n_cand_pairs, total_bins):
+        per-candidate cand-row + cand-col + diagonal emissions only.
+        n_cand_pairs == 2*cand_pos + 1 (e.g. 11 at K=6 1for1, vs 36 in
+        a full pair grid — 3.3x reduction on this dim).
+      - cand_idx_for_p shape (n_pairs,) int64: maps pair-index k to:
+            -1                      → use tmpl_slice[s, k, t]
+            0..(cand_pos-1)         → cand_sv[b, s, k_idx, t] (cand-row[ii])
+            cand_pos..(2*cand_pos-1) → cand_sv[b, s, k_idx, t] (cand-col[jj])
+            2*cand_pos              → cand_sv[b, s, k_idx, t] (diagonal)
+
+    Same Viterbi recurrence as _batched_viterbi_score; only the emission
+    read is split.  The set of double-precision values fed into the
+    recurrence is bit-identical to what a single-source sv would supply
+    (the cand_idx_for_p dispatch reads exactly the same double from
+    whichever source holds it).  Output sample sums also bit-identical
+    under fastmath=True since the loop order and value sequence are
+    unchanged.
+
+    Parallelism: prange over (batch × samples) as before.  Each thread
+    reads its own batch's cand_sv slab plus a shared tmpl_slice; tmpl is
+    L3-cache-resident at production shapes (~25 MB non-cand portion)
+    and shared across all threads, so the cache-hit rate on tmpl reads
+    is much higher than the old per-batch sv layout.
+
+    Args:
+        tmpl_slice:        (n_samples, n_pairs, total_bins) float64,
+                           read-only, shared across batches.  Cells at
+                           cand_idx_for_p[k] >= 0 are NEVER read (those
+                           positions come from cand_sv instead), so the
+                           caller may leave them uninitialised (np.empty)
+                           if convenient.
+        cand_sv:           (n_chunk, n_samples, 2*cand_pos+1, total_bins)
+                           float64, read-only.  Per-batch slab; written
+                           by _build_cand_sv_numba beforehand.
+        cand_idx_for_p:    (n_pairs,) int64, precomputed pair-index →
+                           cand-slot lookup (see above).  Constant for
+                           a given (stride, cand_pos), so built once per
+                           swap round in Python.
+        penalty:           float, Viterbi switch penalty.
+
+    Returns:
+        scores: (n_chunk,) float64, per-batch summed log-likelihoods.
+    """
+    n_chunk = cand_sv.shape[0]
+    n_samples = cand_sv.shape[1]
+    n_bins = cand_sv.shape[3]
+    n_pairs = tmpl_slice.shape[1]
+
+    sample_scores = np.empty((n_chunk, n_samples), dtype=np.float64)
+    n_total = n_chunk * n_samples
+
+    for idx in prange(n_total):
+        b = idx // n_samples
+        s = idx % n_samples
+
+        current_scores = np.empty(n_pairs, dtype=np.float64)
+        # Init at t=0 — same value sequence as the old single-source kernel
+        # would have read from sv[b, s, k, 0].
+        for k in range(n_pairs):
+            cidx = cand_idx_for_p[k]
+            if cidx < 0:
+                current_scores[k] = tmpl_slice[s, k, 0]
+            else:
+                current_scores[k] = cand_sv[b, s, cidx, 0]
+
+        # Viterbi recurrence — identical structure to _batched_viterbi_score:
+        # find max of current_scores, subtract penalty for the switch_base,
+        # then for each k pick max(stay, switch) + emission.  Only the
+        # emission source differs.
+        for t in range(1, n_bins):
+            best_prev = -np.inf
+            for k in range(n_pairs):
+                if current_scores[k] > best_prev:
+                    best_prev = current_scores[k]
+            switch_base = best_prev - penalty
+            for k in range(n_pairs):
+                cidx = cand_idx_for_p[k]
+                if cidx < 0:
+                    emission = tmpl_slice[s, k, t]
+                else:
+                    emission = cand_sv[b, s, cidx, t]
+                stay = current_scores[k]
+                if stay > switch_base:
+                    current_scores[k] = stay + emission
+                else:
+                    current_scores[k] = switch_base + emission
+
+        final_max = -np.inf
+        for k in range(n_pairs):
+            if current_scores[k] > final_max:
+                final_max = current_scores[k]
+        sample_scores[b, s] = final_max
+
+    # Phase 2: sum across samples per batch — same as _batched_viterbi_score.
+    scores = np.empty(n_chunk, dtype=np.float64)
+    for b in range(n_chunk):
+        total = 0.0
+        for s in range(n_samples):
+            total += sample_scores[b, s]
+        scores[b] = total
+    return scores
+
+
+@njit(parallel=True, fastmath=False)
+def _build_cand_sv_numba(cand_sv, bin_ems_stacked,
+                          chunk_cands_arr, map_matrix,
+                          t_haps_stacked, bin_offs, nbs,
+                          _s0, _s1, cand_pos):
+    """Build the compact per-candidate emission tensor for the split-layout
+    Viterbi (_batched_viterbi_score_split).
+
+    Writes ONLY the cand-row + cand-col + diagonal emissions — the
+    template (non-cand) data lives separately in tmpl_slice and is read
+    directly by the Viterbi kernel.
+
+    cand_sv[local_idx, s, cidx, b]:
+      - cidx in [0, cand_pos):
+          cand-row[ii=cidx], emission =
+            bin_ems_stacked[_s0+s, t_haps_stacked[ii, b_i], h_c[b_i], b]
+      - cidx in [cand_pos, 2*cand_pos):
+          cand-col[jj=cidx-cand_pos], emission =
+            bin_ems_stacked[_s0+s, h_c[b_i], t_haps_stacked[jj, b_i], b]
+      - cidx = 2*cand_pos:
+          diagonal, emission = bin_ems_stacked[_s0+s, h_c[b_i], h_c[b_i], b]
+
+    where h_c[b_i] = map_matrix[chunk_cands_arr[local_idx], b_i] is the
+    candidate's hap-id for block b_i, and b runs over [bin_offs[b_i],
+    bin_offs[b_i] + nbs[b_i]) — i.e. the bins owned by block b_i in the
+    stacked total_bins axis.
+
+    The compact `(n_chunk, _sn, 2*cand_pos+1, total_bins)` layout stores
+    each candidate's per-pair emissions for the cand-row + cand-col +
+    diagonal cells only (the cells whose values differ across
+    candidates).  Non-cand cells are read directly from tmpl_slice by
+    the downstream Viterbi kernel, avoiding any full-pair-grid sv
+    materialisation.
+
+    Parallelism: prange over local_idx (each thread writes its own
+    cand_sv[local_idx] slab; no race).
+
+    Args:
+        cand_sv:           (n_chunk, _sn, 2*cand_pos+1, total_bins) float64,
+                           OUTPUT, written in-place via np.empty().
+                           This kernel fully overwrites all cand_sv
+                           cells, so the np.empty garbage is safe.
+        bin_ems_stacked:   (num_samples, n_haps, n_haps, total_bins)
+                           float64, read-only.  Per-block emission
+                           tensors padded to a common n_haps and
+                           concatenated along the bins axis.
+        chunk_cands_arr:   (n_chunk,) int64, candidate row indices.
+        map_matrix:        (n_cands_total, n_blocks) int64.
+        t_haps_stacked:    (cand_pos, n_blocks) int64.  Note: cand_pos here
+                           equals K_base.
+        bin_offs:          (n_blocks,) int64.
+        nbs:               (n_blocks,) int64.
+        _s0, _s1:          int, sample range.  _sn = _s1 - _s0.
+        cand_pos:          int, the candidate position index in the
+                           (stride, stride) pair grid (== K_base in both
+                           1for1 and 2for1).
+    """
+    n_chunk = chunk_cands_arr.shape[0]
+    n_blocks = bin_offs.shape[0]
+    _sn = _s1 - _s0
+    for local_idx in prange(n_chunk):
+        ci = chunk_cands_arr[local_idx]
+        for b_i in range(n_blocks):
+            bin_off = bin_offs[b_i]
+            nb = nbs[b_i]
+            h_c = map_matrix[ci, b_i]
+            # cand-row: cidx = ii  for ii in [0, cand_pos)
+            for ii in range(cand_pos):
+                t_h = t_haps_stacked[ii, b_i]
+                for s in range(_sn):
+                    for bin_local in range(nb):
+                        cand_sv[local_idx, s, ii, bin_off + bin_local] = \
+                            bin_ems_stacked[_s0 + s, t_h, h_c,
+                                            bin_off + bin_local]
+            # cand-col: cidx = cand_pos + jj  for jj in [0, cand_pos)
+            for jj in range(cand_pos):
+                t_h = t_haps_stacked[jj, b_i]
+                for s in range(_sn):
+                    for bin_local in range(nb):
+                        cand_sv[local_idx, s, cand_pos + jj, bin_off + bin_local] = \
+                            bin_ems_stacked[_s0 + s, h_c, t_h,
+                                            bin_off + bin_local]
+            # Diagonal: cidx = 2 * cand_pos
+            for s in range(_sn):
+                for bin_local in range(nb):
+                    cand_sv[local_idx, s, 2 * cand_pos, bin_off + bin_local] = \
+                        bin_ems_stacked[_s0 + s, h_c, h_c,
+                                        bin_off + bin_local]
+
+
+def _build_cand_idx_for_p(stride, cand_pos):
+    """Build the pair-index → cand-slot lookup for the split-layout
+    Viterbi.
+
+    For a (stride, stride) pair grid where cand_pos = stride - 1:
+        row = p // stride, col = p - row * stride
+        result[p] = -1                  if row < cand_pos and col < cand_pos
+                    row                  if col == cand_pos and row < cand_pos
+                    cand_pos + col       if row == cand_pos and col < cand_pos
+                    2 * cand_pos         if row == cand_pos and col == cand_pos
+
+    Pure-Python; runs once per swap round and the result (int64 array of
+    length n_pairs = stride²) is fed into _batched_viterbi_score_split.
+    """
+    n_pairs = stride * stride
+    out = np.empty(n_pairs, dtype=np.int64)
+    for p in range(n_pairs):
+        row = p // stride
+        col = p - row * stride
+        if row == cand_pos and col == cand_pos:
+            out[p] = 2 * cand_pos
+        elif row == cand_pos:
+            out[p] = cand_pos + col
+        elif col == cand_pos:
+            out[p] = row
+        else:
+            out[p] = -1
+    return out
+
+
+@njit(fastmath=False)
+def _build_tensor_block_numba(tensor, bin_em, local_indices,
+                                s0, s1, K, n_bins_b, bin_offset):
+    """Write one sub-block's (n_pairs × n_bins_b) slice into the scoring
+    tensor, called from _build_tensor_from_paths once per sub-block per
+    path-set.
+
+    Equivalent to the numpy reference:
+        grid_i = np.repeat(local_indices, K)     # shape (K*K,)
+        grid_j = np.tile(local_indices, K)       # shape (K*K,)
+        tensor[:, :, bin_offset:bin_offset+n_bins_b] = \\
+            bin_em[s0:s1, grid_i, grid_j, :]
+
+    with the indexing relation
+        grid_i[p] = local_indices[p // K]
+        grid_j[p] = local_indices[p %  K]
+
+    The numpy fancy-indexing path would allocate an intermediate
+    (n_s, K², n_bins_b) array per call and copy through Python-level
+    indexing machinery.  This kernel writes directly via three nested
+    loops, eliminating the temporary and inlining the index resolution.
+    At K=6, n_pairs=36, n_bins_b≈200 production shapes, the per-call
+    work is ~460k writes (~3.7 MB); numba executes that serially in
+    well under a millisecond.
+
+    SERIAL (no `parallel=True`, no `prange`) — IMPORTANT:
+    `_build_tensor_from_paths` is reached from `score_path_sets_parallel`,
+    which already runs the per-path-set builds inside a Python
+    `ThreadPoolExecutor` (one Python thread per builder).  If THIS
+    kernel also used `prange`, every Python thread would try to acquire
+    the same numba OpenMP thread pool, causing the OMP barrier to
+    serialise everything and adding contention overhead — empirically
+    a ~2.4x slowdown vs the parallel-kernel attempt at 112-way
+    production scale.  Serial execution lets the outer
+    ThreadPoolExecutor own the parallelism instead.
+
+    The per-call work is small (~460k writes per block per call) and
+    the function is called from many parallel contexts simultaneously,
+    so the outer-pool parallelism is the right place to scale.  Inside
+    `_run_1for1_round`, `_run_2for1_round`, and Step 1 (where this
+    function is also reached, but under a single Python thread), the
+    numba thread budget is correctly used by the *other* parallel
+    kernels in the same call (`_build_cand_sv_numba`,
+    `_batched_viterbi_score_split`) — this serial kernel just removes
+    Python-level indexing overhead from its own slice of the call.
+
+    Args:
+        tensor:        (n_s, n_pairs, total_bins) float64, OUTPUT.
+                       Slice [:, :, bin_offset:bin_offset+n_bins_b] is
+                       written in-place; cells outside that bin window
+                       are untouched.  Caller is responsible for
+                       initialising regions not covered by this block.
+        bin_em:        (num_samples, n_haps, n_haps, n_bins_b) float64,
+                       READ-only.  This block's emission tensor.
+        local_indices: (K,) int64.  Per-path local hap indices for this
+                       block.
+        s0, s1:        int, sample range.  n_s = s1 - s0.
+        K:             int, path-set size.  n_pairs = K * K.
+        n_bins_b:      int, this block's bin count.
+        bin_offset:    int, where to start writing in the tensor's
+                       total_bins axis (cumulative bin offset).
+    """
+    n_s = s1 - s0
+    n_pairs = K * K
+    for s in range(n_s):
+        s_src = s0 + s
+        for p in range(n_pairs):
+            row = p // K
+            col = p - row * K
+            i_local = local_indices[row]
+            j_local = local_indices[col]
+            for b in range(n_bins_b):
+                tensor[s, p, bin_offset + b] = \
+                    bin_em[s_src, i_local, j_local, b]
+
+
 @njit(parallel=True, fastmath=True)
 def _viterbi_traceback(tensor, penalty):
     """Viterbi traceback for sample painting.
@@ -219,146 +512,100 @@ def _compute_bin_emissions_numba(block_samples, hap0, hap1, n_haps, n_bins, snps
     
     return bin_emissions
 
+
 @njit(parallel=True, fastmath=False)
-def _fill_all_blocks_numba(sv, tmpl_slice, bin_ems_stacked,
-                            chunk_cands_arr, map_matrix,
-                            t_haps_stacked, bin_offs, nbs,
-                            _s0, _s1, stride, cand_pos):
-    """Fused broadcast + per-block fill kernel. Replaces an earlier
-    Python loop that dispatched a separate per-block numba kernel
-    once per block (N-blocks dispatches per fill call).
+def _build_template_numba(tmpl_full, bin_ems_stacked,
+                           t_haps_stacked, bin_offs, nbs,
+                           K_base, stride):
+    """Build the per-position/pair template tensor for one swap round.
 
-    Per-fill work is now ONE kernel dispatch instead of N-blocks
-    dispatches, and the serial
-    `sv[:] = tmpl_slice[np.newaxis, :, :, :]` broadcast is now
-    inside prange, running in parallel across candidates.
+    Computes, for each sample s, per-block (b_i), per-pair (ii, jj) with
+    ii, jj in [0, K_base):
 
-    Observed on L3 chr5 run 20260424_184837:
-      CR_1for1_fill wall   = 251.3s  (8064 calls)
-      CR_1for1_kernel wall =  17.7s  (kernel time only)
-    So ~93% of fill wall was Python overhead (broadcast + 10
-    np.asarray/np.ascontiguousarray calls + 10 kernel dispatches
-    with their OMP barriers) rather than actual numba work.
-    This kernel absorbs all of that into one parallel region.
+        pos = ii * stride + jj
+        tmpl_full[s, pos, bin_off + bin_local] =
+            bin_ems_stacked[s, t_haps_stacked[ii, b_i],
+                            t_haps_stacked[jj, b_i],
+                            bin_off + bin_local]
 
-    Mathematically identical to the reference per-block Python
-    loop (validated byte-exact by validate_fused_fill.py):
+    Cells at (row == cand_pos) or (col == cand_pos), where
+    cand_pos = stride - 1 = K_base, are left untouched (uninitialised
+    from the np.empty allocator).  The Viterbi kernel never reads those
+    cells from tmpl_slice — the candidate fill kernel
+    (_build_cand_sv_numba) supplies real data for every cand-row /
+    cand-col / diagonal cell, and the Viterbi recurrence dispatches
+    through `cand_idx_for_p[k]` to read from cand_sv whenever k is a
+    cand cell.
 
-        sv[:] = tmpl_slice[None, :, :, :]   # broadcast
-        for b_i in range(n_blocks):
-            bin_off = bin_offs[b_i]; nb = nbs[b_i]
-            for local_idx in range(n_chunk):
-                ci = chunk_cands[local_idx]
-                h_c = map_matrix[ci, b_i]
-                for ii in range(cand_pos):
-                    p = ii*stride + cand_pos
-                    sv[local_idx, :, p, bin_off:bin_off+nb] = \\
-                        bin_ems_stacked[
-                            _s0:_s1, t_haps_stacked[ii, b_i], h_c,
-                            bin_off:bin_off+nb]
-                for jj in range(cand_pos):
-                    p = cand_pos*stride + jj
-                    sv[local_idx, :, p, bin_off:bin_off+nb] = \\
-                        bin_ems_stacked[
-                            _s0:_s1, h_c, t_haps_stacked[jj, b_i],
-                            bin_off:bin_off+nb]
-                p = cand_pos*stride + cand_pos
-                sv[local_idx, :, p, bin_off:bin_off+nb] = \\
-                    bin_ems_stacked[_s0:_s1, h_c, h_c,
-                                     bin_off:bin_off+nb]
+    Equivalent to the Python reference:
 
-    but parallelized over local_idx via prange (GIL-free) AND
-    with the broadcast fused inside the prange so the template
-    fill also runs in parallel (instead of being a serial memcpy).
+        for b_i: for ii: for jj:
+            tmpl[:, pos, bin_off:bin_off+nb] = \
+                bin_em[_s0:_s1, t_haps[ii], t_haps[jj], :]
 
-    REQUIRES: bin_ems_stacked must be built by concatenating
-    per-block em['bin_emissions'] along axis=-1. This requires
-    all blocks in sub_em to have the same (num_samples, n_haps,
-    n_haps) leading-dim shape — i.e. uniform n_haps across
-    sub-blocks within the super-block. If that invariant doesn't
-    hold, np.concatenate raises ValueError at chimera setup
-    (no fallback path).
+    which ran K * n_sample_chunks * n_blocks * K_base² slice-copy
+    operations per swap round (~7500 at K=6, 10 blocks, 5 chunks),
+    each through numpy's fancy-indexing machinery with Python
+    interpreter overhead.  This kernel folds the whole thing into one
+    prange'd numba region and writes via direct indexing.
+
+    Parallelism: prange over samples (each thread writes its own
+    tmpl_full[s, :, :] row; no race).  Numba thread count is set by
+    the caller via numba.set_num_threads.
 
     Args:
-        sv:                (n_chunk, _sn, n_pairs, total_bins) float64,
-                           written in-place, fully overwritten.
-        tmpl_slice:        (_sn, n_pairs, total_bins) float64, read-only,
-                           broadcast into every sv[local_idx].
-        bin_ems_stacked:   (num_samples, n_haps, n_haps, total_bins)
-                           float64, read-only, concatenated bins.
-        chunk_cands_arr:   (n_chunk,) int64, candidate row indices into
-                           map_matrix.
-        map_matrix:        (n_cands_total, n_blocks) int64, contiguous;
-                           maps candidate idx -> per-block hap idx.
-        t_haps_stacked:    (cand_pos, n_blocks) int64, stacked from
-                           hpb[b_i]. t_haps_stacked[ii, b_i] is the hap
-                           id at position ii for block b_i in the
-                           current basis.
-        bin_offs:          (n_blocks,) int64, cumulative bin offsets in
-                           the stacked bin dimension.
-        nbs:               (n_blocks,) int64, per-block bin counts.
-        _s0, _s1:          int, sample range. _sn = _s1 - _s0.
-        stride:            int, pair-index row stride (== K for 1for1,
-                           == K_result for 2for1 — both == cand_pos+1).
-        cand_pos:          int, row/col of the candidate in the pair
-                           index (== K_base in both 1for1 and 2for1).
+        tmpl_full:        (num_samples, n_pairs, total_bins) float64,
+                          OUTPUT, written in-place. Caller pre-allocates
+                          via np.empty; this kernel writes only the
+                          non-cand cells (see docstring above).
+        bin_ems_stacked:  (num_samples, n_haps, n_haps, total_bins)
+                          float64, read-only. Per-block emission tensors
+                          padded to a common n_haps and concatenated
+                          along the bins axis.
+        t_haps_stacked:   (K_base, n_blocks) int64. t_haps_stacked[ii, b_i]
+                          gives the hap-id for basis position ii in block b_i.
+        bin_offs:         (n_blocks,) int64, cumulative bin offsets.
+        nbs:              (n_blocks,) int64, per-block bin counts.
+        K_base:           int, number of basis (non-candidate) positions.
+                          Equal to K-1 for 1for1, K-2 for 2for1.
+        stride:           int, pair-index row stride. Equal to
+                          K (1for1) or K_result=K-1 (2for1). Also equal
+                          to K_base + 1 since cand_pos = K_base.
+
+    Mathematically byte-equivalent to the Python reference:
+
+        tmpl_full = np.zeros((num_samples, n_pairs, total_bins), dtype=float64)
+        bin_off = 0
+        for b_i in range(n_blocks):
+            nb = nbs[b_i]
+            for ii in range(K_base):
+                for jj in range(K_base):
+                    pos = ii * stride + jj
+                    tmpl_full[:, pos, bin_off:bin_off+nb] = bin_ems_stacked[
+                        :, t_haps_stacked[ii, b_i],
+                        t_haps_stacked[jj, b_i],
+                        bin_off:bin_off+nb]
+            bin_off += nb
+
+    except: tmpl_full is allocated via np.empty (cand cells uninitialised);
+    np.zeros vs np.empty differs only at cand cells which downstream never
+    reads, so the difference is mathematically and observably equivalent.
     """
-    n_chunk = chunk_cands_arr.shape[0]
+    num_samples = tmpl_full.shape[0]
     n_blocks = bin_offs.shape[0]
-    _sn = _s1 - _s0
-    n_pairs = sv.shape[2]
-    total_bins = sv.shape[3]
-    for local_idx in prange(n_chunk):
-        ci = chunk_cands_arr[local_idx]
-        # --- Phase 1: broadcast tmpl_slice into sv[local_idx] ---
-        # This is the `sv[:] = tmpl_slice[None, :, :, :]` operation
-        # done in parallel across candidates instead of as a serial
-        # 30 MB memcpy.  Each thread writes its own sv[local_idx]
-        # slab (~0.5 MB at L3 shapes) so different threads exercise
-        # different DRAM channels.
-        for s in range(_sn):
-            for p in range(n_pairs):
-                for b in range(total_bins):
-                    sv[local_idx, s, p, b] = tmpl_slice[s, p, b]
-        # --- Phase 2: overwrite cand row / col / diagonal slots ---
-        # For each block, the candidate being tested lives at row
-        # cand_pos and column cand_pos of the (K_result, K_result)
-        # pair grid.  We overwrite:
-        #   (ii, cand_pos) for ii in [0, cand_pos)   -- cand-row slots
-        #   (cand_pos, jj) for jj in [0, cand_pos)   -- cand-col slots
-        #   (cand_pos, cand_pos)                     -- diagonal
-        # using bin_ems_stacked indexed by the candidate's per-block
-        # hap id h_c = map_matrix[ci, b_i] and the basis haps
-        # t_haps_stacked[ii/jj, b_i] for the non-candidate positions.
+    for s in prange(num_samples):
         for b_i in range(n_blocks):
             bin_off = bin_offs[b_i]
             nb = nbs[b_i]
-            h_c = map_matrix[ci, b_i]
-            # cand-row slots: (ii*stride + cand_pos) for ii in [0, cand_pos)
-            for ii in range(cand_pos):
-                p = ii * stride + cand_pos
-                t_h = t_haps_stacked[ii, b_i]
-                for s in range(_sn):
+            for ii in range(K_base):
+                t_h_i = t_haps_stacked[ii, b_i]
+                for jj in range(K_base):
+                    pos = ii * stride + jj
+                    t_h_j = t_haps_stacked[jj, b_i]
                     for bin_local in range(nb):
-                        sv[local_idx, s, p, bin_off + bin_local] = \
-                            bin_ems_stacked[_s0 + s, t_h, h_c,
+                        tmpl_full[s, pos, bin_off + bin_local] = \
+                            bin_ems_stacked[s, t_h_i, t_h_j,
                                             bin_off + bin_local]
-            # cand-col slots: (cand_pos*stride + jj) for jj in [0, cand_pos)
-            for jj in range(cand_pos):
-                p = cand_pos * stride + jj
-                t_h = t_haps_stacked[jj, b_i]
-                for s in range(_sn):
-                    for bin_local in range(nb):
-                        sv[local_idx, s, p, bin_off + bin_local] = \
-                            bin_ems_stacked[_s0 + s, h_c, t_h,
-                                            bin_off + bin_local]
-            # Diagonal: (cand_pos*stride + cand_pos)
-            p = cand_pos * stride + cand_pos
-            for s in range(_sn):
-                for bin_local in range(nb):
-                    sv[local_idx, s, p, bin_off + bin_local] = \
-                        bin_ems_stacked[_s0 + s, h_c, h_c,
-                                        bin_off + bin_local]
 
 
 @njit(parallel=True, fastmath=False)
@@ -587,10 +834,19 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites, snps_pe
         )
         
         del block_samples, haps_tensor, hap0, hap1
+        # Precompute a {hap_key: local_index_in_hap_keys} dict so downstream
+        # call sites that map path entries → local hap indices can use an
+        # O(1) lookup instead of repeating list.index() (O(n_haps) per call).
+        # _build_tensor_from_paths is called ~1500 times per L1 batch and does
+        # K such lookups per block, so cache hit-rate is high; the other two
+        # call sites (_compute_block_diffs, all-pair-diffs build) consume the
+        # same field.  Built once per block here; never mutated downstream.
+        key_to_local_idx = {k: i for i, k in enumerate(hap_keys)}
         all_emissions.append({
             'hap_keys': hap_keys,
             'bin_emissions': bin_emissions,
-            'n_bins': n_bins
+            'n_bins': n_bins,
+            'key_to_local_idx': key_to_local_idx,
         })
     _malloc_trim()
     return all_emissions
@@ -602,7 +858,15 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites, snps_pe
 
 def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=None):
     """Build Viterbi scoring tensor from a set of key-paths.
-    If sample_range=(s0, s1) is given, only builds for those samples."""
+    If sample_range=(s0, s1) is given, only builds for those samples.
+
+    Per-block fill goes through _build_tensor_block_numba, a serial
+    numba kernel that writes the (n_pairs × n_bins_b) slice directly
+    via three nested loops, avoiding the numpy fancy-index + slice-
+    assign intermediate `tensor[:, :, off:off+nb] = bin_em[s0:s1,
+    grid_i, grid_j, :]` (which would allocate a (n_s, K², n_bins_b)
+    temporary per block per call).
+    """
     K = len(path_set)
     n_pairs = K * K
     total_bins = sum(e['n_bins'] for e in sub_emissions)
@@ -612,18 +876,51 @@ def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=
     else:
         s0, s1 = 0, num_samples
         n_s = num_samples
-    tensor = np.zeros((n_s, n_pairs, total_bins), dtype=np.float64)
+    # np.empty rather than np.zeros — the per-block numba kernel fully
+    # writes every (s, p, b) cell in its own bin window (b in
+    # [bin_offset, bin_offset + n_bins_b)); the union of those windows
+    # is exactly [0, total_bins), so the entire tensor is overwritten
+    # by the end of the loop.  np.zeros' implicit page-zeroing was
+    # wasted work.
+    tensor = np.empty((n_s, n_pairs, total_bins), dtype=np.float64)
     bin_offset = 0
     for b_idx, em_data in enumerate(sub_emissions):
         n_bins_b = em_data['n_bins']
         bin_em = em_data['bin_emissions']
-        hap_keys = em_data['hap_keys']
-        local_indices = np.array([hap_keys.index(path[b_idx]) for path in path_set], dtype=np.intp)
-        grid_i = np.repeat(local_indices, K)
-        grid_j = np.tile(local_indices, K)
-        tensor[:, :, bin_offset:bin_offset + n_bins_b] = bin_em[s0:s1, grid_i, grid_j, :]
+        # Use the precomputed {hap_key: local_idx} dict (built once in
+        # compute_subblock_emissions) instead of K linear searches via
+        # list.index().  Falls back gracefully for any externally-built
+        # sub_emissions that didn't supply the cache.
+        key_to_local = em_data.get('key_to_local_idx')
+        if key_to_local is not None:
+            local_indices = np.array(
+                [key_to_local[path[b_idx]] for path in path_set],
+                dtype=np.int64,
+            )
+        else:
+            hap_keys = em_data['hap_keys']
+            local_indices = np.array(
+                [hap_keys.index(path[b_idx]) for path in path_set],
+                dtype=np.int64,
+            )
+        # Numba kernel writes tensor[:, :, bin_offset:bin_offset+n_bins_b]
+        # via direct three-loop indexing — same values as the numpy
+        # fancy-index path, no intermediate allocation.  Edge case K=0
+        # gives n_pairs=0; the kernel's inner loop is a no-op and the
+        # tensor's bin window stays at np.empty garbage.  In practice
+        # K=0 doesn't reach this function (paint_samples_viterbi has an
+        # explicit early-return at line ~1314); guarding here is a
+        # defensive harmless cost.
+        if n_pairs > 0:
+            _build_tensor_block_numba(
+                tensor, bin_em, local_indices,
+                s0, s1, K, n_bins_b, bin_offset,
+            )
         bin_offset += n_bins_b
-    return np.ascontiguousarray(tensor)
+    # `tensor` was allocated via np.empty and overwritten in-place by
+    # the per-block kernel; it remains C-contiguous.  No
+    # np.ascontiguousarray wrap needed.
+    return tensor
 
 
 def score_path_set(path_set, sub_emissions, penalty, num_samples,
@@ -778,11 +1075,7 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
                 behaviour).
     """
     n_cands = len(beam_results)
-    _cr_mark("CR_warmstart_start",
-             f"n_cands={n_cands} batch_cc={batch_cc} pen={penalty} "
-             f"max_K_cap={max_K_cap}")
     if n_cands == 0:
-        _cr_mark("CR_warmstart_done", "empty beam -> empty selected")
         return [], float('inf')
 
     # Decode every beam path's dense_path to a key-path once.
@@ -810,8 +1103,6 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
         seen.add(kt)
         unique_beam_idx.append(bi)
         unique_keypaths.append(kp)
-    _cr_mark("CR_warmstart_dedup_done",
-             f"unique={len(unique_keypaths)} of {n_cands}")
 
     selected_keypaths = []          # list of key-paths (parallel to ...)
     selected_beam_idx = []          # ... this list of beam-row indices
@@ -827,8 +1118,6 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
         if kt in selected_tuples:
             continue                # already in selected, skip
         if len(selected_keypaths) >= max_K_cap:
-            _cr_mark("CR_warmstart_cap",
-                     f"hit max_K_cap={max_K_cap} at beam_idx={beam_idx}")
             break
 
         # ------ Try ADD ------
@@ -845,9 +1134,6 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
             selected_tuples.add(kt)
             bic_S = bic_cand
             n_adds += 1
-            _cr_mark("CR_warmstart_add",
-                     f"beam_idx={beam_idx} K={len(selected_keypaths)} "
-                     f"BIC={bic_S:.2f}")
 
             # ------ DROP LOOP ------
             # After each successful add, check whether any current
@@ -902,15 +1188,9 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
                                      if i != best_drop_i]
                 bic_S = best_drop_bic
                 n_drops += 1
-                _cr_mark("CR_warmstart_drop",
-                         f"beam_idx={dropped_bidx} "
-                         f"K={len(selected_keypaths)} BIC={bic_S:.2f}")
         else:
             n_rejects += 1
 
-    _cr_mark("CR_warmstart_done",
-             f"K={len(selected_beam_idx)} BIC={bic_S:.2f} "
-             f"adds={n_adds} drops={n_drops} rejects={n_rejects}")
     return selected_beam_idx, bic_S
 
 
@@ -955,8 +1235,7 @@ def _compute_all_pair_diffs_kernel(bin_em, pair_si_idx, pair_sj_idx,
             sum_{s, k} | bin_em[s, pair_si_idx[p], k, t]
                        - bin_em[s, pair_sj_idx[p], k, t] |
 
-    Mathematically equivalent to the original numpy chain that lived in
-    find_hotspots._compute_block_diffs():
+    Mathematically equivalent to the numpy reference:
 
         diff = np.zeros((num_samples, n_bins))
         for k in range(n_haps):
@@ -964,10 +1243,11 @@ def _compute_all_pair_diffs_kernel(bin_em, pair_si_idx, pair_sj_idx,
         diff /= n_haps
         return np.mean(diff, axis=0)
 
-    The kernel's outer loop ordering (k, then s, then t) matches the original
-    numpy chain's per-k broadcast addition into diff[s, t], so the final
-    per-t accumulation differs from numpy only by 1-ULP-class floating-
-    point rounding (validated via end-to-end hotspot equivalence).
+    The kernel's outer loop ordering (k, then s, then t) matches the
+    numpy reference's per-k broadcast addition into diff[s, t], so the
+    final per-t accumulation differs from numpy only by 1-ULP-class
+    floating-point rounding (validated via end-to-end hotspot
+    equivalence).
 
     Args:
         bin_em: (num_samples, n_haps, n_haps, n_bins) float64 -- block's
@@ -1018,8 +1298,8 @@ def _find_hotspots_kernel(mean_diffs_flat, bin_offsets, sample_paths,
                             out_count, out_boundary,
                             out_hap_out, out_hap_in,
                             out_left_zone, out_right_zone):
-    """Hotspot detection kernel.  Replaces the Python triple-nested loop
-    that lived in find_hotspots (zone extension + swap counting).
+    """Hotspot detection kernel — fused numba implementation of the
+    zone-extension + swap-counting algorithm used by find_hotspots.
 
     Iterates over every (boundary b, pair p) combination.  For each, walks
     left and right of the boundary through ambiguous-mean_diff bins to
@@ -1027,11 +1307,11 @@ def _find_hotspots_kernel(mean_diffs_flat, bin_offsets, sample_paths,
     pair (si, sj) within that zone.  Emits a hotspot record if the count
     meets min_samples.
 
-    Mathematically identical to the original (verified end-to-end byte-
-    equivalent on the hotspot list, modulo 1-ULP class differences in
-    mean_diffs that don't cross threshold boundaries).  The original
-    Python logic is preserved verbatim as a comment block inside
-    find_hotspots() above.
+    Mathematically identical to the equivalent Python implementation
+    (1-ULP class differences in mean_diffs may shift threshold-boundary
+    decisions in theory, but verified end-to-end byte-equivalent on the
+    hotspot list at production scale).  The Python reference is
+    preserved verbatim as a comment block inside find_hotspots() above.
 
     Args:
         mean_diffs_flat: (n_pairs, total_bins) float64 -- per-pair per-bin
@@ -1205,8 +1485,17 @@ def find_hotspots(sample_paths, K, num_blocks, sub_emissions, path_set,
         def _compute_block_diffs(block_idx, si, sj):
             em = sub_emissions[block_idx]
             hap_keys = em['hap_keys']
-            si_idx = hap_keys.index(path_set[si][block_idx])
-            sj_idx = hap_keys.index(path_set[sj][block_idx])
+            # Use the precomputed {hap_key: local_idx} dict (added in
+            # compute_subblock_emissions) for O(1) lookup; falls back to
+            # list.index() if the cache is missing (externally-built
+            # sub_emissions).
+            key_to_local = em.get('key_to_local_idx')
+            if key_to_local is not None:
+                si_idx = key_to_local[path_set[si][block_idx]]
+                sj_idx = key_to_local[path_set[sj][block_idx]]
+            else:
+                si_idx = hap_keys.index(path_set[si][block_idx])
+                sj_idx = hap_keys.index(path_set[sj][block_idx])
             bin_em = em['bin_emissions']
             n_haps = len(hap_keys)
             diff = np.zeros((num_samples, em['n_bins']))
@@ -1313,14 +1602,24 @@ def find_hotspots(sample_paths, K, num_blocks, sub_emissions, path_set,
         hap_keys = em['hap_keys']
         bin_em = em['bin_emissions']
         # Build per-block per-pair hap-index arrays from the path_set view
-        # of this block.
+        # of this block.  Use the precomputed {hap_key: local_idx} dict for
+        # O(1) lookup (n_pairs × 2 lookups per block); falls back to
+        # list.index() if the cache is missing.
+        key_to_local = em.get('key_to_local_idx')
         pair_si_idx_block = np.empty(n_pairs, dtype=np.int64)
         pair_sj_idx_block = np.empty(n_pairs, dtype=np.int64)
-        for p in range(n_pairs):
-            pair_si_idx_block[p] = hap_keys.index(
-                path_set[pair_si[p]][block_idx])
-            pair_sj_idx_block[p] = hap_keys.index(
-                path_set[pair_sj[p]][block_idx])
+        if key_to_local is not None:
+            for p in range(n_pairs):
+                pair_si_idx_block[p] = key_to_local[
+                    path_set[pair_si[p]][block_idx]]
+                pair_sj_idx_block[p] = key_to_local[
+                    path_set[pair_sj[p]][block_idx]]
+        else:
+            for p in range(n_pairs):
+                pair_si_idx_block[p] = hap_keys.index(
+                    path_set[pair_si[p]][block_idx])
+                pair_sj_idx_block[p] = hap_keys.index(
+                    path_set[pair_sj[p]][block_idx])
         # bin_em is sourced from compute_subblock_emissions which produces
         # float64 contiguous tensors.  Pass-through (no copy) is the common
         # path; np.ascontiguousarray is a defensive no-op if the caller
@@ -1680,17 +1979,11 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     n_blocks = len(batch_blocks)
     n_cands = len(beam_results)
     
-    _cr_mark("CR_entry",
-             f"n_samples={num_samples} n_blocks={n_blocks} n_cands={n_cands} "
-             f"max_founders={max_founders} cc_scale={cc_scale}")
     
     # --- Compute parameters ---
-    _cr_mark("CR_compute_params_start")
     pen_sel = penalty_override if penalty_override is not None else compute_penalty(batch_blocks)
     spb = spb_override if spb_override is not None else compute_spb(batch_blocks)
     batch_cc = cc_override if cc_override is not None else compute_cc(batch_blocks, num_samples, cc_scale)
-    _cr_mark("CR_compute_params_done",
-             f"pen_sel={pen_sel} spb={spb} batch_cc={batch_cc}")
     
     # --- Cap total bins to prevent memory blowup ---
     total_sites = sum(len(b.positions) for b in batch_blocks)
@@ -1699,42 +1992,36 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         spb = math.ceil(total_sites / max_bins_for_cr)
     
     # --- Sub-block emissions ---
-    _cr_mark("CR_sub_em_start", f"spb={spb} total_sites={total_sites}")
     sub_em = compute_subblock_emissions(batch_blocks, global_probs, global_sites, spb,
                                         num_threads=num_threads)
     total_bins = sum(e['n_bins'] for e in sub_em)
-    _cr_mark("CR_sub_em_done",
-             f"total_bins={total_bins} per_block_bins={[e['n_bins'] for e in sub_em]}")
     
     # --- Map matrix: beam index -> dense hap index per block ---
-    _cr_mark("CR_map_matrix_start")
     map_matrix = np.zeros((n_cands, n_blocks), dtype=int)
     for c_idx, (path, _) in enumerate(beam_results):
         for b_idx, dense_idx in enumerate(path):
             map_matrix[c_idx, b_idx] = dense_idx
-    _cr_mark("CR_map_matrix_done", f"shape={map_matrix.shape}")
 
-    # --- Fused-fill-kernel precompute ---
+    # --- Stacked emission tensor precompute ---
     # Build bin_ems_stacked = concatenated per-block bin_emissions along
-    # the bins axis. The fused _fill_all_blocks_numba kernel then runs
-    # as a single dispatch per fill call (instead of n_blocks dispatches
-    # plus a serial pre-broadcast).
+    # the bins axis.  Downstream kernels (_build_template_numba and
+    # _build_cand_sv_numba) consume this stacked array as a single
+    # dispatch per call instead of paying n_blocks dispatches plus a
+    # serial per-block pre-broadcast.
     #
     # Concatenation requires uniform leading-dim shape
     # (num_samples, n_haps, n_haps) across blocks. When sub-blocks have
     # different n_haps (e.g. a super-block with one n_haps=4 block and
     # nine n_haps=6 blocks), we pad the smaller blocks up to the
-    # super-block's max n_haps with zeros. The kernel only ever indexes
+    # super-block's max n_haps with zeros. The kernels only ever index
     # bin_ems_stacked[s, t_h, h_c, ...] with t_h, h_c in [0, n_haps_b)
     # for block b — those indices come from map_matrix which is bounded
     # by each block's actual n_haps_b — so the padded slots
     # [n_haps_b : max_n_haps] are never read at runtime. Padding is
-    # purely additive memory, no math change. Verified byte-exact by
-    # the jagged-padded scenario in validate_fused_fill.py.
+    # purely additive memory, no math change.
     #
-    # Also: cache int64-contiguous map_matrix so the fused kernel
-    # doesn't pay an astype/ascontiguousarray per fill call.
-    _cr_mark("CR_stack_bin_em_start")
+    # Also: cache int64-contiguous map_matrix so the downstream kernels
+    # don't pay an astype/ascontiguousarray per call.
     _max_n_haps = max(em['bin_emissions'].shape[1] for em in sub_em)
     _padded_bin_ems = []
     _n_padded = 0
@@ -1763,11 +2050,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     assert _off == total_bins, (
         f"bin offset mismatch: cumulative={_off} total_bins={total_bins}")
     map_matrix_c = np.ascontiguousarray(map_matrix).astype(np.int64)
-    _cr_mark("CR_stack_bin_em_done",
-             f"shape={stacked_bin_em.shape} "
-             f"max_n_haps={_max_n_haps} "
-             f"n_padded={_n_padded}/{len(sub_em)} "
-             f"per_block_nbs={list(int(x) for x in nbs_arr)}")
     del _padded_bin_ems
     
     # --- Local tensor builders ---
@@ -1783,7 +2065,9 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             tensor[:, :, bin_off:bin_off + nb] = \
                 bin_em[:, np.repeat(local_haps, n_sub), np.tile(local_haps, n_sub), :]
             bin_off += nb
-        return np.ascontiguousarray(tensor)
+        # `tensor` was allocated via np.zeros (C-contiguous) and only
+        # slice-assigned in-place; ascontiguousarray would be a no-op.
+        return tensor
     
     def build_tensors_threaded(subset_list):
         nt = _resolve_threads(num_threads)
@@ -1843,7 +2127,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     # =========================================================================
     # STEP 1: Forward Selection (sample-chunked)
     # =========================================================================
-    _cr_mark("CR_step1_start")
     selected = list(_warmstart_selected)
     current_best_bic = _warmstart_bic
     for k in range(step1_max_iters):
@@ -1852,8 +2135,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             break
         K_next = len(selected) + 1
         n_pairs = K_next * K_next
-        _cr_mark("CR_step1_iter_start",
-                 f"k={k} K_next={K_next} n_pairs={n_pairs} n_remaining={len(remaining)}")
         # Dynamic thread resync: pull the latest total_cores // active_workers
         # value before doing any per-iteration work.  Step 1's fused-fill and
         # batched-Viterbi kernels at lines 1041 / 1054 below use whatever
@@ -1869,7 +2150,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         all_scores = {}
         
         # Build template with base pairs (full samples — moderate size)
-        _cr_mark("CR_step1_template_build_start", f"k={k}")
         template = np.zeros((num_samples, n_pairs, total_bins), dtype=np.float64)
         per_block_sel_haps = []
         if selected:
@@ -1887,23 +2167,33 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         else:
             for b_i in range(len(sub_em)):
                 per_block_sel_haps.append(np.array([], dtype=int))
-        # For the fused fill kernel: stack per_block_sel_haps into a
-        # (cand_pos, n_blocks) int64 array once per k-iteration. cand_pos
-        # for step1 is K_next - 1 (the candidate lives at row/col index
-        # K_next-1 in the pair grid, so there are K_next-1 "other" base
-        # positions). When K_next == 1 the basis is empty and
-        # per_block_sel_haps contains (0,)-shape arrays, so the stacked
-        # array has shape (0, n_blocks). Numba accepts int64[:, :]
-        # parameters regardless of runtime shape; the row/col loops
-        # (range(cand_pos) = range(0)) are skipped so t_haps_stacked is
-        # never indexed at runtime. Verified byte-exact by scenario 9
-        # of validate_fused_fill.py (step1_Knext=1_empty_basis).
+        # Stack per_block_sel_haps into a (cand_pos, n_blocks) int64
+        # array once per k-iteration, for downstream
+        # _build_cand_sv_numba.  cand_pos for step1 is K_next - 1 (the
+        # candidate lives at row/col index K_next-1 in the pair grid,
+        # so there are K_next-1 "other" base positions).  When
+        # K_next == 1 the basis is empty and per_block_sel_haps contains
+        # (0,)-shape arrays, so the stacked array has shape
+        # (0, n_blocks).  Numba accepts int64[:, :] parameters regardless
+        # of runtime shape; the row/col loops (range(cand_pos) =
+        # range(0)) are skipped so t_haps_stacked is never indexed at
+        # runtime.
         t_haps_stacked_step1 = np.stack(
             per_block_sel_haps, axis=1
         ).astype(np.int64)
-        _cr_mark("CR_step1_template_build_done", f"k={k}")
-        
-        _cr_mark("CR_step1_chunks_start", f"k={k} max_chunk={max_chunk}")
+
+        # Split-layout precomputation for this k iteration.  In Step 1,
+        # stride = K_next and cand_pos = K_next - 1, both of which change
+        # per k (selected grows each iteration), so the cand-slot lookup
+        # must be rebuilt each iteration.  Special case K_next == 1:
+        # stride=1, cand_pos=0, n_pairs=1; the single pair is the
+        # diagonal cand cell, cand_idx_for_p = [0], n_cand_pairs = 1.
+        stride_s1 = K_next
+        cand_pos_s1 = K_next - 1
+        cand_idx_for_p_s1 = _build_cand_idx_for_p(stride_s1, cand_pos_s1)
+        n_cand_pairs_s1 = 2 * cand_pos_s1 + 1
+        chunk_cands_arr_s1_dtype = np.int64  # captured for use below
+
         for cs in range(0, len(remaining), max_chunk):
             chunk = remaining[cs:cs + max_chunk]
             n_chunk = len(chunk)
@@ -1914,71 +2204,57 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             for _s0 in range(0, num_samples, _SAMPLE_CHUNK):
                 _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
                 _sn = _s1 - _s0
-                
-                stacked_chunk = np.empty((n_chunk, _sn, n_pairs, total_bins),
-                                         dtype=np.float64)
+
+                # Compact per-candidate emission tensor of shape
+                # (n_chunk, _sn, 2*cand_pos+1, total_bins).  Stores only
+                # the cand-row + cand-col + diagonal cells (the cells
+                # whose values differ across candidates); non-cand cells
+                # are read directly from tmpl_slice by the Viterbi
+                # kernel via the cand_idx_for_p[k] dispatch.  At
+                # K_next=6 that's 11 cand pairs vs 36 total in the
+                # full pair grid, a 3.3x memory reduction.  At K_next=1,
+                # n_cand_pairs=1 (the diagonal only).
+                cand_sv = np.empty(
+                    (n_chunk, _sn, n_cand_pairs_s1, total_bins),
+                    dtype=np.float64,
+                )
                 _tmpl_slice = template[_s0:_s1]
-                
-                _cr_mark("CR_step1_fill_start",
-                         f"k={k} cs={cs} _s0={_s0} n_chunk={n_chunk} "
-                         f"K_next={K_next}")
-                # Fused numba fill kernel.  Byte-exact to step2's fused
-                # path with the mapping:
-                #     stride  ↔  K_next
-                #     cand_pos ↔ K_next - 1
-                # Row pos   = ii * stride + cand_pos
-                #           = ii * K_next + (K_next - 1)        ← step1 row
-                # Col pos   = cand_pos * stride + jj
-                #           = (K_next - 1) * K_next + jj        ← step1 col
-                # Diag pos  = cand_pos * stride + cand_pos
-                #           = (K_next - 1) * K_next + (K_next - 1)
-                #           = K_next * K_next - 1               ← step1 diag
-                # validate_fused_fill.py verifies this identity on
-                # synthetic step1-shaped inputs (K_next = 1..6).
-                chunk_cands_arr_s1 = np.asarray(chunk_arr, dtype=np.int64)
-                stride_s1 = K_next
-                cand_pos_s1 = K_next - 1
-                _cr_mark("CR_step1_numba_dispatch",
-                         f"nt_numba={_numba_get_num_threads()} "
-                         f"n_chunk={n_chunk} n_blocks={len(sub_em)} "
-                         f"K_next={K_next}")
-                _cr_mark("CR_step1_kernel_start",
-                         f"k={k} cs={cs} _s0={_s0}")
-                _fill_all_blocks_numba(
-                    stacked_chunk, _tmpl_slice, stacked_bin_em,
+
+                # _build_cand_sv_numba writes only cand-row + cand-col +
+                # diagonal emissions into the compact (n_chunk, _sn,
+                # 2*cand_pos+1, total_bins) layout.  The Viterbi kernel
+                # reads non-cand emissions directly from tmpl_slice via
+                # the cand_idx_for_p[k] dispatch (k=-1 → template,
+                # k>=0 → cand_sv[..., k, ...]).
+                chunk_cands_arr_s1 = np.asarray(chunk_arr, dtype=chunk_cands_arr_s1_dtype)
+                _build_cand_sv_numba(
+                    cand_sv, stacked_bin_em,
                     chunk_cands_arr_s1, map_matrix_c,
                     t_haps_stacked_step1,
                     bin_offs_arr, nbs_arr,
-                    _s0, _s1, stride_s1, cand_pos_s1)
-                _cr_mark("CR_step1_kernel_done",
-                         f"k={k} cs={cs} _s0={_s0}")
-                _cr_mark("CR_step1_fill_done",
-                         f"k={k} cs={cs} _s0={_s0}")
+                    _s0, _s1, cand_pos_s1)
                 
-                _cr_mark("CR_step1_viterbi_score_start",
-                         f"k={k} cs={cs} n_chunk={n_chunk} sample_chunk=[{_s0},{_s1})")
-                partial = _batched_viterbi_score(
-                    np.ascontiguousarray(stacked_chunk), float(pen_sel))
-                _cr_mark("CR_step1_viterbi_score_done", f"k={k} cs={cs} _s0={_s0}")
+                # Split-source Viterbi reads non-cand emissions from
+                # _tmpl_slice (shared across candidates) and cand emissions
+                # from cand_sv (per-candidate).  No ascontiguousarray wrap
+                # needed — both inputs are already C-contiguous.
+                partial = _batched_viterbi_score_split(
+                    _tmpl_slice, cand_sv, cand_idx_for_p_s1,
+                    float(pen_sel))
                 accum_scores += partial
-                del stacked_chunk
+                del cand_sv
             
             for j, ci in enumerate(chunk):
                 all_scores[ci] = float(accum_scores[j])
         del template
         _malloc_trim()
-        _cr_mark("CR_step1_chunks_done", f"k={k}")
         best_idx = max(all_scores, key=all_scores.get)
         new_bic = ((len(selected) + 1) * batch_cc) - (2 * all_scores[best_idx])
-        _cr_mark("CR_step1_iter_done",
-                 f"k={k} best_idx={best_idx} best_score={all_scores[best_idx]:.2f} "
-                 f"new_bic={new_bic:.2f} cur_best_bic={current_best_bic:.2f}")
         if new_bic < current_best_bic:
             current_best_bic = new_bic
             selected.append(best_idx)
         else:
             break
-    _cr_mark("CR_step1_done", f"selected={selected}")
     
     # Fix: if Step 1 selected nothing (all candidates scored -inf or failed
     # the BIC comparison on the first iteration), fall back to the single
@@ -1989,8 +2265,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     # downstream reconstruct_haplotypes_from_beam can process, even if the
     # selection machinery numerically failed for this batch.
     if not selected:
-        _cr_mark("CR_step1_fallback",
-                 "Step 1 selected nothing -- using top beam result as fallback")
         # beam_results is sorted best-first coming out of run_full_mesh_beam_search.
         # Pick index 0 (the top-scoring path) as our single selected founder.
         if n_cands > 0:
@@ -2000,9 +2274,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             # immediately; _process_single_batch already handles this path
             # (it ends up with status='reconstruction_failed' rather than
             # crashing).
-            _cr_mark("CR_step1_fallback_empty",
-                     "beam_results is also empty -- returning []")
-            _cr_mark("CR_return", "returning [] (degenerate input)")
             return []
     
     # =========================================================================
@@ -2021,8 +2292,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     # rounds -- whichever comes first.
     # =========================================================================
     MAX_OUTER_ITERATIONS = 3
-    _cr_mark("CR_outer_loop_start",
-             f"max_iters={MAX_OUTER_ITERATIONS} selected_in={selected}")
 
     # Reverse-lookup dict: beam key-paths -> beam indices.  Used to map any
     # splice product that happens to equal a beam entry back to that entry,
@@ -2036,9 +2305,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
 
     for _outer_iter in range(MAX_OUTER_ITERATIONS):
         _state_before = frozenset(selected)
-        _cr_mark("CR_outer_iter_start",
-                 f"outer_iter={_outer_iter} K={len(selected)} "
-                 f"n_cands={n_cands}")
 
         # =========================================================================
         # STEP 2: Swap Refinement (sample-chunked)
@@ -2118,16 +2384,12 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             Returns:
                 (remove_idx, add_idx, score_gain) or None
             """
-            _cr_mark("CR_1for1_start",
-                     f"K={len(selected)} mode={get_candidates_fn.__name__ if hasattr(get_candidates_fn, '__name__') else '?'}")
             K = len(selected)
             if K < 2:
-                _cr_mark("CR_1for1_done", "reason=K<2")
                 return None
             n_pairs = K * K
             unselected = [x for x in range(n_cands) if x not in selected]
             if not unselected:
-                _cr_mark("CR_1for1_done", "reason=no_unselected")
                 return None
         
             K_base = K - 1
@@ -2136,20 +2398,29 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             sc = max(4, min(64, int(5e8 / (_sc * n_pairs * total_bins * 8))))
             best_swap = None
             best_gain = 0.0
-        
+
+            # Sample chunk starts don't depend on the swap position i,
+            # so build the list once outside the K-position loop instead
+            # of rebuilding it K times.
+            _sample_starts = list(range(0, num_samples, _SAMPLE_CHUNK))
+
+            # Precompute the pair-index → cand-slot lookup for the
+            # split-layout Viterbi (_batched_viterbi_score_split).  For
+            # 1for1, stride = K and cand_pos = K - 1; this is constant for
+            # the entire round, so compute once here rather than per swap
+            # position or per candidate chunk.  Length n_pairs = K*K = 36
+            # at production shapes — tiny array.
+            cand_idx_for_p = _build_cand_idx_for_p(K, cand_pos)
+            n_cand_pairs = 2 * cand_pos + 1
+
             # Process each swap position independently — only 1 template alive at a time
             for i in range(K):
-                _cr_mark("CR_1for1_pos_iter_start", f"i={i}")
                 temp_set = selected[:i] + selected[i + 1:]
-                _cr_mark("CR_1for1_get_cands_start", f"i={i}")
                 cands = get_candidates_fn(temp_set, unselected)
-                _cr_mark("CR_1for1_get_cands_done", f"i={i} n_cands={len(cands) if cands else 0}")
                 if not cands:
-                    _cr_mark("CR_1for1_pos_iter_done", f"i={i} skipped=no_cands")
                     continue
             
                 # Store hap indices for this position (tiny — just integer arrays)
-                _cr_mark("CR_1for1_hpb_build_start", f"i={i}")
                 hpb = {}
                 for b_i, em_data in enumerate(sub_em):
                     hpb[b_i] = map_matrix[np.array(temp_set), b_i]
@@ -2161,42 +2432,27 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     [hpb[b_i] for b_i in range(len(sub_em))],
                     axis=1,
                 ).astype(np.int64)
-                _cr_mark("CR_1for1_hpb_build_done", f"i={i}")
             
-                # Precompute templates_by_sample once per position iter.
-                # The template slice depends on (i, _s0) but NOT on the
-                # candidate chunk cs, so the original `for cs: for _s0:
-                # build` rebuilt the same template once per cs chunk
-                # (8064 builds aggregate at chr5 shapes vs 5760 needed).
-                # Building once per _s0 here and reusing across cs chunks
-                # eliminates the redundant rebuilds (most pronounced in
-                # phase_C's all-candidates passes where each position
-                # spawns multiple cs chunks). Mathematically byte-exact:
-                # same templates, fewer rebuilds.
-                _cr_mark("CR_1for1_template_build_start", f"i={i}")
-                _sample_starts = list(range(0, num_samples, _SAMPLE_CHUNK))
-                templates_by_sample = []
-                for _s0 in _sample_starts:
-                    _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
-                    _sn = _s1 - _s0
-                    tmpl_slice = np.zeros((_sn, n_pairs, total_bins), dtype=np.float64)
-                    bin_off = 0
-                    for b_i, em_data in enumerate(sub_em):
-                        bin_em = em_data['bin_emissions']
-                        nb = em_data['n_bins']
-                        t_haps = hpb[b_i]
-                        for ii in range(K_base):
-                            for jj in range(K_base):
-                                pos = ii * K + jj
-                                tmpl_slice[:, pos, bin_off:bin_off + nb] = \
-                                    bin_em[_s0:_s1, t_haps[ii], t_haps[jj], :]
-                        bin_off += nb
-                    templates_by_sample.append(tmpl_slice)
-                _cr_mark("CR_1for1_template_build_done",
-                         f"i={i} n_templates={len(templates_by_sample)}")
+                # Precompute the full-sample template once per position iter
+                # via the parallel numba kernel _build_template_numba.  The
+                # template depends on (i, samples) — once built we can slice
+                # zero-copy per sample chunk inside the candidate loop.
+                #
+                # The kernel writes via direct indexing in a single prange'd
+                # region (one dispatch per round), avoiding the Python-level
+                # K * n_sample_chunks * n_blocks * K_base² slice-copy loop
+                # that the equivalent numpy implementation would run.
+                # Cand cells in tmpl_full are deliberately left uninitialised
+                # by the kernel; the Viterbi recurrence never reads them
+                # because cand_idx_for_p[k] dispatches those k values to
+                # cand_sv (built separately by _build_cand_sv_numba).
+                tmpl_full = np.empty((num_samples, n_pairs, total_bins),
+                                     dtype=np.float64)
+                _build_template_numba(tmpl_full, stacked_bin_em,
+                                      t_haps_stacked, bin_offs_arr, nbs_arr,
+                                      K_base, K)
             
                 # Process candidates in chunks
-                _cr_mark("CR_1for1_chunks_start", f"i={i} n_cands={len(cands)} sc={sc}")
                 for cs in range(0, len(cands), sc):
                     chunk_cands = cands[cs:cs + sc]
                     n_chunk = len(chunk_cands)
@@ -2206,77 +2462,61 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     for _s0_idx, _s0 in enumerate(_sample_starts):
                         _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
                         _sn = _s1 - _s0
-                        # Reuse precomputed template (built once per
-                        # position above, see CR_1for1_template_build).
-                        tmpl_slice = templates_by_sample[_s0_idx]
+                        # Zero-copy slice into the per-position full
+                        # template built once above by _build_template_numba.
+                        # tmpl_full is C-contiguous; slicing the leading
+                        # axis preserves contiguity, which numba prefers.
+                        tmpl_slice = tmpl_full[_s0:_s1]
+
+                        # Allocate the compact per-candidate emission
+                        # tensor — only cand-row + cand-col + diagonal
+                        # cells (2*cand_pos+1 entries on the pair axis,
+                        # vs n_pairs = stride² for the full pair grid).
+                        # At K=6 1for1: 11 vs 36 ≈ 3.3x smaller; non-cand
+                        # emissions come from tmpl_slice, which is
+                        # L3-cache-resident and shared across all n_chunk
+                        # batches inside _batched_viterbi_score_split.
+                        cand_sv = np.empty(
+                            (n_chunk, _sn, n_cand_pairs, total_bins),
+                            dtype=np.float64,
+                        )
                     
-                        _cr_mark("CR_1for1_alloc_sv_start",
-                                 f"i={i} cs={cs} _s0={_s0} "
-                                 f"shape=({n_chunk},{_sn},{n_pairs},{total_bins})")
-                        sv = np.empty((n_chunk, _sn, n_pairs, total_bins), dtype=np.float64)
-                        _cr_mark("CR_1for1_alloc_sv_done",
-                                 f"i={i} cs={cs} _s0={_s0}")
-                    
-                        _cr_mark("CR_1for1_fill_start",
-                                 f"i={i} cs={cs} _s0={_s0} n_chunk={n_chunk}")
                         nt = _resolve_threads(num_threads)
-                        # Fused numba fill kernel — one dispatch does the
-                        # broadcast (sv[:] = tmpl[None,...]) AND per-block
-                        # cand-row/col/diagonal fill in parallel via prange.
-                        # Handles all n_haps cases via padding at chimera
-                        # setup (see CR_stack_bin_em build).  Byte-exact
-                        # with the pure-Python reference (verified by
-                        # validate_fused_fill.py on synthetic L3-shaped
-                        # inputs including jagged-padded scenarios).
+                        # _build_cand_sv_numba writes ONLY the cand-row +
+                        # cand-col + diagonal emissions into cand_sv.  No
+                        # full-pair-grid broadcast — the Viterbi kernel
+                        # reads non-cand pairs directly from tmpl_slice
+                        # via the cand_idx_for_p[k] dispatch.
                         chunk_cands_arr = np.asarray(chunk_cands, dtype=np.int64)
-                        stride_n = cand_pos + 1  # == K for 1for1
-                        # DIAGNOSTIC: log numba's actual thread count at
-                        # kernel dispatch time and bracket the kernel-only
-                        # portion so we can separate kernel wall from
-                        # broadcast/setup wall.
-                        _cr_mark("CR_1for1_numba_dispatch",
-                                 f"nt_numba={_numba_get_num_threads()} "
-                                 f"n_chunk={n_chunk} n_blocks={len(sub_em)}")
-                        _cr_mark("CR_1for1_kernel_start",
-                                 f"i={i} cs={cs} _s0={_s0}")
-                        _fill_all_blocks_numba(
-                            sv, tmpl_slice, stacked_bin_em,
+                        _build_cand_sv_numba(
+                            cand_sv, stacked_bin_em,
                             chunk_cands_arr, map_matrix_c,
                             t_haps_stacked,
                             bin_offs_arr, nbs_arr,
-                            _s0, _s1, stride_n, cand_pos)
-                        _cr_mark("CR_1for1_kernel_done",
-                                 f"i={i} cs={cs} _s0={_s0}")
-                        _cr_mark("CR_1for1_fill_done",
-                                 f"i={i} cs={cs} _s0={_s0} nt={nt}")
+                            _s0, _s1, cand_pos)
                     
-                        _cr_mark("CR_1for1_viterbi_score_start",
-                                 f"i={i} cs={cs} _s0={_s0} n_chunk={n_chunk}")
-                        partial = _batched_viterbi_score(
-                            np.ascontiguousarray(sv), float(pen_sel))
-                        _cr_mark("CR_1for1_viterbi_score_done",
-                                 f"i={i} cs={cs} _s0={_s0}")
+                        # Split-source Viterbi: reads non-cand emissions
+                        # from tmpl_slice (shared) and cand emissions from
+                        # cand_sv (per-batch).  Same recurrence as the
+                        # single-source _batched_viterbi_score.
+                        partial = _batched_viterbi_score_split(
+                            tmpl_slice, cand_sv, cand_idx_for_p,
+                            float(pen_sel))
                         accum_scores += partial
-                        # tmpl_slice is a reference into templates_by_sample
-                        # (precomputed once per position iter above). Free
-                        # sv here; the template list is freed after the
-                        # chunks loop ends.
-                        del sv
+                        # tmpl_slice is a view into tmpl_full (built once
+                        # above by _build_template_numba). Free cand_sv
+                        # here; tmpl_full is freed after the chunks loop.
+                        del cand_sv
                 
                     for j, ci in enumerate(chunk_cands):
                         gain = float(accum_scores[j]) - cur_score
                         if gain > 1e-4 and gain > best_gain:
                             best_gain = gain
                             best_swap = (selected[i], ci)
-                _cr_mark("CR_1for1_chunks_done", f"i={i}")
-                # Free per-position templates before moving to next i.
-                del templates_by_sample
-                _cr_mark("CR_1for1_pos_iter_done", f"i={i}")
+                # Free the per-position template tensor before moving to next i.
+                del tmpl_full
         
             _malloc_trim()
-            _cr_mark("CR_1for1_done",
-                     f"best_gain={best_gain:.4f} "
-                     f"{'found' if best_swap else 'no_swap'}")
             return (best_swap[0], best_swap[1], best_gain) if best_swap else None
     
         # -----------------------------------------------------------------
@@ -2292,10 +2532,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             Returns:
                 (remove1, remove2, add_idx) or None
             """
-            _cr_mark("CR_2for1_start", f"K={len(selected)}")
             K = len(selected)
             if K < 3:
-                _cr_mark("CR_2for1_done", "reason=K<3")
                 return None
         
             current_bic = K * batch_cc - 2 * cur_score
@@ -2303,7 +2541,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             n_pairs_r = K_result * K_result
             unselected = [x for x in range(n_cands) if x not in selected]
             if not unselected:
-                _cr_mark("CR_2for1_done", "reason=no_unselected")
                 return None
         
             K_base = K - 2
@@ -2312,27 +2549,34 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             sc = max(4, min(64, int(5e8 / (_sc * n_pairs_r * total_bins * 8))))
             best_2for1 = None
             best_bic = current_bic
-        
+
+            # Sample chunk starts don't depend on (i, j), so build once
+            # outside the pair loop instead of K*(K-1)/2 times.
+            _sample_starts = list(range(0, num_samples, _SAMPLE_CHUNK))
+
+            # Precompute the pair-index → cand-slot lookup for the
+            # split-layout Viterbi (_batched_viterbi_score_split).  For
+            # 2for1, stride = K_result and cand_pos = K_result - 1; this
+            # is constant for the entire round, so compute once here
+            # rather than per pair.  Length n_pairs_r = K_result² (e.g. 25
+            # at K=6 2for1).
+            cand_idx_for_p = _build_cand_idx_for_p(K_result, cand_pos)
+            n_cand_pairs = 2 * cand_pos + 1
+
             # Process each pair independently — only 1 template slice alive at a time
             # (avoids C(K,2) × full-sample templates = 22 GB for K=12)
             for i in range(K):
                 for j in range(i + 1, K):
-                    _cr_mark("CR_2for1_pair_iter_start", f"i={i} j={j}")
                     temp_set = [selected[k] for k in range(K) if k != i and k != j]
                 
                     # Get candidates for this pair via cheap scoring
-                    _cr_mark("CR_2for1_cheap_score_start", f"i={i} j={j}")
                     bm = precompute_base_max(temp_set)
                     cs_scores = cheap_score_all(bm, temp_set, unselected)
                     ranked = sorted(cs_scores, key=cs_scores.get, reverse=True)[:top_n_swap]
-                    _cr_mark("CR_2for1_cheap_score_done",
-                             f"i={i} j={j} n_ranked={len(ranked)}")
                     if not ranked:
-                        _cr_mark("CR_2for1_pair_iter_done", f"i={i} j={j} skipped=no_ranked")
                         continue
                 
                     # Store hap indices for this pair (tiny)
-                    _cr_mark("CR_2for1_hpb_build_start", f"i={i} j={j}")
                     hpb = {}
                     for b_i, em_data in enumerate(sub_em):
                         hpb[b_i] = map_matrix[np.array(temp_set), b_i]
@@ -2345,40 +2589,20 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         [hpb[b_i] for b_i in range(len(sub_em))],
                         axis=1,
                     ).astype(np.int64)
-                    _cr_mark("CR_2for1_hpb_build_done", f"i={i} j={j}")
                 
-                    # Precompute templates_by_sample once per pair iter.
-                    # Same restructure as _run_1for1_round: the template
-                    # slice depends on (i, j, _s0) but NOT on the
-                    # candidate chunk cs_start. Building once per _s0
-                    # here and reusing across cs_start chunks eliminates
-                    # the redundant rebuilds. Mathematically byte-exact:
-                    # same templates, fewer rebuilds.
-                    _cr_mark("CR_2for1_template_build_start", f"i={i} j={j}")
-                    _sample_starts = list(range(0, num_samples, _SAMPLE_CHUNK))
-                    templates_by_sample = []
-                    for _s0 in _sample_starts:
-                        _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
-                        _sn = _s1 - _s0
-                        tmpl_slice = np.zeros((_sn, n_pairs_r, total_bins), dtype=np.float64)
-                        bin_off = 0
-                        for b_i, em_data in enumerate(sub_em):
-                            bin_em = em_data['bin_emissions']
-                            nb = em_data['n_bins']
-                            t_haps = hpb[b_i]
-                            for ii in range(K_base):
-                                for jj in range(K_base):
-                                    pos = ii * K_result + jj
-                                    tmpl_slice[:, pos, bin_off:bin_off + nb] = \
-                                        bin_em[_s0:_s1, t_haps[ii], t_haps[jj], :]
-                            bin_off += nb
-                        templates_by_sample.append(tmpl_slice)
-                    _cr_mark("CR_2for1_template_build_done",
-                             f"i={i} j={j} n_templates={len(templates_by_sample)}")
+                    # Precompute the full-sample template once per pair iter
+                    # via the parallel numba kernel _build_template_numba.
+                    # Same shape/semantics as in _run_1for1_round, with the
+                    # only difference being stride = K_result instead of K
+                    # (the pair layout is (K_result, K_result) for 2for1).
+                    # Cand cells are left uninitialised — see kernel docstring.
+                    tmpl_full = np.empty((num_samples, n_pairs_r, total_bins),
+                                         dtype=np.float64)
+                    _build_template_numba(tmpl_full, stacked_bin_em,
+                                          t_haps_stacked, bin_offs_arr, nbs_arr,
+                                          K_base, K_result)
                 
                     # Process candidates in chunks
-                    _cr_mark("CR_2for1_chunks_start",
-                             f"i={i} j={j} n_ranked={len(ranked)} sc={sc}")
                     for cs_start in range(0, len(ranked), sc):
                         chunk_cands = ranked[cs_start:cs_start + sc]
                         n_chunk = len(chunk_cands)
@@ -2388,56 +2612,44 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         for _s0_idx, _s0 in enumerate(_sample_starts):
                             _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
                             _sn = _s1 - _s0
-                            # Reuse precomputed template (built once per
-                            # pair above, see CR_2for1_template_build).
-                            tmpl_slice = templates_by_sample[_s0_idx]
+                            # Zero-copy slice into the per-pair full template.
+                            tmpl_slice = tmpl_full[_s0:_s1]
+
+                            # Compact per-candidate emission tensor —
+                            # cand-row + cand-col + diagonal cells only.
+                            # See _run_1for1_round above for the full
+                            # rationale.  The 2for1 stride is K_result
+                            # instead of K, but cand_pos is still equal
+                            # to stride - 1 so the kernel works unchanged.
+                            cand_sv = np.empty(
+                                (n_chunk, _sn, n_cand_pairs, total_bins),
+                                dtype=np.float64,
+                            )
                         
-                            _cr_mark("CR_2for1_alloc_sv_start",
-                                     f"i={i} j={j} cs={cs_start} _s0={_s0} "
-                                     f"shape=({n_chunk},{_sn},{n_pairs_r},{total_bins})")
-                            sv = np.empty((n_chunk, _sn, n_pairs_r, total_bins), dtype=np.float64)
-                            _cr_mark("CR_2for1_alloc_sv_done",
-                                     f"i={i} j={j} cs={cs_start} _s0={_s0}")
-                        
-                            _cr_mark("CR_2for1_fill_start",
-                                     f"i={i} j={j} cs={cs_start} _s0={_s0} n_chunk={n_chunk}")
                             nt = _resolve_threads(num_threads)
-                            # Numba parallel path (identical pattern to
-                            # 1for1, but stride = K_result since the pair
-                            # layout is (K_result, K_result) instead of
-                            # (K, K)). Two possible kernels — see 1for1
-                            # comment for the full rationale.
+                            # _build_cand_sv_numba writes only the cand-row,
+                            # cand-col, and diagonal emissions — Phase 1
+                            # template broadcast is eliminated entirely.
                             chunk_cands_arr = np.asarray(chunk_cands, dtype=np.int64)
-                            stride_n = cand_pos + 1  # == K_result for 2for1
-                            # DIAGNOSTIC: same probe as 1for1 path.
-                            _cr_mark("CR_2for1_numba_dispatch",
-                                     f"nt_numba={_numba_get_num_threads()} "
-                                     f"n_chunk={n_chunk} n_blocks={len(sub_em)}")
-                            _cr_mark("CR_2for1_kernel_start",
-                                     f"i={i} j={j} cs={cs_start} _s0={_s0}")
-                            _fill_all_blocks_numba(
-                                sv, tmpl_slice, stacked_bin_em,
+                            _build_cand_sv_numba(
+                                cand_sv, stacked_bin_em,
                                 chunk_cands_arr, map_matrix_c,
                                 t_haps_stacked,
                                 bin_offs_arr, nbs_arr,
-                                _s0, _s1, stride_n, cand_pos)
-                            _cr_mark("CR_2for1_kernel_done",
-                                     f"i={i} j={j} cs={cs_start} _s0={_s0}")
-                            _cr_mark("CR_2for1_fill_done",
-                                     f"i={i} j={j} cs={cs_start} _s0={_s0} nt={nt}")
+                                _s0, _s1, cand_pos)
                         
-                            _cr_mark("CR_2for1_viterbi_score_start",
-                                     f"i={i} j={j} cs={cs_start} _s0={_s0} n_chunk={n_chunk}")
-                            partial = _batched_viterbi_score(
-                                np.ascontiguousarray(sv), float(pen_sel))
-                            _cr_mark("CR_2for1_viterbi_score_done",
-                                     f"i={i} j={j} cs={cs_start} _s0={_s0}")
+                            # Split-source Viterbi — reads non-cand emissions
+                            # from tmpl_slice (shared) and cand emissions
+                            # from cand_sv (per-batch).
+                            partial = _batched_viterbi_score_split(
+                                tmpl_slice, cand_sv, cand_idx_for_p,
+                                float(pen_sel))
                             accum_scores += partial
-                            # tmpl_slice is a reference into templates_by_sample
-                            # (precomputed once per pair iter above). Free
-                            # sv here; the template list is freed after the
-                            # chunks loop ends.
-                            del sv
+                            # tmpl_slice is a view into tmpl_full (built
+                            # once above by _build_template_numba). Free
+                            # cand_sv here; tmpl_full is freed after the
+                            # chunks loop.
+                            del cand_sv
                     
                         for j_idx, ci in enumerate(chunk_cands):
                             new_score = float(accum_scores[j_idx])
@@ -2445,14 +2657,10 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                             if new_bic < best_bic - 1e-4:
                                 best_bic = new_bic
                                 best_2for1 = (selected[i], selected[j], ci)
-                    _cr_mark("CR_2for1_chunks_done", f"i={i} j={j}")
-                    # Free per-pair templates before moving to next (i, j).
-                    del templates_by_sample
-                    _cr_mark("CR_2for1_pair_iter_done", f"i={i} j={j}")
+                    # Free the per-pair template tensor before moving to next (i, j).
+                    del tmpl_full
         
             _malloc_trim()
-            _cr_mark("CR_2for1_done",
-                     f"{'found' if best_2for1 else 'no_swap'}")
             return best_2for1
     
         # -----------------------------------------------------------------
@@ -2469,18 +2677,14 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         # -----------------------------------------------------------------
         # Main swap loop
         # -----------------------------------------------------------------
-        _cr_mark("CR_step2_start", f"selected={selected}")
         current_score = score_subset(selected)
     
         if len(selected) >= 2:
           _iter_step2 = 0
           while True:  # Outer loop: Phase A → Phase B → Phase C → repeat
             _iter_step2 += 1
-            _cr_mark("CR_step2_outer_iter",
-                     f"iter={_iter_step2} K={len(selected)} score={current_score:.2f}")
         
             # Phase A: top-N 1-for-1 until convergence
-            _cr_mark("CR_step2_phase_A_start", f"iter={_iter_step2}")
             while True:
                 result = _run_1for1_round(selected, _top_n_candidates,
                                           current_score)
@@ -2490,47 +2694,35 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     current_score += gain
                 else:
                     break
-            _cr_mark("CR_step2_phase_A_done",
-                     f"iter={_iter_step2} score={current_score:.2f}")
         
             # Phase B: one round of top-N 2-for-1 (BIC-aware)
-            _cr_mark("CR_step2_phase_B_start", f"iter={_iter_step2}")
             current_score = score_subset(selected)  # resync after Phase A
             result_b = _run_2for1_round(selected, current_score)
             if result_b:
                 rm1, rm2, add = result_b
                 selected = [x for x in selected if x != rm1 and x != rm2] + [add]
                 current_score = score_subset(selected)
-                _cr_mark("CR_step2_phase_B_found", f"iter={_iter_step2}")
                 continue  # Back to Phase A
-            _cr_mark("CR_step2_phase_B_none", f"iter={_iter_step2}")
         
             # Phase C: one round of brute-force 1-for-1
-            _cr_mark("CR_step2_phase_C_start", f"iter={_iter_step2}")
             result_c = _run_1for1_round(selected, _all_candidates,
                                          current_score)
             if result_c:
                 rm, add, gain = result_c
                 selected[selected.index(rm)] = add
                 current_score += gain
-                _cr_mark("CR_step2_phase_C_found", f"iter={_iter_step2}")
                 continue  # Back to Phase A
-            _cr_mark("CR_step2_phase_C_none", f"iter={_iter_step2}")
         
             break  # All three phases found nothing → done
-        _cr_mark("CR_step2_done", f"selected={selected}")
     
         # =========================================================================
         # STEP 3: Force Prune + BIC Prune
         # =========================================================================
-        _cr_mark("CR_step3_start",
-                 f"K={len(selected)} max_founders={max_founders}")
         while len(selected) > max_founders:
             cur_ll = score_subset(selected)
             worst = min(selected, key=lambda idx:
                 cur_ll - score_subset([x for x in selected if x != idx]))
             selected.remove(worst)
-        _cr_mark("CR_step3_force_prune_done", f"K={len(selected)}")
     
         while len(selected) > 1:
             cur_ll = score_subset(selected)
@@ -2546,7 +2738,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 selected.remove(best_rem)
             else:
                 break
-        _cr_mark("CR_step3_done", f"selected={selected}")
     
         # Convert beam indices (possibly including splice-extension
         # indices from prior outer-loop iterations) to key-paths via
@@ -2554,36 +2745,27 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         # beam_results[bi][0] for original beam rows (populated in the
         # shared setup) and holds splice dense paths for extension rows
         # added at end-of-iteration conversions.
-        _cr_mark("CR_key_paths_start")
         paths = []
         for bi in selected:
             path = map_matrix[bi]
             keys = [fast_mesh.reverse_mappings[b][int(d)]
                     for b, d in enumerate(path)]
             paths.append(keys)
-        _cr_mark("CR_key_paths_done", f"n_paths={len(paths)}")
     
         # =========================================================================
         # STEP 4: Chimera Resolution
         # =========================================================================
-        _cr_mark("CR_step4_start",
-                 f"n_paths={len(paths)} max_cr_iterations={max_cr_iterations}")
         current_paths = list(paths)
         for iteration in range(max_cr_iterations):
-            _cr_mark("CR_step4_iter_start",
-                     f"iteration={iteration} K={len(current_paths)}")
             # 4a. Paint samples
             sp, K_cr = paint_samples_viterbi(
                 current_paths, sub_em, paint_penalty, num_samples,
                 num_threads=num_threads)
-            _cr_mark("CR_step4_paint_done", f"iteration={iteration} K_cr={K_cr}")
         
             # 4b. Find hotspots
             hotspots = find_hotspots(
                 sp, K_cr, n_blocks, sub_em, current_paths,
                 num_samples, min_hotspot_samples)
-            _cr_mark("CR_step4_hotspots_done",
-                     f"iteration={iteration} n_hotspots={len(hotspots)}")
         
             # 4c. Build pair-hotspot map + shared-key pairs
             pair_hotspots = {}
@@ -2698,7 +2880,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                                     + current_paths[best_rem + 1:])
                 else:
                     break
-        _cr_mark("CR_step4_done", f"n_paths={len(current_paths)}")
     
 
         # =====================================================================
@@ -2737,22 +2918,13 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             # per-candidate, so they don't need rebuilding here.
             map_matrix_c = np.ascontiguousarray(map_matrix).astype(np.int64)
         selected = _new_selected
-        _cr_mark("CR_outer_convert_done",
-                 f"outer_iter={_outer_iter} K={len(selected)} "
-                 f"n_splices_added={len(_new_dense_rows)} "
-                 f"new_n_cands={n_cands}")
 
         # Early-break if this iteration didn't change the state.
         if frozenset(selected) == _state_before:
-            _cr_mark("CR_outer_iter_converged",
-                     f"outer_iter={_outer_iter} selected={selected}")
             break
     else:
         # Exited because MAX_OUTER_ITERATIONS reached (loop didn't break)
-        _cr_mark("CR_outer_iter_max_reached",
-                 f"max_iters={MAX_OUTER_ITERATIONS} selected={selected}")
-    _cr_mark("CR_outer_loop_done",
-             f"final_K={len(selected)} final_n_cands={n_cands}")
+        pass
 
     # Rebuild current_paths from the final selected one more time so Steps
     # 5 and 6 see a consistent key-path list (map_matrix rows cover both
@@ -2786,9 +2958,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     # paths get sigma(i)=i forced, so the search space is bounded by the
     # active-set size — never K! enumeration even for large K.
     # =========================================================================
-    _cr_mark("CR_step5_start",
-             f"K={len(current_paths)} step5_max_iters={step5_max_iters} "
-             f"step5_top_k={step5_top_k}")
 
     # Need at least 2 paths to permute meaningfully (and score_path_set
     # would segfault on K=0 — _build_tensor_from_paths produces a
@@ -2797,8 +2966,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     # check (W is 1x1 with no off-diagonal mass) but we skip it explicitly
     # to avoid one wasted painting + score_path_set call per empty case.
     if len(current_paths) < 2:
-        _cr_mark("CR_step5_skip_too_few_paths",
-                 f"K={len(current_paths)}")
+        pass
     else:
         # Bin offsets per sub-block (translates sub-block index to bin index)
         _step5_bin_offsets = [0]
@@ -2807,7 +2975,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 _step5_bin_offsets[-1] + _step5_e['n_bins'])
 
         for _step5_iter in range(step5_max_iters):
-            _cr_mark("CR_step5_iter_start", f"step5_iter={_step5_iter}")
             K_s5 = len(current_paths)
 
             # Paint samples on current state
@@ -2893,40 +3060,23 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         _step5_best_active = list(_step5_active)
 
             if _step5_best_method is None:
-                _cr_mark("CR_step5_iter_done",
-                         f"step5_iter={_step5_iter} no_improvement "
-                         f"n_evals={_step5_n_evals}")
                 break
 
             _step5_sigma_str = ','.join(
                 str(int(s)) for s in _step5_best_sigma)
-            _cr_mark("CR_step5_iter_done",
-                     f"step5_iter={_step5_iter} "
-                     f"method={_step5_best_method} "
-                     f"sb={_step5_best_boundary} "
-                     f"active={_step5_best_active} "
-                     f"sigma=({_step5_sigma_str}) "
-                     f"bic_before={_step5_cur_bic:.2f} "
-                     f"bic_after={_step5_best_bic:.2f} "
-                     f"n_evals={_step5_n_evals}")
             current_paths = _step5_best_paths
         else:
             # Loop didn't break — hit step5_max_iters
-            _cr_mark("CR_step5_max_iters_reached",
-                     f"max_iters={step5_max_iters}")
+            pass
 
-    _cr_mark("CR_step5_done", f"K={len(current_paths)}")
 
     # =========================================================================
     # STEP 6: Convert resolved key-paths back to beam format
     # =========================================================================
-    _cr_mark("CR_step6_start", f"n_paths={len(current_paths)}")
     resolved_beam = []
     for path_keys in current_paths:
         dense_path = [fast_mesh.reverse_mappings[b].index(key)
                       for b, key in enumerate(path_keys)]
         resolved_beam.append((dense_path, 0.0))
-    _cr_mark("CR_step6_done", f"n_resolved={len(resolved_beam)}")
-    _cr_mark("CR_return", f"returning {len(resolved_beam)} beam entries")
     
     return resolved_beam
