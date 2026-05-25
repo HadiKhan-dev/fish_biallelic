@@ -165,6 +165,7 @@ from bhd_kernels import (
     _compute_cc,
     _compute_bic,
     _compute_nll_for_subset,
+    PoolEmissionCache,
 )
 
 # Cross-module function imports
@@ -1165,8 +1166,7 @@ def _generate_carrier_residuals(probs_k, H, A, low_idx_list,
 
 
 
-def _greedy_bic_select(candidate_haps, probs_k, lam,
-                        cc_scale=RECOVERY_OUTER_CC_SCALE,
+def _greedy_bic_select(cache, cc_scale=RECOVERY_OUTER_CC_SCALE,
                         max_k=RECOVERY_MAX_K,
                         use_log_bic=False,
                         verbose=False):
@@ -1176,9 +1176,15 @@ def _greedy_bic_select(candidate_haps, probs_k, lam,
     pick the candidate giving the lowest NLL when added; accept iff
     BIC improves (equivalent to NLL_improvement > cc/2).
 
+    Uses PoolEmissionCache to avoid rebuilding the Viterbi emission
+    tensor for each trial subset — the pool's emissions are precomputed
+    once when the cache is built, and each trial only does the (much
+    cheaper) state-axis selection + Viterbi forward pass.
+
     Args:
-      candidate_haps: list of (L_kept,) binary arrays — the pool
-      probs_k, lam: scoring primitives
+      cache: PoolEmissionCache wrapping the candidate pool.  cache.pool_-
+        haps is the candidate list; cache.N and cache.L_kept are used
+        for cc computation.
       cc_scale: BIC complexity-cost scale (outer; default 0.5)
       max_k: hard cap on selected size
       use_log_bic: if True, use log-BIC formula for cc (cc_scale *
@@ -1189,19 +1195,21 @@ def _greedy_bic_select(candidate_haps, probs_k, lam,
       verbose: print accept/reject decisions
 
     Returns:
-      selected_indices: list of indices into candidate_haps
-      selected_haps:    list of arrays (same as candidate_haps[i] for i in indices)
+      selected_indices: list of indices into cache.pool_haps
+      selected_haps:    list of arrays (same as cache.pool_haps[i] for
+                        i in selected_indices)
       current_nll:      NLL at final selection
     """
-    N = probs_k.shape[0]
-    L_kept = probs_k.shape[1]
+    candidate_haps = cache.pool_haps
+    N = cache.N
+    L_kept = cache.L_kept
     cc = _compute_cc(cc_scale, N, L_kept, use_log_bic=use_log_bic)
 
-    nll_K0 = _compute_nll_for_subset([], probs_k, lam)
+    # K=0 baseline NLL via the cache (precomputed at construction).
+    nll_K0 = cache.nll_for_subset([])
     bic_K0 = 0 * cc + 2 * nll_K0
 
     selected_indices = []
-    selected_haps = []
     used = set()
     current_bic = bic_K0
     current_nll = nll_K0
@@ -1210,14 +1218,14 @@ def _greedy_bic_select(candidate_haps, probs_k, lam,
         print(f'    Forward: K=0 NLL={nll_K0:.1f}, BIC={bic_K0:.1f}, '
               f'cc={cc:.1f}, threshold cc/2={cc/2:.1f}')
 
-    while len(selected_haps) < min(len(candidate_haps), max_k):
+    while len(selected_indices) < min(len(candidate_haps), max_k):
         best_ci = -1
         best_nll = float('inf')
         for ci in range(len(candidate_haps)):
             if ci in used:
                 continue
-            trial_haps = selected_haps + [candidate_haps[ci]]
-            trial_nll = _compute_nll_for_subset(trial_haps, probs_k, lam)
+            trial_indices = selected_indices + [ci]
+            trial_nll = cache.nll_for_subset(trial_indices)
             if trial_nll < best_nll:
                 best_nll = trial_nll
                 best_ci = ci
@@ -1225,13 +1233,12 @@ def _greedy_bic_select(candidate_haps, probs_k, lam,
         if best_ci < 0:
             break
 
-        k_new = len(selected_haps) + 1
+        k_new = len(selected_indices) + 1
         bic_new = k_new * cc + 2 * best_nll
         d_nll = current_nll - best_nll
 
         if bic_new < current_bic:
             selected_indices.append(best_ci)
-            selected_haps.append(candidate_haps[best_ci])
             used.add(best_ci)
             if verbose:
                 print(f'    Forward: K={k_new} ACCEPT cand[{best_ci}], '
@@ -1245,11 +1252,11 @@ def _greedy_bic_select(candidate_haps, probs_k, lam,
                       f'< cc/2={cc/2:.1f}')
             break
 
+    selected_haps = [candidate_haps[i] for i in selected_indices]
     return selected_indices, selected_haps, current_nll
 
 
-def _swap_refine(selected_indices, selected_haps, pool_haps,
-                  probs_k, lam, current_nll,
+def _swap_refine(cache, selected_indices, current_nll,
                   nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
                   max_passes=10, verbose=False):
     """Try swapping each selected hap with each unselected pool member.
@@ -1259,25 +1266,50 @@ def _swap_refine(selected_indices, selected_haps, pool_haps,
     Sometimes greedy forward selection picks a near-optimal hap early
     that becomes redundant after later picks; swap lets us replace it
     with a better one without requiring a full re-search.
+
+    Uses PoolEmissionCache so each trial costs O(N · K_sub_states ·
+    n_bins) for the state-axis selection + Viterbi forward pass, rather
+    than the original O(N · K_sub_states · L) for emission rebuild +
+    Viterbi.  At K_sub=6 this is a roughly order-of-magnitude saving per
+    trial, and `_swap_refine` performs many trials per call (~K * pool
+    per pass, ~K passes).
+
+    Args:
+      cache: PoolEmissionCache over the swap-pool of candidates.
+      selected_indices: list of indices into cache.pool_haps — current
+        selection.  Replaced (or kept) one-at-a-time during refinement.
+      current_nll: scalar — NLL at the current selection, used as the
+        comparison point.  Caller should pass the NLL value at the
+        SAME indices the cache would score (typically the output of
+        _greedy_bic_select that just preceded the swap).
+      nll_tolerance: minimum NLL improvement required to accept a swap.
+      max_passes: defensive cap on the outer pass loop.
+      verbose: print accept decisions per swap.
+
+    Returns:
+      (selected_indices, selected_haps, current_nll, n_swaps)
     """
     sel_ind = list(selected_indices)
-    sel_haps = list(selected_haps)
-    K = len(sel_haps)
+    K = len(sel_ind)
     if K == 0:
-        return sel_ind, sel_haps, current_nll, 0
+        return sel_ind, [], current_nll, 0
 
+    pool_size = cache.K_pool
     n_swaps = 0
     for pass_num in range(max_passes):
         improved_in_pass = False
         for si in range(K):
             best_ci = -1
             best_nll = current_nll - nll_tolerance
-            for ci in range(len(pool_haps)):
+            for ci in range(pool_size):
                 if ci in sel_ind:
                     continue
-                trial_haps = list(sel_haps)
-                trial_haps[si] = pool_haps[ci]
-                trial_nll = _compute_nll_for_subset(trial_haps, probs_k, lam)
+                # Trial: replace pool index at position si with ci.
+                # Build the trial subset by index substitution and score
+                # it through the cache (no emission rebuild).
+                trial_indices = list(sel_ind)
+                trial_indices[si] = ci
+                trial_nll = cache.nll_for_subset(trial_indices)
                 if trial_nll < best_nll:
                     best_nll = trial_nll
                     best_ci = ci
@@ -1285,7 +1317,6 @@ def _swap_refine(selected_indices, selected_haps, pool_haps,
                 if verbose:
                     print(f'    Swap: pos {si} (cand[{sel_ind[si]}]) -> cand[{best_ci}], '
                           f'NLL {current_nll:.1f} -> {best_nll:.1f}')
-                sel_haps[si] = pool_haps[best_ci]
                 sel_ind[si] = best_ci
                 current_nll = best_nll
                 improved_in_pass = True
@@ -1294,10 +1325,11 @@ def _swap_refine(selected_indices, selected_haps, pool_haps,
         if not improved_in_pass:
             break
 
+    sel_haps = [cache.pool_haps[i] for i in sel_ind]
     return sel_ind, sel_haps, current_nll, n_swaps
 
 
-def _bic_prune(selected_indices, selected_haps, probs_k, lam,
+def _bic_prune(cache, selected_indices,
                 cc_scale=RECOVERY_OUTER_CC_SCALE, use_log_bic=False,
                 verbose=False):
     """BIC pruning: try dropping each selected hap.  Drop if the NLL
@@ -1308,31 +1340,43 @@ def _bic_prune(selected_indices, selected_haps, probs_k, lam,
     haps that propped each other up).  Matches the project's
     refine_selection_by_pruning pattern in beam_search_core.
 
+    Uses PoolEmissionCache so each leave-one-out trial reuses the pool's
+    precomputed emissions (no per-trial rebuild).  For a K-sized
+    selection, one prune iteration evaluates K trials (one per dropped
+    hap) plus one full-K-NLL reference; the cache makes each trial
+    cheap.
+
     use_log_bic: bool — if True, use log-BIC formula for cc; if False
       (default, project standard), use linear formula.  Must match the
       use_log_bic of the surrounding K-growth so the prune threshold
       cc/2 is consistent with K-growth's growth threshold.
 
+    Args:
+      cache: PoolEmissionCache over the candidate pool.
+      selected_indices: list of pool indices forming the current
+        selection (subset of cache.pool_haps).
+      cc_scale, use_log_bic: BIC parameters; cc/2 is the drop threshold.
+      verbose: print drop decisions.
+
     Returns: (pruned_indices, pruned_haps, final_nll, n_dropped)
     """
-    N = probs_k.shape[0]
-    L_kept = probs_k.shape[1]
+    N = cache.N
+    L_kept = cache.L_kept
     cc = _compute_cc(cc_scale, N, L_kept, use_log_bic=use_log_bic)
 
     sel_ind = list(selected_indices)
-    sel_haps = list(selected_haps)
     n_dropped = 0
 
-    while len(sel_haps) > 0:
-        nll_full = _compute_nll_for_subset(sel_haps, probs_k, lam)
-        K = len(sel_haps)
+    while len(sel_ind) > 0:
+        nll_full = cache.nll_for_subset(sel_ind)
+        K = len(sel_ind)
 
         best_drop_idx = -1
         best_dnll = cc / 2   # threshold; only drop if dnll_increase < this
 
         for i in range(K):
-            trial = sel_haps[:i] + sel_haps[i+1:]
-            nll_trial = _compute_nll_for_subset(trial, probs_k, lam)
+            trial = sel_ind[:i] + sel_ind[i+1:]
+            nll_trial = cache.nll_for_subset(trial)
             dnll = nll_trial - nll_full   # NLL increase from dropping
             if dnll < best_dnll:
                 best_dnll = dnll
@@ -1345,10 +1389,10 @@ def _bic_prune(selected_indices, selected_haps, probs_k, lam,
             print(f'    Prune: drop pos {best_drop_idx} (cand[{sel_ind[best_drop_idx]}]), '
                   f'NLL increase {best_dnll:.1f} < cc/2={cc/2:.1f} -- DROPPED')
         del sel_ind[best_drop_idx]
-        del sel_haps[best_drop_idx]
         n_dropped += 1
 
-    final_nll = _compute_nll_for_subset(sel_haps, probs_k, lam)
+    final_nll = cache.nll_for_subset(sel_ind)
+    sel_haps = [cache.pool_haps[i] for i in sel_ind]
     return sel_ind, sel_haps, final_nll, n_dropped
 
 
@@ -1488,6 +1532,44 @@ def _haps_equal(haps_a, haps_b, eps_pct=RECOVERY_HAPS_EQUAL_EPS_PCT):
 
 
 # =============================================================================
+# CARRIER-COUNTING KERNEL
+# =============================================================================
+# Pure-numerical inner loop pulled out of _late_low_carrier_rescue so the
+# double loop over (sample, strand) runs at njit speed.  Counts how many
+# real-strand carriers each hap has, treating the wildcard sentinel
+# (A[s, slot] == K) as "not a real carrier" -- those strands are
+# excluded from the per-hap usage tally.
+#
+# Inputs:
+#   A: (N, 2) int — pair assignments; entries in [0, K] where K is the
+#                   wildcard sentinel
+#   K: int       — number of real haps (the wildcard sentinel value)
+#
+# Returns:
+#   usage: (K,) int64 — per-hap real-strand carrier counts
+
+@njit(cache=True)
+def _count_real_carriers_kernel(A, K):
+    N = A.shape[0]
+    usage = np.zeros(K, dtype=np.int64)
+    for s in range(N):
+        for slot in range(2):
+            f = int(A[s, slot])
+            if f != K:
+                usage[f] += 1
+    return usage
+
+
+def _count_real_carriers(A, K):
+    """Thin wrapper that ensures contiguous int input before dispatching
+    to the njit kernel.  At N=320 this is ~640 inner iterations, so
+    contiguity overhead matters less than the kernel call cost, but the
+    contract is uniform with the rest of this module's wrappers."""
+    A_arr = np.ascontiguousarray(A, dtype=np.int64)
+    return _count_real_carriers_kernel(A_arr, int(K))
+
+
+# =============================================================================
 # SUBTRACTION-BASED RECOVERY: ROUND LOOP
 # =============================================================================
 
@@ -1554,6 +1636,15 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
 
     prev_selected = [s.copy() for s in selected]
 
+    # Carry a `prev_round_cache` reference across rounds so each round's
+    # PoolEmissionCache build can reuse rows for haps whose CONTENT
+    # appeared in the previous round's pool.  Saves ~30-50% of the cache
+    # construction time when CD didn't move existing `selected` haps and
+    # only a small number of new consensus haps were added — exactly the
+    # late-round-convergence pattern.  See PoolEmissionCache.__init__ in
+    # bhd_kernels.py for the row-reuse logic and bit-equivalence proof.
+    prev_round_cache = None
+
     for round_num in range(1, max_rounds + 1):
         # 1. Subtraction: generate clean residual candidates
         raw_candidates = _run_subtraction_round(
@@ -1592,16 +1683,33 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
         # 4. Pool = selected union new_haps
         pool = list(selected) + list(new_haps)
 
+        # Build the per-round PoolEmissionCache.  All `_compute_nll_for_-
+        # subset` calls inside _greedy_bic_select / _swap_refine /
+        # _bic_prune in this round will be evaluated against this fixed
+        # pool, so the cache amortises the Viterbi emission build over
+        # the hundreds of subset queries that follow.  See bhd_kernels.
+        # PoolEmissionCache for the design rationale.  Memory cost:
+        # O(N * |pool|² * n_bins / 2) ≈ a few MB to ~30 MB depending on
+        # pool size; discarded at the end of this iteration.
+        #
+        # `prev_round_cache` lets the constructor copy emission rows for
+        # haps whose content matches a hap in the previous round's
+        # pool — saving the dominant rr-pair build cost in the common
+        # case where most of `selected` is unchanged round-to-round.
+        round_cache = PoolEmissionCache(pool, probs_k, lam=lam,
+                                         prev_cache=prev_round_cache)
+        prev_round_cache = round_cache
+
         # 5. Greedy BIC forward selection (haps frozen)
         sel_indices, sel_haps, sel_nll = _greedy_bic_select(
-            pool, probs_k, lam,
+            round_cache,
             cc_scale=outer_cc_scale, max_k=max_K,
             use_log_bic=use_log_bic, verbose=verbose)
 
         # 6. Swap refinement (haps still frozen)
         if len(sel_haps) > 0:
             sel_indices, sel_haps, sel_nll, n_swaps = _swap_refine(
-                sel_indices, sel_haps, pool, probs_k, lam,
+                round_cache, sel_indices,
                 current_nll=sel_nll,
                 nll_tolerance=swap_nll_tolerance,
                 verbose=verbose)
@@ -1609,7 +1717,7 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
         # 7. BIC pruning (haps still frozen)
         if len(sel_haps) > 0:
             sel_indices, sel_haps, sel_nll, n_dropped = _bic_prune(
-                sel_indices, sel_haps, probs_k, lam,
+                round_cache, sel_indices,
                 cc_scale=outer_cc_scale, use_log_bic=use_log_bic,
                 verbose=verbose)
 
@@ -1728,14 +1836,11 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
     if K == 0:
         return H, A, costs, wcs, NLL
 
-    # Compute per-hap real-strand carrier counts (excluding wildcards)
-    W = K
-    usage = np.zeros(K, dtype=np.int64)
-    for s in range(N):
-        for slot in range(2):
-            f = int(A[s, slot])
-            if f != W:
-                usage[f] += 1
+    # Compute per-hap real-strand carrier counts (excluding wildcards).
+    # The inner double loop over (sample, strand) runs at njit speed
+    # via _count_real_carriers_kernel; W = K is the wildcard sentinel
+    # the kernel uses to skip non-real-strand entries.
+    usage = _count_real_carriers(A, K)
 
     # Trigger condition: any hap below the low-carrier threshold.
     # Floor of 2 ensures we never trigger on degenerate K=0 or K=1
@@ -1886,6 +1991,11 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
     # Pool = current H + new candidates
     pool = H_list + new_candidates
 
+    # Build the late-rescue PoolEmissionCache.  All _greedy_bic_select /
+    # _swap_refine / _bic_prune calls below evaluate subsets of this
+    # fixed pool, so we precompute the Viterbi emission tensor once.
+    rescue_cache = PoolEmissionCache(pool, probs_k, lam=lam)
+
     # Compute current BIC for comparison
     cc = _compute_cc(cc_scale, N, L_kept, use_log_bic=use_log_bic)
     BIC_orig = _compute_bic(K, NLL, cc)
@@ -1894,7 +2004,7 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
     # allows BIC to grow K by 1, OR shrink K by stopping early when a
     # smaller subset has lower BIC.
     sel_indices, sel_haps, sel_nll = _greedy_bic_select(
-        pool, probs_k, lam,
+        rescue_cache,
         cc_scale=cc_scale, max_k=K + 1,
         use_log_bic=use_log_bic, verbose=verbose)
 
@@ -1911,7 +2021,7 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
     # displaces a chimera from its slot when a clean carrier residual
     # (= the missing truth founder) is in the pool.
     sel_indices, sel_haps, sel_nll, n_swaps = _swap_refine(
-        sel_indices, sel_haps, pool, probs_k, lam, sel_nll,
+        rescue_cache, sel_indices, sel_nll,
         nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
         max_passes=10, verbose=verbose)
 
@@ -1924,7 +2034,7 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
     # falls below cc/2.  This is what actually gives the K=7 → K=6
     # BIC win.
     sel_indices, sel_haps, sel_nll, n_dropped = _bic_prune(
-        sel_indices, sel_haps, probs_k, lam,
+        rescue_cache, sel_indices,
         cc_scale=cc_scale, use_log_bic=use_log_bic, verbose=verbose)
 
     if not sel_haps:
