@@ -156,9 +156,9 @@ if __name__ == '__main__':
     #     Track1/Track2 accuracy by generation and the perfect-phasing rate.
     #
     # All three default to False (run all validations).
-    SKIP_VALIDATIONS_BLOCK_HAPS = True
-    SKIP_VALIDATIONS_PAINTING = False
-    SKIP_VALIDATIONS_PHASE_CORRECTION = False
+    SKIP_VALIDATIONS_BLOCK_HAPS = False
+    SKIP_VALIDATIONS_PAINTING = True
+    SKIP_VALIDATIONS_PHASE_CORRECTION = True
 
 
     import numpy as np
@@ -686,7 +686,8 @@ if __name__ == '__main__':
                             max_sites_for_linking=2000,
                             cc_scale=0.5,
                             num_processes=n_processes,
-                            maxtasksperchild=WORKER_MAXTASKS
+                            maxtasksperchild=WORKER_MAXTASKS,
+                            refine_after_stitch=False  # STAGE_4 runs its own refinement pipeline; opt out
                         )
                     return l1_fn
                 
@@ -705,7 +706,8 @@ if __name__ == '__main__':
                             num_processes=n_processes,
                             n_generations=N_GENERATIONS,
                             verbose=False,
-                            maxtasksperchild=WORKER_MAXTASKS
+                            maxtasksperchild=WORKER_MAXTASKS,
+                            refine_after_stitch=False  # STAGE_4 runs its own refinement pipeline; opt out
                         )
                     return l2_fn
                 

@@ -117,7 +117,31 @@ _VITERBI_BIC_ENABLED = True
 # fewer chimeras rejected; >= 50 collapses to baseline-equivalent.
 # 5 is the default; tune by editing this constant or by setting it from
 # a caller before invoking _grow_K_with_recovery.
-VITERBI_SWITCH_PENALTY = 5.0
+#
+# Update (2026-05): raised default from 5.0 to 10.0 to address within-
+# block-recombination "switch-trap" failures.  At chr10:503 (and the
+# chr3 F0 cluster, chr6 F4 cluster, and a handful of other blocks),
+# K-growth correctly identifies all distinct haplotype patterns
+# including a chimera, then the residual-trio rescue (added 2026-05,
+# see bhd_recovery._residual_trio_rescue) surfaces the missing pure
+# founder as a candidate — but BIC rejects K=5 because the clean
+# carriers of the missing founder can already fit their data by
+# Viterbi-switching between the chimera (in pre-breakpoint region)
+# and the near-clone founder (in post-breakpoint region) at the cost
+# of just 5 nats per sample.  This 5-nat switch cost is below the
+# BIC-acceptance threshold (cc/2 = 80 nats vs the typical 70-nat LL
+# improvement from 14 clean carriers), so K=5 is wrongly rejected and
+# the truth founder is missed.  Doubling to 10.0 makes those switches
+# cost 10 nats × 14 carriers = 140 nats, comfortably above cc/2 = 80,
+# so K=5 is accepted and the truth founder recovered.
+#
+# Trade-off: the original V5 vs V10 sweep showed V5 had 9pp more
+# spurious-K reduction.  But residual-trio's strict filtering
+# (cleanness=1.0, min_cluster_size=3, dedup_vs_h=1.0%) makes spurious
+# K-additions much less likely at V10 than they were in the original
+# sweep (which preceded residual-trio).  Empirical A/B test on
+# full stage 3 + downstream pipeline is the right way to validate.
+VITERBI_SWITCH_PENALTY = 10.0
 
 # Bin granularity for Viterbi: each bin sums log-prob emissions within the
 # bin before applying the inter-bin switch penalty.  At spb=10 (the

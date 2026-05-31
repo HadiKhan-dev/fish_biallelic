@@ -86,11 +86,13 @@ from bhd_recovery import (
     RECOVERY_SWAP_NLL_TOLERANCE,
     RECOVERY_MAX_OUTER_ITERATIONS,
     RECOVERY_LOW_CARRIER_TRIGGER_FRAC,
+    RESIDUAL_TRIO_ENABLED,
     _greedy_bic_select,
     _swap_refine,
     _bic_prune,
     _subtraction_recovery_round_loop,
     _late_low_carrier_rescue,
+    _residual_trio_rescue,
     _hamming_pct_kept,
     _haps_equal,
 )
@@ -1578,6 +1580,23 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
         probs_k, H_final, A_final, costs_final, wcs_final, nll_final,
         lam=lam, cc_scale=cc_scale, use_log_bic=use_log_bic,
         max_iter=max_iter_per_K, verbose=verbose)
+
+    # 3.6. Residual-trio rescue (added 2026-05): post-convergence pass
+    # that mines per-sample residuals across ALL samples (not just low-
+    # carrier-hap carriers) to surface near-clone founders that K-
+    # growth's residual-mass seeding missed.  Complements low-carrier
+    # rescue (which handles low-frequency chimeric replacements) by
+    # targeting the orthogonal pattern: all haps healthy but one
+    # absorbs carriers of a near-clone partner founder.  Internal
+    # gate: skip if no admitted candidate or BIC does not improve.
+    # Cannot regress.  See chr10:503 diagnostic for the motivating
+    # case (F0 vs F4 at 5-bit distance, 14 clean F0 carriers absorbed
+    # into the F4 slot).
+    if RESIDUAL_TRIO_ENABLED:
+        H_final, A_final, costs_final, wcs_final, nll_final = _residual_trio_rescue(
+            probs_k, H_final, A_final, costs_final, wcs_final, nll_final,
+            lam=lam, cc_scale=cc_scale, use_log_bic=use_log_bic,
+            max_iter=max_iter_per_K, verbose=verbose)
 
     wm_final = float(wcs_final.sum()) / max(2 * N, 1)
 

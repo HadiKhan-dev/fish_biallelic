@@ -294,6 +294,68 @@ RECOVERY_MAX_OUTER_ITERATIONS = 3
 RECOVERY_LOW_CARRIER_TRIGGER_FRAC = 0.02
 
 # =============================================================================
+# RESIDUAL-TRIO RESCUE CONSTANTS (added 2026-05): post-K-growth pass that
+# mines per-sample residuals (argmax_dosage[s] - H[A[s, other_slot]]) across
+# ALL samples (not just low-carrier-hap carriers) to surface near-clone
+# founders that K-growth's residual-mass seeding missed.
+#
+# Motivating case: chr10:503 F0.  At this block F0 has 36 carriers (11%) but
+# differs from F4 at only 5 of 200 sites.  K-growth fits {F1, F2, F4, chimera}
+# and absorbs the 14 clean F0 carriers into the F4 slot (residual NLL ≈ 70
+# nats over 14 samples × 5 sites).  Trio recovery never emits pure-F0 as a
+# candidate (the F0-pair-type groups are dominated by 22 chimera carriers
+# whose group dosages encode the chimera, not pure F0).
+#
+# Mechanism: for each (sample, slot), compute residual = argmax_dosage[s] -
+# H[A[s, other_slot]].  When the other-slot partner is exact-truth, residual
+# = the actual other-strand founder exactly (verified by the cleanness
+# filter, which rejects residuals with out-of-range bits).  At chr10:503,
+# 9 clean F0/F2 samples currently fit as (F4, F2) produce 9 identical
+# residuals = pure F0 at 5 bits from H[F4] — a clean cluster of 9 candidates
+# pointing at the missing near-clone founder.
+#
+# This complements _late_low_carrier_rescue.  Late-rescue triggers only when
+# min hap usage drops below RECOVERY_LOW_CARRIER_TRIGGER_FRAC and exists to
+# replace low-frequency chimeras.  Residual-trio triggers on the orthogonal
+# pattern: ALL haps have healthy usage but one of them is absorbing carriers
+# of a near-clone partner founder.  No overlap by construction (low-rescue
+# bails out if no low-carrier hap exists; residual-trio is the path for the
+# remaining cases).
+RESIDUAL_TRIO_ENABLED = True
+
+# Cleanness threshold for residual-trio: residuals where < this fraction of
+# sites land in {0, 1} after subtraction are rejected as noise.  Higher than
+# the late-rescue cleanness (0.95) because residual-trio mines every sample
+# pair, not just low-carrier targets, and noisier residuals dilute clean
+# clusters more readily.  At cleanness = 1.0 (every site clean), only
+# residuals against a truly-correct partner survive — the strictest possible
+# filter, and the right default when most blocks have clean partners.
+RESIDUAL_TRIO_CLEANNESS_THRESHOLD = 1.0
+
+# Cluster dedup threshold for residual-trio candidates (% Hamming).  After
+# generating up to 2N clean residuals across all samples, near-duplicates
+# are merged.  0.5% at L=200 means residuals within 1 bit cluster together.
+# Tighter than the 1% used inside trio's hap-pool dedup because residuals
+# are direct subtractions (no consensus averaging), so noise per residual
+# is at most 1-2 sites — exactly bit-identical residuals should cluster
+# but anything more is a real distinction worth preserving.
+RESIDUAL_TRIO_DEDUP_PCT = 0.5
+
+# Minimum cluster size (number of supporting samples) for a residual-trio
+# candidate to be admitted to the BIC pool.  At chr10:503 the clean-F0
+# signal is 9 samples — the smallest support we'd want to ensure produces
+# a real candidate.  Set to 3 to filter out single-sample-noise residuals
+# (a single sample's residual could be a chimera fragment); 3+ identical
+# residuals from independent samples is strong evidence of a hidden founder.
+RESIDUAL_TRIO_MIN_CLUSTER_SIZE = 3
+
+# Dedup threshold (% Hamming) for matching residual-trio candidates against
+# existing H rows.  Tighter than candidate-vs-candidate dedup (0.5%) since
+# the H rows are themselves the "current best estimate" and we want to skip
+# candidates that won't add new information.  1.0% at L=200 = 2 bits.
+RESIDUAL_TRIO_DEDUP_VS_H_PCT = 1.0
+
+# =============================================================================
 # SUBTRACTION-BASED RECOVERY: BERNOULLI MIXTURE HELPERS
 # =============================================================================
 #
@@ -1023,6 +1085,89 @@ def _generate_carrier_residuals_kernel(argmax_dosage, H, A,
     return out_buf[:out_count], out_count
 
 
+@njit(cache=True)
+def _generate_all_sample_residuals_kernel(argmax_dosage, H, A,
+                                          cleanness_threshold):
+    """Numba kernel for _generate_all_sample_residuals (verbose=False path).
+
+    Variant of _generate_carrier_residuals_kernel that loops over EVERY
+    (sample, slot) pair — not just samples whose A[s, slot] is in a
+    low_idx_set.  Used by _residual_trio_rescue to mine residuals across
+    the whole population, surfacing near-clone founders that K-growth's
+    residual-mass seeding missed.
+
+    For each (sample, slot), the OTHER slot's H-row is the partner being
+    subtracted: we want residual = strand_at_slot, so we subtract the
+    OTHER strand's H entry.  This is the algebra of _late_low_carrier_-
+    rescue but applied to all samples regardless of usage statistics.
+
+    Iteration: s outer, slot middle.  For each (s, slot), the partner is
+    fixed as A[s, 1 - slot] (the OTHER slot's H row).  Wildcard partners
+    (A entry == K, the wildcard sentinel) are skipped because subtracting
+    a wildcard means we don't know the other strand and any residual
+    derived from it is uninterpretable.
+
+    Output buffer is preallocated worst-case (N * 2 rows) — every sample
+    can contribute at most 2 residuals.  The wrapper truncates to the
+    active count.
+
+    Args:
+        argmax_dosage: (N, L) int64 — precomputed argmax dosages
+        H: (K, L) int64 — current founder bits
+        A: (N, 2) int64 — current pair assignments (entry K = wildcard
+            sentinel)
+        cleanness_threshold: float — min admissible-site fraction
+
+    Returns:
+        out_buf: (out_count, L) int64 — accepted clipped residuals
+        out_count: int — number of valid rows in out_buf
+    """
+    N, L = argmax_dosage.shape
+    K = H.shape[0]
+    # Worst case: every (s, slot) pair accepted.  At N=320 this is 640
+    # rows — tiny.  Each row is L int64 = 1.6 KB at L=200 → 1 MB total
+    # worst case, well within budget.
+    out_buf = np.empty((N * 2, L), dtype=np.int64)
+    out_count = 0
+
+    for s in range(N):
+        for slot in range(2):
+            # The partner is the OTHER slot's H row.  We want to expose
+            # the founder at `slot` so we subtract A[s, 1 - slot].
+            partner_idx = A[s, 1 - slot]
+            # Wildcard partners (sentinel index K) are not valid
+            # subtractors — we don't have an H row for the wildcard,
+            # and a residual derived against it is meaningless.
+            if partner_idx < 0 or partner_idx >= K:
+                continue
+            # Compute residual on the fly and count admissible sites
+            n_in_01 = 0
+            for l in range(L):
+                r = argmax_dosage[s, l] - H[partner_idx, l]
+                if 0 <= r <= 1:
+                    n_in_01 += 1
+            cleanness = n_in_01 / L
+            if cleanness < cleanness_threshold:
+                continue
+            # Accepted — write clipped residual.  Clipping is defensive:
+            # if cleanness_threshold < 1.0 some sites can be out-of-
+            # range; we clip to {0, 1} so downstream consumers see a
+            # well-formed binary vector.  At cleanness_threshold == 1.0
+            # (the default) no clipping is needed in principle, but we
+            # keep the clip for symmetry with the low-carrier kernel.
+            for l in range(L):
+                r = argmax_dosage[s, l] - H[partner_idx, l]
+                if r < 0:
+                    out_buf[out_count, l] = 0
+                elif r > 1:
+                    out_buf[out_count, l] = 1
+                else:
+                    out_buf[out_count, l] = r
+            out_count += 1
+
+    return out_buf[:out_count], out_count
+
+
 def _generate_carrier_residuals(probs_k, H, A, low_idx_list,
                                  cleanness_threshold=RECOVERY_CLEANNESS_THRESHOLD,
                                  verbose=False):
@@ -1748,6 +1893,265 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
         return np.empty((0, probs_k.shape[1]), dtype=np.int64)
     return np.stack(selected, axis=0)
 
+
+
+# =============================================================================
+# RESIDUAL-TRIO RESCUE (added 2026-05): post-K-growth pass that mines
+# per-sample residuals across ALL samples to surface near-clone founders
+# K-growth's residual-mass seeding missed.
+# =============================================================================
+#
+# Algorithm:
+#   1. For every (sample, slot), compute residual = argmax_dosage[s] -
+#      H[A[s, other_slot]].  When the other-slot partner is a clean,
+#      truth-near founder, residual = the actual strand at `slot`.  When
+#      the partner is itself a chimera, residual will fail the cleanness
+#      filter (out-of-range bits at heterozygous sites where the chimera
+#      differs from the true partner).
+#   2. Filter to clean residuals (every site in {0, 1}).
+#   3. Cluster the clean residuals using bhd_trio's
+#      _cluster_haps_consensus_kernel (same clustering machinery the
+#      hom-recovery candidate emitter uses, for compatibility with the
+#      trio pipeline's pool composition).
+#   4. For each cluster centroid:
+#      - if within RESIDUAL_TRIO_DEDUP_VS_H_PCT of any existing H row →
+#        skip (already in dictionary)
+#      - else admit as a candidate
+#   5. Pool = current H + admitted residual-trio candidates + (optionally)
+#      fresh trio/hom/pairwise candidates.  Run greedy BIC forward + swap
+#      + prune + refit, same as _late_low_carrier_rescue.
+#   6. Accept iff BIC strictly improves.
+#
+# Differs from _late_low_carrier_rescue:
+#   - Mines EVERY sample's residuals (not just low-carrier-hap carriers).
+#   - Trigger is per-block "any near-clone-derived candidate exists",
+#     evaluated after residual clustering.  No usage-based gate.
+#
+# Motivating case: chr10:503 F0, where 9 clean F0/F2 samples are
+# misfitted to (F4, F2) and produce 9 identical residuals = pure F0 at
+# 5 bits from H[F4].  See conversation notes 2026-05-25 for the full
+# diagnostic trace.
+
+def _generate_all_sample_residuals(probs_k, H, A,
+                                   cleanness_threshold=RESIDUAL_TRIO_CLEANNESS_THRESHOLD):
+    """Generate per-(sample, slot) residuals across ALL samples.
+
+    Variant of _generate_carrier_residuals that mines every sample's
+    residual against its currently-assigned OTHER slot, not just samples
+    whose A[s, slot] is in a low-carrier set.  Used by _residual_trio_-
+    rescue to surface near-clone founders K-growth missed.
+
+    For each (sample, slot) with a non-wildcard partner at A[s, 1-slot]:
+        residual = argmax_dosage[s] - H[A[s, 1-slot]]
+    Residuals where < cleanness_threshold of sites land in {0, 1} are
+    rejected (the partner is impure, or the data is noisy).
+
+    Args:
+      probs_k: (N, L_kept, 3) — kept-site posteriors
+      H: (K, L_kept) — current founder bits (int64)
+      A: (N, 2) — current pair assignments (entry K is wildcard sentinel)
+      cleanness_threshold: float — min admissible-site fraction
+
+    Returns:
+      list of (L_kept,) np.int64 binary arrays — one per (sample, slot)
+      pair that survived cleanness filtering.
+    """
+    N, L_kept = probs_k.shape[0], probs_k.shape[1]
+    K = H.shape[0]
+    if K == 0:
+        return []
+    argmax_dosage = probs_k.argmax(axis=2)                        # (N, L_kept)
+    argmax_arr = np.ascontiguousarray(argmax_dosage.astype(np.int64))
+    H_arr = np.ascontiguousarray(H.astype(np.int64))
+    A_arr = np.ascontiguousarray(A.astype(np.int64))
+
+    out_buf, out_count = _generate_all_sample_residuals_kernel(
+        argmax_arr, H_arr, A_arr, float(cleanness_threshold))
+    # Repackage into list-of-arrays for consistency with the rest of
+    # the candidate-source APIs (trio, hom, pairwise all return lists).
+    return [out_buf[i].copy() for i in range(out_count)]
+
+
+def _residual_trio_rescue(probs_k, H, A, costs, wcs, NLL,
+                          lam, cc_scale, use_log_bic, max_iter,
+                          cleanness_threshold=RESIDUAL_TRIO_CLEANNESS_THRESHOLD,
+                          dedup_pct=RESIDUAL_TRIO_DEDUP_PCT,
+                          dedup_vs_h_pct=RESIDUAL_TRIO_DEDUP_VS_H_PCT,
+                          min_cluster_size=RESIDUAL_TRIO_MIN_CLUSTER_SIZE,
+                          verbose=False):
+    """Post-K-growth pass surfacing near-clone founders via per-sample
+    residual mining + clustering.
+
+    Architecture mirrors _late_low_carrier_rescue but with two
+    differences:
+      - Mines residuals across ALL samples (not just low-carrier-hap
+        carriers).  This is the new candidate source.
+      - No usage-based trigger gate.  The implicit gate is "did the
+        residual clustering produce any candidate that isn't already
+        in H?"  If not, returns the inputs unchanged at near-zero cost.
+
+    Args:
+      probs_k: (N, L_kept, 3) — kept-site posteriors
+      H: (K, L_kept) int64 — current discrete founder bits
+      A: (N, 2) int64 — current pair assignments (K = wildcard sentinel)
+      costs: (N,) — per-sample CAPPED cost
+      wcs: (N,) — per-sample wildcard slot count
+      NLL: float — current UNCAPPED total NLL
+      lam: wildcard penalty
+      cc_scale, use_log_bic: BIC formula parameters (must match outer
+        pipeline)
+      max_iter: cap on _fit_at_fixed_K coord-descent iterations
+      cleanness_threshold: min admissible-site fraction for residuals
+        (default RESIDUAL_TRIO_CLEANNESS_THRESHOLD = 1.0)
+      dedup_pct: candidate-vs-candidate clustering threshold (% Hamming)
+      dedup_vs_h_pct: candidate-vs-H dedup threshold (% Hamming) — drop
+        candidates already within this distance of any H row
+      min_cluster_size: minimum supporting samples per admitted candidate
+      verbose: if True, print diagnostic trace
+
+    Returns:
+      (H, A, costs, wcs, NLL) — possibly updated; identical to inputs
+      if no admitted candidate or BIC did not improve.
+    """
+    N, L_kept = probs_k.shape[0], probs_k.shape[1]
+    K = H.shape[0]
+    if K == 0:
+        return H, A, costs, wcs, NLL
+
+    # Step 1: Generate residuals across all samples
+    residuals_list = _generate_all_sample_residuals(
+        probs_k, H, A, cleanness_threshold=cleanness_threshold)
+
+    if not residuals_list:
+        if verbose:
+            print(f'[residual-trio] no clean residuals — skipping '
+                  f'(cleanness_threshold={cleanness_threshold})')
+        return H, A, costs, wcs, NLL
+
+    if verbose:
+        print(f'[residual-trio] generated {len(residuals_list)} clean '
+              f'residuals (cleanness_threshold={cleanness_threshold})')
+
+    # Step 2: Cluster the residuals.  Use bhd_trio's clustering kernel
+    # which we already use for hom-recovery candidates — same single-
+    # pass online clustering with majority-vote consensus, ensuring
+    # candidate sets from different sources cluster compatibly.
+    threshold_bits = int(dedup_pct / 100.0 * L_kept)
+    residuals_arr = np.ascontiguousarray(
+        np.stack(residuals_list, axis=0).astype(np.int64))
+    cluster_buf, n_clusters = bhd_trio._cluster_haps_consensus_kernel(
+        residuals_arr, threshold_bits, min_cluster_size)
+    cluster_haps = [cluster_buf[i].copy() for i in range(n_clusters)]
+
+    if verbose:
+        print(f'[residual-trio] clustered {len(residuals_list)} residuals -> '
+              f'{n_clusters} clusters (dedup_pct={dedup_pct}%, '
+              f'min_cluster_size={min_cluster_size})')
+
+    if not cluster_haps:
+        if verbose:
+            print(f'[residual-trio] no clusters survived min_cluster_size — '
+                  f'skipping')
+        return H, A, costs, wcs, NLL
+
+    # Step 3: Drop cluster centroids that are already in H (within
+    # dedup_vs_h_pct).  The remaining candidates are the "new" near-
+    # clone founders that residual-trio is proposing.
+    H_list = [H[k] for k in range(K)]
+    new_candidates = []
+    for cand in cluster_haps:
+        is_dup = False
+        for h in H_list:
+            if _hamming_pct_kept(cand, h) < dedup_vs_h_pct:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+        new_candidates.append(cand)
+
+    if not new_candidates:
+        if verbose:
+            print(f'[residual-trio] all {n_clusters} cluster centroids are '
+                  f'already in H (within {dedup_vs_h_pct}%) — skipping')
+        return H, A, costs, wcs, NLL
+
+    if verbose:
+        print(f'[residual-trio] {len(new_candidates)} candidates not in H '
+              f'(dedup_vs_h_pct={dedup_vs_h_pct}%):')
+        for ci, cand in enumerate(new_candidates):
+            hams = [_hamming_pct_kept(cand, H[k]) for k in range(K)]
+            ham_str = ', '.join(f'H{k}={h:5.2f}%' for k, h in enumerate(hams))
+            print(f'    new_cand[{ci}]: [{ham_str}]')
+
+    # Step 4: BIC subset selection on the enriched pool.  Same as
+    # _late_low_carrier_rescue: build a PoolEmissionCache once (precom-
+    # putes Viterbi emissions for the whole pool) then run greedy
+    # forward → swap refinement → BIC prune → refit at fixed K →
+    # compare BIC.
+    pool = H_list + new_candidates
+
+    # Build the residual-trio PoolEmissionCache.  All _greedy_bic_select /
+    # _swap_refine / _bic_prune calls below evaluate subsets of this
+    # fixed pool, so we precompute the Viterbi emission tensor once.
+    rescue_cache = PoolEmissionCache(pool, probs_k, lam=lam)
+
+    cc = _compute_cc(cc_scale, N, L_kept, use_log_bic=use_log_bic)
+    BIC_orig = _compute_bic(K, NLL, cc)
+
+    # Greedy BIC forward selection on enriched pool.  max_k = K + 1
+    # allows BIC to grow K by 1, OR shrink K by stopping early when a
+    # smaller subset has lower BIC.
+    sel_indices, sel_haps, sel_nll = _greedy_bic_select(
+        rescue_cache,
+        cc_scale=cc_scale, max_k=K + 1,
+        use_log_bic=use_log_bic, verbose=verbose)
+
+    if not sel_haps:
+        if verbose:
+            print(f'[residual-trio] forward selection picked K=0 — keeping '
+                  f'original')
+        return H, A, costs, wcs, NLL
+
+    sel_indices, sel_haps, sel_nll, n_swaps = _swap_refine(
+        rescue_cache, sel_indices, sel_nll,
+        nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
+        max_passes=10, verbose=verbose)
+
+    sel_indices, sel_haps, sel_nll, n_dropped = _bic_prune(
+        rescue_cache, sel_indices,
+        cc_scale=cc_scale, use_log_bic=use_log_bic, verbose=verbose)
+
+    if not sel_haps:
+        if verbose:
+            print(f'[residual-trio] post-swap-prune picked K=0 — keeping '
+                  f'original')
+        return H, A, costs, wcs, NLL
+
+    # Step 5: Refit at chosen K and compare BIC.  Same convention as
+    # _late_low_carrier_rescue: strict improvement by > 0.1 to avoid
+    # float-noise oscillation.
+    H_new = np.array(sel_haps, dtype=np.int64)
+    H_new, A_new, costs_new, wcs_new, n_iter_new, NLL_new = _fit_at_fixed_K(
+        probs_k, H_new, lam, max_iter=max_iter)
+    K_new = H_new.shape[0]
+    BIC_new = _compute_bic(K_new, NLL_new, cc)
+
+    if verbose:
+        swap_str = f'{n_swaps} swap{"s" if n_swaps != 1 else ""}'
+        prune_str = f'{n_dropped} prune{"s" if n_dropped != 1 else ""}'
+        print(f'[residual-trio] orig: K={K}, NLL={NLL:.1f}, BIC={BIC_orig:.1f}')
+        print(f'[residual-trio] new:  K={K_new}, NLL={NLL_new:.1f}, '
+              f'BIC={BIC_new:.1f} (after {swap_str}, {prune_str})')
+
+    if BIC_new < BIC_orig - 0.1:
+        if verbose:
+            print(f'[residual-trio] BIC improved by {BIC_orig - BIC_new:.1f} '
+                  f'— ACCEPT')
+        return H_new, A_new, costs_new, wcs_new, NLL_new
+    if verbose:
+        print(f'[residual-trio] BIC did not improve '
+              f'(delta={BIC_orig - BIC_new:+.1f}) — KEEP ORIGINAL')
+    return H, A, costs, wcs, NLL
 
 
 # =============================================================================

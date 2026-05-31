@@ -647,7 +647,10 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           maxtasksperchild=None,
                           min_gb_per_worker=4.0,
                           # Output control
-                          verbose=False):
+                          verbose=False,
+                          # Per-level post-stitch refinement (see level_refine.py)
+                          refine_after_stitch=True,
+                          refine_max_iter=None):
     """Performs one level of Hierarchical Assembly.
 
     Memory strategy:
@@ -901,5 +904,28 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             
     print(f"Hierarchical Step Complete. Produced {len(output_super_blocks)} Super-Blocks.")
     print(f"  Success: {success_count}, Passthrough: {passthrough_count}, Failed: {failed_count}")
+    
+    # =====================================================================
+    # Per-level post-stitch REFINEMENT (default on).
+    # After the level is stitched, refine each super-block AGAINST ITSELF
+    # (self-block painting LL, no access to lower levels) up to
+    # refine_max_iter fixed-point passes per block.  Replaces a haplotype
+    # only when a carrier-re-derived version raises the self-block painting
+    # likelihood (dLL > 0); never adds.  refine_level sizes its own pool to
+    # the block count and uses the same dynamic inner-thread machinery as
+    # this function, so it stays core-saturated even at L2/L3/L4 where there
+    # are few blocks.  Controlled by refine_after_stitch (default True).
+    # See level_refine.py for the validation (converges; net-positive on
+    # truth; 0 founders lost).
+    # =====================================================================
+    if refine_after_stitch and len(output_super_blocks) > 0:
+        import level_refine
+        print(f"  Refining {len(output_super_blocks)} super-blocks "
+              f"(self-scoring, up to {refine_max_iter or '3x#haps'} passes/block)...")
+        refined = level_refine.refine_level(
+            output_super_blocks, global_probs, global_sites,
+            n_workers=num_processes, paint_penalty=paint_penalty,
+            max_block_iter=refine_max_iter, verbose=verbose)
+        output_super_blocks = list(refined)
     
     return block_haplotypes.BlockResults(output_super_blocks)

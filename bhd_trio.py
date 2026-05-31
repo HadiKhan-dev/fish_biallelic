@@ -1,5 +1,6 @@
 #%% =====================================================================
-# bhd_trio.py — Trio recovery (XOR-based group-trio algorithm)
+# bhd_trio.py — Trio recovery (XOR-based group-trio algorithm) +
+#               homozygous-sample recovery (mini-module)
 #
 # Split out of block_haplotypes_discrete.py as part of the 4-file split.
 # Contains the trio-recovery subsystem: an XOR-based group-trio algorithm
@@ -14,6 +15,16 @@
 # Called by block_haplotypes_discrete._grow_K_with_recovery and
 # bhd_recovery._late_low_carrier_rescue (see TRIO_RECOVERY_ENABLED
 # below for the master switch).
+#
+# This file ALSO contains a companion mini-module for homozygous-sample
+# recovery: _homozygous_recovery_candidate_haps.  A sample whose argmax
+# dosages are in {0, 2} at >= HOM_RECOVERY_FRACTION of sites is highly
+# likely to consist of two copies of a single founder, so dividing the
+# dosage by 2 recovers the founder bit pattern.  Output is the same
+# shape and dtype as the trio recovery output, so the two candidate
+# sets can be concatenated by the caller before BIC selection.  See
+# the HOMOZYGOUS-SAMPLE RECOVERY section near the end of this file
+# for full details.
 #
 # NUMBA OPTIMIZATION (added after 4-file split + chr8 production
 # validation):  The three hot functions are numba-accelerated with @njit
@@ -117,11 +128,26 @@ except ImportError:
 #   - Estimate D = median pairwise sample-XOR Hamming.  For all-hets
 #     data this is bimodal with the larger cluster at the inter-pair-
 #     type distance.
-#   - Cluster threshold = TRIO_CLUSTER_FRACTION * D (= 0.5 * D)
+#   - Cluster threshold = TRIO_CLUSTER_FRACTION * D (= 0.25 * D)
 #   - Match threshold   = TRIO_MATCH_FRACTION   * D (= 0.4 * D)
 #   - Distinct check    = TRIO_DISTINCT_FRACTION * D (= 0.5 * D);
 #     rejects trios where any two of the three group centroids are
 #     within the distinct threshold of each other.
+#
+# CLUSTER_FRACTION TUNING HISTORY:
+#   Originally 0.5, lowered to 0.25 after observing that closely-
+#   related founder pairs (e.g. F0/F5 at 6% Hamming on chr6:23422407)
+#   cause pair-type groups to merge: at cluster_thresh = 0.5 * D = 15
+#   bits, the F0/F1 pair-type's XOR class differs from F1/F5's by
+#   (F0+F5) mod 2 = 12 bits, so F0/F1 samples get absorbed into the
+#   F1/F5 group.  This eliminates the proper third corner for any
+#   F4-recovery triangle, and the algorithm falls back to a F0/F4 +
+#   F1/F5 + F1/F4 tetragon whose algebra is contaminated.  Tightening
+#   cluster_fraction to 0.25 keeps closely-related pair-types in
+#   separate groups; sweep across 55 known failure blocks + 200
+#   healthy regression blocks showed +201 net founder-block
+#   recoveries with 231 fixes vs 30 breaks, including recovery of
+#   F4 at chr6:23422407.
 #
 # Validation (test_xor_trio_noise.py + test_xor_trio_grouped.py):
 #   - K=3 N=120 across noise grid (depth 5/10/20, mutation 0/2%):
@@ -153,8 +179,9 @@ TRIO_D_ESTIMATE_N_SAMPLES = 1000
 TRIO_D_ESTIMATE_SEED = 42
 
 # Threshold fractions (multipliers of D, the estimated inter-pair-type
-# Hamming distance).  See validation results in module docstring.
-TRIO_CLUSTER_FRACTION = 0.5
+# Hamming distance).  See validation results in module docstring and
+# the cluster_fraction tuning history above.
+TRIO_CLUSTER_FRACTION = 0.25
 TRIO_MATCH_FRACTION = 0.4
 TRIO_DISTINCT_FRACTION = 0.5
 
@@ -171,8 +198,19 @@ TRIO_MIN_SITES = 50                 # too few sites makes XOR matching
 # (canonical g1<g2<g3 enumeration in _find_grouped_trios_kernel), and
 # the same true founder appears in many of them.  We cluster by Hamming
 # similarity and emit per-cluster majority-vote consensus.
-TRIO_HAP_DEDUP_PCT = 2.0            # Hamming pct below which two haps
-                                    # are considered the same founder
+TRIO_HAP_DEDUP_PCT = 1.0            # Hamming pct below which two haps
+                                    # are considered the same founder.
+                                    # Lowered from 2.0 to 1.0 after the
+                                    # sweep across 55 failure + 200
+                                    # healthy regression blocks showed
+                                    # +26 net recoveries (27 fixes,
+                                    # 1 break) at 1.0%.  Tighter dedup
+                                    # avoids over-merging near-but-
+                                    # distinct founders (e.g. closely-
+                                    # related founder pairs at the
+                                    # block-specific Hamming level)
+                                    # that the 2.0% threshold was
+                                    # collapsing into a single cluster.
 TRIO_MIN_HAP_CLUSTER_SIZE = 1       # drop hap clusters with fewer than
                                     # this many supporting candidates
                                     # (likely noise rather than real
@@ -197,6 +235,21 @@ TRIO_MIN_HAP_CLUSTER_SIZE = 1       # drop hap clusters with fewer than
                                     # "no filter" effective behavior;
                                     # set to 2+ to require multiple
                                     # supporting triangles per founder.
+
+# Homozygous-sample recovery parameters (companion mini-module — see
+# _homozygous_recovery_candidate_haps at the bottom of this file).
+HOM_RECOVERY_ENABLED = True
+HOM_RECOVERY_FRACTION = 0.98        # min fraction of sites where the
+                                    # sample's argmax dosage is in
+                                    # {0, 2} for the sample to be
+                                    # eligible.  98% allows up to 4
+                                    # noisy sites out of L=200 — the
+                                    # cluster majority-vote downstream
+                                    # absorbs that noise across multi-
+                                    # ple same-founder hom samples.
+# Clustering uses the same TRIO_HAP_DEDUP_PCT and
+# TRIO_MIN_HAP_CLUSTER_SIZE as trio recovery (both produce candidate
+# founder haps; downstream caller treats them uniformly).
 
 
 @njit(cache=True)
@@ -1000,3 +1053,374 @@ def _trio_recovery_candidate_haps(probs_k,
         print(f'[trio] Recovered {candidate_haps.shape[0]} unique '
               f'candidate haplotypes')
     return candidate_haps
+
+# =============================================================================
+# HOMOZYGOUS-SAMPLE RECOVERY (mini-module within bhd_trio.py)
+# =============================================================================
+#
+# Motivation: trio recovery requires three samples covering three distinct
+# diploid pair-types in a triangle structure.  A complementary, much simpler
+# source of founder-hap candidates exists: samples that are highly
+# homozygous over the block region.  If sample s has argmax dosages in
+# {0, 2} at >= HOM_RECOVERY_FRACTION (default 98%) of the L sites, it is
+# overwhelmingly likely to consist of two copies of a single founder hap
+# h_F.  Then for any such site:
+#       dosage[s, l] / 2  =  h_F[l]
+# directly recovers a founder bit.  At the rare residual het sites
+# (<=2% by threshold), the underlying truth is still presumed homozygous,
+# so we tie-break using the per-site genotype probabilities — bit = 1 iff
+# P(hom-alt | data) > P(hom-ref | data), ignoring the het probability.
+# Across multiple same-founder homozygous samples, per-bit majority vote
+# in the clustering step absorbs any individual-sample tie-break errors.
+#
+# Algorithm:
+#   1. Argmax dosages from probs_k: D[s, l] ∈ {0, 1, 2}
+#   2. Per-sample homozygous fraction: hom_frac[s] = mean_l(D[s, l] ∈ {0, 2})
+#   3. Eligible samples: hom_frac[s] >= HOM_RECOVERY_FRACTION
+#   4. Per eligible sample, build a candidate hap:
+#         - at sites where D[s, l] in {0, 2}:  bit = D[s, l] // 2
+#         - at the rare D[s, l] == 1 sites:    bit = 1 iff probs_k[s, l, 2]
+#                                                       > probs_k[s, l, 0]
+#   5. Online-cluster the candidate haps by Hamming distance (threshold
+#      TRIO_HAP_DEDUP_PCT * L / 100 bits — same as trio dedup), drop
+#      clusters below TRIO_MIN_HAP_CLUSTER_SIZE, emit per-cluster
+#      majority-vote consensus.
+#
+# Composability with trio recovery: both functions return (G_unique, L)
+# np.int64 arrays of candidate founder haps.  Caller can concatenate the
+# two outputs before BIC selection.  Trio recovery's strength is all-hets
+# blocks; homozygous recovery's strength is blocks where some founders
+# have homozygous carriers — they are largely complementary.
+#
+# Cost:  O(N * L) for hom-fraction identification + O(P^2 * L) for the
+# online clustering where P is the number of eligible homozygous samples
+# (typically << N).  Trivial compared to trio recovery's O(G^3 * L).
+#
+# Implementation notes:
+#   - The clustering kernel (_cluster_haps_consensus_kernel) is a
+#     separate numba function from _consensus_recovery_blind_kernel.
+#     The clustering loop in the two kernels is intentionally identical
+#     — same online single-pass assignment with memmove-style group
+#     bookkeeping, same per-cluster majority-vote consensus — so the
+#     two candidate sets cluster compatibly when concatenated by the
+#     caller.  Kept as separate kernels rather than a refactor to
+#     preserve the byte-identical numba-equivalence guarantees on the
+#     trio kernel.
+# =============================================================================
+
+@njit(cache=True)
+def _cluster_haps_consensus_kernel(haps_pool, threshold_bits,
+                                       min_cluster_size):
+    """Online clustering + per-cluster majority-vote consensus on a flat
+    pool of candidate haplotypes.
+
+    Args:
+        haps_pool: (n_pool, L) np.int64 — input candidate haps
+        threshold_bits: int — Hamming threshold for "same founder"
+        min_cluster_size: int — minimum cluster size to emit
+
+    Returns:
+        final_haps_buf: (n_clusters, L) np.int64 — preallocated buffer
+            (only the first n_final rows are valid)
+        n_final: int — number of valid final haps in buf[:n_final]
+
+    Algorithm: identical to the clustering step of _consensus_recovery_
+    blind_kernel (single-pass online assignment with running per-bit
+    majority centroid, then per-cluster majority-vote consensus
+    computed from members' raw pool entries — NOT from the running
+    centroid, to match the Python `cluster_haps.sum(axis=0) > nm/2.0`
+    semantics).  Kept as a separate function to avoid refactoring the
+    trio kernel; clustering semantics are intentionally byte-identical
+    so trio + hom candidate sets cluster compatibly when concatenated.
+    """
+    n_pool = haps_pool.shape[0]
+    L = haps_pool.shape[1]
+
+    # n_pool == 0 should be handled by the caller — we still need >= 1
+    # buffer entry to satisfy numba.  Use C_max = max(n_pool, 1).
+    if n_pool < 1:
+        C_max = 1
+    else:
+        C_max = n_pool
+
+    centroids = np.zeros((C_max, L), dtype=np.int64)
+    bit_votes = np.zeros((C_max, L), dtype=np.int64)
+    n_members = np.zeros(C_max, dtype=np.int64)
+    # Per-cluster member indices — ragged, capacity per cluster is
+    # n_pool in the worst case (all pool haps in one cluster).
+    cluster_members = np.zeros((C_max, C_max), dtype=np.int64)
+
+    n_clusters = 0
+    for hi in range(n_pool):
+        # Find nearest existing cluster
+        best_c = -1
+        best_d = L + 1
+        for c in range(n_clusters):
+            d = 0
+            for l in range(L):
+                if haps_pool[hi, l] != centroids[c, l]:
+                    d += 1
+            if d < best_d:
+                best_d = d
+                best_c = c
+        if best_c >= 0 and best_d <= threshold_bits:
+            # Add to existing cluster best_c
+            cluster_members[best_c, n_members[best_c]] = hi
+            n_members[best_c] += 1
+            for l in range(L):
+                bit_votes[best_c, l] += haps_pool[hi, l]
+            nm = n_members[best_c]
+            for l in range(L):
+                # > nm/2 (matches Python: bit_votes > n_members / 2.0)
+                if 2 * bit_votes[best_c, l] > nm:
+                    centroids[best_c, l] = 1
+                else:
+                    centroids[best_c, l] = 0
+        else:
+            # Start a new cluster
+            c = n_clusters
+            cluster_members[c, 0] = hi
+            n_members[c] = 1
+            for l in range(L):
+                centroids[c, l] = haps_pool[hi, l]
+                bit_votes[c, l] = haps_pool[hi, l]
+            n_clusters += 1
+
+    # Emit per-cluster consensus for clusters meeting min_cluster_size.
+    # Consensus computed from raw pool members (not the running
+    # centroid) to match the Python semantics exactly.
+    if n_clusters < 1:
+        # Edge case: empty pool — return an empty buffer
+        return np.zeros((1, L), dtype=np.int64), 0
+    final_haps_buf = np.zeros((n_clusters, L), dtype=np.int64)
+    n_final = 0
+    for c in range(n_clusters):
+        if n_members[c] < min_cluster_size:
+            continue
+        nm = n_members[c]
+        for l in range(L):
+            votes = 0
+            for k in range(nm):
+                hi = cluster_members[c, k]
+                votes += haps_pool[hi, l]
+            if 2 * votes > nm:
+                final_haps_buf[n_final, l] = 1
+            else:
+                final_haps_buf[n_final, l] = 0
+        n_final += 1
+    return final_haps_buf, n_final
+
+
+@njit(cache=True)
+def _build_hom_candidates_kernel(dosage, probs_k, hom_threshold):
+    """Numba kernel for the homozygous-sample identification + candidate
+    hap construction in _homozygous_recovery_candidate_haps.
+
+    Single-pass kernel: identifies highly-homozygous samples (those
+    with >= hom_threshold fraction of sites where dosage is in {0, 2})
+    and builds their candidate haps in one go, avoiding the boolean-
+    mask temporaries that a pure-numpy implementation would create.
+
+    Args:
+        dosage: (N, L) np.int64 — argmax dosages from probs_k
+        probs_k: (N, L, 3) np.float64 — per-genotype posteriors
+        hom_threshold: float — eligibility threshold (fraction of sites
+            where dosage is in {0, 2}); a sample is eligible iff its
+            hom fraction is >= this value (matches the np.where
+            semantics of the pre-numba implementation).
+
+    Returns:
+        candidates: (n_eligible, L) np.int64 — recovered candidate
+            haplotypes for the eligible samples (or shape (0, L) if
+            no samples are eligible)
+        hom_idx: (n_eligible,) np.int64 — sample indices for the
+            eligible samples (parallel to candidates row order)
+        n_tiebreak: int — number of bits resolved by the het-site tie-
+            break (informational for diagnostic verbose output;
+            n_direct = n_eligible * L - n_tiebreak)
+
+    Algorithm:
+        Pass 1: count hom-genotype sites per sample (sites where dosage
+                is 0 or 2); tally eligible count.  O(N * L).
+        Pass 2: for each eligible sample, build candidate hap:
+                  - at sites where dosage in {0, 2}: bit = dosage // 2
+                    (0 if dosage == 0, 1 if dosage == 2)
+                  - at sites where dosage == 1: tie-break by
+                    bit = 1 iff probs_k[s, l, 2] > probs_k[s, l, 0],
+                    else 0.  This avoids the systematic bias of pure
+                    dosage // 2 (which would set all het sites to 0
+                    regardless of which homozygous state is more
+                    likely under the posterior).
+                O(n_eligible * L).
+    """
+    N = dosage.shape[0]
+    L = dosage.shape[1]
+    L_f = float(L)
+
+    # Pass 1: count hom sites per sample, tally eligible count
+    hom_counts = np.zeros(N, dtype=np.int64)
+    n_eligible = 0
+    for s in range(N):
+        c = 0
+        for l in range(L):
+            v = dosage[s, l]
+            if v == 0 or v == 2:
+                c += 1
+        hom_counts[s] = c
+        if c / L_f >= hom_threshold:
+            n_eligible += 1
+
+    # Empty case: return zero-row outputs.  Keep n_tiebreak = 0 so the
+    # caller can still unpack 3 values uniformly.
+    if n_eligible == 0:
+        return (np.zeros((0, L), dtype=np.int64),
+                np.zeros(0, dtype=np.int64),
+                np.int64(0))
+
+    # Allocate outputs sized exactly to the eligible count
+    candidates = np.empty((n_eligible, L), dtype=np.int64)
+    hom_idx = np.empty(n_eligible, dtype=np.int64)
+
+    # Pass 2: build candidates for eligible samples only.  We re-check
+    # eligibility from hom_counts rather than allocating a parallel
+    # mask array — the per-sample check is cheap, and hom_counts is
+    # already in cache.
+    n_tiebreak = np.int64(0)
+    i = 0
+    for s in range(N):
+        if hom_counts[s] / L_f < hom_threshold:
+            continue
+        hom_idx[i] = s
+        for l in range(L):
+            v = dosage[s, l]
+            if v == 0:
+                candidates[i, l] = 0
+            elif v == 2:
+                candidates[i, l] = 1
+            else:  # v == 1, tie-break using P(hom-alt) vs P(hom-ref)
+                if probs_k[s, l, 2] > probs_k[s, l, 0]:
+                    candidates[i, l] = 1
+                else:
+                    candidates[i, l] = 0
+                n_tiebreak += 1
+        i += 1
+
+    return candidates, hom_idx, n_tiebreak
+
+
+def _homozygous_recovery_candidate_haps(probs_k,
+                                          hom_threshold=HOM_RECOVERY_FRACTION,
+                                          hap_dedup_pct=TRIO_HAP_DEDUP_PCT,
+                                          min_hap_cluster_size=TRIO_MIN_HAP_CLUSTER_SIZE,
+                                          verbose=False):
+    """Companion to _trio_recovery_candidate_haps — recovers founder haps
+    from highly-homozygous samples.
+
+    A sample is "highly homozygous" iff its argmax dosages are in {0, 2}
+    at >= hom_threshold fraction of sites.  Such a sample is presumed
+    to consist of two copies of a single founder, so dividing the
+    dosage by 2 recovers the founder bit pattern (at hom sites; at the
+    rare het sites we tie-break using probs_k).  Multiple same-founder
+    homozygous samples produce ~identical candidate haps which we
+    cluster (same machinery as trio recovery's output dedup) and emit
+    per-cluster majority-vote consensus for.
+
+    Args:
+        probs_k: (N, L, 3) np.float — per-(sample, site) genotype
+            posteriors, already in kept-site space.
+        hom_threshold: float — eligibility threshold for "highly
+            homozygous" (default HOM_RECOVERY_FRACTION = 0.98).
+        hap_dedup_pct: float — Hamming-% threshold below which two
+            recovered haps are considered the same founder.
+        min_hap_cluster_size: int — drop clusters below this size.
+        verbose: bool — print intermediate counts.
+
+    Returns: (G_unique, L) np.int64 — recovered founder haps.  May be
+        empty (shape (0, L)) if no samples meet the eligibility
+        threshold or all clusters fall below min_hap_cluster_size.
+
+    Designed to compose with _trio_recovery_candidate_haps — the output
+    is the same shape and dtype, so the caller can do
+        haps_all = np.concatenate(
+            [_trio_recovery_candidate_haps(probs_k, ...),
+             _homozygous_recovery_candidate_haps(probs_k, ...)], axis=0)
+    and pass haps_all to downstream BIC selection.  If desired, the
+    caller can also re-cluster haps_all via _cluster_haps_consensus_
+    kernel to fold any near-duplicates between the two candidate sets
+    (e.g., a founder that's recovered both as a trio member and as a
+    homozygous-sample double).
+
+    Implementation: thin Python wrapper around two numba kernels —
+    _build_hom_candidates_kernel for the hot identify + per-bit
+    recovery loop, and _cluster_haps_consensus_kernel for the output
+    deduplication.  argmax remains in numpy (np.argmax with axis=2 is
+    heavily optimized C; numba's argmax does not support axis on >1D
+    arrays as of this writing).
+    """
+    N = probs_k.shape[0]
+    L = probs_k.shape[1]
+
+    if N < 1 or L < TRIO_MIN_SITES:
+        if verbose:
+            print(f'[hom] Skipping: N={N} or L={L} '
+                  f'(min sites {TRIO_MIN_SITES})')
+        return np.zeros((0, L), dtype=np.int64)
+
+    # Step 1: argmax dosages (numpy — np.argmax with axis on 3D is
+    # heavily optimized C, faster than a numba loop would be).  astype
+    # produces a fresh contiguous int64 array suitable for the kernel.
+    dosage = np.argmax(probs_k, axis=2).astype(np.int64)   # (N, L)
+
+    # Step 2-3: identify highly-homozygous samples + build candidate
+    # haps (combined in a single numba kernel — matches the
+    # one-kernel-per-significant-computation convention used by the
+    # trio path: _cluster_samples_by_xor_kernel,
+    # _compute_group_consensus_dosages_kernel, etc.).  probs_k is made
+    # contiguous + float64 to satisfy the kernel's strict type
+    # signature; if the caller already passes a contiguous float64
+    # array (the common case), np.ascontiguousarray is a no-op.
+    probs_k_c = np.ascontiguousarray(probs_k, dtype=np.float64)
+    candidate_haps, hom_idx, n_tiebreak = _build_hom_candidates_kernel(
+        dosage,
+        probs_k_c,
+        float(hom_threshold),
+    )
+    n_hom = candidate_haps.shape[0]
+
+    if verbose:
+        print(f'[hom] {n_hom}/{N} samples '
+              f'>= {hom_threshold*100:.0f}% homozygous')
+
+    if n_hom == 0:
+        return np.zeros((0, L), dtype=np.int64)
+
+    if verbose:
+        n_direct = n_hom * L - int(n_tiebreak)
+        print(f'[hom] {n_direct} bits from dosage//2, '
+              f'{int(n_tiebreak)} bits from het tie-break '
+              f'({100.0 * int(n_tiebreak) / max(1, n_hom * L):.2f}% of bits)')
+
+    # Step 4: cluster candidate haps by Hamming similarity (numba
+    # kernel — same one used by the standalone clustering API).
+    # candidate_haps is already C-contiguous int64 from the kernel,
+    # but explicit ascontiguousarray defends against future changes
+    # to the kernel return path.
+    threshold_bits = int(hap_dedup_pct / 100.0 * L)
+    final_buf, n_final = _cluster_haps_consensus_kernel(
+        np.ascontiguousarray(candidate_haps, dtype=np.int64),
+        int(threshold_bits),
+        int(min_hap_cluster_size),
+    )
+
+    if verbose:
+        print(f'[hom] {n_hom} candidates -> {n_final} unique '
+              f'founders after dedup (min_cluster_size='
+              f'{min_hap_cluster_size}, dedup_thresh='
+              f'{hap_dedup_pct}% = {threshold_bits} bits)')
+
+    if n_final == 0:
+        return np.zeros((0, L), dtype=np.int64)
+    # Tight slice + copy (defensive — the kernel buffer is sized
+    # C_max which is >= n_final, and the caller may mutate the
+    # returned array).
+    return final_buf[:n_final].copy()
