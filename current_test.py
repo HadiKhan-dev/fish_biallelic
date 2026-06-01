@@ -1,38 +1,33 @@
 """
-test_level_refine — validate level_refine.refine_level (SELF-SCORING) on saved L1
-checkpoints.
+diagnose_block154_L0 — determine whether L0->L1 chimera resolution could have fixed
+block 154's F2 tail, by inspecting block 154's constituent L0 blocks.
 
-WHAT THIS CHECKS
-----------------
-level_refine now scores each super-block AGAINST ITSELF (no L0 blocks): each sample is
-painted as a mosaic of the super-block's own haps over its window, directly from
-global_probs.  This is a DIFFERENT objective than the earlier L0-keypath scoring used
-by the L1->L2 prototype, so the prototype's results (and the prior L0-keypath
-"31 improved, 0 lost") do NOT carry over -- this objective must be validated fresh.
-The retired strict math-identity test (which compared to the L0-keypath core) no
-longer applies, by design.
+The question: block 154 (L1) is built from ~10 L0 blocks via beam search +
+chimera_resolution + reconstruction.  Its F2 hap is correct in the head, garbled in the
+tail [34102448..34157989].  Could chimera_resolution (which routes each founder through
+L0 block-haplotypes) have fixed the tail at the L0->L1 build?
 
-The success criteria (the gate for pipeline integration):
-  (1) CONVERGENCE: every block converges (max passes < cap, no DID NOT CONVERGE).
-      The re-paint fixed-point loop + min_dll margin guarantee termination.
-  (2) AGREEMENT: truth-guided (mode a) and truth-free (mode b) counts are close
-      (a genuine fixed point should not depend much on rep ordering).
-  (3) TRUTH ACCURACY: each replaced hap should move CLOSER to its true founder, or at
-      worst negligibly worse -- never lost.  dLL>min_dll optimises the SELF-BLOCK
-      PAINTING LL (truth-free), which does NOT by itself guarantee closer-to-truth: on
-      a contaminated carrier set a replace can raise LL while nudging a hap toward a
-      near-twin.  So we measure, per replaced hap, the Hamming distance to the nearest
-      true founder BEFORE vs AFTER, and report improved / worse / unchanged, the worst
-      degradation, and any hap that crossed from <2% ("matches a founder") to >=2%
-      ("lost").
+Two scenarios, distinguished by the L0 data:
+  SCENARIO 1 (routing-fixable): a clean true-F2 L0 hap EXISTS in the tail L0 blocks but
+    the path selected a different L0 hap.  chimera_resolution could route to it.
+  SCENARIO 2 (not in L0 vocabulary): no L0 hap is a clean true-F2 segment in the tail
+    (L0 reconstruction itself merged F2/F5).  Nothing to route to.
 
-Truth is used ONLY for these validation labels; the refinement itself is truth-free
-(mode b is the production path; mode a's truth-guided rep selector exists only to
-compare rep-ordering sensitivity).
+PLUS the flat-objective check: over each tail L0 block, what is true-F2 vs true-F5
+Hamming?  If ~0, F2/F5 coincide at L0-block scale -> routing between them is cost-free
+-> chimera_resolution has no signal to prefer correct routing (the twin-coincidence
+wall at the routing level), regardless of scenario.
 
-Run:
-  python test_level_refine.py chr3 chr4 chr6 chr7 chr8
-  python test_level_refine.py                       # default set
+Outputs:
+  1. Which L0 blocks span block 154's window; which lie in the tail span.
+  2. For each tail L0 block: F2 vs F5 truth distance over that block (the flat-objective
+     test), and each L0 hap's distance to true F2 and true F5 (the vocabulary test).
+  3. Verdict: scenario 1 vs 2, and whether the objective is flat in the tail.
+
+Falls back gracefully if simd_block_results (L0) is pruned from the checkpoint.
+
+Run:  python diagnose_block154_L0.py                 # chr4 154 F2 (vs F5)
+      python diagnose_block154_L0.py chr4 154 F2 F5
 """
 import os
 import sys
@@ -41,12 +36,9 @@ import pickle
 import thread_config  # noqa: F401
 
 import numpy as np
-import level_refine as lr
 
 
 CHECKPOINT_DIR = os.environ.get('CHECKPOINT_DIR', '.pipeline_checkpoints')
-DEFAULT_CONTIGS = ['chr3', 'chr4', 'chr6', 'chr7', 'chr8']
-EPS_PRESENT = float(os.environ.get('EPS_PRESENT', '2.0'))  # the "matches a founder" band
 
 
 def _load(stage, contig):
@@ -61,167 +53,166 @@ def _collapse(hap):
     return arr.astype(np.int8)
 
 
-def _hamming_pct(a, b):
+def _ham(a, b):
+    if len(a) == 0:
+        return float('nan')
     return 100.0 * float(np.mean(a != b))
 
 
 def _build(contig):
     import simulate_sequences
     nlh = _load('01_vcf_discovery', contig)['naive_long_haps']
-    orig_sites, orig_haps = nlh
-    orig_sites = np.asarray(orig_sites)
-    truth = [np.asarray(t).astype(np.int8) for t in simulate_sequences.concretify_haps(orig_haps)]
-    sim = _load('02_simulation', contig)
-    global_probs = np.ascontiguousarray(sim['simd_probs'])
+    orig_sites = np.asarray(nlh[0])
+    truth = [np.asarray(t).astype(np.int8) for t in simulate_sequences.concretify_haps(nlh[1])]
     l1 = _load('06_assembly_L1', contig)['super_blocks_L1']
     site_to_idx = {int(s): i for i, s in enumerate(orig_sites)}
-    return orig_sites, truth, global_probs, l1, site_to_idx
+    return orig_sites, truth, l1, site_to_idx
 
 
-def _block_seqs(sb):
-    return np.stack([_collapse(sb.haplotypes[k]) for k in sorted(sb.haplotypes.keys())], axis=0)
+def _try_load_L0(contig):
+    """Try several plausible keys/stages for the L0 block haplotypes."""
+    candidates = [
+        ('03_block_haplotypes', 'simd_block_results'),
+        ('03_block_haplotypes', 'block_results'),
+        ('03_block_haplotypes', 'L0'),
+    ]
+    for stage, key in candidates:
+        try:
+            d = _load(stage, contig)
+            if key in d and d[key] is not None:
+                return d[key], f"{stage}:{key}"
+        except Exception:
+            continue
+    # also try: maybe the whole checkpoint IS the list
+    try:
+        d = _load('03_block_haplotypes', contig)
+        for k, v in d.items():
+            if isinstance(v, (list, tuple)) and len(v) > 0 and hasattr(v[0], 'haplotypes'):
+                return v, f"03_block_haplotypes:{k}"
+    except Exception:
+        pass
+    return None, None
 
 
-def _nearest_truth_dist(hap, truth_block):
-    """min Hamming(%) of hap to any true founder over this block's positions."""
-    return min(_hamming_pct(hap, truth_block[f]) for f in range(truth_block.shape[0]))
-
-
-def _truth_accuracy_delta(orig_blocks, refined_blocks, truth, site_to_idx):
-    """For every block that changed, compare each hap's distance-to-nearest-true-founder
-    before vs after.  Returns aggregate stats over all CHANGED haps."""
+def main(contig, j_l1, fa, fb):
+    orig_sites, truth, l1, site_to_idx = _build(contig)
     K = len(truth)
-    improved = worse = unchanged = 0
-    worst_degradation = 0.0          # max positive (after-before) over changed haps (%)
-    best_improvement = 0.0           # min (after-before) i.e. most negative (%)
-    lost = 0                         # crossed <EPS -> >=EPS (matched a founder, now doesn't)
-    gained = 0                       # crossed >=EPS -> <EPS (now matches a founder)
-    per_change = []
-    for j in range(len(orig_blocks)):
-        ob, rb = orig_blocks[j], refined_blocks[j]
-        if ob is rb:
-            continue  # unchanged block (same object)
-        opos = np.asarray(ob.positions)
-        idx = np.array([site_to_idx[int(p)] for p in opos])
-        tb = np.stack([truth[f][idx] for f in range(K)]).astype(np.int8)
-        oseq = _block_seqs(ob)
-        rseq = _block_seqs(rb)
-        # haps are positionally aligned (replace-only, same count/order)
-        n = min(oseq.shape[0], rseq.shape[0])
-        for h in range(n):
-            if np.array_equal(oseq[h], rseq[h]):
-                continue  # this hap didn't change
-            d_before = _nearest_truth_dist(oseq[h], tb)
-            d_after = _nearest_truth_dist(rseq[h], tb)
-            delta = d_after - d_before
-            per_change.append((j, h, d_before, d_after, delta))
-            if delta < -1e-12:
-                improved += 1
-            elif delta > 1e-12:
-                worse += 1
+    a = int(fa.lstrip('F')); b = int(fb.lstrip('F'))
+
+    # locate block 154's tail span (where its F_a hap is wrong)
+    sb = l1[j_l1]
+    pos = np.asarray(sb.positions); L = len(pos)
+    idx = np.array([site_to_idx[int(p)] for p in pos])
+    seqs = np.stack([_collapse(sb.haplotypes[k]) for k in sorted(sb.haplotypes.keys())], axis=0)
+    tb1 = np.stack([truth[f][idx] for f in range(K)]).astype(np.int8)
+    D1 = np.array([[_ham(seqs[h], tb1[f]) for f in range(K)] for h in range(seqs.shape[0])])
+    try:
+        from scipy.optimize import linear_sum_assignment
+        rows, cols = linear_sum_assignment(D1)
+        h1 = {int(c): int(r) for r, c in zip(rows, cols)}[a]
+    except Exception:
+        h1 = int(np.argmin(D1[:, a]))
+    diff_full = (seqs[h1] != tb1[a]).astype(float)
+    win = max(20, L // 40)
+    local = np.convolve(diff_full, np.ones(win) / win, mode='same')
+    hot = np.nonzero(local > 0.10)[0]
+    split = int(hot[0]) if hot.size else int(L * 0.75)
+    tail_lo_pos, tail_hi_pos = int(pos[split]), int(pos[-1])
+
+    print("=" * 92)
+    print(f"diagnose_block154_L0 — {contig} L1 block {j_l1}, founder F{a} (twin F{b})")
+    print(f"  L1 window [{int(pos[0])}..{int(pos[-1])}], tail span [{tail_lo_pos}..{tail_hi_pos}]")
+    print(f"  L1 F{a} hap tail-dist to truth: {_ham(seqs[h1][split:], tb1[a][split:]):.3f}%")
+    print("=" * 92)
+
+    # ---- the flat-objective test does NOT need L0 haps; do it from truth first ----
+    # Partition the L1 window into ~200-SNP L0-sized chunks and report F_a vs F_b per chunk.
+    print(f"\n  FLAT-OBJECTIVE TEST (truth-only): F{a} vs F{b} per ~200-SNP L0-sized chunk")
+    print(f"  across the L1 window.  (~0% in the tail => routing F{a}<->F{b} is cost-free")
+    print(f"  there, so chimera_resolution has NO signal to route correctly.)")
+    chunk = 200
+    nchunks = int(np.ceil(L / chunk))
+    print("    chunk  SNP-range            genomic-range                    F%da-F%db" % (a, b))
+    for c in range(nchunks):
+        lo = c * chunk; hi = min(lo + chunk, L)
+        d = _ham(tb1[a][lo:hi], tb1[b][lo:hi])
+        in_tail = lo >= split
+        marker = "  <-- TAIL" if in_tail else ""
+        print(f"    {c:<5}  [{lo:5}:{hi:5}]  [{int(pos[lo]):>9}..{int(pos[hi-1]):>9}]   "
+              f"{d:6.2f}%{marker}")
+
+    # ---- vocabulary test: needs the L0 blocks ----
+    print("\n  VOCABULARY TEST: do block 154's tail L0 blocks contain a clean true-F%d" % a)
+    print("  segment (scenario 1, routable) or is F%d merged into F%d at L0 (scenario 2)?" % (a, b))
+    L0, src = _try_load_L0(contig)
+    if L0 is None:
+        print("\n    [L0 block haplotypes NOT available in checkpoints -- simd_block_results")
+        print("     was pruned after L1 (known pipeline behaviour).  Cannot inspect L0 hap")
+        print("     vocabulary directly.  The flat-objective test above still stands and is")
+        print("     the decisive one: see verdict.]")
+        L0 = None
+    else:
+        print(f"    [loaded L0 from {src}: {len(L0)} L0 blocks]")
+        # find L0 blocks overlapping the tail span
+        tail_L0 = []
+        for bi in range(len(L0)):
+            p0 = np.asarray(L0[bi].positions)
+            if p0[-1] >= tail_lo_pos and p0[0] <= tail_hi_pos:
+                ov = int(np.sum((p0 >= tail_lo_pos) & (p0 <= tail_hi_pos)))
+                if ov > 0:
+                    tail_L0.append(bi)
+        print(f"    L0 blocks overlapping the tail span: {tail_L0}")
+        for bi in tail_L0:
+            p0 = np.asarray(L0[bi].positions)
+            in_t = (p0 >= tail_lo_pos) & (p0 <= tail_hi_pos)
+            idx0 = np.array([site_to_idx[int(pp)] for pp in p0[in_t]])
+            if len(idx0) == 0:
+                continue
+            t_a = truth[a][idx0]; t_b = truth[b][idx0]
+            seqs0 = np.stack([_collapse(L0[bi].haplotypes[k])[in_t]
+                              for k in sorted(L0[bi].haplotypes.keys())], axis=0)
+            da = np.array([_ham(seqs0[h], t_a) for h in range(seqs0.shape[0])])
+            db = np.array([_ham(seqs0[h], t_b) for h in range(seqs0.shape[0])])
+            best_a = float(da.min()); best_b = float(db.min())
+            print(f"      L0 block {bi} (tail part, {in_t.sum()} SNPs, {seqs0.shape[0]} haps): "
+                  f"F{a}/F{b} truth-dist over this part = {_ham(t_a, t_b):.2f}%")
+            print(f"         best L0 hap match to true F{a}: {best_a:.2f}%   "
+                  f"to true F{b}: {best_b:.2f}%")
+            if best_a < 2.0 and _ham(t_a, t_b) > 2.0:
+                print(f"         -> a clean true-F{a} L0 hap EXISTS here and F{a}!=F{b} "
+                      f"(SCENARIO 1: routable)")
+            elif _ham(t_a, t_b) < 1.0:
+                print(f"         -> F{a}==F{b} here (twin-coincidence): routing cost-free, "
+                      f"no signal (flat objective)")
             else:
-                unchanged += 1
-            worst_degradation = max(worst_degradation, delta)
-            best_improvement = min(best_improvement, delta)
-            if d_before < EPS_PRESENT <= d_after:
-                lost += 1
-            if d_before >= EPS_PRESENT > d_after:
-                gained += 1
-    return dict(improved=improved, worse=worse, unchanged=unchanged,
-                worst_degradation=worst_degradation, best_improvement=best_improvement,
-                lost=lost, gained=gained, per_change=per_change)
+                print(f"         -> no clean true-F{a} L0 hap (SCENARIO 2: not in vocabulary)")
 
-
-def main(contig):
-    orig_sites, truth, global_probs, l1, site_to_idx = _build(contig)
-    K = len(truth)
-    n_l1 = len(l1)
-    print("=" * 88)
-    print(f"test_level_refine — {contig}   (L1 blocks: {n_l1}, K={K})")
-    print("=" * 88)
-
-    # truth-guided rep selector: rep for founder f = nearest current hap to truth[f].
-    # Used ONLY to compare rep-ordering sensitivity vs the truth-free path.
-    def truth_guided_reps(j, cur_seqs, positions):
-        idx = np.array([site_to_idx[int(p)] for p in positions])
-        reps = []
-        for f in range(K):
-            tf = truth[f][idx]
-            dists = np.array([_hamming_pct(cur_seqs[h], tf) for h in range(cur_seqs.shape[0])])
-            reps.append(int(np.argmin(dists)))
-        return reps
-
-    # ---- mode (a): truth-guided reps (rep-ordering sensitivity check) ----
-    print("\n  [mode a] truth-guided reps ...")
-    refined_a, actions_a = lr.refine_level(
-        l1, global_probs, orig_sites,
-        rep_selector=truth_guided_reps, return_actions=True, verbose=True)
-    replace_a = sum(len(v) for v in actions_a.values())
-    iters_a = [x.get('block_iter', 1) for v in actions_a.values() for x in v]
-    max_iter_a = max(iters_a) if iters_a else 0
-
-    # ---- mode (b): truth-free reps (PRODUCTION path) ----
-    print("\n  [mode b] truth-free reps (production path) ...")
-    refined_b, actions_b = lr.refine_level(
-        l1, global_probs, orig_sites,
-        rep_selector=None, return_actions=True, verbose=True)
-    replace_b = sum(len(v) for v in actions_b.values())
-    iters_b = [x.get('block_iter', 1) for v in actions_b.values() for x in v]
-    max_iter_b = max(iters_b) if iters_b else 0
-
-    # ---- (3) TRUTH ACCURACY on the PRODUCTION (mode-b) refinement ----
-    print("\n  [truth accuracy] mode-b refined haps vs nearest true founder (before/after) ...")
-    acc = _truth_accuracy_delta(l1, refined_b, truth, site_to_idx)
-
-    # ---- criteria ----
-    # convergence: max pass strictly below cap (cap = 3*K). also: refine_level prints
-    # a loud DID NOT CONVERGE line itself; here we infer from max pass vs cap.
-    cap = 3 * K
-    converged_a = (max_iter_a < cap)
-    converged_b = (max_iter_b < cap)
-    agree = abs(replace_a - replace_b) <= max(2, int(0.1 * max(replace_a, replace_b)))
-    no_founder_lost = (acc['lost'] == 0)
-
-    print("\n  SUMMARY — " + contig)
-    print(f"    replacements:   mode-a {replace_a} (max pass {max_iter_a}), "
-          f"mode-b {replace_b} (max pass {max_iter_b})   [cap={cap}]")
-    print(f"    (1) converged:  mode-a {'YES' if converged_a else '*** NO (hit cap)'}, "
-          f"mode-b {'YES' if converged_b else '*** NO (hit cap)'}")
-    print(f"    (2) agreement:  |{replace_a}-{replace_b}|={abs(replace_a-replace_b)}  "
-          f"{'OK' if agree else '*** modes disagree'}")
-    print(f"    (3) truth acc:  improved {acc['improved']}, worse {acc['worse']}, "
-          f"unchanged {acc['unchanged']}  | worst degradation {acc['worst_degradation']:+.3f}%, "
-          f"best improvement {acc['best_improvement']:+.3f}%")
-    print(f"                    founders LOST (<2%->>=2%): {acc['lost']}   "
-          f"founders GAINED (>=2%-><2%): {acc['gained']}")
-    if acc['worse'] > 0:
-        # show the worse ones (small list)
-        worse_list = [(j, h, f"{b:.3f}->{a:.3f}%") for (j, h, b, a, d) in acc['per_change'] if d > 1e-12]
-        print(f"                    worse haps ({len(worse_list)}): {worse_list[:10]}"
-              f"{' ...' if len(worse_list) > 10 else ''}")
-
-    overall_ok = converged_a and converged_b and agree and no_founder_lost
-    print(f"    => {'PASS' if overall_ok else '*** CHECK'} "
-          f"(converged + modes agree + no founder lost)")
-    return overall_ok, acc
+    # ---- verdict ----
+    tail_d = _ham(tb1[a][split:], tb1[b][split:])
+    print("\n" + "=" * 92)
+    print("  VERDICT")
+    print("=" * 92)
+    if tail_d < 1.0:
+        print(f"  F{a} and F{b} coincide over the tail ({tail_d:.2f}%).  Whether or not a")
+        print(f"  clean L0 hap exists, chimera_resolution's objective is FLAT there: routing a")
+        print(f"  sample onto F{a}'s hap vs F{b}'s hap costs the same (identical sequences), so")
+        print(f"  it has NO basis to prefer the correct routing.  => L0->L1 chimera resolution")
+        print(f"  CANNOT fix this tail -- not a tuning issue, a fundamental lack of signal where")
+        print(f"  the two founders are identical.  Same twin-coincidence wall, routing-level.")
+        print(f"  The error is only resolvable using the FLANKS where F{a}!=F{b} to carry the")
+        print(f"  distinction THROUGH the coincident region -- which neither boundary-swap")
+        print(f"  chimera resolution nor carrier re-derivation does.")
+    else:
+        print(f"  F{a} and F{b} DIFFER over the tail ({tail_d:.2f}%) -- NOT a pure twin-")
+        print(f"  coincidence.  If a clean true-F{a} L0 hap exists (scenario 1), then")
+        print(f"  chimera_resolution SHOULD have been able to route to it, and its failure to")
+        print(f"  is a detection/threshold gap worth investigating in find_hotspots.")
 
 
 if __name__ == '__main__':
-    import hierarchical_assembly as _ha
-    _w = _ha.NoDaemonPool(1); _w.terminate(); _w.join(); del _w
-    print("Forkserver started (lightweight, pre-data).")
-    all_ok = True
-    total_improved = total_worse = total_lost = 0
-    worst_deg = 0.0
-    for c in (sys.argv[1:] if len(sys.argv) > 1 else DEFAULT_CONTIGS):
-        ok, acc = main(c)
-        all_ok = all_ok and ok
-        total_improved += acc['improved']; total_worse += acc['worse']; total_lost += acc['lost']
-        worst_deg = max(worst_deg, acc['worst_degradation'])
-        print()
-    print("=" * 88)
-    print(f"OVERALL: improved {total_improved}, worse {total_worse}, lost {total_lost}, "
-          f"worst degradation {worst_deg:+.3f}%")
-    print(f"  criteria (converge + modes agree + no founder lost): "
-          f"{'ALL PASS' if all_ok else '*** SOME FAILED — investigate'}")
-    print("=" * 88)
+    args = sys.argv[1:]
+    contig = args[0] if len(args) >= 1 else 'chr4'
+    j = int(args[1]) if len(args) >= 2 else 154
+    fa = args[2] if len(args) >= 3 else 'F2'
+    fb = args[3] if len(args) >= 4 else 'F5'
+    main(contig, j, fa, fb)

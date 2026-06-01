@@ -529,7 +529,7 @@ if __name__ == '__main__':
         t0 = time.time()
         contig_results = simulate_sequences.process_all_contigs_parallel(
             region_keys, all_offspring_lists, truth_paintings_lists, sites_list,
-            read_depth=20, error_rate=0.02,
+            read_depth=5, error_rate=0.02,
             snps_per_block=200, snp_shift=200,
             num_processes=n_processes,
             seed=(SIMULATION_SEED + 1_000_000) if SIMULATION_SEED is not None else None
