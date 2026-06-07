@@ -6,7 +6,7 @@
 # the initial K-growth pass:
 #
 #   - Recovery constants (RECOVERY_*, RECOVERY_LOW_CARRIER_*)
-#   - Bernoulli mixture machinery (_logsumexp, _kmeans_pp_init,
+#   - Bernoulli mixture machinery (_kmeans_pp_init,
 #     _bernoulli_mixture_em, _fit_bernoulli_mixture_select_K) — fits
 #     a K-component mixture over candidate haps with inner BIC over K.
 #   - Candidate generation (_run_subtraction_round, _generate_carrier_-
@@ -193,11 +193,79 @@ from bhd_trio import _trio_recovery_candidate_haps
 # strand is genuinely there but with read-error sites.
 RECOVERY_CLEANNESS_THRESHOLD = 0.90
 
+# -----------------------------------------------------------------------------
+# Residual mode for subtraction recovery (low-read-depth)
+# -----------------------------------------------------------------------------
+# RECOVERY_RESIDUAL_MODE selects how the residual candidates fed to the inner
+# Bernoulli mixture are generated inside _subtraction_recovery_round_loop:
+#
+#   "argmax" (default) — the behaviour documented above: subtract each
+#            founder from each sample's ARGMAX dosage, clip the result to
+#            {0, 1}, and admit residuals whose fraction of in-{0,1} sites
+#            (the hard "cleanness") meets RECOVERY_CLEANNESS_THRESHOLD.  This
+#            is the validated production path; selecting "argmax" leaves
+#            _subtraction_recovery_round_loop bit-identical to before.
+#
+#   "soft" — a low-read-depth front-end that keeps the genotype likelihoods
+#            instead of hard-calling them, and clusters the residuals with a
+#            marginal-likelihood Bernoulli-haplotype mixture (model B).  For
+#            founder strand h and a sample with genotype likelihoods L(g),
+#            the latent other strand o satisfies g = h + o, giving per-site
+#            other-strand likelihoods (the inadmissible third genotype is
+#            dropped):
+#              h[l]=0:  L0 = L(g=0) [o=0],  L1 = L(g=1) [o=1]
+#              h[l]=1:  L0 = L(g=1) [o=0],  L1 = L(g=2) [o=1]
+#            A candidate is admitted when its mean admissible POSTERIOR mass
+#            (P0+P1 for h=0, P1+P2 for h=1) meets RECOVERY_CLEANNESS_THRESHOLD
+#            — the same screen as the argmax path.  The mixture then
+#            MARGINALISES o rather than plugging in its posterior mean:
+#              E-step:  log P(cand | k) = Σ_l log(L0(1-θ_k) + L1 θ_k)
+#              M-step:  θ_k[l] = Σ_m γ_mk r_o / Σ_m γ_mk,
+#                       r_o = L1 θ_k / (L0(1-θ_k) + L1 θ_k)
+#            At an uninformative site (L0 ~ L1) r_o -> θ_k[l], so the
+#            candidate defers to the cluster consensus and θ converges to the
+#            mean of the INFORMATIVE carriers only — eliminating the dilution
+#            toward 0.5 that sinks a plain Bernoulli mixture fed E[o] (the
+#            earlier plug-in soft path, which was empirically WORSE than
+#            argmax at low depth for exactly this reason).  Sub-threshold
+#            evidence is still used (graded), unlike argmax which thresholds
+#            it away — so model B ties argmax where data is plentiful and
+#            beats it in the low-depth transition zone.  The rounded θ
+#            (θ > 0.5) is the consensus founder.  K-means++ init runs on the
+#            expected other strand E[o] = L1/(L0+L1) via the same L1-distance
+#            initialiser as the argmax path (L1 == Hamming on binary; see
+#            _kmeans_pp_init_kernel).
+#
+#            probs_k holds the POSTERIOR; the marginalisation needs the
+#            LIKELIHOOD.  When site_priors is threaded in (real data) the HWE
+#            site prior is divided out: L(g) ∝ probs_k[g] / site_priors[g]
+#            (the per-(sample, site) normaliser cancels in both EM steps, so
+#            only the per-genotype prior ratio matters).  When site_priors is
+#            None probs_k is used directly — exact when it already is the
+#            likelihood (flat prior, e.g. synthetic data).
+#
+# Same rationale as the trio / seed soft front-ends.  "soft" is RESULT-
+# AFFECTING at every read depth and must be validated against ground truth
+# before use; it is opt-in for that reason.  Only the main recovery loop
+# (_subtraction_recovery_round_loop) honours this switch; the rescue entries
+# (_late_low_carrier_rescue, _residual_trio_rescue) still use argmax
+# residuals.
+RECOVERY_RESIDUAL_MODE = "argmax"
+
 # Bernoulli mixture parameters for inner K-selection on candidates
 RECOVERY_MIXTURE_K_MAX = 10            # try K=1..K_max, pick best by inner BIC
 RECOVERY_MIXTURE_N_RESTARTS = 3        # EM restarts per K (different K-means++ seeds)
 RECOVERY_MIXTURE_MAX_ITER = 100        # max EM iterations per fit
-RECOVERY_MIXTURE_TOL = 1e-6            # relative LL change for EM convergence
+RECOVERY_MIXTURE_TOL = 1e-3            # relative LL change for EM convergence.
+                                      # The mixture output is a BINARY consensus
+                                      # (theta > 0.5), which stabilises long
+                                      # before the LL converges to high
+                                      # precision, so 1e-3 yields a consensus
+                                      # identical to 1e-6 (verified, 0 bit-diff)
+                                      # while cutting EM iterations ~3x — the
+                                      # dominant cost of the soft recovery path
+                                      # (and each block runs on a single core,
+                                      # so this single-thread cut is the win).
 RECOVERY_MIXTURE_THETA_EPS = 1e-3      # clip theta to [eps, 1-eps] for log stability
 RECOVERY_MIXTURE_RNG_SEED = 42         # base RNG seed (varied per round)
 
@@ -372,14 +440,6 @@ RESIDUAL_TRIO_DEDUP_VS_H_PCT = 1.0
 # fitted theta vectors (rounded to {0, 1}) become consensus candidate haps
 # for outer BIC subset-selection on actual sample data.
 
-def _logsumexp(x, axis):
-    """Numerically stable log-sum-exp along an axis.  Returns array with
-    that axis squeezed.  Handles -inf max (all entries -inf) by zeroing
-    the offset (so the result is -inf, not NaN)."""
-    m = x.max(axis=axis, keepdims=True)
-    m_safe = np.where(np.isfinite(m), m, 0.0)
-    return (m_safe + np.log(np.exp(x - m_safe).sum(axis=axis, keepdims=True))).squeeze(axis)
-
 
 @njit(cache=True)
 def _kmeans_pp_init_kernel(candidates, K, uniforms):
@@ -390,7 +450,8 @@ def _kmeans_pp_init_kernel(candidates, K, uniforms):
 
       - uniforms[0]: drives the first center selection (uniform over N)
       - uniforms[k] for k in 1..K-1: drives the weighted choice for
-        the k-th center (weighted by min-Hamming-distance squared)
+        the k-th center (weighted by min-L1-distance squared; L1 equals
+        Hamming on binary candidates)
 
     Conversion from uniform to index:
       - For the first center: int(uniforms[0] * N) — same as
@@ -419,7 +480,8 @@ def _kmeans_pp_init_kernel(candidates, K, uniforms):
       these.
 
     Args:
-        candidates: (N, L) float64 binary candidate array
+        candidates: (N, L) float64 candidate array (binary 0/1 in argmax
+            mode, fractional in [0, 1] in soft mode)
         K: number of centers to pick
         uniforms: (K,) float64 random draws in [0, 1) from the wrapper
 
@@ -444,7 +506,12 @@ def _kmeans_pp_init_kernel(candidates, K, uniforms):
     centers_idx[0] = c0
     picked[c0] = True
 
-    # Per-candidate running minimum Hamming distance to nearest center.
+    # Per-candidate running minimum distance to nearest center.  Distance
+    # is L1 (sum of |a - b| over sites).  On BINARY candidates this equals
+    # Hamming distance exactly (|0-1| = 1, |0-0| = |1-1| = 0), so argmax-
+    # mode recovery is bit-identical to the original Hamming kernel; on
+    # FRACTIONAL (soft) candidates L1 is the correct generalisation (a
+    # Hamming `!=` test would treat 0.49 vs 0.51 as a full mismatch).
     # We update this incrementally each time a new center is added —
     # cheaper than recomputing from scratch (the original recomputes
     # min over all existing centers each iteration via the (N, n_exist, L)
@@ -452,13 +519,12 @@ def _kmeans_pp_init_kernel(candidates, K, uniforms):
     # set equals running-min.
     #
     # Initial state: distance to c0 only.
-    min_dists = np.empty(N, dtype=np.int64)
+    min_dists = np.empty(N, dtype=np.float64)
     for i in range(N):
-        # Hamming distance between candidates[i] and candidates[c0]
-        d = 0
+        # L1 distance between candidates[i] and candidates[c0]
+        d = 0.0
         for l in range(L):
-            if candidates[i, l] != candidates[c0, l]:
-                d += 1
+            d += abs(candidates[i, l] - candidates[c0, l])
         min_dists[i] = d
 
     # === Subsequent centers: weighted by squared min-Hamming ===
@@ -518,10 +584,9 @@ def _kmeans_pp_init_kernel(candidates, K, uniforms):
         # iteration since we don't need min_dists after that)
         if k < K - 1:
             for i in range(N):
-                d = 0
+                d = 0.0
                 for l in range(L):
-                    if candidates[i, l] != candidates[new_c, l]:
-                        d += 1
+                    d += abs(candidates[i, l] - candidates[new_c, l])
                 if d < min_dists[i]:
                     min_dists[i] = d
 
@@ -1004,6 +1069,317 @@ def _run_subtraction_round(pool, argmax_dosage_kept,
     # Copy each row to detach from the kernel's slice — defensive in
     # case downstream callers mutate.
     return [out_buf[i].copy() for i in range(out_count)]
+
+
+def _run_subtraction_round_soft(pool, probs_k, site_priors=None,
+                                  cleanness_threshold=RECOVERY_CLEANNESS_THRESHOLD):
+    """Soft analogue of _run_subtraction_round (RECOVERY_RESIDUAL_MODE ==
+    "soft"): generate other-strand LIKELIHOODS for the marginal-likelihood
+    mixture, rather than hard-called residual bits.
+
+    For founder strand h and a sample with genotype likelihoods L(g) over
+    dosages g in {0, 1, 2}, the other strand o satisfies g = h + o, so the
+    per-site other-strand likelihoods are:
+      h[l]=0: L0 = L(g=0)  (o=0),  L1 = L(g=1)  (o=1)
+      h[l]=1: L0 = L(g=1)  (o=0),  L1 = L(g=2)  (o=1)
+    (the third, "inadmissible", genotype — g=2 when h=0, g=0 when h=1 — is
+    dropped; a sample whose reads favour it gets low L0 and L1, hence low
+    likelihood under every mixture component.)  These (L0, L1) feed
+    _fit_bernoulli_mixture_ml_select_K, which marginalises the latent
+    other-strand allele instead of plugging in its posterior mean — so
+    uninformative sites defer to the cluster consensus rather than diluting
+    it (see that function and RECOVERY_RESIDUAL_MODE).
+
+    probs_k holds the genotype POSTERIOR.  When site_priors is given the HWE
+    site prior is divided out to recover the genotype LIKELIHOOD (the correct
+    quantity for the marginalisation): L(g) prop probs_k[g] / site_priors[g].
+    The per-(sample, site) normaliser is irrelevant — it cancels in both EM
+    steps, so only the per-genotype prior ratio matters — hence no
+    renormalisation is needed.  When site_priors is None probs_k is used
+    directly, which is exact when probs_k already is the likelihood (flat
+    prior, e.g. synthetic data).
+
+    A candidate (founder h, sample s) is admitted when its mean admissible
+    POSTERIOR mass (P0+P1 for h=0, P1+P2 for h=1) over sites meets
+    cleanness_threshold — the same screen as the argmax path.
+
+    Args:
+      pool: list of (L_kept,) binary arrays (the founders to subtract)
+      probs_k: (N, L_kept, 3) genotype posteriors (kept sites)
+      site_priors: (L_kept, 3) genotype priors to divide out, or None
+      cleanness_threshold: min mean admissible posterior mass to accept
+
+    Returns:
+      (L0, L1): two (M, L_kept) float64 arrays of other-strand likelihoods
+        for the M admitted candidates, in (pool-outer, sample-inner) order.
+        Both are empty (M=0) when the pool is empty or nothing is clean.
+    """
+    L = probs_k.shape[1]
+    empty = np.empty((0, L), dtype=np.float64)
+    if len(pool) == 0:
+        return empty, empty
+
+    P0 = probs_k[:, :, 0]
+    P1 = probs_k[:, :, 1]
+    P2 = probs_k[:, :, 2]                                          # (N, L) views
+
+    # Genotype likelihoods for the model: divide out the site prior if given.
+    if site_priors is not None:
+        sp = np.asarray(site_priors, dtype=np.float64)            # (L, 3)
+        Lk0 = P0 / sp[None, :, 0]
+        Lk1 = P1 / sp[None, :, 1]
+        Lk2 = P2 / sp[None, :, 2]
+    else:
+        Lk0, Lk1, Lk2 = P0, P1, P2
+
+    L0_list = []
+    L1_list = []
+    for h in pool:
+        hb = np.asarray(h).astype(np.bool_)                       # (L,)
+        # Soft cleanness screen from the POSTERIOR (admissible mass).
+        adm = np.where(hb[None, :], P1 + P2, P0 + P1)             # (N, L)
+        keep = adm.mean(axis=1) >= cleanness_threshold            # (N,)
+        if not keep.any():
+            continue
+        # Other-strand likelihoods (un-renormalised; per-site scale cancels):
+        #   h=0: o=0 -> g=0, o=1 -> g=1 ;  h=1: o=0 -> g=1, o=1 -> g=2
+        l0 = np.where(hb[None, :], Lk1, Lk0)                      # (N, L)
+        l1 = np.where(hb[None, :], Lk2, Lk1)                      # (N, L)
+        L0_list.append(l0[keep])
+        L1_list.append(l1[keep])
+
+    if not L0_list:
+        return empty, empty
+    return (np.ascontiguousarray(np.vstack(L0_list), dtype=np.float64),
+            np.ascontiguousarray(np.vstack(L1_list), dtype=np.float64))
+
+
+@njit(cache=True)
+def _bernoulli_mixture_ml_em_kernel(L0, L1, K, init_theta,
+                                      max_iter, tol, eps):
+    """Numba kernel for _bernoulli_mixture_ml_em (marginal-likelihood EM).
+
+    Mixture of Bernoulli HAPLOTYPES over the latent other-strand allele o.
+    Component k posits o[l] ~ Bernoulli(theta_k[l]); each candidate is
+    observed only through its per-site other-strand likelihoods (L0, L1).
+
+    E-step (marginalises o, no hard call):
+      log P(cand_m | k) = sum_l log( L0[m,l]*(1-theta_k[l])
+                                     + L1[m,l]*theta_k[l] ) + log pi_k
+      resp_mk = softmax_k of the above.
+    M-step (deferral update — the key difference from the plug-in soft):
+      r_o(m,l,k) = L1[m,l]*theta_k[l]
+                   / (L0[m,l]*(1-theta_k[l]) + L1[m,l]*theta_k[l])
+      theta_k[l] = sum_m resp_mk * r_o(m,l,k) / sum_m resp_mk
+    At an uninformative site (L0 ~ L1) r_o -> theta_k[l], so the candidate
+    votes for the status quo and the consensus converges to the mean of the
+    INFORMATIVE candidates only — no dilution toward 0.5.  pi_k = N_k / M.
+
+    Args:
+        L0, L1: (M, L) float64 — per-candidate other-strand likelihoods
+        K: number of components
+        init_theta: (K, L) initial component profiles (in [0,1])
+        max_iter, tol, eps: EM iteration cap, rel-LL tol, theta clip bound
+
+    Returns:
+        theta: (K, L) final profiles
+        pi:    (K,)   final weights
+        ll:    final log-likelihood (scalar)
+        n_iter: iterations used
+        resp:  (M, K) responsibilities
+    """
+    M, L = L0.shape
+    theta = init_theta.astype(np.float64)
+    for k in range(K):
+        for l in range(L):
+            if theta[k, l] < eps:
+                theta[k, l] = eps
+            elif theta[k, l] > 1.0 - eps:
+                theta[k, l] = 1.0 - eps
+    pi = np.ones(K, dtype=np.float64) / K
+
+    prev_ll = -np.inf
+    n_iter = 0
+    ll = 0.0
+    resp = np.zeros((M, K), dtype=np.float64)
+
+    for it in range(max_iter):
+        n_iter = it + 1
+        # E-step: per-candidate, per-component marginal log-likelihood.
+        log_pi = np.log(pi + 1e-15)
+        logp = np.empty((M, K), dtype=np.float64)
+        for m in range(M):
+            for k in range(K):
+                s = 0.0
+                for l in range(L):
+                    mix = L0[m, l] * (1.0 - theta[k, l]) + L1[m, l] * theta[k, l]
+                    if mix < 1e-300:
+                        mix = 1e-300
+                    s += np.log(mix)
+                logp[m, k] = s + log_pi[k]
+        # logsumexp over k -> resp, ll
+        ll_acc = 0.0
+        for m in range(M):
+            mx = logp[m, 0]
+            for k in range(1, K):
+                if logp[m, k] > mx:
+                    mx = logp[m, k]
+            se = 0.0
+            for k in range(K):
+                se += np.exp(logp[m, k] - mx)
+            lnorm = mx + np.log(se)
+            ll_acc += lnorm
+            for k in range(K):
+                resp[m, k] = np.exp(logp[m, k] - lnorm)
+        ll = ll_acc
+
+        # Convergence check (relative).  Break before updating prev_ll so the
+        # caller receives the most recent ll.
+        if prev_ll != -np.inf and abs(ll - prev_ll) < tol * max(abs(ll), 1.0):
+            break
+        prev_ll = ll
+
+        # M-step.
+        N_k = np.zeros(K, dtype=np.float64)
+        for k in range(K):
+            for m in range(M):
+                N_k[k] += resp[m, k]
+        for k in range(K):
+            pi[k] = N_k[k] / M
+        new_theta = np.empty((K, L), dtype=np.float64)
+        for k in range(K):
+            nk = N_k[k] if N_k[k] > 1e-10 else 1e-10
+            for l in range(L):
+                tkl = theta[k, l]
+                num = 0.0
+                for m in range(M):
+                    den = L0[m, l] * (1.0 - tkl) + L1[m, l] * tkl
+                    if den < 1e-300:
+                        den = 1e-300
+                    num += resp[m, k] * (L1[m, l] * tkl) / den
+                v = num / nk
+                if v < eps:
+                    v = eps
+                elif v > 1.0 - eps:
+                    v = 1.0 - eps
+                new_theta[k, l] = v
+        theta = new_theta
+
+    return theta, pi, ll, n_iter, resp
+
+
+def _bernoulli_mixture_ml_em(L0, L1, K, init_theta,
+                               max_iter=RECOVERY_MIXTURE_MAX_ITER,
+                               tol=RECOVERY_MIXTURE_TOL,
+                               eps=RECOVERY_MIXTURE_THETA_EPS):
+    """Single marginal-likelihood EM run (model B).  Thin wrapper around
+    _bernoulli_mixture_ml_em_kernel; see it for the math.
+
+    Args:
+      L0, L1: (M, L) float64 other-strand likelihoods
+      K: number of components
+      init_theta: (K, L) initial profiles
+      max_iter, tol, eps: EM controls
+
+    Returns:
+      theta (K, L), pi (K,), ll (float), n_iter (int), resp (M, K)
+    """
+    L0c = np.ascontiguousarray(L0, dtype=np.float64)
+    L1c = np.ascontiguousarray(L1, dtype=np.float64)
+    init = np.ascontiguousarray(init_theta, dtype=np.float64)
+    theta, pi, ll, n_iter, resp = _bernoulli_mixture_ml_em_kernel(
+        L0c, L1c, int(K), init, int(max_iter), float(tol), float(eps))
+    return theta, pi, float(ll), int(n_iter), resp
+
+
+def _fit_bernoulli_mixture_ml_select_K(L0, L1,
+                                         K_max=RECOVERY_MIXTURE_K_MAX,
+                                         n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
+                                         seed=RECOVERY_MIXTURE_RNG_SEED,
+                                         verbose=False):
+    """Marginal-likelihood Bernoulli-haplotype mixture (model B) for the
+    "soft" recovery path: fit K=1..K_max, pick the K minimising BIC, return
+    the rounded consensus haps.  The model-B analogue of
+    _fit_bernoulli_mixture_select_K.
+
+    Each candidate is a pair of per-site other-strand likelihood vectors
+    (L0, L1) from _run_subtraction_round_soft.  The mixture marginalises the
+    latent other-strand allele (E-step) and updates each profile from the
+    informative candidates only (M-step deferral), so low-coverage /
+    heterozygous-ambiguous sites neither bias cluster assignment nor pull the
+    consensus toward 0.5 — the failure mode of plugging the posterior mean
+    P(o=1) into a plain Bernoulli mixture.  Sub-threshold evidence is still
+    used (graded), unlike the binary argmax path which thresholds it away.
+
+    K-means++ init runs on the expected other strand E[o] = L1/(L0+L1) using
+    the same (L1-distance) initialiser as the argmax path.  BIC and the
+    over-permissive inner-fit philosophy match _fit_bernoulli_mixture_select_K
+    (the outer BIC subset-selection on sample data filters noise components).
+
+    Args:
+      L0, L1: (M, L) float64 other-strand likelihoods
+      K_max: upper bound on K to try
+      n_restarts: EM restarts per K (different K-means++ seeds)
+      seed: base RNG seed
+      verbose: print BIC trace
+
+    Returns:
+      list of (L,) binary arrays — consensus haps for the selected K.
+      Empty list if there are no candidates.
+
+    BIC formula (identical to the binary mixture):
+      BIC = -2*LL + (K*L + K - 1) * log(max(M, 2)),  lower = better.
+    """
+    M = L0.shape[0]
+    if M == 0:
+        return []
+    L = L0.shape[1]
+
+    # Expected other strand for the kmeans++ init distance (in [0,1]).
+    Eo = L1 / (L0 + L1 + 1e-12)                                   # (M, L)
+    Eo = np.ascontiguousarray(Eo, dtype=np.float64)
+
+    K_max_effective = min(K_max, M)
+    rng = np.random.default_rng(seed)
+
+    best_overall = None   # (K, BIC, theta)
+    bic_trace = []
+
+    if verbose:
+        print(f'    Inner ML-mixture fitting: M={M} candidates, L={L}, '
+              f'trying K=1..{K_max_effective}, n_restarts={n_restarts}')
+
+    for K in range(1, K_max_effective + 1):
+        best_for_K = None   # (LL, theta)
+        for restart in range(n_restarts):
+            # _kmeans_pp_init returns the selected centers themselves
+            # (rows of Eo), which serve directly as the initial profiles.
+            init_theta = _kmeans_pp_init(Eo, K, rng)
+            theta, pi, ll, _n_iter, _resp = _bernoulli_mixture_ml_em(
+                L0, L1, K, init_theta=init_theta)
+            if best_for_K is None or ll > best_for_K[0]:
+                best_for_K = (ll, theta)
+
+        ll, theta = best_for_K
+        n_params = K * L + (K - 1)
+        bic = -2 * ll + n_params * np.log(max(M, 2))
+        bic_trace.append((K, bic, ll))
+
+        if best_overall is None or bic < best_overall[1]:
+            best_overall = (K, bic, theta)
+
+    if verbose:
+        for K, bic, ll in bic_trace:
+            marker = ' <-' if K == best_overall[0] else ''
+            print(f'      K={K:>2d}: LL={ll:>11.1f}, BIC={bic:>11.1f}{marker}')
+
+    best_K, best_bic, best_theta = best_overall
+    if verbose:
+        print(f'    Inner ML-mixture: selected K={best_K} with BIC={best_bic:.1f}')
+
+    # Round theta to binary consensus founder profiles.
+    binary_thetas = (best_theta > 0.5).astype(np.int64)
+    return [binary_thetas[k].copy() for k in range(best_K)]
 
 
 @njit(cache=True)
@@ -1731,6 +2107,7 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
                                        swap_nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
                                        haps_equal_eps_pct=RECOVERY_HAPS_EQUAL_EPS_PCT,
                                        use_log_bic=False,
+                                       site_priors=None,
                                        verbose=False):
     """Iterative subtraction-recovery rounds until convergence.
 
@@ -1765,6 +2142,11 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
       cleanness_threshold: min residual cleanness to admit a candidate
       swap_nll_tolerance: NLL improvement floor for accepting a swap
       haps_equal_eps_pct: tolerance for round-convergence detection
+      site_priors: (L_kept, 3) per-site genotype priors, or None.  Used
+        only in RECOVERY_RESIDUAL_MODE == "soft" to divide the HWE site
+        prior out of probs_k and recover the genotype LIKELIHOODS for the
+        marginal-likelihood mixture (real data); None is correct when
+        probs_k already is the likelihood (flat prior, e.g. synthetic).
       verbose: print per-round trace
 
     Returns:
@@ -1791,24 +2173,47 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
     prev_round_cache = None
 
     for round_num in range(1, max_rounds + 1):
-        # 1. Subtraction: generate clean residual candidates
-        raw_candidates = _run_subtraction_round(
-            selected, argmax_dosage_kept,
-            cleanness_threshold=cleanness_threshold)
-        if len(raw_candidates) == 0:
+        # 1+2. Generate consensus haps (residuals -> mixture -> BIC over K).
+        #    In "soft" mode the residuals are the other-strand LIKELIHOODS
+        #    (L0, L1) per site, fed to the marginal-likelihood Bernoulli-
+        #    haplotype mixture (_fit_bernoulli_mixture_ml_select_K), which
+        #    marginalises the latent other-strand allele rather than hard-
+        #    calling it.  In the default "argmax" mode the residuals are the
+        #    binary clipped residuals of the argmax dosage, fed to the binary
+        #    Bernoulli mixture.  Both return K consensus haps (binary).
+        if RECOVERY_RESIDUAL_MODE == "soft":
+            L0_cand, L1_cand = _run_subtraction_round_soft(
+                selected, probs_k, site_priors=site_priors,
+                cleanness_threshold=cleanness_threshold)
+            n_raw = L0_cand.shape[0]
+            if n_raw == 0:
+                if verbose:
+                    print(f'  [recovery round {round_num}] no clean residuals -- CONVERGED')
+                break
             if verbose:
-                print(f'  [recovery round {round_num}] no clean residuals -- CONVERGED')
-            break
-
-        # 2. Bernoulli mixture fit + BIC over K -> consensus haps
-        if verbose:
-            print(f'  [recovery round {round_num}] {len(raw_candidates)} raw candidates')
-        consensus_haps = _fit_bernoulli_mixture_select_K(
-            raw_candidates,
-            K_max=mixture_K_max,
-            n_restarts=mixture_n_restarts,
-            seed=mixture_seed_base + round_num,
-            verbose=verbose)
+                print(f'  [recovery round {round_num}] {n_raw} raw candidates')
+            consensus_haps = _fit_bernoulli_mixture_ml_select_K(
+                L0_cand, L1_cand,
+                K_max=mixture_K_max,
+                n_restarts=mixture_n_restarts,
+                seed=mixture_seed_base + round_num,
+                verbose=verbose)
+        else:
+            raw_candidates = _run_subtraction_round(
+                selected, argmax_dosage_kept,
+                cleanness_threshold=cleanness_threshold)
+            if len(raw_candidates) == 0:
+                if verbose:
+                    print(f'  [recovery round {round_num}] no clean residuals -- CONVERGED')
+                break
+            if verbose:
+                print(f'  [recovery round {round_num}] {len(raw_candidates)} raw candidates')
+            consensus_haps = _fit_bernoulli_mixture_select_K(
+                raw_candidates,
+                K_max=mixture_K_max,
+                n_restarts=mixture_n_restarts,
+                seed=mixture_seed_base + round_num,
+                verbose=verbose)
         if len(consensus_haps) == 0:
             if verbose:
                 print(f'  [recovery round {round_num}] no mixture consensus -- CONVERGED')
@@ -2185,7 +2590,7 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
          A.  They retain pre-CD-drift information about candidate
          founders, including low-frequency truths that the rest of
          the pipeline drifted away from.  Trio is deterministic
-         (TRIO_D_ESTIMATE_SEED=42) and cheap (~100ms at N=320).
+         (soft-agreement clustering via HDBSCAN) and cheap (~100ms at N=320).
       4. Dedups trio candidates against current H at 0.5% (tight; only
          collapse near-exact duplicates so we don't waste evaluations
          on candidates that are already in H).
@@ -2283,7 +2688,7 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
     # originally produced a candidate at 2.5% from truth_4, which got
     # drifted to 3% (= chim_5) during downstream CD; re-running trio
     # here regenerates the pre-drift candidate.  Trio is deterministic
-    # (TRIO_D_ESTIMATE_SEED=42) and cheap (~100ms at N=320).
+    # (soft-agreement clustering via HDBSCAN) and cheap (~100ms at N=320).
     if verbose:
         residuals, provenance = _generate_carrier_residuals(
             probs_k, H, A, low_idx_list,

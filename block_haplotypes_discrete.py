@@ -3,12 +3,13 @@
 The top-level orchestration layer of stage-3 block-haplotype founder
 discovery.  As of the 4-file split, this file contains:
 
-  - K-medoid multi-start constants (K_MEDOID_STARTS_DEFAULT,
-    MEDOID_MIN_N_FOR_MULTISTART, MEDOID_PAM_MAX_ITER)
+  - Multi-start constants (K_MEDOID_STARTS_DEFAULT,
+    MEDOID_MIN_N_FOR_MULTISTART, SEED_SOFT_MIN_CLUSTER_SIZE)
   - Forkserver pool scaffolding (_ForkserverPool, _init_block_worker,
     _BH_ACTIVE_COUNTER, _BH_TOTAL_CORES)
   - _grow_K — the main K-growth coordinate-descent orchestrator
-  - _kmedoids_pam, _initial_kgrowth_with_medoids — K-medoid multi-start
+  - _soft_cluster_seed_haps, _initial_kgrowth_with_medoids — soft-cluster
+    multi-start seeding
   - _grow_K_with_recovery — top-level entry that combines K-growth,
     trio recovery, pairwise recovery, subtraction recovery, and late
     low-carrier rescue
@@ -142,41 +143,55 @@ np.seterr(divide='ignore', invalid='ignore')
 # not a basin-membership predictor, so the default's chosen seed is in
 # the chimera basin on these blocks.
 #
-# Fix: deterministic multi-start.  At the K=0 -> K=1 transition, pick
-# K_MEDOID_STARTS samples spread across seed-hap-space (via PAM
-# k-medoids on the pairwise Hamming distance matrix of sample seeds)
-# and run full K-growth from each as a separate H_init.  Pick the
-# trajectory with lowest final BIC = K_final * cc + 2 * NLL_final.
-# BIC (not raw NLL) is the right cross-K comparison criterion: it
-# penalises trajectories that grew to a larger K than the data
-# justifies, so multi-start naturally prefers parsimonious solutions
-# of equal data-fit quality.
+# Fix: deterministic multi-start with soft-clustering seeds.  At the
+# K=0 -> K=1 transition, instead of relying on a single most-decisive
+# sample, we generate up to K_MEDOID_STARTS DIVERSE seed haps and run
+# full K-growth from each as a separate H_init, then pick the trajectory
+# with lowest final BIC = K_final * cc + 2 * NLL_final.  BIC (not raw
+# NLL) is the right cross-K comparison criterion: it penalises
+# trajectories that grew to a larger K than the data justifies, so
+# multi-start naturally prefers parsimonious solutions of equal data-fit
+# quality.
 #
-# Why k-medoids and not top-K-decisive?  Decisiveness doesn't
-# correlate with basin membership — confirmed empirically: chr17 needed
-# K=20 top-decisive samples to find a truth-basin medoid, but K=5
-# k-medoids found 4 of them.  K-medoids picks DIVERSE seeds in
-# hap-space, which at small K guarantees representation from each
-# truth-progenitor cluster.
+# The diverse seeds come from the posterior soft-clustering front-end
+# (_soft_cluster_seed_haps): samples are clustered on the expected-
+# genotype-agreement similarity (bhd_kernels.soft_agreement_similarity)
+# via HDBSCAN, and the largest clusters' per-site pooled-alt consensus
+# haps (bhd_kernels.alt_fractions -> pooled_alt_to_hap) become the seeds.
+# This guarantees representation from each truth-progenitor cluster (the
+# property that makes multi-start work — confirmed empirically: top-K-
+# decisive seeds do NOT correlate with basin membership, e.g. chr17
+# needed K=20 top-decisive samples to find a truth-basin seed) while
+# keeping the posteriors rather than hard-calling them, so the seeds stay
+# robust at low read depth.  A cluster's pooled consensus also averages
+# out the per-sample het / zero-coverage noise that a single argmax
+# sample-seed carries, and selection no longer depends on per-sample
+# "decisiveness" (which collapses at low depth).  Same rationale and
+# shared primitives as the trio soft front-end (bhd_kernels.py); the
+# hdbscan / bhd_kernels imports are performed lazily inside
+# _soft_cluster_seed_haps.
 #
 # Cost: K_MEDOID_STARTS x full K-growth instead of 1x.  At default
-# K=5 medoids, stage 3 cost is roughly 5x the single-trajectory cost.
+# K=5 seeds, stage 3 cost is roughly 5x the single-trajectory cost.
 # Per-block parallelism unchanged.
 
-# Number of medoid starts at the initial K=0 -> K=1 transition.
-# Reducing to 1 disables multi-start (recovers legacy single-start
-# behavior).  Increasing improves robustness on blocks with very
-# heterogeneous truth founders but costs proportionally more time.
+# Number of cluster-seed starts at the initial K=0 -> K=1 transition.
+# Reducing to 1 disables multi-start (recovers single-start behavior).
+# Increasing improves robustness on blocks with very heterogeneous truth
+# founders but costs proportionally more time.
 K_MEDOID_STARTS_DEFAULT = 5
 
-# Minimum sample count for medoid multi-start to be applied.  If
-# N < K_MEDOID_STARTS, we fall back to single-start because PAM
-# can't pick more medoids than there are points.
+# Minimum sample count for multi-start to be applied.  Below this we fall
+# back to a single branch (soft clustering needs at least a few samples
+# per pair-type to form clusters).
 MEDOID_MIN_N_FOR_MULTISTART = 3
 
-# Maximum PAM swap-phase iterations.  PAM converges quickly on
-# small-K problems; 100 is a defensive cap rarely reached.
-MEDOID_PAM_MAX_ITER = 100
+# HDBSCAN minimum cluster size for the soft seed front-end — the minimum
+# number of samples that must share a pair-type for that pair-type to seed a
+# branch.  Mirrors the trio front-end's TRIO_SOFT_MIN_CLUSTER_SIZE.  Other
+# HDBSCAN parameters use the library defaults, matching block_haplotypes.py's
+# precomputed-metric usage.
+SEED_SOFT_MIN_CLUSTER_SIZE = 3
 # =============================================================================
 # REJECTED EXPERIMENT — POST-CD TWO-STEP REFINEMENT
 # =============================================================================
@@ -712,251 +727,76 @@ def _grow_K(probs_k, kept_mask_full, lam,
 
 
 # =============================================================================
-# K-MEDOIDS (PAM) FOR INITIAL-K-GROWTH MULTI-START
+# SOFT-CLUSTERING SEEDS FOR INITIAL-K-GROWTH MULTI-START
 # =============================================================================
+# Generates the diverse K=1 seed haps for _initial_kgrowth_with_medoids by
+# clustering the samples on the posterior soft-agreement similarity and
+# emitting one denoised pooled-alt consensus seed per cluster.  This keeps
+# the genotype posteriors rather than hard-calling each sample's dosage,
+# which preserves the low-read-depth signal.  hdbscan and bhd_kernels are
+# imported lazily.
 
-def _kmedoids_pam(D, K, max_iter=MEDOID_PAM_MAX_ITER):
-    """Partitioning Around Medoids (PAM) on a precomputed (N, N)
-    pairwise distance matrix D.  Returns sorted medoid indices.
+def _soft_cluster_seed_haps(probs_k, n_seeds,
+                              min_cluster_size=SEED_SOFT_MIN_CLUSTER_SIZE,
+                              verbose=False):
+    """Generate up to ``n_seeds`` diverse K=1 seed haps by soft clustering.
 
-    Algorithm:
-      BUILD: greedily pick K medoids.  First medoid minimises sum of
-             distances to all points.  Subsequent medoids each chosen
-             to minimise the resulting total cost (sum over points of
-             distance-to-nearest-medoid).
-      SWAP:  iteratively try swapping each medoid with each non-medoid;
-             accept any swap that strictly reduces total cost.  Stop
-             when no improving swap exists or max_iter reached.
+    Clusters samples on the expected-genotype-agreement similarity
+    (bhd_kernels.soft_agreement_similarity) via HDBSCAN on the derived
+    distance (S.max() - S), ranks clusters by membership size (largest
+    first), and returns one binary seed hap per cluster (up to n_seeds) as
+    the per-site pooled-alt consensus of the cluster
+    (bhd_kernels.alt_fractions averaged over members -> pooled_alt_to_hap).
 
-    Determinism: pure greedy selection on D, ties broken by index
-    order (np.argmin returns first-min).  No RNG.
+    A homozygous-looking cluster yields a clean founder readout; a
+    heterozygous (pair-type) cluster yields the same forced-bits / majority
+    readout the per-sample seed would, but denoised by pooling over the
+    whole cluster — a much better K-growth starting point at low read depth.
 
     Arguments:
-        D: (N, N) symmetric non-negative distance matrix
-        K: int, number of medoids to pick (must be <= N)
-        max_iter: defensive cap on swap-phase iterations
+        probs_k: (N, L, 3) genotype posteriors restricted to kept sites
+        n_seeds: int — maximum number of seed haps to return (the multi-
+            start branch count)
+        min_cluster_size: int — HDBSCAN minimum cluster size
+        verbose: bool
 
     Returns:
-        medoids: list of K int indices, sorted ascending
+        list of (L,) np.int64 seed haps, length in [0, n_seeds].  May be
+        shorter than n_seeds (or empty) when HDBSCAN finds fewer clusters;
+        the caller falls back to its single-branch path when empty.
     """
-    N = D.shape[0]
-    if K >= N:
-        return list(range(N))
-    if K <= 0:
-        return []
+    import bhd_kernels as _bk
+    import hdbscan
 
-    # Delegate the BUILD + SWAP phases to a single njit kernel.  Reduces
-    # the O(N*K) Python-list `in medoids` membership tests to O(1)
-    # boolean lookups per candidate, and lets the inner loops over N
-    # (which dominate at N=320) run at compiled speed.
-    D_c = np.ascontiguousarray(D, dtype=np.float64)
-    medoid_arr = _kmedoids_pam_kernel(D_c, int(K), int(max_iter))
-    # Return as a Python sorted list (matches original signature).
-    return sorted([int(m) for m in medoid_arr])
+    N, L = probs_k.shape[0], probs_k.shape[1]
 
+    # Soft-agreement similarity -> precomputed distance for HDBSCAN.
+    S = _bk.soft_agreement_similarity(probs_k)            # (N, N) in [0, 1]
+    dist = (S.max() - S)
+    np.fill_diagonal(dist, 0.0)
+    dist = np.ascontiguousarray(dist, dtype=np.float64)
 
-@njit(cache=True)
-def _pairwise_hamming_kernel(X):
-    """Compute pairwise normalised Hamming distance for binary seed
-    matrix X.  D[i, j] = (# positions where X[i] != X[j]) / L.
+    labels = hdbscan.HDBSCAN(
+        metric='precomputed',
+        min_cluster_size=int(min_cluster_size),
+    ).fit(dist).labels_
 
-    Output is dense (N, N), symmetric with zero diagonal.  Walks only
-    the upper triangle (j > i) and mirrors to (j, i).
+    # Rank clusters by size, largest first (label -1 is HDBSCAN noise).
+    clusters = [(c, np.where(labels == c)[0])
+                for c in np.unique(labels) if c != -1]
+    clusters.sort(key=lambda cm: -cm[1].shape[0])
 
-    For N=320, L=200 this saves ~20 MB of (N, L) bool temporaries and
-    roughly halves the comparisons vs the naive (i, j) full square loop.
+    if verbose:
+        sizes = [int(mem.shape[0]) for _c, mem in clusters]
+        print(f'[seed-soft] N={N}, clusters={len(clusters)} sizes={sizes}, '
+              f'taking up to {n_seeds}')
 
-    Numerical note: we divide by L explicitly (not by multiplying by
-    1/L) so the result matches np.mean's accumulator-sum-then-divide
-    convention exactly.  Multiplying by a precomputed reciprocal would
-    differ by 1 ULP for integer counts that don't divide L evenly.
-    """
-    N = X.shape[0]
-    L = X.shape[1]
-    D = np.zeros((N, N), dtype=np.float64)
-    L_f = float(L)
-    for i in range(N):
-        for j in range(i + 1, N):
-            count = 0
-            for l in range(L):
-                if X[i, l] != X[j, l]:
-                    count += 1
-            d = count / L_f
-            D[i, j] = d
-            D[j, i] = d
-    return D
-
-
-@njit(cache=True)
-def _kmedoids_pam_kernel(D, K, max_iter):
-    """njit BUILD + SWAP phases of PAM.  Drop-in replacement for the
-    Python implementation.
-
-    Returns the medoid set as a (K,) int64 array (UNSORTED — the
-    Python wrapper sorts the result).  Order within the returned array
-    reflects the BUILD-phase insertion order modified by SWAP-phase
-    replacements; sorting in Python keeps the public API identical
-    to the original `sorted(medoids)` return.
-
-    Key data-structure change vs Python: instead of a Python list of
-    medoid indices with O(K) `in` membership tests, we keep a
-    (N,) bool `is_medoid` array — membership tests are O(1).  This
-    matters in the SWAP phase's tight `for c in range(N): if c in
-    medoids: continue` inner loop, which the Python version paid O(K)
-    for per c (so O(N*K) per swap attempt).
-    """
-    N = D.shape[0]
-    is_medoid = np.zeros(N, dtype=np.bool_)
-    medoids = np.empty(K, dtype=np.int64)
-
-    # ---- BUILD phase ----
-    # First medoid minimises total distance to all points.
-    sum_d = np.zeros(N, dtype=np.float64)
-    for i in range(N):
-        s = 0.0
-        for j in range(N):
-            s += D[i, j]
-        sum_d[i] = s
-    first = 0
-    best_first = sum_d[0]
-    for i in range(1, N):
-        if sum_d[i] < best_first:
-            best_first = sum_d[i]
-            first = i
-    medoids[0] = first
-    is_medoid[first] = True
-    n_med = 1
-
-    # current_min[i] = min over m in medoids of D[m, i]
-    current_min = np.empty(N, dtype=np.float64)
-    for i in range(N):
-        current_min[i] = D[first, i]
-
-    for _ in range(1, K):
-        best_cost = np.inf
-        best_idx = -1
-        for c in range(N):
-            if is_medoid[c]:
-                continue
-            cost = 0.0
-            for i in range(N):
-                d_ci = D[c, i]
-                if d_ci < current_min[i]:
-                    cost += d_ci
-                else:
-                    cost += current_min[i]
-            if cost < best_cost - 1e-9:
-                best_cost = cost
-                best_idx = c
-        if best_idx < 0:
-            break
-        medoids[n_med] = best_idx
-        is_medoid[best_idx] = True
-        # Update current_min with the new medoid's distances
-        for i in range(N):
-            d_bi = D[best_idx, i]
-            if d_bi < current_min[i]:
-                current_min[i] = d_bi
-        n_med += 1
-
-    # If BUILD failed to add K medoids (shouldn't happen for K <= N
-    # with non-degenerate D, but guard defensively to match the
-    # Python version), truncate.
-    if n_med < K:
-        # Return what we have; caller sorts and converts to list.
-        # This path is reached when best_idx == -1 in the BUILD loop;
-        # the Python version did `break` out of the for-k loop and
-        # ended up with len(medoids) < K, so we mirror that.
-        out = np.empty(n_med, dtype=np.int64)
-        for kk in range(n_med):
-            out[kk] = medoids[kk]
-        return out
-
-    # Sort medoids ascending before SWAP.  This is essential for
-    # behavioural parity with the Python version, which does
-    # `medoids = sorted(medoids)` between BUILD and SWAP.  SWAP is
-    # greedy ("accept the first improving swap"), so the iteration
-    # order of `mi` (offsets into the medoid array) affects which
-    # swap is found and accepted first.  Without this sort the
-    # njit kernel's SWAP can diverge from the Python version's
-    # SWAP starting from K >= 5 (verified at K=5 with N=30 random
-    # data, May 2026).  current_min is invariant under medoid
-    # relabelling, so it does not need to be recomputed after sort.
-    # Use insertion sort (small K, ascending).
-    for ii in range(1, n_med):
-        key = medoids[ii]
-        jj = ii - 1
-        while jj >= 0 and medoids[jj] > key:
-            medoids[jj + 1] = medoids[jj]
-            jj -= 1
-        medoids[jj + 1] = key
-
-    # ---- SWAP phase ----
-    # Current total cost: sum over i of min_m D[m, i].
-    # current_min already holds these per-point minima from BUILD.
-    cur_cost = 0.0
-    for i in range(N):
-        cur_cost += current_min[i]
-
-    # Buffer for the per-mi "drop-one-medoid" minima: drop_min[i] =
-    # min over medoids excluding medoids[mi] of D[m, i].  Allocated
-    # once outside the SWAP loop, reused for each (max_iter, mi).
-    drop_min = np.empty(N, dtype=np.float64)
-
-    for _ in range(max_iter):
-        improved = False
-        for mi in range(n_med):
-            # Precompute drop_min[i] for this mi.  Then each candidate
-            # swap with c has new_cost = sum_i min(drop_min[i], D[c, i]),
-            # which is O(N) per c (vs the naive O(N*K)).  At N=320
-            # K=5 this is a ~5x reduction in SWAP-evaluation work.
-            for i in range(N):
-                bd = np.inf
-                for mj in range(n_med):
-                    if mj == mi:
-                        continue
-                    d_mji = D[medoids[mj], i]
-                    if d_mji < bd:
-                        bd = d_mji
-                drop_min[i] = bd
-
-            for c in range(N):
-                if is_medoid[c]:
-                    continue
-                # Compute new_cost = sum_i min(drop_min[i], D[c, i]).
-                new_cost = 0.0
-                for i in range(N):
-                    d_ci = D[c, i]
-                    if d_ci < drop_min[i]:
-                        new_cost += d_ci
-                    else:
-                        new_cost += drop_min[i]
-                if new_cost < cur_cost - 1e-9:
-                    # Accept the swap.
-                    m_drop = medoids[mi]
-                    is_medoid[m_drop] = False
-                    is_medoid[c] = True
-                    medoids[mi] = c
-                    cur_cost = new_cost
-                    # Rebuild current_min from the new medoid set so
-                    # subsequent swap evaluations reflect reality.
-                    # We could rebuild incrementally but at N=320 the
-                    # full rebuild is cheap and avoids accumulated error.
-                    for i in range(N):
-                        bd = D[medoids[0], i]
-                        for mj in range(1, n_med):
-                            d_mji = D[medoids[mj], i]
-                            if d_mji < bd:
-                                bd = d_mji
-                        current_min[i] = bd
-                    improved = True
-                    break
-            if improved:
-                break
-        if not improved:
-            break
-
-    return medoids
+    alt = _bk.alt_fractions(probs_k)                      # (N, L) E[alt dose]/2
+    seeds = []
+    for _c, mem in clusters[:n_seeds]:
+        pooled = alt[mem].mean(axis=0)                    # (L,)
+        seeds.append(_bk.pooled_alt_to_hap(pooled).astype(np.int64))
+    return seeds
 
 
 def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
@@ -1141,39 +981,33 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
     # Cap medoid count at N (PAM degenerate otherwise)
     n_medoid_starts = min(n_medoid_starts, N)
 
-    # Build sample seeds.  Each sample's seed is its argmax-dosage
-    # interpretation under _init_hap_from_sample_dosage's rules
-    # (forced bits at homozygous sites, population-frequency tiebreak
-    # at heterozygous sites).
-    seed_array = np.zeros((N, L_kept), dtype=np.int64)
-    for s in range(N):
-        seed_array[s] = _init_hap_from_sample_dosage(
-            probs_k, s, kept_mask=None)
-
-    # Compute pairwise Hamming distance matrix (in [0, 1] units).
-    # D[i, j] = mean over l of (seed[i, l] != seed[j, l])
-    # The numpy version was:
-    #   for i in range(N):
-    #       D[i] = np.mean(seed_array != seed_array[i], axis=1)
-    # which allocates a (N, L) temporary boolean array per row (N rows,
-    # so N*N*L bytes peak — for N=320, L=200 that's ~20 MB just in
-    # temporaries, hit once per block per _initial_kgrowth_with_medoids
-    # call).  The njit kernel fuses the comparison + accumulator into
-    # one pass with no temporary, and exploits symmetry (D[i, j] =
-    # D[j, i]) to halve the work.
-    D = _pairwise_hamming_kernel(np.ascontiguousarray(seed_array, dtype=np.int64))
-
-    # Run PAM to pick diverse seed samples
-    medoid_indices = _kmedoids_pam(D, n_medoid_starts,
-                                     max_iter=MEDOID_PAM_MAX_ITER)
-
+    # Build the diverse K=1 seed haps for the branches.  Each entry of
+    # seed_haps is a (L_kept,) binary hap; seed_labels[i] is a short tag
+    # used only for verbose logging.  Seeds come from the posterior soft-
+    # clustering front-end: cluster on the soft-agreement similarity and
+    # use up to n_medoid_starts cluster pooled-alt consensuses as the
+    # diverse seeds (a denoised, low-read-depth-robust analogue of the
+    # per-sample argmax seed).
+    soft_seeds = _soft_cluster_seed_haps(
+        probs_k, n_medoid_starts,
+        min_cluster_size=SEED_SOFT_MIN_CLUSTER_SIZE, verbose=verbose)
+    if len(soft_seeds) == 0:
+        # HDBSCAN found no clusters (e.g. too few samples per pair-type
+        # at very low depth) — fall back to the single branch.
+        if verbose:
+            print('[medoid] soft clustering found no clusters — '
+                  'single-branch fallback')
+        H_init = H_trio_seed if has_trio else None
+        return _process_one_branch(H_init)
+    seed_haps = soft_seeds
+    seed_labels = [f'soft cluster {i}' for i in range(len(seed_haps))]
     if verbose:
         if has_trio:
-            print(f'[medoid] selected medoids: {medoid_indices}, '
-                  f'each branch H_init = stack([H_trio_seed (K={K_trio}), '
-                  f'medoid_seed])')
+            print(f'[medoid] {len(seed_haps)} soft-cluster seeds, '
+                  f'each branch H_init = stack([H_trio_seed '
+                  f'(K={K_trio}), cluster_seed])')
         else:
-            print(f'[medoid] selected medoids: {medoid_indices}')
+            print(f'[medoid] {len(seed_haps)} soft-cluster seeds')
 
     # Run full per-branch processing from each medoid; keep the best
     # by final BIC.  BIC = K_final * cc + 2 * NLL_final correctly
@@ -1183,7 +1017,7 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
     # paying their complexity cost.
     best_BIC = float('inf')
     best_result = None
-    best_medoid = -1
+    best_label = None
 
     # No-medoid baseline branch (only when has_trio).  This branch
     # starts with H_init = H_trio_seed alone (size K_trio), so
@@ -1215,14 +1049,14 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
                   f'BIC={baseline_BIC:.1f}')
         best_BIC = baseline_BIC
         best_result = baseline_result
-        best_medoid = -1   # sentinel for "baseline" (no medoid sample)
+        best_label = 'no-medoid baseline'
 
-    for m in medoid_indices:
-        # Build per-branch H_init: trio_seed prefix + medoid m's seed
+    for seed_hap, label in zip(seed_haps, seed_labels):
+        # Build per-branch H_init: trio_seed prefix + this branch's seed hap
         if has_trio:
-            H_init = np.vstack([H_trio_seed, seed_array[m:m + 1]])
+            H_init = np.vstack([H_trio_seed, seed_hap[None, :]])
         else:
-            H_init = seed_array[m:m + 1]
+            H_init = seed_hap[None, :]
         result = _process_one_branch(H_init)
         # result tuple: (H, A, per_sample_cost, wildcard_slots,
         #                K_final, wildcard_mass, history)
@@ -1231,18 +1065,16 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
         result_BIC = _compute_bic(result_K, result_NLL, cc)
         if verbose:
             tag = ' + recovery' if run_per_branch_recovery else ''
-            print(f'[medoid] start at sample {m}{tag}: '
+            print(f'[medoid] start at {label}{tag}: '
                   f'K_final={result_K}, NLL={result_NLL:.1f}, '
                   f'BIC={result_BIC:.1f}')
         if result_BIC < best_BIC:
             best_BIC = result_BIC
             best_result = result
-            best_medoid = m
+            best_label = label
 
     if verbose:
-        winner = ('no-medoid baseline' if best_medoid < 0
-                  else f'sample {best_medoid}')
-        print(f'[medoid] best trajectory: {winner}, '
+        print(f'[medoid] best trajectory: {best_label}, '
               f'BIC={best_BIC:.1f}')
 
     return best_result

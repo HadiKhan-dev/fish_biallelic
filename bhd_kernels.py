@@ -11,8 +11,8 @@
 #   - Low-level helpers (_safe_neg_log, _decisiveness).
 #   - Initialization helpers (_init_hap_from_sample_dosage,
 #     _select_initial_seed).
-#   - Cost-tensor computation (_per_site_cost_real_real, _per_site_cost_-
-#     real_W, _per_site_cost_W_W).
+#   - Cost computation (_per_site_cost_W_W, _ww_bin_emis_from_cost_ww,
+#     _log_probs_kernel).
 #   - Viterbi log-likelihood kernel (_viterbi_ll_per_sample, _viterbi_nll).
 #   - Pair-assignment / founder-update steps (_update_A, _update_H,
 #     _update_one_founder).
@@ -280,129 +280,6 @@ def _select_initial_seed(probs, kept_mask):
 # All cost tensors are computed over kept sites only.  The "cost" of a pair
 # for a sample is the negative log-likelihood plus wildcard penalties.
 
-def _per_site_cost_real_real(probs_k, H_k):
-    """For all real-real pairs (i, j) with i ≤ j, compute per-(sample, site)
-    cost.
-
-    Arguments:
-        probs_k: (N, L_kept, 3) — kept-site genotype posteriors
-        H_k:     (K, L_kept) — kept-site discrete founder haps in {0, 1}
-
-    Returns:
-        cost: (N, n_pairs_real, L_kept) where n_pairs_real = K(K+1)/2.
-              cost[s, p, l] = -log probs_k[s, l, H_k[i, l] + H_k[j, l]]
-              for the p-th pair (i, j).
-        pair_indices: list of (i, j) tuples in p-order.
-    """
-    K, L = H_k.shape
-    pair_indices = [(i, j) for i in range(K) for j in range(i, K)]
-    n_pairs = len(pair_indices)
-    N = probs_k.shape[0]
-    if n_pairs == 0:
-        return np.empty((N, 0, L)), []
-
-    # Build (n_pairs, 2) int array of pair (i, j) endpoints so the kernel
-    # can index into H_k without a Python list.  pair_indices stays as
-    # the returned tuple list for downstream consumers (e.g. _update_A's
-    # translate-back loop, which expects Python-tuple indexing).
-    pair_idx_arr = np.empty((n_pairs, 2), dtype=np.int64)
-    for p, (i, j) in enumerate(pair_indices):
-        pair_idx_arr[p, 0] = i
-        pair_idx_arr[p, 1] = j
-
-    probs_c = np.ascontiguousarray(probs_k, dtype=np.float64)
-    H_c = np.ascontiguousarray(H_k, dtype=np.int64)
-    cost = _per_site_cost_real_real_kernel(probs_c, H_c, pair_idx_arr)
-    return cost, pair_indices
-
-
-@njit(cache=True, parallel=True, fastmath=False)
-def _per_site_cost_real_real_kernel(probs_k, H_k, pair_idx_arr):
-    """njit version of the real-real cost tensor build.
-
-    Avoids the (N, n_pairs, L, 1) broadcast / take_along_axis that the
-    numpy version had to use, by writing the inner triple loop directly.
-    The site axis is the innermost loop (best cache locality on a
-    C-contig probs_k that is (N, L, 3)).
-
-    Returns:
-        cost: (N, n_pairs, L) float64
-
-    Note: -log floor is LOG_EPS, identical to _safe_neg_log's behaviour.
-    LOG_EPS appears as a literal here because module-level constants are
-    not importable inside @njit functions; the value 1e-12 must be kept
-    in sync with LOG_EPS in the module body.
-    """
-    LOG_EPS_LOCAL = 1e-12
-
-    N = probs_k.shape[0]
-    L = probs_k.shape[1]
-    n_pairs = pair_idx_arr.shape[0]
-    cost = np.empty((N, n_pairs, L), dtype=np.float64)
-
-    # prange over samples — N is typically 320 and each sample's work is
-    # independent.  Inner loops are sequential per sample.
-    for s in prange(N):
-        for p in range(n_pairs):
-            i = pair_idx_arr[p, 0]
-            j = pair_idx_arr[p, 1]
-            for l in range(L):
-                d = H_k[i, l] + H_k[j, l]
-                pv = probs_k[s, l, d]
-                if pv < LOG_EPS_LOCAL:
-                    pv = LOG_EPS_LOCAL
-                cost[s, p, l] = -math.log(pv)
-    return cost
-
-
-def _per_site_cost_real_W(probs_k, H_k, lam):
-    """For each (real founder, wildcard) pair, compute per-(sample, site) cost.
-
-    Arguments:
-        probs_k: (N, L_kept, 3)
-        H_k:     (K, L_kept)
-        lam:     wildcard penalty per strand-site usage
-
-    Returns:
-        cost: (N, K, L_kept) where cost[s, k, l] is the cost of pair (k, W)
-              for sample s at site l, with the wildcard strand picking
-              its allele optimally per site.
-    """
-    probs_c = np.ascontiguousarray(probs_k, dtype=np.float64)
-    H_c = np.ascontiguousarray(H_k, dtype=np.int64)
-    return _per_site_cost_real_W_kernel(probs_c, H_c, float(lam))
-
-
-@njit(cache=True, parallel=True, fastmath=False)
-def _per_site_cost_real_W_kernel(probs_k, H_k, lam):
-    """njit version of the real-W cost tensor build.
-
-    For each (real founder k, wildcard) pair the wildcard strand picks
-    its allele w in {0, 1} to maximise probs_k[s, l, H_k[k, l] + w].
-    Direct max over two candidates instead of the
-    take_along_axis-on-two-broadcast-tensors dance the numpy version
-    needed.
-    """
-    LOG_EPS_LOCAL = 1e-12
-
-    N = probs_k.shape[0]
-    L = probs_k.shape[1]
-    K = H_k.shape[0]
-    cost = np.empty((N, K, L), dtype=np.float64)
-
-    for s in prange(N):
-        for k in range(K):
-            for l in range(L):
-                d0 = H_k[k, l]          # w = 0
-                d1 = d0 + 1              # w = 1
-                p0 = probs_k[s, l, d0]
-                p1 = probs_k[s, l, d1]
-                pmax = p0 if p0 > p1 else p1
-                if pmax < LOG_EPS_LOCAL:
-                    pmax = LOG_EPS_LOCAL
-                cost[s, k, l] = -math.log(pmax) + lam
-    return cost
-
 
 def _per_site_cost_W_W(probs_k, lam):
     """Per-(sample, site) cost of the (W, W) pair: each strand's wildcard
@@ -488,12 +365,11 @@ def _log_probs_kernel(probs_k):
     (sample, site, genotype) cell.
 
     This is the heart of Tier 0: probs_k is INVARIANT across CD
-    iterations within a single `_fit_at_fixed_K` invocation, so every
-    `-log(probs[s, l, d])` value the `_update_A_fused_kernel` and
-    `_update_one_founder_kernel` evaluate inside their (s, state, l)
-    or (l, bucket, sample) walks is itself invariant.  Computing all
-    3 * N * L log values ONCE per fit replaces N * L * 3 * (~28) log
-    calls per `_update_A` and several more per `_update_H`.
+    iterations within a single `_fit_at_fixed_K` invocation, so the
+    `log P(g)` values that `_update_A` (via its BLAS precompute) and
+    `_update_one_founder_kernel` consume are themselves invariant.
+    Computing all 3 * N * L log values ONCE per fit avoids recomputing
+    them in every `_update_A` and `_update_H` call.
 
     Bit-equivalence with the original inline pattern:
 
@@ -822,7 +698,8 @@ def _viterbi_nll(haps_list, probs_k,
 # UPDATE STEP A: pair assignments per sample
 # =============================================================================
 
-def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None):
+def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
+              blas_lp_cache=None):
     """For each sample, pick the pair assignment that minimises its
     capped cost.
 
@@ -850,6 +727,16 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None)
                   the optimisation programme; expected ~25% CPU
                   reduction at K=6 N=320 L=200 because the kernel
                   was log()-bound.
+        blas_lp_cache: optional 5-tuple from
+                  `_update_A_blas_lp_precompute(log_probs, lam,
+                  snps_per_bin, n_bins)` — the log_probs-derived inputs
+                  (C0b, diff1_bt, w_bt, kW_Cb, kWdiff_bt) for the
+                  BLAS-hybrid kernel.  Like cost_WW / log_probs these
+                  are invariant across CD iterations, so
+                  `_fit_at_fixed_K` precomputes them once and threads
+                  them through; standalone callers leave this None and
+                  it is computed internally.  Consulted only on the
+                  K > 0 production path; ignored at K = 0.
 
     Returns:
         A: (N, 2) int array — A[s, *] in {0..K-1, K} where K = wildcard
@@ -875,20 +762,21 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None)
     probs_c = _maybe_c_contig(probs_k, np.float64)
     H_c = _maybe_c_contig(H_k, np.int64)
 
-    # === FUSED PATH (production default) ===
+    # === FUSED BLAS PATH (production default) ===
     # When _VITERBI_BIC_ENABLED is True (the production default) AND
-    # K > 0, dispatch to _update_A_fused_kernel which produces baseline
-    # (A, wildcard_slots) AND Viterbi-BIC (per_sample_cost = -viterbi_ll)
-    # in a single walk through (s, state, l).  Bit-identical to the
-    # previous two-pass implementation; see the kernel docstring for the
-    # equivalence argument.
+    # K > 0, dispatch to _update_A_fused_blas_kernel, which produces the
+    # baseline outputs (A, wildcard_slots) AND the Viterbi-BIC signal
+    # (per_sample_cost = -viterbi_ll) from precomputed GEMM contractions
+    # of the rr/kW state emissions.  See that kernel and
+    # _update_A_blas_lp_precompute for the factorisation and its
+    # equivalence to a direct scalar per-(state, site) summation.
     #
     # K = 0 falls through to the baseline-only path below for bit-
     # identity with the legacy K=0 behaviour, which skipped the Viterbi
-    # override (the "if _VITERBI_BIC_ENABLED and K > 0" guard in the
-    # previous code).  At K = 0 the only state is (W, W), there are no
-    # transitions, and per_sample_cost equals the baseline WW cost
-    # directly via _per_site_cost_W_W's left-to-right sum.
+    # override (the "if _VITERBI_BIC_ENABLED and K > 0" guard).  At K = 0
+    # the only state is (W, W), there are no transitions, and
+    # per_sample_cost equals the baseline WW cost directly via
+    # _per_site_cost_W_W's left-to-right sum.
     if _VITERBI_BIC_ENABLED and K > 0:
         # Bin sizing — same logic as _viterbi_ll_per_sample so the
         # fused kernel's bin_emis matches _viterbi_binned_emissions_-
@@ -924,11 +812,54 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None)
             log_probs = _log_probs_kernel(probs_c)
         log_probs_c = _maybe_c_contig(log_probs, np.float64)
 
-        A, baseline_cost, wildcard_slots, viterbi_ll = _update_A_fused_kernel(
-            probs_c, H_c, float(lam),
-            float(VITERBI_SWITCH_PENALTY),
-            int(snps_per_bin), int(n_bins),
-            cost_WW_c, WW_bin_emis_c, log_probs_c)
+        # Factor the rr and kW state emissions into GEMM contractions
+        # (see _update_A_fused_blas_kernel and _update_A_blas_lp_-
+        # precompute).  The log_probs-derived inputs are invariant across
+        # CD iterations, so _fit_at_fixed_K threads a once-per-fit
+        # blas_lp_cache; standalone callers compute it here.
+        if blas_lp_cache is None:
+            blas_lp_cache = _update_A_blas_lp_precompute(
+                log_probs_c, float(lam), int(snps_per_bin), int(n_bins))
+        C0b, diff1_bt, w_bt, kW_Cb, kWdiff_bt = blas_lp_cache
+
+        # rr pair indices (i, j) with i <= j in row-major order — matches
+        # the rr state order of _update_A_fused_blas_kernel.
+        n_rr = K * (K + 1) // 2
+        rr_i, rr_j = np.triu_indices(K)
+        rr_i = rr_i.astype(np.int64)
+        rr_j = rr_j.astype(np.int64)
+
+        # H-dependent GEMM inputs.  Pad H to n_bins*snps_per_bin with
+        # zeros when L is not a multiple of snps_per_bin; padded sites
+        # contribute 0 to every binned contraction (see precompute).
+        Lpad = int(n_bins) * int(snps_per_bin)
+        if Lpad == L:
+            Hf = H_c.astype(np.float64)
+        else:
+            Hf = np.zeros((K, Lpad), dtype=np.float64)
+            Hf[:, :L] = H_c
+        Hrb = np.ascontiguousarray(
+            Hf.reshape(K, int(n_bins), int(snps_per_bin)).transpose(1, 0, 2))
+        # Ub[k,s,b]   = sum_{l in bin b} (a1-a0)[s,l] * H[k,l]
+        Ub = np.ascontiguousarray(
+            np.matmul(Hrb, diff1_bt).transpose(1, 2, 0))
+        # kW_Ub[k,s,b] = sum_{l in bin b} (m12-m01)[s,l] * H[k,l]
+        kW_Ub = np.ascontiguousarray(
+            np.matmul(Hrb, kWdiff_bt).transpose(1, 2, 0))
+        # BB[p,l] = H[i,l]*H[j,l] for rr pair p=(i,j); then
+        # Mb[p,s,b] = sum_{l in bin b} (a0-2a1+a2)[s,l] * BB[p,l]
+        BB = Hf[rr_i] * Hf[rr_j]
+        BBrb = np.ascontiguousarray(
+            BB.reshape(n_rr, int(n_bins), int(snps_per_bin)).transpose(1, 0, 2))
+        Mb = np.ascontiguousarray(
+            np.matmul(BBrb, w_bt).transpose(1, 2, 0))
+
+        A, baseline_cost, wildcard_slots, viterbi_ll = (
+            _update_A_fused_blas_kernel(
+                C0b, Ub, Mb, kW_Cb, kW_Ub,
+                cost_WW_c, WW_bin_emis_c,
+                rr_i, rr_j, float(VITERBI_SWITCH_PENALTY),
+                K, int(n_bins), int(L)))
 
         # Per-sample cost = -log-likelihood (NLL convention used elsewhere
         # in this module).  Alias _unc to match the previous code's
@@ -1103,201 +1034,197 @@ def _update_A_baseline_kernel(probs_k, H_k, lam):
     return A, per_sample_cost, wildcard_slots
 
 
+def _update_A_blas_lp_precompute(log_probs, lam, snps_per_bin, n_bins):
+    """Precompute the log_probs-derived BLAS inputs for
+    `_update_A_fused_blas_kernel`.
+
+    These depend only on log_probs (hence on probs_k) and lam — NOT on
+    H — so they are INVARIANT across a coordinate-descent run and can be
+    computed once per `_fit_at_fixed_K` invocation, which threads the
+    result through every `_update_A` call (exactly as it already does for
+    cost_WW / WW_bin_emis / log_probs).  Standalone `_update_A` callers
+    pass blas_lp_cache=None and get this computed internally per call.
+
+    Factorisation (the algebraic identity the kernel relies on).  Write
+    a_g = log P(g) for g in {0, 1, 2} (i.e. log_probs[s, l, g], already
+    LOG_EPS-clamped).  The rr state (i, j) per-site emission is
+    a_{H[i,l] + H[j,l]}, which expands EXACTLY (verified to ~1e-13) as
+        a_d = a0
+              + (a1 - a0) * (H[i,l] + H[j,l])
+              + (a0 - 2 a1 + a2) * H[i,l] * H[j,l]
+    (check d = 0, 1, 2 against H[i,l], H[j,l] in {0,1}).  Summing over
+    the sites of a bin gives, per (sample, bin),
+        C0b + Ub[i] + Ub[j] + Mb[(i,j)]
+    with C0b = sum a0, Ub[k] = sum (a1-a0) H[k,l] = (H @ (a1-a0)),
+    and Mb[(i,j)] = sum (a0-2a1+a2) H[i,l] H[j,l] = ((H_i*H_j) @ w).
+    The kW state (k, W) per-site emission max(a_{H[k,l]}, a_{H[k,l]+1})
+    - lam is likewise linear in H[k,l]: with m01 = max(a0, a1), m12 =
+    max(a1, a2), it equals m01 + (m12 - m01) H[k,l] - lam, summing to
+        kW_Cb + kW_Ub[k]
+    with kW_Cb = sum m01 - (real sites in bin) * lam and kW_Ub[k] =
+    sum (m12 - m01) H[k,l] = (H @ (m12-m01)).
+
+    Returns the H-INDEPENDENT pieces as a 5-tuple
+    (C0b, diff1_bt, w_bt, kW_Cb, kWdiff_bt):
+        C0b:       (N, n_bins)                    sum_bin a0
+        diff1_bt:  (n_bins, snps_per_bin, N)      (a1 - a0), binned + T
+        w_bt:      (n_bins, snps_per_bin, N)      (a0 - 2a1 + a2), binned + T
+        kW_Cb:     (N, n_bins)                    sum_bin m01 - n_real*lam
+        kWdiff_bt: (n_bins, snps_per_bin, N)      (m12 - m01), binned + T
+    The "_bt" layout (n_bins, snps_per_bin, N) lets np.matmul against a
+    (n_bins, K, snps_per_bin) H-tensor produce the binned (n_bins, K, N)
+    contraction in one batched GEMM.  The H-dependent GEMMs (Ub, Mb,
+    kW_Ub) are formed by the caller (`_update_A`).
+
+    Ragged last bin: when L is not a multiple of snps_per_bin the arrays
+    are zero-padded to n_bins*snps_per_bin.  A padded site contributes 0
+    to every binned sum (0 is the additive identity) and 0 to every
+    matmul (its a-values are 0, so a1-a0, a0-2a1+a2, m12-m01 are all 0,
+    and the H / H_i*H_j factors are 0 there too), so the result matches
+    the scalar kernel's `if end > L: end = L` clamp exactly.  The kW
+    per-bin lam offset uses the REAL (unpadded) site count per bin.
+    """
+    N = log_probs.shape[0]
+    L = log_probs.shape[1]
+    Lpad = n_bins * snps_per_bin
+    if Lpad == L:
+        a0 = np.ascontiguousarray(log_probs[:, :, 0])
+        a1 = np.ascontiguousarray(log_probs[:, :, 1])
+        a2 = np.ascontiguousarray(log_probs[:, :, 2])
+    else:
+        a0 = np.zeros((N, Lpad), dtype=np.float64)
+        a1 = np.zeros((N, Lpad), dtype=np.float64)
+        a2 = np.zeros((N, Lpad), dtype=np.float64)
+        a0[:, :L] = log_probs[:, :, 0]
+        a1[:, :L] = log_probs[:, :, 1]
+        a2[:, :L] = log_probs[:, :, 2]
+
+    C0b = np.ascontiguousarray(
+        a0.reshape(N, n_bins, snps_per_bin).sum(axis=2))
+    diff1_bt = np.ascontiguousarray(
+        (a1 - a0).reshape(N, n_bins, snps_per_bin).transpose(1, 2, 0))
+    w_bt = np.ascontiguousarray(
+        (a0 - 2.0 * a1 + a2).reshape(N, n_bins, snps_per_bin).transpose(1, 2, 0))
+
+    m01 = np.maximum(a0, a1)
+    m12 = np.maximum(a1, a2)
+    real_per_bin = np.empty(n_bins, dtype=np.float64)
+    for b in range(n_bins):
+        start = b * snps_per_bin
+        end = start + snps_per_bin
+        if end > L:
+            end = L
+        cnt = end - start
+        if cnt < 0:
+            cnt = 0
+        real_per_bin[b] = cnt
+    kW_Cb = np.ascontiguousarray(
+        m01.reshape(N, n_bins, snps_per_bin).sum(axis=2)
+        - real_per_bin[None, :] * lam)
+    kWdiff_bt = np.ascontiguousarray(
+        (m12 - m01).reshape(N, n_bins, snps_per_bin).transpose(1, 2, 0))
+
+    return C0b, diff1_bt, w_bt, kW_Cb, kWdiff_bt
+
+
 @njit(cache=True, parallel=True, fastmath=False)
-def _update_A_fused_kernel(probs_k, H_k, lam, penalty, snps_per_bin, n_bins,
-                            cost_WW, WW_bin_emis, log_probs):
-    """Fused baseline argmin + Viterbi-BIC kernel.
+def _update_A_fused_blas_kernel(C0b, Ub, Mb, kW_Cb, kW_Ub,
+                                 cost_WW, WW_bin_emis,
+                                 rr_i, rr_j, penalty, K, n_bins, L):
+    """BLAS-fed fused argmin + Viterbi-BIC kernel — numerically
+    equivalent to a direct scalar per-(state, site) summation of the
+    state emissions, but with that walk replaced by precomputed GEMM
+    contractions.
 
-    Single pass through (sample, state, site) that simultaneously
-    produces the BASELINE outputs (A, baseline_cost, wildcard_slots)
-    consumed by _update_H's bit-voting M-step AND the VITERBI best-
-    path LL per sample consumed as the K-growth BIC signal.
+    Equivalence to the direct scalar form:
+      - rr state (i, j): per-bin emission assembled as
+            C0b[s,b] + Ub[i,s,b] + Ub[j,s,b] + Mb[p,s,b]
+        which equals a direct sum_{l in bin} log_probs[s,l,d]
+        (d = H[i,l] + H[j,l]) up to floating-point reassociation only
+        (~1e-13): the BLAS contractions in Ub/Mb sum within each bin in
+        blocked order rather than strictly left-to-right.  See
+        `_update_A_blas_lp_precompute` for the exact algebraic identity.
+      - kW state (k, W): per-bin emission assembled as
+            kW_Cb[s,b] + kW_Ub[k,s,b]
+        equal to a direct sum_{l in bin} (max(log_probs[s,l,d0],
+        log_probs[s,l,d1]) - lam) up to the same reassociation; the max
+        is taken per site in the precompute (m01 = max(a0,a1), m12 =
+        max(a1,a2)), so monotonicity of log is preserved exactly.
+      - WW state: state cost is summed from cost_WW LEFT-TO-RIGHT and the
+        bin emissions are copied from WW_bin_emis — BIT-IDENTICAL to the
+        direct scalar sum (zero reassociation on this state).
 
-    The previous architecture executed two independent kernels:
-        _update_A_baseline_kernel    walks (s, state, l) for argmin
-        _viterbi_binned_emissions_kernel  walks (s, state, l) for binned
-                                          emissions
-        viterbi_score_selection       runs forward pass on the bin tensor
-    The two walks compute the same per-(s, l, state) scalar log P_pair,
-    differing only in summation strategy: baseline accumulates the
-    uncapped sum over all L sites per state for argmin; binned-emissions
-    accumulates within snps_per_bin-sized bins for the forward pass.
-    Profile showed the two walks together at ~33s out of 50.7s of total
-    CPU on the 5-block chr1 sample.
-
-    The fused kernel walks (s, state, l) ONCE.  For each per-l scalar
-    `lp = log p` (with the per-state offset for kW and WW), it both:
-        cost_total  += -lp + offset         (baseline cost, per state)
-        bin_emis[st, b] += lp - offset      (Viterbi LL emission, per bin)
-    so the two summations are SAME-ORDER (left-to-right within state,
-    contiguous across bins) and bit-identical to the legacy kernels.
-
-    WW state pre-bake: cost_WW: (N, L) and WW_bin_emis: (N, n_bins) are
-    precomputed by the caller (typically `_fit_at_fixed_K` ONCE per CD
-    invocation) and passed in.  The fused kernel's WW state branch
-    becomes a pair of memory writes instead of an inner site-loop with
-    pmax/log computations.  cost_WW is also threaded through to
-    `_update_one_founder_kernel` via the wrapper so the M-step doesn't
-    recompute it either.
-
-    Log-probs pre-bake (Tier 0): log_probs: (N, L, 3) is precomputed
-    ONCE per `_fit_at_fixed_K` invocation as math.log(max(probs_k, EPS)).
-    Inside the kernel, every `lp = log(probs[s, l, d])` becomes
-    `lp = log_probs[s, l, d]` — same scalar, no log() in the inner
-    loop.  Profile showed `_update_A_fused_kernel` was log()-bound
-    (~1.79M log calls per call at K=6 N=320 L=200); caching them
-    once per fit eliminates ~5/6 of the in-kernel arithmetic.  The
-    kW state's pmax becomes `max(log_probs[s, l, d0], log_probs[s, l, d1])`
-    using monotonicity of log.
-
-    After the (state, l) walk, the kernel:
-      1. Argmins state_cost[*] with strict-< first-occurrence tiebreak
-         to recover (A, wildcard_slots), preserving _update_A_baseline_-
-         kernel's semantics.
-      2. Runs an in-place Viterbi forward on the per-sample bin_emis
-         buffer (alpha updated in place, matching viterbi_score_-
-         selection's pattern bit-for-bit) to compute best-path LL.
-
-    Per-sample buffers (bin_emis (K_states, n_bins), state_cost (K_-
-    states,), alpha (K_states,)) are allocated inside the prange so
-    each thread gets thread-local storage with no false sharing.  At
-    K=6, n_bins=20, total per-sample memory is ~4.7 KB — fits in L1.
-
-    K = 0 should NOT call this kernel — the wrapper _update_A handles
-    K = 0 via _update_A_baseline_kernel for bit-identity with the
-    legacy K=0 path that skipped the Viterbi override entirely.
+    The state order (rr (i, j) row-major in [0, n_rr), then (k, W) in
+    [n_rr, n_rr+K), then (W, W) at n_rr+K), the argmin (strict-< first-
+    occurrence tiebreak), the rr-index decode, and the in-place Viterbi
+    forward all match the direct scalar form exactly, so the only
+    departure from bit-identity is the rr/kW reassociation above.  Each
+    state's per-bin emission is assembled ON THE FLY (a few adds per
+    (state, bin)); no (K_states, n_bins, N) tensor is materialised.
 
     Inputs:
-        probs_k:       (N, L, 3) float64, C-contig.  Kept as a parameter
-                       for signature symmetry; the Tier-0 changes mean
-                       the kernel body itself doesn't read probs_k any
-                       more (all probability lookups go through
-                       log_probs).  Left in place so callers don't
-                       need to change argument order.
-        H_k:           (K, L)    int64,   C-contig  (K >= 1)
-        lam:           wildcard penalty per strand-site
-        penalty:       Viterbi switch penalty between adjacent bins
-        snps_per_bin:  bin size in SNPs (>= 1)
-        n_bins:        total bin count (= ceil(L / snps_per_bin))
-        cost_WW:       (N, L)    float64, C-contig — precomputed per-
-                       (sample, site) WW cost (-log p_max + 2*lam, with
-                       LOG_EPS_LOCAL clamp).  Sum over l gives baseline
-                       WW state cost; equivalent up to negation per
-                       l to per-site WW LL.
-        WW_bin_emis:   (N, n_bins) float64, C-contig — precomputed per-
-                       (sample, bin) WW LL emission for Viterbi forward.
-        log_probs:     (N, L, 3) float64, C-contig — precomputed
-                       log(max(probs_k[s, l, g], LOG_EPS_LOCAL)).  Read
-                       in place of every inline log call in the rr and
-                       kW state branches.
+        C0b:         (N, n_bins)        float64 — sum_bin a0 (precompute)
+        Ub:          (K, N, n_bins)     float64 — H @ (a1-a0), binned
+        Mb:          (n_rr, N, n_bins)  float64 — (H_i*H_j) @ (a0-2a1+a2)
+        kW_Cb:       (N, n_bins)        float64 — sum_bin m01 - n_real*lam
+        kW_Ub:       (K, N, n_bins)     float64 — H @ (m12-m01), binned
+        cost_WW:     (N, L)             float64 — per-(sample,site) WW cost
+        WW_bin_emis: (N, n_bins)        float64 — WW per-bin LL emission
+        rr_i, rr_j:  (n_rr,)            int64   — first/second hap index of
+                                                  each rr pair (i <= j)
+        penalty:     Viterbi switch penalty between adjacent bins
+        K:           number of founders
+        n_bins:      bin count
+        L:           number of kept sites (for the WW flat sum)
 
     Returns:
         A:               (N, 2)   int64
-        baseline_cost:   (N,)     float64 — UNCAPPED best-pair NLL per
-                                            sample (== _update_A_baseline_-
-                                            kernel's per_sample_cost)
-        wildcard_slots:  (N,)     int64  — count of W strands in A[s]
-        viterbi_ll:      (N,)     float64 — best Viterbi-path LL per
-                                            sample
-
-    Floors -log(p) at LOG_EPS_LOCAL = 1e-12 in the rr and kW state
-    branches.  WW uses the caller-supplied cost_WW values, which were
-    computed with the same LOG_EPS clamp in `_per_site_cost_W_W_kernel`.
-    With Tier 0 (precomputed log_probs), the LOG_EPS clamp is applied
-    in `_log_probs_kernel` so the kernel body itself doesn't clamp;
-    the constant below is kept as a reference but is no longer reached
-    on the rr/kW paths.
+        baseline_cost:   (N,)     float64 — UNCAPPED best-pair NLL/sample
+        wildcard_slots:  (N,)     int64
+        viterbi_ll:      (N,)     float64 — best Viterbi-path LL/sample
     """
-    LOG_EPS_LOCAL = 1e-12
-
-    N = probs_k.shape[0]
-    L = probs_k.shape[1]
-    K = H_k.shape[0]
+    N = C0b.shape[0]
+    n_rr = Mb.shape[0]
+    K_states = n_rr + K + 1
     W = K   # wildcard sentinel
-
-    n_rr = K * (K + 1) // 2
-    K_states = n_rr + K + 1     # rr pairs + (k, W) pairs + (W, W)
 
     A = np.empty((N, 2), dtype=np.int64)
     baseline_cost = np.empty(N, dtype=np.float64)
     wildcard_slots = np.empty(N, dtype=np.int64)
     viterbi_ll = np.empty(N, dtype=np.float64)
 
-    # prange over samples — each sample is independent.  All inner
-    # buffers (bin_emis, state_cost, alpha) are allocated INSIDE the
-    # prange so they're thread-local and not shared across samples.
     for s in prange(N):
-        # Per-sample storage
         bin_emis = np.empty((K_states, n_bins), dtype=np.float64)
         state_cost = np.empty(K_states, dtype=np.float64)
-
-        # =================================================================
-        # Single (state, l) walk for rr and kW states.  WW state is
-        # filled from precomputed arrays below (no inner l loop).
-        # State iteration order matches _update_A_baseline_kernel and
-        # _viterbi_binned_emissions_kernel so argmin tiebreak and Viterbi
-        # state indices are aligned: rr pairs (i, j) with i <= j in row-
-        # major, then (k, W) in k order, then (W, W).
-        # =================================================================
         st = 0
 
-        # ----- Real-real pairs (i, j) with i <= j -----
-        # Per-site emission: log P(g = H[i,l] + H[j,l]).  Baseline cost
-        # accumulates -log p; Viterbi bin accumulates +log p.  Reads
-        # the precomputed log_probs[s, l, d] (Tier 0) instead of
-        # computing log(probs[s, l, d]) inline.
-        for i in range(K):
-            for j in range(i, K):
-                cost_total = 0.0
-                for b in range(n_bins):
-                    start = b * snps_per_bin
-                    end = start + snps_per_bin
-                    if end > L:
-                        end = L
-                    bin_acc = 0.0
-                    for l in range(start, end):
-                        d = H_k[i, l] + H_k[j, l]
-                        lp = log_probs[s, l, d]
-                        bin_acc += lp
-                        cost_total += -lp
-                    bin_emis[st, b] = bin_acc
-                state_cost[st] = cost_total
-                st += 1
+        # ----- Real-real pairs (i, j) with i <= j (row-major) -----
+        # Per-bin emission C0b + Ub[i] + Ub[j] + Mb[pair]; state cost is
+        # the negated sum over bins (= -total LL under this pair).
+        for p in range(n_rr):
+            i = rr_i[p]
+            j = rr_j[p]
+            cost_total = 0.0
+            for b in range(n_bins):
+                e = C0b[s, b] + Ub[i, s, b] + Ub[j, s, b] + Mb[p, s, b]
+                bin_emis[st, b] = e
+                cost_total += e
+            state_cost[st] = -cost_total
+            st += 1
 
         # ----- Real-W pairs (k, W) -----
-        # Per-site emission: log max(P(H[k,l]), P(H[k,l]+1)) - lam.
-        # Baseline cost: -log pmax + lam.  Same scalars, negated.
-        # Using monotonicity of log, log max(p0, p1) = max(log p0,
-        # log p1), so we compare/select directly on precomputed log
-        # values.  The post-EPS-clamp comparison on raw probs (p0 > p1
-        # with both >= EPS) is identical to the comparison on log_probs
-        # values, because log is strictly monotonic on the positive
-        # reals.  When p0 < EPS we read log_probs[..., d0] = log(EPS)
-        # and likewise for d1, recovering the legacy EPS-clamp result.
         for k in range(K):
             cost_total = 0.0
             for b in range(n_bins):
-                start = b * snps_per_bin
-                end = start + snps_per_bin
-                if end > L:
-                    end = L
-                bin_acc = 0.0
-                for l in range(start, end):
-                    d0 = H_k[k, l]
-                    d1 = d0 + 1
-                    lp0 = log_probs[s, l, d0]
-                    lp1 = log_probs[s, l, d1]
-                    lp = lp0 if lp0 > lp1 else lp1
-                    bin_acc += lp - lam
-                    cost_total += -lp + lam
-                bin_emis[st, b] = bin_acc
-            state_cost[st] = cost_total
+                e = kW_Cb[s, b] + kW_Ub[k, s, b]
+                bin_emis[st, b] = e
+                cost_total += e
+            state_cost[st] = -cost_total
             st += 1
 
-        # ----- (W, W) — from precomputed cost_WW and WW_bin_emis -----
-        # Baseline cost: sum_l cost_WW[s, l] (left-to-right; matches
-        # the legacy inline summation order bit-for-bit).
-        # Viterbi bin emissions: precomputed copy.
+        # ----- (W, W) — bit-identical to the scalar fused kernel -----
+        # State cost: sum_l cost_WW[s, l] left-to-right; bin emissions are
+        # the precomputed WW_bin_emis row.
         cost_total = 0.0
         for l in range(L):
             cost_total += cost_WW[s, l]
@@ -1305,12 +1232,7 @@ def _update_A_fused_kernel(probs_k, H_k, lam, penalty, snps_per_bin, n_bins,
             bin_emis[st, b] = WW_bin_emis[s, b]
         state_cost[st] = cost_total
 
-        # =================================================================
-        # Baseline argmin (strict-< first-occurrence tiebreak, matching
-        # _update_A_baseline_kernel).  state_cost layout: rr (i,j) row-
-        # major for slots [0..n_rr), then kW for slots [n_rr..n_rr+K),
-        # then (W,W) at slot n_rr+K.
-        # =================================================================
+        # ----- Baseline argmin (strict-< first-occurrence tiebreak) -----
         best_cost = np.inf
         best_state_idx = 0
         for st_iter in range(K_states):
@@ -1318,8 +1240,6 @@ def _update_A_fused_kernel(probs_k, H_k, lam, penalty, snps_per_bin, n_bins,
                 best_cost = state_cost[st_iter]
                 best_state_idx = st_iter
 
-        # Map best_state_idx back to (a, b, wcs).  For rr block, decode
-        # row-major upper-triangular index by walking rows in order.
         if best_state_idx < n_rr:
             remaining = best_state_idx
             for i in range(K):
@@ -1341,12 +1261,7 @@ def _update_A_fused_kernel(probs_k, H_k, lam, penalty, snps_per_bin, n_bins,
 
         baseline_cost[s] = best_cost
 
-        # =================================================================
-        # Viterbi forward on bin_emis (in-place alpha, matching
-        # viterbi_score_selection's exact pattern).  Single buffer; the
-        # update for state k only reads alpha[k] (its own old value) and
-        # the pre-computed best_prev, so in-place is correct.
-        # =================================================================
+        # ----- Viterbi forward on bin_emis (in-place alpha) -----
         alpha = np.empty(K_states, dtype=np.float64)
         for st_iter in range(K_states):
             alpha[st_iter] = bin_emis[st_iter, 0]
@@ -1370,44 +1285,6 @@ def _update_A_fused_kernel(probs_k, H_k, lam, penalty, snps_per_bin, n_bins,
         viterbi_ll[s] = best_final
 
     return A, baseline_cost, wildcard_slots, viterbi_ll
-
-
-@njit(cache=True)
-def _update_A_translate_kernel(best_idx, pair_idx_arr, n_rr, K):
-    """Translate a flat best-pair index back to (a, b) and wildcard slots.
-
-    Index layout in best_idx (matches all_costs concatenation in _update_A):
-        [0 .. n_rr)         real-real pair states; pair_idx_arr[p] = (i, j)
-        [n_rr .. n_rr + K)  real-W pair states; bi - n_rr = real founder index
-        n_rr + K            (W, W) state
-
-    Returns (A, wildcard_slots) where:
-        A:               (N, 2) int64, with W = K used as the wildcard sentinel.
-                         Entries are canonical (real-first, W-second for kW;
-                         real-real pairs come straight from pair_idx_arr).
-        wildcard_slots:  (N,) int64 in {0, 1, 2}
-    """
-    N = best_idx.shape[0]
-    W = K
-    A = np.empty((N, 2), dtype=np.int64)
-    wildcard_slots = np.empty(N, dtype=np.int64)
-
-    for s in range(N):
-        bi = best_idx[s]
-        if bi < n_rr:
-            A[s, 0] = pair_idx_arr[bi, 0]
-            A[s, 1] = pair_idx_arr[bi, 1]
-            wildcard_slots[s] = 0
-        elif bi < n_rr + K:
-            k_real = bi - n_rr
-            A[s, 0] = k_real
-            A[s, 1] = W
-            wildcard_slots[s] = 1
-        else:
-            A[s, 0] = W
-            A[s, 1] = W
-            wildcard_slots[s] = 2
-    return A, wildcard_slots
 
 
 # =============================================================================
@@ -1813,12 +1690,13 @@ def _fit_at_fixed_K(probs_k, H_init, lam, max_iter=50):
     # cost_WW.  Same for log_probs (Tier 0), which depends only on
     # probs_k.  We compute all three here and thread them through.
     #
-    # The fused _update_A_fused_kernel skips its WW state's inner site-
-    # loop entirely (replaced by writes from WW_bin_emis) and reads
-    # log_probs[s, l, d] inline in the rr and kW branches instead of
-    # calling math.log per visit.  The M-step kernel
-    # _update_one_founder_kernel reads cost_WW[s, l] for the cap value
-    # and log_probs[s, l, g] for the per-genotype cost.
+    # The fused _update_A_fused_blas_kernel takes the WW state's bin
+    # emissions from WW_bin_emis (no inner WW site-loop), while the rr/kW
+    # state emissions come from GEMM contractions of log_probs-derived
+    # arrays (built once by _update_A_blas_lp_precompute) rather than
+    # per-visit log() calls.  The M-step kernel _update_one_founder_kernel
+    # reads cost_WW[s, l] for the cap value and log_probs[s, l, g] for the
+    # per-genotype cost.
     # ---------------------------------------------------------------------
     L = probs_k.shape[1]
     cost_WW = _per_site_cost_W_W(probs_k, lam)
@@ -1834,8 +1712,21 @@ def _fit_at_fixed_K(probs_k, H_init, lam, max_iter=50):
         cost_WW_c = _maybe_c_contig(cost_WW, np.float64)
         WW_bin_emis = _ww_bin_emis_from_cost_ww(
             cost_WW_c, int(_snps_per_bin), int(_n_bins))
+        # Pre-bake the BLAS-hybrid kernel's log_probs-derived inputs ONCE
+        # (invariant across CD iterations, exactly like cost_WW /
+        # WW_bin_emis / log_probs above).  _update_A threads these through
+        # so only the H-dependent GEMMs run per iteration — the bulk of
+        # the K-growth speedup.  Skipped at K=0, where the baseline
+        # _update_A path doesn't invoke the kernel.
+        if H.shape[0] > 0:
+            _blas_lp_cache = _update_A_blas_lp_precompute(
+                _maybe_c_contig(log_probs, np.float64), float(lam),
+                int(_snps_per_bin), int(_n_bins))
+        else:
+            _blas_lp_cache = None
     else:
         WW_bin_emis = None
+        _blas_lp_cache = None
 
     # Tracks whether we need to recompute A and per-sample costs after
     # the loop exits.  When the loop exits via CD CONVERGENCE
@@ -1861,7 +1752,7 @@ def _fit_at_fixed_K(probs_k, H_init, lam, max_iter=50):
         # recomputing inside.
         A, per_sample_cost, per_sample_cost_unc, wildcard_slots = _update_A(
             probs_k, H, lam, cost_WW=cost_WW, WW_bin_emis=WW_bin_emis,
-            log_probs=log_probs)
+            log_probs=log_probs, blas_lp_cache=_blas_lp_cache)
 
         # Convergence check via A
         a_changed = (A_prev is None) or (not np.array_equal(A, A_prev))
@@ -1886,7 +1777,7 @@ def _fit_at_fixed_K(probs_k, H_init, lam, max_iter=50):
         # call may have changed H, making A stale).  Recompute.
         A, per_sample_cost, per_sample_cost_unc, wildcard_slots = _update_A(
             probs_k, H, lam, cost_WW=cost_WW, WW_bin_emis=WW_bin_emis,
-            log_probs=log_probs)
+            log_probs=log_probs, blas_lp_cache=_blas_lp_cache)
     # Use UNCAPPED NLL as the K-growth signal (see docstring).
     total_NLL = float(per_sample_cost_unc.sum())
 
@@ -1943,7 +1834,6 @@ def _compute_bic(K, nll, cc):
     the absolute number is informative when comparing across K.
     """
     return K * cc + 2.0 * nll
-
 
 
 def _compute_nll_for_subset(haps_list, probs_k, lam):
@@ -2236,6 +2126,100 @@ def _viterbi_partial_binned_emissions_kernel(
     return out_tensor
 
 
+# Per-cache byte budget for the precomputed full-pool emission tensor built
+# in PoolEmissionCache.__init__.  When the tensor would exceed this, the
+# cache skips the allocation and falls back to on-the-fly per-subset scoring
+# (see the MEMORY GUARD block in __init__).  The tensor's state axis is
+# K_states = K_pool*(K_pool+1)//2 + K_pool + 1, i.e. O(K_pool^2); at the
+# small pools (<= ~30) that block discovery produces at normal read depth it
+# is a ~30 MB speed win, but at low read depth the trio/pairwise candidate
+# pool can balloon to thousands and the tensor then runs to hundreds of GiB
+# (K_pool=3398, N=320, n_bins=20 -> 276 GiB), OOM-killing the worker.
+# 256 MiB caps a single cache's tensor at K_pool ~ 100 (at N=320, n_bins=20).
+# Block discovery runs up to n_processes workers concurrently, each of which
+# may hold one seed-trim cache, so the worst-case aggregate is bounded by
+# ~256 MiB * n_processes (~29 GiB at 112 workers) rather than the unbounded
+# hundreds-of-GiB a single low-depth block could otherwise demand.  Tunable:
+# raise it on large-memory nodes to keep the fast path for bigger pools,
+# lower it when running many workers on a memory-tight node.
+POOL_EMISSION_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+
+@njit(cache=True, parallel=True, fastmath=False)
+def _viterbi_subset_from_pool_kernel(pool_tensor, pool_state_indices, penalty):
+    """Flat-penalty Viterbi best-path score per sample, scoring ONLY the
+    subset of states named by `pool_state_indices`, read in place from
+    the full pool emission tensor.
+
+    Bit-identical to (and a drop-in for) the legacy query path::
+
+        sub_tensor = np.ascontiguousarray(
+            pool_tensor[:, pool_state_indices, :])
+        best_ll    = viterbi_score_selection(sub_tensor, penalty)
+
+    but without materialising `sub_tensor`.  The fancy-index gather plus
+    its ascontiguousarray copy were the dominant cost of nll_for_subset
+    (each subset query rebuilt a (N, K_sub_states, n_bins) tensor); the
+    Viterbi DP itself is cheap.  This kernel folds the state selection
+    into the DP's emission reads: wherever viterbi_score_selection reads
+    ll_tensor[s, k, i], this reads pool_tensor[s, pool_state_indices[k], i]
+    — the SAME scalar by construction of the gather — and runs the
+    identical recurrence in the identical left-to-right order, so the
+    returned best-path scores match the legacy path to the last bit.
+
+    Arguments:
+        pool_tensor:        (N, K_pool_states, n_bins) float64 — the
+                            cache's full emission tensor.
+        pool_state_indices: (K_sub_states,) int64 — state-axis indices
+                            (into pool_tensor) of the subset's states,
+                            as produced by _build_pool_state_index_map_kernel.
+        penalty:            flat switch penalty (float).
+
+    Returns:
+        (N,) float64 best-path score per sample (NLL = -sum).
+    """
+    n_samples = pool_tensor.shape[0]
+    K = pool_state_indices.shape[0]
+    n_sites = pool_tensor.shape[2]
+    best_scores = np.empty(n_samples, dtype=np.float64)
+
+    for s in prange(n_samples):
+        # Buffer for current scores (faster than allocation in loop)
+        current_scores = np.empty(K, dtype=np.float64)
+        for k in range(K):
+            current_scores[k] = pool_tensor[s, pool_state_indices[k], 0]
+
+        for i in range(1, n_sites):
+            # 1. Find best previous score globally
+            best_prev = -np.inf
+            for k in range(K):
+                if current_scores[k] > best_prev:
+                    best_prev = current_scores[k]
+
+            # The baseline score if we switch INTO a state
+            switch_base = best_prev - penalty
+
+            # 2. Update states
+            for k in range(K):
+                emission = pool_tensor[s, pool_state_indices[k], i]
+                stay = current_scores[k]
+
+                # Max(Stay, Switch)
+                if stay > switch_base:
+                    current_scores[k] = stay + emission
+                else:
+                    current_scores[k] = switch_base + emission
+
+        # Final max
+        final_max = -np.inf
+        for k in range(K):
+            if current_scores[k] > final_max:
+                final_max = current_scores[k]
+        best_scores[s] = final_max
+
+    return best_scores
+
+
 class PoolEmissionCache:
     """Precomputed Viterbi-emission tensor for a fixed hap pool.
 
@@ -2298,6 +2282,14 @@ class PoolEmissionCache:
 
         self.n_rr_pool = self.K_pool * (self.K_pool + 1) // 2
 
+        # Memory-guard fallback flag.  Set True by the MEMORY GUARD block
+        # below when the full-pool emission tensor would exceed
+        # POOL_EMISSION_CACHE_MAX_BYTES, in which case nll_for_subset scores
+        # each subset on the fly instead of indexing a precomputed tensor.
+        # Initialised here so every constructor exit path — including the
+        # K_pool == 0 early return — leaves it defined for nll_for_subset.
+        self._fallback = False
+
         # Store reference to probs_k for the incremental-build path's
         # compatibility check.  We use object identity (`is`) below to
         # decide if a `prev_cache` argument is compatible — this is
@@ -2324,6 +2316,35 @@ class PoolEmissionCache:
 
         if self.K_pool == 0:
             # Empty pool: only K=0 subsets queryable.  No tensor needed.
+            self._pool_tensor = None
+            self._log_probs = None
+            return
+
+        # ---------------------------------------------------------------
+        # MEMORY GUARD: fall back to on-the-fly scoring for huge pools.
+        # The full-pool emission tensor built below is O(K_pool^2) in its
+        # state axis (K_states = n_rr_pool + K_pool + 1).  At normal read
+        # depth the candidate pool is small (<= ~30) and this tensor is a
+        # ~30 MB speed win, but at low read depth the trio/pairwise pool can
+        # balloon to thousands and the tensor then runs to hundreds of GiB
+        # (e.g. K_pool=3398, N=320, n_bins=20 -> 276 GiB), OOM-killing the
+        # worker.  When the tensor would exceed POOL_EMISSION_CACHE_MAX_BYTES
+        # we skip building it and set self._fallback; nll_for_subset then
+        # scores each subset directly via _compute_nll_for_subset, which the
+        # class-header equivalence argument certifies is bit-identical to the
+        # cached path (every construction site uses the default penalty /
+        # snps_per_bin that _compute_nll_for_subset also uses; verified for
+        # all call sites).  This reproduces the pre-cache behaviour — slower
+        # per query, bounded memory — so it changes run time, never results.
+        # _pool_tensor / _log_probs are left None so a later cache's
+        # can_reuse_prev check (which requires prev._pool_tensor is not None)
+        # correctly declines to reuse a fallback cache as prev_cache.
+        # ---------------------------------------------------------------
+        pool_tensor_bytes = (
+            self.N * (self.n_rr_pool + self.K_pool + 1) * self.n_bins * 8
+        )
+        if pool_tensor_bytes > POOL_EMISSION_CACHE_MAX_BYTES:
+            self._fallback = True
             self._pool_tensor = None
             self._log_probs = None
             return
@@ -2505,6 +2526,17 @@ class PoolEmissionCache:
             # for bit-identity with legacy _compute_nll_for_subset([], ...).
             return self._nll_K0
 
+        if self._fallback:
+            # Memory-guard fallback (see the MEMORY GUARD block in __init__):
+            # the full-pool emission tensor was too large to materialise, so
+            # score this subset directly.  Bit-identical to the cached path
+            # per the class-header equivalence argument — every construction
+            # site uses the default penalty / snps_per_bin that
+            # _compute_nll_for_subset also uses — so only run time differs.
+            return _compute_nll_for_subset(
+                [self.pool_haps[i] for i in subset_indices],
+                self._probs_k_ref, self.lam)
+
         if self._pool_tensor is None:
             raise ValueError(
                 "PoolEmissionCache was built with empty pool; only "
@@ -2516,15 +2548,245 @@ class PoolEmissionCache:
         si = np.asarray(subset_indices, dtype=np.int64)
         pool_state_indices = _build_pool_state_index_map_kernel(si, self.K_pool)
 
-        # Fancy-index the pool tensor along the state axis to assemble
-        # the subset's emission tensor.  Numpy creates a copy here;
-        # ascontiguousarray is a no-op if already contiguous but
-        # guarantees the layout viterbi_score_selection expects.
-        sub_tensor = np.ascontiguousarray(
-            self._pool_tensor[:, pool_state_indices, :])
-
-        # Run flat-penalty Viterbi on the subset tensor.  Same kernel
-        # used by _viterbi_ll_per_sample.  Returns (N,) of best-path
-        # LL per sample.  NLL = -sum.
-        best_ll = viterbi_score_selection(sub_tensor, self.penalty)
+        # Score the subset's states directly from the pool tensor via the
+        # state-index map, with NO intermediate (N, K_sub_states, n_bins)
+        # tensor.  The legacy path fancy-indexed
+        # self._pool_tensor[:, pool_state_indices, :] and copied it to a
+        # contiguous sub_tensor for viterbi_score_selection; that gather +
+        # ascontiguousarray copy was the dominant per-query cost (the
+        # Viterbi DP itself is cheap).  _viterbi_subset_from_pool_kernel
+        # folds the state selection into the DP's emission reads and is
+        # bit-identical to viterbi_score_selection(sub_tensor, penalty) —
+        # it reads the SAME scalars in the SAME recurrence order.  Returns
+        # (N,) of best-path LL per sample.  NLL = -sum.
+        best_ll = _viterbi_subset_from_pool_kernel(
+            self._pool_tensor, pool_state_indices, self.penalty)
         return -float(best_ll.sum())
+
+
+# =============================================================================
+# SHARED LOW-READ-DEPTH CANDIDATE-GENERATION PRIMITIVES
+# =============================================================================
+#
+# The candidate generators that feed stage-3 founder discovery — trio
+# recovery and homozygous-sample recovery (bhd_trio), the k-medoids
+# multistart seeding (block_haplotypes_discrete), the Bernoulli-mixture /
+# kmeans++ subtraction recovery (bhd_recovery), and pairwise common-hap
+# recovery (bhd_pairwise) — have historically reduced each sample's
+# posteriors to a hard argmax dosage (and, in trio, an XOR/parity form)
+# before clustering or comparing samples.  Hard calls are fine at the read
+# depths those paths were validated on (>= ~10x), but they discard exactly
+# the information that survives at low read depth:
+#
+#   - A zero-coverage site has a ~uniform posterior; argmax calls it dosage
+#     0, which is indistinguishable from a true hom-ref call and injects
+#     spurious agreement into every sample-sample comparison.
+#   - A heterozygous site at low depth (one read) is read as a RANDOM
+#     homozygote, so two true-het samples look like a hard 0-vs-2
+#     disagreement even though their posteriors still place real mass on
+#     the het genotype.
+#
+# These primitives operate on the full posteriors instead of hard calls, so
+# the low-depth signal is retained.  They are SHARED so that every generator
+# uses one validated implementation:
+#
+#   - soft_agreement_similarity(probs_k):
+#       (N, N) expected per-site genotype-agreement matrix under the
+#       posteriors.  Replaces "argmax then pairwise Hamming" as the
+#       sample-sample similarity used for clustering.  It is homoscedastic
+#       by construction — every pair is averaged over all L sites, so unlike
+#       a masked-Hamming distance (whose denominator is the variable count
+#       of jointly-informative sites) it does not assign systematically
+#       noisier distances to low-overlap pairs; a uniform (zero-coverage)
+#       site contributes the same constant 1/3 agreement term to every pair
+#       and so needs no masking.
+#   - alt_fractions(probs_k):
+#       (N, L) per-(sample, site) expected alt-allele fraction E[dosage]/2.
+#       Pooling this across a cluster's members (alt[members].mean(axis=0))
+#       gives a signal-boosted per-site estimate that reveals het sites a
+#       per-sample mode/argmax consensus would collapse: a het site of the
+#       cluster's pair-type pools to ~0.5 (both alleles seen across the
+#       shallow members), a hom site to ~0 or ~1.
+#   - pooled_alt_to_dosage / cluster_homozygosity_score / pooled_alt_to_hap:
+#       small deterministic readers of a pooled-alt vector — call the
+#       dosage {0, 1, 2}, score how homozygous a cluster looks (fraction of
+#       sites NOT sitting in the het band), and read a binary founder hap
+#       off a (presumed homozygous) cluster.
+#
+# IMPORTANT: nothing in the existing code path calls these.  They are
+# dormant additions; each consumer opts in behind its own switch (e.g.
+# bhd_trio's TRIO_CLUSTER).  With those switches off, behaviour is
+# bit-identical to before, because these functions are simply never
+# invoked.  This keeps the additions safe to land ahead of the consumers.
+#
+# Dependency note: these use only numpy (the soft-agreement matrix is built
+# with BLAS matmul; the remaining primitives are elementwise / reduction
+# numpy), consistent with this module's "numpy + math +
+# block_haplotypes.viterbi_score_selection only" contract.  The actual
+# clustering call (HDBSCAN etc.) lives in the consumer modules, not here, so
+# this module pulls in no new dependency.
+#
+# Thresholds are module constants (documented below) so every consumer
+# applies identical cut-points; tune here to retune all consumers at once.
+
+# Pooled alt-allele fraction cut-points for calling a consensus dosage in
+# {0, 1, 2} from a cluster's pooled-alt vector (see pooled_alt_to_dosage).
+# A homozygous-ref pair-type pools to ~0, het to ~0.5, homozygous-alt to ~1.
+# 0.25 / 0.75 place the {0|1} and {1|2} boundaries midway between those
+# modes, matching the natural 0 / 0.5 / 1 structure of the expected alt
+# fraction.  Symmetric about 0.5.
+POOLED_ALT_LO = 0.25
+POOLED_ALT_HI = 0.75
+
+# Het-band edges for the cluster-homozygosity score (see
+# cluster_homozygosity_score).  A site whose pooled-alt sits in
+# (CLUSTER_HOM_BAND_LO, CLUSTER_HOM_BAND_HI) is counted as a het site of the
+# cluster's pair-type; the score is 1 minus the fraction of such sites, so a
+# genuinely homozygous cluster (no het sites) scores ~1 and a heterozygous
+# pair-type (about half its sites het) scores ~0.5.  The (0.35, 0.65) band
+# is narrower than the (0.25, 0.75) dosage band on purpose: the score should
+# count only sites that are clearly intermediate (near 0.5), not sites near
+# the 0.25 / 0.75 dosage boundaries that are still essentially hom calls.
+CLUSTER_HOM_BAND_LO = 0.35
+CLUSTER_HOM_BAND_HI = 0.65
+
+
+def soft_agreement_similarity(probs_k):
+    """(N, N) expected per-site genotype-agreement matrix under posteriors.
+
+        S[i, j] = (1 / L) * sum_l sum_g probs_k[i, l, g] * probs_k[j, l, g]
+
+    The inner sum_g probs_k[i, l, g] * probs_k[j, l, g] is P(G_i = G_j) at
+    site l when G_i and G_j are independent draws from their respective
+    posteriors; averaging over the L sites gives the expected fraction of
+    sites at which the two samples' genotypes agree.  Range [0, 1].
+
+    Computed via BLAS: for each genotype channel g, the (N, N) Gram matrix
+    of the (N, L) slice probs_k[:, :, g] is Pg @ Pg.T; the three Gram
+    matrices are summed and the result divided by L.  This is ~6x faster
+    than an explicit njit triple loop even under the single-threaded BLAS
+    that thread_config.py enforces (GEMM is cache-blocked and vectorised in
+    ways a plain loop is not), and the matrix build is the per-block-
+    dominant cost of the clustering front-end, so the speedup matters.
+
+    DETERMINISM NOTE: unlike this module's Viterbi / BIC kernels — which use
+    explicit, fixed-order summation because they back bit-identity
+    equivalence claims — the matmul's reduction order over the L axis is
+    BLAS-internal and therefore NOT guaranteed bit-stable across BLAS
+    libraries, versions, or thread counts.  The resulting variation is at
+    the float-rounding level (~1e-15 vs an explicit left-to-right loop), and
+    the only consumer of this matrix is HDBSCAN clustering, whose label
+    assignments are insensitive to such perturbations.  This primitive
+    therefore makes NO bit-identity claim, and callers must not rely on its
+    output being reproducible to the last bit across environments.
+
+    The matrix is symmetric (Pg @ Pg.T is symmetric for every g, and a sum
+    of symmetric matrices is symmetric).  The diagonal S[i, i] =
+    (1/L) sum_l sum_g probs_k[i, l, g]^2 is the sample's self-agreement
+    (equal to 1 only where the posterior is a point mass).  Callers that
+    need a distance typically use `S.max() - S` with a zeroed diagonal.
+
+    Inputs:
+        probs_k: (N, L, 3) float64 — per-(sample, site) genotype posteriors.
+                 Made C-contiguous float64 internally (no copy when already
+                 so, via `_maybe_c_contig`); each per-genotype slice is also
+                 forced contiguous for BLAS.
+
+    Returns:
+        S: (N, N) float64 — symmetric expected-agreement matrix.
+    """
+    probs_c = _maybe_c_contig(probs_k, np.float64)
+    N = probs_c.shape[0]
+    L = probs_c.shape[1]
+    S = np.zeros((N, N), dtype=np.float64)
+    # Sum the three per-genotype Gram matrices (g = 0, 1, 2), then scale by
+    # 1/L.  Each slice is forced C-contiguous so BLAS takes its fast path.
+    for g in range(3):
+        Pg = np.ascontiguousarray(probs_c[:, :, g])
+        S += Pg @ Pg.T
+    S /= float(L)
+    return S
+
+
+def alt_fractions(probs_k):
+    """(N, L) per-(sample, site) expected alt-allele fraction E[dosage]/2.
+
+        alt[s, l] = 0.5 * probs_k[s, l, 1] + probs_k[s, l, 2]
+                  = (1 * P(g=1) + 2 * P(g=2)) / 2 = E[dosage] / 2
+
+    Range [0, 1].  Pooling across a cluster's members
+    (alt[members].mean(axis=0)) yields the signal-boosted per-site estimate
+    described in the section header: a homozygous-ref pair-type pools to ~0,
+    a het pair-type to ~0.5, a homozygous-alt pair-type to ~1.
+
+    Pure vectorised numpy (an elementwise combination of two genotype
+    channels, with no reduction across samples), so it is fully
+    deterministic and needs no kernel.
+    """
+    return 0.5 * probs_k[:, :, 1] + probs_k[:, :, 2]
+
+
+def pooled_alt_to_dosage(pooled_alt, lo=POOLED_ALT_LO, hi=POOLED_ALT_HI):
+    """Call a per-site consensus dosage in {0, 1, 2} from a pooled-alt vector.
+
+        pooled_alt[l] < lo  -> 0 (hom-ref)
+        pooled_alt[l] > hi  -> 2 (hom-alt)
+        otherwise           -> 1 (het)
+
+    Defaults lo = POOLED_ALT_LO (0.25), hi = POOLED_ALT_HI (0.75).  Values
+    landing exactly on lo or hi fall through to the het call (1); this is a
+    negligible measure-zero edge for continuous pooled fractions.
+
+    Arguments:
+        pooled_alt: (L,) float64 — a cluster's per-site pooled alt fraction
+                    (e.g. alt_fractions(probs_k)[members].mean(axis=0)).
+
+    Returns:
+        (L,) int64 dosage in {0, 1, 2}.
+    """
+    d = np.ones(pooled_alt.shape[0], dtype=np.int64)
+    d[pooled_alt < lo] = 0
+    d[pooled_alt > hi] = 2
+    return d
+
+
+def cluster_homozygosity_score(pooled_alt, band_lo=CLUSTER_HOM_BAND_LO,
+                               band_hi=CLUSTER_HOM_BAND_HI):
+    """Fraction of a cluster's sites that are NOT in the het band.
+
+        score = 1 - mean_l[ band_lo < pooled_alt[l] < band_hi ]
+
+    A genuinely homozygous cluster (pair-type (A, A), so no site is truly
+    het) has almost no sites near 0.5 and scores ~1; a heterozygous pair-
+    type (A, B) has about half its sites near 0.5 and scores ~0.5.  Range
+    [0, 1].  Defaults band (band_lo, band_hi) = (CLUSTER_HOM_BAND_LO,
+    CLUSTER_HOM_BAND_HI) = (0.35, 0.65).
+
+    Arguments:
+        pooled_alt: (L,) float64 — a cluster's per-site pooled alt fraction.
+
+    Returns:
+        float in [0, 1] — higher means the cluster looks more homozygous.
+    """
+    in_band = (pooled_alt > band_lo) & (pooled_alt < band_hi)
+    return 1.0 - float(in_band.mean())
+
+
+def pooled_alt_to_hap(pooled_alt):
+    """Read a binary founder hap off a (presumed homozygous) cluster.
+
+        bit[l] = 1 if pooled_alt[l] > 0.5 else 0
+
+    Intended for clusters that `cluster_homozygosity_score` has flagged as
+    homozygous, where pooled_alt sits cleanly near 0 or 1 so the 0.5 cut is
+    unambiguous; the recovered hap is the single haplotype that both strands
+    of those homozygous samples carry.  (A value of exactly 0.5 maps to 0; a
+    negligible measure-zero edge for continuous pooled fractions.)
+
+    Arguments:
+        pooled_alt: (L,) float64 — the cluster's per-site pooled alt fraction.
+
+    Returns:
+        (L,) int64 founder hap in {0, 1}.
+    """
+    return (pooled_alt > 0.5).astype(np.int64)

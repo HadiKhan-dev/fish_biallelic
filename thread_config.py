@@ -97,6 +97,11 @@ try:
         'thread_config',
         'block_haplotypes', 'block_linking', 'hmm_matching',
         'beam_search_core', 'analysis_utils', 'chimera_resolution',
+        # paint_samples + pedigree_inference: the pedigree-inference stage now
+        # runs its Phase 1/2/3 and consistency-cutoff pools on forkserver too,
+        # so preload these once in the server (workers inherit via COW) instead
+        # of each worker re-importing them on spawn.
+        'paint_samples', 'pedigree_inference',
     ])
 except (AttributeError, RuntimeError):
     # set_forkserver_preload not available (old Python) or forkserver
