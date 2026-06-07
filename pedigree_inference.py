@@ -44,10 +44,111 @@ except ImportError:
     prange = range
 
 # =============================================================================
+# FORKSERVER POOL + SHARED MEMORY
+# =============================================================================
+# Workers spawn from a lightweight forkserver process (numba imported but its
+# threadpool NOT launched) instead of forking the parent.  This mirrors
+# block_haplotypes / block_linking_naive and, critically, sidesteps the
+# fork-after-numba-OMP-threadpool deadlock that hung the parent-child scoring
+# pool on clean runs: forkserver children fork from a single-threaded server,
+# so the per-worker numba.set_num_threads() calls in the dynamic-thread
+# reallocation are fork-safe.
+#
+# Large numpy arrays are placed in POSIX SharedMemory (/dev/shm) for zero-copy
+# worker access; small/medium data (paintings, scalars) rides as pickled task
+# args or initializer args.  This avoids the O(num_workers × data_size)
+# pickle blow-up that forkserver's per-worker initarg serialization would
+# otherwise incur on the big founder_blocks / stacked allele grids.
+import multiprocessing as _mp
+import multiprocessing.pool
+from multiprocessing import shared_memory as _shm
+from contextlib import contextmanager as _contextmanager
+
+try:
+    _forkserver_ctx = _mp.get_context('forkserver')
+except (ValueError, AttributeError):
+    _forkserver_ctx = _mp.get_context('fork')
+
+
+class _ForkserverPool(multiprocessing.pool.Pool):
+    """A Pool using the forkserver context (mirrors block_linking_naive)."""
+    def __init__(self, *args, **kwargs):
+        kwargs['context'] = _forkserver_ctx
+        super().__init__(*args, **kwargs)
+
+
+@_contextmanager
+def _safe_forkserver_pool(processes, initializer=None, initargs=()):
+    """Create a forkserver pool with __main__ safety.
+
+    Temporarily clears __main__.__file__/__spec__ so forkserver workers do
+    not re-execute the entry script, restoring them on exit.  Same guard
+    block_linking_naive / block_haplotypes_discrete already use.
+    """
+    import sys as _sys
+    _main_mod = _sys.modules.get('__main__')
+    _saved_file = getattr(_main_mod, '__file__', None)
+    _saved_spec = getattr(_main_mod, '__spec__', None)
+    if _main_mod is not None:
+        if hasattr(_main_mod, '__file__'):
+            del _main_mod.__file__
+        _main_mod.__spec__ = None
+    try:
+        with _ForkserverPool(processes=processes, initializer=initializer,
+                             initargs=initargs) as pool:
+            yield pool
+    finally:
+        if _main_mod is not None:
+            if _saved_file is not None:
+                _main_mod.__file__ = _saved_file
+            _main_mod.__spec__ = _saved_spec
+
+
+def _create_shm_array(arr):
+    """Copy a numpy array into POSIX SharedMemory.  Returns (shm_handle, meta).
+
+    The caller keeps shm_handle alive until all workers have attached, then
+    closes/unlinks it (see _shm_cleanup).  `meta` is a small picklable dict
+    carrying the segment name + shape/dtype, safe to pass through pool
+    initargs; _init_pedigree_shared reconstructs a zero-copy ndarray view
+    from it.  Mirrors block_linking_naive._create_shm_array.
+    """
+    arr = np.ascontiguousarray(arr)
+    shm = _shm.SharedMemory(create=True, size=max(int(arr.nbytes), 1))
+    view = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
+    np.copyto(view, arr)
+    meta = {'shm_name': shm.name, 'shape': tuple(arr.shape), 'dtype': str(arr.dtype)}
+    return shm, meta
+
+
+@_contextmanager
+def _shm_cleanup(shm_handles):
+    """Close + unlink the given SharedMemory segments on exit.
+
+    Used as the OUTER context manager around a forkserver pool
+    (`with _shm_cleanup(handles), _safe_forkserver_pool(...) as pool:`) so
+    the pool's workers all exit BEFORE the segments are unlinked, and the
+    segments are released even if the pool body raises.
+    """
+    try:
+        yield
+    finally:
+        for _h in shm_handles:
+            try:
+                _h.close()
+                _h.unlink()
+            except Exception:
+                pass
+
+
+# =============================================================================
 # SHARED DATA FOR POOL WORKERS (avoids pickling large objects per task)
 # =============================================================================
 
 _PEDIGREE_SHARED = {}
+# Worker-side SharedMemory handles for arrays attached in _init_pedigree_shared;
+# closed at the start of the next initializer call (workers may be recycled).
+_SHM_REFS = []
 
 # ---------------------------------------------------------------------------
 # Two-step dynamic thread reallocation for straggler tasks.
@@ -208,6 +309,66 @@ def _update_dynamic_threads():
         pass
 
 
+class _FounderBlockView:
+    """Lightweight read-only stand-in for a founder block, backed by
+    SharedMemory-resident arrays.
+
+    Exposes exactly the .positions / .haplotypes surface that
+    paint_samples.process_contig_for_pedigree needs: it passes the block to
+    convert_id_grid_to_allele_grid[_multisnp], which read only .positions and
+    .haplotypes (and nothing else).  Verified to produce bit-identical convert
+    output vs the real block across 1-D/2-D haplotypes, contiguous and
+    non-contiguous founder ids, single-founder, max_snps=1, and dense bins.
+    """
+    __slots__ = ('positions', 'haplotypes')
+
+    def __init__(self, positions, haplotypes):
+        self.positions = positions
+        self.haplotypes = haplotypes
+
+
+def _decompose_founder_block(founder_block):
+    """Split a founder block into the arrays needed for SharedMemory transport:
+    (positions, stacked_haplotypes, sorted_keys).
+
+    haplotypes is a dict {int founder_id: hap_array}.  The founder_ids are used
+    downstream as row indices into the allele lookup, so we preserve them
+    exactly (they may be non-contiguous) via sorted_keys and stack the
+    per-founder arrays in that key order.  Each hap_array may be 1-D (alleles)
+    or 2-D (argmax'd by the convert functions); all founders in a block share
+    one shape, so they stack cleanly — we assert this rather than assume it
+    silently.
+    """
+    positions = np.ascontiguousarray(founder_block.positions)
+    sorted_keys = sorted(founder_block.haplotypes.keys())
+    haps = [np.ascontiguousarray(founder_block.haplotypes[k]) for k in sorted_keys]
+    if haps:
+        shape0 = haps[0].shape
+        for h in haps:
+            assert h.shape == shape0, (
+                "founder haplotypes have non-uniform shape and cannot be "
+                "stacked for SharedMemory transport")
+        stacked = np.stack(haps, axis=0)
+    else:
+        stacked = np.empty((0, len(positions)), dtype=np.int8)
+    return positions, stacked, sorted_keys
+
+
+def _attach_shm_view(meta):
+    """Attach a SharedMemory segment the parent created; return
+    (handle, zero-copy ndarray view).
+
+    The parent is the sole lifecycle owner: it unlinks each segment via
+    _shm_cleanup once the pool is closed.  Workers only attach + close (never
+    unlink), matching _init_pedigree_shared.  Reads through the view copy out
+    of shared memory (the convert functions fancy-index / .astype / argmax),
+    so the mapping is treated as read-only.
+    """
+    seg = _shm.SharedMemory(name=meta['shm_name'], create=False)
+    arr = np.ndarray(meta['shape'], dtype=np.dtype(meta['dtype']), buffer=seg.buf)
+    return seg, arr
+
+
 def _init_pedigree_shared(shared_dict, active_counter=None, total_cores=None,
                           extra_counter=None):
     """Pool initializer: store shared data in worker's global scope.
@@ -235,11 +396,47 @@ def _init_pedigree_shared(shared_dict, active_counter=None, total_cores=None,
     Backwards-compatible: callers passing only shared_dict get the
     original pre-counter behavior exactly.
     """
-    global _PEDIGREE_SHARED
+    global _PEDIGREE_SHARED, _SHM_REFS
     global _PEDIGREE_ACTIVE_COUNTER, _PEDIGREE_EXTRA_COUNTER
     global _PEDIGREE_TOTAL_CORES, _PEDIGREE_I_HAVE_EXTRA
     _PEDIGREE_SHARED.clear()
-    _PEDIGREE_SHARED.update(shared_dict)
+    # Detach any SharedMemory segments attached by a previous initializer
+    # call on this worker (workers may be recycled across pools).
+    for _ref in _SHM_REFS:
+        try:
+            _ref.close()
+        except Exception:
+            pass
+    _SHM_REFS = []
+    # Store shared values, reconstructing zero-copy numpy views for any
+    # SharedMemory-backed arrays.  Large arrays (the Phase 2/3 contig_caches
+    # stacked_alleles/stacked_hom_mask) are handed to forkserver workers as
+    # small {shm_name, shape, dtype} metadata dicts rather than pickled per
+    # worker; everything else (paintings, scalars, small cost vectors) is
+    # stored as-is.
+    for _key, _val in shared_dict.items():
+        if _key == 'contig_caches':
+            _rebuilt = []
+            for _cache in _val:
+                _new_cache = {}
+                for _ck, _cv in _cache.items():
+                    if isinstance(_cv, dict) and 'shm_name' in _cv:
+                        _seg = _shm.SharedMemory(name=_cv['shm_name'], create=False)
+                        _SHM_REFS.append(_seg)
+                        _new_cache[_ck] = np.ndarray(
+                            _cv['shape'], dtype=np.dtype(_cv['dtype']),
+                            buffer=_seg.buf)
+                    else:
+                        _new_cache[_ck] = _cv
+                _rebuilt.append(_new_cache)
+            _PEDIGREE_SHARED[_key] = _rebuilt
+        elif isinstance(_val, dict) and 'shm_name' in _val:
+            _seg = _shm.SharedMemory(name=_val['shm_name'], create=False)
+            _SHM_REFS.append(_seg)
+            _PEDIGREE_SHARED[_key] = np.ndarray(
+                _val['shape'], dtype=np.dtype(_val['dtype']), buffer=_seg.buf)
+        else:
+            _PEDIGREE_SHARED[_key] = _val
     _PEDIGREE_ACTIVE_COUNTER = active_counter
     _PEDIGREE_TOTAL_CORES = total_cores
     _PEDIGREE_EXTRA_COUNTER = extra_counter
@@ -612,9 +809,15 @@ class PedigreeResult:
             print(f"[Consistency-Cutoff] Checking {len(trios)} trios across "
                   f"{len(contig_data_list)} chromosomes ({n_workers} workers)...")
 
-        # Store tolerance paintings in shared dict for fork COW
+        # Share ONLY the tolerance paintings with the workers.  The worker
+        # reads contig_data['tolerance_painting'] and never touches
+        # founder_block, so we strip founder_blocks here: forkserver pickles
+        # the initializer args per worker, and broadcasting the ~0.5 GB of
+        # founder_blocks to every worker would OOM, whereas the chunk-list
+        # paintings are compact.
         shared = {
-            'contig_data_list': contig_data_list,
+            'contig_data_list': [{'tolerance_painting': cd['tolerance_painting']}
+                                 for cd in contig_data_list],
             'step': step,
         }
 
@@ -623,19 +826,18 @@ class PedigreeResult:
         for t in trios:
             tasks.append((t['df_idx'], t['child'], t['child_i'], t['p1_i'], t['p2_i']))
 
-        ctx = mp.get_context('fork')
         actual_workers = min(n_workers, len(tasks))
         # Counters for the two-step dynamic-thread reallocation pattern
         # (see module-level _PEDIGREE_ACTIVE_COUNTER docstring).  Fresh
-        # mp.Value('i', 0) per pool so stale state from previous pools
-        # doesn't leak in.  total_cores=actual_workers tells worker
+        # _forkserver_ctx.Value('i', 0) per pool so stale state from previous
+        # pools doesn't leak in.  total_cores=actual_workers tells worker
         # processes the maximum thread budget they can ever request.
-        active_counter = ctx.Value('i', 0)
-        extra_counter = ctx.Value('i', 0)
+        active_counter = _forkserver_ctx.Value('i', 0)
+        extra_counter = _forkserver_ctx.Value('i', 0)
 
-        with ctx.Pool(processes=actual_workers,
-                      initializer=_init_pedigree_shared,
-                      initargs=(shared, active_counter, actual_workers, extra_counter)) as pool:
+        with _safe_forkserver_pool(actual_workers,
+                                   initializer=_init_pedigree_shared,
+                                   initargs=(shared, active_counter, actual_workers, extra_counter)) as pool:
             results = list(tqdm(
                 pool.imap_unordered(_check_trio_consistency_worker, tasks),
                 total=len(tasks),
@@ -1536,22 +1738,41 @@ def _process_contig_batch(args):
     Worker: process a BATCH of samples for one contig in Phase 1.
     Uses IBS-aware single Viterbi painting — accesses SamplePainting.chunks
     directly and derives hom mask from allele identity.
+
+    The contig's tolerance painting + the binning scalars arrive DIRECTLY in
+    the task args; the founder block arrives via per-contig SharedMemory
+    (referenced by metadata in the task args) so it is materialized once per
+    contig and shared zero-copy across that contig's sample-batch tasks,
+    instead of unpickling a private ~founder-block-sized copy per task.  The
+    worker touches no module-global shared state.
     """
     from paint_samples import process_contig_for_pedigree
-    
-    contig_idx, sample_start, sample_end = args
-    contig_data = _PEDIGREE_SHARED['contig_data_list'][contig_idx]
-    tol_painting = contig_data['tolerance_painting']
-    founder_block = contig_data['founder_block']
-    snps_per_bin = _PEDIGREE_SHARED['snps_per_bin']
-    recomb_rate = _PEDIGREE_SHARED['recomb_rate']
-    max_snps_per_bin = _PEDIGREE_SHARED['max_snps_per_bin']
-    
-    return process_contig_for_pedigree(
-        contig_idx, sample_start, sample_end,
-        tol_painting, founder_block,
-        snps_per_bin, recomb_rate, max_snps_per_bin
-    )
+
+    (contig_idx, sample_start, sample_end, tol_painting, founder_meta,
+     snps_per_bin, recomb_rate, max_snps_per_bin) = args
+
+    # Rebuild the founder block from its per-contig SharedMemory segments.
+    # The proxy exposes the same .positions / .haplotypes surface the convert
+    # functions read; keys preserve the (possibly non-contiguous) founder ids,
+    # and stacked[i] is a zero-copy row view for founder keys[i].
+    pos_seg, positions = _attach_shm_view(founder_meta['positions'])
+    hap_seg, stacked = _attach_shm_view(founder_meta['haplotypes'])
+    keys = founder_meta['keys']
+    haplotypes = {keys[i]: stacked[i] for i in range(len(keys))}
+    founder_block = _FounderBlockView(positions, haplotypes)
+
+    try:
+        return process_contig_for_pedigree(
+            contig_idx, sample_start, sample_end,
+            tol_painting, founder_block,
+            snps_per_bin, recomb_rate, max_snps_per_bin
+        )
+    finally:
+        # process_contig_for_pedigree has already copied the founder data into
+        # the returned allele grids (the convert functions copy), so detaching
+        # here is safe; the parent still owns + unlinks the segments.
+        pos_seg.close()
+        hap_seg.close()
 
 
 def _score_contig_pairs(contig_idx):
@@ -1689,7 +1910,7 @@ def _score_trios_batch(batch_sample_args):
     and claim an extra thread; rescale numba threads to floor+extra.
     On exit, release the extra and decrement.  Inside the per-contig
     loop, _update_dynamic_threads() lets the worker rebalance as peers
-    finish -- the major Phase 2 win because that's where the bulk of
+    finish -- the major Phase 3 win because that's where the bulk of
     pipeline time is spent and where the work-distribution tail is.
     """
     # Counter inc/threads-up on entry.  See _check_trio_consistency_worker
@@ -1778,7 +1999,7 @@ def _score_trios_batch(batch_sample_args):
                 # tasks, this worker re-checks the active count and may
                 # claim newly-available extras (or release if active
                 # grew).  This is the most impactful hook in the file --
-                # Phase 2 tail dynamics depend on it.
+                # Phase 3 tail dynamics depend on it.
                 _update_dynamic_threads()
 
                 stacked = cache['stacked_alleles']
@@ -1831,7 +2052,7 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     """
     Multi-contig pedigree inference using tolerance paintings with multi-SNP voting.
 
-    Phase 2 candidate-pair enumeration:
+    Phase 3 candidate-pair enumeration:
       use_anchor_union=False  (legacy):
           For each child i, enumerate trios from top_k × top_k candidates
           where the candidate set is filtered by the +5 margin generation
@@ -1844,8 +2065,8 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
             (b) top_anchor_k × all-N -- each of the top anchor_k candidates
                 is paired with every other valid sample (both orderings).
           This catches asymmetric cases where one true parent dominates
-          Phase 1b scoring so much that the other true parent falls outside
-          top-K.  Cost: ~17-18x current Phase 2; mathematically a strict
+          Phase 2 scoring so much that the other true parent falls outside
+          top-K.  Cost: ~17-18x current Phase 3; mathematically a strict
           superset of the legacy candidate pair set.
     """
     import multiprocessing as mp
@@ -1868,31 +2089,62 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     # (contig, sample_batch) pairs to use all cores, not just 7.
     # With 7 contigs × ~10 batches each = ~70 tasks across 112 cores.
     samples_per_phase1_batch = max(1, num_samples // max(1, n_workers // num_contigs))
-    
+
+    # Move each contig's founder block into per-contig SharedMemory once, then
+    # share it zero-copy across that contig's sample-batch tasks.  This
+    # replaces the previous option-(a) scheme that pickled a private copy of
+    # the whole founder_block into every (contig, sample_batch) task — at ~112
+    # workers that re-pickling was the dominant Phase 1 transient.  Only the
+    # (small) tolerance painting + binning scalars now ride in the task args;
+    # the founder block rides as SharedMemory metadata, and the worker rebuilds
+    # a read-only _FounderBlockView (bit-identical convert output, verified).
+    #
+    # As soon as a contig's block is copied into shm we release the parent's
+    # reference to the original object: founder_blocks are unused after Phase 1
+    # (Phase 2/3 use the stacked allele arrays; the consistency cutoff uses
+    # paintings only).  When the caller has also released its reference (it
+    # evicts the checkpoint-backed super_blocks_L4 before calling and re-loads
+    # it for the later phase-correction step), this frees the original
+    # immediately — so the large founder set is not held through Phase 2/3.
+    _phase1_shm_handles = []
+    contig_founder_meta = {}
+    for c_idx in range(num_contigs):
+        cd = contig_data_list[c_idx]
+        positions, stacked_haps, sorted_keys = _decompose_founder_block(cd['founder_block'])
+        _pos_shm, _pos_meta = _create_shm_array(positions)
+        _hap_shm, _hap_meta = _create_shm_array(stacked_haps)
+        _phase1_shm_handles.extend([_pos_shm, _hap_shm])
+        contig_founder_meta[c_idx] = {
+            'positions': _pos_meta,
+            'haplotypes': _hap_meta,
+            'keys': sorted_keys,
+        }
+        cd['founder_block'] = None  # release original (now in shm; dead post-Phase-1)
+        del positions, stacked_haps
+
     phase1_tasks = []
     for c_idx in range(num_contigs):
+        cd = contig_data_list[c_idx]
+        tol_painting = cd['tolerance_painting']
+        fmeta = contig_founder_meta[c_idx]
         for s_start in range(0, num_samples, samples_per_phase1_batch):
             s_end = min(s_start + samples_per_phase1_batch, num_samples)
-            phase1_tasks.append((c_idx, s_start, s_end))
-    
+            phase1_tasks.append((c_idx, s_start, s_end, tol_painting,
+                                 fmeta, snps_per_bin, recomb_rate,
+                                 max_snps_per_bin))
+
     print(f"\n--- Phase 1: Processing {num_contigs} Contigs × {len(phase1_tasks)} tasks "
           f"({n_workers} workers, {max_snps_per_bin} SNPs/bin) ---")
-    
+
     error_pen = -math.log(1e-2)
     phase_pen = 50.0
-    
-    # Share contig data via initializer — tolerance paintings + founder blocks
-    shared_phase1 = {
-        'contig_data_list': contig_data_list,
-        'snps_per_bin': snps_per_bin,
-        'recomb_rate': recomb_rate,
-        'max_snps_per_bin': max_snps_per_bin,
-    }
-    
-    ctx = mp.get_context('fork')
-    with ctx.Pool(processes=min(n_workers, len(phase1_tasks)),
-                  initializer=_init_pedigree_shared,
-                  initargs=(shared_phase1,)) as pool:
+
+    # Workers spawn from the forkserver (single-threaded, numba imported but
+    # not launched) instead of forking the parent — see the module-level
+    # _ForkserverPool note.  _shm_cleanup is the OUTER context manager so the
+    # founder segments are unlinked only after every worker has exited.
+    with _shm_cleanup(_phase1_shm_handles), \
+         _safe_forkserver_pool(min(n_workers, len(phase1_tasks))) as pool:
         phase1_results = list(tqdm(
             pool.imap_unordered(_process_contig_batch, phase1_tasks),
             total=len(phase1_tasks),
@@ -1923,17 +2175,40 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
         for local_i, global_i in enumerate(range(s_start, s_end)):
             contig_sample_grids[c_idx][global_i] = result['sample_allele_grids'][local_i]
         total_switches[s_start:s_end] += result['switch_counts']
-    
-    contig_caches = []
+    # phase1_results is fully consumed by the two passes above; drop the
+    # result wrappers now (the inner per-sample grids survive via
+    # contig_sample_grids until they are stacked + freed below).
+    del phase1_results
+
+    # Phase 2 + Phase 3: Use ONE forkserver Pool for both phases to avoid
+    # double spawn overhead.  The big per-contig arrays go into SharedMemory
+    # (zero-copy); workers attach them in _init_pedigree_shared.
+    COMPLEXITY_PENALTY = 0.0
+
+    # Assemble each contig's stacked allele/hom arrays and move them straight
+    # into POSIX SharedMemory (zero-copy for the forkserver workers, which
+    # would otherwise each unpickle a private copy — tens of GB at ~112
+    # workers).  We drop both the heap stacked copies AND this contig's
+    # per-sample grids as soon as the shm copy is made, so the parent never
+    # holds more than one contig's worth of heap allele data on top of the
+    # shm itself.  sw_costs / st_costs are tiny transition-cost vectors, left
+    # as plain pickled values.
+    #
+    # The per-sample 'sample_allele_grids' lists are intentionally NOT retained
+    # or shared.  The batched score_*_batch_kernel[_multisnp] kernels consume
+    # the stacked arrays; the only reader of sample_allele_grids was the legacy
+    # _score_contig_pairs / score_*_precomputed path, which is never called
+    # (and already read it from the shared dict, from which the forkserver
+    # migration had excluded sample_allele_grids).  Retaining the per-sample
+    # grids would be a third redundant copy of the allele data in the parent.
+    _pedigree_shm_handles = []
+    contig_caches_shm = []
     for c_idx in range(num_contigs):
         meta = contig_meta[c_idx]
-        # Build stacked arrays for the batched HMM-call kernels.
         # paint_samples.process_contig_for_pedigree (line ~1170) always emits
         # a single-element list [(allele_grid, hom_mask, 1.0)] per sample, so
         # we can stack across samples into a single contiguous array.  This is
         # the input format expected by score_*_batch_kernel[_multisnp] above.
-        # The legacy 'sample_allele_grids' list is kept so the unused
-        # score_*_precomputed wrappers (and any external callers) still work.
         grids_list = contig_sample_grids[c_idx]
         assert all(len(g) == 1 for g in grids_list), (
             "Expected exactly one allele grid per sample per contig "
@@ -1952,33 +2227,35 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
         assert stacked_alleles.shape[1:] == first_alleles.shape
         assert stacked_hom_mask.shape[0] == len(grids_list)
         assert stacked_hom_mask.shape[1:] == first_hom.shape
-        contig_caches.append({
-            'sample_allele_grids': contig_sample_grids[c_idx],
+        # Move the stacked arrays into SharedMemory, then immediately release
+        # the heap stacked copies and this contig's per-sample grids.
+        _sa_shm, _sa_meta = _create_shm_array(stacked_alleles)
+        _hm_shm, _hm_meta = _create_shm_array(stacked_hom_mask)
+        _pedigree_shm_handles.extend([_sa_shm, _hm_shm])
+        contig_caches_shm.append({
+            'stacked_alleles': _sa_meta,
+            'stacked_hom_mask': _hm_meta,
             'sw_costs': meta['sw_costs'],
             'st_costs': meta['st_costs'],
-            # New stacked arrays for batched kernels (optimization #4):
-            'stacked_alleles': stacked_alleles,
-            'stacked_hom_mask': stacked_hom_mask,
         })
         global_total_bins += meta['num_bins']
-    
-    # Phase 1b + Phase 2: Use ONE Pool for both phases to avoid double fork overhead.
-    # Set all shared data before Pool creation — workers see it via fork COW.
-    COMPLEXITY_PENALTY = 0.0
-    
+        del stacked_alleles, stacked_hom_mask
+        contig_sample_grids[c_idx] = None
+    del contig_sample_grids
+
     shared_all = {
-        'contig_caches': contig_caches,
+        'contig_caches': contig_caches_shm,
         'error_pen': error_pen,
         'phase_pen': phase_pen,
         'mismatch_penalty': mismatch_penalty,
         'num_samples': num_samples,
-        # Phase 2 fields (set now so workers have them at fork time)
+        # Phase 3 fields (set now so workers have them at spawn time)
         'total_switches': total_switches,
         'complexity_penalty': COMPLEXITY_PENALTY,
     }
     
-    # Phase 1b: Score all pairs — parallelize by CHILD ROWS (not by contig)
-    print(f"\n--- Phase 1b: Scoring Parent-Child Pairs ({n_workers} workers) ---")
+    # Phase 2: Score all pairs — parallelize by CHILD ROWS (not by contig)
+    print(f"\n--- Phase 2: Scoring Parent-Child Pairs ({n_workers} workers) ---")
     
     children_per_batch = max(1, num_samples // (n_workers * 2))
     child_batches = []
@@ -1990,20 +2267,22 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
 
     # Counters for the two-step dynamic-thread reallocation pattern
     # (see module-level _PEDIGREE_ACTIVE_COUNTER docstring).  Fresh
-    # mp.Value('i', 0) per pool.  This pool services BOTH Phase 1b
-    # and Phase 2, so the same counters tracking active workers carry
-    # across the two phases -- by design, since at the boundary between
-    # the phases all workers have decremented (Phase 1b finishes) before
-    # the Phase 2 dispatch starts, so the counter is naturally back at 0.
-    pool_active_counter = ctx.Value('i', 0)
-    pool_extra_counter = ctx.Value('i', 0)
+    # _forkserver_ctx.Value('i', 0) per pool.  This pool services BOTH
+    # Phase 2 and Phase 3, so the same counters tracking active workers
+    # carry across the two phases -- by design, since at the boundary
+    # between the phases all workers have decremented (Phase 2 finishes)
+    # before the Phase 3 dispatch starts, so the counter is naturally
+    # back at 0.
+    pool_active_counter = _forkserver_ctx.Value('i', 0)
+    pool_extra_counter = _forkserver_ctx.Value('i', 0)
     pool_workers = min(n_workers, len(child_batches))
 
-    with ctx.Pool(processes=pool_workers,
-                  initializer=_init_pedigree_shared,
-                  initargs=(shared_all, pool_active_counter, n_workers, pool_extra_counter)) as pool:
+    with _shm_cleanup(_pedigree_shm_handles), \
+         _safe_forkserver_pool(pool_workers,
+                               initializer=_init_pedigree_shared,
+                               initargs=(shared_all, pool_active_counter, n_workers, pool_extra_counter)) as pool:
         
-        # --- Phase 1b ---
+        # --- Phase 2 ---
         results = list(tqdm(
             pool.imap_unordered(_score_pairs_by_children, child_batches),
             total=len(child_batches),
@@ -2023,7 +2302,7 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
             cand_mask[i, :] = valid_gen
             cand_mask[i, i] = False
 
-        # --- Phase 2: Trio Verification (same Pool, no re-fork) ---
+        # --- Phase 3: Trio Verification (same Pool, no re-fork) ---
         # cand_mask above is preserved in both paths: the legacy path applies
         # it to gate top_indices, while the anchor-union path no longer
         # applies it for gating (the +5 margin spuriously excluded high-
@@ -2033,11 +2312,11 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
         # investigate_phase1b_coverage.py captures it via stack-frame spy
         # for diagnostic purposes.
         if use_anchor_union:
-            print(f"\n--- Phase 2: Trio Verification "
+            print(f"\n--- Phase 3: Trio Verification "
                   f"(UNION: top-{top_k} × top-{top_k} ∪ top-{anchor_k} anchors × all-N, "
                   f"reusing pool) ---")
         else:
-            print(f"\n--- Phase 2: Trio Verification (Top {top_k} Pairs, reusing pool) ---")
+            print(f"\n--- Phase 3: Trio Verification (Top {top_k} Pairs, reusing pool) ---")
 
         all_sample_args = []
         for i in range(num_samples):
@@ -2064,7 +2343,7 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
                 # (run_trio_phase_aware_hmm[_multisnp]) is bit-identical under
                 # (p1, p2) swap -- verified empirically May 2026 (100/100
                 # random trios match exactly).  The earlier version stored
-                # both (a, j) and (j, a), doubling Phase 2 cost.
+                # both (a, j) and (j, a), doubling Phase 3 cost.
                 pair_set = set()
                 # (a) top-K × top-K (unordered i<j)
                 top_list_int = [int(p) for p in top_indices]
@@ -2125,8 +2404,8 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     
     for sample_idx, best_trio, best_trio_score, top_indices in trio_results:
         valid_scores = total_scores[sample_idx].copy()
-        # Match the filter behaviour used in Phase 2 args construction so
-        # the scores reported in parent_candidates correspond to what Phase 2
+        # Match the filter behaviour used in Phase 3 args construction so
+        # the scores reported in parent_candidates correspond to what Phase 3
         # actually saw at trio-scoring time.
         if use_anchor_union:
             valid_scores[sample_idx] = -np.inf  # self-pair only

@@ -529,7 +529,7 @@ if __name__ == '__main__':
         t0 = time.time()
         contig_results = simulate_sequences.process_all_contigs_parallel(
             region_keys, all_offspring_lists, truth_paintings_lists, sites_list,
-            read_depth=5, error_rate=0.02,
+            read_depth=3, error_rate=0.02,
             snps_per_block=200, snp_shift=200,
             num_processes=n_processes,
             seed=(SIMULATION_SEED + 1_000_000) if SIMULATION_SEED is not None else None
@@ -2015,6 +2015,18 @@ if __name__ == '__main__':
                 contig_inputs.append(entry)
             else:
                 print(f"Warning: Tolerance painting missing for {r_name}")
+
+        # Founder-block eviction (pairs with the SharedMemory hand-off inside
+        # infer_pedigree_multi_contig_tolerance).  contig_inputs now holds the
+        # only reference to each founder block, so drop the checkpoint-backed
+        # super_blocks_L4 from multi_contig_results: pedigree inference copies
+        # each block into SharedMemory and releases its own reference once
+        # Phase 1 is dispatched, so the large founder set is freed for the
+        # duration of Phase 2/3 + the consistency cutoff instead of sitting
+        # idle in main.  super_blocks_L4 is re-loaded (via _ensure_key) further
+        # below for F1 recoloring / propagation.
+        for r_name in region_keys:
+            multi_contig_results[r_name].pop('super_blocks_L4', None)
 
         # 2. Run Inference (16-State HMM with tolerance-aware scoring)
         #    n_workers uses all available cores

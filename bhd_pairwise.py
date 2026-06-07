@@ -107,19 +107,20 @@ import numpy as np
 # scalar loops run as pure Python (slow but correct).  The wrappers
 # preserve the exact same input/output shapes either way.
 try:
-    from numba import njit
+    from numba import njit, prange
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
     warnings.warn(
         "Numba not found.  bhd_pairwise will fall back to pure-Python "
-        "paths for build_pairwise_partial_haps, grow_cluster_iterative, "
+        "paths for build_pairwise_partial_haps, the clustering kernel, "
         "count_carriers, and apply_quality_filters "
         "(typically 3-33x slower per call).",
         ImportWarning,
     )
-    # Dummy decorator that accepts arguments (like cache=True) but does
-    # nothing — same pattern as analysis_utils.py and bhd_trio.py.
+    # Dummy decorator that accepts arguments (like cache=True or
+    # parallel=True) but does nothing — same pattern as analysis_utils.py
+    # and bhd_trio.py.
     def njit(*args, **kwargs):
         def decorator(func):
             return func
@@ -127,6 +128,9 @@ except ImportError:
         if len(args) == 1 and callable(args[0]) and not kwargs:
             return args[0]
         return decorator
+    # prange falls back to the builtin range when numba is unavailable, so
+    # the parallel build kernels run correctly as (serial) pure Python.
+    prange = range
 
 # =============================================================================
 # MASTER ENABLE FLAG (consumed by block_haplotypes_discrete.py and bhd_recovery.py)
@@ -142,6 +146,56 @@ except ImportError:
 # clean ones.  No blocks regressed.  Pairwise adds ~0.4 sec/block to
 # stage-3 founder discovery.
 PAIRWISE_RECOVERY_ENABLED = True
+
+# -----------------------------------------------------------------------------
+# Residual mode for pairwise recovery (low-read-depth)
+# -----------------------------------------------------------------------------
+# PAIRWISE_RESIDUAL_MODE selects how the two argmax-dosage hard-call gates in
+# this module decide pair compatibility and carrier consistency:
+#
+#   "argmax" (default) — the behaviour documented throughout: a pair is
+#            compatible if its ARGMAX dosages conflict (one 0, the other 2)
+#            at <= MAX_PAIR_INCOMPAT sites, and a sample is a carrier of a
+#            hap if its ARGMAX dosage is incompatible (h=0 & dosage=2, or
+#            h=1 & dosage=0) at <= max_incompat sites.  This is the validated
+#            production path; selecting "argmax" leaves build_pairwise_partial_
+#            haps and apply_quality_filters bit-identical to before.
+#
+#   "soft" — a low-read-depth front-end that keeps the genotype posteriors
+#            instead of hard-calling the dosage.  Both gates count, per site,
+#            only CONFIDENT conflicts/incompatibilities — sites where the
+#            posterior probability of the offending genotype exceeds
+#            PAIRWISE_SOFT_CONFLICT_TAU — rather than hard argmax events:
+#              pair compat:   conflict prob = P_i(0)P_j(2) + P_i(2)P_j(0)
+#              carrier h=0:   incompat prob = P_s(2)   (sample hom-alt)
+#              carrier h=1:   incompat prob = P_s(0)   (sample hom-ref)
+#            At low depth a diffuse posterior contributes a small probability,
+#            not a hard +1, so argmax noise no longer spuriously rejects
+#            truly-compatible pairs (which collapses the partial-hap pool to
+#            nothing at ~3x) or destroys the strict-carrier counts Filters
+#            D/E rely on.  Summing the per-site PROBABILITY directly would
+#            overcount (it accumulates tiny residual-mass products across all
+#            L sites); thresholding each site at tau first — the "more likely
+#            than not to conflict here" boundary — is the correct analogue of
+#            the hard count.  Determination (the partial-hap VALUES) and the
+#            clustering stay argmax; the cluster majority-vote denoises them.
+#            Filter A's determined-fraction floor is also left as argmax.
+#
+# Same rationale as the trio / seed / recovery soft front-ends.  "soft" is
+# RESULT-AFFECTING at every read depth and must be validated against ground
+# truth before use; it is opt-in for that reason.  NOTE: the strict-carrier
+# threshold (Filter D, MIN_STRICT_CARRIER_FRAC) is hand-calibrated against
+# real-data argmax strict-carrier distributions; the soft count is larger at
+# low depth, so this threshold likely needs RECALIBRATION on real data when
+# "soft" is enabled.
+PAIRWISE_RESIDUAL_MODE = "argmax"
+
+# Per-site posterior threshold for the "soft" gates: a site counts as a
+# confident conflict / incompatibility only when the offending-genotype
+# posterior probability exceeds this value.  0.5 is the principled "more
+# likely than not" boundary and the empirically-best value (lower values are
+# too strict — they flag too many sites and over-reject pairs).
+PAIRWISE_SOFT_CONFLICT_TAU = 0.5
 
 
 # -----------------------------------------------------------------------
@@ -395,7 +449,7 @@ MAX_LENIENT_EXCESS_RATIO = 0.60
 # -----------------------------------------------------------------------
 # CORE ALGORITHM — pairwise common-hap recovery
 # -----------------------------------------------------------------------
-@njit(cache=True)
+@njit(parallel=True, cache=True)
 def _build_pairwise_partial_haps_kernel(dosage,
                                           max_pair_incompat,
                                           min_partial_determined):
@@ -408,13 +462,30 @@ def _build_pairwise_partial_haps_kernel(dosage,
 
     Buffer sizing: P_max = N*(N-1)/2 worst case (every pair compatible).
     At N=320 that's 51040 partial-haps × L bytes (int8) ≈ 10 MB for
-    values, same for determined, plus 8 bytes/row for sources.  We
-    truncate to actual P at the wrapper.
+    values, same for determined.  We truncate to actual P at the wrapper.
 
     Two-pass per pair so we can early-exit on incompat before doing the
     expensive second pass.  This matches the original's
     `n_incompat <= max_pair_incompat` admission filter — pairs failing
     incompat are rejected before the (n_compat, L) inner work.
+
+    PARALLELISM: the (i, j) pairs are independent, so Phase 1 runs the
+    outer i-loop under prange.  To make parallel writes race-free AND
+    keep the output ROW ORDER identical to the serial version (the
+    downstream `np.argsort(-determined_counts, kind='stable')` seed
+    selection depends on it), each pair writes into its DETERMINISTIC
+    slot in the worst-case buffer rather than into a shared running
+    counter:
+        slot(i, j) = base(i) + (j - i - 1),
+        base(i)    = i*(N-1) - i*(i-1)//2   (# pairs with first index < i)
+    No two pairs map to the same slot, so there is no write contention
+    and no need for atomics.  A `keep` flag marks slots that pass both
+    the incompat and the min-determined thresholds.  Phase 2 then walks
+    the slots in increasing order (= (i, j) enumeration order) and
+    compacts the kept rows to the front IN PLACE — safe because the
+    write index P never exceeds the read index slot.  Output (kept rows,
+    their order, values, determined) is byte-identical to the serial
+    two-pass implementation.
 
     Args:
         dosage: (N, L) int64 — argmax dosages in {0, 1, 2}
@@ -425,7 +496,6 @@ def _build_pairwise_partial_haps_kernel(dosage,
     Returns:
         all_values: (P, L) int8 — tightly sized, contains {-1, 0, 1}
         all_determined: (P, L) bool — tightly sized
-        sources: (P, 2) int64 — (i, j) per row
     """
     N, L = dosage.shape
     P_max = N * (N - 1) // 2
@@ -434,11 +504,15 @@ def _build_pairwise_partial_haps_kernel(dosage,
     # all_values plus ~10MB bool for all_determined; manageable.
     all_values_buf = np.empty((P_max, L), dtype=np.int8)
     all_determined_buf = np.empty((P_max, L), dtype=np.bool_)
-    sources_buf = np.empty((P_max, 2), dtype=np.int64)
+    # keep[slot] = True iff the pair at that slot passes both thresholds.
+    # Zero-initialised so rejected / never-written slots stay False.
+    keep = np.zeros(P_max, dtype=np.bool_)
 
-    P = 0
-    for i in range(N - 1):
+    # Phase 1 (parallel over i): each pair writes its own fixed slot.
+    for i in prange(N - 1):
+        base = i * (N - 1) - (i * (i - 1)) // 2
         for j in range(i + 1, N):
+            slot = base + (j - i - 1)
             # Pass 1: count incompat sites.  Early-exit when we already
             # know the pair will be rejected — saves the second pass on
             # the typical ~50% of pairs that are incompatible.
@@ -453,10 +527,10 @@ def _build_pairwise_partial_haps_kernel(dosage,
             if n_incompat > max_pair_incompat:
                 continue
 
-            # Pass 2: build the partial hap at row P of the output
-            # buffer.  We're tentatively writing here; if n_determined
-            # ends up below threshold we'll simply not increment P and
-            # the next pair overwrites this row.
+            # Pass 2: build the partial hap at this pair's slot in the
+            # output buffer.  We're tentatively writing here; if
+            # n_determined ends up below threshold we simply leave
+            # keep[slot] False and Phase 2 skips the row.
             n_determined = 0
             for l in range(L):
                 d_i = dosage[i, l]
@@ -465,31 +539,146 @@ def _build_pairwise_partial_haps_kernel(dosage,
                 # Original numpy code masks via `& ~inc_compat` and
                 # leaves the -1 fill from np.full.
                 if (d_i == 0 and d_j == 2) or (d_i == 2 and d_j == 0):
-                    all_values_buf[P, l] = -1
-                    all_determined_buf[P, l] = False
+                    all_values_buf[slot, l] = -1
+                    all_determined_buf[slot, l] = False
                 # Non-incompat: forced_0 priority (matches numpy's
                 # "partials[forced_0]=0 first, then partials[forced_1]=1"
                 # — these are mutually exclusive after incompat masking,
                 # so the elif order matches when one is True).
                 elif d_i == 0 or d_j == 0:
-                    all_values_buf[P, l] = 0
-                    all_determined_buf[P, l] = True
+                    all_values_buf[slot, l] = 0
+                    all_determined_buf[slot, l] = True
                     n_determined += 1
                 elif d_i == 2 or d_j == 2:
-                    all_values_buf[P, l] = 1
-                    all_determined_buf[P, l] = True
+                    all_values_buf[slot, l] = 1
+                    all_determined_buf[slot, l] = True
                     n_determined += 1
                 else:
-                    all_values_buf[P, l] = -1
-                    all_determined_buf[P, l] = False
+                    all_values_buf[slot, l] = -1
+                    all_determined_buf[slot, l] = False
 
             if n_determined >= min_partial_determined:
-                sources_buf[P, 0] = i
-                sources_buf[P, 1] = j
-                P += 1
-            # else: row at P is discarded; next iter overwrites it
+                keep[slot] = True
+            # else: keep[slot] stays False; Phase 2 discards this row
 
-    return all_values_buf[:P], all_determined_buf[:P], sources_buf[:P]
+    # Phase 2 (serial): compact kept rows to the front in slot order
+    # (= (i, j) enumeration order).  P <= slot always, so the in-place
+    # row copy never clobbers a row we have not yet read.
+    P = 0
+    for slot in range(P_max):
+        if keep[slot]:
+            if P != slot:
+                for l in range(L):
+                    all_values_buf[P, l] = all_values_buf[slot, l]
+                    all_determined_buf[P, l] = all_determined_buf[slot, l]
+            P += 1
+
+    return all_values_buf[:P], all_determined_buf[:P]
+
+
+@njit(parallel=True, cache=True)
+def _build_pairwise_partial_haps_soft_kernel(dosage, P0, P2, tau,
+                                               max_conflict,
+                                               min_partial_determined):
+    """Soft-compatibility variant of _build_pairwise_partial_haps_kernel
+    (PAIRWISE_RESIDUAL_MODE == "soft").
+
+    The ONLY change from the argmax kernel is the pair-acceptance test in
+    Pass 1.  Instead of counting hard argmax 0-vs-2 conflicts, it counts the
+    number of sites where the POSTERIOR conflict probability
+        P(0-vs-2 at l) = P0[i,l]*P2[j,l] + P2[i,l]*P0[j,l]
+    exceeds tau (a "confident conflict" site), and admits the pair when that
+    count is <= max_conflict.  At low read depth a diffuse posterior gives a
+    small product (not a hard +1), so argmax noise no longer spuriously
+    rejects truly-compatible pairs — which is what collapses the partial-hap
+    pool to ~0 at low depth in the argmax kernel.  (Summing the per-site
+    probabilities directly would overcount across all L sites; thresholding
+    each site first is the correct analogue of the hard count.)
+
+    Pass 2 — the partial-hap VALUES and determined mask — is byte-for-byte
+    identical to the argmax kernel: argmax forcing (a hom call forces the
+    shared strand) with per-site hard-incompat masking.  The cluster
+    majority-vote denoises these values downstream, so only the gate needs
+    softening.
+
+    PARALLELISM: identical scheme to the argmax kernel — Phase 1 runs the
+    outer i-loop under prange with each pair writing its DETERMINISTIC slot
+        slot(i, j) = base(i) + (j - i - 1),
+        base(i)    = i*(N-1) - i*(i-1)//2,
+    so there is no write contention; a `keep` flag marks admitted slots;
+    Phase 2 compacts kept rows to the front in slot (= (i, j)) order in
+    place.  Row order and contents are byte-identical to the serial version.
+
+    Args:
+        dosage: (N, L) int64 — argmax dosages in {0, 1, 2} (Pass 2)
+        P0, P2: (N, L) float64 — posteriors for dosage 0 and 2 (Pass 1)
+        tau: float — per-site confident-conflict threshold
+        max_conflict: int — max confident-conflict sites to admit a pair
+        min_partial_determined: int — partial-rejection threshold
+
+    Returns:
+        all_values: (P, L) int8 in {-1, 0, 1}; all_determined: (P, L) bool
+        — same shapes/semantics as the argmax kernel.
+    """
+    N, L = dosage.shape
+    P_max = N * (N - 1) // 2
+
+    all_values_buf = np.empty((P_max, L), dtype=np.int8)
+    all_determined_buf = np.empty((P_max, L), dtype=np.bool_)
+    # keep[slot] = True iff the pair at that slot passes both thresholds.
+    keep = np.zeros(P_max, dtype=np.bool_)
+
+    # Phase 1 (parallel over i): each pair writes its own fixed slot.
+    for i in prange(N - 1):
+        base = i * (N - 1) - (i * (i - 1)) // 2
+        for j in range(i + 1, N):
+            slot = base + (j - i - 1)
+            # Pass 1 (soft): count confident-conflict sites; early-exit.
+            n_conf = 0
+            for l in range(L):
+                cl = P0[i, l] * P2[j, l] + P2[i, l] * P0[j, l]
+                if cl > tau:
+                    n_conf += 1
+                    if n_conf > max_conflict:
+                        break
+            if n_conf > max_conflict:
+                continue
+
+            # Pass 2 (argmax determination — identical to the argmax kernel).
+            n_determined = 0
+            for l in range(L):
+                d_i = dosage[i, l]
+                d_j = dosage[j, l]
+                if (d_i == 0 and d_j == 2) or (d_i == 2 and d_j == 0):
+                    all_values_buf[slot, l] = -1
+                    all_determined_buf[slot, l] = False
+                elif d_i == 0 or d_j == 0:
+                    all_values_buf[slot, l] = 0
+                    all_determined_buf[slot, l] = True
+                    n_determined += 1
+                elif d_i == 2 or d_j == 2:
+                    all_values_buf[slot, l] = 1
+                    all_determined_buf[slot, l] = True
+                    n_determined += 1
+                else:
+                    all_values_buf[slot, l] = -1
+                    all_determined_buf[slot, l] = False
+
+            if n_determined >= min_partial_determined:
+                keep[slot] = True
+
+    # Phase 2 (serial): compact kept rows to the front in slot order
+    # (= (i, j) enumeration order); P <= slot, so the in-place copy is safe.
+    P = 0
+    for slot in range(P_max):
+        if keep[slot]:
+            if P != slot:
+                for l in range(L):
+                    all_values_buf[P, l] = all_values_buf[slot, l]
+                    all_determined_buf[P, l] = all_determined_buf[slot, l]
+            P += 1
+
+    return all_values_buf[:P], all_determined_buf[:P]
 
 
 def build_pairwise_partial_haps(probs,
@@ -514,14 +703,12 @@ def build_pairwise_partial_haps(probs,
                        (undetermined).
         all_determined: (P, L) bool — True at sites where the partial-
                        hap value is determined (= forced 0 or forced 1).
-        sources:       list of (i, j) for each row.
 
     Implementation: delegates to a numba kernel that uses scalar loops
     over (i, j) and writes directly into preallocated worst-case
-    buffers.  Output is byte-identical to the pre-numba implementation
-    (same row order, same values, same sources) — order is preserved
-    so the downstream `np.argsort(-determined_counts, kind='stable')`
-    seed selection picks the same seeds.
+    buffers.  Output preserves row order so the downstream
+    `np.argsort(-determined_counts, kind='stable')` seed selection picks
+    the same seeds.
     """
     N, L, _ = probs.shape
     # v6 — per-block resolution of fractional thresholds.  At L=200 the
@@ -538,313 +725,294 @@ def build_pairwise_partial_haps(probs,
     if N < 2:
         empty_v = np.empty((0, L), dtype=np.int8)
         empty_d = np.empty((0, L), dtype=bool)
-        return empty_v, empty_d, []
+        return empty_v, empty_d
 
-    all_values, all_determined, sources_arr = \
-        _build_pairwise_partial_haps_kernel(
-            dosage, int(max_pair_incompat), int(min_partial_determined))
+    if PAIRWISE_RESIDUAL_MODE == "soft":
+        # Soft compatibility gate: posterior confident-conflict count.
+        # Determination (Pass 2) stays argmax inside the soft kernel.
+        P0 = np.ascontiguousarray(probs[:, :, 0], dtype=np.float64)
+        P2 = np.ascontiguousarray(probs[:, :, 2], dtype=np.float64)
+        all_values, all_determined = \
+            _build_pairwise_partial_haps_soft_kernel(
+                dosage, P0, P2, float(PAIRWISE_SOFT_CONFLICT_TAU),
+                int(max_pair_incompat), int(min_partial_determined))
+    else:
+        all_values, all_determined = \
+            _build_pairwise_partial_haps_kernel(
+                dosage, int(max_pair_incompat), int(min_partial_determined))
 
     if all_values.shape[0] == 0:
         empty_v = np.empty((0, L), dtype=np.int8)
         empty_d = np.empty((0, L), dtype=bool)
-        return empty_v, empty_d, []
+        return empty_v, empty_d
 
-    # Repackage sources from (P, 2) array into the legacy list-of-
-    # tuples that downstream callers expect.
-    P = sources_arr.shape[0]
-    sources = [(int(sources_arr[k, 0]), int(sources_arr[k, 1]))
-                for k in range(P)]
-    return all_values, all_determined, sources
+    return all_values, all_determined
 
 
 @njit(cache=True)
-def _grow_cluster_iterative_kernel(seed_idx,
-                                      all_values,
-                                      all_determined,
-                                      available,
-                                      min_cluster_overlap,
-                                      max_cluster_disagreements,
-                                      max_iter):
-    """Numba kernel for grow_cluster_iterative.
+def _cluster_all_seeds_kernel(all_values, all_determined, seed_order,
+                               min_cluster_overlap,
+                               max_cluster_disagreements,
+                               max_iter, min_cluster_size):
+    """Fused numba kernel for the whole pairwise clustering pass (Step 2 of
+    pairwise_common_hap_recover).
 
-    Replaces the original's (P, L) bool overlap and disagree_mask
-    intermediates (~5MB each per iteration) with two scalar
-    accumulators per partial-hap computed in a tight loop, avoiding
-    the per-iteration allocation cost that dominated the production
-    profile.
+    Replaces the previous structure — a Python `for seed_idx in seed_order`
+    loop that called grow_cluster_iterative (and through it the single-seed
+    kernel _grow_cluster_iterative_kernel) once per seed — with one kernel
+    that runs the entire greedy seed-grow loop in nopython mode.  This
+    removes the per-seed Python overhead that became significant once the
+    soft compatibility gate enlarged the partial-hap pool: per seed the old
+    path paid a wrapper call, two np.ascontiguousarray no-op checks on the
+    full (P, L) arrays, an np.where(...).tolist() over (P,) bool, and a dict
+    construction.  The per-seed scratch buffers (compatible, prev_compatible,
+    final_compatible, compat_idx, and the consensus work arrays) are
+    allocated ONCE here and reused across seeds instead of being
+    re-allocated by every grow_cluster_iterative call.
 
-    Optimizations applied on top of the basic scalar-loop port:
-      1. EARLY TERMINATION in the compat-check inner L-loop: break as
-         soon as disagreements > max_cluster_disagreements, since the
-         partial-hap is already rejected and the rest of the L-pass
-         only affects overlap_count (which is irrelevant once we know
-         compatible[p] = False).  At production size most partials
-         in pass-2+ ARE rejected (the cluster has converged), so this
-         is the dominant fast path.
-      2. COMPACT COMPATIBLE-INDEX in the votes pass: rather than
-         scanning all P=25712 partials per site checking
-         `if compatible[p]`, we build a packed int64 array of just
-         the compatible indices (~5000 entries typical) once per
-         iteration and iterate that.  Reduces the votes pass from
-         L*P to L*n_compat, ~5x at production size.
+    GREEDY SEED-GROW (unchanged semantics).  Seeds are visited in seed_order
+    (the caller passes np.argsort(-determined_counts, kind='stable'), so the
+    most informative partial-haps — those that determined the most bits —
+    anchor clusters first).  A seed whose partial-hap was already claimed by
+    an earlier cluster (available[seed] == False) is skipped.  Otherwise we
+    grow a cluster from it and mark its members unavailable — this mutation
+    happens for EVERY grown seed, including clusters that then prove too
+    small to emit, exactly as the previous code mutated available[] inside
+    grow_cluster_iterative BEFORE the Python min_cluster_size check.  A
+    cluster is EMITTED (its consensus recorded) only when it has
+    >= min_cluster_size members.
 
-    Algorithm faithfully reproduces the Python version including its
-    convergence semantics:
-      - First iteration: prev_compatible is None, no convergence check;
-        we just compute compatible[], assign to prev_compatible
-      - Later iterations: break if compatible == prev_compatible
-      - On break from convergence: final_compatible retains the value
-        set at the END of the previous successful iteration
-      - On break from empty compat (compat_count < 1): final_compatible
-        retains last iter's value or stays None (handled by the
-        have_final flag)
-      - If no iteration ever set final_compatible (i.e. max_iter == 0,
-        or first iter compat empty): fall back to seed-only
+    SINGLE-CLUSTER GROW (inlined from the former _grow_cluster_iterative_
+    kernel, byte-for-byte semantics):
+      Grow a cluster from a seed partial-hap by iterative batch-merge with
+      re-check: at each iteration, find every available partial-hap that's
+      compatible with the current consensus; recompute consensus by majority
+      vote across all such candidates; iterate until the compatible set
+      stabilises.  "Compatible" = overlap (intersection of determined
+      regions) >= min_cluster_overlap, AND disagreements (sites in the
+      overlap where consensus and candidate differ) <= max_cluster_
+      disagreements.  The re-check inside iteration is what handles the
+      pathological case where two true strands collapse into the seed's
+      compatibility set: after the first majority-vote consensus, candidates
+      from the wrong strand fail the disagreement check and drop out.
 
-    Tiebreak in majority vote: votes_1 >= votes_0 -> 1, matching the
-    Python `np.where(votes_1 >= votes_0, 1, 0)`.
+      Optimizations preserved from the single-seed kernel (they replaced the
+      original's (P, L) bool overlap/disagree_mask intermediates — ~5MB each
+      per iteration at production size — with two scalar accumulators per
+      partial-hap):
+        1. EARLY TERMINATION in the compat-check inner L-loop: break as soon
+           as disagreements > max_cluster_disagreements, since the partial-
+           hap is already rejected and the rest of the L-pass only affects
+           overlap_count (irrelevant once compatible[p] = False).  At
+           production size in iter 2+ most partials ARE rejected (the
+           cluster has converged), so this is the dominant fast path.
+        2. COMPACT COMPATIBLE-INDEX in the votes pass: rather than scanning
+           all P partials per site checking `if compatible[p]`, build a
+           packed int64 array of just the compatible indices once per
+           iteration and iterate that — reduces the votes pass from L*P to
+           L*n_compat.
 
-    Mutates available[] in place at end (marks final_compatible members
-    as no longer available).
+      Convergence semantics (faithfully reproduced from the Python version):
+        - First iteration: prev_compatible unused; compute compatible[],
+          snapshot into prev_compatible.
+        - Later iterations: break if compatible == prev_compatible.
+        - On convergence break: final_compatible retains the value set at
+          the END of the previous committed iteration.
+        - On empty-compat break (n_compat < 1): final_compatible retains
+          the last committed value (or the seed-only fallback if none).
+        - If no iteration ever committed (max_iter == 0, or first-iter
+          compat empty): fall back to seed-only.
+      Tiebreak in majority vote: votes_1 >= votes_0 -> 1 (matches the numpy
+      `np.where(votes_1 >= votes_0, 1, 0)`).
+
+    The per-seed scratch arrays do NOT need resetting between seeds:
+    `compatible` is fully overwritten on the first iteration of each grow;
+    `prev_compatible` is gated by have_prev (reset False per seed);
+    `final_compatible` is fully written by either a committed iteration or
+    the seed-only fallback — matching the fresh np.zeros the single-seed
+    kernel allocated per call.
 
     Args:
-        seed_idx: int — index into all_values for the seed partial-hap
         all_values: (P, L) int8 in {-1, 0, 1}
         all_determined: (P, L) bool
-        available: (P,) bool — modified in-place at end
+        seed_order: (P,) int64 — seed visitation order
         min_cluster_overlap: int
         max_cluster_disagreements: int
         max_iter: int
+        min_cluster_size: int — minimum members required to EMIT a cluster
 
     Returns:
-        cur_values: (L,) int8 — final consensus
-        cur_determined: (L,) bool
-        final_compatible: (P,) bool — True at cluster member indices
-            (caller does np.where(...)[0].tolist() to get member list)
+        cons_values: (n_clusters, L) int8 — per-emitted-cluster consensus
+            (-1 marks sites NO member determined; the caller fills these by
+            the population-frequency tiebreak)
+        cons_determined: (n_clusters, L) bool
+        cons_sizes: (n_clusters,) int64 — member count per emitted cluster
+        cons_detcount: (n_clusters,) int64 — determined-bit count (= the
+            old determined_count = int(cd.sum()))
     """
     P, L = all_values.shape
 
-    # Copy seed into consensus
+    available = np.ones(P, dtype=np.bool_)
+
+    # Per-emitted-cluster output buffers (worst case: every seed emits, so
+    # at most P clusters; members are exclusive across clusters so the total
+    # emitted member count is also <= P).
+    cons_values = np.empty((P, L), dtype=np.int8)
+    cons_determined = np.empty((P, L), dtype=np.bool_)
+    cons_sizes = np.empty(P, dtype=np.int64)
+    cons_detcount = np.empty(P, dtype=np.int64)
+
+    # Scratch reused across seeds.
     cur_values = np.empty(L, dtype=np.int8)
     cur_determined = np.empty(L, dtype=np.bool_)
-    for l in range(L):
-        cur_values[l] = all_values[seed_idx, l]
-        cur_determined[l] = all_determined[seed_idx, l]
-
-    # Scratch buffers reused across iterations.  numba prefers explicit
-    # types and shapes here over dynamic resizing.
     compatible = np.zeros(P, dtype=np.bool_)
     prev_compatible = np.zeros(P, dtype=np.bool_)
     final_compatible = np.zeros(P, dtype=np.bool_)
     new_values = np.empty(L, dtype=np.int8)
     new_determined = np.empty(L, dtype=np.bool_)
-    # Packed compat index — populated each iteration after compatibility
-    # check.  Size up to P; we track active count separately.
     compat_idx = np.empty(P, dtype=np.int64)
 
-    have_prev = False
-    have_final = False
+    n_clusters = 0
 
-    for _it in range(max_iter):
-        # Compute compatible[p] = available[p] AND overlap_count(p) >=
-        # min_cluster_overlap AND disagreements(p) <= max_disagreements.
-        # Early-exit the inner L-loop on disagreements > max — the
-        # partial is rejected regardless of the rest of the L-pass.
-        # At production size in iter 2+ this is the fast path for most
-        # partials (cluster has shrunk to the true strand's partials).
-        for p in range(P):
-            if not available[p] and p != seed_idx:
-                # Even non-available partials are skipped — they got
-                # claimed by an earlier cluster.  (seed_idx is always
-                # forced True below.)
-                compatible[p] = False
-                continue
-            overlap_count = 0
-            disagreements = 0
-            rejected = False
-            for l in range(L):
-                if cur_determined[l] and all_determined[p, l]:
-                    overlap_count += 1
-                    if cur_values[l] != all_values[p, l]:
-                        disagreements += 1
-                        if disagreements > max_cluster_disagreements:
-                            rejected = True
-                            break
-            if rejected:
-                compatible[p] = False
-            else:
-                compatible[p] = overlap_count >= min_cluster_overlap
-        # Always include the seed itself
-        compatible[seed_idx] = True
+    for s in range(seed_order.shape[0]):
+        seed_idx = seed_order[s]
+        if not available[seed_idx]:
+            continue
 
-        # Convergence: compatible set hasn't changed since last iter
-        if have_prev:
-            equal = True
+        # ---- grow one cluster from seed_idx (inlined single-seed kernel) ----
+        # Copy seed into consensus
+        for l in range(L):
+            cur_values[l] = all_values[seed_idx, l]
+            cur_determined[l] = all_determined[seed_idx, l]
+
+        have_prev = False
+        have_final = False
+
+        for _it in range(max_iter):
+            # Compute compatible[p] = available[p] AND overlap_count(p) >=
+            # min_cluster_overlap AND disagreements(p) <= max_disagreements.
+            # Early-exit the inner L-loop on disagreements > max — the
+            # partial is rejected regardless of the rest of the L-pass.
             for p in range(P):
-                if compatible[p] != prev_compatible[p]:
-                    equal = False
-                    break
-            if equal:
-                break
-        # Snapshot compatible into prev for next iter's check
-        for p in range(P):
-            prev_compatible[p] = compatible[p]
-        have_prev = True
-
-        # Build packed compatible-index array (reused in votes pass)
-        n_compat = 0
-        for p in range(P):
-            if compatible[p]:
-                compat_idx[n_compat] = p
-                n_compat += 1
-        if n_compat < 1:
-            # Original breaks before setting final_compatible — leave
-            # have_final as it was (False on first iter, True if a
-            # previous iter set it; that snapshot persists).
-            break
-
-        # Recompute consensus by majority vote across compatible
-        # partial-haps.  L-outer, n_compat-inner; iterate the packed
-        # index array (~5000 entries at production size) rather than
-        # all P=25712 partials.
-        for l in range(L):
-            votes_0 = 0
-            votes_1 = 0
-            for k in range(n_compat):
-                p = compat_idx[k]
-                if all_determined[p, l]:
-                    v = all_values[p, l]
-                    if v == 0:
-                        votes_0 += 1
-                    elif v == 1:
-                        votes_1 += 1
-            total = votes_0 + votes_1
-            if total > 0:
-                new_determined[l] = True
-                # Tiebreak: prefer 1 if tied (matches numpy
-                # `np.where(votes_1 >= votes_0, 1, 0)`).
-                if votes_1 >= votes_0:
-                    new_values[l] = 1
+                if not available[p] and p != seed_idx:
+                    # Claimed by an earlier cluster.  (seed_idx is always
+                    # forced True below.)
+                    compatible[p] = False
+                    continue
+                overlap_count = 0
+                disagreements = 0
+                rejected = False
+                for l in range(L):
+                    if cur_determined[l] and all_determined[p, l]:
+                        overlap_count += 1
+                        if cur_values[l] != all_values[p, l]:
+                            disagreements += 1
+                            if disagreements > max_cluster_disagreements:
+                                rejected = True
+                                break
+                if rejected:
+                    compatible[p] = False
                 else:
-                    new_values[l] = 0
-            else:
-                new_determined[l] = False
-                new_values[l] = -1
+                    compatible[p] = overlap_count >= min_cluster_overlap
+            # Always include the seed itself
+            compatible[seed_idx] = True
 
-        # Commit new consensus to cur_*
-        for l in range(L):
-            cur_values[l] = new_values[l]
-            cur_determined[l] = new_determined[l]
-        # Snapshot compatible -> final_compatible
+            # Convergence: compatible set hasn't changed since last iter
+            if have_prev:
+                equal = True
+                for p in range(P):
+                    if compatible[p] != prev_compatible[p]:
+                        equal = False
+                        break
+                if equal:
+                    break
+            # Snapshot compatible into prev for next iter's check
+            for p in range(P):
+                prev_compatible[p] = compatible[p]
+            have_prev = True
+
+            # Build packed compatible-index array (reused in votes pass)
+            n_compat = 0
+            for p in range(P):
+                if compatible[p]:
+                    compat_idx[n_compat] = p
+                    n_compat += 1
+            if n_compat < 1:
+                # Original breaks before setting final_compatible — leave
+                # have_final as it was (False on first iter, True if a
+                # previous iter set it; that snapshot persists).
+                break
+
+            # Recompute consensus by majority vote across compatible
+            # partial-haps.  L-outer, n_compat-inner; iterate the packed
+            # index array rather than all P partials.
+            for l in range(L):
+                votes_0 = 0
+                votes_1 = 0
+                for k in range(n_compat):
+                    p = compat_idx[k]
+                    if all_determined[p, l]:
+                        v = all_values[p, l]
+                        if v == 0:
+                            votes_0 += 1
+                        elif v == 1:
+                            votes_1 += 1
+                total = votes_0 + votes_1
+                if total > 0:
+                    new_determined[l] = True
+                    # Tiebreak: prefer 1 if tied (matches numpy
+                    # `np.where(votes_1 >= votes_0, 1, 0)`).
+                    if votes_1 >= votes_0:
+                        new_values[l] = 1
+                    else:
+                        new_values[l] = 0
+                else:
+                    new_determined[l] = False
+                    new_values[l] = -1
+
+            # Commit new consensus to cur_*
+            for l in range(L):
+                cur_values[l] = new_values[l]
+                cur_determined[l] = new_determined[l]
+            # Snapshot compatible -> final_compatible
+            for p in range(P):
+                final_compatible[p] = compatible[p]
+            have_final = True
+
+        # If no iteration ever set final_compatible (e.g. max_iter == 0, or
+        # first iter had compat_count < 1 with no prior commit), fall back
+        # to seed-only.  Matches the Python original.
+        if not have_final:
+            for p in range(P):
+                final_compatible[p] = False
+            final_compatible[seed_idx] = True
+
+        # Mutate available in-place — claim this cluster's members.  This
+        # happens for every grown seed, even if the cluster is too small to
+        # emit (matches the old available[] mutation inside the per-seed
+        # kernel, which ran before the Python min_cluster_size check).
+        n_members = 0
         for p in range(P):
-            final_compatible[p] = compatible[p]
-        have_final = True
+            if final_compatible[p]:
+                available[p] = False
+                n_members += 1
+        # ---- end grow ----
 
-    # If no iteration ever set final_compatible (e.g. max_iter == 0,
-    # or first iter had compat_count < 1 with no prior commit), fall
-    # back to seed-only.  Matches the Python original.
-    if not have_final:
-        for p in range(P):
-            final_compatible[p] = False
-        final_compatible[seed_idx] = True
+        # Emit the cluster's consensus only if it reached min_cluster_size.
+        if n_members >= min_cluster_size:
+            for l in range(L):
+                cons_values[n_clusters, l] = cur_values[l]
+                cons_determined[n_clusters, l] = cur_determined[l]
+            det_cnt = 0
+            for l in range(L):
+                if cur_determined[l]:
+                    det_cnt += 1
+            cons_sizes[n_clusters] = n_members
+            cons_detcount[n_clusters] = det_cnt
+            n_clusters += 1
 
-    # Mutate available in-place — same as the Python version
-    for p in range(P):
-        if final_compatible[p]:
-            available[p] = False
-
-    return cur_values, cur_determined, final_compatible
-
-
-def grow_cluster_iterative(seed_idx,
-                            all_values, all_determined,
-                            available,
-                            min_cluster_overlap=None,
-                            max_cluster_disagreements=None,
-                            max_iter=MAX_CLUSTER_GROW_ITER):
-    """Grow a cluster from a seed partial-hap by iterative batch-merge
-    with re-check: at each iteration, find every available partial-hap
-    that's compatible with the current consensus; recompute consensus
-    by majority vote across all such candidates; iterate until the
-    compatible set stabilises.
-
-    "Compatible" = overlap (intersection of determined regions) is
-    ≥ min_cluster_overlap, AND disagreements (sites in the overlap
-    where consensus and candidate differ) is ≤ max_cluster_disagreements.
-
-    The re-check inside iteration is what handles the pathological case
-    where two true strands collapse into the seed's compatibility set:
-    after the first majority-vote consensus, candidates from the wrong
-    strand fail the disagreement check and drop out.
-
-    Args:
-        seed_idx: int — index into all_values for the seed partial-hap
-        all_values, all_determined: (P, L) — as returned by
-            build_pairwise_partial_haps
-        available: (P,) bool — True for partial-haps not yet claimed by
-            another cluster.  Modified in-place at the end to mark the
-            cluster's final members as no longer available.
-        ...
-
-    Returns:
-        consensus_values: (L,) int8 in {0, 1, -1} — final cluster
-            consensus (-1 marks sites that NO partial-hap in the cluster
-            determined; these are filled by the population-frequency
-            tiebreak in the caller)
-        consensus_determined: (L,) bool
-        members: list of int — indices into all_values for the cluster's
-            final members
-
-    Implementation: delegates to a numba kernel that uses two scalar
-    accumulators per partial-hap (overlap_count, disagreements) instead
-    of the original (P, L) bool intermediates, eliminating ~5MB of
-    per-iteration allocation at production size.  Output (consensus
-    values, members list, available[] post-mutation) is byte-identical
-    to the pre-numba implementation.
-    """
-    P, L = all_values.shape
-    # v6 — per-block resolution of fractional thresholds.  At L=200 the
-    # values resolve to 20 and 2, matching v5 absolutes exactly.
-    if min_cluster_overlap is None:
-        min_cluster_overlap = max(1, int(round(MIN_CLUSTER_OVERLAP_FRAC * L)))
-    if max_cluster_disagreements is None:
-        max_cluster_disagreements = max(1, int(round(NOISE_SLACK_FRAC * L)))
-
-    # Edge case: empty input.  Kernel handles it but we short-circuit
-    # to avoid allocating zero-length scratch.
-    if P == 0:
-        return (np.full(L, -1, dtype=np.int8),
-                np.zeros(L, dtype=bool),
-                [])
-
-    # Defensive: ensure dtypes match the kernel signature.  The caller
-    # passes arrays from build_pairwise_partial_haps which are already
-    # int8 / bool, so these casts are no-ops in practice.
-    all_values_arr = np.ascontiguousarray(all_values, dtype=np.int8)
-    all_determined_arr = np.ascontiguousarray(all_determined, dtype=np.bool_)
-    # available is mutated in-place by the kernel; ensure it's a numba-
-    # compatible bool array (and that the caller's view picks up the
-    # mutation, since np.ascontiguousarray may return a copy if dtype
-    # changes).  available is passed as bool from the caller, so the
-    # cast is also a no-op and shares memory.
-    if available.dtype != np.bool_:
-        # Should not happen in production but be safe
-        raise ValueError(
-            f"available must be bool; got {available.dtype}")
-
-    cur_values, cur_determined, final_compatible = \
-        _grow_cluster_iterative_kernel(
-            int(seed_idx),
-            all_values_arr,
-            all_determined_arr,
-            available,
-            int(min_cluster_overlap),
-            int(max_cluster_disagreements),
-            int(max_iter),
-        )
-
-    members = np.where(final_compatible)[0].tolist()
-    return cur_values, cur_determined, members
+    return (cons_values[:n_clusters], cons_determined[:n_clusters],
+            cons_sizes[:n_clusters], cons_detcount[:n_clusters])
 
 
 def pairwise_common_hap_recover(probs,
@@ -878,7 +1046,6 @@ def pairwise_common_hap_recover(probs,
             'cluster_size': int
             'determined_count': int — # of bits the cluster determined
                 BEFORE the population-frequency tiebreak filled the rest
-            'pair_sources': list of (i, j) tuples that contributed
     """
     N, L, _ = probs.shape
     # v6 — resolve None defaults from the global fractional constants.
@@ -896,7 +1063,7 @@ def pairwise_common_hap_recover(probs,
     if max_cluster_disagreements is None:
         max_cluster_disagreements = max(1, int(round(NOISE_SLACK_FRAC * L)))
     # Step 1: pairwise partial-haps
-    all_values, all_determined, sources = build_pairwise_partial_haps(
+    all_values, all_determined = build_pairwise_partial_haps(
         probs,
         max_pair_incompat=max_pair_incompat,
         min_partial_determined=min_partial_determined)
@@ -906,30 +1073,35 @@ def pairwise_common_hap_recover(probs,
 
     # Step 2: cluster by greedy seed-grow.  Seeds chosen by descending
     # determined-count (the most informative partial-haps anchor the
-    # cluster well).
+    # cluster well).  The entire seed loop AND the per-seed single-cluster
+    # grow now run inside one fused numba kernel (_cluster_all_seeds_kernel)
+    # instead of a Python loop calling grow_cluster_iterative per seed; see
+    # that kernel's docstring.  Output (emitted clusters, their consensus
+    # values/determined masks, sizes, determined counts) is identical to the
+    # previous per-seed implementation.
     determined_counts = all_determined.sum(axis=1)
-    seed_order = np.argsort(-determined_counts, kind='stable')
+    seed_order = np.argsort(-determined_counts, kind='stable').astype(np.int64)
 
-    available = np.ones(P, dtype=bool)
+    # Defensive dtype/contiguity: the fused kernel expects int8 / bool
+    # C-contiguous arrays.  build_pairwise_partial_haps already returns
+    # these (a row-slice of a C-contiguous buffer stays C-contiguous), so
+    # these are no-ops in practice.
+    all_values_arr = np.ascontiguousarray(all_values, dtype=np.int8)
+    all_determined_arr = np.ascontiguousarray(all_determined, dtype=np.bool_)
+
+    (cons_values, cons_determined, cons_sizes, cons_detcount) = \
+        _cluster_all_seeds_kernel(
+            all_values_arr, all_determined_arr, seed_order,
+            int(min_cluster_overlap), int(max_cluster_disagreements),
+            int(max_cluster_grow_iter), int(min_cluster_size))
+
     consensus_haps = []
-
-    for seed_idx in seed_order:
-        if not available[seed_idx]:
-            continue
-        cv, cd, members = grow_cluster_iterative(
-            int(seed_idx), all_values, all_determined, available,
-            min_cluster_overlap=min_cluster_overlap,
-            max_cluster_disagreements=max_cluster_disagreements,
-            max_iter=max_cluster_grow_iter)
-        if len(members) < min_cluster_size:
-            continue
-        cluster_pair_sources = [sources[m] for m in members]
+    for c in range(cons_sizes.shape[0]):
         consensus_haps.append({
-            'cv': cv,
-            'cd': cd,
-            'cluster_size': len(members),
-            'determined_count': int(cd.sum()),
-            'pair_sources': cluster_pair_sources,
+            'cv': cons_values[c],
+            'cd': cons_determined[c],
+            'cluster_size': int(cons_sizes[c]),
+            'determined_count': int(cons_detcount[c]),
         })
 
     # Step 3: resolve MASKs via population alt-allele frequency
@@ -944,7 +1116,6 @@ def pairwise_common_hap_recover(probs,
             'hap': h,
             'cluster_size': c['cluster_size'],
             'determined_count': c['determined_count'],
-            'pair_sources': c['pair_sources'],
         })
 
     return final, P
@@ -1049,6 +1220,52 @@ def count_carriers(hap, dosage, max_incompat=None):
     hap_arr = np.ascontiguousarray(hap, dtype=np.int64)
     dosage_arr = np.ascontiguousarray(dosage, dtype=np.int64)
     return _count_carriers_kernel(hap_arr, dosage_arr, int(max_incompat))
+
+
+@njit(cache=True)
+def _count_carriers_soft_kernel(hap, P0, P2, tau, max_incompat):
+    """Soft carrier count for apply_quality_filters Filters B/D/E when
+    PAIRWISE_RESIDUAL_MODE == "soft".
+
+    Soft analogue of _count_carriers_kernel.  A sample s carries hap iff the
+    number of CONFIDENT incompatibility sites is <= max_incompat, where a
+    site l is a confident incompatibility when the posterior probability of
+    the offending genotype exceeds tau:
+        hap[l] == 0:  offending = hom-alt (dosage 2)  -> P2[s, l] > tau
+        hap[l] == 1:  offending = hom-ref (dosage 0)  -> P0[s, l] > tau
+    This is the carrier-count analogue of the soft pair-compatibility gate:
+    at low depth a diffuse posterior gives a small offending-genotype
+    probability, not a hard argmax incompatibility, so argmax noise no
+    longer destroys the (strict, max_incompat=0) carrier counts Filters D/E
+    depend on.  Early-exits the inner loop on n_incompat > max_incompat.
+
+    Args:
+        hap: (L,) int64 — fully resolved hap in {0, 1}
+        P0, P2: (N, L) float64 — posteriors for dosage 0 and 2
+        tau: float — per-site confident-incompatibility threshold
+        max_incompat: int — slack threshold (0 for strict carriers)
+
+    Returns:
+        int — number of carrier samples
+    """
+    N, L = P0.shape
+    carrier_count = 0
+    for s in range(N):
+        n_incompat = 0
+        is_carrier = True
+        for l in range(L):
+            if hap[l] == 0:
+                p_off = P2[s, l]
+            else:
+                p_off = P0[s, l]
+            if p_off > tau:
+                n_incompat += 1
+                if n_incompat > max_incompat:
+                    is_carrier = False
+                    break
+        if is_carrier:
+            carrier_count += 1
+    return carrier_count
 
 
 @njit(cache=True)
@@ -1242,7 +1459,8 @@ def apply_quality_filters(recovered, dosage,
                            max_carrier_incompat=None,
                            cross_dedup_pct=CROSS_CLUSTER_DEDUP_PCT,
                            min_strict_carriers=None,
-                           max_lenient_excess_ratio=MAX_LENIENT_EXCESS_RATIO):
+                           max_lenient_excess_ratio=MAX_LENIENT_EXCESS_RATIO,
+                           probs=None):
     """Apply post-clustering quality filters to reduce spurious haps.
 
     Filter ordering and rationale:
@@ -1341,13 +1559,40 @@ def apply_quality_filters(recovered, dosage,
     if n_rec == 0:
         return [], []
 
+    # In "soft" mode (and only when probs is provided) the lenient and
+    # strict carrier counts are computed from the genotype POSTERIOR
+    # (_count_carriers_soft_kernel) rather than the argmax dosage, so low-
+    # depth argmax noise no longer destroys the strict-carrier counts Filters
+    # D/E rely on.  "argmax" mode (or probs=None) leaves the counts — and
+    # therefore Filters B/D/E — byte-identical to before.
+    use_soft = (PAIRWISE_RESIDUAL_MODE == "soft") and (probs is not None)
+
+    # PERFORMANCE (soft path): the soft carrier count needs the dosage-0 and
+    # dosage-2 posterior planes.  Slicing them out of the (N, L, 3) array is
+    # a strided view, so np.ascontiguousarray must allocate and copy a full
+    # (N, L) float64 array.  We call _count_carriers_soft_kernel twice per
+    # candidate (lenient + strict), so computing those planes per call would
+    # be 4 * len(recovered) full-array copies — which dominated apply_quality_
+    # filters at production size.  The planes are identical across all
+    # candidates, so we slice them ONCE here and pass them into the kernel.
+    if use_soft:
+        P0_soft = np.ascontiguousarray(probs[:, :, 0], dtype=np.float64)
+        P2_soft = np.ascontiguousarray(probs[:, :, 2], dtype=np.float64)
+        tau_soft = float(PAIRWISE_SOFT_CONFLICT_TAU)
+
     # Step 1 — annotate every candidate with its carrier count.  We
     # compute this once per candidate so subsequent filter steps can
     # reuse the value.
     enriched = []
     for r in recovered:
-        carriers = count_carriers(r['hap'], dosage,
-                                   max_incompat=max_carrier_incompat)
+        if use_soft:
+            hap_arr = np.ascontiguousarray(r['hap'], dtype=np.int64)
+            carriers = _count_carriers_soft_kernel(
+                hap_arr, P0_soft, P2_soft, tau_soft,
+                int(max_carrier_incompat))
+        else:
+            carriers = count_carriers(r['hap'], dosage,
+                                       max_incompat=max_carrier_incompat)
         r2 = dict(r)
         r2['carriers'] = carriers
         enriched.append(r2)
@@ -1357,8 +1602,13 @@ def apply_quality_filters(recovered, dosage,
     # already-enriched list rather than rebuilding to keep the existing
     # Step 1 byte-identical.
     for r2 in enriched:
-        r2['strict_carriers'] = count_carriers(r2['hap'], dosage,
-                                                max_incompat=0)
+        if use_soft:
+            hap_arr = np.ascontiguousarray(r2['hap'], dtype=np.int64)
+            r2['strict_carriers'] = _count_carriers_soft_kernel(
+                hap_arr, P0_soft, P2_soft, tau_soft, 0)
+        else:
+            r2['strict_carriers'] = count_carriers(r2['hap'], dosage,
+                                                    max_incompat=0)
 
     # Stack arrays for the numba kernel.
     haps_arr = np.empty((n_rec, L), dtype=np.int64)
@@ -1467,7 +1717,7 @@ def pairwise_recovery_candidate_haps(probs_k, verbose=False):
             print(f'[pairwise] no candidates (n_partials={n_partials})')
         return []
     dosage = probs_k.argmax(axis=2).astype(np.int64)
-    survivors, rejected = apply_quality_filters(recovered, dosage)
+    survivors, rejected = apply_quality_filters(recovered, dosage, probs=probs_k)
     if verbose:
         print(f'[pairwise] {len(recovered)} raw candidates -> '
               f'{len(survivors)} after filters '
