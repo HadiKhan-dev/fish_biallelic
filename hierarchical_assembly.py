@@ -18,6 +18,14 @@ import beam_search_core
 import analysis_utils
 import chimera_resolution
 
+import os
+
+# env-gated per-phase wall-clock profiling of _process_single_batch (no effect
+# on results when off): set BHD_HIER_PROFILE=1 to print a per-phase breakdown
+# for batches whose super-block spans >= BHD_HIER_PROFILE_MIN_L sites.
+_HIER_PROFILE = os.environ.get('BHD_HIER_PROFILE', '') not in ('', '0', 'false', 'False')
+_HIER_PROFILE_MIN_L = int(os.environ.get('BHD_HIER_PROFILE_MIN_L', '500000'))
+
 
 # =============================================================================
 # NON-DAEMONIC FORKSERVER POOL
@@ -366,7 +374,11 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, gl
     super_probs = None
     if global_probs is not None and global_sites is not None:
         indices = np.searchsorted(global_sites, super_positions)
-        super_probs = global_probs[:, indices, :]
+        # parallel gather (bit-identical to global_probs[:, indices, :]); the
+        # numpy advanced-index version is single-threaded and copies the whole
+        # (N, n_super, 3) probs -- ~5.4 GB / ~10-20s at L4 -- inside the batch
+        # worker.  See chimera_resolution._gather_samples_numba.
+        super_probs = chimera_resolution._gather_samples_numba(global_probs, indices)
     else:
         probs_list = []
         for b in original_blocks:
@@ -479,6 +491,21 @@ def _process_single_batch(args):
                 'status': 'passthrough'
             }
 
+        # --- env-gated per-phase wall timing (no effect on results when off:
+        # _acc only mutates _pt inside `if _prof`, and the report is gated) ---
+        _prof = _HIER_PROFILE
+        _pt = {}
+        _t_batch = time.perf_counter()
+        def _acc(_key, _t0):
+            _e = _pt.get(_key)
+            _dt = time.perf_counter() - _t0
+            if _e is None:
+                _pt[_key] = [_dt, 1]
+            else:
+                _e[0] += _dt
+                _e[1] += 1
+
+        _t = time.perf_counter()
         # 1. Create proxies (downsample large blocks for linking).
         proxy_list = []
         for b in original_portion:
@@ -498,6 +525,7 @@ def _process_single_batch(args):
                                            n_generations, recomb_tolerance)
         else:
             beam_max_gap = None
+        if _prof: _acc('setup(proxy+slice+gap)', _t)
 
         # =================================================================
         # 4. Generate Mesh — DYNAMIC SEQUENTIAL phase.
@@ -513,9 +541,12 @@ def _process_single_batch(args):
         if use_hmm_linking:
             # Emissions: ThreadPoolExecutor (threads release GIL inside
             # the numba kernel; no oversubscription risk).
+            _t = time.perf_counter()
             viterbi_emissions = hmm_matching.generate_viterbi_block_emissions(
                 batch_probs, batch_sites, portion_proxy, num_processes=pool_budget
             )
+            if _prof: _acc('mesh_emissions', _t)
+            _t = time.perf_counter()
             mesh = hmm_matching.generate_transition_probability_mesh_double_hmm(
                 None, None, portion_proxy,
                 recomb_rate=recomb_rate,
@@ -524,23 +555,28 @@ def _process_single_batch(args):
                 num_processes=1,
                 dynamic_cores_fn=_get_dynamic_threads,
             )
+            if _prof: _acc('mesh_transition', _t)
             del viterbi_emissions
         else:
+            _t = time.perf_counter()
             mesh = block_linking.generate_transition_probability_mesh(
                 batch_probs, batch_sites, portion_proxy,
                 use_standard_baum_welch=True,
                 num_processes=pool_budget
             )
+            if _prof: _acc('mesh_transition', _t)
 
         # =================================================================
         # 5. Beam Search — NUMBA-ONLY phase.  No inner pool; give all
         # dynamic threads to numba.
         # =================================================================
         _apply_dynamic_threads()
+        _t = time.perf_counter()
         beam_results = beam_search_core.run_full_mesh_beam_search(
             portion_proxy, mesh, beam_width=beam_width,
             max_gap=beam_max_gap, verbose=verbose
         )
+        if _prof: _acc('beam_search', _t)
 
         if not beam_results:
             return {
@@ -559,6 +595,7 @@ def _process_single_batch(args):
         # 6. Selection + Swap + CR — NUMBA-ONLY phase.
         # =================================================================
         _apply_dynamic_threads()
+        _t = time.perf_counter()
         resolved_beam = chimera_resolution.select_and_resolve(
             beam_results=beam_results,
             fast_mesh=fast_mesh,
@@ -573,6 +610,7 @@ def _process_single_batch(args):
             cc_scale=cc_scale,
             num_threads=_get_dynamic_threads,
         )
+        if _prof: _acc('select_and_resolve(CR)', _t)
 
         del beam_results
         _libc.malloc_trim(0)
@@ -581,23 +619,47 @@ def _process_single_batch(args):
         # 7. Reconstruction — NUMBA-ONLY phase.
         # =================================================================
         _apply_dynamic_threads()
+        _t = time.perf_counter()
         reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
             resolved_beam, fast_mesh, original_portion
         )
+        if _prof: _acc('reconstruction', _t)
 
         del resolved_beam, fast_mesh
         _libc.malloc_trim(0)
 
         # 8. Package.
+        _t = time.perf_counter()
         super_block = convert_reconstruction_to_superblock(
             reconstructed_data, original_portion, batch_probs, batch_sites
         )
+        if _prof: _acc('package', _t)
 
         del reconstructed_data, batch_probs, batch_sites, portion_proxy, proxy_list
         _libc.malloc_trim(0)
 
         # 9. Structural chimera pruning.
+        _t = time.perf_counter()
         super_block = beam_search_core.prune_superblock_chimeras(super_block)
+        if _prof: _acc('prune', _t)
+
+        if _prof:
+            try:
+                _nL = len(super_block.positions) if super_block is not None else 0
+                if _nL >= _HIER_PROFILE_MIN_L:
+                    _wall = time.perf_counter() - _t_batch
+                    _timed = sum(v[0] for v in _pt.values())
+                    _aw = _ACTIVE_COUNTER.value if _ACTIVE_COUNTER is not None else 1
+                    _hdr = (f"  [hier profile] batch={b_idx} N={global_probs.shape[0]} "
+                            f"L={_nL} | numba_threads={numba.get_num_threads()} "
+                            f"active_workers={_aw} | batch_wall={_wall:.1f}s")
+                    _body = "\n".join(
+                        f"      {_k:24s} {_v[0]:7.2f}s  ({_v[1]:5d} calls)"
+                        for _k, _v in sorted(_pt.items(), key=lambda kv: -kv[1][0]))
+                    _oth = f"      {'other(numpy+setup)':24s} {_wall - _timed:7.2f}s"
+                    print(_hdr + "\n" + _body + "\n" + _oth, flush=True)
+            except Exception:
+                pass
 
         return {
             'batch_idx': b_idx,

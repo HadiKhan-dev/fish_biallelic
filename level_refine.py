@@ -74,6 +74,16 @@ import thread_config  # noqa: F401  (forkserver preload + single-thread BLAS; be
 
 import numpy as np
 
+# Optional per-block phase profiling for the refinement -- DIAGNOSTIC ONLY, OFF by
+# default and with zero effect on results.  Set BHD_REFINE_PROFILE=1 to print, for
+# each super-block with L >= BHD_REFINE_PROFILE_MIN_L (default 500000), the wall
+# time spent in each phase (emission full/incremental, paint, score, the
+# carrier/consensus/dists kernels) plus the ACTUAL numba thread count in use --
+# this is what localises the production bottleneck for the big blocks (e.g. L4).
+import time as _time
+_REFINE_PROFILE = os.environ.get('BHD_REFINE_PROFILE', '') not in ('', '0', 'false', 'False')
+_REFINE_PROFILE_MIN_L = int(os.environ.get('BHD_REFINE_PROFILE_MIN_L', '500000'))
+
 
 # Worker-side per-call data (set in the pool initializer; small + shared)
 _WK = {}
@@ -137,10 +147,14 @@ def _viterbi_partner(E_c, switch_pen):
     return path
 
 
-def _emissions_for(positions, hap_seqs, spb, num_threads=None):
+def _emissions_for(positions, hap_seqs, spb, num_threads=None, return_ctx=False):
     """compute_subblock_emissions for ONE synthetic block (the super-block itself).
     num_threads: int or callable forwarded to the numba kernel (dynamic-thread scaling
-    so a worker that holds many cores at the upper levels actually uses them)."""
+    so a worker that holds many cores at the upper levels actually uses them).
+    return_ctx: if True, also return a small dict with the EXACT block_samples
+    array the kernel saw (plus spb / n_bins / n_sites), so the refinement loop can
+    apply bit-identical single-hap emission updates via _emissions_replace_one
+    instead of recomputing the whole (N, K, K, n_bins) tensor per paint/score."""
     import chimera_resolution
     gp = _WK['global_probs']; gs = _WK['global_sites']
     block = _SynblockView(positions, hap_seqs)
@@ -150,15 +164,37 @@ def _emissions_for(positions, hap_seqs, spb, num_threads=None):
     bsites = np.ascontiguousarray(gs[lo:hi + 1])
     sub_em = chimera_resolution.compute_subblock_emissions(
         [block], bprobs, bsites, spb, num_threads=num_threads)
+    if return_ctx:
+        # Reconstruct block_samples EXACTLY as compute_subblock_emissions built it
+        # (indices = searchsorted(bsites, positions); block_samples =
+        # bprobs[:, indices, :]), so incremental updates use the same per-sample
+        # probabilities — and the same dtype — the full kernel did.
+        idx = np.searchsorted(bsites, np.asarray(positions))
+        # Same gather compute_subblock_emissions performed, rebuilt for the
+        # incremental-update context.  Use the parallel kernel (bit-identical to
+        # np.ascontiguousarray(bprobs[:, idx, :]); see
+        # chimera_resolution._gather_samples_numba) -- single-threaded numpy here
+        # cost another ~10-20s at L4 inside the emission phase.
+        if num_threads is not None:
+            chimera_resolution._resolve_threads(num_threads)
+        block_samples = chimera_resolution._gather_samples_numba(bprobs, idx)
+        ctx = {'block_samples': block_samples, 'spb': int(spb),
+               'n_bins': int(sub_em[0]['n_bins']),
+               'n_sites': int(len(np.asarray(positions)))}
+        return sub_em, ctx
     return sub_em
 
 
-def _paint_self(positions, hap_seqs, spb, penalty, num_threads=None):
+def _paint_self(positions, hap_seqs, spb, penalty, num_threads=None, sub_em=None):
     """Paint all N samples against hap_seqs over `positions` as a SINGLE block.
-    Returns (sp [N, n_bins], K, bof [n_sites]) or None."""
+    Returns (sp [N, n_bins], K, bof [n_sites]) or None.
+    sub_em: OPTIONAL precomputed emissions for hap_seqs (from _emissions_for /
+    _emissions_replace_one).  When given, the emission tensor is NOT recomputed
+    (it is bit-identical to a fresh compute); only the Viterbi paint runs."""
     import chimera_resolution
     gp = _WK['global_probs']
-    sub_em = _emissions_for(positions, hap_seqs, spb, num_threads=num_threads)
+    if sub_em is None:
+        sub_em = _emissions_for(positions, hap_seqs, spb, num_threads=num_threads)
     total_bins = sub_em[0]['n_bins']
     N = gp.shape[0]
     # single block -> keypath per sample is over this one block; paint_samples_viterbi
@@ -173,15 +209,47 @@ def _paint_self(positions, hap_seqs, spb, penalty, num_threads=None):
     return sp.astype(np.int32), int(K), bof
 
 
-def _score_self(positions, hap_seqs, spb, penalty, num_threads=None):
-    """Self-block painting LL over all N samples for hap_seqs over `positions`."""
+def _score_self(positions, hap_seqs, spb, penalty, num_threads=None, sub_em=None):
+    """Self-block painting LL over all N samples for hap_seqs over `positions`.
+    sub_em: OPTIONAL precomputed emissions for hap_seqs (from _emissions_for /
+    _emissions_replace_one).  When given, the emission tensor is NOT recomputed
+    (it is bit-identical to a fresh compute); only the Viterbi scoring runs."""
     import chimera_resolution
     gp = _WK['global_probs']
-    sub_em = _emissions_for(positions, hap_seqs, spb, num_threads=num_threads)
+    if sub_em is None:
+        sub_em = _emissions_for(positions, hap_seqs, spb, num_threads=num_threads)
     N = gp.shape[0]
     keypaths = [[i] for i in range(hap_seqs.shape[0])]
     return float(chimera_resolution.score_path_set(
         keypaths, sub_em, float(penalty), N, num_threads=num_threads))
+
+
+def _emissions_replace_one(sub_em, ctx, cur_seqs, estar, new_hap, num_threads=None):
+    """Return a NEW sub_em for `cur_seqs` with hap `estar` replaced by `new_hap`,
+    recomputing ONLY the estar row/column of the (K, K) pair grid (every other
+    pair is unchanged by a single-hap edit).  The result is bit-identical to
+    _emissions_for on the modified hap matrix but costs O(K) pairs, not O(K^2).
+    `ctx` is the dict returned by _emissions_for(..., return_ctx=True); only its
+    bin_emissions array is fresh (a copy), the other sub_em fields (hap_keys,
+    n_bins, key_to_local_idx) are reused unchanged since K is fixed."""
+    import chimera_resolution
+    bin_em = sub_em[0]['bin_emissions'].copy()
+    n_haps = int(cur_seqs.shape[0])
+    seqs_new = cur_seqs.copy()
+    seqs_new[estar] = new_hap
+    # one-hot alleles matching _seq_to_prob_block / compute_subblock_emissions:
+    # hap0 = (seq == 0), hap1 = (seq == 1) as float64, shape (K, n_sites).
+    hap0 = np.ascontiguousarray((seqs_new == 0).astype(np.float64))
+    hap1 = np.ascontiguousarray((seqs_new == 1).astype(np.float64))
+    if num_threads is not None:
+        chimera_resolution._resolve_threads(num_threads)
+    chimera_resolution._update_bin_emissions_one_hap_numba(
+        bin_em, ctx['block_samples'], hap0, hap1, int(estar),
+        n_haps, ctx['n_bins'], ctx['spb'], ctx['n_sites'])
+    return [{'hap_keys': sub_em[0]['hap_keys'],
+             'bin_emissions': bin_em,
+             'n_bins': sub_em[0]['n_bins'],
+             'key_to_local_idx': sub_em[0]['key_to_local_idx']}]
 
 
 def _carriers_of(sp, K, rep_idx):
@@ -219,13 +287,38 @@ def _refine_one_block(task):
         site_to_idx = _WK['site_to_idx']
         pos = np.asarray(pos)
         present0 = np.asarray(seqs, dtype=np.int8)
+        # --- diagnostic per-block phase timing (gated by BHD_REFINE_PROFILE; no
+        # effect on results -- times each phase and reports the actual thread count) ---
+        _prof = _REFINE_PROFILE
+        _pt = {}
+        _t_block = _time.perf_counter()
+        def _acc(_key, _t0):
+            _e = _pt.get(_key)
+            _dt = _time.perf_counter() - _t0
+            if _e is None:
+                _pt[_key] = [_dt, 1]
+            else:
+                _e[0] += _dt; _e[1] += 1
         cur = present0.copy()
         actions = []
-        idx_g = np.array([site_to_idx[int(p)] for p in pos])
+        # index of each block position within global_sites.  global_sites is
+        # sorted and pos is a subset of it, so searchsorted gives exactly the
+        # site_to_idx[pos] mapping -- vectorised, instead of L (~1.5M at L4)
+        # Python-level dict lookups.
+        idx_g = np.searchsorted(_WK['global_sites'], pos)
 
         # dosage over this window -- from genotype probs, INDEPENDENT of cur.
-        d = gp[:, idx_g, 1] * 1.0 + gp[:, idx_g, 2] * 2.0
-        d_r = np.clip(np.rint(d), 0, 2).astype(np.int16)
+        # _dosage_round_numba is bit-identical to
+        #   np.clip(np.rint(gp[:, idx_g, 1] + 2*gp[:, idx_g, 2]), 0, 2).astype(int16)
+        # but runs across the inner cores and writes a contiguous (N, L) int16
+        # array directly -- avoiding the (N, L) float64 gather/rint/clip/astype
+        # temporaries and the per-block ascontiguousarray copy the numpy path
+        # needed (its astype(order='K') left the fancy-indexed result
+        # non-contiguous, so every carrier/consensus kernel would otherwise
+        # re-copy the whole (N, L) array).
+        if dyn_fn is not None:
+            chimera_resolution._resolve_threads(dyn_fn)
+        d_r = chimera_resolution._dosage_round_numba(gp, idx_g)
 
         eps = _OPT['eps_present']
         support_thresh = _OPT['support_thresh']
@@ -245,13 +338,31 @@ def _refine_one_block(task):
         if max_block_iter is None:
             max_block_iter = 3 * cur.shape[0]
 
+        # Emission caching: compute the full (N, K, K, n_bins) self-block emission
+        # tensor for cur ONCE (with ctx for bit-identical single-hap updates), and
+        # reuse it for every paint and for the base-LL score.  A candidate differs
+        # from cur in exactly one hap, so its emissions are cur's tensor with only
+        # that hap's row/column recomputed (_emissions_replace_one); an accepted
+        # replace makes the candidate the new cur, so we adopt em_cand directly.
+        # This removes the per-paint / per-rep FULL recompute that dominated the
+        # stage, and is bit-identical to recomputing emissions on every call.
+        _t = _time.perf_counter()
+        em_cur, em_ctx = _emissions_for(pos, cur, spb, num_threads=dyn_fn,
+                                        return_ctx=True)
+        if _prof: _acc('emission_full', _t)
+        _t = _time.perf_counter()
+        base_ll = _score_self(pos, cur, spb, penalty, num_threads=dyn_fn, sub_em=em_cur)
+        if _prof: _acc('score', _t)
+
         converged = False
         _bi_iter = 0
         while _bi_iter < max_block_iter:
             _bi_iter += 1
 
             # RE-PAINT current haps (self-block) -> consistent carrier assignment
-            pj = _paint_self(pos, cur, spb, penalty, num_threads=dyn_fn)
+            _t = _time.perf_counter()
+            pj = _paint_self(pos, cur, spb, penalty, num_threads=dyn_fn, sub_em=em_cur)
+            if _prof: _acc('paint', _t)
             if pj is None:
                 if _bi_iter == 1:
                     return dict(j=j, modified=False, refined_seqs=None, actions=[],
@@ -271,37 +382,51 @@ def _refine_one_block(task):
                 # ---- re-derive H from this carrier set (v2 Viterbi partner) ----
                 m, L = cur.shape
                 C = np.array(sorted(carriers), dtype=np.int64)
-                d_rC = d_r[C]
                 fi = (sp // K_p)[C]; fj = (sp % K_p)[C]
                 counts = np.array([(fi == h).sum() + (fj == h).sum() for h in range(K_p)])
                 f_side = int(np.argmax(counts))
                 N_tilde = cur[f_side] if f_side < cur.shape[0] else cur[0]
                 nbins = int(bof.max()) + 1
-                Bmat = np.zeros((L, nbins), dtype=np.float64)
-                Bmat[np.arange(L), bof] = 1.0
-                E = np.zeros((C.size, nbins, m), dtype=np.float64)
-                for k in range(m):
-                    diff = d_rC - cur[k][None, :]
-                    invalid = (diff < 0) | (diff > 1)
-                    extracted = np.clip(diff, 0, 1)
-                    nearmatch = (extracted == N_tilde[None, :]) & (~invalid)
-                    Lsite = invalid * log_invalid + nearmatch * near_bonus
-                    E[:, :, k] = Lsite @ Bmat
-                partner_site = np.empty((C.size, L), dtype=np.int64)
-                for c in range(C.size):
-                    path = _viterbi_partner(E[c], switch_pen)
-                    partner_site[c] = path[bof]
-                present_by_partner = np.take_along_axis(cur, partner_site, axis=0)
-                Fdiff = d_rC - present_by_partner
-                Fest = np.clip(Fdiff, 0, 1).astype(np.int16)
-                contribute = (Fdiff == 0) | (Fdiff == 1)
-                mask = contribute.astype(np.float64)
-                denom = mask.sum(0); num = (Fest * mask).sum(0)
-                H = N_tilde.copy(); has = denom > 0
-                frac1 = np.zeros(L); frac1[has] = num[has] / denom[has]
-                H[has] = (frac1[has] >= 0.5).astype(np.int8)
-                win_frac = np.where(H == 1, frac1, 1.0 - frac1)
-                dists_e = np.array([_hamming_pct(cur[k], H) for k in range(m)])
+                # Carrier-derivation, PARALLELISED over carriers: build each
+                # carrier's binned stay-score matrix and run the stay/switch
+                # partner Viterbi inside one prange kernel, instead of the serial
+                # `for k: E[:, :, k] = Lsite @ Bmat` build followed by the
+                # `for c: _viterbi_partner(E[c])` Python loop.  This lets a worker
+                # use its dynamic thread count on this phase too (the emission
+                # kernels already do); _resolve_threads re-syncs the count to
+                # total_cores // active_workers.  Equivalent to the old code up to
+                # ULP (bin-sum order vs BLAS matmul) and the argmax tie-break for
+                # the switch back-pointer (which only reorders equally-scored
+                # partners).  See chimera_resolution._viterbi_partner_carriers_numba.
+                if dyn_fn is not None:
+                    chimera_resolution._resolve_threads(dyn_fn)
+                _t = _time.perf_counter()
+                partner_site = chimera_resolution._viterbi_partner_carriers_numba(
+                    d_r, C, np.ascontiguousarray(cur),
+                    np.ascontiguousarray(N_tilde), np.ascontiguousarray(bof),
+                    int(nbins), float(log_invalid), float(near_bonus),
+                    float(switch_pen))
+                if _prof: _acc('carrier_kernel', _t)
+                # Consensus, PARALLELISED over sites: derive H (and frac1 / has /
+                # win_frac) by summing each site's carrier partner-dosage support on
+                # the fly, instead of materialising the (C, L) present/Fdiff/Fest/mask
+                # arrays and reducing them in single-threaded numpy -- the dominant
+                # serial cost when L is large (the L4 super-block, L ~ 1.5M).  The
+                # H = num/denom >= 0.5 decision is exact (num, denom are integer
+                # counts); frac1 / win_frac differ only by the ULP of the division.
+                # Both kernels read d_r[C[c]] directly so the (C, L) carrier gather
+                # d_rC is never materialised.
+                _t = _time.perf_counter()
+                H, frac1, has, win_frac = chimera_resolution._consensus_from_carriers_numba(
+                    d_r, C, np.ascontiguousarray(cur),
+                    np.ascontiguousarray(partner_site), np.ascontiguousarray(N_tilde))
+                if _prof: _acc('consensus_kernel', _t)
+                # per-hap distance to H, PARALLELISED over haps (== the
+                # [_hamming_pct(cur[k], H) for k] list, same 100*(cnt/L) value)
+                _t = _time.perf_counter()
+                dists_e = chimera_resolution._dists_to_H_numba(
+                    np.ascontiguousarray(cur), np.ascontiguousarray(H))
+                if _prof: _acc('dists_kernel', _t)
                 estar = int(np.argmin(dists_e)); pmin = float(dists_e[estar])
                 deciding = (H != cur[estar])
                 n_supported = int((deciding & has & (win_frac >= support_thresh)).sum())
@@ -315,12 +440,27 @@ def _refine_one_block(task):
                 # score dLL: self-block LL with H at estar vs current haps
                 cand = cur.copy()
                 cand[estar] = H
-                base_ll = _score_self(pos, cur, spb, penalty, num_threads=dyn_fn)
-                cand_ll = _score_self(pos, cand, spb, penalty, num_threads=dyn_fn)
+                # candidate emissions = cur's tensor with ONLY hap estar's row/column
+                # recomputed (bit-identical to _emissions_for on `cand`).  base_ll is
+                # the cached self-block LL of the current haps (refreshed only when an
+                # accepted replace changes cur), so neither side recomputes emissions.
+                _t = _time.perf_counter()
+                em_cand = _emissions_replace_one(em_cur, em_ctx, cur, estar, H,
+                                                 num_threads=dyn_fn)
+                if _prof: _acc('emission_incr', _t)
+                _t = _time.perf_counter()
+                cand_ll = _score_self(pos, cand, spb, penalty, num_threads=dyn_fn,
+                                      sub_em=em_cand)
+                if _prof: _acc('score', _t)
                 dLL = cand_ll - base_ll
 
                 if dLL > min_dll:
                     cur[estar] = H
+                    # accepted: `cand` IS the new cur, so em_cand already holds the
+                    # correct emissions -> adopt them (no recompute) and refresh the
+                    # cached base LL for the remaining reps / passes.
+                    em_cur = em_cand
+                    base_ll = cand_ll
                     actions.append(dict(rep=int(rep), estar=int(estar), dLL=float(dLL),
                                         pmin=float(pmin), n_supported=int(n_supported),
                                         block_iter=int(_bi_iter)))
@@ -333,6 +473,19 @@ def _refine_one_block(task):
         modified = len(actions) > 0
         refined = cur.astype(np.int8).tolist() if modified else None
         status = 'ok' if converged else 'NOT_CONVERGED_cap_hit'
+        if _prof and cur.shape[1] >= _REFINE_PROFILE_MIN_L:
+            _tot = _time.perf_counter() - _t_block
+            _sum = sum(v[0] for v in _pt.values())
+            _active = _ha._ACTIVE_COUNTER.value if _ha._ACTIVE_COUNTER is not None else 1
+            print(f"  [refine profile] j={j} N={N} K={cur.shape[0]} L={cur.shape[1]} "
+                  f"passes={_bi_iter} accepts={len(actions)} | "
+                  f"numba_threads={numba.get_num_threads()} active_workers={_active} "
+                  f"ceiling={numba.config.NUMBA_NUM_THREADS} | block_wall={_tot:.1f}s",
+                  flush=True)
+            for _k in sorted(_pt, key=lambda x: -_pt[x][0]):
+                print(f"      {_k:20s} {_pt[_k][0]:8.2f}s  ({_pt[_k][1]:5d} calls)",
+                      flush=True)
+            print(f"      {'other(numpy+setup)':20s} {_tot - _sum:8.2f}s", flush=True)
         return dict(j=j, modified=modified, refined_seqs=refined, actions=actions,
                     status=status, passes=int(_bi_iter), converged=bool(converged))
     except Exception as e:

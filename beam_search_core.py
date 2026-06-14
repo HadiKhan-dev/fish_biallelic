@@ -554,22 +554,24 @@ def reconstruct_haplotypes_from_beam(beam_results, fast_mesh, haps_data):
     reconstructed = []
     
     for path_indices, score in beam_results:
-        combined_pos = []
-        combined_hap = []
-        
+        # Concatenate the per-block positions/haplotypes with np.concatenate
+        # rather than extending Python lists element-by-element and calling
+        # np.array() on a ~1.5M-entry list: the list path iterates every site
+        # as a Python object (single-threaded, ~5s at L4), while concatenate is
+        # a C-level copy.  Same values in the same block order, so the result is
+        # identical.
+        pos_parts = []
+        hap_parts = []
         for block_idx, dense_idx in enumerate(path_indices):
             key = fast_mesh.get_key_from_dense(block_idx, dense_idx)
             block_obj = haps_data[block_idx]
-            pos = block_obj.positions
-            hap_array = block_obj.haplotypes[key]
-            
-            combined_pos.extend(pos)
-            combined_hap.extend(hap_array)
-            
+            pos_parts.append(np.asarray(block_obj.positions))
+            hap_parts.append(np.asarray(block_obj.haplotypes[key]))
+
         reconstructed.append({
             "score": score,
-            "positions": np.array(combined_pos),
-            "haplotype": np.array(combined_hap),
+            "positions": np.concatenate(pos_parts) if pos_parts else np.array([]),
+            "haplotype": np.concatenate(hap_parts) if hap_parts else np.array([]),
             "path_indices": path_indices
         })
         
