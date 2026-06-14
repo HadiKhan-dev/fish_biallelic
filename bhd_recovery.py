@@ -327,7 +327,7 @@ RECOVERY_OUTER_CC_SCALE = 0.5
 # Hard caps on selected size and rounds (defensive against pathological
 # blocks that wouldn't converge naturally).
 RECOVERY_MAX_K = 12
-RECOVERY_MAX_ROUNDS = 10
+RECOVERY_MAX_ROUNDS = 4
 
 # NLL-tolerance for swap refinement: a swap is applied only if it
 # reduces NLL by more than this amount (avoids oscillation between

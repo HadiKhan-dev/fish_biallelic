@@ -705,46 +705,6 @@ class PedigreeResult:
             if updates == 0:
                 break
 
-    def perform_automatic_cutoff(self, force_clusters=2, sigma_threshold=5.0):
-        if self.total_bins == 0: return
-        scores = []
-        indices = []
-        for i, s in enumerate(self.samples):
-            raw = self.trio_scores.get(s, -1e9)
-            norm_score = raw / self.total_bins
-            scores.append(norm_score)
-            indices.append(i)
-        scores_arr = np.array(scores).reshape(-1, 1)
-        try:
-            kmeans = KMeans(n_clusters=force_clusters, random_state=42, n_init=10)
-            labels = kmeans.fit_predict(scores_arr)
-            centers = kmeans.cluster_centers_.flatten()
-            good_cluster_idx = np.argmax(centers)
-            good_scores = scores_arr[labels == good_cluster_idx]
-            if len(good_scores) < 2:
-                cutoff = np.mean(centers)
-                print(f"[Auto-Cutoff] Not enough good samples for stats. Using midpoint: {cutoff:.4f}")
-            else:
-                mean_good = np.mean(good_scores)
-                std_good = np.std(good_scores)
-                cutoff = mean_good - (sigma_threshold * std_good)
-                bad_center = centers[1-good_cluster_idx]
-                if cutoff < bad_center:
-                    cutoff = (mean_good + bad_center) / 2
-                    print("[Auto-Cutoff] Sigma cutoff too wide, reverting to midpoint.")
-            print(f"\n[Auto-Cutoff] Centers: {centers}")
-            print(f"[Auto-Cutoff] Good Cluster Stats: Mean={np.mean(good_scores):.4f}, Std={np.std(good_scores):.4f}")
-            print(f"[Auto-Cutoff] Calculated Threshold (Mean - {sigma_threshold}*Std): {cutoff:.4f}")
-            updates = 0
-            for i, score in zip(indices, scores):
-                if score < cutoff:
-                    self.relationships.at[i, 'Parent1'] = None
-                    self.relationships.at[i, 'Parent2'] = None
-                    updates += 1
-            print(f"[Auto-Cutoff] Reclassified {updates} samples as Founders/F1 (Score < {cutoff:.4f}).")
-            self._recalculate_generations()
-        except Exception as e:
-            print(f"[Auto-Cutoff] Failed: {e}")
 
     def perform_consistency_cutoff(self, contig_data_list, threshold=0.90, step=1000,
                                      n_workers=None, verbose=True):
@@ -894,12 +854,28 @@ class PedigreeResult:
                 if verbose:
                     print(f"[Cycle Resolution] Pedigree is acyclic after {iteration-1} fix(es).")
                 break
-            cycles = list(nx.simple_cycles(G))
-            if verbose:
-                print(f"[Cycle Resolution] Iteration {iteration}: Found {len(cycles)} cycle(s)")
+            # Nodes lying on a cycle = nodes in a non-trivial strongly-connected
+            # component (size >= 2), plus any node carrying a self-loop (a
+            # length-1 cycle).  This is the exact set the previous
+            #     cycles = list(nx.simple_cycles(G))
+            #     for cycle in cycles: samples_in_cycles.update(cycle)
+            # produced, but computed in linear time via Tarjan SCCs.  The old
+            # nx.simple_cycles enumerated EVERY simple cycle (Johnson's
+            # algorithm) and list() materialized them all; on a dense cyclic
+            # graph (e.g. a low-depth garbage pedigree) the cycle count is
+            # combinatorial, so it spun single-threaded and grew the list until
+            # OOM.  Only the node set was ever used downstream, never the cycles
+            # themselves, so the cycle-breaking result is identical.
             samples_in_cycles = set()
-            for cycle in cycles:
-                samples_in_cycles.update(cycle)
+            for scc in nx.strongly_connected_components(G):
+                if len(scc) > 1:
+                    samples_in_cycles.update(scc)
+            for node in G.nodes():
+                if G.has_edge(node, node):
+                    samples_in_cycles.add(node)
+            if verbose:
+                print(f"[Cycle Resolution] Iteration {iteration}: "
+                      f"{len(samples_in_cycles)} node(s) in cycles")
             candidates_to_fix = []
             for sample in samples_in_cycles:
                 row = self.relationships[self.relationships['Sample'] == sample]
@@ -936,105 +912,6 @@ class PedigreeResult:
 # =============================================================================
 # 2. DISCRETIZATION & ALLELE CONVERSION FOR TOLERANCE PAINTINGS
 # =============================================================================
-
-def discretize_consensus_with_uncertainty(consensus_painting, start_pos, end_pos, snps_per_bin=100):
-    total_len = end_pos - start_pos
-    approx_bp_per_bin = snps_per_bin * 100 
-    num_bins = int(total_len / approx_bp_per_bin)
-    if num_bins < 100: num_bins = 100 
-    bin_edges = np.linspace(start_pos, end_pos, num_bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    id_grid = np.zeros((num_bins, 2), dtype=np.int32) - 1
-    potential_hom_mask = np.ones(num_bins, dtype=np.bool_)
-    cons_chunks = consensus_painting.chunks
-    if not cons_chunks:
-        return id_grid, potential_hom_mask, bin_centers
-    if consensus_painting.representative_path is not None:
-        rep_chunks = consensus_painting.representative_path.chunks
-    else:
-        rep_chunks = None
-    c_ends = np.array([c.end for c in cons_chunks])
-    c_starts = np.array([c.start for c in cons_chunks])
-    chunk_indices = np.searchsorted(c_ends, bin_centers)
-    chunk_indices = np.clip(chunk_indices, 0, len(cons_chunks) - 1)
-    for b in range(num_bins):
-        cidx = chunk_indices[b]
-        chunk = cons_chunks[cidx]
-        if bin_centers[b] < chunk.start or bin_centers[b] >= chunk.end:
-            potential_hom_mask[b] = True
-            continue
-        intersection = chunk.possible_hap1 & chunk.possible_hap2
-        potential_hom_mask[b] = len(intersection) > 0
-    if rep_chunks:
-        rep_ends = np.array([c.end for c in rep_chunks])
-        rep_h1 = np.array([c.hap1 for c in rep_chunks])
-        rep_h2 = np.array([c.hap2 for c in rep_chunks])
-        rep_starts = np.array([c.start for c in rep_chunks])
-        rep_indices = np.searchsorted(rep_ends, bin_centers)
-        rep_indices = np.clip(rep_indices, 0, len(rep_chunks) - 1)
-        valid_mask = bin_centers >= rep_starts[rep_indices]
-        id_grid[:, 0] = np.where(valid_mask, rep_h1[rep_indices], -1)
-        id_grid[:, 1] = np.where(valid_mask, rep_h2[rep_indices], -1)
-    return id_grid, potential_hom_mask, bin_centers
-
-
-def discretize_sample_painting_with_hom_mask(sample_painting, start_pos, end_pos, snps_per_bin=100):
-    total_len = end_pos - start_pos
-    approx_bp_per_bin = snps_per_bin * 100 
-    num_bins = int(total_len / approx_bp_per_bin)
-    if num_bins < 100: num_bins = 100 
-    bin_edges = np.linspace(start_pos, end_pos, num_bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    id_grid = np.zeros((num_bins, 2), dtype=np.int32) - 1
-    chunks = sample_painting.chunks
-    if not chunks:
-        potential_hom_mask = np.ones(num_bins, dtype=np.bool_)
-        return id_grid, potential_hom_mask, bin_centers
-    c_ends = np.array([c.end for c in chunks])
-    c_h1 = np.array([c.hap1 for c in chunks])
-    c_h2 = np.array([c.hap2 for c in chunks])
-    c_starts = np.array([c.start for c in chunks])
-    indices = np.searchsorted(c_ends, bin_centers)
-    indices = np.clip(indices, 0, len(chunks) - 1)
-    valid_mask = bin_centers >= c_starts[indices]
-    id_grid[:, 0] = np.where(valid_mask, c_h1[indices], -1)
-    id_grid[:, 1] = np.where(valid_mask, c_h2[indices], -1)
-    potential_hom_mask = (id_grid[:, 0] == id_grid[:, 1]) | (id_grid[:, 0] == -1) | (id_grid[:, 1] == -1)
-    return id_grid, potential_hom_mask, bin_centers
-
-
-def discretize_tolerance_paintings(block_tolerance_painting, snps_per_bin=100):
-    start_pos = block_tolerance_painting.start_pos
-    end_pos = block_tolerance_painting.end_pos
-    total_len = end_pos - start_pos
-    approx_bp_per_bin = snps_per_bin * 100 
-    num_bins = int(total_len / approx_bp_per_bin)
-    if num_bins < 100: num_bins = 100 
-    bin_edges = np.linspace(start_pos, end_pos, num_bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    num_samples = len(block_tolerance_painting)
-    sample_grids = []
-    for i in range(num_samples):
-        sample_obj = block_tolerance_painting[i]
-        grids_for_sample = []
-        consensus_list = sample_obj.consensus_list
-        if consensus_list:
-            for cons in consensus_list:
-                id_grid, potential_hom_mask, _ = discretize_consensus_with_uncertainty(
-                    cons, start_pos, end_pos, snps_per_bin
-                )
-                grids_for_sample.append((id_grid, potential_hom_mask, cons.weight))
-        if not grids_for_sample and sample_obj.paths:
-            id_grid, potential_hom_mask, _ = discretize_sample_painting_with_hom_mask(
-                sample_obj.paths[0], start_pos, end_pos, snps_per_bin
-            )
-            grids_for_sample.append((id_grid, potential_hom_mask, 1.0))
-        if not grids_for_sample:
-            id_grid = np.zeros((num_bins, 2), dtype=np.int32) - 1
-            potential_hom_mask = np.ones(num_bins, dtype=np.bool_)
-            grids_for_sample.append((id_grid, potential_hom_mask, 1.0))
-        sample_grids.append(grids_for_sample)
-    return sample_grids, bin_centers
 
 
 def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_width_bp=None):
@@ -1119,124 +996,6 @@ def convert_id_grid_to_allele_grid_multisnp(id_grid, bin_centers, founder_block,
                 allele_grid[b, 1, k_idx] = founder_alleles[f1, snp_idx]
     return allele_grid
 
-
-# =============================================================================
-# 2b. SNP-LEVEL DATA STRUCTURES FOR BINNED AGGREGATION
-# =============================================================================
-
-def get_snp_level_founder_ids(painting_chunks, snp_positions):
-    n_snps = len(snp_positions)
-    id_array = np.full((n_snps, 2), -1, dtype=np.int32)
-    if not painting_chunks:
-        return id_array
-    c_ends = np.array([c.end for c in painting_chunks])
-    c_h1 = np.array([c.hap1 for c in painting_chunks])
-    c_h2 = np.array([c.hap2 for c in painting_chunks])
-    c_starts = np.array([c.start for c in painting_chunks])
-    indices = np.searchsorted(c_ends, snp_positions)
-    indices = np.clip(indices, 0, len(painting_chunks) - 1)
-    valid_mask = snp_positions >= c_starts[indices]
-    id_array[:, 0] = np.where(valid_mask, c_h1[indices], -1)
-    id_array[:, 1] = np.where(valid_mask, c_h2[indices], -1)
-    return id_array
-
-
-def get_snp_level_hom_mask_from_consensus(consensus_painting, snp_positions):
-    n_snps = len(snp_positions)
-    hom_mask = np.ones(n_snps, dtype=np.bool_)
-    cons_chunks = consensus_painting.chunks
-    if not cons_chunks:
-        return hom_mask
-    c_ends = np.array([c.end for c in cons_chunks])
-    c_starts = np.array([c.start for c in cons_chunks])
-    chunk_indices = np.searchsorted(c_ends, snp_positions)
-    chunk_indices = np.clip(chunk_indices, 0, len(cons_chunks) - 1)
-    for s in range(n_snps):
-        cidx = chunk_indices[s]
-        chunk = cons_chunks[cidx]
-        if snp_positions[s] < chunk.start or snp_positions[s] >= chunk.end:
-            hom_mask[s] = True
-            continue
-        intersection = chunk.possible_hap1 & chunk.possible_hap2
-        hom_mask[s] = len(intersection) > 0
-    return hom_mask
-
-
-def build_founder_allele_lookup(founder_block):
-    snp_positions = founder_block.positions
-    n_snps = len(snp_positions)
-    hap_keys = sorted(list(founder_block.haplotypes.keys()))
-    max_id = max(hap_keys) if hap_keys else 0
-    allele_lookup = np.full((max_id + 1, n_snps), -1, dtype=np.int8)
-    for fid, h_arr in founder_block.haplotypes.items():
-        if h_arr.ndim == 2:
-            raw_alleles = np.argmax(h_arr, axis=1)
-        else:
-            raw_alleles = h_arr
-        allele_lookup[fid, :] = raw_alleles.astype(np.int8)
-    return allele_lookup, snp_positions
-
-
-def create_bin_structure(snp_positions, snps_per_bin=100):
-    n_snps = len(snp_positions)
-    if n_snps == 0:
-        return np.array([], dtype=np.int32), np.array([], dtype=np.int32), np.array([])
-    num_bins = max(1, n_snps // snps_per_bin)
-    if num_bins < 100 and n_snps >= 100:
-        num_bins = 100
-    bin_starts = np.zeros(num_bins, dtype=np.int32)
-    bin_ends = np.zeros(num_bins, dtype=np.int32)
-    bin_centers = np.zeros(num_bins, dtype=np.float64)
-    snps_per = n_snps // num_bins
-    remainder = n_snps % num_bins
-    start_idx = 0
-    for b in range(num_bins):
-        extra = 1 if b < remainder else 0
-        end_idx = start_idx + snps_per + extra
-        bin_starts[b] = start_idx
-        bin_ends[b] = end_idx
-        if end_idx > start_idx:
-            bin_centers[b] = np.mean(snp_positions[start_idx:end_idx])
-        start_idx = end_idx
-    return bin_starts, bin_ends, bin_centers
-
-
-def aggregate_hom_mask_to_bins(snp_hom_mask, bin_starts, bin_ends):
-    n_bins = len(bin_starts)
-    bin_hom_mask = np.zeros(n_bins, dtype=np.bool_)
-    for b in range(n_bins):
-        bin_hom_mask[b] = np.any(snp_hom_mask[bin_starts[b]:bin_ends[b]])
-    return bin_hom_mask
-
-
-# =============================================================================
-# 3. STATISTICAL CALCULATIONS
-# =============================================================================
-
-def calculate_ibd_matrices(grid):
-    num_samples, num_bins, _ = grid.shape
-    kinship_sum = np.zeros((num_samples, num_samples))
-    ibd0_sum = np.zeros((num_samples, num_samples))
-    valid_counts = np.zeros((num_samples, num_samples))
-    batch_size = 500
-    for b_start in range(0, num_bins, batch_size):
-        b_end = min(b_start + batch_size, num_bins)
-        g_sub = grid[:, b_start:b_end, :]
-        A = g_sub[:, np.newaxis, :, :]
-        B = g_sub[np.newaxis, :, :, :]
-        valid_mask = (A[..., 0] != -1) & (B[..., 0] != -1)
-        valid_counts += np.sum(valid_mask, axis=2)
-        match_direct = (A[...,0] == B[...,0]) & (A[...,1] == B[...,1])
-        match_cross  = (A[...,0] == B[...,1]) & (A[...,1] == B[...,0])
-        match_both   = match_direct | match_cross
-        any_match = (A[...,0] == B[...,0]) | (A[...,0] == B[...,1]) | (A[...,1] == B[...,0]) | (A[...,1] == B[...,1])
-        k_scores = np.zeros_like(match_both, dtype=float)
-        k_scores[any_match] = 0.5; k_scores[match_both] = 1.0; k_scores[~valid_mask] = 0.0
-        kinship_sum += np.sum(k_scores, axis=2)
-        ibd0_scores = (~any_match).astype(float); ibd0_scores[~valid_mask] = 0.0
-        ibd0_sum += np.sum(ibd0_scores, axis=2)
-    valid_counts[valid_counts == 0] = 1.0
-    return kinship_sum / valid_counts, ibd0_sum / valid_counts
 
 # =============================================================================
 # 4. HMM KERNELS (8-STATE FILTER & 16-STATE VERIFIER)
@@ -1525,62 +1284,6 @@ def run_trio_phase_aware_hmm_multisnp(child_dip_alleles, child_potential_hom_mas
 
 DEFAULT_MISMATCH_PENALTY = -4.605170  # math.log(0.01)
 
-def score_parent_child_all_consensus_precomputed(child_grids, parent_grids, 
-                                                  switch_costs, stay_costs, 
-                                                  error_penalty, phase_penalty,
-                                                  mismatch_penalty=DEFAULT_MISMATCH_PENALTY):
-    best_score = -np.inf
-    for child_allele_grid, child_hom_mask, child_weight in child_grids:
-        for parent_allele_grid, parent_hom_mask, parent_weight in parent_grids:
-            if child_allele_grid.ndim == 3:
-                score = run_phase_agnostic_hmm_multisnp(
-                    child_allele_grid, child_hom_mask,
-                    parent_allele_grid,
-                    switch_costs, stay_costs,
-                    error_penalty, phase_penalty,
-                    mismatch_penalty
-                )
-            else:
-                score = run_phase_agnostic_hmm(
-                    child_allele_grid, child_hom_mask,
-                    parent_allele_grid,
-                    switch_costs, stay_costs,
-                    error_penalty, phase_penalty,
-                    mismatch_penalty
-                )
-            if score > best_score:
-                best_score = score
-    return best_score
-
-
-def score_trio_all_consensus_precomputed(child_grids, p1_grids, p2_grids,
-                                          switch_costs, stay_costs,
-                                          error_penalty, phase_penalty,
-                                          mismatch_penalty=DEFAULT_MISMATCH_PENALTY):
-    best_score = -np.inf
-    for child_allele_grid, child_hom_mask, child_weight in child_grids:
-        for p1_allele_grid, p1_hom_mask, p1_weight in p1_grids:
-            for p2_allele_grid, p2_hom_mask, p2_weight in p2_grids:
-                if child_allele_grid.ndim == 3:
-                    score = run_trio_phase_aware_hmm_multisnp(
-                        child_allele_grid, child_hom_mask,
-                        p1_allele_grid, p2_allele_grid,
-                        switch_costs, stay_costs,
-                        error_penalty, phase_penalty,
-                        mismatch_penalty
-                    )
-                else:
-                    score = run_trio_phase_aware_hmm(
-                        child_allele_grid, child_hom_mask,
-                        p1_allele_grid, p2_allele_grid,
-                        switch_costs, stay_costs,
-                        error_penalty, phase_penalty,
-                        mismatch_penalty
-                    )
-                if score > best_score:
-                    best_score = score
-    return best_score
-
 
 # -----------------------------------------------------------------------------
 # Batched HMM-call kernels (optimization #4 from May 2026 numba pass).
@@ -1751,6 +1454,36 @@ def _process_contig_batch(args):
     (contig_idx, sample_start, sample_end, tol_painting, founder_meta,
      snps_per_bin, recomb_rate, max_snps_per_bin) = args
 
+    # Counter inc / threads-up on entry.  Same two-step dynamic-thread
+    # reallocation pattern as _score_pairs_by_children and
+    # _check_trio_consistency_worker (see the module-level
+    # _PEDIGREE_ACTIVE_COUNTER docstring): when the pool was initialized with
+    # counters, atomically bump the active count, claim an extra from the
+    # remainder pool, and set this worker's numba threads to its fair share.
+    # process_contig_for_pedigree's heavy step is the
+    # convert_id_grid_to_allele_grid[_multisnp] kernel, which is
+    # @njit(parallel=True) and is NOT internally thread-scoped, so this
+    # set_num_threads governs it directly.  Unlike the other workers there is
+    # no in-task rebalance hook -- the task is a single painting-convert call
+    # with no Python-level loop to re-check from -- so the share is fixed at
+    # entry (a task starting while few peers are active gets more threads).
+    # No-op when the pool has no counters, preserving legacy behavior exactly.
+    counter_inc = False
+    if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
+        try:
+            import numba as _numba
+            with _PEDIGREE_ACTIVE_COUNTER.get_lock():
+                _PEDIGREE_ACTIVE_COUNTER.value += 1
+            counter_inc = True
+            active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
+            floor = _PEDIGREE_TOTAL_CORES // active
+            remainder = _PEDIGREE_TOTAL_CORES - floor * active
+            _try_claim_extra(remainder)
+            n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
+            _numba.set_num_threads(n_threads)
+        except Exception:
+            pass
+
     # Rebuild the founder block from its per-contig SharedMemory segments.
     # The proxy exposes the same .positions / .haplotypes surface the convert
     # functions read; keys preserve the (possibly non-contiguous) founder ids,
@@ -1773,33 +1506,15 @@ def _process_contig_batch(args):
         # here is safe; the parent still owns + unlinks the segments.
         pos_seg.close()
         hap_seg.close()
-
-
-def _score_contig_pairs(contig_idx):
-    """Worker: score all parent-child pairs for one contig. Reads from shared data."""
-    cache = _PEDIGREE_SHARED['contig_caches'][contig_idx]
-    sample_allele_grids = cache['sample_allele_grids']
-    sw_costs = cache['sw_costs']
-    st_costs = cache['st_costs']
-    error_pen = _PEDIGREE_SHARED['error_pen']
-    phase_pen = _PEDIGREE_SHARED['phase_pen']
-    mismatch_penalty = _PEDIGREE_SHARED['mismatch_penalty']
-    num_samples = _PEDIGREE_SHARED['num_samples']
-    
-    scores = np.zeros((num_samples, num_samples))
-    for i in range(num_samples):
-        for j in range(num_samples):
-            if i == j:
-                continue
-            score = score_parent_child_all_consensus_precomputed(
-                sample_allele_grids[i],
-                sample_allele_grids[j],
-                sw_costs, st_costs,
-                error_pen, phase_pen,
-                mismatch_penalty
-            )
-            scores[i, j] = score
-    return scores
+        # Release this worker's extra claim and decrement the active count so
+        # peers re-checking _update_dynamic_threads() see a core free up.
+        _try_release_extra()
+        if counter_inc and _PEDIGREE_ACTIVE_COUNTER is not None:
+            try:
+                with _PEDIGREE_ACTIVE_COUNTER.get_lock():
+                    _PEDIGREE_ACTIVE_COUNTER.value -= 1
+            except Exception:
+                pass
 
 
 def _score_pairs_by_children(child_indices):
@@ -2143,8 +1858,22 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     # not launched) instead of forking the parent — see the module-level
     # _ForkserverPool note.  _shm_cleanup is the OUTER context manager so the
     # founder segments are unlinked only after every worker has exited.
+    # Counters for the two-step dynamic-thread reallocation pattern, matching
+    # Phase 2/3 and the consistency cutoff (see the module-level
+    # _PEDIGREE_ACTIVE_COUNTER docstring).  Fresh _forkserver_ctx.Value('i', 0)
+    # per pool.  total_cores=n_workers tells each worker its maximum thread
+    # budget; _process_contig_batch starts at its fair share and the share is
+    # larger for tasks that begin once peers have finished.  Phase 1 passes an
+    # EMPTY shared dict -- it carries its data in the task args + per-contig
+    # SharedMemory, never via _PEDIGREE_SHARED -- so _init_pedigree_shared here
+    # only installs the counters and the per-worker numba ceiling.
+    phase1_active_counter = _forkserver_ctx.Value('i', 0)
+    phase1_extra_counter = _forkserver_ctx.Value('i', 0)
     with _shm_cleanup(_phase1_shm_handles), \
-         _safe_forkserver_pool(min(n_workers, len(phase1_tasks))) as pool:
+         _safe_forkserver_pool(min(n_workers, len(phase1_tasks)),
+                               initializer=_init_pedigree_shared,
+                               initargs=({}, phase1_active_counter, n_workers,
+                                         phase1_extra_counter)) as pool:
         phase1_results = list(tqdm(
             pool.imap_unordered(_process_contig_batch, phase1_tasks),
             total=len(phase1_tasks),
@@ -2455,63 +2184,6 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
 
 
 # =============================================================================
-# 7. CYCLE DETECTION AND RESOLUTION
-# =============================================================================
-
-def build_pedigree_graph(relationships_df):
-    G = nx.DiGraph()
-    for _, row in relationships_df.iterrows():
-        child = row['Sample']
-        G.add_node(child)
-        p1 = row.get('Parent1')
-        p2 = row.get('Parent2')
-        if pd.notna(p1):
-            G.add_edge(p1, child)
-        if pd.notna(p2):
-            G.add_edge(p2, child)
-    return G
-
-
-def detect_cycles(relationships_df):
-    G = build_pedigree_graph(relationships_df)
-    if nx.is_directed_acyclic_graph(G):
-        return []
-    return list(nx.simple_cycles(G))
-
-
-def propagate_generations(relationships_df):
-    fixed_df = relationships_df.copy()
-    name_to_gen = {}
-    for idx, row in fixed_df.iterrows():
-        if pd.isna(row['Parent1']) and pd.isna(row['Parent2']):
-            fixed_df.at[idx, 'Generation'] = 'F1'
-            name_to_gen[row['Sample']] = 'F1'
-        else:
-            fixed_df.at[idx, 'Generation'] = 'Unknown'
-    for _ in range(10):
-        changed = False
-        for idx, row in fixed_df.iterrows():
-            if row['Generation'] != 'Unknown':
-                continue
-            p1, p2 = row['Parent1'], row['Parent2']
-            p1_gen = name_to_gen.get(p1)
-            p2_gen = name_to_gen.get(p2)
-            if p1_gen and p2_gen:
-                try:
-                    g1 = int(p1_gen[1:])
-                    g2 = int(p2_gen[1:])
-                    gen = f"F{max(g1, g2) + 1}"
-                    fixed_df.at[idx, 'Generation'] = gen
-                    name_to_gen[row['Sample']] = gen
-                    changed = True
-                except:
-                    pass
-        if not changed:
-            break
-    return fixed_df
-
-
-# =============================================================================
 # 8. VISUALIZATION & WRAPPER
 # =============================================================================
 
@@ -2552,22 +2224,3 @@ def draw_pedigree_tree(relationships_df, output_file="pedigree_tree.png"):
     labels = {n:n for n in to_label}
     nx.draw_networkx_labels(G, pos, labels=labels, font_size=8)
     plt.axis('off'); plt.tight_layout(); plt.savefig(output_file, dpi=150); plt.close()
-
-
-def run_pedigree_inference_tolerance(tolerance_painting, sample_ids=None, snps_per_bin=100, 
-                                     founder_block=None, recomb_rate=5e-8,
-                                     output_prefix="pedigree",
-                                     mismatch_penalty=DEFAULT_MISMATCH_PENALTY,
-                                     n_workers=None):
-    if founder_block is None: 
-        raise ValueError("Founder Block is required.")
-    if sample_ids is None: 
-        sample_ids = [f"S_{i}" for i in range(len(tolerance_painting))]
-    contig_input = [{'tolerance_painting': tolerance_painting, 'founder_block': founder_block}]
-    result = infer_pedigree_multi_contig_tolerance(contig_input, sample_ids, top_k=20,
-                                                    snps_per_bin=snps_per_bin, recomb_rate=recomb_rate,
-                                                    mismatch_penalty=mismatch_penalty,
-                                                    n_workers=n_workers)
-    result.relationships.to_csv(f"{output_prefix}.ped", index=False)
-    draw_pedigree_tree(result.relationships, output_file=f"{output_prefix}_tree.png")
-    return result

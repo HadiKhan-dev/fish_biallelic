@@ -846,7 +846,30 @@ def prune_chimeras(hap_dict, probs_array,
     # first-occurrence tie-break) but parallel; the numpy reduction scans the
     # whole probs_array single-threaded (~5.4 GB at L4).
     if HAS_NUMBA:
-        sample_geno_stack = _argmax3_numba(probs_array)
+        try:
+            sample_geno_stack = _argmax3_numba(probs_array)
+        except Exception as _argmax_err:
+            # _argmax3_numba is @njit(cache=True, parallel=True).  Under heavy
+            # forkserver worker recycling with the numba cache on a network
+            # filesystem, a freshly-spawned worker can intermittently fail to
+            # unbox its argument ("can't unbox array from PyObject into native
+            # value") even for a perfectly valid (num_samples, num_sites, 3)
+            # float32 array -- a numba cache/runtime glitch in that worker, not
+            # bad data.  np.argmax over axis=2 is bit-identical to the kernel
+            # (same first-occurrence tie-break, see the comment above), so fall
+            # back to it rather than aborting the whole hierarchical-assembly
+            # batch.  The array's signature is logged so a *genuine* wrong-type
+            # input would still be visible: np.argmax raises loudly on object /
+            # ragged / wrong-ndim arrays and never silently mis-reduces a valid
+            # one, so the fallback can only produce the identical result or fail.
+            print(f"  [prune_chimeras] _argmax3_numba raised "
+                  f"{type(_argmax_err).__name__}: {_argmax_err} | probs_array "
+                  f"type={type(probs_array).__name__} "
+                  f"dtype={getattr(probs_array, 'dtype', None)} "
+                  f"shape={getattr(probs_array, 'shape', None)} "
+                  f"C_contig={getattr(getattr(probs_array, 'flags', None), 'c_contiguous', None)} "
+                  f"-> using bit-identical np.argmax fallback", flush=True)
+            sample_geno_stack = np.argmax(probs_array, axis=2).astype(np.int8)
     else:
         sample_geno_stack = np.argmax(probs_array, axis=2).astype(np.int8)
     
