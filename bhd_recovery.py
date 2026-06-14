@@ -254,7 +254,17 @@ RECOVERY_RESIDUAL_MODE = "argmax"
 
 # Bernoulli mixture parameters for inner K-selection on candidates
 RECOVERY_MIXTURE_K_MAX = 10            # try K=1..K_max, pick best by inner BIC
-RECOVERY_MIXTURE_N_RESTARTS = 3        # EM restarts per K (different K-means++ seeds)
+RECOVERY_MIXTURE_N_RESTARTS = 2        # EM restarts per K (different K-means++ seeds).
+                                       # Reduced 3 -> 2 after validation: produces bit-
+                                       # identical recovered founders across low- and
+                                       # high-K, uniform- and skewed-frequency blocks
+                                       # (K=6/12/20 tested).  The mixture only PROPOSES
+                                       # candidate consensus haps; the outer BIC subset-
+                                       # selection on the sample data is what picks the
+                                       # founders, and it is empirically robust to which
+                                       # mixture local-optimum did the proposing.  Kept at
+                                       # 2 (not 1) to retain a restart safety margin for
+                                       # the multi-modal EM landscape.
 RECOVERY_MIXTURE_MAX_ITER = 100        # max EM iterations per fit
 RECOVERY_MIXTURE_TOL = 1e-3            # relative LL change for EM convergence.
                                       # The mixture output is a BINARY consensus
@@ -268,6 +278,28 @@ RECOVERY_MIXTURE_TOL = 1e-3            # relative LL change for EM convergence.
                                       # so this single-thread cut is the win).
 RECOVERY_MIXTURE_THETA_EPS = 1e-3      # clip theta to [eps, 1-eps] for log stability
 RECOVERY_MIXTURE_RNG_SEED = 42         # base RNG seed (varied per round)
+
+# Patience for the mixture K-sweep early-stop (see _fit_bernoulli_mixture_-
+# select_K / _fit_bernoulli_mixture_ml_select_K).  Both inner-mixture fits
+# sweep K = 1 .. K_max_effective and pick the global-min-BIC K.  Without an
+# early stop that sweep is linear in K_max_effective in the number of EM
+# fits (and ~quadratic in wall time, since each EM fit at K components is
+# itself O(K)); when the recovery caps are raised to support many founders
+# (e.g. K_max ~ 40), a block whose true K is small would otherwise pay the
+# full 40-wide sweep on every mixture call.  The early stop tracks the best
+# BIC seen so far and terminates once `patience` CONSECUTIVE increasing-K
+# values fail to improve on it.  It only ever truncates the TAIL of the
+# sweep — it never changes which K is selected among the K it evaluates —
+# and because the counter resets on every BIC improvement, a fit whose BIC
+# is still descending at K* is always evaluated through K* (plus `patience`
+# further K).  The residual risk is a globally better BIC that sits MORE
+# than `patience` increasing-K steps past a local BIC minimum following a
+# non-monotone bump; the RECOVERY_MIXTURE_N_RESTARTS EM restarts per K
+# mitigate the EM-local-optimum source of such bumps.  Threaded as
+# recovery_mixture_patience / mixture_patience through the recovery call
+# chain; pass None there to disable the early stop and recover the
+# full-sweep behaviour bit-for-bit.
+RECOVERY_MIXTURE_PATIENCE = 3
 
 # Intra-round dedup safety net.  The mixture's BIC over K already
 # prevents near-duplicate components from being selected, so this is
@@ -741,9 +773,29 @@ def _bernoulli_mixture_em_kernel(cands, K, init_centers,
         # E-step
         log_theta = np.log(theta)
         log_one_minus_theta = np.log(1 - theta)
-        # log_p = cands @ log_theta.T + (1 - cands) @ log_one_minus_theta.T
+        # E-step emission log P(c | k), FUSED to a single GEMM.  The original
+        # form was the two-GEMM expression
+        #     log_p = cands @ log_theta.T + (1 - cands) @ log_one_minus_theta.T
+        # which also materialises a full (N, L) (1 - cands) temporary.  Since
+        # `cands` is binary {0, 1}, that equals (exactly, in real arithmetic)
+        #     cands @ (log_theta - log_one_minus_theta).T
+        #         + sum_l log_one_minus_theta[k, l]
+        # i.e. ONE GEMM against the logit matrix plus a per-component constant
+        # c[k] (the row-sums of log_one_minus_theta) broadcast over samples.
+        # This halves the E-step GEMM work and drops the (1 - cands) alloc.
+        # The floating-point summation order differs from the two-GEMM form,
+        # so log_p (and hence theta / resp / ll) may differ at the last bits;
+        # the binary consensus (theta > 0.5) and the downstream BIC subset-
+        # selection are robust to that (validated on the recovery panel).
         # Numba's @ dispatches to the same BLAS as numpy.
-        log_p = cands @ log_theta.T + (1 - cands) @ log_one_minus_theta.T
+        logit = log_theta - log_one_minus_theta                  # (K, L)
+        c = np.empty(K, dtype=np.float64)
+        for k in range(K):
+            s = 0.0
+            for l in range(L):
+                s += log_one_minus_theta[k, l]
+            c[k] = s
+        log_p = cands @ logit.T + c                              # (N, K) + (K,)
         log_pi = np.log(pi + 1e-15)
         # log_p_weighted = log_p + log_pi[None, :]  — broadcast row-wise
         log_p_weighted = log_p + log_pi  # numba broadcasts (N, K) + (K,)
@@ -855,6 +907,7 @@ def _fit_bernoulli_mixture_select_K(candidates,
                                       K_max=RECOVERY_MIXTURE_K_MAX,
                                       n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
                                       seed=RECOVERY_MIXTURE_RNG_SEED,
+                                      patience=RECOVERY_MIXTURE_PATIENCE,
                                       verbose=False):
     """Fit Bernoulli mixture for K=1..K_max, pick the K minimising BIC.
 
@@ -863,6 +916,11 @@ def _fit_bernoulli_mixture_select_K(candidates,
       K_max: upper bound on K to try
       n_restarts: EM restarts per K (with different K-means++ seeds)
       seed: base RNG seed (for reproducibility)
+      patience: stop the K-sweep after this many CONSECUTIVE increasing-K
+        values fail to improve the best BIC (see RECOVERY_MIXTURE_PATIENCE).
+        Truncates the sweep tail only; does not change the selected K among
+        the K it evaluates.  patience=None disables the early stop (full
+        sweep, bit-identical to the pre-early-stop behaviour).
       verbose: print BIC trace
 
     Returns:
@@ -893,6 +951,7 @@ def _fit_bernoulli_mixture_select_K(candidates,
     rng = np.random.default_rng(seed)
 
     best_overall = None   # tuple: (K, BIC, theta, pi, ll, effective_sizes)
+    no_improve = 0        # consecutive increasing-K with no BIC improvement
     bic_trace = []
 
     if verbose:
@@ -919,6 +978,20 @@ def _fit_bernoulli_mixture_select_K(candidates,
 
         if best_overall is None or bic < best_overall[1]:
             best_overall = (K, bic, theta, pi, ll, effective_sizes)
+            no_improve = 0
+        else:
+            # No BIC improvement at this K.  Count it; once `patience`
+            # CONSECUTIVE increasing-K values have failed to beat the best
+            # BIC, stop sweeping (the tail is wasted work — see
+            # RECOVERY_MIXTURE_PATIENCE).  patience=None disables this and
+            # restores the full K=1..K_max_effective sweep bit-for-bit.
+            no_improve += 1
+            if patience is not None and no_improve >= patience:
+                if verbose:
+                    print(f'      [patience] stop sweep at K={K} '
+                          f'({no_improve} consecutive non-improving K; '
+                          f'best K={best_overall[0]})')
+                break
 
     if verbose:
         for K, bic, ll, eff_sizes in bic_trace:
@@ -1296,6 +1369,7 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
                                          K_max=RECOVERY_MIXTURE_K_MAX,
                                          n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
                                          seed=RECOVERY_MIXTURE_RNG_SEED,
+                                         patience=RECOVERY_MIXTURE_PATIENCE,
                                          verbose=False):
     """Marginal-likelihood Bernoulli-haplotype mixture (model B) for the
     "soft" recovery path: fit K=1..K_max, pick the K minimising BIC, return
@@ -1321,6 +1395,11 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
       K_max: upper bound on K to try
       n_restarts: EM restarts per K (different K-means++ seeds)
       seed: base RNG seed
+      patience: stop the K-sweep after this many CONSECUTIVE increasing-K
+        values fail to improve the best BIC (see RECOVERY_MIXTURE_PATIENCE).
+        Truncates the sweep tail only; does not change the selected K among
+        the K it evaluates.  patience=None disables the early stop (full
+        sweep, bit-identical to the pre-early-stop behaviour).
       verbose: print BIC trace
 
     Returns:
@@ -1343,6 +1422,7 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
     rng = np.random.default_rng(seed)
 
     best_overall = None   # (K, BIC, theta)
+    no_improve = 0        # consecutive increasing-K with no BIC improvement
     bic_trace = []
 
     if verbose:
@@ -1367,6 +1447,20 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
 
         if best_overall is None or bic < best_overall[1]:
             best_overall = (K, bic, theta)
+            no_improve = 0
+        else:
+            # No BIC improvement at this K.  Count it; once `patience`
+            # CONSECUTIVE increasing-K values have failed to beat the best
+            # BIC, stop sweeping (the tail is wasted work — see
+            # RECOVERY_MIXTURE_PATIENCE).  patience=None disables this and
+            # restores the full K=1..K_max_effective sweep bit-for-bit.
+            no_improve += 1
+            if patience is not None and no_improve >= patience:
+                if verbose:
+                    print(f'      [patience] stop sweep at K={K} '
+                          f'({no_improve} consecutive non-improving K; '
+                          f'best K={best_overall[0]})')
+                break
 
     if verbose:
         for K, bic, ll in bic_trace:
@@ -2103,6 +2197,7 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
                                        mixture_K_max=RECOVERY_MIXTURE_K_MAX,
                                        mixture_n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
                                        mixture_seed_base=RECOVERY_MIXTURE_RNG_SEED,
+                                       mixture_patience=RECOVERY_MIXTURE_PATIENCE,
                                        cleanness_threshold=RECOVERY_CLEANNESS_THRESHOLD,
                                        swap_nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
                                        haps_equal_eps_pct=RECOVERY_HAPS_EQUAL_EPS_PCT,
@@ -2139,6 +2234,8 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
       max_iter_per_K: cap on coord-descent iterations within each round
       intra_round_dedup_pct: tight dedup threshold for consensus haps
       mixture_K_max, mixture_n_restarts, mixture_seed_base: inner mixture params
+      mixture_patience: K-sweep early-stop patience for the inner mixture
+        (see RECOVERY_MIXTURE_PATIENCE); None disables the early stop.
       cleanness_threshold: min residual cleanness to admit a candidate
       swap_nll_tolerance: NLL improvement floor for accepting a swap
       haps_equal_eps_pct: tolerance for round-convergence detection
@@ -2197,6 +2294,7 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
                 K_max=mixture_K_max,
                 n_restarts=mixture_n_restarts,
                 seed=mixture_seed_base + round_num,
+                patience=mixture_patience,
                 verbose=verbose)
         else:
             raw_candidates = _run_subtraction_round(
@@ -2213,6 +2311,7 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
                 K_max=mixture_K_max,
                 n_restarts=mixture_n_restarts,
                 seed=mixture_seed_base + round_num,
+                patience=mixture_patience,
                 verbose=verbose)
         if len(consensus_haps) == 0:
             if verbose:

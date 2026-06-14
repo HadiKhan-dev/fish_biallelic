@@ -83,6 +83,7 @@ from bhd_recovery import (
     RECOVERY_MIXTURE_K_MAX,
     RECOVERY_MIXTURE_N_RESTARTS,
     RECOVERY_MIXTURE_RNG_SEED,
+    RECOVERY_MIXTURE_PATIENCE,
     RECOVERY_CLEANNESS_THRESHOLD,
     RECOVERY_SWAP_NLL_TOLERANCE,
     RECOVERY_MAX_OUTER_ITERATIONS,
@@ -818,6 +819,7 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
                                     recovery_mixture_K_max=RECOVERY_MIXTURE_K_MAX,
                                     recovery_mixture_n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
                                     recovery_mixture_seed_base=RECOVERY_MIXTURE_RNG_SEED,
+                                    recovery_mixture_patience=RECOVERY_MIXTURE_PATIENCE,
                                     recovery_cleanness_threshold=RECOVERY_CLEANNESS_THRESHOLD,
                                     recovery_swap_nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
                                     recovery_haps_equal_eps_pct=RECOVERY_HAPS_EQUAL_EPS_PCT,
@@ -941,6 +943,7 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
             mixture_K_max=recovery_mixture_K_max,
             mixture_n_restarts=recovery_mixture_n_restarts,
             mixture_seed_base=recovery_mixture_seed_base,
+            mixture_patience=recovery_mixture_patience,
             cleanness_threshold=recovery_cleanness_threshold,
             swap_nll_tolerance=recovery_swap_nll_tolerance,
             haps_equal_eps_pct=recovery_haps_equal_eps_pct,
@@ -1103,6 +1106,7 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
                             recovery_mixture_K_max=RECOVERY_MIXTURE_K_MAX,
                             recovery_mixture_n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
                             recovery_mixture_seed_base=RECOVERY_MIXTURE_RNG_SEED,
+                            recovery_mixture_patience=RECOVERY_MIXTURE_PATIENCE,
                             recovery_swap_nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
                             recovery_haps_equal_eps_pct=RECOVERY_HAPS_EQUAL_EPS_PCT,
                             verbose=False):
@@ -1320,6 +1324,7 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
         recovery_mixture_K_max=recovery_mixture_K_max,
         recovery_mixture_n_restarts=recovery_mixture_n_restarts,
         recovery_mixture_seed_base=recovery_mixture_seed_base,
+        recovery_mixture_patience=recovery_mixture_patience,
         recovery_cleanness_threshold=recovery_cleanness_threshold,
         recovery_swap_nll_tolerance=recovery_swap_nll_tolerance,
         recovery_haps_equal_eps_pct=recovery_haps_equal_eps_pct,
@@ -1345,6 +1350,7 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
             mixture_K_max=recovery_mixture_K_max,
             mixture_n_restarts=recovery_mixture_n_restarts,
             mixture_seed_base=recovery_mixture_seed_base + outer_it * 1000,
+            mixture_patience=recovery_mixture_patience,
             cleanness_threshold=recovery_cleanness_threshold,
             swap_nll_tolerance=recovery_swap_nll_tolerance,
             haps_equal_eps_pct=recovery_haps_equal_eps_pct,
@@ -1823,6 +1829,20 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                               coord_descent_max_iter=50,
                               min_supporters_for_confidence=2,
                               n_medoid_starts=K_MEDOID_STARTS_DEFAULT,
+                              # Recovery caps and inner-mixture early-stop.
+                              # recovery_max_K / recovery_mixture_K_max default
+                              # to None = "auto": resolved below to
+                              # max(module constant, K_max), so raising the
+                              # public K_max (e.g. to support ~40 founders)
+                              # auto-raises the recovery selection / inner-
+                              # mixture caps WITHOUT changing the default-K_max
+                              # behaviour.  recovery_mixture_patience is the
+                              # mixture K-sweep early-stop patience (see
+                              # RECOVERY_MIXTURE_PATIENCE); pass None to disable
+                              # it (full sweep, bit-identical to pre-early-stop).
+                              recovery_max_K=None,
+                              recovery_mixture_K_max=None,
+                              recovery_mixture_patience=RECOVERY_MIXTURE_PATIENCE,
                               # Legacy parameters that still apply (final cleanup)
                               diff_threshold_percent=1.0,
                               penalty_strength=5.0,
@@ -1891,7 +1911,15 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
 
     # --- 3. RESTRICT TO KEPT SITES FOR INFERENCE ---
     if kept_mask.any():
-        probs_k = probs_array[:, kept_mask, :]
+        # Boolean masking on the middle axis yields a NON-C-contiguous view;
+        # probs_k is the largest array in the block and is handed to every CD
+        # kernel, each of which requires C-contiguous input (via
+        # _maybe_c_contig).  Materialise it C-contiguous ONCE here so those
+        # per-call contiguity checks fast-path instead of deep-copying the
+        # ~N*L*3 tensor on every founder of every coordinate-descent iteration
+        # (profiled at ~28% of a K=40 block).  Pure layout change — the values
+        # are identical, so results are bit-for-bit unchanged.
+        probs_k = np.ascontiguousarray(probs_array[:, kept_mask, :])
     else:
         # No kept sites — degenerate case
         probs_k = probs_array[:, :0, :]
@@ -1918,6 +1946,21 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     # missed (e.g., when K-growth gets stuck at a low K_final due to dirty
     # haps causing pseudo-convergence; see chr11:28698298, chr14:14665241).
     # Returns the same 7-tuple as _grow_K, so this is a transparent change.
+    # Resolve the recovery caps.  None means "auto": take the larger of the
+    # module-constant default and K_max, so raising the public K_max (e.g.
+    # to support ~40 founders) automatically raises the recovery selection
+    # and inner-mixture caps to match, WITHOUT changing the default-K_max
+    # behaviour — at the default K_max=10, max(RECOVERY_MAX_K=12, 10)=12 and
+    # max(RECOVERY_MIXTURE_K_MAX=10, 10)=10, i.e. the existing constants.
+    # The mixture-sweep patience early-stop (recovery_mixture_patience) is
+    # what keeps the average (small-true-K) cost from scaling with these
+    # raised caps; without it the inner mixture would sweep K=1..cap on every
+    # call regardless of how many founders the block actually needs.
+    if recovery_max_K is None:
+        recovery_max_K = max(RECOVERY_MAX_K, K_max)
+    if recovery_mixture_K_max is None:
+        recovery_mixture_K_max = max(RECOVERY_MIXTURE_K_MAX, K_max)
+
     H_k, A, per_sample_cost, wildcard_slots, K_final, wildcard_mass, history = \
         _grow_K_with_recovery(probs_k, kept_mask,
                               lam=lambda_wildcard_penalty,
@@ -1925,7 +1968,10 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                               min_relative_improvement=min_wildcard_relative_improvement,
                               K_max=K_max,
                               max_iter_per_K=coord_descent_max_iter,
-                              n_medoid_starts=n_medoid_starts)
+                              n_medoid_starts=n_medoid_starts,
+                              recovery_max_K=recovery_max_K,
+                              recovery_mixture_K_max=recovery_mixture_K_max,
+                              recovery_mixture_patience=recovery_mixture_patience)
 
     # --- 5. COMPUTE PER-SITE CONFIDENCE (kept-site coords) ---
     confidence_k, n_supporters_k = _compute_per_site_confidence(
@@ -2084,6 +2130,18 @@ def generate_all_block_haplotypes(genomic_data,
                                     K_max=10,
                                     coord_descent_max_iter=50,
                                     min_supporters_for_confidence=2,
+                                    # Recovery caps + inner-mixture sweep
+                                    # early-stop, forwarded to
+                                    # generate_haplotypes_block.  recovery_max_K
+                                    # / recovery_mixture_K_max default to None
+                                    # ("auto" = max(module constant, K_max)), so
+                                    # raising K_max for high-founder runs
+                                    # auto-raises the recovery caps;
+                                    # recovery_mixture_patience defaults to
+                                    # RECOVERY_MIXTURE_PATIENCE (None disables).
+                                    recovery_max_K=None,
+                                    recovery_mixture_K_max=None,
+                                    recovery_mixture_patience=RECOVERY_MIXTURE_PATIENCE,
                                     # Legacy params (used in final cleanup)
                                     diff_threshold_percent=1.0,
                                     penalty_strength=5.0,
@@ -2107,6 +2165,9 @@ def generate_all_block_haplotypes(genomic_data,
         'K_max': K_max,
         'coord_descent_max_iter': coord_descent_max_iter,
         'min_supporters_for_confidence': min_supporters_for_confidence,
+        'recovery_max_K': recovery_max_K,
+        'recovery_mixture_K_max': recovery_mixture_K_max,
+        'recovery_mixture_patience': recovery_mixture_patience,
         'diff_threshold_percent': diff_threshold_percent,
         'penalty_strength': penalty_strength,
         'chimera_max_recombs': chimera_max_recombs,

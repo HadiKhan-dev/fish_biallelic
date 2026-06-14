@@ -9,12 +9,18 @@ Main entry point: select_and_resolve()
 
 import numpy as np
 import math
+import os
+import time as _time
 import ctypes
 import heapq
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
 from scipy.optimize import linear_sum_assignment
+
+# env-gated coarse phase timing inside select_and_resolve (no effect on results
+# when off): set BHD_CR_PROFILE=1 to print Step1 / Step2-3-4 / Step5 wall times.
+_CR_PROFILE = os.environ.get('BHD_CR_PROFILE', '') not in ('', '0', 'false', 'False')
 
 import block_haplotypes
 
@@ -389,6 +395,11 @@ def _build_tensor_block_numba(tensor, bin_em, local_indices,
     production scale.  Serial execution lets the outer
     ThreadPoolExecutor own the parallelism instead.
 
+    (Single-Python-thread callers — score_path_set, paint_samples_viterbi
+    — instead use the prange variant _build_tensor_block_numba_par, where
+    there is no outer pool to contend with and the per-call build is the
+    dominant cost.)
+
     The per-call work is small (~460k writes per block per call) and
     the function is called from many parallel contexts simultaneously,
     so the outer-pool parallelism is the right place to scale.  Inside
@@ -418,6 +429,46 @@ def _build_tensor_block_numba(tensor, bin_em, local_indices,
     n_s = s1 - s0
     n_pairs = K * K
     for s in range(n_s):
+        s_src = s0 + s
+        for p in range(n_pairs):
+            row = p // K
+            col = p - row * K
+            i_local = local_indices[row]
+            j_local = local_indices[col]
+            for b in range(n_bins_b):
+                tensor[s, p, bin_offset + b] = \
+                    bin_em[s_src, i_local, j_local, b]
+
+
+@njit(parallel=True, fastmath=False)
+def _build_tensor_block_numba_par(tensor, bin_em, local_indices,
+                                  s0, s1, K, n_bins_b, bin_offset):
+    """Parallel-over-samples variant of _build_tensor_block_numba.
+
+    Identical writes (and therefore identical values) to the serial
+    kernel, but the outer sample loop is a `prange`, so a single
+    Python-thread caller gets the full numba OpenMP thread pool for the
+    build.  Each iteration writes a disjoint `tensor[s, :, :]` row, so
+    there is no write race.
+
+    Used by the SINGLE-Python-thread scorers (`score_path_set`,
+    `paint_samples_viterbi`) reached from the sequential warmstart walk
+    and CR Steps 1-5, where there is no competing `ThreadPoolExecutor`
+    and the per-call build (a ~250 MB tensor write at production K) is
+    otherwise serial and dominates the call.  Parallelising it over
+    samples is what actually keeps the cores busy in those loops.
+
+    The serial `_build_tensor_block_numba` is still used inside
+    `score_path_sets_parallel`, whose own `ThreadPoolExecutor` owns the
+    parallelism — a `prange` there would make every builder thread
+    contend for the same OMP pool (~2.4x slowdown; see that kernel's
+    docstring).  This kernel and that one are deliberately the two halves
+    of that split: prange for single-threaded callers, serial+nogil for
+    the pooled caller.
+    """
+    n_s = s1 - s0
+    n_pairs = K * K
+    for s in prange(n_s):
         s_src = s0 + s
         for p in range(n_pairs):
             row = p // K
@@ -484,33 +535,402 @@ def _compute_bin_emissions_numba(block_samples, hap0, hap1, n_haps, n_bins, snps
         s1 = block_samples[s, :, 1]
         s2 = block_samples[s, :, 2]
         
-        for h1_idx in range(n_haps):
-            h1_0 = hap0[h1_idx]
-            h1_1 = hap1[h1_idx]
-            
-            for h2_idx in range(n_haps):
-                h2_0 = hap0[h2_idx]
-                h2_1 = hap1[h2_idx]
-                
-                for site in range(n_sites):
-                    c00 = h1_0[site] * h2_0[site]
-                    c01 = (h1_0[site] * h2_1[site]) + (h1_1[site] * h2_0[site])
-                    c11 = h1_1[site] * h2_1[site]
-                    
-                    model = s0[site] * c00 + s1[site] * c01 + s2[site] * c11
-                    
-                    final = model * 0.99 + 0.01 / 3.0
-                    if final < 1e-300:
-                        final = 1e-300
-                    
-                    ll = math.log(final)
-                    if ll < -2.0:
-                        ll = -2.0
-                    
-                    b = site // snps_per_bin
+        # The diploid emission at a site depends only on the dosage (h1 allele +
+        # h2 allele = 0, 1 or 2), so there are just THREE possible log-emissions
+        # per site -- one per dosage.  Compute them once per site and index by
+        # dosage in the pair loops instead of recomputing model+log for all
+        # n_haps^2 pairs (for n_haps=6 that is 3 logs/site rather than 36).  The
+        # dosage selects exactly the s0/s1/s2 that the one-hot products
+        # c00/c01/c11 selected before, and each bin still accumulates its sites in
+        # the same (ascending) order, so the result is bit-for-bit identical.
+        for site in range(n_sites):
+            f0 = s0[site] * 0.99 + 0.01 / 3.0
+            if f0 < 1e-300:
+                f0 = 1e-300
+            l0 = math.log(f0)
+            if l0 < -2.0:
+                l0 = -2.0
+
+            f1 = s1[site] * 0.99 + 0.01 / 3.0
+            if f1 < 1e-300:
+                f1 = 1e-300
+            l1 = math.log(f1)
+            if l1 < -2.0:
+                l1 = -2.0
+
+            f2 = s2[site] * 0.99 + 0.01 / 3.0
+            if f2 < 1e-300:
+                f2 = 1e-300
+            l2 = math.log(f2)
+            if l2 < -2.0:
+                l2 = -2.0
+
+            b = site // snps_per_bin
+            for h1_idx in range(n_haps):
+                a1 = hap1[h1_idx][site]
+                for h2_idx in range(n_haps):
+                    dosage = a1 + hap1[h2_idx][site]
+                    if dosage < 0.5:
+                        ll = l0
+                    elif dosage < 1.5:
+                        ll = l1
+                    else:
+                        ll = l2
                     bin_emissions[s, h1_idx, h2_idx, b] += ll
     
     return bin_emissions
+
+
+@njit(parallel=True, fastmath=True)
+def _update_bin_emissions_one_hap_numba(bin_emissions, block_samples, hap0, hap1,
+                                        estar, n_haps, n_bins, snps_per_bin, n_sites):
+    """In-place update of `bin_emissions` for the (estar, *) ROW and (*, estar)
+    COLUMN of the (n_haps, n_haps) hap-pair grid, after hap `estar` has been
+    replaced (hap0[estar] / hap1[estar] hold the NEW hap's one-hot alleles).
+
+    The per-site arithmetic is identical to _compute_bin_emissions_numba (the
+    same three per-site dosage log-emissions l0/l1/l2), and every emission cell
+    depends ONLY on the
+    two haps of its pair.  A single-hap replacement therefore changes EXACTLY the
+    estar row and estar column; all other cells are unchanged.  So overwriting
+    just those cells here yields a tensor bit-identical to a full
+    _compute_bin_emissions_numba recompute on the modified hap matrix — at
+    O(n_haps) pair-cost instead of O(n_haps^2).  Parallelises over samples (each
+    thread owns its own s-slice, so the result is deterministic regardless of
+    thread count); the thread count is controlled by the caller via
+    numba.set_num_threads, exactly like the full kernel.
+
+    The diagonal (estar, estar) is written once in the ROW loop; the COLUMN loop
+    skips h1_idx == estar so it is not double-accumulated.
+    """
+    num_samples = block_samples.shape[0]
+    e0 = hap0[estar]
+    e1 = hap1[estar]
+
+    for s in prange(num_samples):
+        s0 = block_samples[s, :, 0]
+        s1 = block_samples[s, :, 1]
+        s2 = block_samples[s, :, 2]
+
+        # clear the estar row & column for this sample before re-accumulating
+        for h in range(n_haps):
+            for b in range(n_bins):
+                bin_emissions[s, estar, h, b] = 0.0
+                bin_emissions[s, h, estar, b] = 0.0
+
+        # Same per-site dosage dedup as the full kernel: three log-emissions per
+        # site (one per dosage 0/1/2), indexed by each pair's dosage, rather than
+        # recomputing model+log for all 2*n_haps-1 affected pairs.  Re-accumulate
+        # the estar ROW (estar, h2) and COLUMN (h1, estar); each bin sums its sites
+        # in ascending order exactly as a full recompute would, so the updated
+        # cells are bit-identical.  The diagonal (estar, estar) is written in the
+        # ROW loop; the COLUMN loop skips h1_idx == estar.
+        for site in range(n_sites):
+            f0 = s0[site] * 0.99 + 0.01 / 3.0
+            if f0 < 1e-300:
+                f0 = 1e-300
+            l0 = math.log(f0)
+            if l0 < -2.0:
+                l0 = -2.0
+
+            f1 = s1[site] * 0.99 + 0.01 / 3.0
+            if f1 < 1e-300:
+                f1 = 1e-300
+            l1 = math.log(f1)
+            if l1 < -2.0:
+                l1 = -2.0
+
+            f2 = s2[site] * 0.99 + 0.01 / 3.0
+            if f2 < 1e-300:
+                f2 = 1e-300
+            l2 = math.log(f2)
+            if l2 < -2.0:
+                l2 = -2.0
+
+            b = site // snps_per_bin
+            ea = e1[site]
+
+            # ROW: pairs (estar, h2_idx) for every h2 (includes (estar, estar))
+            for h2_idx in range(n_haps):
+                dosage = ea + hap1[h2_idx][site]
+                if dosage < 0.5:
+                    ll = l0
+                elif dosage < 1.5:
+                    ll = l1
+                else:
+                    ll = l2
+                bin_emissions[s, estar, h2_idx, b] += ll
+
+            # COLUMN: pairs (h1_idx, estar) for every h1 except estar (done above)
+            for h1_idx in range(n_haps):
+                if h1_idx == estar:
+                    continue
+                dosage = hap1[h1_idx][site] + ea
+                if dosage < 0.5:
+                    ll = l0
+                elif dosage < 1.5:
+                    ll = l1
+                else:
+                    ll = l2
+                bin_emissions[s, h1_idx, estar, b] += ll
+
+    return bin_emissions
+
+
+@njit(parallel=True, fastmath=True)
+def _dosage_round_numba(gp, idx_g):
+    """Rounded per-sample dosage over a window, parallelised over samples.
+
+    For each sample s and window position t (idx_g[t] = the site's index in the
+    global probs array):
+
+        d_r[s, t] = clip(rint(gp[s, idx_g[t], 1] + 2 * gp[s, idx_g[t], 2]), 0, 2)
+
+    returned as int16.  This is the numba equivalent of the numpy expression
+
+        d   = gp[:, idx_g, 1] * 1.0 + gp[:, idx_g, 2] * 2.0
+        d_r = np.clip(np.rint(d), 0, 2).astype(np.int16)
+
+    and is bit-identical to it: the dosage is formed in float64 exactly as above,
+    Python/numba round() and np.rint() both round half to even, and the clip maps
+    into {0, 1, 2}.  Computing it here avoids the (N, L) float64 gather + rint +
+    clip + astype temporaries AND the subsequent ascontiguousarray copy of the
+    numpy path (the output is written contiguously), and spreads the work over the
+    inner-core pool instead of running single-threaded in numpy.
+    """
+    N = gp.shape[0]
+    L = idx_g.shape[0]
+    out = np.empty((N, L), dtype=np.int16)
+    for s in prange(N):
+        for t in range(L):
+            g = idx_g[t]
+            d = gp[s, g, 1] * 1.0 + gp[s, g, 2] * 2.0
+            r = round(d)
+            if r < 0.0:
+                r = 0.0
+            elif r > 2.0:
+                r = 2.0
+            out[s, t] = np.int16(r)
+    return out
+
+
+@njit(parallel=True, fastmath=True)
+def _gather_samples_numba(probs, indices):
+    """Parallel equivalent of np.ascontiguousarray(probs[:, indices, :]).
+
+    probs: (N, n_global, 3); indices: (n_sites,) integer positions into axis 1.
+    Returns a C-contiguous (N, n_sites, 3) array with
+    out[s, t, c] = probs[s, indices[t], c].
+
+    This is a pure copy (no arithmetic), so it is bit-identical to numpy's
+    advanced-index gather.  numpy runs that gather single-threaded, and at L4 the
+    probs slice is ~5.4 GB, so the fancy-index copy costs ~10-20s on one core;
+    spreading the copy over samples lets the inner-core pool absorb it.  The
+    output layout (N, n_sites, 3) matches numpy's, so block_samples[s, :, c] has
+    the same stride the emission kernels already expect.
+    """
+    N = probs.shape[0]
+    n_sites = indices.shape[0]
+    out = np.empty((N, n_sites, 3), dtype=probs.dtype)
+    for s in prange(N):
+        for t in range(n_sites):
+            g = indices[t]
+            out[s, t, 0] = probs[s, g, 0]
+            out[s, t, 1] = probs[s, g, 1]
+            out[s, t, 2] = probs[s, g, 2]
+    return out
+
+
+@njit(parallel=True, fastmath=True)
+def _viterbi_partner_carriers_numba(d_r, carrier_idx, cur, N_tilde, bof, nbins,
+                                    log_invalid, near_bonus, switch_pen):
+    """Per-carrier partner-haplotype Viterbi for the refinement carrier
+    re-derivation, PARALLELISED over carriers (prange — carriers are independent).
+
+    For each carrier c this builds its (nbins, m) binned stay-score matrix E_c:
+        E_c[b, k] = sum over the sites of bin b of the per-site score, where the
+        per-site score is `log_invalid` when the carrier's dosage minus hap k is
+        outside {0, 1}, else `near_bonus` when the extracted allele equals
+        N_tilde, else 0.0.
+    Then it runs the stay/switch Viterbi over bins and writes the per-site partner
+    index path[bof[site]] into partner_site[c].
+
+    This is the parallel counterpart of the serial numpy code it replaces —
+    the `for k: E[:, :, k] = Lsite @ Bmat` bin-emission build together with
+    `for c: partner_site[c] = _viterbi_partner(E[c], switch_pen)[bof]`.  It is
+    mathematically equivalent: the per-bin sums differ from the BLAS matmul only
+    by floating-point summation order (a few ULP), and the argmax / second-argmax
+    feeding the switch back-pointer use a first-occurrence tie-break (numpy's
+    argsort uses an unspecified one), which only ever changes the chosen partner
+    among haps that score EXACTLY equal — i.e. among equally-optimal partners.
+    Each carrier owns its own E_c / V / back / path scratch, so the result is
+    independent of the thread count; the count is set by the caller via
+    numba.set_num_threads (so a worker uses total_cores // active_workers here too).
+
+    Takes the full per-sample dosage `d_r` (N, L) plus the carrier sample indices
+    `carrier_idx` and reads carrier rows as views (d_r[carrier_idx[c]]) instead of
+    a pre-gathered (C, L) `d_rC` -- avoids materialising that per-rep gather copy.
+    """
+    nC = carrier_idx.shape[0]
+    L = d_r.shape[1]
+    m = cur.shape[0]
+    partner_site = np.empty((nC, L), dtype=np.int64)
+
+    for c in prange(nC):
+        d_r_c = d_r[carrier_idx[c]]                # carrier dosage row (view; no copy)
+        # --- build E_c (nbins, m): binned per-site stay-scores for each hap ---
+        E_c = np.zeros((nbins, m), dtype=np.float64)
+        for k in range(m):
+            for site in range(L):
+                diff = d_r_c[site] - cur[k, site]
+                if diff < 0 or diff > 1:
+                    Lsite = log_invalid
+                elif diff == N_tilde[site]:
+                    Lsite = near_bonus
+                else:
+                    Lsite = 0.0
+                E_c[bof[site], k] += Lsite
+
+        # --- stay/switch Viterbi over bins (matches _viterbi_partner) ---
+        V = np.empty((nbins, m), dtype=np.float64)
+        back = np.zeros((nbins, m), dtype=np.int64)
+        for k in range(m):
+            V[0, k] = E_c[0, k]
+        for b in range(1, nbins):
+            # am = argmax(V[b-1]); sec = argmax over the rest (first-occurrence ties)
+            am = 0
+            for k in range(1, m):
+                if V[b - 1, k] > V[b - 1, am]:
+                    am = k
+            sec = -1
+            for k in range(m):
+                if k == am:
+                    continue
+                if sec < 0 or V[b - 1, k] > V[b - 1, sec]:
+                    sec = k
+            m1 = V[b - 1, am]
+            m2 = V[b - 1, sec]
+            for j in range(m):
+                if j == am:
+                    best_other = m2
+                    sw_src = sec
+                else:
+                    best_other = m1
+                    sw_src = am
+                stay = V[b - 1, j]
+                switch_val = best_other - switch_pen
+                if stay >= switch_val:
+                    V[b, j] = E_c[b, j] + stay
+                    back[b, j] = j
+                else:
+                    V[b, j] = E_c[b, j] + switch_val
+                    back[b, j] = sw_src
+
+        # --- backtrack: path[-1] = argmax(V[-1]); path[b-1] = back[b, path[b]] ---
+        path = np.empty(nbins, dtype=np.int64)
+        last = 0
+        for k in range(1, m):
+            if V[nbins - 1, k] > V[nbins - 1, last]:
+                last = k
+        path[nbins - 1] = last
+        for b in range(nbins - 1, 0, -1):
+            path[b - 1] = back[b, path[b]]
+
+        # --- map the bin-path to per-site partner indices ---
+        for site in range(L):
+            partner_site[c, site] = path[bof[site]]
+
+    return partner_site
+
+
+@njit(parallel=True, fastmath=True)
+def _consensus_from_carriers_numba(d_r, carrier_idx, cur, partner_site, N_tilde):
+    """Per-site consensus of the carrier partner-painting, PARALLELISED over
+    SITES (prange).  For each site it sums, over carriers, the partner-dosage
+    support and returns the new hap H plus frac1 / has / win_frac.
+
+    This replaces the serial numpy block
+        present_by_partner = take_along_axis(cur, partner_site, 0)
+        Fdiff = d_rC - present_by_partner ; Fest = clip(Fdiff, 0, 1)
+        contribute = (Fdiff == 0) | (Fdiff == 1) ; mask = contribute.astype(f8)
+        denom = mask.sum(0) ; num = (Fest * mask).sum(0)
+        H = N_tilde; has = denom > 0; frac1[has] = num[has]/denom[has]
+        H[has] = frac1[has] >= 0.5 ; win_frac = where(H==1, frac1, 1-frac1)
+    which materialises several (C, L) arrays and reduces them single-threaded —
+    the dominant serial cost when L is large (e.g. the L4 super-block, L ~ 1.5M).
+
+    Computing denom/num on the fly per site avoids the (C, L) temporaries and
+    parallelises over the L axis (controlled by numba.set_num_threads); reading
+    d_r[carrier_idx[c]] directly also avoids materialising the per-rep (C, L)
+    carrier-dosage gather d_rC.  num and denom are integer-valued counts, so the
+    H decision num/denom >= 0.5 is equivalent to 2*num >= denom and is unaffected
+    by the ULP of the division (the float result is at least 1/(2*denom) away from
+    0.5 unless exactly 0.5, where it is exact) -- H, and therefore the downstream
+    estar / deciding / n_supported, are identical to the numpy version; only
+    frac1 / win_frac can differ by a ULP, exactly as for any reordered sum.
+    """
+    nC = carrier_idx.shape[0]
+    L = d_r.shape[1]
+    H = np.empty(L, dtype=np.int8)
+    frac1 = np.zeros(L, dtype=np.float64)
+    has = np.zeros(L, dtype=np.bool_)
+    win_frac = np.empty(L, dtype=np.float64)
+
+    for site in prange(L):
+        denom = 0.0
+        num = 0.0
+        for c in range(nC):
+            ps = partner_site[c, site]
+            fdiff = d_r[carrier_idx[c], site] - cur[ps, site]
+            if fdiff == 0 or fdiff == 1:          # contribute & Fest==fdiff here
+                denom += 1.0
+                num += fdiff
+        if denom > 0.0:
+            has[site] = True
+            f1 = num / denom
+            frac1[site] = f1
+            if f1 >= 0.5:
+                H[site] = 1
+                win_frac[site] = f1
+            else:
+                H[site] = 0
+                win_frac[site] = 1.0 - f1
+        else:
+            hh = N_tilde[site]
+            H[site] = hh
+            frac1[site] = 0.0                      # frac1 stays 0 where denom==0
+            if hh == 1:
+                win_frac[site] = 0.0               # where(H==1, frac1, .) -> frac1 == 0
+            else:
+                win_frac[site] = 1.0               # where(H==0, ., 1-frac1) -> 1 - 0
+
+    return H, frac1, has, win_frac
+
+
+@njit(parallel=True, fastmath=False)
+def _dists_to_H_numba(cur, H):
+    """Per-hap Hamming distance (in percent) from each hap to the consensus hap H,
+    PARALLELISED over haps (prange).  Returns out[k] = 100 * mean(cur[k] != H),
+    the parallel equivalent of  np.array([_hamming_pct(cur[k], H) for k in range(m)]).
+
+    The per-hap mismatch count is an integer and the value is computed as
+    100.0 * (cnt / L) -- the same operation order as numpy's
+    100.0 * float(np.mean(cur[k] != H)) -- so the result is identical (and the
+    downstream argmin / pmin are over integer-count distances separated by 100/L,
+    far larger than any ULP, so estar is unaffected regardless).  m is small, but
+    the work is tiny (m * L compares); haps are independent so there are no races
+    and the result is independent of the thread count.
+    """
+    m = cur.shape[0]
+    L = cur.shape[1]
+    out = np.empty(m, dtype=np.float64)
+    for k in prange(m):
+        cnt = 0
+        for site in range(L):
+            if cur[k, site] != H[site]:
+                cnt += 1
+        out[k] = 100.0 * (cnt / L)
+    return out
 
 
 @njit(parallel=True, fastmath=False)
@@ -817,18 +1237,24 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites, snps_pe
         n_sites = len(positions)
         n_bins = math.ceil(n_sites / snps_per_bin)
         indices = np.searchsorted(global_sites, positions)
-        block_samples = np.ascontiguousarray(global_probs[:, indices, :])
+        # Dynamic thread resync (gated on num_threads being provided, so
+        # any external caller that doesn't pass it sees the original
+        # "no thread management" behaviour).  Done BEFORE the gather so the
+        # (multi-GB at L4) block_samples copy is parallelised as well.
+        if num_threads is not None:
+            _resolve_threads(num_threads)
+        # block_samples = np.ascontiguousarray(global_probs[:, indices, :]), but
+        # via a parallel kernel.  numpy's advanced-index gather of the
+        # (N, n_global, 3) probs runs single-threaded and costs ~10-20s at L4,
+        # where it dominated the emission phase; _gather_samples_numba is a
+        # bit-identical pure copy spread over the inner-core pool.
+        block_samples = _gather_samples_numba(global_probs, indices)
         hap_keys = sorted(block.haplotypes.keys())
         n_haps = len(hap_keys)
         haps_tensor = np.array([block.haplotypes[k] for k in hap_keys])
         hap0 = np.ascontiguousarray(haps_tensor[:, :, 0])
         hap1 = np.ascontiguousarray(haps_tensor[:, :, 1])
 
-        # Dynamic thread resync (gated on num_threads being provided, so
-        # any external caller that doesn't pass it sees the original
-        # "no thread management" behaviour).
-        if num_threads is not None:
-            _resolve_threads(num_threads)
         bin_emissions = _compute_bin_emissions_numba(
             block_samples, hap0, hap1, n_haps, n_bins, snps_per_bin, n_sites
         )
@@ -856,7 +1282,8 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites, snps_pe
 # TENSOR BUILDING AND SCORING
 # =============================================================================
 
-def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=None):
+def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=None,
+                             parallel_build=False):
     """Build Viterbi scoring tensor from a set of key-paths.
     If sample_range=(s0, s1) is given, only builds for those samples.
 
@@ -866,6 +1293,16 @@ def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=
     assign intermediate `tensor[:, :, off:off+nb] = bin_em[s0:s1,
     grid_i, grid_j, :]` (which would allocate a (n_s, K², n_bins_b)
     temporary per block per call).
+
+    parallel_build: when True, the per-block fill uses the prange-over-
+    samples kernel `_build_tensor_block_numba_par` instead of the serial
+    one (identical values).  Callers reached from a single Python thread
+    (score_path_set, paint_samples_viterbi -> the sequential warmstart
+    walk and CR Steps 1-5) pass True so the otherwise-serial ~250 MB
+    tensor write is spread across the numba thread pool.  The pooled
+    caller `score_path_sets_parallel` keeps the default False — its own
+    ThreadPoolExecutor owns the parallelism and a prange there would
+    contend on the OMP pool.
     """
     K = len(path_set)
     n_pairs = K * K
@@ -912,10 +1349,16 @@ def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=
         # explicit early-return at line ~1314); guarding here is a
         # defensive harmless cost.
         if n_pairs > 0:
-            _build_tensor_block_numba(
-                tensor, bin_em, local_indices,
-                s0, s1, K, n_bins_b, bin_offset,
-            )
+            if parallel_build:
+                _build_tensor_block_numba_par(
+                    tensor, bin_em, local_indices,
+                    s0, s1, K, n_bins_b, bin_offset,
+                )
+            else:
+                _build_tensor_block_numba(
+                    tensor, bin_em, local_indices,
+                    s0, s1, K, n_bins_b, bin_offset,
+                )
         bin_offset += n_bins_b
     # `tensor` was allocated via np.empty and overwritten in-place by
     # the per-block kernel; it remains C-contiguous.  No
@@ -932,8 +1375,15 @@ def score_path_set(path_set, sub_emissions, penalty, num_samples,
     latest dynamic thread allocation.  Default None preserves the original
     behaviour (no thread resync) for any existing callers that don't pass
     the argument.
+
+    This scorer is only ever called from single-Python-thread contexts
+    (the sequential warmstart add walk and CR Steps 1-5), so the tensor
+    build uses the prange-over-samples kernel (parallel_build=True): the
+    build is the dominant per-call cost and there is no outer
+    ThreadPoolExecutor to contend with.
     """
-    tensor = _build_tensor_from_paths(path_set, sub_emissions, num_samples)
+    tensor = _build_tensor_from_paths(path_set, sub_emissions, num_samples,
+                                      parallel_build=True)
     if num_threads is not None:
         _resolve_threads(num_threads)
     return float(np.sum(block_haplotypes.viterbi_score_selection(tensor, float(penalty))))
@@ -1190,7 +1640,6 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
                 n_drops += 1
         else:
             n_rejects += 1
-
     return selected_beam_idx, bic_S
 
 
@@ -1207,6 +1656,10 @@ def paint_samples_viterbi(path_set, sub_emissions, penalty, num_samples,
     latest dynamic thread allocation.  Default None preserves the original
     behaviour (no thread resync) for any existing callers that don't pass
     the argument.
+
+    Like score_path_set, this is only reached from single-Python-thread
+    contexts (CR Steps 2/4), so the build uses the prange-over-samples
+    kernel (parallel_build=True).
     """
     K = len(path_set)
     # Fix: K=0 produces a (n_samples, 0, total_bins) tensor with n_pairs=0.
@@ -1219,7 +1672,8 @@ def paint_samples_viterbi(path_set, sub_emissions, penalty, num_samples,
         total_bins = sum(e['n_bins'] for e in sub_emissions)
         sample_paths = np.zeros((num_samples, total_bins), dtype=np.int32)
         return sample_paths, K
-    tensor = _build_tensor_from_paths(path_set, sub_emissions, num_samples)
+    tensor = _build_tensor_from_paths(path_set, sub_emissions, num_samples,
+                                      parallel_build=True)
     if num_threads is not None:
         _resolve_threads(num_threads)
     return _viterbi_traceback(tensor, float(penalty)), K
@@ -1984,7 +2438,20 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     pen_sel = penalty_override if penalty_override is not None else compute_penalty(batch_blocks)
     spb = spb_override if spb_override is not None else compute_spb(batch_blocks)
     batch_cc = cc_override if cc_override is not None else compute_cc(batch_blocks, num_samples, cc_scale)
-    
+
+    # --- env-gated coarse phase timing (no effect on results when off:
+    # _cacc only mutates _cpt inside `if _crp`, and the report is gated) ---
+    _crp = _CR_PROFILE
+    _cpt = {}
+    def _cacc(_key, _t0):
+        _e = _cpt.get(_key)
+        _dt = _time.perf_counter() - _t0
+        if _e is None:
+            _cpt[_key] = [_dt, 1]
+        else:
+            _e[0] += _dt
+            _e[1] += 1
+
     # --- Cap total bins to prevent memory blowup ---
     total_sites = sum(len(b.positions) for b in batch_blocks)
     estimated_bins = math.ceil(total_sites / spb)
@@ -1992,8 +2459,11 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         spb = math.ceil(total_sites / max_bins_for_cr)
     
     # --- Sub-block emissions ---
+    _ct = _time.perf_counter()
     sub_em = compute_subblock_emissions(batch_blocks, global_probs, global_sites, spb,
                                         num_threads=num_threads)
+    if _crp: _cacc('emission', _ct)
+    _ct = _time.perf_counter()
     total_bins = sum(e['n_bins'] for e in sub_em)
     
     # --- Map matrix: beam index -> dense hap index per block ---
@@ -2051,6 +2521,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         f"bin offset mismatch: cumulative={_off} total_bins={total_bins}")
     map_matrix_c = np.ascontiguousarray(map_matrix).astype(np.int64)
     del _padded_bin_ems
+    if _crp: _cacc('cr_setup_stack', _ct)
+    _ct = _time.perf_counter()
     
     # --- Local tensor builders ---
     def build_tensor_sel(subset_indices):
@@ -2124,11 +2596,14 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         num_threads=num_threads,
     )
     
+    if _crp: _cacc('warmstart', _ct)
+
     # =========================================================================
     # STEP 1: Forward Selection (sample-chunked)
     # =========================================================================
     selected = list(_warmstart_selected)
     current_best_bic = _warmstart_bic
+    _ct = _time.perf_counter()
     for k in range(step1_max_iters):
         remaining = [x for x in range(n_cands) if x not in selected]
         if not remaining:
@@ -2276,6 +2751,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             # crashing).
             return []
     
+    if _crp: _cacc('step1_forward_select', _ct)
+
     # =========================================================================
     # OUTER LOOP: iterate Steps 2, 3, 4 to full convergence (max 3 rounds)
     #
@@ -2303,6 +2780,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                       for b, d in enumerate(_path))
         beam_keypaths[_keys] = _ci
 
+    _ct = _time.perf_counter()
     for _outer_iter in range(MAX_OUTER_ITERATIONS):
         _state_before = frozenset(selected)
 
@@ -2936,6 +3414,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         for _bi in selected
     ]
 
+    if _crp: _cacc('step2_3_4_loop', _ct)
+    _ct = _time.perf_counter()
     # =========================================================================
     # STEP 5: Painter-Guided Escape (V10 + V11)
     #
@@ -3069,6 +3549,18 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             # Loop didn't break — hit step5_max_iters
             pass
 
+
+    if _crp: _cacc('step5_escape', _ct)
+    if _crp:
+        try:
+            _tot = sum(v[0] for v in _cpt.values())
+            _lines = [f"  [CR profile] K_final={len(current_paths)} "
+                      f"n_cands={n_cands} blocks={len(sub_em)} | sum={_tot:.1f}s"]
+            for _k, _v in sorted(_cpt.items(), key=lambda kv: -kv[1][0]):
+                _lines.append(f"        {_k:22s} {_v[0]:7.2f}s")
+            print("\n".join(_lines), flush=True)
+        except Exception:
+            pass
 
     # =========================================================================
     # STEP 6: Convert resolved key-paths back to beam format

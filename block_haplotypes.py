@@ -691,6 +691,38 @@ def _compute_best_pair_errors_kernel(H_stack, sample_geno_stack):
 
 
 @njit(cache=True, parallel=True, fastmath=False)
+def _argmax3_numba(probs):
+    """Parallel equivalent of np.argmax(probs, axis=2).astype(np.int8) for a
+    (N, L, 3) array (per-site genotype argmax over the 3 dosage classes).
+
+    Returns (N, L) int8.  Matches np.argmax exactly, including the
+    first-occurrence tie-break: the branch order returns the lowest index whose
+    value equals the row max.  Parallelised over samples instead of running the
+    reduction single-threaded in numpy, which scans the whole probs array (~5.4
+    GB at L4) on one core.
+    """
+    N = probs.shape[0]
+    L = probs.shape[1]
+    out = np.empty((N, L), dtype=np.int8)
+    for s in prange(N):
+        for t in range(L):
+            p0 = probs[s, t, 0]
+            p1 = probs[s, t, 1]
+            p2 = probs[s, t, 2]
+            if p0 >= p1:
+                if p0 >= p2:
+                    out[s, t] = 0
+                else:
+                    out[s, t] = 2
+            else:
+                if p1 >= p2:
+                    out[s, t] = 1
+                else:
+                    out[s, t] = 2
+    return out
+
+
+@njit(cache=True, parallel=True, fastmath=False)
 def _compute_pair_errors_matrix_kernel(H_stack, sample_geno_stack):
     """JIT kernel returning the FULL per-sample, per-pair error matrix.
     
@@ -810,7 +842,13 @@ def prune_chimeras(hap_dict, probs_array,
     num_sites_outer = probs_array.shape[1]
     # np.argmax over axis=2 returns int64 by default; cast to int8 to match
     # the JIT kernel's expected dtype.  Values are always in {0, 1, 2}.
-    sample_geno_stack = np.argmax(probs_array, axis=2).astype(np.int8)
+    # _argmax3_numba is bit-identical to np.argmax(probs_array, axis=2) (same
+    # first-occurrence tie-break) but parallel; the numpy reduction scans the
+    # whole probs_array single-threaded (~5.4 GB at L4).
+    if HAS_NUMBA:
+        sample_geno_stack = _argmax3_numba(probs_array)
+    else:
+        sample_geno_stack = np.argmax(probs_array, axis=2).astype(np.int8)
     
     def compute_best_pair_errors(hap_dict_local, sample_geno_stack_local):
         """For each sample, compute error of best haplotype pair (no recomb within block).
