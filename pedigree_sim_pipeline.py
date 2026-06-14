@@ -1,3 +1,56 @@
+#!/usr/bin/env python3
+# ============================================================================
+# pedigree_sim_pipeline.py
+# ----------------------------------------------------------------------------
+# SELF-CONTAINED snapshot of pipeline.py's setup + stages 2-11 (verbatim code
+# and comments), parameterized for the read-depth x seed sweep.  This file has
+# NO runtime dependency on pipeline.py -- you can delete pipeline.py and this
+# still runs.  It was produced by copying pipeline.py lines 1-2083 unchanged
+# except that four knobs are sourced from environment variables (with the
+# defaults below), and the file stops after stage 11 (no phase correction).
+#
+# It still imports the same project modules (block_haplotypes_discrete,
+# hierarchical_assembly, pedigree_inference, simulate_sequences, ...), so keep
+# it in the project directory alongside those.
+#
+# STAGE 1 (founder discovery) is reused: if its checkpoint already exists in
+# the checkpoint dir it is skipped and loaded; if not, it is computed from the
+# VCF exactly as in pipeline.py.  The sweep driver (pedigree_depth_sweep.py)
+# symlinks the existing .pipeline_checkpoints/01_vcf_discovery in, so stage 1
+# is reused read-only and never recomputed.
+#
+# RUN STANDALONE (one combo): edit the defaults via env, e.g.
+#     BHD_SWEEP_SEED=0 BHD_SWEEP_DEPTH=5 python pedigree_sim_pipeline.py
+# RUN VIA THE SWEEP: let pedigree_depth_sweep.py set the env vars per seed.
+#
+# NOTE: this is a STATIC snapshot. If you later change pipeline.py's stage 2-11
+# logic, re-sync this file (ask for a regeneration).
+# ============================================================================
+import os as _bhd_os
+_BHD_SEED       = int(_bhd_os.environ.get("BHD_SWEEP_SEED", "0"))
+_BHD_DEPTH      = float(_bhd_os.environ.get("BHD_SWEEP_DEPTH", "5"))
+_BHD_CKPT_DIR   = _bhd_os.environ.get("BHD_SWEEP_CKPT_DIR", "pedigree_sweep_checkpoints")
+_BHD_OUTPUT_DIR = _bhd_os.environ.get("BHD_SWEEP_OUTPUT_DIR", "pedigree_sweep_results")
+# Quiet tqdm progress bars when stdout/stderr is a file (the sweep logs): default
+# tqdm's `disable` to None so it auto-disables on a non-TTY, while still showing
+# bars if you run this file directly in a terminal. Iteration is unaffected, and
+# the copied pipeline body's tqdm() calls are left untouched.
+try:
+    import tqdm as _bhd_tqdm
+    import functools as _bhd_ft
+    _bhd_tqdm_orig_init = _bhd_tqdm.std.tqdm.__init__
+    @_bhd_ft.wraps(_bhd_tqdm_orig_init)
+    def _bhd_tqdm_init(self, *_a, **_k):
+        _k.setdefault("disable", None)   # None = auto-off when not a TTY
+        return _bhd_tqdm_orig_init(self, *_a, **_k)
+    _bhd_tqdm.std.tqdm.__init__ = _bhd_tqdm_init
+except Exception:
+    pass
+if __name__ == "__main__":   # only the main process prints; workers re-import this module
+    print("[PEDIGREE-SIM] seed=%s depth=%s ckpt=%s out=%s"
+          % (_BHD_SEED, _BHD_DEPTH, _BHD_CKPT_DIR, _BHD_OUTPUT_DIR), flush=True)
+# ============================================================================
+
 #%%
 # =============================================================================
 # Module-level definitions (PICKLABLE by forkserver workers)
@@ -217,7 +270,7 @@ if __name__ == '__main__':
     # deterministic sub-seeds from this value.  Set to None for non-reproducible
     # runs using system entropy.
     # -------------------------------------------------------------------------
-    SIMULATION_SEED = 72
+    SIMULATION_SEED = _BHD_SEED
 
     # Start the forkserver NOW, before any data is loaded.
     # The forkserver process inherits only the current ~500 MB footprint
@@ -249,7 +302,7 @@ if __name__ == '__main__':
     # To force a full re-run:  rm -rf .pipeline_checkpoints/
     # To re-run from stage N:  delete that stage's dir and all later ones.
 
-    CHECKPOINT_DIR = ".pipeline_checkpoints"
+    CHECKPOINT_DIR = _BHD_CKPT_DIR
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     def _stage_dir(stage):
@@ -468,7 +521,7 @@ if __name__ == '__main__':
         # Per-contig data loaded on-demand via _ensure_key
     else:
         start = time.time()
-        output_dir = "results_simulation"
+        output_dir = _BHD_OUTPUT_DIR
         try:
             os.makedirs(output_dir, exist_ok=True)
         except OSError:
@@ -529,7 +582,7 @@ if __name__ == '__main__':
         t0 = time.time()
         contig_results = simulate_sequences.process_all_contigs_parallel(
             region_keys, all_offspring_lists, truth_paintings_lists, sites_list,
-            read_depth=5, error_rate=0.02,
+            read_depth=_BHD_DEPTH, error_rate=0.02,
             snps_per_block=200, snp_shift=200,
             num_processes=n_processes,
             seed=(SIMULATION_SEED + 1_000_000) if SIMULATION_SEED is not None else None
@@ -570,7 +623,7 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # Ensure output_dir and globals exist for all subsequent stages
-    output_dir = "results_simulation"
+    output_dir = _BHD_OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)
 
     if 'region_keys' not in dir() or region_keys is None:
@@ -2083,598 +2136,3 @@ if __name__ == '__main__':
 
         save_global(STAGE_11, {'pedigree_df': pedigree_df})
         mark_stage_complete(STAGE_11)
-
-#%%
-if __name__ == '__main__':
-    # =============================================================================
-    # STAGE 12: PHASE CORRECTION (using DISCOVERED haplotypes)
-    # =============================================================================
-    STAGE_12 = "12_phase_correction"
-
-    if stage_complete(STAGE_12):
-        print(f"\n[RESUME] Skipping phase correction (checkpoint found)")
-        # Load per-contig phase correction results for validation
-        for r_name in region_keys:
-            s12 = load_contig(STAGE_12, r_name)
-            for k, v in s12.items():
-                multi_contig_results.setdefault(r_name, {})[k] = v
-            del s12
-    else:
-        print("\n" + "="*60)
-        print("RUNNING: Phase Correction (Discovered Haplotypes)")
-        print("="*60)
-
-        # `_load_contig_for_phase_correction` is now defined at MODULE
-        # top level (above the `if __name__ == '__main__':` block) so
-        # the forkserver workers can pickle a reference to it.  The
-        # previous closure here -- defined inside __main__ and using
-        # main's `_ensure_key` + `multi_contig_results` -- would not
-        # have survived pickling under the forkserver start method.
-        # See the docstring of the top-level function for the stage
-        # mapping it uses.
-
-        # Ensure contig names exist in multi_contig_results (load_fn needs keys)
-        for r_name in region_keys:
-            multi_contig_results.setdefault(r_name, {})
-
-        start = time.time()
-        # Run phase correction — workers load their own data via load_fn
-        # num_rounds=6 (was 3): under Jacobi iteration (introduced with
-        # the May 2026 within-contig per-sample threading in
-        # phase_correction.run_correction_round), the round count to
-        # reach `corrections == 0` is typically 1-2 higher than under
-        # Gauss-Seidel.  Setting num_rounds=3 left every contig
-        # hitting the limit without full convergence, which caused a
-        # measurable accuracy regression (perfect-phasing rate dropped
-        # ~11pp).  Bumping the ceiling to 6 gives Jacobi room to
-        # actually finish; the early-exit on `corrections == 0` means
-        # genuinely-converged contigs incur no extra work.  Look for
-        # "HIT MAX ROUNDS" in the worker output if even 6 is too low.
-        multi_contig_results = phase_correction.correct_phase_all_contigs(
-            multi_contig_results,
-            pedigree_df,
-            sample_names,
-            num_rounds=6,
-            verbose=True,
-            max_workers=n_processes,
-            load_fn=_load_contig_for_phase_correction
-        )
-        print(f"Phase correction time: {time.time()-start:.1f}s")
-
-        # =============================================================================
-        # GREEDY PHASE REFINEMENT POST-PROCESSING
-        # =============================================================================
-        print("\n" + "="*60)
-        print("RUNNING: Greedy Phase Refinement (HOM→HET boundary flips)")
-        print("="*60)
-
-        # Same load_fn that phase correction used.  Greedy workers
-        # now load founder_block themselves rather than expecting it
-        # in main's multi_contig_results -- this is the
-        # complement of the May 2026 IPC-cost fix in
-        # phase_correction.py (`_process_contig_worker` no longer
-        # returns founder_block).  Parallel disk I/O across 22
-        # worker processes ~ same speed as the previous mechanism
-        # (each worker was also loading founder_block) without the
-        # ~40s pickle/pipe overhead of returning it.
-        start_refine = time.time()
-        multi_contig_results = phase_correction.post_process_phase_greedy_all_contigs(
-            multi_contig_results,
-            pedigree_df,
-            sample_names,
-            snps_per_bin=100,
-            recomb_rate=5e-8,
-            mismatch_cost=4.6,
-            max_workers=n_processes,
-            load_fn=_load_contig_for_phase_correction,
-            verbose=True
-        )
-        print(f"Greedy refinement time: {time.time()-start_refine:.1f}s")
-
-        # =============================================================================
-        # PARSIMONIOUS F1 RECOLORING
-        # =============================================================================
-        # F1 recoloring and the propagation step that follows both run
-        # in the MAIN process (sequentially across contigs).  They
-        # access founder_block from main's multi_contig_results, which
-        # no longer has it after the IPC-cost fix removed founder_block
-        # from the phase correction worker return tuple.  Pre-load it
-        # here in parallel via threads (parallel disk I/O across 22
-        # contigs, typical ~5-15s) so the F1 + propagation loops see
-        # the data they expect.  RAM cost is ~30-40 GB for the full
-        # set of founder_blocks; HPC nodes typically have plenty.
-        print("\n" + "="*60)
-        print("LOADING founder_blocks for F1 recoloring + propagation")
-        print("="*60)
-        from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
-        _t0 = time.time()
-        def _load_founder_block_for_main(r_name):
-            _ensure_key(r_name, 'super_blocks_L4')
-            if 'super_blocks_L4' in multi_contig_results[r_name]:
-                multi_contig_results[r_name]['founder_block'] = \
-                    multi_contig_results[r_name]['super_blocks_L4'][0]
-            elif 'super_blocks_L3' in multi_contig_results[r_name]:
-                multi_contig_results[r_name]['founder_block'] = \
-                    multi_contig_results[r_name]['super_blocks_L3'][0]
-        with _ThreadPoolExecutor(max_workers=min(n_processes, len(region_keys))) as _ex:
-            list(_ex.map(_load_founder_block_for_main, region_keys))
-        print(f"Founder block parallel load: {time.time()-_t0:.1f}s")
-
-        print("\n" + "="*60)
-        print("RUNNING: Parsimonious F1 Recoloring")
-        print("="*60)
-
-        for r_name in region_keys:
-            if r_name not in multi_contig_results:
-                continue
-            data = multi_contig_results[r_name]
-            painting_key = 'refined_painting' if 'refined_painting' in data else 'corrected_painting'
-            if painting_key not in data or 'founder_block' not in data:
-                continue
-
-            recolored = phase_correction.apply_parsimonious_f1_recoloring(
-                data[painting_key],
-                data['founder_block'],
-                pedigree_df,
-                sample_names,
-                max_workers=n_processes,
-                max_mismatch_rate=0.02,
-                verbose=False
-            )
-            data['final_painting'] = recolored
-
-        # =============================================================================
-        # PROPAGATE RECOLORING TO OFFSPRING
-        # =============================================================================
-        print("\n" + "="*60)
-        print("RUNNING: Propagate Recoloring to Offspring")
-        print("="*60)
-
-        for r_name in region_keys:
-            if r_name not in multi_contig_results:
-                continue
-            data = multi_contig_results[r_name]
-            if 'final_painting' not in data or 'founder_block' not in data:
-                continue
-
-            propagated = phase_correction.propagate_recoloring_to_offspring(
-                data['final_painting'],
-                data['founder_block'],
-                pedigree_df,
-                sample_names,
-                max_workers=n_processes,
-                max_mismatch_rate=0.02,
-                verbose=False
-            )
-            data['final_painting'] = propagated
-
-        # Save per-contig phase correction results
-        for r_name in region_keys:
-            d = {k: multi_contig_results[r_name][k]
-                 for k in ('corrected_painting', 'refined_painting',
-                           'final_painting', 'founder_block')
-                 if k in multi_contig_results[r_name]}
-            save_contig(STAGE_12, r_name, d)
-
-        # Free everything — phase validation reloads from checkpoints
-        multi_contig_results = {r: {'naive_long_haps': multi_contig_results[r].get('naive_long_haps')}
-                                for r in region_keys if 'naive_long_haps' in multi_contig_results.get(r, {})}
-        gc.collect()
-        mark_stage_complete(STAGE_12)
-
-#%%
-if __name__ == '__main__' and not SKIP_VALIDATIONS_PHASE_CORRECTION:
-    # =============================================================================
-    # VALIDATE PHASE CORRECTION AGAINST GROUND TRUTH (ALLELE-LEVEL)
-    # =============================================================================
-    print("\n" + "="*60)
-    print("VALIDATING: Phase Correction vs Ground Truth (Allele-Level)")
-    print("  (Using DISCOVERED haplotypes for painting, TRUE founders for validation)")
-    print("="*60)
-
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    # Reload paintings from stage 12 checkpoints (freed during save)
-    def _load_stage12(r_name):
-        if contig_done(STAGE_12, r_name):
-            s12 = load_contig(STAGE_12, r_name)
-            for k, v in s12.items():
-                multi_contig_results.setdefault(r_name, {})[k] = v
-            del s12
-        return r_name
-
-    print("\nLoading phase correction + validation data from checkpoints...")
-    load_start = time.time()
-    with ThreadPoolExecutor(max_workers=min(8, len(region_keys))) as executor:
-        list(executor.map(_load_stage12, region_keys))
-    print(f"Stage 12 reload: {time.time()-load_start:.1f}s")
-
-    def extract_founder_ids_at_positions(painting, positions):
-        n_pos = len(positions)
-        hap1_ids = np.full(n_pos, -1, dtype=np.int32)
-        hap2_ids = np.full(n_pos, -1, dtype=np.int32)
-        chunks = painting.chunks if hasattr(painting, 'chunks') else []
-        if not chunks:
-            return hap1_ids, hap2_ids
-        n_chunks = len(chunks)
-        chunk_starts = np.array([c.start for c in chunks], dtype=np.int64)
-        chunk_ends = np.array([c.end for c in chunks], dtype=np.int64)
-        chunk_hap1 = np.array([c.hap1 for c in chunks], dtype=np.int32)
-        chunk_hap2 = np.array([c.hap2 for c in chunks], dtype=np.int32)
-        chunk_indices = np.searchsorted(chunk_ends, positions, side='right')
-        chunk_indices = np.clip(chunk_indices, 0, n_chunks - 1)
-        valid_mask = (positions >= chunk_starts[chunk_indices]) & (positions < chunk_ends[chunk_indices])
-        hap1_ids[valid_mask] = chunk_hap1[chunk_indices[valid_mask]]
-        hap2_ids[valid_mask] = chunk_hap2[chunk_indices[valid_mask]]
-        return hap1_ids, hap2_ids
-
-    def evaluate_contig_dual_founders(args):
-        """
-        Per-contig evaluator -- kept as a thin wrapper around the
-        new per-sample evaluator `_evaluate_one_sample` so that any
-        external code paths still see this name.  The actual BEFORE /
-        AFTER evaluation loops below bypass this wrapper and submit
-        per-sample tasks directly to a ThreadPoolExecutor with
-        max_workers=n_processes, which gives ~5x more parallelism
-        on a 22-contig / 320-sample workload (22 contigs only used
-        22 cores; per-sample dispatch uses all 112).
-        """
-        r_name, painting, truth, positions, disc_dense_haps, true_dense_haps, sample_names_local = args
-        results = []
-        for i, name in enumerate(sample_names_local):
-            _r, _name, sample_result = _evaluate_one_sample(
-                (r_name, i, name, painting[i], truth[i],
-                 positions, disc_dense_haps, true_dense_haps)
-            )
-            results.append(sample_result)
-        contig_eval = pd.DataFrame(results)
-        contig_eval['Contig'] = r_name
-        return r_name, contig_eval
-
-
-    def _evaluate_one_sample(args):
-        """
-        Per-sample dual-founders evaluator.  Safe to call concurrently
-        across threads -- it only reads from its arg tuple and the
-        shared `disc_dense_haps` / `true_dense_haps` arrays (which are
-        read-only after construction in the calling site).  Returns
-        (r_name, sample_name, result_dict) so the caller can group
-        results by contig for the per-contig summary print.
-
-        The numerical body is byte-identical to the original inner
-        loop of evaluate_contig_dual_founders -- only the wrapping
-        changed (single sample per call instead of looping over all
-        samples in a contig).
-        """
-        (r_name, sample_idx, sample_name, corrected_sample, truth_sample,
-         positions, disc_dense_haps, true_dense_haps) = args
-        corr_hap1, corr_hap2 = extract_founder_ids_at_positions(corrected_sample, positions)
-        true_hap1, true_hap2 = extract_founder_ids_at_positions(truth_sample, positions)
-        n_pos = len(positions)
-        pos_indices = np.arange(n_pos)
-        max_disc = disc_dense_haps.shape[0]
-        corr_allele1 = np.full(n_pos, -1, dtype=np.int8)
-        corr_allele2 = np.full(n_pos, -1, dtype=np.int8)
-        v1 = (corr_hap1 >= 0) & (corr_hap1 < max_disc)
-        v2 = (corr_hap2 >= 0) & (corr_hap2 < max_disc)
-        corr_allele1[v1] = disc_dense_haps[corr_hap1[v1], pos_indices[v1]]
-        corr_allele2[v2] = disc_dense_haps[corr_hap2[v2], pos_indices[v2]]
-        max_true = true_dense_haps.shape[0]
-        true_allele1 = np.full(n_pos, -1, dtype=np.int8)
-        true_allele2 = np.full(n_pos, -1, dtype=np.int8)
-        v3 = (true_hap1 >= 0) & (true_hap1 < max_true)
-        v4 = (true_hap2 >= 0) & (true_hap2 < max_true)
-        true_allele1[v3] = true_dense_haps[true_hap1[v3], pos_indices[v3]]
-        true_allele2[v4] = true_dense_haps[true_hap2[v4], pos_indices[v4]]
-        direct_match = (corr_allele1 == true_allele1) & (corr_allele2 == true_allele2)
-        flipped_match = (corr_allele1 == true_allele2) & (corr_allele2 == true_allele1)
-        correct_either = direct_match | flipped_match
-        n_direct = np.sum(direct_match)
-        n_flipped = np.sum(flipped_match)
-        if n_direct >= n_flipped:
-            track1_correct = (corr_allele1 == true_allele1)
-            track2_correct = (corr_allele2 == true_allele2)
-            dominant_phase = "Direct"
-        else:
-            track1_correct = (corr_allele1 == true_allele2)
-            track2_correct = (corr_allele2 == true_allele1)
-            dominant_phase = "Flipped"
-        valid_mask = (corr_allele1 != -1) & (corr_allele2 != -1) & (true_allele1 != -1) & (true_allele2 != -1)
-        n_valid = np.sum(valid_mask)
-        if n_valid > 0:
-            accuracy = np.sum(correct_either & valid_mask) / n_valid
-            track1_acc = np.sum(track1_correct & valid_mask) / n_valid
-            track2_acc = np.sum(track2_correct & valid_mask) / n_valid
-        else:
-            accuracy = 0.0
-            track1_acc = 0.0
-            track2_acc = 0.0
-        return (r_name, sample_name, {
-            'Sample': sample_name, 'Total_sites': n_pos, 'Valid_sites': int(n_valid),
-            'Correct_sites': int(np.sum(correct_either & valid_mask)),
-            'Accuracy': accuracy, 'Track1_accuracy': track1_acc,
-            'Track2_accuracy': track2_acc, 'Direct_matches': int(n_direct),
-            'Flipped_matches': int(n_flipped), 'Dominant_phase': dominant_phase
-        })
-
-
-    def _evaluate_paintings_per_sample(painting_by_contig, contig_shared_local,
-                                       sample_names_local, region_keys_local,
-                                       max_workers):
-        """
-        Driver: flatten all (contig, sample) pairs into a single task
-        list, dispatch to a ThreadPoolExecutor with `max_workers`
-        workers, and group the per-sample results back by contig.
-
-        Per-contig summary lines are printed in region_keys order
-        after ALL samples complete (the previous per-contig dispatch
-        printed each contig's summary as the contig finished; the new
-        scheme has to wait for all samples to finish first because
-        the workload is interleaved across contigs).  This is a minor
-        UX trade-off; the per-sample work is so fast that the print
-        block lands within a fraction of a second of the last sample.
-
-        Returns a list of per-contig DataFrames in region_keys order.
-        """
-        # Build flat per-sample arg list.  All large arrays
-        # (disc_dense_haps, true_dense_haps, positions) are shared
-        # by reference across all sample tasks within a contig --
-        # ThreadPoolExecutor preserves shared memory semantics so
-        # there's no pickling cost.
-        all_args = []
-        for r_name in region_keys_local:
-            painting = painting_by_contig.get(r_name)
-            if painting is None:
-                continue
-            if r_name not in contig_shared_local:
-                continue
-            truth, positions, disc_dense_haps, true_dense_haps = contig_shared_local[r_name]
-            for i, name in enumerate(sample_names_local):
-                all_args.append((r_name, i, name, painting[i], truth[i],
-                                  positions, disc_dense_haps, true_dense_haps))
-
-        if not all_args:
-            return []
-
-        # Group results by contig as they come back.  Using a dict
-        # keyed by r_name so we can iterate region_keys at the end
-        # for ordered printing.
-        results_by_contig = {r: [] for r in region_keys_local}
-        effective_workers = max(1, min(len(all_args), max_workers))
-
-        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            for r_name, sample_name, sample_result in executor.map(_evaluate_one_sample, all_args):
-                results_by_contig[r_name].append(sample_result)
-
-        # Build per-contig DataFrames + print summary in region_keys order
-        contig_dfs = []
-        for r_name in region_keys_local:
-            sample_results = results_by_contig.get(r_name, [])
-            if not sample_results:
-                continue
-            contig_eval = pd.DataFrame(sample_results)
-            contig_eval['Contig'] = r_name
-            mean_acc = contig_eval['Accuracy'].mean() * 100
-            mean_t1 = contig_eval['Track1_accuracy'].mean() * 100
-            mean_t2 = contig_eval['Track2_accuracy'].mean() * 100
-            print(f"  {r_name}: Allele={mean_acc:.2f}%, Track1={mean_t1:.2f}%, Track2={mean_t2:.2f}%")
-            contig_dfs.append(contig_eval)
-
-        return contig_dfs
-
-    print("Evaluating phase correction accuracy (allele-level)...")
-    print("  Paintings use DISCOVERED haplotypes")
-    print("  Validation converts to alleles using TRUE founders")
-
-    # Build shared data for each contig (truth, positions, dense haps)
-    # Pre-load any missing keys in parallel
-    def _load_validation_keys(r_name):
-        _ensure_key(r_name, 'truth_painting')
-        _ensure_key(r_name, 'super_blocks_L4')
-        _ensure_key(r_name, 'naive_long_haps')
-        _ensure_key(r_name, 'tolerance_result')
-        return r_name
-    
-    t0 = time.time()
-    with ThreadPoolExecutor(max_workers=min(8, len(region_keys))) as executor:
-        list(executor.map(_load_validation_keys, region_keys))
-    print(f"  Validation data loaded in {time.time()-t0:.1f}s")
-    
-    contig_shared = {}
-    for r_name in region_keys:
-        if 'truth_painting' not in multi_contig_results[r_name]:
-            continue
-        truth = multi_contig_results[r_name]['truth_painting']
-        if 'super_blocks_L4' in multi_contig_results[r_name]:
-            discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
-        else:
-            discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
-        positions = discovered_block.positions
-        dense_haps, _ = phase_correction.founder_block_to_dense(discovered_block)
-        
-        orig_sites, orig_haps = multi_contig_results[r_name]['naive_long_haps']
-        orig_haps_concrete = simulate_sequences.concretify_haps(orig_haps)
-        site_indices = np.searchsorted(orig_sites, positions)
-        site_indices = np.clip(site_indices, 0, len(orig_sites) - 1)
-        true_dense_haps = np.array([h[site_indices] for h in orig_haps_concrete], dtype=np.int8)
-        
-        contig_shared[r_name] = (truth, positions, dense_haps, true_dense_haps)
-
-    # --- BEFORE: evaluate uncorrected painting (raw Viterbi output) ---
-    # Per-sample parallelism: flatten the 22-contig x 320-sample
-    # workload into 7040 independent sample tasks and dispatch via a
-    # single ThreadPoolExecutor with max_workers=n_processes.  See
-    # the docstring of `_evaluate_paintings_per_sample` for details.
-    print("\n" + "-"*60)
-    print("BEFORE phase correction (raw Viterbi painting):")
-    print("-"*60)
-
-    before_painting_by_contig = {}
-    for r_name in region_keys:
-        if r_name not in contig_shared:
-            continue
-        raw_painting = multi_contig_results[r_name].get('tolerance_result')
-        if raw_painting is None:
-            continue
-        before_painting_by_contig[r_name] = raw_painting
-
-    before_contig_results = _evaluate_paintings_per_sample(
-        before_painting_by_contig, contig_shared, sample_names,
-        region_keys, max_workers=n_processes
-    )
-
-    if before_contig_results:
-        before_df = pd.concat(before_contig_results, ignore_index=True)
-        before_df['Generation'] = before_df['Sample'].apply(
-            lambda x: 'F1' if x.startswith('F1') else ('F2' if x.startswith('F2') else 'F3'))
-    else:
-        before_df = pd.DataFrame()
-
-    # --- AFTER: evaluate corrected painting ---
-    # Per-sample parallelism: same flatten-and-dispatch pattern as
-    # the BEFORE block above.  See `_evaluate_paintings_per_sample`
-    # for the rationale.
-    print("\n" + "-"*60)
-    print("AFTER phase correction (corrected + greedy + F1 recoloring):")
-    print("-"*60)
-
-    after_painting_by_contig = {}
-    for r_name in region_keys:
-        if r_name not in contig_shared:
-            continue
-        if 'final_painting' in multi_contig_results[r_name]:
-            painting = multi_contig_results[r_name]['final_painting']
-        elif 'refined_painting' in multi_contig_results[r_name]:
-            painting = multi_contig_results[r_name]['refined_painting']
-        elif 'corrected_painting' in multi_contig_results[r_name]:
-            painting = multi_contig_results[r_name]['corrected_painting']
-        else:
-            continue
-        after_painting_by_contig[r_name] = painting
-
-    all_contig_results = _evaluate_paintings_per_sample(
-        after_painting_by_contig, contig_shared, sample_names,
-        region_keys, max_workers=n_processes
-    )
-
-    if all_contig_results:
-        full_eval_df = pd.concat(all_contig_results, ignore_index=True)
-        eval_output = os.path.join(output_dir, "phase_correction_evaluation_discovered.csv")
-        try:
-            full_eval_df.to_csv(eval_output, index=False)
-            print(f"\nDetailed evaluation saved to: {eval_output}")
-        except OSError:
-            print("WARNING: Could not save evaluation CSV (disk full)")
-        
-        full_eval_df['Generation'] = full_eval_df['Sample'].apply(
-            lambda x: 'F1' if x.startswith('F1') else ('F2' if x.startswith('F2') else 'F3')
-        )
-        
-        # ============================================================
-        # BEFORE vs AFTER COMPARISON
-        # ============================================================
-        print("\n" + "="*60)
-        print("PHASE CORRECTION: BEFORE vs AFTER COMPARISON")
-        print("="*60)
-        
-        if len(before_df) > 0:
-            print("\nBy Generation:")
-            print(f"  {'Gen':<4s}  {'Before Allele':>14s}  {'After Allele':>13s}  {'Before Track1':>14s}  {'After Track1':>13s}  {'Improvement':>12s}")
-            for gen in ['F1', 'F2', 'F3']:
-                b_gen = before_df[before_df['Generation'] == gen]
-                a_gen = full_eval_df[full_eval_df['Generation'] == gen]
-                if len(b_gen) > 0 and len(a_gen) > 0:
-                    b_acc = b_gen['Accuracy'].mean()*100
-                    a_acc = a_gen['Accuracy'].mean()*100
-                    b_t1 = b_gen['Track1_accuracy'].mean()*100
-                    a_t1 = a_gen['Track1_accuracy'].mean()*100
-                    diff = a_t1 - b_t1
-                    print(f"  {gen:<4s}  {b_acc:>13.2f}%  {a_acc:>12.2f}%  {b_t1:>13.2f}%  {a_t1:>12.2f}%  {diff:>+11.2f}%")
-            
-            b_overall_acc = before_df['Accuracy'].mean()*100
-            a_overall_acc = full_eval_df['Accuracy'].mean()*100
-            b_overall_t1 = before_df['Track1_accuracy'].mean()*100
-            a_overall_t1 = full_eval_df['Track1_accuracy'].mean()*100
-            diff_overall = a_overall_t1 - b_overall_t1
-            print(f"  {'All':<4s}  {b_overall_acc:>13.2f}%  {a_overall_acc:>12.2f}%  {b_overall_t1:>13.2f}%  {a_overall_t1:>12.2f}%  {diff_overall:>+11.2f}%")
-            
-            # Perfect phasing comparison
-            perfect_threshold = 0.999
-            b_perfect = len(before_df[before_df['Track1_accuracy'] >= perfect_threshold])
-            a_perfect = len(full_eval_df[full_eval_df['Track1_accuracy'] >= perfect_threshold])
-            n_total = len(full_eval_df)
-            print(f"\n  Perfect phasing (>=99.9% Track1):")
-            print(f"    Before: {b_perfect}/{n_total} ({100*b_perfect/n_total:.1f}%)")
-            print(f"    After:  {a_perfect}/{n_total} ({100*a_perfect/n_total:.1f}%)")
-        
-        # ============================================================
-        # DETAILED AFTER RESULTS
-        # ============================================================
-        print("\n" + "="*60)
-        print("PHASE CORRECTION RESULTS (AFTER)")
-        print("="*60)
-        
-        print("\nAccuracy by Generation:")
-        for gen in ['F1', 'F2', 'F3']:
-            gen_df = full_eval_df[full_eval_df['Generation'] == gen]
-            if len(gen_df) > 0:
-                print(f"  {gen}: Accuracy={gen_df['Accuracy'].mean()*100:.2f}%, "
-                      f"Track1={gen_df['Track1_accuracy'].mean()*100:.2f}%, "
-                      f"Track2={gen_df['Track2_accuracy'].mean()*100:.2f}%, "
-                      f"N={len(gen_df)}")
-        
-        print(f"\nOverall Accuracy:  {full_eval_df['Accuracy'].mean()*100:.2f}%")
-        print(f"Overall Track1:    {full_eval_df['Track1_accuracy'].mean()*100:.2f}%")
-        print(f"Overall Track2:    {full_eval_df['Track2_accuracy'].mean()*100:.2f}%")
-        
-        n_direct = (full_eval_df['Dominant_phase'] == 'Direct').sum()
-        n_flipped = (full_eval_df['Dominant_phase'] == 'Flipped').sum()
-        print(f"\nPhase assignment: {n_direct} samples Direct, {n_flipped} samples Flipped")
-        
-        print("\nWorst 10 samples by accuracy:")
-        worst = full_eval_df.nsmallest(10, 'Accuracy')[['Sample', 'Contig', 'Accuracy', 'Track1_accuracy', 'Track2_accuracy', 'Dominant_phase']]
-        worst_display = worst.copy()
-        worst_display['Accuracy'] = worst_display['Accuracy'] * 100
-        worst_display['Track1_accuracy'] = worst_display['Track1_accuracy'] * 100
-        worst_display['Track2_accuracy'] = worst_display['Track2_accuracy'] * 100
-        print(worst_display.to_string(index=False, float_format='%.2f'))
-        
-        print("\n" + "="*60)
-        print("PERFECT PHASING SUMMARY")
-        print("="*60)
-        
-        perfect_threshold = 0.999
-        perfect_samples = full_eval_df[full_eval_df['Track1_accuracy'] >= perfect_threshold]
-        n_perfect = len(perfect_samples)
-        n_total = len(full_eval_df)
-        
-        print(f"\nSamples with >=99.9% Track1 accuracy: {n_perfect}/{n_total} ({100*n_perfect/n_total:.1f}%)")
-        
-        for gen in ['F1', 'F2', 'F3']:
-            gen_df = full_eval_df[full_eval_df['Generation'] == gen]
-            gen_perfect = gen_df[gen_df['Track1_accuracy'] >= perfect_threshold]
-            if len(gen_df) > 0:
-                print(f"  {gen}: {len(gen_perfect)}/{len(gen_df)} ({100*len(gen_perfect)/len(gen_df):.1f}%)")
-        
-        internal_switch = full_eval_df[
-            (full_eval_df['Track1_accuracy'] < perfect_threshold) & 
-            (full_eval_df['Track1_accuracy'] > 0.5)
-        ]
-        print(f"\nSamples with internal phase switches: {len(internal_switch)}")
-        if len(internal_switch) > 0:
-            print(internal_switch[['Sample', 'Contig', 'Track1_accuracy', 'Track2_accuracy']].head(20).to_string(index=False))
-
-    print(f"\nPhase correction validation complete.")
-    print(f"Total time: {time.time()-total_start:.1f}s")
-
-#%%
-if __name__ == '__main__':
-    # =============================================================================
-    # FINAL SUMMARY
-    # =============================================================================
-    total_elapsed = time.time() - total_start
-    print(f"\n{'='*60}")
-    print(f"COMPLETE RUN FINISHED in {total_elapsed:.1f}s ({total_elapsed/60:.1f} min)")
-    print(f"Log saved to: {log_path}")
-    print(f"{'='*60}")
-# %%
