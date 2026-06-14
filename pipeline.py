@@ -179,7 +179,7 @@ if __name__ == '__main__':
     import vcf_data_loader
     import analysis_utils
     import hap_statistics
-    import block_haplotypes_discrete as block_haplotypes  # Discrete coordinate descent w/ wildcard founder (drop-in for block_haplotypes)
+    import block_haplotypes_discrete  # Discrete coordinate descent w/ wildcard founder (drop-in for block_haplotypes)
     import block_linking_naive
     import block_linking
     import simulate_sequences
@@ -424,11 +424,11 @@ if __name__ == '__main__':
 
             # 2. Run Haplotype Discovery
             start = time.time()
-            block_results = block_haplotypes.generate_all_block_haplotypes(genomic_data,
+            block_results = block_haplotypes_discrete.generate_all_block_haplotypes(genomic_data,
                                                                            num_processes=n_processes)
 
             valid_blocks = [b for b in block_results if len(b.positions) > 0]
-            block_results = block_haplotypes.BlockResults(valid_blocks)
+            block_results = block_haplotypes_discrete.BlockResults(valid_blocks)
             
             print(f"  [Discovery] Haplotypes generated in {time.time() - start:.2f}s")
 
@@ -604,7 +604,7 @@ if __name__ == '__main__':
             simd_genomic_data = multi_contig_results[r_name]['simd_genomic_data']
             
             t_chr = time.time()
-            simd_block_results = block_haplotypes.generate_all_block_haplotypes(
+            simd_block_results = block_haplotypes_discrete.generate_all_block_haplotypes(
                 simd_genomic_data,
                 uniqueness_threshold_percent=1.0,
                 diff_threshold_percent=0.5,
@@ -614,7 +614,7 @@ if __name__ == '__main__':
             disc_time = time.time() - t_chr
             
             valid_blocks = [b for b in simd_block_results if len(b.positions) > 0]
-            simd_block_results = block_haplotypes.BlockResults(valid_blocks)
+            simd_block_results = block_haplotypes_discrete.BlockResults(valid_blocks)
             
             multi_contig_results[r_name]['simd_block_results'] = simd_block_results
             save_contig(STAGE_3, r_name, {'simd_block_results': simd_block_results})

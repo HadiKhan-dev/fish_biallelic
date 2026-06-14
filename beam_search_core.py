@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 
 # Import the Viterbi kernel for the selection phase
-from block_haplotypes import viterbi_score_selection, prune_chimeras
+from bhd_kernels import viterbi_score_selection, prune_chimeras
 
 # =============================================================================
 # 1. FAST MESH (O(1) Lookup)

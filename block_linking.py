@@ -6,7 +6,6 @@ from scipy.special import logsumexp
 from functools import partial
 
 import analysis_utils
-import block_haplotypes
 
 # glibc malloc_trim — releases freed pages back to OS
 try:

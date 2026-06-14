@@ -15,7 +15,7 @@ import numpy as np
 import math
 import time
 import warnings
-import block_haplotypes
+import block_haplotypes_discrete
 
 
 # =============================================================================
@@ -741,7 +741,7 @@ def deconvolve(super_blocks, viterbi_paintings, raw_blocks,
             
             block_new_haps = new_haps_flat[:, site_start:site_end, :]
             refined_haps = {ki: block_new_haps[ki].copy() for ki in range(K)}
-            refined_block = block_haplotypes.BlockResult(
+            refined_block = block_haplotypes_discrete.BlockResult(
                 positions=raw_block.positions.copy(),
                 haplotypes=refined_haps,
                 keep_flags=raw_block.keep_flags,
@@ -754,7 +754,7 @@ def deconvolve(super_blocks, viterbi_paintings, raw_blocks,
         if refined_blocks[ri] is None:
             refined_blocks[ri] = raw_blocks[ri]
     
-    return block_haplotypes.BlockResults(refined_blocks)
+    return block_haplotypes_discrete.BlockResults(refined_blocks)
 
 
 # =============================================================================
@@ -823,7 +823,7 @@ def dedup_blocks(blocks, threshold_pct=1.0, verbose=True):
         
         new_haps = {new_idx: block.haplotypes[old_key]
                     for new_idx, old_key in enumerate(kept)}
-        new_block = block_haplotypes.BlockResult(
+        new_block = block_haplotypes_discrete.BlockResult(
             positions=block.positions.copy(),
             haplotypes=new_haps,
             keep_flags=block.keep_flags,
@@ -836,7 +836,7 @@ def dedup_blocks(blocks, threshold_pct=1.0, verbose=True):
         print(f"  Dedup: {total_before} -> {total_after} total haps "
               f"({n_collapsed} blocks had merges)")
     
-    return block_haplotypes.BlockResults(deduped)
+    return block_haplotypes_discrete.BlockResults(deduped)
 
 
 # =============================================================================

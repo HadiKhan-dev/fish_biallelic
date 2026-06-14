@@ -21,7 +21,7 @@ from collections import defaultdict
 from scipy.optimize import linear_sum_assignment
 from numba import njit, prange, get_num_threads as _numba_get_num_threads
 
-import block_haplotypes
+import bhd_kernels
 
 from chimera_kernels import (
     _resolve_threads,
@@ -262,7 +262,7 @@ def score_path_set(path_set, sub_emissions, penalty, num_samples,
                                       parallel_build=True)
     if num_threads is not None:
         _resolve_threads(num_threads)
-    return float(np.sum(block_haplotypes.viterbi_score_selection(tensor, float(penalty))))
+    return float(np.sum(bhd_kernels.viterbi_score_selection(tensor, float(penalty))))
 
 
 def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
