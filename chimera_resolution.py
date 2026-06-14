@@ -18,7 +18,7 @@ import os
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
 
-import block_haplotypes
+import bhd_kernels
 
 # env-gated coarse phase timing inside select_and_resolve (no effect on results
 # when off): set BHD_CR_PROFILE=1 to print Step1 / Step2-3-4 / Step5 wall times.
@@ -278,7 +278,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         # the worker scale up its numba thread count as peers finish.
         _resolve_threads(num_threads)
         return float(np.sum(
-            block_haplotypes.viterbi_score_selection(tensor, float(pen_sel))))
+            bhd_kernels.viterbi_score_selection(tensor, float(pen_sel))))
     
     # =========================================================================
     # STEP 0: Beam Warmstart (seeds Step 1's selected set)

@@ -70,6 +70,7 @@ from bhd_kernels import (
     _init_hap_from_sample_dosage,
     _select_initial_seed,
     _fit_at_fixed_K,
+    _update_A,
     _compute_cc,
     _compute_bic,
     PoolEmissionCache,
@@ -100,20 +101,20 @@ from bhd_recovery import (
 )
 from bhd_trio import _trio_recovery_candidate_haps
 
-# Re-export public names from block_haplotypes that this orchestrator
-# uses internally (BlockResult and BlockResults are the output types;
-# consolidate_similar_candidates, select_optimal_haplotype_set_viterbi,
-# and prune_chimeras are called from _final_cleanup).  viterbi_score_-
-# selection is imported by bhd_kernels.py for its own Viterbi LL
-# computation but is also referenced here.
-from block_haplotypes import (
-    BlockResult,
-    BlockResults,
-    consolidate_similar_candidates,
-    select_optimal_haplotype_set_viterbi,
+# prune_chimeras + viterbi_score_selection are the scoring / chimera-pruning
+# kernels, now living in the bhd_kernels leaf (migrated out of the retired
+# legacy block_haplotypes.py); _update_dynamic_threads is the shared dynamic-
+# thread hook, also in bhd_kernels, used by select_optimal_haplotype_set_viterbi.
+from bhd_kernels import (
     prune_chimeras,
     viterbi_score_selection,
+    _update_dynamic_threads,
 )
+# BlockResult, BlockResults, consolidate_similar_candidates, and
+# select_optimal_haplotype_set_viterbi were migrated out of block_haplotypes.py
+# into this module — see the "MIGRATED FROM block_haplotypes.py" section at the
+# end of the file.  (find_missing_haplotypes_iterative is still imported lazily
+# from the legacy module inside the residual loop, where present.)
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid='ignore')
@@ -2037,8 +2038,155 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
 
 
 # =============================================================================
+# find_missing_haplotypes_iterative — discrete-native residual founder discovery
+# =============================================================================
+# Discrete's own replacement for the residual step the robust wrapper used to
+# borrow from block_haplotypes.find_missing_haplotypes_iterative.  Rather than
+# transliterate the legacy choices (a k-limited recombination matcher for the
+# fit check, the legacy clustering algorithm for re-generation, a flat 2%
+# Hamming redundancy filter), this uses discrete's own machinery end to end:
+#
+#   * Detection.  Each sample is assigned to its best founder PAIR under
+#     discrete's exact cost model via _update_A, with the wildcard founder as
+#     the explicit "unexplained" state.  A sample is residual iff at least one
+#     of its two strands lands on the wildcard sentinel — i.e. discrete itself,
+#     under the same wildcard penalty `lambda_wildcard_penalty` it uses during
+#     discovery, judges that no real founder explains that strand.  The penalty
+#     IS the threshold, so there is no foreign error-percentage cutoff.
+#
+#   * Generation.  discrete coordinate-descent founder discovery
+#     (generate_haplotypes_block) is run on just the residual samples, with the
+#     same discrete parameters as the parent block.  This is the whole point of
+#     retiring block_haplotypes: the residual pass now uses discrete's algorithm
+#     too, so the founder set is internally consistent.
+#
+#   * Dedup.  A discovered founder is returned only if its minimum per-site
+#     Hamming distance (over kept sites, via discrete's _hamming_pct_kept) to
+#     every existing founder exceeds `dedup_threshold_percent` (discrete's hap-
+#     equality tolerance by default), so only genuinely new founders propagate.
+#
+# Founder QUALITY is delegated to generate_haplotypes_block, which already gates
+# emission on wildcard-mass / per-founder support — we deliberately do not add a
+# second, redundant confidence filter here.
+# =============================================================================
+
+def find_missing_haplotypes_iterative(positions, reads_array, current_haps,
+                                      keep_flags=None,
+                                      lambda_wildcard_penalty=DEFAULT_LAMBDA,
+                                      min_residual_samples=None,
+                                      dedup_threshold_percent=RECOVERY_HAPS_EQUAL_EPS_PCT,
+                                      **generation_kwargs):
+    """Find founders the current set cannot explain, using discrete machinery.
+
+    Assigns every sample to its best founder pair under discrete's cost model
+    (with a wildcard founder for unexplained strands), runs discrete
+    coordinate-descent discovery on the samples discrete leaves on the wildcard,
+    and returns the founders that are not already present.
+
+    Args:
+        positions, reads_array, keep_flags: as for generate_haplotypes_block.
+        current_haps: {key: (n_sites_full, 2) [P(0), P(1)]} current founder set.
+        lambda_wildcard_penalty: wildcard penalty used both for the residual-
+            detection assignment and for the residual discovery, kept consistent
+            with the parent block.
+        min_residual_samples: minimum number of wildcard-assigned samples before
+            recovery is attempted.  None (default) resolves to 2x discrete's
+            per-site confidence floor (min_supporters_for_confidence, default 2)
+            so the trigger scales if that floor is raised; below it the
+            unexplained signal is too weak to support a confident new founder.
+        dedup_threshold_percent: a discovered founder is kept only if its minimum
+            kept-site Hamming distance (%) to every existing founder exceeds
+            this.  Defaults to discrete's hap-equality tolerance.
+        **generation_kwargs: forwarded to the residual generate_haplotypes_block
+            call (e.g. K_max, penalty_strength, min_supporters_for_confidence).
+            `known_haplotypes` is dropped: residual discovery runs fresh and is
+            deduped against `current_haps` afterwards.
+
+    Returns:
+        {new_idx: (n_sites_full, 2)} newly discovered founders (possibly empty),
+        in the same [P(0), P(1)] format as generate_haplotypes_block output.
+    """
+    if len(current_haps) == 0:
+        return {}
+
+    n_sites_full = reads_array.shape[1]
+    if keep_flags is None:
+        keep_flags = np.ones(n_sites_full, dtype=np.int64)
+    keep_flags = np.asarray(keep_flags, dtype=np.int64)
+    kept_mask = keep_flags > 0
+    if not kept_mask.any():
+        return {}
+
+    # Trigger floor: 2x discrete's per-site confidence requirement unless the
+    # caller pins it explicitly.
+    if min_residual_samples is None:
+        min_supporters = int(generation_kwargs.get('min_supporters_for_confidence', 2))
+        min_residual_samples = max(2, 2 * min_supporters)
+
+    # Probs on kept sites only, materialised C-contiguous so the assignment /
+    # CD kernels fast-path their contiguity checks (boolean masking yields a
+    # non-contiguous view).  Pure layout change — values are identical.
+    (_, probs_array) = analysis_utils.reads_to_probabilities(reads_array)
+    probs_k = np.ascontiguousarray(probs_array[:, kept_mask, :])
+    if probs_k.shape[0] == 0 or probs_k.shape[1] == 0:
+        return {}
+
+    # Current founders -> discrete {0, 1} matrix on kept sites.  This inverts
+    # _discrete_haps_to_prob_arrays: P(1) >= P(0) -> allele 1.  Confident sites
+    # (1,0)/(0,1) map back exactly; "no-information" (0.5, 0.5) sites map to 1
+    # but carry no discriminative weight in the assignment because the data
+    # there is uniform too.  _update_A requires {0, 1} (no MASK), which the
+    # argmax guarantees.
+    hap_keys = list(current_haps.keys())
+    L_kept = int(kept_mask.sum())
+    H_kept = np.empty((len(hap_keys), L_kept), dtype=np.int64)
+    for i, k in enumerate(hap_keys):
+        hp = np.asarray(current_haps[k], dtype=np.float64)
+        H_kept[i] = (hp[:, 1][kept_mask] >= hp[:, 0][kept_mask]).astype(np.int64)
+    H_kept = np.ascontiguousarray(H_kept)
+
+    # Discrete-native fit: assign each sample to its best founder pair, with the
+    # wildcard sentinel == K marking strands no real founder explains.
+    K = H_kept.shape[0]
+    A, _per_sample_cost, _per_sample_cost_unc, _wildcard_slots = _update_A(
+        probs_k, H_kept, lambda_wildcard_penalty)
+
+    # Residual = samples discrete cannot fully place: at least one strand on the
+    # wildcard sentinel.
+    residual_idx = np.where(np.any(A == K, axis=1))[0]
+    if len(residual_idx) < min_residual_samples:
+        return {}
+
+    # Discrete founder discovery on the residual samples, fresh (deduped below)
+    # and with the parent block's discrete parameters.
+    generation_kwargs.pop('known_haplotypes', None)
+    sub_block_result = generate_haplotypes_block(
+        positions, reads_array[residual_idx], keep_flags=keep_flags,
+        lambda_wildcard_penalty=lambda_wildcard_penalty,
+        **generation_kwargs)
+
+    # Keep only founders not already present: minimum kept-site Hamming (%) to
+    # every existing founder must exceed the tolerance.
+    newly_found_unique = {}
+    new_idx = 0
+    for sub_hap in sub_block_result.haplotypes.values():
+        sub_arr = np.asarray(sub_hap, dtype=np.float64)
+        sub_H = (sub_arr[:, 1][kept_mask] >= sub_arr[:, 0][kept_mask]).astype(np.int64)
+        min_diff = 100.0
+        for i in range(K):
+            d = _hamming_pct_kept(sub_H, H_kept[i])
+            if d < min_diff:
+                min_diff = d
+        if min_diff > dedup_threshold_percent:
+            newly_found_unique[new_idx] = sub_hap
+            new_idx += 1
+
+    return newly_found_unique
+
+
+# =============================================================================
 # generate_haplotypes_block_robust — same iterative-residual-discovery
-# wrapper as the legacy module, calling our generate_haplotypes_block.
+# wrapper, now calling our own discrete find_missing_haplotypes_iterative.
 # =============================================================================
 
 def generate_haplotypes_block_robust(positions, reads_array, keep_flags=None,
@@ -2065,20 +2213,17 @@ def generate_haplotypes_block_robust(positions, reads_array, keep_flags=None,
         final_result = generate_haplotypes_block(
             positions, reads_array, keep_flags=keep_flags, **run_kwargs)
 
-        # Residual check: legacy uses find_missing_haplotypes_iterative
-        # with k-limited Viterbi.  We reuse that logic via the legacy
-        # module's helper — it operates on hap_dict + probs_array, and
-        # our hap_dict is in the same format.
-        try:
-            from block_haplotypes import find_missing_haplotypes_iterative
-        except ImportError:
-            break
-
+        # Residual check: identify samples the current founder set cannot
+        # explain — discrete's own wildcard assignment, not the legacy
+        # k-limited matcher — and run discrete founder discovery on just those
+        # (see find_missing_haplotypes_iterative above).  Forward this block's
+        # generation parameters so the residual pass uses identical discrete
+        # settings; lambda_wildcard_penalty binds to its explicit param and
+        # known_haplotypes is dropped inside (residual discovery is fresh and
+        # deduped).
         missing_haps_dict = find_missing_haplotypes_iterative(
             positions, reads_array, final_result.haplotypes,
-            keep_flags=keep_flags,
-            error_threshold_percent=2.0,
-            min_bad_samples=5)
+            keep_flags=keep_flags, **kwargs)
 
         if len(missing_haps_dict) == 0:
             break
@@ -2222,3 +2367,217 @@ def generate_all_block_haplotypes(genomic_data,
         gc.collect()
 
     return BlockResults(overall_haplotypes)
+
+
+# =============================================================================
+# MIGRATED FROM block_haplotypes.py (legacy block-hap discovery, retired).
+# The BlockResult/BlockResults output types and the consolidate / optimal-set
+# selection helpers now live here so the active ecosystem imports them from
+# the discrete driver instead of from the legacy module.  Verbatim moves.
+# =============================================================================
+
+class BlockResult:
+    """
+    Container for the reconstructed haplotypes of a single genomic block.
+    """
+    def __init__(self, positions, haplotypes, reads_count_matrix=None, keep_flags=None, probs_array=None):
+        self.positions = positions
+        self.haplotypes = haplotypes # Dictionary {id: numpy_array}
+        self.reads_count_matrix = reads_count_matrix # Optional: source reads (Samples x Sites x 2)
+        self.keep_flags = keep_flags
+        self.probs_array = probs_array # New Optional: genotype probabilities (Samples x Sites x 3)
+        
+    def __len__(self):
+        return len(self.haplotypes)
+
+    def __repr__(self):
+        active_sites = np.sum(self.keep_flags) if self.keep_flags is not None else len(self.positions)
+        has_probs = "with probs" if self.probs_array is not None else "no probs"
+        return f"<BlockResult: {len(self.haplotypes)} haplotypes at {len(self.positions)} sites ({active_sites} active), {has_probs}>"
+
+class BlockResults:
+    """
+    A container class holding a list of BlockResult objects, representing
+    the reconstruction results for an entire genomic region.
+    """
+    def __init__(self, block_result_list):
+        self.blocks = block_result_list
+
+    def __len__(self):
+        return len(self.blocks)
+
+    def __getitem__(self, index):
+        """Allows accessing blocks by index: block_results[i]"""
+        return self.blocks[index]
+
+    def __iter__(self):
+        """Allows iterating: for block in block_results: ..."""
+        return iter(self.blocks)
+
+    def __repr__(self):
+        return f"<BlockResults: containing {len(self.blocks)} processed blocks>"
+
+def consolidate_similar_candidates(candidates, diff_threshold_percent=1.0):
+    """
+    Greedily merges candidates that are nearly identical.
+    
+    Args:
+        candidates: dict or list of haplotype arrays.
+        diff_threshold_percent: Percentage difference (0-100) below which to merge.
+    """
+    if not candidates: return {}
+    
+    # Normalize input to list of arrays
+    if isinstance(candidates, dict):
+        candidate_list = list(candidates.values())
+    else:
+        candidate_list = candidates
+
+    unique_haps = []
+    
+    for hap in candidate_list:
+        is_duplicate = False
+        for existing in unique_haps:
+            # Calculate Hamming distance (percentage of sites that differ)
+            diff = np.mean(hap != existing) * 100.0
+            
+            if diff < diff_threshold_percent:
+                # It's a duplicate (or noise variant)
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            unique_haps.append(hap)
+            
+    # Rebuild dictionary with sequential keys
+    return {i: h for i, h in enumerate(unique_haps)}
+
+def select_optimal_haplotype_set_viterbi(candidate_haps, probs_array, 
+                                         recomb_penalty=10.0,
+                                         penalty_strength=1.0,
+                                         read_error_prob=0.02,
+                                         max_sites_for_selection=2000):
+    """
+    Selects the smallest set of haplotypes that explains the data best.
+    """
+    
+    # --- 1. SETUP DATA ---
+    if isinstance(candidate_haps, dict):
+        hap_keys = list(candidate_haps.keys())
+        H = np.array([candidate_haps[k] for k in hap_keys])
+    else:
+        hap_keys = list(range(len(candidate_haps)))
+        H = np.array(candidate_haps)
+        
+    num_candidates = len(H)
+    num_samples, total_sites, _ = probs_array.shape
+    
+    if num_candidates == 0: return []
+
+    # --- 2. DOWNSAMPLING STRATEGY ---
+    if total_sites > max_sites_for_selection:
+        stride = math.ceil(total_sites / max_sites_for_selection)
+        # Slice the data
+        probs_active = probs_array[:, ::stride, :]
+        H_active = H[:, ::stride, :]
+    else:
+        stride = 1
+        probs_active = probs_array
+        H_active = H
+
+    num_active_sites = probs_active.shape[1]
+
+    # --- 3. PRE-CALCULATE ALL PAIR LIKELIHOODS (MEMORY SAFE) ---
+    idx_i, idx_j = np.triu_indices(num_candidates)
+    num_pairs = len(idx_i)
+    
+    ll_tensor = np.empty((num_samples, num_pairs, num_active_sites), dtype=np.float32)
+    
+    W = np.array([[0, 1, 2], [1, 0, 1], [2, 1, 0]], dtype=np.float32)
+    
+    batch_size = 50
+    
+    for start_p in range(0, num_pairs, batch_size):
+        end_p = min(start_p + batch_size, num_pairs)
+        
+        batch_idx_i = idx_i[start_p:end_p]
+        batch_idx_j = idx_j[start_p:end_p]
+        
+        h0 = H_active[batch_idx_i, :, 0]
+        h1 = H_active[batch_idx_i, :, 1]
+        h2_0 = H_active[batch_idx_j, :, 0]
+        h2_1 = H_active[batch_idx_j, :, 1]
+        
+        g00 = h0 * h2_0
+        g11 = h1 * h2_1
+        g01 = (h0 * h2_1) + (h1 * h2_0)
+        del h0, h1, h2_0, h2_1
+        
+        batch_pairs = np.stack([g00, g01, g11], axis=-1)
+        del g00, g01, g11
+        
+        weighted_pairs = batch_pairs @ W
+        del batch_pairs
+        
+        batch_dist = np.sum(
+            probs_active[:, np.newaxis, :, :] * weighted_pairs[np.newaxis, :, :, :],
+            axis=3
+        )
+        del weighted_pairs
+        
+        ll_tensor[:, start_p:end_p, :] = (-batch_dist * stride)
+        del batch_dist
+
+    del H_active, probs_active
+    ll_tensor = np.maximum(ll_tensor, -2.0 * stride)
+    ll_tensor = np.ascontiguousarray(ll_tensor, dtype=np.float64)
+    _malloc_trim()
+
+    # --- 4. SELECTION LOOP ---
+    
+    selected_indices = []
+    current_best_bic = float('inf')
+    
+    min_complexity = recomb_penalty * 1.5
+    calculated_complexity = math.log(num_samples) * total_sites * penalty_strength * 0.01
+    complexity_cost = max(calculated_complexity, min_complexity)
+    
+    while len(selected_indices) < num_candidates:
+        _update_dynamic_threads()
+        
+        best_new_index = -1
+        best_new_bic = float('inf')
+        
+        remaining = [x for x in range(num_candidates) if x not in selected_indices]
+        
+        for cand_idx in remaining:
+            trial_set = selected_indices + [cand_idx]
+            
+            subset_mask = np.zeros(num_candidates, dtype=bool)
+            subset_mask[trial_set] = True
+            
+            valid_pairs_mask = subset_mask[idx_i] & subset_mask[idx_j]
+            
+            if not np.any(valid_pairs_mask):
+                continue
+            
+            active_ll_tensor = ll_tensor[:, valid_pairs_mask, :]
+            
+            best_scores = viterbi_score_selection(active_ll_tensor, float(recomb_penalty))
+            
+            total_log_likelihood = np.sum(best_scores)
+            
+            k = len(trial_set)
+            bic = (k * complexity_cost) - (2 * total_log_likelihood)
+            
+            if bic < best_new_bic:
+                best_new_bic = bic
+                best_new_index = cand_idx
+        
+        if best_new_bic < current_best_bic:
+            selected_indices.append(best_new_index)
+            current_best_bic = best_new_bic
+        else:
+            break
+            
+    return [hap_keys[i] for i in selected_indices]

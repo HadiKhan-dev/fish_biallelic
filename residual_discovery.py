@@ -26,7 +26,8 @@ import multiprocessing.pool
 import warnings
 from multiprocessing.shared_memory import SharedMemory
 
-import block_haplotypes
+import bhd_kernels
+import block_haplotypes_discrete
 import block_haplotype_refinement
 
 
@@ -741,7 +742,7 @@ def _quality_check(block, block_probs, new_hap, num_samples, min_rr):
     new_hap_2d[np.arange(n_sites), new_hap] = 1.0
     expanded_hap_dict[len(hap_keys)] = new_hap_2d
     
-    pruned = block_haplotypes.prune_chimeras(
+    pruned = bhd_kernels.prune_chimeras(
         expanded_hap_dict, block_probs,
         max_recombs=1, max_mismatch_percent=0.5,
         min_mean_delta_to_protect=0.25
@@ -829,7 +830,7 @@ def _quality_check_from_arrays(base_hap_array, hap_dict_2d, block_probs,
     new_hap_2d[np.arange(n_sites), new_hap] = 1.0
     expanded_hap_dict[len(hap_keys)] = new_hap_2d
     
-    pruned = block_haplotypes.prune_chimeras(
+    pruned = bhd_kernels.prune_chimeras(
         expanded_hap_dict, block_probs,
         max_recombs=1, max_mismatch_percent=0.5,
         min_mean_delta_to_protect=0.25
@@ -859,7 +860,7 @@ def _add_hap_to_block(block, new_hap):
     new_haps = dict(block.haplotypes)
     new_haps[new_key] = new_hap_2d
     
-    return block_haplotypes.BlockResult(
+    return block_haplotypes_discrete.BlockResult(
         positions=block.positions,
         haplotypes=new_haps,
         keep_flags=block.keep_flags,
@@ -1578,7 +1579,7 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
     # Dedup: merge near-identical haplotypes (catches duplicate FPs at 0% error)
     t_dedup_start = time.time()
     output_br = block_haplotype_refinement.dedup_blocks(
-        block_haplotypes.BlockResults(output_blocks),
+        block_haplotypes_discrete.BlockResults(output_blocks),
         threshold_pct=1.0,
         verbose=verbose
     )
@@ -1593,7 +1594,7 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
         block = output_list[bi]
         if block.probs_array is None or len(block.haplotypes) < 3:
             continue
-        pruned_haps = block_haplotypes.prune_chimeras(
+        pruned_haps = bhd_kernels.prune_chimeras(
             block.haplotypes, block.probs_array,
             max_recombs=1,
             max_mismatch_percent=0.25,
@@ -1609,4 +1610,4 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
         print(f"    Chimera prune: removed {n_pruned} haps from modified blocks  [{t_prune:.1f}s]")
         print(f"    Residual discovery complete ({time.time()-t0:.1f}s)")
     
-    return block_haplotypes.BlockResults(output_list)
+    return block_haplotypes_discrete.BlockResults(output_list)
