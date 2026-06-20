@@ -1,13 +1,37 @@
 # Data
 fish_vcf/
+fish_vcf_restriped/
+
+# Pipeline checkpoints (large pickle files, regenerated on re-run)
+.pipeline_checkpoints/
+.pipeline_checkpoints_real/
+.pipeline_checkpoints_tropheops_withFounders
+
+# Pickled checkpoints anywhere (the multi-GB stage pickles) — global safety net
+*.pkl
+*.pickle
 
 # Outputs
 results_simulation/
+results_real/
+results_tropheops_withFounders/
+path_plots/
+debug_hierarchical/
+
+# Pedigree depth-sweep (per-(depth,seed) checkpoints are many GB; CSVs are reproducible)
+pedigree_depth_sweep/
+# default dirs if pedigree_sim_pipeline.py is ever run standalone (without the driver)
+pedigree_sweep_checkpoints/
+pedigree_sweep_results/
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
+
+# Logs
+logs/
+model_logs/
 
 # Generated images
 *.png
