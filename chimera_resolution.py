@@ -24,6 +24,17 @@ import bhd_kernels
 # when off): set BHD_CR_PROFILE=1 to print Step1 / Step2-3-4 / Step5 wall times.
 _CR_PROFILE = os.environ.get('BHD_CR_PROFILE', '') not in ('', '0', 'false', 'False')
 
+# Byte budget for the per-candidate-chunk scoring tensors built during
+# forward-selection / swap rounds (the split-layout cand_sv).  The candidate
+# chunk is sized so the FULL-sample cand_sv fits this budget, which lets each
+# chunk be scored in a SINGLE sample pass instead of in _SAMPLE_CHUNK-sized
+# passes.  The per-sample Viterbi scores are identical either way (each
+# sample's recurrence is independent); only the cross-sample summation order
+# in the split scorer's Phase 2 differs, i.e. the totals are
+# floating-point-equivalent (a few dozen ULP).  Raise for fewer, larger
+# chunks; lower to cap peak memory per worker.
+_CR_STACK_BYTES_BUDGET = 4 * 1024**3
+
 # =============================================================================
 # RE-EXPORTS from the kernel and machinery layers
 # =============================================================================
@@ -246,19 +257,38 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
     
     # --- Local tensor builders ---
     def build_tensor_sel(subset_indices):
+        # This tensor feeds bhd_kernels.viterbi_score_selection, a SHARED
+        # kernel that uses the (n_samples, n_pairs, total_bins) pair-major
+        # layout throughout the codebase, so it is deliberately NOT
+        # transposed to the pairs-innermost layout the CR-local
+        # batched/split scorers use.  It is float32 (viterbi_score_selection
+        # accumulates in float64 and already accepts float32 tensors from the
+        # beam/discrete callers, so only the stored emissions carry the
+        # ~1e-7 float32 quantisation).  The per-block gather now runs through
+        # the parallel numba kernel _build_tensor_block_numba_par instead of
+        # a np.repeat/np.tile fancy-index slice-assign (which allocated a
+        # (num_samples, n_sub**2, nb) intermediate per block and ran single-
+        # threaded).  The gather is identical: for pair p the kernel reads
+        # bin_em[s, local_haps[p // n_sub], local_haps[p % n_sub], bin] --
+        # exactly the cells np.repeat(local_haps, n_sub)[p] /
+        # np.tile(local_haps, n_sub)[p] selected -- so the result is a
+        # bit-identical float32 cast of the old numpy path.
         n_sub = len(subset_indices)
         n_pairs = n_sub * n_sub
-        tensor = np.zeros((num_samples, n_pairs, total_bins), dtype=np.float64)
+        # np.empty is safe: the kernel overwrites every (s, p, bin) cell in
+        # each block's bin window, whose union is exactly [0, total_bins).
+        tensor = np.empty((num_samples, n_pairs, total_bins), dtype=np.float32)
         bin_off = 0
         for b_i, em_data in enumerate(sub_em):
             nb = em_data['n_bins']
             bin_em = em_data['bin_emissions']
-            local_haps = map_matrix[subset_indices, b_i]
-            tensor[:, :, bin_off:bin_off + nb] = \
-                bin_em[:, np.repeat(local_haps, n_sub), np.tile(local_haps, n_sub), :]
+            local_haps = np.ascontiguousarray(
+                map_matrix[subset_indices, b_i]).astype(np.int64)
+            if n_pairs > 0:
+                _build_tensor_block_numba_par(
+                    tensor, bin_em, local_haps,
+                    0, num_samples, n_sub, nb, bin_off)
             bin_off += nb
-        # `tensor` was allocated via np.zeros (C-contiguous) and only
-        # slice-assigned in-place; ascontiguousarray would be a no-op.
         return tensor
     
     def build_tensors_threaded(subset_list):
@@ -338,14 +368,25 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         # under the same thread count, and as peers finish during a long
         # forward-selection pass we want this worker to scale up.
         nt = _resolve_threads(num_threads)
-        # Size max_chunk using _SAMPLE_CHUNK to bound stacked tensor
-        _sc = min(num_samples, _SAMPLE_CHUNK)
+        # Size the candidate chunk so the FULL-sample compact cand_sv
+        # (max_chunk, num_samples, 2*(K_next-1)+1, total_bins) stays within
+        # the byte budget, then score all samples in a single pass below
+        # (instead of _SAMPLE_CHUNK-sized passes).  cand_sv stores only the
+        # 2*cand_pos+1 cand pairs, far smaller than the n_pairs = K_next²
+        # full grid, so this fits comfortably at production shapes.
+        _ncp_s1 = 2 * (K_next - 1) + 1
+        _cand_bytes_s1 = num_samples * _ncp_s1 * total_bins * 4   # float32
         max_chunk = max(4, min(64,
-            int(5e8 / (_sc * n_pairs * total_bins * 8))))
+            int(_CR_STACK_BYTES_BUDGET // max(1, _cand_bytes_s1))))
+        # One sample pass when a single candidate's full-sample slab fits the
+        # budget (the normal case); otherwise fall back to sample-chunking.
+        _sc_eff = (num_samples if _cand_bytes_s1 <= _CR_STACK_BYTES_BUDGET
+                   else max(1, int(_CR_STACK_BYTES_BUDGET
+                                   // (_ncp_s1 * total_bins * 4))))
         all_scores = {}
         
         # Build template with base pairs (full samples — moderate size)
-        template = np.zeros((num_samples, n_pairs, total_bins), dtype=np.float64)
+        template = np.zeros((num_samples, total_bins, n_pairs), dtype=np.float32)
         per_block_sel_haps = []
         if selected:
             bin_off = 0
@@ -357,7 +398,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 for ii in range(K_next - 1):
                     for jj in range(K_next - 1):
                         pos = ii * K_next + jj
-                        template[:, pos, bin_off:bin_off + nb] = bin_em[:, sel_haps[ii], sel_haps[jj], :]
+                        template[:, bin_off:bin_off + nb, pos] = bin_em[:, sel_haps[ii], sel_haps[jj], :]
                 bin_off += nb
         else:
             for b_i in range(len(sub_em)):
@@ -396,8 +437,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             
             # Accumulate scores across sample chunks
             accum_scores = np.zeros(n_chunk, dtype=np.float64)
-            for _s0 in range(0, num_samples, _SAMPLE_CHUNK):
-                _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
+            for _s0 in range(0, num_samples, _sc_eff):
+                _s1 = min(_s0 + _sc_eff, num_samples)
                 _sn = _s1 - _s0
 
                 # Compact per-candidate emission tensor of shape
@@ -410,8 +451,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 # full pair grid, a 3.3x memory reduction.  At K_next=1,
                 # n_cand_pairs=1 (the diagonal only).
                 cand_sv = np.empty(
-                    (n_chunk, _sn, n_cand_pairs_s1, total_bins),
-                    dtype=np.float64,
+                    (n_chunk, _sn, total_bins, n_cand_pairs_s1),
+                    dtype=np.float32,
                 )
                 _tmpl_slice = template[_s0:_s1]
 
@@ -592,15 +633,26 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         
             K_base = K - 1
             cand_pos = K - 1
-            _sc = min(num_samples, _SAMPLE_CHUNK)
-            sc = max(4, min(64, int(5e8 / (_sc * n_pairs * total_bins * 8))))
+            # Size the candidate chunk so the FULL-sample compact cand_sv
+            # (sc, num_samples, 2*cand_pos+1, total_bins) stays within the
+            # byte budget, then score all samples in a single pass (instead
+            # of _SAMPLE_CHUNK-sized passes — see _sample_starts below).
+            # cand_sv stores only the 2*cand_pos+1 cand pairs, far smaller
+            # than the n_pairs = K² full grid.
+            _ncp = 2 * cand_pos + 1
+            _cand_bytes = num_samples * _ncp * total_bins * 4   # float32
+            sc = max(4, min(64, int(_CR_STACK_BYTES_BUDGET
+                                    // max(1, _cand_bytes))))
+            _sc_eff = (num_samples if _cand_bytes <= _CR_STACK_BYTES_BUDGET
+                       else max(1, int(_CR_STACK_BYTES_BUDGET
+                                       // (_ncp * total_bins * 4))))
             best_swap = None
             best_gain = 0.0
 
             # Sample chunk starts don't depend on the swap position i,
             # so build the list once outside the K-position loop instead
             # of rebuilding it K times.
-            _sample_starts = list(range(0, num_samples, _SAMPLE_CHUNK))
+            _sample_starts = list(range(0, num_samples, _sc_eff))
 
             # Precompute the pair-index → cand-slot lookup for the
             # split-layout Viterbi (_batched_viterbi_score_split).  For
@@ -644,8 +696,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 # by the kernel; the Viterbi recurrence never reads them
                 # because cand_idx_for_p[k] dispatches those k values to
                 # cand_sv (built separately by _build_cand_sv_numba).
-                tmpl_full = np.empty((num_samples, n_pairs, total_bins),
-                                     dtype=np.float64)
+                tmpl_full = np.empty((num_samples, total_bins, n_pairs),
+                                     dtype=np.float32)
                 _build_template_numba(tmpl_full, stacked_bin_em,
                                       t_haps_stacked, bin_offs_arr, nbs_arr,
                                       K_base, K)
@@ -658,7 +710,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     # Accumulate scores across sample chunks
                     accum_scores = np.zeros(n_chunk, dtype=np.float64)
                     for _s0_idx, _s0 in enumerate(_sample_starts):
-                        _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
+                        _s1 = min(_s0 + _sc_eff, num_samples)
                         _sn = _s1 - _s0
                         # Zero-copy slice into the per-position full
                         # template built once above by _build_template_numba.
@@ -675,8 +727,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         # L3-cache-resident and shared across all n_chunk
                         # batches inside _batched_viterbi_score_split.
                         cand_sv = np.empty(
-                            (n_chunk, _sn, n_cand_pairs, total_bins),
-                            dtype=np.float64,
+                            (n_chunk, _sn, total_bins, n_cand_pairs),
+                            dtype=np.float32,
                         )
                     
                         nt = _resolve_threads(num_threads)
@@ -743,14 +795,25 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         
             K_base = K - 2
             cand_pos = K_result - 1
-            _sc = min(num_samples, _SAMPLE_CHUNK)
-            sc = max(4, min(64, int(5e8 / (_sc * n_pairs_r * total_bins * 8))))
+            # Size the candidate chunk so the FULL-sample compact cand_sv
+            # (sc, num_samples, 2*cand_pos+1, total_bins) stays within the
+            # byte budget, then score all samples in a single pass (instead
+            # of _SAMPLE_CHUNK-sized passes — see _sample_starts below).
+            # cand_sv stores only the 2*cand_pos+1 cand pairs, far smaller
+            # than the n_pairs_r = K_result² full grid.
+            _ncp = 2 * cand_pos + 1
+            _cand_bytes = num_samples * _ncp * total_bins * 4   # float32
+            sc = max(4, min(64, int(_CR_STACK_BYTES_BUDGET
+                                    // max(1, _cand_bytes))))
+            _sc_eff = (num_samples if _cand_bytes <= _CR_STACK_BYTES_BUDGET
+                       else max(1, int(_CR_STACK_BYTES_BUDGET
+                                       // (_ncp * total_bins * 4))))
             best_2for1 = None
             best_bic = current_bic
 
             # Sample chunk starts don't depend on (i, j), so build once
             # outside the pair loop instead of K*(K-1)/2 times.
-            _sample_starts = list(range(0, num_samples, _SAMPLE_CHUNK))
+            _sample_starts = list(range(0, num_samples, _sc_eff))
 
             # Precompute the pair-index → cand-slot lookup for the
             # split-layout Viterbi (_batched_viterbi_score_split).  For
@@ -794,8 +857,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     # only difference being stride = K_result instead of K
                     # (the pair layout is (K_result, K_result) for 2for1).
                     # Cand cells are left uninitialised — see kernel docstring.
-                    tmpl_full = np.empty((num_samples, n_pairs_r, total_bins),
-                                         dtype=np.float64)
+                    tmpl_full = np.empty((num_samples, total_bins, n_pairs_r),
+                                         dtype=np.float32)
                     _build_template_numba(tmpl_full, stacked_bin_em,
                                           t_haps_stacked, bin_offs_arr, nbs_arr,
                                           K_base, K_result)
@@ -808,7 +871,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         # Accumulate scores across sample chunks
                         accum_scores = np.zeros(n_chunk, dtype=np.float64)
                         for _s0_idx, _s0 in enumerate(_sample_starts):
-                            _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
+                            _s1 = min(_s0 + _sc_eff, num_samples)
                             _sn = _s1 - _s0
                             # Zero-copy slice into the per-pair full template.
                             tmpl_slice = tmpl_full[_s0:_s1]
@@ -820,8 +883,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                             # instead of K, but cand_pos is still equal
                             # to stride - 1 so the kernel works unchanged.
                             cand_sv = np.empty(
-                                (n_chunk, _sn, n_cand_pairs, total_bins),
-                                dtype=np.float64,
+                                (n_chunk, _sn, total_bins, n_cand_pairs),
+                                dtype=np.float32,
                             )
                         
                             nt = _resolve_threads(num_threads)

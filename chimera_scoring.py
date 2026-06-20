@@ -48,6 +48,15 @@ from chimera_kernels import (
 )
 
 
+# Peak memory budget (bytes) for the batched scoring tensor built in
+# score_path_sets_parallel.  n_chunk is sized so one `stacked` buffer
+# (n_chunk x num_samples x n_pairs x total_bins x 8) stays under this.
+# Larger -> fewer, bigger chunks (less dispatch/loop overhead) at higher
+# peak RAM.  The sample axis already supplies thread parallelism, so this
+# trades memory for batching efficiency, not for core utilisation.
+_STACK_BYTES_BUDGET = 4 * 1024**3  # 4 GiB
+
+
 # =============================================================================
 # PARAMETER COMPUTATION
 # =============================================================================
@@ -159,7 +168,7 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites, snps_pe
 # =============================================================================
 
 def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=None,
-                             parallel_build=False):
+                             parallel_build=False, out=None):
     """Build Viterbi scoring tensor from a set of key-paths.
     If sample_range=(s0, s1) is given, only builds for those samples.
 
@@ -179,6 +188,12 @@ def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=
     caller `score_path_sets_parallel` keeps the default False — its own
     ThreadPoolExecutor owns the parallelism and a prange there would
     contend on the OMP pool.
+
+    out: optional pre-allocated (n_s, n_pairs, total_bins) float64 buffer
+    to write into instead of allocating a fresh tensor.  Used by
+    score_path_sets_parallel to build each path-set directly into its slot
+    of the batched scoring tensor (eliminating both the per-call temporary
+    and the subsequent stack-copy).
     """
     K = len(path_set)
     n_pairs = K * K
@@ -195,7 +210,16 @@ def _build_tensor_from_paths(path_set, sub_emissions, num_samples, sample_range=
     # is exactly [0, total_bins), so the entire tensor is overwritten
     # by the end of the loop.  np.zeros' implicit page-zeroing was
     # wasted work.
-    tensor = np.empty((n_s, n_pairs, total_bins), dtype=np.float64)
+    if out is not None:
+        # Write directly into a caller-provided buffer (a slice of the
+        # batched `stacked` tensor in score_path_sets_parallel), avoiding
+        # both this per-call allocation and the subsequent stack-copy.
+        # Must be (n_s, n_pairs, total_bins) float64 and C-contiguous; the
+        # per-block kernel overwrites every cell in its bin window, whose
+        # union is exactly [0, total_bins), so no pre-zeroing is needed.
+        tensor = out
+    else:
+        tensor = np.empty((n_s, n_pairs, total_bins), dtype=np.float64)
     bin_offset = 0
     for b_idx, em_data in enumerate(sub_emissions):
         n_bins_b = em_data['n_bins']
@@ -265,51 +289,154 @@ def score_path_set(path_set, sub_emissions, penalty, num_samples,
     return float(np.sum(bhd_kernels.viterbi_score_selection(tensor, float(penalty))))
 
 
+@njit(parallel=True, fastmath=False, cache=True)
+def _build_stacked_block_batched(stacked, bin_em, local_idx_block, K, n_bins_b,
+                                 bin_offset):
+    """Fill ONE sub-block's bin window of the batched scoring tensor for ALL
+    path-sets and ALL samples in a single parallel dispatch.
+
+    This is the batched analogue of _build_tensor_block_numba(_par): instead
+    of one Python call per path-set (each building that path-set's slot of
+    `stacked` and paying per-call Python index prep + dispatch overhead),
+    score_path_sets_parallel precomputes every path-set's local hap indices
+    for this block and this kernel writes all of them at once.  The per-cell
+    gather is identical, so the values are identical:
+
+        stacked[j, s, p, bin_offset + t] =
+            bin_em[s, local_idx_block[j, p // K], local_idx_block[j, p % K], t]
+
+    Args:
+        stacked:         (n_chunk, num_samples, total_bins, n_pairs)
+                         float32/float64, OUTPUT (PAIRS-INNERMOST).  Only the
+                         column window
+                         [bin_offset : bin_offset + n_bins_b] of every
+                         (path-set, sample, pair) cell is written here; the
+                         other columns are written by the other blocks' calls.
+        bin_em:          (num_samples, n_haps_b, n_haps_b, n_bins_b) float64,
+                         READ-only.  This block's emission tensor, shared by
+                         all path-sets in the chunk.
+        local_idx_block: (n_chunk, K) int64.  local_idx_block[j, k] is
+                         path-set j's local hap index (into bin_em's n_haps
+                         axes) for path k at this block.
+        K:               int, path-set size (constant within the chunk, which
+                         is drawn from a single size-K group).  n_pairs = K*K.
+        n_bins_b:        int, this block's bin count.
+        bin_offset:      int, column offset into stacked's total_bins axis.
+
+    prange is over the flattened (path-set x sample) axis -> n_chunk *
+    num_samples parallel units, which saturates the thread pool from the
+    sample axis alone even when n_chunk is small.  Each (j, s) writes a
+    disjoint stacked[j, s, :, window] region, so there is no write race.
+    """
+    n_chunk = stacked.shape[0]
+    num_samples = bin_em.shape[0]
+    n_pairs = K * K
+    n_units = n_chunk * num_samples
+    for u in prange(n_units):
+        j = u // num_samples
+        s = u - j * num_samples
+        for p in range(n_pairs):
+            row = p // K
+            col = p - row * K
+            i_local = local_idx_block[j, row]
+            j_local = local_idx_block[j, col]
+            for t in range(n_bins_b):
+                stacked[j, s, bin_offset + t, p] = bin_em[s, i_local, j_local, t]
+
+
 def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
                              chunk_size=64, num_threads=8):
     """Score multiple path sets, grouped by size for batched Viterbi.
-    Processes samples in chunks of _SAMPLE_CHUNK to bound memory."""
+
+    Build + score strategy (fully vectorised for thread utilisation):
+    per chunk of same-size path-sets we (1) precompute every path-set's
+    local hap indices for every block in one Python pass, (2) build the whole
+    batched (n_chunk, num_samples, total_bins, n_pairs) float32 scoring
+    tensor (PAIRS-INNERMOST; the DP accumulates in float64) with
+    one `_build_stacked_block_batched` dispatch PER BLOCK (each prange'd over
+    the flattened path-set x sample axis), and (3) score the chunk in a single
+    `_batched_viterbi_score` dispatch (prange'd over batch x samples).
+
+    There is no ThreadPoolExecutor and no per-path-set Python loop in the hot
+    path: the only Python work per chunk is the index precompute (n_chunk x
+    n_blocks x K cheap dict lookups) and n_blocks kernel launches.  This
+    removes the per-path-set build-wrapper overhead (the `local_indices`
+    list-comp, dict gets, and per-block dispatch in _build_tensor_from_paths)
+    that dominated once the GIL-serialised ThreadPoolExecutor build was gone.
+
+    All samples are scored together; `_batched_viterbi_score` sums the
+    per-sample Viterbi scores per path-set (its Phase 2), so each result is
+    identical to a per-sample-chunk accumulation up to summation order.
+
+    Memory: peak is one `stacked` buffer of
+    n_chunk x num_samples x total_bins x n_pairs x 4 bytes (float32); n_chunk
+    is capped to keep this within _STACK_BYTES_BUDGET (raise it for fewer,
+    larger chunks)."""
+    n_blocks = len(sub_emissions)
+    # Per-block constants, gathered once: emission tensor, bin count, the
+    # cumulative bin offset, and the {hap_key: local_idx} map (built in
+    # compute_subblock_emissions; fall back to hap_keys for externally-built
+    # sub_emissions that didn't supply it).
+    bin_ems = [e['bin_emissions'] for e in sub_emissions]
+    nbins_b = [e['n_bins'] for e in sub_emissions]
+    total_b = int(sum(nbins_b))
+    bin_offsets = [0] * n_blocks
+    _acc = 0
+    for b in range(n_blocks):
+        bin_offsets[b] = _acc
+        _acc += nbins_b[b]
+    key_maps = []
+    for e in sub_emissions:
+        k2l = e.get('key_to_local_idx')
+        if k2l is None:
+            k2l = {k: i for i, k in enumerate(e['hap_keys'])}
+        key_maps.append(k2l)
+
     groups = defaultdict(list)
     for i, ps in enumerate(path_sets):
         groups[len(ps)].append((i, ps))
     results = [None] * len(path_sets)
     for K, group_items in groups.items():
         n_pairs = K * K
-        total_b = sum(e['n_bins'] for e in sub_emissions)
-        _sc = min(num_samples, _SAMPLE_CHUNK)
-        adaptive_cs = max(4, min(64, int(5e8 / (_sc * n_pairs * total_b * 8))))
-        cs = min(adaptive_cs, chunk_size)
+        # Cap the batch so the stacked tensor stays within the memory budget.
+        # Parallelism comes from the (path-set x sample) axis inside the build
+        # kernel and from (batch x samples) in the scorer, so a small n_chunk
+        # still saturates the pool; n_chunk only governs the dispatch count.
+        per_set_bytes = num_samples * n_pairs * total_b * 4   # float32
+        cs = max(1, min(chunk_size,
+                        int(_STACK_BYTES_BUDGET // max(1, per_set_bytes))))
         for chunk_start in range(0, len(group_items), cs):
             chunk = group_items[chunk_start:chunk_start + cs]
             n_chunk = len(chunk)
-            
-            # Accumulate scores across sample chunks
-            accum_scores = np.zeros(n_chunk, dtype=np.float64)
-            for _s0 in range(0, num_samples, _SAMPLE_CHUNK):
-                _s1 = min(_s0 + _SAMPLE_CHUNK, num_samples)
-                
-                def _build_one(item, _s0=_s0, _s1=_s1):
-                    _, ps = item
-                    return _build_tensor_from_paths(ps, sub_emissions, num_samples,
-                                                    sample_range=(_s0, _s1))
-                nt = _resolve_threads(num_threads)
-                if nt <= 1 or n_chunk <= 1:
-                    chunk_tensors = [_build_one(item) for item in chunk]
-                else:
-                    with ThreadPoolExecutor(max_workers=nt) as executor:
-                        chunk_tensors = list(executor.map(_build_one, chunk))
-                # Pre-allocate and fill to avoid double memory from np.stack
-                stacked = np.empty((n_chunk, _s1 - _s0, n_pairs, total_b),
-                                   dtype=np.float64)
-                for j, t in enumerate(chunk_tensors):
-                    stacked[j] = t
-                del chunk_tensors
-                partial = _batched_viterbi_score(stacked, float(penalty))
-                accum_scores += partial
-                del stacked
-            _malloc_trim()
-            for j, (orig_idx, _) in enumerate(chunk):
-                results[orig_idx] = float(accum_scores[j])
+            _resolve_threads(num_threads)
+            # Precompute local hap indices for the whole chunk in one pass.
+            # Layout (n_blocks, n_chunk, K) so local_idx[b] is a contiguous
+            # (n_chunk, K) slice handed straight to the per-block kernel.
+            local_idx = np.empty((n_blocks, n_chunk, K), dtype=np.int64)
+            for j in range(n_chunk):
+                ps = chunk[j][1]
+                for k in range(K):
+                    pk = ps[k]
+                    for b in range(n_blocks):
+                        local_idx[b, j, k] = key_maps[b][pk[b]]
+            # Build the whole batched tensor: one parallel dispatch per block
+            # fills that block's bin window for every (path-set, sample).
+            # np.empty is safe: every cell is overwritten across the block
+            # windows (their union is exactly [0, total_b)).
+            stacked = np.empty((n_chunk, num_samples, total_b, n_pairs),
+                               dtype=np.float32)
+            for b in range(n_blocks):
+                _build_stacked_block_batched(
+                    stacked, bin_ems[b], local_idx[b],
+                    K, nbins_b[b], bin_offsets[b])
+            scores = _batched_viterbi_score(stacked, float(penalty))
+            del stacked
+            for j in range(n_chunk):
+                results[chunk[j][0]] = float(scores[j])
+    # One trim at the end rather than per chunk: the big stacked buffers are
+    # mmap-backed and released on free, so a per-chunk trim only added syscall
+    # churn without lowering the (single-buffer) peak.
+    _malloc_trim()
     return results
 
 
