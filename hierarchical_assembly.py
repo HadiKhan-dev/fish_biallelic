@@ -1,5 +1,6 @@
 import thread_config
 from thread_config import numba_thread_scope
+import dynamic_threads
 
 import numpy as np
 import math
@@ -105,73 +106,16 @@ _SHARED_META = {}
 # how many workers hold +1 threads so exactly `remainder` workers get
 # ceil and the rest get floor — zero idle cores.  This outer-pool
 # counter is the most production-impactful of the project's extras
-# counters: _get_dynamic_threads is passed as `dynamic_cores_fn` into
+# counters: dynamic_threads.get_dynamic_threads is passed as `dynamic_cores_fn` into
 # inner stage-7 sequential paths
 # (hmm_matching.generate_transition_probability_mesh_double_hmm with
 # num_processes=1), so the outer remainder distribution propagates
 # down to those inner workers' in-flight thread rescaling.
 #
-# _ACTIVE_COUNTER / _TOTAL_CORES: pool-wide active count + total budget.
-# _EXTRA_COUNTER: pool-wide atomic int = workers currently holding +1.
-# _I_HAVE_EXTRA: per-worker-process bool, True iff this worker has +1.
-# All are None/False outside a properly-initialised pool worker.
-
-_ACTIVE_COUNTER = None
-_TOTAL_CORES = None
-_EXTRA_COUNTER = None
-_I_HAVE_EXTRA = False
-
-
-def _try_claim_extra(remainder):
-    """Atomically attempt to claim an extra thread from the remainder pool.
-
-    Returns True if successfully claimed (and sets _I_HAVE_EXTRA),
-    False if the pool is exhausted or the counter isn't set up.
-    Idempotent: re-calling while already holding does not double-claim.
-
-    Race analysis: the counter increment is guarded by its own lock.
-    `current_extras < remainder` is evaluated INSIDE the lock so two
-    workers can't both observe `current_extras = remainder - 1` and
-    both push the counter to `remainder + 1`.  The local
-    `_I_HAVE_EXTRA = True` happens-after the counter increment
-    (within the same thread of execution).
-    """
-    global _I_HAVE_EXTRA
-    if _I_HAVE_EXTRA:
-        return True
-    if _EXTRA_COUNTER is None:
-        return False
-    try:
-        with _EXTRA_COUNTER.get_lock():
-            if _EXTRA_COUNTER.value < remainder:
-                _EXTRA_COUNTER.value += 1
-                _I_HAVE_EXTRA = True
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _try_release_extra():
-    """Atomically release this worker's extra claim, if held.
-
-    Defensive: clears the local flag even if the shared counter
-    mutation fails.
-    """
-    global _I_HAVE_EXTRA
-    if not _I_HAVE_EXTRA:
-        return False
-    if _EXTRA_COUNTER is None:
-        _I_HAVE_EXTRA = False
-        return False
-    try:
-        with _EXTRA_COUNTER.get_lock():
-            _EXTRA_COUNTER.value -= 1
-            _I_HAVE_EXTRA = False
-            return True
-    except Exception:
-        _I_HAVE_EXTRA = False
-        return False
+# The dynamic-thread state and helpers (active/extra counters, atomic
+# claim/release, get/apply) now live in the shared dynamic_threads module;
+# see its docstring.  _init_worker_meta wires this worker to the pool-wide
+# counters via dynamic_threads.set_dynamic_thread_state.
 
 
 def _init_worker_meta(meta_dict, total_cores, active_counter, extra_counter):
@@ -181,7 +125,7 @@ def _init_worker_meta(meta_dict, total_cores, active_counter, extra_counter):
     arrays, configures the numba thread pool ceiling to total_cores
     so set_num_threads can scale freely later (starts at 1 — the real
     value is set per phase in _process_single_batch), and wires the
-    active/extra counters used by _get_dynamic_threads.
+    active/extra counters used by dynamic_threads.get_dynamic_threads.
 
     With OMP PASSIVE or TBB threading layers, idle threads in an
     oversized pool sleep and consume zero CPU.  Avoid workqueue —
@@ -206,70 +150,13 @@ def _init_worker_meta(meta_dict, total_cores, active_counter, extra_counter):
     except Exception:
         pass
 
-    global _SHARED_META, _ACTIVE_COUNTER, _TOTAL_CORES
-    global _EXTRA_COUNTER, _I_HAVE_EXTRA
+    global _SHARED_META
     _SHARED_META = meta_dict
-    _ACTIVE_COUNTER = active_counter
-    _TOTAL_CORES = total_cores
-    _EXTRA_COUNTER = extra_counter
-    # Defensive: ensure no stale claim from worker recycling.
-    _I_HAVE_EXTRA = False
-
-
-def _get_dynamic_threads():
-    """Compute optimal thread count for this worker based on active peers.
-
-    Returns floor(total_cores / active_workers) + (1 if this worker
-    holds an extra-claim else 0), clamped to [1, total_cores].
-
-    Remainder distribution: exactly `remainder = total % active`
-    workers hold a +1 thread; the rest hold floor.  Net effect: total
-    threads in use = total_cores at all times, with no idle cores.
-    This call may claim or release an extra based on the current
-    `remainder`.
-
-    The read of active_counter.value is intentionally lock-free — a
-    slightly stale count is fine since we recheck between every major
-    phase.  The extra-counter lock IS acquired briefly during
-    claim/release because those mutations must be atomic.
-
-    Returns 1 in the sequential path (when _ACTIVE_COUNTER is None).
-    """
-    if _ACTIVE_COUNTER is None or _TOTAL_CORES is None:
-        return 1
-    active = max(_ACTIVE_COUNTER.value, 1)
-    floor = _TOTAL_CORES // active
-    remainder = _TOTAL_CORES - floor * active
-
-    # Adjust extra-claim based on current remainder.
-    if _EXTRA_COUNTER is not None:
-        try:
-            current_extras = _EXTRA_COUNTER.value
-        except Exception:
-            current_extras = 0
-        if not _I_HAVE_EXTRA:
-            if current_extras < remainder:
-                _try_claim_extra(remainder)
-        else:
-            if current_extras > remainder:
-                _try_release_extra()
-
-    return max(1, floor + (1 if _I_HAVE_EXTRA else 0))
-
-
-def _apply_dynamic_threads():
-    """
-    Recompute and apply numba thread allocation.
-    Returns the thread count.
-    
-    Use this before phases that use numba directly (beam search,
-    chimera resolution, reconstruction). Do NOT use before phases
-    that spawn inner pools — those should set numba to 1 instead.
-    """
-    import numba
-    n = _get_dynamic_threads()
-    numba.set_num_threads(n)
-    return n
+    # Wire this worker to the shared dynamic-thread counters; the state and
+    # helpers live in dynamic_threads.  set_dynamic_thread_state resets the
+    # per-worker extra-claim flag, so a recycled worker can't inherit a stale
+    # claim.
+    dynamic_threads.set_dynamic_thread_state(total_cores, active_counter, extra_counter)
 
 
 def _create_shared_array(array, label):
@@ -473,13 +360,11 @@ def _process_single_batch(args):
 
     try:
         # Register this worker as active.
-        if _ACTIVE_COUNTER is not None:
-            with _ACTIVE_COUNTER.get_lock():
-                _ACTIVE_COUNTER.value += 1
+        dynamic_threads.increment_active()
 
         # Initial allocation — first phase uses inner pools, so start
         # numba at 1.
-        _get_dynamic_threads()
+        dynamic_threads.get_dynamic_threads()
         numba.set_num_threads(1)
 
         original_portion = block_haplotypes_discrete.BlockResults(original_blocks_list)
@@ -531,11 +416,11 @@ def _process_single_batch(args):
         # 4. Generate Mesh — DYNAMIC SEQUENTIAL phase.
         # Emissions: ThreadPoolExecutor (pure numpy, fast, no numba).
         # Mesh EM: sequential over gaps with dynamic numba threads;
-        # _get_dynamic_threads called between each gap (and inside the
+        # dynamic_threads.get_dynamic_threads called between each gap (and inside the
         # EM loop via dynamic_cores_fn) so this worker scales up as
         # peers finish.
         # =================================================================
-        dyn_threads = _get_dynamic_threads()
+        dyn_threads = dynamic_threads.get_dynamic_threads()
         pool_budget = max(inner_num_processes, dyn_threads)
 
         if use_hmm_linking:
@@ -553,7 +438,7 @@ def _process_single_batch(args):
                 use_standard_baum_welch=False,
                 precalculated_viterbi_emissions=viterbi_emissions,
                 num_processes=1,
-                dynamic_cores_fn=_get_dynamic_threads,
+                dynamic_cores_fn=dynamic_threads.get_dynamic_threads,
             )
             if _prof: _acc('mesh_transition', _t)
             del viterbi_emissions
@@ -570,7 +455,7 @@ def _process_single_batch(args):
         # 5. Beam Search — NUMBA-ONLY phase.  No inner pool; give all
         # dynamic threads to numba.
         # =================================================================
-        _apply_dynamic_threads()
+        dynamic_threads.apply_dynamic_threads()
         _t = time.perf_counter()
         beam_results = beam_search_core.run_full_mesh_beam_search(
             portion_proxy, mesh, beam_width=beam_width,
@@ -594,7 +479,7 @@ def _process_single_batch(args):
         # =================================================================
         # 6. Selection + Swap + CR — NUMBA-ONLY phase.
         # =================================================================
-        _apply_dynamic_threads()
+        dynamic_threads.apply_dynamic_threads()
         _t = time.perf_counter()
         resolved_beam = chimera_resolution.select_and_resolve(
             beam_results=beam_results,
@@ -608,7 +493,7 @@ def _process_single_batch(args):
             paint_penalty=paint_penalty,
             min_hotspot_samples=min_hotspot_samples,
             cc_scale=cc_scale,
-            num_threads=_get_dynamic_threads,
+            num_threads=dynamic_threads.get_dynamic_threads,
         )
         if _prof: _acc('select_and_resolve(CR)', _t)
 
@@ -618,7 +503,7 @@ def _process_single_batch(args):
         # =================================================================
         # 7. Reconstruction — NUMBA-ONLY phase.
         # =================================================================
-        _apply_dynamic_threads()
+        dynamic_threads.apply_dynamic_threads()
         _t = time.perf_counter()
         reconstructed_data = beam_search_core.reconstruct_haplotypes_from_beam(
             resolved_beam, fast_mesh, original_portion
@@ -649,7 +534,7 @@ def _process_single_batch(args):
                 if _nL >= _HIER_PROFILE_MIN_L:
                     _wall = time.perf_counter() - _t_batch
                     _timed = sum(v[0] for v in _pt.values())
-                    _aw = _ACTIVE_COUNTER.value if _ACTIVE_COUNTER is not None else 1
+                    _aw = dynamic_threads.active_value()
                     _hdr = (f"  [hier profile] batch={b_idx} N={global_probs.shape[0]} "
                             f"L={_nL} | numba_threads={numba.get_num_threads()} "
                             f"active_workers={_aw} | batch_wall={_wall:.1f}s")
@@ -671,10 +556,8 @@ def _process_single_batch(args):
         # counter, so peers see the freed extra-slot before the
         # decremented active count.  _try_release_extra is a no-op
         # when this worker holds no extra or _EXTRA_COUNTER is None.
-        _try_release_extra()
-        if _ACTIVE_COUNTER is not None:
-            with _ACTIVE_COUNTER.get_lock():
-                _ACTIVE_COUNTER.value -= 1
+        dynamic_threads.release_dynamic_extra()
+        dynamic_threads.decrement_active()
         # Detach from shared memory (parent unlinks).
         shm_probs.close()
         shm_sites.close()
@@ -924,13 +807,10 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             # _ACTIVE_COUNTER stays None (no peers to coordinate
             # with); the caller is expected to call
             # numba.set_num_threads(total_cores) directly.
-            global _SHARED_META, _ACTIVE_COUNTER, _TOTAL_CORES
-            global _EXTRA_COUNTER, _I_HAVE_EXTRA
+            global _SHARED_META
             _SHARED_META = shared_meta
-            _ACTIVE_COUNTER = None
-            _TOTAL_CORES = total_cores
-            _EXTRA_COUNTER = None
-            _I_HAVE_EXTRA = False
+            # _ACTIVE_COUNTER stays None -> dynamic_threads helpers return 1.
+            dynamic_threads.set_dynamic_thread_state(total_cores, None, None)
             results = []
             for args in tqdm(worker_args, desc="Processing Batches"):
                 results.append(_process_single_batch(args))

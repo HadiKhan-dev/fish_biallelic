@@ -46,9 +46,9 @@ import numpy as np
 
 # Shared dynamic-thread reallocation: re-checked at the entry of trio recovery
 # (a major Stage-3 phase) so a straggler block grows into cores freed as peers
-# finish.  thread_config is a leaf config module (no bhd_* imports) -> no
+# finish.  dynamic_threads is a leaf module (no bhd_* imports) -> no
 # import cycle; the helper no-ops on the sequential path.
-import thread_config
+import dynamic_threads
 
 # Defensive numba import matching the project convention (see
 # analysis_utils.py, block_haplotypes.py).  If numba is unavailable,
@@ -796,7 +796,7 @@ def _soft_unified_recovery(probs_k,
 
     # Re-check thread allocation at the start of trio recovery (a major
     # phase: soft-clustering + group-triangle algebra).
-    thread_config.apply_dynamic_threads()
+    dynamic_threads.apply_dynamic_threads()
 
     # Step 1: soft-agreement similarity -> precomputed distance.  The
     # distance is S.max() - S (so identical samples are closest) with the

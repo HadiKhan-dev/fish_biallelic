@@ -118,10 +118,10 @@ import numpy as np
 
 # Shared dynamic-thread reallocation: re-checked at this module's recovery
 # phase boundaries (mixture K-sweeps, recovery rounds) so a straggler Stage-3
-# block grows into cores freed as its peers finish.  thread_config is a leaf
+# block grows into cores freed as its peers finish.  dynamic_threads is a leaf
 # config module (no bhd_* imports), so this introduces no import cycle; the
 # helpers no-op on the sequential path until a pool wires the counters.
-import thread_config
+import dynamic_threads
 
 # Defensive numba import matching the project convention (see
 # analysis_utils.py, block_haplotypes.py, bhd_trio.py, bhd_pairwise.py).
@@ -969,7 +969,7 @@ def _fit_bernoulli_mixture_select_K(candidates,
         # Re-check thread allocation at each K of the mixture sweep -- this
         # sweep is the dominant cost for high-K blocks, so a straggler grows
         # into cores freed as its peers finish.
-        thread_config.apply_dynamic_threads()
+        dynamic_threads.apply_dynamic_threads()
         # Multi-restart: pick the best LL across n_restarts independent
         # K-means++ inits.  EM has local minima; multi-start gives robustness.
         best_for_K = None   # (LL, theta, pi, resp)
@@ -1442,7 +1442,7 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
 
     for K in range(1, K_max_effective + 1):
         # Re-check thread allocation at each K of the ML-mixture sweep.
-        thread_config.apply_dynamic_threads()
+        dynamic_threads.apply_dynamic_threads()
         best_for_K = None   # (LL, theta)
         for restart in range(n_restarts):
             # _kmeans_pp_init returns the selected centers themselves
@@ -2284,7 +2284,7 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
 
     for round_num in range(1, max_rounds + 1):
         # Re-check thread allocation at the top of each recovery round.
-        thread_config.apply_dynamic_threads()
+        dynamic_threads.apply_dynamic_threads()
         # 1+2. Generate consensus haps (residuals -> mixture -> BIC over K).
         #    In "soft" mode the residuals are the other-strand LIKELIHOODS
         #    (L0, L1) per site, fed to the marginal-likelihood Bernoulli-
