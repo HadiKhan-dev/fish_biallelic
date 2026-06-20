@@ -72,8 +72,18 @@ def _batched_viterbi_score(stacked_tensor, penalty):
     Parallelizes over batch x samples (e.g. 4 x 320 = 1280 parallel units),
     giving full utilization of 112 threads even with small batch sizes.
     Thread count controlled by numba_thread_scope.
+
+    Emission layout is PAIRS-INNERMOST: stacked_tensor has shape
+    (n_batch, n_samples, n_bins, n_pairs) and may be float32.  The Viterbi
+    inner loop reads all n_pairs emissions at a fixed (b, s, t) as the
+    contiguous row stacked_tensor[b, s, t, :], which is cache-friendly (vs
+    the old (..., n_pairs, n_bins) layout, where the pair axis was strided
+    by n_bins).  float32 reads are promoted to float64 by the arithmetic
+    below; current_scores / sample_scores stay float64, so the DP
+    accumulates in double precision and only the stored emissions carry
+    float32 (~1e-7 relative) quantisation.
     """
-    n_batch, n_samples, n_pairs, n_bins = stacked_tensor.shape
+    n_batch, n_samples, n_bins, n_pairs = stacked_tensor.shape
     
     # Phase 1: compute per-(batch, sample) scores in parallel
     sample_scores = np.empty((n_batch, n_samples), dtype=np.float64)
@@ -85,7 +95,7 @@ def _batched_viterbi_score(stacked_tensor, penalty):
         
         current_scores = np.empty(n_pairs, dtype=np.float64)
         for k in range(n_pairs):
-            current_scores[k] = stacked_tensor[b, s, k, 0]
+            current_scores[k] = stacked_tensor[b, s, 0, k]
         for t in range(1, n_bins):
             best_prev = -np.inf
             for k in range(n_pairs):
@@ -93,7 +103,7 @@ def _batched_viterbi_score(stacked_tensor, penalty):
                     best_prev = current_scores[k]
             switch_base = best_prev - penalty
             for k in range(n_pairs):
-                emission = stacked_tensor[b, s, k, t]
+                emission = stacked_tensor[b, s, t, k]
                 stay = current_scores[k]
                 if stay > switch_base:
                     current_scores[k] = stay + emission
@@ -130,19 +140,19 @@ def _batched_viterbi_score_split(tmpl_slice, cand_sv, cand_idx_for_p, penalty):
     once.
 
     Split layout:
-      - tmpl_slice  shape (n_samples, n_pairs, total_bins): the shared
+      - tmpl_slice  shape (n_samples, total_bins, n_pairs): the shared
         template, allocated once per swap position.  Used for the
         ~70% of pair indices that don't involve the candidate row or
         column.
-      - cand_sv     shape (n_chunk, n_samples, n_cand_pairs, total_bins):
+      - cand_sv     shape (n_chunk, n_samples, total_bins, n_cand_pairs):
         per-candidate cand-row + cand-col + diagonal emissions only.
         n_cand_pairs == 2*cand_pos + 1 (e.g. 11 at K=6 1for1, vs 36 in
         a full pair grid — 3.3x reduction on this dim).
       - cand_idx_for_p shape (n_pairs,) int64: maps pair-index k to:
-            -1                      → use tmpl_slice[s, k, t]
-            0..(cand_pos-1)         → cand_sv[b, s, k_idx, t] (cand-row[ii])
-            cand_pos..(2*cand_pos-1) → cand_sv[b, s, k_idx, t] (cand-col[jj])
-            2*cand_pos              → cand_sv[b, s, k_idx, t] (diagonal)
+            -1                      → use tmpl_slice[s, t, k]
+            0..(cand_pos-1)         → cand_sv[b, s, t, k_idx] (cand-row[ii])
+            cand_pos..(2*cand_pos-1) → cand_sv[b, s, t, k_idx] (cand-col[jj])
+            2*cand_pos              → cand_sv[b, s, t, k_idx] (diagonal)
 
     Same Viterbi recurrence as _batched_viterbi_score; only the emission
     read is split.  The set of double-precision values fed into the
@@ -159,14 +169,14 @@ def _batched_viterbi_score_split(tmpl_slice, cand_sv, cand_idx_for_p, penalty):
     is much higher than the old per-batch sv layout.
 
     Args:
-        tmpl_slice:        (n_samples, n_pairs, total_bins) float64,
+        tmpl_slice:        (n_samples, total_bins, n_pairs) float32/float64,
                            read-only, shared across batches.  Cells at
                            cand_idx_for_p[k] >= 0 are NEVER read (those
                            positions come from cand_sv instead), so the
                            caller may leave them uninitialised (np.empty)
                            if convenient.
-        cand_sv:           (n_chunk, n_samples, 2*cand_pos+1, total_bins)
-                           float64, read-only.  Per-batch slab; written
+        cand_sv:           (n_chunk, n_samples, total_bins, 2*cand_pos+1)
+                           float32/float64, read-only.  Per-batch slab; written
                            by _build_cand_sv_numba beforehand.
         cand_idx_for_p:    (n_pairs,) int64, precomputed pair-index →
                            cand-slot lookup (see above).  Constant for
@@ -179,8 +189,8 @@ def _batched_viterbi_score_split(tmpl_slice, cand_sv, cand_idx_for_p, penalty):
     """
     n_chunk = cand_sv.shape[0]
     n_samples = cand_sv.shape[1]
-    n_bins = cand_sv.shape[3]
-    n_pairs = tmpl_slice.shape[1]
+    n_bins = cand_sv.shape[2]
+    n_pairs = tmpl_slice.shape[2]
 
     sample_scores = np.empty((n_chunk, n_samples), dtype=np.float64)
     n_total = n_chunk * n_samples
@@ -195,9 +205,9 @@ def _batched_viterbi_score_split(tmpl_slice, cand_sv, cand_idx_for_p, penalty):
         for k in range(n_pairs):
             cidx = cand_idx_for_p[k]
             if cidx < 0:
-                current_scores[k] = tmpl_slice[s, k, 0]
+                current_scores[k] = tmpl_slice[s, 0, k]
             else:
-                current_scores[k] = cand_sv[b, s, cidx, 0]
+                current_scores[k] = cand_sv[b, s, 0, cidx]
 
         # Viterbi recurrence — identical structure to _batched_viterbi_score:
         # find max of current_scores, subtract penalty for the switch_base,
@@ -212,9 +222,9 @@ def _batched_viterbi_score_split(tmpl_slice, cand_sv, cand_idx_for_p, penalty):
             for k in range(n_pairs):
                 cidx = cand_idx_for_p[k]
                 if cidx < 0:
-                    emission = tmpl_slice[s, k, t]
+                    emission = tmpl_slice[s, t, k]
                 else:
-                    emission = cand_sv[b, s, cidx, t]
+                    emission = cand_sv[b, s, t, cidx]
                 stay = current_scores[k]
                 if stay > switch_base:
                     current_scores[k] = stay + emission
@@ -249,7 +259,7 @@ def _build_cand_sv_numba(cand_sv, bin_ems_stacked,
     template (non-cand) data lives separately in tmpl_slice and is read
     directly by the Viterbi kernel.
 
-    cand_sv[local_idx, s, cidx, b]:
+    cand_sv[local_idx, s, b, cidx]:  (PAIRS-INNERMOST layout)
       - cidx in [0, cand_pos):
           cand-row[ii=cidx], emission =
             bin_ems_stacked[_s0+s, t_haps_stacked[ii, b_i], h_c[b_i], b]
@@ -264,19 +274,25 @@ def _build_cand_sv_numba(cand_sv, bin_ems_stacked,
     bin_offs[b_i] + nbs[b_i]) — i.e. the bins owned by block b_i in the
     stacked total_bins axis.
 
-    The compact `(n_chunk, _sn, 2*cand_pos+1, total_bins)` layout stores
+    The compact `(n_chunk, _sn, total_bins, 2*cand_pos+1)` layout stores
     each candidate's per-pair emissions for the cand-row + cand-col +
     diagonal cells only (the cells whose values differ across
     candidates).  Non-cand cells are read directly from tmpl_slice by
     the downstream Viterbi kernel, avoiding any full-pair-grid sv
     materialisation.
 
-    Parallelism: prange over local_idx (each thread writes its own
-    cand_sv[local_idx] slab; no race).
+    Parallelism: prange over the flattened (candidate x sample) axis
+    (n_chunk * _sn units), so the thread pool stays saturated even when
+    the candidate chunk n_chunk is smaller than the core count (e.g. high
+    K, where the cand_sv memory budget caps n_chunk well below n_threads).
+    Each (local_idx, s) thread writes a disjoint cand_sv[local_idx, s, :, :]
+    slab, so there is no write race, and the per-cell gather is
+    bit-identical to a candidate-only loop (same cells, same values; only
+    the iteration order differs).
 
     Args:
-        cand_sv:           (n_chunk, _sn, 2*cand_pos+1, total_bins) float64,
-                           OUTPUT, written in-place via np.empty().
+        cand_sv:           (n_chunk, _sn, total_bins, 2*cand_pos+1)
+                           float32/float64, OUTPUT, written via np.empty().
                            This kernel fully overwrites all cand_sv
                            cells, so the np.empty garbage is safe.
         bin_ems_stacked:   (num_samples, n_haps, n_haps, total_bins)
@@ -297,7 +313,17 @@ def _build_cand_sv_numba(cand_sv, bin_ems_stacked,
     n_chunk = chunk_cands_arr.shape[0]
     n_blocks = bin_offs.shape[0]
     _sn = _s1 - _s0
-    for local_idx in prange(n_chunk):
+    # Flattened (candidate x sample) parallel axis: n_chunk * _sn units.
+    # local_idx = u // _sn selects the candidate slab; s = u % _sn the
+    # sample.  This keeps all threads busy when n_chunk alone is smaller
+    # than the core count (high K).  The gather below is unchanged from
+    # the candidate-only version — same destination cells, same source
+    # values — so cand_sv is bit-identical; only the loop nesting moved s
+    # from an inner loop to the (flattened) parallel index.
+    n_units = n_chunk * _sn
+    for u in prange(n_units):
+        local_idx = u // _sn
+        s = u - local_idx * _sn
         ci = chunk_cands_arr[local_idx]
         for b_i in range(n_blocks):
             bin_off = bin_offs[b_i]
@@ -306,25 +332,22 @@ def _build_cand_sv_numba(cand_sv, bin_ems_stacked,
             # cand-row: cidx = ii  for ii in [0, cand_pos)
             for ii in range(cand_pos):
                 t_h = t_haps_stacked[ii, b_i]
-                for s in range(_sn):
-                    for bin_local in range(nb):
-                        cand_sv[local_idx, s, ii, bin_off + bin_local] = \
-                            bin_ems_stacked[_s0 + s, t_h, h_c,
-                                            bin_off + bin_local]
+                for bin_local in range(nb):
+                    cand_sv[local_idx, s, bin_off + bin_local, ii] = \
+                        bin_ems_stacked[_s0 + s, t_h, h_c,
+                                        bin_off + bin_local]
             # cand-col: cidx = cand_pos + jj  for jj in [0, cand_pos)
             for jj in range(cand_pos):
                 t_h = t_haps_stacked[jj, b_i]
-                for s in range(_sn):
-                    for bin_local in range(nb):
-                        cand_sv[local_idx, s, cand_pos + jj, bin_off + bin_local] = \
-                            bin_ems_stacked[_s0 + s, h_c, t_h,
-                                            bin_off + bin_local]
-            # Diagonal: cidx = 2 * cand_pos
-            for s in range(_sn):
                 for bin_local in range(nb):
-                    cand_sv[local_idx, s, 2 * cand_pos, bin_off + bin_local] = \
-                        bin_ems_stacked[_s0 + s, h_c, h_c,
+                    cand_sv[local_idx, s, bin_off + bin_local, cand_pos + jj] = \
+                        bin_ems_stacked[_s0 + s, h_c, t_h,
                                         bin_off + bin_local]
+            # Diagonal: cidx = 2 * cand_pos
+            for bin_local in range(nb):
+                cand_sv[local_idx, s, bin_off + bin_local, 2 * cand_pos] = \
+                    bin_ems_stacked[_s0 + s, h_c, h_c,
+                                    bin_off + bin_local]
 
 
 def _build_cand_idx_for_p(stride, cand_pos):
@@ -941,7 +964,7 @@ def _build_template_numba(tmpl_full, bin_ems_stacked,
     ii, jj in [0, K_base):
 
         pos = ii * stride + jj
-        tmpl_full[s, pos, bin_off + bin_local] =
+        tmpl_full[s, bin_off + bin_local, pos] =
             bin_ems_stacked[s, t_haps_stacked[ii, b_i],
                             t_haps_stacked[jj, b_i],
                             bin_off + bin_local]
@@ -958,7 +981,7 @@ def _build_template_numba(tmpl_full, bin_ems_stacked,
     Equivalent to the Python reference:
 
         for b_i: for ii: for jj:
-            tmpl[:, pos, bin_off:bin_off+nb] = \
+            tmpl[:, bin_off:bin_off+nb, pos] = \
                 bin_em[_s0:_s1, t_haps[ii], t_haps[jj], :]
 
     which ran K * n_sample_chunks * n_blocks * K_base² slice-copy
@@ -972,8 +995,8 @@ def _build_template_numba(tmpl_full, bin_ems_stacked,
     the caller via numba.set_num_threads.
 
     Args:
-        tmpl_full:        (num_samples, n_pairs, total_bins) float64,
-                          OUTPUT, written in-place. Caller pre-allocates
+        tmpl_full:        (num_samples, total_bins, n_pairs)
+                          float32/float64, OUTPUT. Caller pre-allocates
                           via np.empty; this kernel writes only the
                           non-cand cells (see docstring above).
         bin_ems_stacked:  (num_samples, n_haps, n_haps, total_bins)
@@ -992,14 +1015,14 @@ def _build_template_numba(tmpl_full, bin_ems_stacked,
 
     Mathematically byte-equivalent to the Python reference:
 
-        tmpl_full = np.zeros((num_samples, n_pairs, total_bins), dtype=float64)
+        tmpl_full = np.zeros((num_samples, total_bins, n_pairs), dtype=float64)
         bin_off = 0
         for b_i in range(n_blocks):
             nb = nbs[b_i]
             for ii in range(K_base):
                 for jj in range(K_base):
                     pos = ii * stride + jj
-                    tmpl_full[:, pos, bin_off:bin_off+nb] = bin_ems_stacked[
+                    tmpl_full[:, bin_off:bin_off+nb, pos] = bin_ems_stacked[
                         :, t_haps_stacked[ii, b_i],
                         t_haps_stacked[jj, b_i],
                         bin_off:bin_off+nb]
@@ -1021,7 +1044,7 @@ def _build_template_numba(tmpl_full, bin_ems_stacked,
                     pos = ii * stride + jj
                     t_h_j = t_haps_stacked[jj, b_i]
                     for bin_local in range(nb):
-                        tmpl_full[s, pos, bin_off + bin_local] = \
+                        tmpl_full[s, bin_off + bin_local, pos] = \
                             bin_ems_stacked[s, t_h_i, t_h_j,
                                             bin_off + bin_local]
 

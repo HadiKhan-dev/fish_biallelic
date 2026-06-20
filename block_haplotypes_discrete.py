@@ -261,9 +261,18 @@ _BH_ACTIVE_COUNTER = None
 _BH_TOTAL_CORES = None
 
 
-def _init_block_worker(total_cores, active_counter):
+def _init_block_worker(total_cores, active_counter, extra_counter=None):
     """Initializer for worker processes — sets up dynamic numba thread
-    allocation based on number of currently-active workers."""
+    allocation based on number of currently-active workers.
+
+    Wires both this module's _BH_* globals (used to increment/decrement the
+    active count around each block) and thread_config's shared dynamic-thread
+    state, which is read by thread_config.apply_dynamic_threads() at every
+    phase boundary across this module + bhd_recovery + bhd_trio.  That lets a
+    straggler block GROW into cores freed as its peers finish, instead of
+    being pinned for its whole run to the thread count it got at start.
+    extra_counter drives the remainder distribution (total threads in use ==
+    total_cores, zero idle cores); None falls back to floor-only."""
     global _BH_ACTIVE_COUNTER, _BH_TOTAL_CORES
     _BH_ACTIVE_COUNTER = active_counter
     _BH_TOTAL_CORES = total_cores
@@ -274,6 +283,9 @@ def _init_block_worker(total_cores, active_counter):
         numba.set_num_threads(1)
     except Exception:
         pass
+    # Wire the shared state so every phase boundary across this module +
+    # bhd_recovery + bhd_trio re-checks the SAME pool-wide active count.
+    thread_config.set_dynamic_thread_state(total_cores, active_counter, extra_counter)
 
 def _grow_K(probs_k, kept_mask_full, lam,
             wildcard_mass_threshold=0.0,
@@ -548,6 +560,8 @@ def _grow_K(probs_k, kept_mask_full, lam,
     # in the codebase (e.g. the uncertainty flag in
     # generate_haplotypes_block), but does NOT affect K-growth's stop.
     while True:
+        # Re-check thread allocation at each K-growth step.
+        thread_config.apply_dynamic_threads()
         K_cur = H.shape[0]
         if K_cur >= K_max:
             break
@@ -1056,6 +1070,9 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
         best_label = 'no-medoid baseline'
 
     for seed_hap, label in zip(seed_haps, seed_labels):
+        # Re-check thread allocation at the top of each medoid branch (each
+        # branch runs its own per-branch recovery -- a heavy phase).
+        thread_config.apply_dynamic_threads()
         # Build per-branch H_init: trio_seed prefix + this branch's seed hap
         if has_trio:
             H_init = np.vstack([H_trio_seed, seed_hap[None, :]])
@@ -1305,6 +1322,10 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
     # stage-3 from ~30 min to ~1 hour single-threaded (proportional on
     # parallel cores).  Trade-off accepted for more thorough
     # exploration on the rare hard blocks where it matters.
+    # Re-check thread allocation before the medoid multistart (the per-branch
+    # recovery here is the heaviest single phase): a straggler block claims
+    # cores freed as its peers finish.
+    thread_config.apply_dynamic_threads()
     H, A, costs, wcs, K_final, wm, history = _initial_kgrowth_with_medoids(
         probs_k, kept_mask_full, lam,
         n_medoid_starts=n_medoid_starts,
@@ -1337,6 +1358,8 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
 
     # 2. Outer iteration: alternate recovery and K-growth
     for outer_it in range(recovery_max_outer_iterations):
+        # Re-check thread allocation at the top of each outer iteration.
+        thread_config.apply_dynamic_threads()
         if verbose:
             print(f'[recovery] === Outer iteration {outer_it + 1} ===')
 
@@ -1975,6 +1998,10 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                               recovery_mixture_patience=recovery_mixture_patience)
 
     # --- 5. COMPUTE PER-SITE CONFIDENCE (kept-site coords) ---
+    # Re-check thread allocation before the one parallel kernel in the block
+    # path (this confidence pass): after the long serial recovery above, peers
+    # may have finished, so pick up any cores freed in the meantime here.
+    thread_config.apply_dynamic_threads()
     confidence_k, n_supporters_k = _compute_per_site_confidence(
         probs_k, H_k, A, lam=lambda_wildcard_penalty,
         min_supporters=min_supporters_for_confidence)
@@ -2248,13 +2275,15 @@ def _worker_generate_block_direct(args):
     orchestrator scaffolding can be reused."""
     block_idx, positions, reads, flags, kwargs = args
 
-    import numba as _numba
-    if _BH_ACTIVE_COUNTER is not None and _BH_TOTAL_CORES is not None:
+    # Register this worker as active, then take an initial thread allocation
+    # from the shared dynamic-thread state.  The per-block recovery path
+    # (here + bhd_recovery / bhd_trio) re-checks this allocation at every
+    # phase boundary via thread_config.apply_dynamic_threads(), so a straggler
+    # block grows into cores freed as its peers finish.
+    if _BH_ACTIVE_COUNTER is not None:
         with _BH_ACTIVE_COUNTER.get_lock():
             _BH_ACTIVE_COUNTER.value += 1
-        active = max(_BH_ACTIVE_COUNTER.value, 1)
-        n_threads = max(1, _BH_TOTAL_CORES // active)
-        _numba.set_num_threads(n_threads)
+    thread_config.apply_dynamic_threads()
 
     try:
         result = generate_haplotypes_block_robust(
@@ -2262,6 +2291,12 @@ def _worker_generate_block_direct(args):
         _malloc_trim()
         return (block_idx, result)
     finally:
+        # Release any held extra FIRST, then decrement the active counter, so
+        # peers see the freed extra-slot before the decremented active count
+        # (mirrors hierarchical_assembly).  The counter WIRING persists across
+        # tasks (set once in _init_block_worker) for Pool worker reuse — only
+        # the per-task extra-claim is released here.
+        thread_config.release_dynamic_extra()
         if _BH_ACTIVE_COUNTER is not None:
             with _BH_ACTIVE_COUNTER.get_lock():
                 _BH_ACTIVE_COUNTER.value -= 1
@@ -2342,9 +2377,14 @@ def generate_all_block_haplotypes(genomic_data,
 
     try:
         active_counter = _forkserver_ctx.Value('i', 0)
+        # extra_counter: # workers currently holding the +1 remainder thread,
+        # so total threads in use across the pool stays == num_processes with
+        # no idle cores as the active-block count changes (see thread_config's
+        # dynamic-thread mechanism).
+        extra_counter = _forkserver_ctx.Value('i', 0)
         with _ForkserverPool(processes=num_processes,
                               initializer=_init_block_worker,
-                              initargs=(num_processes, active_counter)) as pool:
+                              initargs=(num_processes, active_counter, extra_counter)) as pool:
             results = []
             for result in tqdm(
                 pool.imap_unordered(_worker_generate_block_direct, task_args, chunksize=1),

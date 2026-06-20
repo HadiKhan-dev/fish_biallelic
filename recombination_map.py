@@ -518,6 +518,7 @@ def decode_crossovers_from_path(path, snp_positions):
 # =============================================================================
 import os
 import pickle
+import multiprocessing as mp
 
 STAGE_VCF = "01_vcf_discovery"       # naive_long_haps (true founders)
 STAGE_SIM = "02_simulation"          # truth_painting + truth_pedigree
@@ -666,6 +667,41 @@ def cumulative_cM(midpoints, n_meioses, lo, hi, bin_bp):
     return edges, cum
 
 
+def process_truth_cM(lo, hi, bin_bp, recomb_rate=RECOMB_RATE):
+    """Underlying generative genetic map -- the recombination process itself.
+
+    The simulator lays crossovers as a Poisson process at a CONSTANT per-bp
+    rate `recomb_rate` (no hotspots; see recombine_haps), so the expected
+    genetic distance over a physical span d (bp) is E[#crossovers] =
+    d * recomb_rate Morgans, i.e. 100 * d * recomb_rate cM.  This is the ground
+    truth the map is trying to estimate, and it is INDEPENDENT of any pedigree,
+    painting, or HMM decode: a straight line at 100 * recomb_rate * 1e6 cM/Mb
+    (= 5 cM/Mb at recomb_rate = 5e-8).
+
+    This is the third curve.  It differs from the two DECODED curves:
+      * 'truth'    = trio-HMM crossovers off the TRUE ancestry painting; this
+                     can only see crossovers between segments of DIFFERENT
+                     founder ancestry, so it sits slightly BELOW the process
+                     line by the invisible-crossover (IBD) fraction.
+      * 'inferred' = trio-HMM crossovers off the RECONSTRUCTED painting; painting
+                     switch errors add spurious ancestry transitions, inflating
+                     it ABOVE 'truth' (and often above the process line too).
+
+    Returned on the SAME bin edges as cumulative_cM so all three curves share an
+    x-axis.  Values are the exact model expectation; for a uniform-rate sim this
+    equals the realized per-meiosis truth in expectation (finite-sample noise
+    aside), so no per-meiosis breakpoint record is needed.
+    """
+    if hi <= lo:
+        return np.array([lo, hi], dtype=float), np.array([0.0, 0.0])
+    n_bins = max(1, int(np.ceil((hi - lo) / float(bin_bp))))
+    edges = lo + np.arange(n_bins + 1) * float(bin_bp)
+    if edges[-1] < hi:
+        edges[-1] = hi
+    cum = 100.0 * float(recomb_rate) * (edges - lo)
+    return edges, cum
+
+
 # =============================================================================
 # Inferred pedigree (results CSV)
 # =============================================================================
@@ -701,14 +737,94 @@ def read_inferred_pedigree(ckpt_dir, csv_path=None, results_dirname="results_sim
 
 
 # =============================================================================
+def _warmup_hmm():
+    """Compile the numba trio-HMM once in the parent (with the SAME dtypes the
+    real decode uses: int8 diploid alleles, bool hom mask, float64 costs) so the
+    forked workers load the cached compile instead of each triggering it in
+    parallel.  Pure compilation warm-up; no effect on any result.  Best-effort:
+    `cache=True` already persists the compile to disk, so this is just to avoid a
+    first-run compile storm across workers.
+    """
+    n = 8
+    snp = (np.arange(1, n + 1, dtype=np.float64) * 1000.0)
+    child = np.zeros((n, 2), dtype=np.int8)
+    par = np.zeros((n, 2), dtype=np.int8)
+    hom = compute_hom_mask(child)
+    sw, st = build_switch_stay_costs(snp)
+    try:
+        run_trio_phase_aware_hmm_backtrack(
+            child, hom, par, par, sw, st,
+            ERROR_PENALTY, PHASE_PENALTY, MISMATCH_PENALTY)
+    except Exception:  # pragma: no cover -- warm-up must never be fatal
+        pass
+
+
+def _build_one_contig(args):
+    """Worker: build one contig's truth + inferred + process curves.
+
+    Module-level and picklable so build_maps can fan the (embarrassingly
+    parallel) per-chromosome work across a process pool.  Each worker loads ONLY
+    its own contig from the checkpoint tree -- nothing large is serialised from
+    the parent -- runs the trio-HMM crossover decode for both the truth and the
+    inferred paintings, and returns the contig's curve dict.  The crossover /
+    HMM / cM math is identical to the original serial loop body.
+    """
+    (contig, ckpt_dir, bin_bp, true_links, inferred_links, sample_names) = args
+
+    # Founder allele lookups (truth: rebuilt sim founders; inferred: L4).
+    naive = load_contig(ckpt_dir, STAGE_VCF, contig)["naive_long_haps"]
+    truth_lookup, truth_pos = build_truth_founder_lookup(naive)
+    l4 = load_contig(ckpt_dir, STAGE_L4, contig)["super_blocks_L4"]
+    inf_lookup, inf_pos = build_inferred_founder_lookup(l4)
+
+    # Paintings.
+    truth_samples = _samples_of(load_contig(ckpt_dir, STAGE_SIM, contig)["truth_painting"])
+    truth_by_name = _index_by_name(truth_samples, sample_names)
+    inf_obj = load_contig(ckpt_dir, STAGE_PAINT, contig)["tolerance_result"]
+    inf_by_name = _index_by_name(_samples_of(inf_obj), sample_names)
+
+    # Crossovers (truth uses true links + sim founders; inferred uses inferred
+    # links + L4 founders).
+    t_mid, t_n, t_nc = collect_crossovers(truth_by_name, true_links, truth_lookup, truth_pos)
+    i_mid, i_n, i_nc = collect_crossovers(inf_by_name, inferred_links, inf_lookup, inf_pos)
+
+    lo = float(min(truth_pos[0], inf_pos[0]))
+    hi = float(max(truth_pos[-1], inf_pos[-1]))
+    t_edges, t_cum = cumulative_cM(t_mid, t_n, lo, hi, bin_bp)
+    i_edges, i_cum = cumulative_cM(i_mid, i_n, lo, hi, bin_bp)
+    # Underlying generative truth (constant-rate process); shares the x-axis.
+    p_edges, p_cum = process_truth_cM(lo, hi, bin_bp)
+
+    return contig, {
+        "truth": (t_edges, t_cum), "inferred": (i_edges, i_cum),
+        "process": (p_edges, p_cum),
+        "n_meioses_truth": t_n, "n_meioses_inferred": i_n,
+        # crossover COUNTS (numerator) + children, so the truth/inferred gap can
+        # be split into numerator (more decoded crossovers) vs denominator
+        # (different #meioses from the inferred pedigree).
+        "n_crossovers_truth": len(t_mid), "n_crossovers_inferred": len(i_mid),
+        "n_children_truth": t_nc, "n_children_inferred": i_nc,
+        "lo": lo, "hi": hi,
+    }
+
+
+# =============================================================================
 # Map driver
 # =============================================================================
 def build_maps(ckpt_dir, bin_bp, use_inferred_pedigree=True, inferred_csv=None,
-               contigs=None, verbose=True):
-    """Build truth + inferred Marey maps for every contig.
+               contigs=None, verbose=True, n_workers=None):
+    """Build truth + inferred + process Marey maps for every contig.
+
+    Per-chromosome work is embarrassingly parallel (each contig loads its own
+    checkpoint data and decodes independently), so contigs are fanned across a
+    process pool of `n_workers` (default: min(#contigs, CPU count)).  Pass
+    n_workers=1 to force the original serial path.
 
     Returns {contig: {'truth': (edges, cum), 'inferred': (edges, cum),
-                      'n_meioses_truth', 'n_meioses_inferred', 'lo', 'hi'}}.
+                      'process': (edges, cum), 'n_meioses_truth',
+                      'n_meioses_inferred', 'n_crossovers_truth',
+                      'n_crossovers_inferred', 'n_children_truth',
+                      'n_children_inferred', 'lo', 'hi'}}.
     """
     g = load_global(ckpt_dir, STAGE_SIM)
     truth_pedigree = g["truth_pedigree"]
@@ -727,38 +843,48 @@ def build_maps(ckpt_dir, bin_bp, use_inferred_pedigree=True, inferred_csv=None,
     if contigs is None:
         contigs = region_keys
 
+    if n_workers is None:
+        n_workers = min(len(contigs), os.cpu_count() or 1)
+    n_workers = max(1, int(n_workers))
+
+    tasks = [(contig, ckpt_dir, bin_bp, true_links, inferred_links, sample_names)
+             for contig in contigs]
+
+    if n_workers == 1 or len(tasks) == 1:
+        results = [_build_one_contig(t) for t in tasks]
+    else:
+        # Warm the numba HMM once so forked workers load the cached compile
+        # rather than each triggering it simultaneously.
+        _warmup_hmm()
+        ctx = mp.get_context("fork")
+        with ctx.Pool(processes=n_workers) as pool:
+            results = pool.map(_build_one_contig, tasks)
+
+    # Reassemble in the requested contig order (Pool.map preserves order, but be
+    # explicit so the dict + plots are deterministic regardless of scheduling).
+    by_contig = {c: d for (c, d) in results}
     out = {}
     for contig in contigs:
-        # Founder allele lookups (truth: rebuilt sim founders; inferred: L4).
-        naive = load_contig(ckpt_dir, STAGE_VCF, contig)["naive_long_haps"]
-        truth_lookup, truth_pos = build_truth_founder_lookup(naive)
-        l4 = load_contig(ckpt_dir, STAGE_L4, contig)["super_blocks_L4"]
-        inf_lookup, inf_pos = build_inferred_founder_lookup(l4)
-
-        # Paintings.
-        truth_samples = _samples_of(load_contig(ckpt_dir, STAGE_SIM, contig)["truth_painting"])
-        truth_by_name = _index_by_name(truth_samples, sample_names)
-        inf_obj = load_contig(ckpt_dir, STAGE_PAINT, contig)["tolerance_result"]
-        inf_by_name = _index_by_name(_samples_of(inf_obj), sample_names)
-
-        # Crossovers (truth uses true links + sim founders; inferred uses inferred
-        # links + L4 founders).
-        t_mid, t_n, _ = collect_crossovers(truth_by_name, true_links, truth_lookup, truth_pos)
-        i_mid, i_n, _ = collect_crossovers(inf_by_name, inferred_links, inf_lookup, inf_pos)
-
-        lo = float(min(truth_pos[0], inf_pos[0]))
-        hi = float(max(truth_pos[-1], inf_pos[-1]))
-        t_edges, t_cum = cumulative_cM(t_mid, t_n, lo, hi, bin_bp)
-        i_edges, i_cum = cumulative_cM(i_mid, i_n, lo, hi, bin_bp)
-
-        out[contig] = {
-            "truth": (t_edges, t_cum), "inferred": (i_edges, i_cum),
-            "n_meioses_truth": t_n, "n_meioses_inferred": i_n,
-            "lo": lo, "hi": hi,
-        }
+        d = by_contig[contig]
+        out[contig] = d
         if verbose:
-            print(f"  {contig}: truth {t_cum[-1]:6.1f} cM ({t_n} meioses) / "
-                  f"inferred {i_cum[-1]:6.1f} cM ({i_n} meioses)")
+            span_mb = (d["hi"] - d["lo"]) / 1e6
+            t_cm, i_cm = d["truth"][1][-1], d["inferred"][1][-1]
+            p_cm = d["process"][1][-1]
+            t_rate = t_cm / span_mb if span_mb > 0 else 0.0
+            i_rate = i_cm / span_mb if span_mb > 0 else 0.0
+            t_xpm = (d["n_crossovers_truth"] / d["n_meioses_truth"]
+                     if d["n_meioses_truth"] else 0.0)
+            i_xpm = (d["n_crossovers_inferred"] / d["n_meioses_inferred"]
+                     if d["n_meioses_inferred"] else 0.0)
+            print(f"  {contig}: process {p_cm:6.1f} cM "
+                  f"({100.0 * RECOMB_RATE * 1e6:.2f} cM/Mb) | "
+                  f"truth {t_cm:6.1f} cM = {t_rate:4.2f} cM/Mb "
+                  f"[{d['n_crossovers_truth']} xo / {d['n_meioses_truth']} mei "
+                  f"= {t_xpm:.3f} xo/mei] | "
+                  f"inferred {i_cm:6.1f} cM = {i_rate:4.2f} cM/Mb "
+                  f"[{d['n_crossovers_inferred']} xo / {d['n_meioses_inferred']} mei "
+                  f"= {i_xpm:.3f} xo/mei]")
     return out
 
 
@@ -784,6 +910,13 @@ def plot_maps(maps, out_path, title="Recombination map (cumulative genetic dista
         ax.set_visible(True)
         t_edges, t_cum = maps[contig]["truth"]
         i_edges, i_cum = maps[contig]["inferred"]
+        # Underlying generative truth (constant-rate process): a smooth dashed
+        # reference line, plotted first so the two decoded step-curves sit on
+        # top of it.
+        if "process" in maps[contig]:
+            p_edges, p_cum = maps[contig]["process"]
+            ax.plot(np.asarray(p_edges) / 1e6, p_cum,
+                    color="#2e7d32", lw=1.3, ls="--", label="Process (5 cM/Mb)")
         ax.step(np.asarray(t_edges) / 1e6, t_cum, where="post",
                 color="#1f4e8c", lw=1.4, label="Truth")
         ax.step(np.asarray(i_edges) / 1e6, i_cum, where="post",
@@ -812,6 +945,10 @@ def plot_one_chromosome(contig, data, path):
     t_edges, t_cum = data["truth"]
     i_edges, i_cum = data["inferred"]
     fig, ax = plt.subplots(figsize=(5.5, 4.0))
+    if "process" in data:
+        p_edges, p_cum = data["process"]
+        ax.plot(np.asarray(p_edges) / 1e6, p_cum, color="#2e7d32", lw=1.4,
+                ls="--", label=f"Process ({100.0 * RECOMB_RATE * 1e6:.0f} cM/Mb)")
     ax.step(np.asarray(t_edges) / 1e6, t_cum, where="post", color="#1f4e8c",
             lw=1.6, label=f"Truth ({data['n_meioses_truth']} meioses)")
     ax.step(np.asarray(i_edges) / 1e6, i_cum, where="post", color="#c0392b",
@@ -826,19 +963,32 @@ def plot_one_chromosome(contig, data, path):
 
 
 def write_chromosome_csv(contig, data, path):
-    """Per-chromosome cM curve as CSV: position_mb, cum_cM_truth, cum_cM_inferred.
+    """Per-chromosome cM curve as CSV:
+    position_mb, cum_cM_process, cum_cM_truth, cum_cM_inferred.
 
-    Truth and inferred share the same bin edges (same lo/hi/bin_bp), so one
-    position column suffices; aligned on the shorter length defensively.
+    All three curves share the same bin edges (same lo/hi/bin_bp), so one
+    position column suffices; aligned on the shortest length defensively.
+    `cum_cM_process` is the underlying generative truth (constant-rate line);
+    it is omitted gracefully for any legacy map dict that predates it.
     """
     t_edges, t_cum = data["truth"]
     i_edges, i_cum = data["inferred"]
-    n = min(len(t_edges), len(i_edges), len(t_cum), len(i_cum))
-    arr = np.column_stack([np.asarray(t_edges[:n]) / 1e6,
-                           np.asarray(t_cum[:n]),
-                           np.asarray(i_cum[:n])])
-    np.savetxt(path, arr, delimiter=",", comments="",
-               header="position_mb,cum_cM_truth,cum_cM_inferred", fmt="%.6g")
+    if "process" in data:
+        p_edges, p_cum = data["process"]
+        n = min(len(t_edges), len(i_edges), len(p_edges),
+                len(t_cum), len(i_cum), len(p_cum))
+        arr = np.column_stack([np.asarray(t_edges[:n]) / 1e6,
+                               np.asarray(p_cum[:n]),
+                               np.asarray(t_cum[:n]),
+                               np.asarray(i_cum[:n])])
+        header = "position_mb,cum_cM_process,cum_cM_truth,cum_cM_inferred"
+    else:
+        n = min(len(t_edges), len(i_edges), len(t_cum), len(i_cum))
+        arr = np.column_stack([np.asarray(t_edges[:n]) / 1e6,
+                               np.asarray(t_cum[:n]),
+                               np.asarray(i_cum[:n])])
+        header = "position_mb,cum_cM_truth,cum_cM_inferred"
+    np.savetxt(path, arr, delimiter=",", comments="", header=header, fmt="%.6g")
 
 
 def save_map_data(maps, path):
@@ -984,6 +1134,9 @@ def main(argv=None):
                    help="ablation: build the inferred map with the TRUE pedigree links")
     p.add_argument("--inferred-pedigree-csv", default=None,
                    help="explicit path to pedigree_inference_discovered.csv")
+    p.add_argument("--workers", type=int, default=None,
+                   help="parallel worker processes for the per-chromosome decode "
+                        "(default: min(#contigs, CPU count); 1 = serial)")
     p.add_argument("--selftest", action="store_true",
                    help="run synthetic validation and exit (no checkpoints needed)")
     args = p.parse_args(argv)
@@ -998,6 +1151,7 @@ def main(argv=None):
         use_inferred_pedigree=not args.true_pedigree_for_inferred,
         inferred_csv=args.inferred_pedigree_csv,
         contigs=args.contigs,
+        n_workers=args.workers,
     )
     save_outputs(maps, args.out_dir)
     return 0
