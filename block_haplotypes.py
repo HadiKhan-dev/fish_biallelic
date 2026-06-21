@@ -70,12 +70,14 @@ from bhd_kernels import (
     _safe_neg_log,
     _init_hap_from_sample_dosage,
     _select_initial_seed,
+)
+from bhd_fit import (
     _fit_at_fixed_K,
     _update_A,
     _compute_cc,
     _compute_bic,
-    PoolEmissionCache,
 )
+from bhd_pool import PoolEmissionCache
 from bhd_recovery import (
     RECOVERY_HAPS_EQUAL_EPS_PCT,
     RECOVERY_OUTER_CC_SCALE,
@@ -102,20 +104,13 @@ from bhd_recovery import (
 )
 from bhd_trio import _trio_recovery_candidate_haps
 
-# prune_chimeras + viterbi_score_selection are the scoring / chimera-pruning
-# kernels, now living in the bhd_kernels leaf (migrated out of the retired
-# legacy block_haplotypes.py); _update_dynamic_threads is the shared dynamic-
-# thread hook, also in bhd_kernels, used by select_optimal_haplotype_set_viterbi.
-from bhd_kernels import (
-    prune_chimeras,
-    viterbi_score_selection,
-    _update_dynamic_threads,
-)
-# BlockResult, BlockResults, consolidate_similar_candidates, and
-# select_optimal_haplotype_set_viterbi were migrated out of block_haplotypes.py
-# into this module — see the "MIGRATED FROM block_haplotypes.py" section at the
-# end of the file.  (find_missing_haplotypes_iterative is still imported lazily
-# from the legacy module inside the residual loop, where present.)
+# BlockResult, BlockResults, and consolidate_similar_candidates were migrated
+# out of the retired legacy block_haplotypes.py into this module — see the
+# "MIGRATED FROM block_haplotypes.py" section at the end of the file.
+# (find_missing_haplotypes_iterative is still imported lazily from the legacy
+# module inside the residual loop, where present.)  Dynamic-thread rescaling
+# uses the standalone dynamic_threads module (apply_dynamic_threads), wired in
+# _init_block_worker.
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid='ignore')
@@ -2492,133 +2487,3 @@ def consolidate_similar_candidates(candidates, diff_threshold_percent=1.0):
             
     # Rebuild dictionary with sequential keys
     return {i: h for i, h in enumerate(unique_haps)}
-
-def select_optimal_haplotype_set_viterbi(candidate_haps, probs_array, 
-                                         recomb_penalty=10.0,
-                                         penalty_strength=1.0,
-                                         read_error_prob=0.02,
-                                         max_sites_for_selection=2000):
-    """
-    Selects the smallest set of haplotypes that explains the data best.
-    """
-    
-    # --- 1. SETUP DATA ---
-    if isinstance(candidate_haps, dict):
-        hap_keys = list(candidate_haps.keys())
-        H = np.array([candidate_haps[k] for k in hap_keys])
-    else:
-        hap_keys = list(range(len(candidate_haps)))
-        H = np.array(candidate_haps)
-        
-    num_candidates = len(H)
-    num_samples, total_sites, _ = probs_array.shape
-    
-    if num_candidates == 0: return []
-
-    # --- 2. DOWNSAMPLING STRATEGY ---
-    if total_sites > max_sites_for_selection:
-        stride = math.ceil(total_sites / max_sites_for_selection)
-        # Slice the data
-        probs_active = probs_array[:, ::stride, :]
-        H_active = H[:, ::stride, :]
-    else:
-        stride = 1
-        probs_active = probs_array
-        H_active = H
-
-    num_active_sites = probs_active.shape[1]
-
-    # --- 3. PRE-CALCULATE ALL PAIR LIKELIHOODS (MEMORY SAFE) ---
-    idx_i, idx_j = np.triu_indices(num_candidates)
-    num_pairs = len(idx_i)
-    
-    ll_tensor = np.empty((num_samples, num_pairs, num_active_sites), dtype=np.float32)
-    
-    W = np.array([[0, 1, 2], [1, 0, 1], [2, 1, 0]], dtype=np.float32)
-    
-    batch_size = 50
-    
-    for start_p in range(0, num_pairs, batch_size):
-        end_p = min(start_p + batch_size, num_pairs)
-        
-        batch_idx_i = idx_i[start_p:end_p]
-        batch_idx_j = idx_j[start_p:end_p]
-        
-        h0 = H_active[batch_idx_i, :, 0]
-        h1 = H_active[batch_idx_i, :, 1]
-        h2_0 = H_active[batch_idx_j, :, 0]
-        h2_1 = H_active[batch_idx_j, :, 1]
-        
-        g00 = h0 * h2_0
-        g11 = h1 * h2_1
-        g01 = (h0 * h2_1) + (h1 * h2_0)
-        del h0, h1, h2_0, h2_1
-        
-        batch_pairs = np.stack([g00, g01, g11], axis=-1)
-        del g00, g01, g11
-        
-        weighted_pairs = batch_pairs @ W
-        del batch_pairs
-        
-        batch_dist = np.sum(
-            probs_active[:, np.newaxis, :, :] * weighted_pairs[np.newaxis, :, :, :],
-            axis=3
-        )
-        del weighted_pairs
-        
-        ll_tensor[:, start_p:end_p, :] = (-batch_dist * stride)
-        del batch_dist
-
-    del H_active, probs_active
-    ll_tensor = np.maximum(ll_tensor, -2.0 * stride)
-    ll_tensor = np.ascontiguousarray(ll_tensor, dtype=np.float64)
-    _malloc_trim()
-
-    # --- 4. SELECTION LOOP ---
-    
-    selected_indices = []
-    current_best_bic = float('inf')
-    
-    min_complexity = recomb_penalty * 1.5
-    calculated_complexity = math.log(num_samples) * total_sites * penalty_strength * 0.01
-    complexity_cost = max(calculated_complexity, min_complexity)
-    
-    while len(selected_indices) < num_candidates:
-        _update_dynamic_threads()
-        
-        best_new_index = -1
-        best_new_bic = float('inf')
-        
-        remaining = [x for x in range(num_candidates) if x not in selected_indices]
-        
-        for cand_idx in remaining:
-            trial_set = selected_indices + [cand_idx]
-            
-            subset_mask = np.zeros(num_candidates, dtype=bool)
-            subset_mask[trial_set] = True
-            
-            valid_pairs_mask = subset_mask[idx_i] & subset_mask[idx_j]
-            
-            if not np.any(valid_pairs_mask):
-                continue
-            
-            active_ll_tensor = ll_tensor[:, valid_pairs_mask, :]
-            
-            best_scores = viterbi_score_selection(active_ll_tensor, float(recomb_penalty))
-            
-            total_log_likelihood = np.sum(best_scores)
-            
-            k = len(trial_set)
-            bic = (k * complexity_cost) - (2 * total_log_likelihood)
-            
-            if bic < best_new_bic:
-                best_new_bic = bic
-                best_new_index = cand_idx
-        
-        if best_new_bic < current_best_bic:
-            selected_indices.append(best_new_index)
-            current_best_bic = best_new_bic
-        else:
-            break
-            
-    return [hap_keys[i] for i in selected_indices]

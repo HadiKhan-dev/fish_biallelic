@@ -14,7 +14,7 @@
 #     subset selection.
 #   - BIC subset selection (_greedy_bic_select, _swap_refine, _bic_-
 #     prune) — outer BIC scoring on sample data; the BIC criterion
-#     here uses Viterbi NLL via bhd_kernels._compute_nll_for_subset
+#     here uses Viterbi NLL via bhd_fit._compute_nll_for_subset
 #     when _VITERBI_BIC_ENABLED is True (the production default).
 #   - Hap-comparison helpers (_hamming_pct_kept, _haps_equal) — used by
 #     the round loop, late rescue, and the orchestrator's
@@ -171,14 +171,16 @@ from bhd_kernels import (
     MASK,
     _safe_neg_log,
     _per_site_cost_W_W,
+)
+from bhd_fit import (
     _update_A,
     _update_H,
     _fit_at_fixed_K,
     _compute_cc,
     _compute_bic,
     _compute_nll_for_subset,
-    PoolEmissionCache,
 )
+from bhd_pool import PoolEmissionCache
 
 # Cross-module function imports
 from bhd_trio import _trio_recovery_candidate_haps
