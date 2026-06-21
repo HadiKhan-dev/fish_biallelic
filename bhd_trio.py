@@ -2,7 +2,7 @@
 # bhd_trio.py — Trio recovery (posterior soft-clustering + group-trio
 #               algorithm)
 #
-# Split out of block_haplotypes_discrete.py as part of the 4-file split.
+# Split out of block_haplotypes.py as part of the 4-file split.
 # Contains the trio-recovery subsystem: recovers founder haplotypes for
 # blocks where standard K-growth fails because every sample is a 1+1
 # dosage blend of two true founders.
@@ -17,7 +17,7 @@
 # pooled-alt primitives are imported lazily from bhd_kernels.
 #
 # Public entry point: _trio_recovery_candidate_haps(probs_k, ...)
-# Called by block_haplotypes_discrete._grow_K_with_recovery and
+# Called by block_haplotypes._grow_K_with_recovery and
 # bhd_recovery's residual rescue (see TRIO_RECOVERY_ENABLED below for the
 # master switch).
 #
@@ -597,7 +597,7 @@ def _trio_recovery_candidate_haps(probs_k,
 
     Designed to compose with _fit_at_fixed_K — the output is a valid H_init
     array.  This is a thin entry point preserved for its callers
-    (block_haplotypes_discrete, bhd_recovery's residual rescue); the recovery
+    (block_haplotypes, bhd_recovery's residual rescue); the recovery
     logic lives in _soft_unified_recovery.
     """
     return _soft_unified_recovery(

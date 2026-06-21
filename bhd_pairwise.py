@@ -133,7 +133,7 @@ except ImportError:
     prange = range
 
 # =============================================================================
-# MASTER ENABLE FLAG (consumed by block_haplotypes_discrete.py and bhd_recovery.py)
+# MASTER ENABLE FLAG (consumed by block_haplotypes.py and bhd_recovery.py)
 # =============================================================================
 
 # Master switch — set to False to bypass v6 pairwise common-hap recovery
@@ -1682,7 +1682,7 @@ def apply_quality_filters(recovered, dosage,
 
 
 # -----------------------------------------------------------------------
-# Top-level production entry point.  Used by block_haplotypes_discrete's
+# Top-level production entry point.  Used by block_haplotypes's
 # _grow_K_with_recovery (seed stage) and _late_low_carrier_rescue
 # (rescue stage) to enrich the candidate pool that the existing trio
 # recovery already populates.

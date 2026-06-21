@@ -27,7 +27,7 @@ import warnings
 from multiprocessing.shared_memory import SharedMemory
 
 import bhd_kernels
-import block_haplotypes_discrete
+import block_haplotypes
 import block_haplotype_refinement
 
 
@@ -860,7 +860,7 @@ def _add_hap_to_block(block, new_hap):
     new_haps = dict(block.haplotypes)
     new_haps[new_key] = new_hap_2d
     
-    return block_haplotypes_discrete.BlockResult(
+    return block_haplotypes.BlockResult(
         positions=block.positions,
         haplotypes=new_haps,
         keep_flags=block.keep_flags,
@@ -1579,7 +1579,7 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
     # Dedup: merge near-identical haplotypes (catches duplicate FPs at 0% error)
     t_dedup_start = time.time()
     output_br = block_haplotype_refinement.dedup_blocks(
-        block_haplotypes_discrete.BlockResults(output_blocks),
+        block_haplotypes.BlockResults(output_blocks),
         threshold_pct=1.0,
         verbose=verbose
     )
@@ -1610,4 +1610,4 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
         print(f"    Chimera prune: removed {n_pruned} haps from modified blocks  [{t_prune:.1f}s]")
         print(f"    Residual discovery complete ({time.time()-t0:.1f}s)")
     
-    return block_haplotypes_discrete.BlockResults(output_list)
+    return block_haplotypes.BlockResults(output_list)

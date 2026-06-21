@@ -83,7 +83,7 @@ def _safe_forkserver_pool(processes, initializer=None, initargs=()):
 
     Temporarily clears __main__.__file__/__spec__ so forkserver workers do
     not re-execute the entry script, restoring them on exit.  Same guard
-    block_linking_naive / block_haplotypes_discrete already use.
+    block_linking_naive / block_haplotypes already use.
     """
     import sys as _sys
     _main_mod = _sys.modules.get('__main__')
