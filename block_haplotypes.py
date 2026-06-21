@@ -1,4 +1,4 @@
-"""block_haplotypes_discrete.py — Discrete-hap founder discovery (orchestrator)
+"""block_haplotypes.py — Discrete-hap founder discovery (orchestrator)
 
 The top-level orchestration layer of stage-3 block-haplotype founder
 discovery.  As of the 4-file split, this file contains:
@@ -29,7 +29,7 @@ import-only-downstream — nothing in the 4 split files imports back
 from here, which keeps the dependency DAG acyclic.
 
 Public callers (e.g. pipeline.py) continue to use:
-    import block_haplotypes_discrete as bhd
+    import block_haplotypes as bhd
     bhd.generate_haplotypes_block(...)
     bhd.generate_all_block_haplotypes(...)
 """

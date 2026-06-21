@@ -12,7 +12,7 @@ import multiprocessing.pool
 from multiprocessing.shared_memory import SharedMemory
 
 # Import your specific modules
-import block_haplotypes_discrete
+import block_haplotypes
 import block_linking
 import hmm_matching
 import beam_search_core
@@ -227,7 +227,7 @@ def create_downsampled_proxy(block, max_sites=2000):
     if block.probs_array is not None:
         new_probs = np.ascontiguousarray(block.probs_array[:, ::stride, :])
 
-    proxy = block_haplotypes_discrete.BlockResult(
+    proxy = block_haplotypes.BlockResult(
         positions=new_pos,
         haplotypes=new_haps,
         keep_flags=new_flags,
@@ -287,7 +287,7 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, gl
     if reads_list and len(reads_list) == len(original_blocks):
         super_reads = np.concatenate(reads_list, axis=1)
 
-    super_block = block_haplotypes_discrete.BlockResult(
+    super_block = block_haplotypes.BlockResult(
         positions=super_positions,
         haplotypes=super_haplotypes,
         keep_flags=super_flags,
@@ -367,7 +367,7 @@ def _process_single_batch(args):
         dynamic_threads.get_dynamic_threads()
         numba.set_num_threads(1)
 
-        original_portion = block_haplotypes_discrete.BlockResults(original_blocks_list)
+        original_portion = block_haplotypes.BlockResults(original_blocks_list)
 
         if len(original_portion) < 2:
             return {
@@ -395,7 +395,7 @@ def _process_single_batch(args):
         proxy_list = []
         for b in original_portion:
             proxy_list.append(create_downsampled_proxy(b, max_sites_for_linking))
-        portion_proxy = block_haplotypes_discrete.BlockResults(proxy_list)
+        portion_proxy = block_haplotypes.BlockResults(proxy_list)
 
         # 2. Slice to batch-relevant sites only.
         all_positions = np.concatenate([b.positions for b in original_portion])
@@ -870,4 +870,4 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             max_block_iter=refine_max_iter, verbose=verbose)
         output_super_blocks = list(refined)
     
-    return block_haplotypes_discrete.BlockResults(output_super_blocks)
+    return block_haplotypes.BlockResults(output_super_blocks)

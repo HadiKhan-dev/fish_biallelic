@@ -1,7 +1,7 @@
 #%% =====================================================================
 # bhd_recovery.py — Subtraction-based recovery + late low-carrier rescue
 #
-# Split out of block_haplotypes_discrete.py as part of the 4-file split.
+# Split out of block_haplotypes.py as part of the 4-file split.
 # Contains the candidate-pool-driven recovery subsystems that run after
 # the initial K-growth pass:
 #

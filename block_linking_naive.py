@@ -12,7 +12,7 @@ from functools import partial
 
 import analysis_utils
 import hap_statistics
-import block_haplotypes_discrete
+import block_haplotypes
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
@@ -79,7 +79,7 @@ def _strip_block(block):
     each block from ~1.5 MB to ~20 KB, making direct task arguments practical.
     Keeps reads_count_matrix (used by overlap merge in pools 1-3, 5).
     """
-    return block_haplotypes_discrete.BlockResult(
+    return block_haplotypes.BlockResult(
         positions=block.positions,
         haplotypes=block.haplotypes,
         keep_flags=block.keep_flags,
@@ -95,7 +95,7 @@ def _strip_block_light(block):
     Used by Pool 4 where reads are placed in SharedMemory separately.
     The resulting block is ~5-10 KB (just positions, haplotypes, keep_flags).
     """
-    return block_haplotypes_discrete.BlockResult(
+    return block_haplotypes.BlockResult(
         positions=block.positions,
         haplotypes=block.haplotypes,
         keep_flags=block.keep_flags,
@@ -273,7 +273,7 @@ def _worker_combine_chained_blocks_direct(args):
             rcm = reads_flat[offset : offset + n_samples * n_sites * 2].reshape(n_samples, n_sites, 2)
         else:
             rcm = lb.reads_count_matrix  # None
-        full_blocks.append(block_haplotypes_discrete.BlockResult(
+        full_blocks.append(block_haplotypes.BlockResult(
             positions=lb.positions,
             haplotypes=lb.haplotypes,
             keep_flags=lb.keep_flags,
@@ -281,7 +281,7 @@ def _worker_combine_chained_blocks_direct(args):
             probs_array=None,
         ))
     
-    reconstituted = block_haplotypes_discrete.BlockResults(full_blocks)
+    reconstituted = block_haplotypes.BlockResults(full_blocks)
     return combine_chained_blocks_to_single_hap(
         reconstituted, chain_data,
         read_error_prob=read_error_prob,

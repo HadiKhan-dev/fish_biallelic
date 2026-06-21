@@ -1,7 +1,7 @@
 #%% =====================================================================
 # bhd_kernels.py — Atomic computation kernel for stage-3 block haplotypes
 #
-# Split out of block_haplotypes_discrete.py as part of the 4-file split.
+# Split out of block_haplotypes.py as part of the 4-file split.
 # Contains the BIC/CD primitives that every higher-level subsystem builds
 # on:
 #
@@ -1884,7 +1884,7 @@ def _compute_nll_for_subset(haps_list, probs_k, lam):
 # =============================================================================
 #
 # The recovery loop (_subtraction_recovery_round_loop, _late_low_carrier_-
-# rescue) and the trio/pairwise seed-trim (in block_haplotypes_discrete.py's
+# rescue) and the trio/pairwise seed-trim (in block_haplotypes.py's
 # _grow_K_with_recovery) each do hundreds-to-thousands of `_compute_nll_-
 # for_subset` calls over subsets drawn from a FIXED candidate pool.  Each
 # call independently rebuilds the (N, K_states, n_bins) binned-emission
@@ -2696,7 +2696,7 @@ class PoolEmissionCache:
 #
 # The candidate generators that feed stage-3 founder discovery — trio
 # recovery and homozygous-sample recovery (bhd_trio), the k-medoids
-# multistart seeding (block_haplotypes_discrete), the Bernoulli-mixture /
+# multistart seeding (block_haplotypes), the Bernoulli-mixture /
 # kmeans++ subtraction recovery (bhd_recovery), and pairwise common-hap
 # recovery (bhd_pairwise) — have historically reduced each sample's
 # posteriors to a hard argmax dosage (and, in trio, an XOR/parity form)
@@ -2922,7 +2922,7 @@ def pooled_alt_to_hap(pooled_alt):
 # MIGRATED FROM block_haplotypes.py (legacy block-hap discovery, retired).
 # Dynamic-thread reallocation subsystem + Viterbi/chimera scoring kernels +
 # prune_chimeras now live here so the active ecosystem (beam_search_core,
-# chimera_resolution/scoring, residual_discovery, block_haplotypes_discrete)
+# chimera_resolution/scoring, residual_discovery, block_haplotypes)
 # imports them from the bhd_* leaf instead of from the legacy module.
 # =============================================================================
 
