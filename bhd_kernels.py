@@ -2220,6 +2220,100 @@ def _viterbi_subset_from_pool_kernel(pool_tensor, pool_state_indices, penalty):
     return best_scores
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _batch_subset_scores_kernel(pool_tensor, subsets, K_pool, penalty):
+    """Batched _viterbi_subset_from_pool_kernel: score MANY equal-size
+    subsets at once, parallelised across candidates.
+
+    `prange` is over the candidate axis (the outer loop), with the
+    per-sample Viterbi DP run SERIALLY inside each candidate (no nested
+    prange).  This is the win on pathological large-pool blocks where the
+    greedy / swap selection evaluates many candidate subsets: instead of a
+    sequential Python loop launching one tiny per-sample-parallel kernel per
+    candidate (Python + dispatch overhead dominating, few cores busy), all
+    candidates run concurrently here.
+
+    Each candidate inlines _build_pool_state_index_map_kernel followed by the
+    exact _viterbi_subset_from_pool_kernel recurrence, reading the SAME
+    pool_tensor scalars in the SAME left-to-right order, so out[c, s] equals
+    the best-path score _viterbi_subset_from_pool_kernel would return for
+    subset c, sample s — to the last bit.
+
+    Arguments:
+        pool_tensor: (N, K_pool_states, n_bins) float64 — the cache's full
+            emission tensor.
+        subsets:     (n_cand, K_sub) int64 — each row a subset of pool
+            indices (K_sub >= 1; rows need not be sorted, matching
+            _build_pool_state_index_map_kernel's contract).
+        K_pool:      int — total pool size.
+        penalty:     flat switch penalty (float).
+
+    Returns:
+        (n_cand, N) float64 best-path score per (candidate, sample).  The
+        caller forms NLL per candidate as -out.sum(axis=1), reusing the same
+        numpy pairwise reduction as nll_for_subset.
+    """
+    n_cand = subsets.shape[0]
+    K_sub = subsets.shape[1]
+    N = pool_tensor.shape[0]
+    n_sites = pool_tensor.shape[2]
+    n_rr_pool = K_pool * (K_pool + 1) // 2
+    n_rr_sub = K_sub * (K_sub + 1) // 2
+    K_sub_states = n_rr_sub + K_sub + 1
+
+    out = np.empty((n_cand, N), dtype=np.float64)
+
+    for c in prange(n_cand):
+        # --- build this subset's pool-state-index map (inline of
+        # _build_pool_state_index_map_kernel) ---
+        sidx = subsets[c]
+        psi = np.empty(K_sub_states, dtype=np.int64)
+        slot = 0
+        for a in range(K_sub):
+            pa = sidx[a]
+            for b in range(a, K_sub):
+                pb = sidx[b]
+                if pa <= pb:
+                    lo = pa
+                    hi = pb
+                else:
+                    lo = pb
+                    hi = pa
+                psi[slot] = lo * K_pool - lo * (lo - 1) // 2 + (hi - lo)
+                slot += 1
+        for k_sub in range(K_sub):
+            psi[slot] = n_rr_pool + sidx[k_sub]
+            slot += 1
+        psi[slot] = n_rr_pool + K_pool
+
+        # --- Viterbi DP over samples, SERIAL here (inline of
+        # _viterbi_subset_from_pool_kernel with range instead of prange) ---
+        for s in range(N):
+            current = np.empty(K_sub_states, dtype=np.float64)
+            for k in range(K_sub_states):
+                current[k] = pool_tensor[s, psi[k], 0]
+            for i in range(1, n_sites):
+                best_prev = -np.inf
+                for k in range(K_sub_states):
+                    if current[k] > best_prev:
+                        best_prev = current[k]
+                switch_base = best_prev - penalty
+                for k in range(K_sub_states):
+                    emission = pool_tensor[s, psi[k], i]
+                    stay = current[k]
+                    if stay > switch_base:
+                        current[k] = stay + emission
+                    else:
+                        current[k] = switch_base + emission
+            final_max = -np.inf
+            for k in range(K_sub_states):
+                if current[k] > final_max:
+                    final_max = current[k]
+            out[c, s] = final_max
+
+    return out
+
+
 class PoolEmissionCache:
     """Precomputed Viterbi-emission tensor for a fixed hap pool.
 
@@ -2562,6 +2656,38 @@ class PoolEmissionCache:
         best_ll = _viterbi_subset_from_pool_kernel(
             self._pool_tensor, pool_state_indices, self.penalty)
         return -float(best_ll.sum())
+
+    def batch_nll_for_subsets(self, subsets):
+        """Vectorised nll_for_subset over many EQUAL-size subsets at once.
+
+        Arguments:
+            subsets: (n_cand, K_sub) int64 — each row a subset of pool
+                indices (K_sub >= 1).  Rows need not be sorted.
+
+        Returns:
+            (n_cand,) float64 — NLL per row, each bit-identical to
+            nll_for_subset(subsets[c]): the per-candidate emission recurrence
+            is identical, and the per-sample sum reuses the same numpy
+            pairwise reduction (-scores.sum(axis=1)).
+
+        Parallelised across candidates (prange in _batch_subset_scores_kernel)
+        rather than per-candidate-over-samples — the win on pathological
+        large-pool blocks where there are many candidates but each one's
+        Viterbi is tiny.  Falls back to a per-subset loop in the memory-guard /
+        empty-pool paths, exactly as nll_for_subset does.
+        """
+        subsets = np.ascontiguousarray(subsets, dtype=np.int64)
+        n_cand = subsets.shape[0]
+        if n_cand == 0:
+            return np.empty(0, dtype=np.float64)
+        if self._fallback or self._pool_tensor is None:
+            out = np.empty(n_cand, dtype=np.float64)
+            for c in range(n_cand):
+                out[c] = self.nll_for_subset(subsets[c])
+            return out
+        scores = _batch_subset_scores_kernel(
+            self._pool_tensor, subsets, self.K_pool, self.penalty)
+        return -scores.sum(axis=1)
 
 
 # =============================================================================
