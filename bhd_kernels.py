@@ -32,7 +32,15 @@ import warnings
 
 import numpy as np
 from numba import njit, prange
-
+from bhd_config import (
+    CLUSTER_HOM_BAND_HI,
+    CLUSTER_HOM_BAND_LO,
+    DEFAULT_LAMBDA,
+    POOLED_ALT_HI,
+    POOLED_ALT_LO,
+    VITERBI_SNPS_PER_BIN,
+    VITERBI_SWITCH_PENALTY,
+)
 
 
 HAS_NUMBA = True  # bhd_kernels hard-imports numba; flag kept for the migrated prune_chimeras fast/slow branch
@@ -55,105 +63,11 @@ MASK = -1
 # K varies during growth.  The W sentinel is computed as the current K at
 # each call site that needs it.
 
-# Default wildcard penalty.  λ in log-likelihood units per (strand, site)
-# wildcard usage.  Sites where the real founder pair gives a likelihood at
-# least 1/e^(2λ) ≈ 0.37 of the wildcard's optimal genotype likelihood
-# prefer real founders; below that, wildcards take over.  λ=0.5 puts the
-# crossover at "real wins until likelihood ratio of (best wildcard /
-# real-pair) exceeds e^1 ≈ 2.7."
-DEFAULT_LAMBDA = 0.5
 
 # Numerical floor for log(probability) — prevents -inf when a sample's
 # posterior is exactly zero at a particular genotype (which can happen
 # at sites with no reads).
 LOG_EPS = 1e-12
-
-
-# =============================================================================
-# VITERBI BIC SCORING — replaces best-pair-per-sample cost calculation
-# =============================================================================
-#
-# When _VITERBI_BIC_ENABLED is True (the production default), the per-sample
-# cost calculation inside _update_A is replaced with a Viterbi best-path
-# log-likelihood over a state space of all founder-pair states (including
-# wildcard pairs), allowing inter-bin switches between pair states at a flat
-# cost VITERBI_SWITCH_PENALTY per switch.  This lets the BIC criterion
-# correctly identify chimeric founders: a chimera that fits some samples
-# better than any single existing-founder pair will, under Viterbi, be
-# rejected if those samples can be modelled by switching between two
-# existing-founder pairs at a within-block recombination point.
-#
-# Validated end-to-end on 250 K-mixed blocks (test_viterbi_full_pipeline_*):
-#   - V5 (penalty=5): 88% spurious reduction vs baseline, 0/1354 captures
-#     lost across K strata 1 through 10
-#   - V10 (penalty=10): 79% spurious reduction, 0/1354 captures lost
-# V5 strictly Pareto-dominates V10 (same captures, fewer spurious).
-#
-# Architecture: when enabled, _compute_nll_for_subset returns Viterbi NLL
-# directly (bypassing _update_A entirely for scoring); _update_A still
-# computes the baseline best-pair-per-sample assignment A (used by
-# _update_H's bit-voting M-step) and wildcard_slots (used for wildcard
-# mass tracking), but the returned per_sample_cost and per_sample_cost_unc
-# arrays are replaced with Viterbi per-sample NLL.  This means every BIC
-# accept/reject decision downstream of _fit_at_fixed_K — K-growth's NLL
-# improvement signal at lines 1255 and 1455, the medoid-branch BIC
-# comparison at 2581/2602, the late-rescue BIC_new at 3341 — sees
-# Viterbi-based scoring.  Coord descent on H (the M-step bit voting in
-# _update_H) still operates under baseline pair assignments because
-# rewriting bit voting to be Viterbi-path-aware would be a much larger
-# change; the compromise was validated to give the gains reported above
-# without rewriting _update_H.
-#
-# To revert to baseline best-pair-per-sample scoring for A/B comparison,
-# set _VITERBI_BIC_ENABLED = False.  Setting the flag is process-global,
-# so it should be set before _grow_K_with_recovery is called and not
-# changed during a run; with multiprocessing.Pool workers, each worker
-# has its own module state and can have an independent setting if needed.
-_VITERBI_BIC_ENABLED = True
-
-# Switch penalty for the Viterbi BIC kernel.  At lower values, switches
-# between pair states are cheaper => more aggressive chimera rejection.
-# At higher values, switches approach prohibitive cost => behaviour
-# approaches baseline best-pair-per-sample.  Validated sweep on K>6
-# blocks gave a Pareto frontier: 0 loses captures; 5 is the production
-# sweet spot (88% spurious reduction, 0 captures lost); 10-30 progressively
-# fewer chimeras rejected; >= 50 collapses to baseline-equivalent.
-# 5 is the default; tune by editing this constant or by setting it from
-# a caller before invoking _grow_K_with_recovery.
-#
-# Update (2026-05): raised default from 5.0 to 10.0 to address within-
-# block-recombination "switch-trap" failures.  At chr10:503 (and the
-# chr3 F0 cluster, chr6 F4 cluster, and a handful of other blocks),
-# K-growth correctly identifies all distinct haplotype patterns
-# including a chimera, then the residual-trio rescue (added 2026-05,
-# see bhd_recovery._residual_trio_rescue) surfaces the missing pure
-# founder as a candidate — but BIC rejects K=5 because the clean
-# carriers of the missing founder can already fit their data by
-# Viterbi-switching between the chimera (in pre-breakpoint region)
-# and the near-clone founder (in post-breakpoint region) at the cost
-# of just 5 nats per sample.  This 5-nat switch cost is below the
-# BIC-acceptance threshold (cc/2 = 80 nats vs the typical 70-nat LL
-# improvement from 14 clean carriers), so K=5 is wrongly rejected and
-# the truth founder is missed.  Doubling to 10.0 makes those switches
-# cost 10 nats × 14 carriers = 140 nats, comfortably above cc/2 = 80,
-# so K=5 is accepted and the truth founder recovered.
-#
-# Trade-off: the original V5 vs V10 sweep showed V5 had 9pp more
-# spurious-K reduction.  But residual-trio's strict filtering
-# (cleanness=1.0, min_cluster_size=3, dedup_vs_h=1.0%) makes spurious
-# K-additions much less likely at V10 than they were in the original
-# sweep (which preceded residual-trio).  Empirical A/B test on
-# full stage 3 + downstream pipeline is the right way to validate.
-VITERBI_SWITCH_PENALTY = 10.0
-
-# Bin granularity for Viterbi: each bin sums log-prob emissions within the
-# bin before applying the inter-bin switch penalty.  At spb=10 (the
-# default), a 200-SNP block has 20 bins and Viterbi can switch pair states
-# at most 19 times.  Matches chimera_resolution.py's L1 anchor
-# (compute_spb() = max(10, avg_sites//20) gives 10 for L=200 blocks).
-# Lower spb => more switching points (more granular chimera handling but
-# more compute); higher spb => fewer switch points (coarser, faster).
-VITERBI_SNPS_PER_BIN = 10
 
 
 # =============================================================================
@@ -451,7 +365,7 @@ def _maybe_c_contig(arr, dtype):
 # inter-bin switching at a flat penalty cost.  Used by _update_A and
 # _compute_nll_for_subset when _VITERBI_BIC_ENABLED is True (default) to
 # replace the best-pair-per-sample BIC scoring.  See the VITERBI BIC
-# SCORING constants block near the top of the file for rationale and
+# SCORING constants block in bhd_config for rationale and
 # validated parameter values.
 #
 # State space (with include_wildcards=True, the default):
@@ -761,27 +675,6 @@ def _viterbi_nll(haps_list, probs_k,
 #
 # Thresholds are module constants (documented below) so every consumer
 # applies identical cut-points; tune here to retune all consumers at once.
-
-# Pooled alt-allele fraction cut-points for calling a consensus dosage in
-# {0, 1, 2} from a cluster's pooled-alt vector (see pooled_alt_to_dosage).
-# A homozygous-ref pair-type pools to ~0, het to ~0.5, homozygous-alt to ~1.
-# 0.25 / 0.75 place the {0|1} and {1|2} boundaries midway between those
-# modes, matching the natural 0 / 0.5 / 1 structure of the expected alt
-# fraction.  Symmetric about 0.5.
-POOLED_ALT_LO = 0.25
-POOLED_ALT_HI = 0.75
-
-# Het-band edges for the cluster-homozygosity score (see
-# cluster_homozygosity_score).  A site whose pooled-alt sits in
-# (CLUSTER_HOM_BAND_LO, CLUSTER_HOM_BAND_HI) is counted as a het site of the
-# cluster's pair-type; the score is 1 minus the fraction of such sites, so a
-# genuinely homozygous cluster (no het sites) scores ~1 and a heterozygous
-# pair-type (about half its sites het) scores ~0.5.  The (0.35, 0.65) band
-# is narrower than the (0.25, 0.75) dosage band on purpose: the score should
-# count only sites that are clearly intermediate (near 0.5), not sites near
-# the 0.25 / 0.75 dosage boundaries that are still essentially hom calls.
-CLUSTER_HOM_BAND_LO = 0.35
-CLUSTER_HOM_BAND_HI = 0.65
 
 
 def soft_agreement_similarity(probs_k):

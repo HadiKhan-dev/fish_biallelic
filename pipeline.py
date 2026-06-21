@@ -662,7 +662,9 @@ if __name__ == '__main__':
             _ensure_key(r_name, 'naive_long_haps')
             reads = multi_contig_results[r_name]['simulated_reads']
             avg_depth = np.mean(np.sum(reads, axis=-1))
-            print(f"\n  {r_name}: average read depth = {avg_depth:.1f}x")
+            print(f"\n{'='*60}")
+            print(f"{r_name}: average read depth = {avg_depth:.1f}x")
+            print(f"{'='*60}")
             
             if avg_depth < REFINEMENT_DEPTH_THRESHOLD:
                 print(f"  Depth < {REFINEMENT_DEPTH_THRESHOLD}x → Running L1+L2 refinement")

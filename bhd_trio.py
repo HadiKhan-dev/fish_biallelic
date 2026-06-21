@@ -49,6 +49,16 @@ import numpy as np
 # finish.  dynamic_threads is a leaf module (no bhd_* imports) -> no
 # import cycle; the helper no-ops on the sequential path.
 import dynamic_threads
+from bhd_config import (
+    TRIO_DISTINCT_FRACTION,
+    TRIO_HAP_DEDUP_PCT,
+    TRIO_MATCH_FRACTION,
+    TRIO_MIN_HAP_CLUSTER_SIZE,
+    TRIO_MIN_SAMPLES,
+    TRIO_MIN_SITES,
+    TRIO_SOFT_HOM_SCORE,
+    TRIO_SOFT_MIN_CLUSTER_SIZE,
+)
 
 # Defensive numba import matching the project convention (see
 # analysis_utils.py, block_haplotypes.py).  If numba is unavailable,
@@ -139,44 +149,9 @@ except ImportError:
 # never make it worse.
 # -----------------------------------------------------------------------------
 
-# Master switch — set to False to bypass trio recovery entirely
-TRIO_RECOVERY_ENABLED = True
 
-
-# Threshold fractions for the group-triangle algebra, applied as multipliers
-# of the median pairwise group-centroid Hamming distance (see
-# _soft_unified_recovery — the denoised analogue of the per-sample distance
-# the recovery historically estimated).
-TRIO_MATCH_FRACTION = 0.4
-TRIO_DISTINCT_FRACTION = 0.5
-
-# Minimum block size requirements — below these, trio scheme is skipped
-# (returns empty) and the caller falls through to the existing pipeline.
-TRIO_MIN_SAMPLES = 9                # need at least 3 samples per pair-type
-                                    # times 3 pair-types in a triangle
-TRIO_MIN_SITES = 50                 # too few sites makes XOR matching
                                     # unreliable (statistical insufficiency)
 
-# Recovered-haplotype clustering parameters (production blind recovery,
-# no ground-truth comparison).  Each group-trio yields 3 candidate
-# haplotypes; across all trios this gives ~G(G-1)(G-2)/2 candidates
-# (canonical g1<g2<g3 enumeration in _find_grouped_trios_kernel), and
-# the same true founder appears in many of them.  We cluster by Hamming
-# similarity and emit per-cluster majority-vote consensus.
-TRIO_HAP_DEDUP_PCT = 1.0            # Hamming pct below which two haps
-                                    # are considered the same founder.
-                                    # Lowered from 2.0 to 1.0 after the
-                                    # sweep across 55 failure + 200
-                                    # healthy regression blocks showed
-                                    # +26 net recoveries (27 fixes,
-                                    # 1 break) at 1.0%.  Tighter dedup
-                                    # avoids over-merging near-but-
-                                    # distinct founders (e.g. closely-
-                                    # related founder pairs at the
-                                    # block-specific Hamming level)
-                                    # that the 2.0% threshold was
-                                    # collapsing into a single cluster.
-TRIO_MIN_HAP_CLUSTER_SIZE = 1       # drop hap clusters with fewer than
                                     # this many supporting candidates
                                     # (likely noise rather than real
                                     # founder).  HISTORY: prior to the
@@ -231,22 +206,6 @@ TRIO_MIN_HAP_CLUSTER_SIZE = 1       # drop hap clusters with fewer than
 # The hdbscan and bhd_kernels imports are performed lazily inside
 # _soft_unified_recovery, keeping this module's import surface (numpy +
 # warnings) minimal at load time.
-
-# HDBSCAN minimum cluster size — the minimum number
-# of samples sharing a pair-type for that pair-type to be recovered as a
-# cluster.  Mirrors the ">= 3 samples per pair-type" requirement behind
-# TRIO_MIN_SAMPLES.  Other HDBSCAN parameters use the library defaults
-# (min_samples = min_cluster_size, cluster_selection_method = "eom",
-# alpha = 1.0, allow_single_cluster = False), matching block_haplotypes.py's
-# precomputed-metric usage; expose them here if finer control is needed.
-TRIO_SOFT_MIN_CLUSTER_SIZE = 3
-
-# Cluster-homozygosity score (see bhd_kernels.cluster_homozygosity_score) at
-# or above which a "soft"-mode cluster is treated as homozygous and its
-# founder read off directly rather than routed to the triangle algebra.
-# 0.90 = at most ~10% of the cluster's sites may sit in the het band before
-# the cluster is treated as a heterozygous pair-type.
-TRIO_SOFT_HOM_SCORE = 0.90
 
 
 @njit(cache=True)

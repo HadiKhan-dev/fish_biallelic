@@ -7,14 +7,16 @@ import math
 from numba import njit, prange
 
 from bhd_kernels import (
-    VITERBI_SNPS_PER_BIN,
-    VITERBI_SWITCH_PENALTY,
-    _VITERBI_BIC_ENABLED,
     _log_probs_kernel,
     _maybe_c_contig,
     _per_site_cost_W_W,
     _viterbi_nll,
     _ww_bin_emis_from_cost_ww,
+)
+from bhd_config import (
+    VITERBI_SNPS_PER_BIN,
+    VITERBI_SWITCH_PENALTY,
+    _VITERBI_BIC_ENABLED,
 )
 
 
@@ -1172,7 +1174,7 @@ def _compute_nll_for_subset(haps_list, probs_k, lam):
     Viterbi best-path NLL over founder-pair states with switching
     allowed at VITERBI_SWITCH_PENALTY cost per switch.  When False, the
     baseline best-pair-per-sample NLL is returned (preserved for A/B
-    revert; see the VITERBI BIC SCORING constants block for rationale).
+    revert; see the VITERBI BIC SCORING constants block in bhd_config for rationale).
     """
     # K=0 path is identical under both scoring schemes: only state is
     # (W, W), no transitions to consider.  Handled inline so this branch
