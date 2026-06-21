@@ -9,7 +9,7 @@
 # except that four knobs are sourced from environment variables (with the
 # defaults below), and the file stops after stage 11 (no phase correction).
 #
-# It still imports the same project modules (block_haplotypes_discrete,
+# It still imports the same project modules (block_haplotypes,
 # hierarchical_assembly, pedigree_inference, simulate_sequences, ...), so keep
 # it in the project directory alongside those.
 #
@@ -232,7 +232,7 @@ if __name__ == '__main__':
     import vcf_data_loader
     import analysis_utils
     import hap_statistics
-    import block_haplotypes_discrete as block_haplotypes  # Discrete coordinate descent w/ wildcard founder (drop-in for block_haplotypes)
+    import block_haplotypes
     import block_linking_naive
     import block_linking
     import simulate_sequences

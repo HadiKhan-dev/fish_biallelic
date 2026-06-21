@@ -129,7 +129,7 @@ import dynamic_threads
 # per-kernel scalar loops run as pure Python (slow but correct).  The
 # wrappers preserve the exact same input/output shapes either way.
 try:
-    from numba import njit
+    from numba import njit, prange
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
@@ -150,6 +150,11 @@ except ImportError:
         if len(args) == 1 and callable(args[0]) and not kwargs:
             return args[0]
         return decorator
+
+    # prange falls back to the builtin range so the parallel restart/scoring
+    # kernels run as ordinary (serial) Python loops without numba — same
+    # output, just no multi-core dispatch.
+    prange = range
 
 import bhd_kernels
 import bhd_trio
@@ -910,6 +915,54 @@ def _bernoulli_mixture_em(cands, K, init_centers,
     return theta, pi, float(ll), int(n_iter), resp
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _run_em_restarts_kernel(cands, K, all_inits, max_iter, tol, eps):
+    """Run all EM restarts for a fixed K in parallel ACROSS restarts.
+
+    `prange` is over the restart axis; each restart calls the serial
+    _bernoulli_mixture_em_kernel on its own pre-generated init.  The EM is
+    deterministic given its init (no internal RNG), and each restart writes
+    only its own row of the output arrays, so there is no shared-state race
+    and the per-restart (ll, theta, pi, resp) are bit-identical to running
+    _bernoulli_mixture_em_kernel serially with the same inits.  The kernel's
+    BLAS matmuls (cands @ logit.T, resp.T @ cands) run single-threaded under
+    the pinned BLAS thread count, so dispatching them concurrently from the
+    prange does not oversubscribe — the parallelism is the restart axis.
+
+    Arguments:
+        cands:     (N, L) float64 — the candidate matrix (shared, read-only).
+        K:         number of mixture components.
+        all_inits: (R, K, L) float64 — per-restart K-means++ init centers,
+                   generated SERIALLY by the caller so the RNG stream (and
+                   hence the inits) matches the old per-restart loop exactly.
+        max_iter, tol, eps: EM hyper-parameters (the same module constants the
+                   _bernoulli_mixture_em wrapper passes through).
+
+    Returns:
+        lls:    (R,)        final log-likelihood per restart.
+        thetas: (R, K, L)   final theta per restart.
+        pis:    (R, K)      final pi per restart.
+        resps:  (R, N, K)   final responsibilities per restart.
+    The caller selects the best restart with a strict-> lowest-index reduction
+    over `lls`, reproducing the old `if best is None or ll > best[0]` semantic.
+    """
+    R = all_inits.shape[0]
+    N = cands.shape[0]
+    L = cands.shape[1]
+    lls = np.empty(R, dtype=np.float64)
+    thetas = np.empty((R, K, L), dtype=np.float64)
+    pis = np.empty((R, K), dtype=np.float64)
+    resps = np.empty((R, N, K), dtype=np.float64)
+    for r in prange(R):
+        theta_r, pi_r, ll_r, n_iter_r, resp_r = _bernoulli_mixture_em_kernel(
+            cands, K, all_inits[r], max_iter, tol, eps)
+        lls[r] = ll_r
+        thetas[r] = theta_r
+        pis[r] = pi_r
+        resps[r] = resp_r
+    return lls, thetas, pis, resps
+
+
 def _fit_bernoulli_mixture_select_K(candidates,
                                       K_max=RECOVERY_MIXTURE_K_MAX,
                                       n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
@@ -972,15 +1025,34 @@ def _fit_bernoulli_mixture_select_K(candidates,
         dynamic_threads.apply_dynamic_threads()
         # Multi-restart: pick the best LL across n_restarts independent
         # K-means++ inits.  EM has local minima; multi-start gives robustness.
-        best_for_K = None   # (LL, theta, pi, resp)
+        #
+        # Parallelised across restarts: the K-means++ inits are generated
+        # SERIALLY here, which consumes `rng` in exactly the same order as the
+        # old per-restart loop (one _kmeans_pp_init draw per restart), so the
+        # inits are identical.  The EM runs are then dispatched together via
+        # _run_em_restarts_kernel, whose prange is over restarts.  Each EM is
+        # deterministic given its init, so every restart's (ll, theta, pi,
+        # resp) is bit-identical to the old serial loop, and the strict->
+        # lowest-index reduction below selects the same restart `best_for_K`
+        # did (which kept the FIRST restart attaining the max LL).
+        all_inits = np.empty((n_restarts, K, L), dtype=np.float64)
         for restart in range(n_restarts):
-            init_centers = _kmeans_pp_init(cands_arr, K, rng)
-            theta, pi, ll, _n_iter, resp = _bernoulli_mixture_em(
-                cands_arr, K, init_centers=init_centers)
-            if best_for_K is None or ll > best_for_K[0]:
-                best_for_K = (ll, theta, pi, resp)
-
-        ll, theta, pi, resp = best_for_K
+            all_inits[restart] = _kmeans_pp_init(cands_arr, K, rng)
+        lls, thetas, pis, resps = _run_em_restarts_kernel(
+            cands_arr, K, all_inits,
+            int(RECOVERY_MIXTURE_MAX_ITER), float(RECOVERY_MIXTURE_TOL),
+            float(RECOVERY_MIXTURE_THETA_EPS))
+        best_r = 0
+        for r in range(1, n_restarts):
+            if lls[r] > lls[best_r]:
+                best_r = r
+        ll = float(lls[best_r])
+        # .copy() so theta/pi/resp are standalone arrays (as the per-restart
+        # _bernoulli_mixture_em returned), not views into the per-K batch
+        # buffers that are reallocated on the next K.
+        theta = thetas[best_r].copy()
+        pi = pis[best_r].copy()
+        resp = resps[best_r].copy()
         n_params = K * L + (K - 1)
         bic = -2 * ll + n_params * np.log(max(N, 2))
 
@@ -1024,7 +1096,7 @@ def _fit_bernoulli_mixture_select_K(candidates,
 # SUBTRACTION-BASED RECOVERY: CANDIDATE GENERATION & OUTER BIC SELECTION
 # =============================================================================
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, fastmath=False)
 def _run_subtraction_round_kernel(pool_arr, argmax_dosage_kept,
                                     cleanness_threshold):
     """Numba kernel for _run_subtraction_round.
@@ -1058,27 +1130,27 @@ def _run_subtraction_round_kernel(pool_arr, argmax_dosage_kept,
     """
     P, L = pool_arr.shape
     N = argmax_dosage_kept.shape[0]
-    # Worst case: every sample is clean for every pool member.
-    # At production P=30, N=320, L=200, this is ~50 MB int64 — fine.
-    out_buf = np.empty((P * N, L), dtype=np.int64)
 
-    # Minimum admissible-site count for "clean" decision.  Match the
-    # original `cleanness = in_01.mean(axis=1); clean_mask = cleanness
-    # >= cleanness_threshold` exactly — integer-comparison equivalent
-    # is `n_in_01 >= ceil(threshold * L)`.  Use rounding to nearest
-    # to avoid subtle off-by-one drift; for the production default of
-    # 0.90 at L=200 this is 180 and matches the float comparison
-    # 180/200=0.90 >= 0.90.
+    # Parallelised over pool members (prange).  A running append counter
+    # would race across threads, so we use a deterministic two-pass scheme:
+    #   Pass 1 (parallel over p): decide cleanness per (pool member, sample)
+    #     and count the accepted samples for each pool member.
+    #   cumsum the counts into per-pool output offsets (serial, O(P), cheap).
+    #   Pass 2 (parallel over p): each pool member writes its accepted clipped
+    #     residuals into its OWN disjoint output block, in sample order.
+    # The block offsets reproduce pool-outer order and the inner sample loop
+    # reproduces sample-inner order, so the output is byte-identical to the
+    # serial single-counter version (same values, same sequence).
     #
-    # Note: float-mean and integer-count threshold can differ at edge
-    # cases where threshold*L isn't exact.  The numpy original uses
-    # exact float mean which has rounding behavior.  To preserve byte-
-    # identity we replicate the exact float-mean comparison: compute
-    # n_in_01 as int, divide by L, compare to threshold.  Numba handles
-    # this fine since both sides are float64.
-
-    out_count = 0
-    for p in range(P):
+    # Cleanness decision matches the original `cleanness = in_01.mean(axis=1);
+    # clean_mask = cleanness >= cleanness_threshold` exactly: we compute
+    # n_in_01 as an int, divide by L, and compare to the threshold in float64
+    # (so the same float-mean rounding governs the accept/skip decision, with
+    # no integer-count off-by-one drift at non-exact threshold*L).
+    keep = np.zeros((P, N), dtype=np.bool_)
+    counts = np.zeros(P, dtype=np.int64)
+    for p in prange(P):
+        cnt = 0
         for s in range(N):
             # Count admissible sites for this (pool member, sample) pair
             n_in_01 = 0
@@ -1087,20 +1159,35 @@ def _run_subtraction_round_kernel(pool_arr, argmax_dosage_kept,
                 if 0 <= r <= 1:
                     n_in_01 += 1
             cleanness = n_in_01 / L
-            if cleanness < cleanness_threshold:
+            if cleanness >= cleanness_threshold:
+                keep[p, s] = True
+                cnt += 1
+        counts[p] = cnt
+
+    offsets = np.zeros(P, dtype=np.int64)
+    total = 0
+    for p in range(P):
+        offsets[p] = total
+        total += counts[p]
+
+    out_buf = np.empty((total, L), dtype=np.int64)
+    for p in prange(P):
+        pos = offsets[p]
+        for s in range(N):
+            if not keep[p, s]:
                 continue
-            # Accepted — write clipped residual into output buffer
+            # Accepted — write clipped residual into this pool member's block
             for l in range(L):
                 r = argmax_dosage_kept[s, l] - pool_arr[p, l]
                 # np.clip(r, 0, 1)
                 if r < 0:
-                    out_buf[out_count, l] = 0
+                    out_buf[pos, l] = 0
                 elif r > 1:
-                    out_buf[out_count, l] = 1
+                    out_buf[pos, l] = 1
                 else:
-                    out_buf[out_count, l] = r
-            out_count += 1
-    return out_buf[:out_count], out_count
+                    out_buf[pos, l] = r
+            pos += 1
+    return out_buf, total
 
 
 def _run_subtraction_round(pool, argmax_dosage_kept,
@@ -1153,6 +1240,97 @@ def _run_subtraction_round(pool, argmax_dosage_kept,
     # Copy each row to detach from the kernel's slice — defensive in
     # case downstream callers mutate.
     return [out_buf[i].copy() for i in range(out_count)]
+
+
+@njit(cache=True, parallel=True, fastmath=False)
+def _run_subtraction_round_soft_kernel(pool_arr, P0, P1, P2,
+                                         Lk0, Lk1, Lk2, cleanness_threshold):
+    """Numba kernel for _run_subtraction_round_soft, parallel over pool.
+
+    Replaces the per-pool-member numpy temporaries (adm, keep, l0, l1; each
+    O(N*L) per pool member) with a prange over pool members.  A running
+    append counter would race across threads, so the writes use a
+    deterministic two-pass scheme (count -> cumsum offsets -> write to
+    disjoint per-pool blocks), the same pattern as the hard-call kernel:
+      Pass 1 (parallel over p): cleanness screen per (pool member, sample) —
+        admissible-mass mean over sites >= threshold — and count accepted
+        samples per pool member.
+      cumsum the counts into per-pool output offsets (serial, O(P), cheap).
+      Pass 2 (parallel over p): each pool member writes its accepted
+        (L0, L1) rows into its own disjoint block, in sample order.
+
+    Numerical behaviour vs the numpy version:
+      - The (L0, L1) VALUES are element-wise selects of the same Lk0/Lk1/Lk2
+        the caller computed (h[l]=0 -> (Lk0, Lk1); h[l]=1 -> (Lk1, Lk2)), so
+        they are bit-identical to `np.where(...)` and the vstack output.
+      - The cleanness screen sums admissible mass per row sequentially rather
+        than via numpy's pairwise `adm.mean(axis=1)`, a sanctioned ULP-level
+        difference in summation order.  It can only change which samples are
+        admitted for a sample whose mass sits within a few ULP of the
+        threshold, which essentially never happens; the admitted-row VALUES
+        are unaffected either way.
+
+    Output ordering (pool-outer, sample-inner) matches the old
+    `for h in pool` + per-h `l0[keep]` + vstack exactly.
+
+    Args:
+        pool_arr: (P, L) int64 — stacked founder bits (0/1); used as a
+            truthiness per site, matching `h.astype(bool)`.
+        P0, P1, P2: (N, L) float64 — genotype POSTERIORS (for the screen).
+        Lk0, Lk1, Lk2: (N, L) float64 — genotype LIKELIHOODS (for the
+            output; equal to P0/P1/P2 divided by the site prior, or the
+            posteriors themselves when no prior is supplied).
+        cleanness_threshold: float — min mean admissible mass to admit.
+
+    Returns:
+        L0_out, L1_out: (M, L) float64 — admitted other-strand likelihoods
+            for the M admitted (pool member, sample) pairs, contiguous, in
+            (pool-outer, sample-inner) order.  Both have M==0 rows when the
+            pool admits nothing.
+    """
+    P, L = pool_arr.shape
+    N = P0.shape[0]
+    # Pass 1: cleanness screen per (pool member, sample); count per pool.
+    keep = np.zeros((P, N), dtype=np.bool_)
+    counts = np.zeros(P, dtype=np.int64)
+    for p in prange(P):
+        cnt = 0
+        for s in range(N):
+            adm_sum = 0.0
+            for l in range(L):
+                if pool_arr[p, l]:
+                    adm_sum += P1[s, l] + P2[s, l]
+                else:
+                    adm_sum += P0[s, l] + P1[s, l]
+            if adm_sum / L >= cleanness_threshold:
+                keep[p, s] = True
+                cnt += 1
+        counts[p] = cnt
+
+    offsets = np.zeros(P, dtype=np.int64)
+    total = 0
+    for p in range(P):
+        offsets[p] = total
+        total += counts[p]
+
+    L0_out = np.empty((total, L), dtype=np.float64)
+    L1_out = np.empty((total, L), dtype=np.float64)
+    # Pass 2: write the admitted (L0, L1) rows into each pool member's block.
+    for p in prange(P):
+        pos = offsets[p]
+        for s in range(N):
+            if not keep[p, s]:
+                continue
+            for l in range(L):
+                if pool_arr[p, l]:
+                    L0_out[pos, l] = Lk1[s, l]
+                    L1_out[pos, l] = Lk2[s, l]
+                else:
+                    L0_out[pos, l] = Lk0[s, l]
+                    L1_out[pos, l] = Lk1[s, l]
+            pos += 1
+
+    return L0_out, L1_out
 
 
 def _run_subtraction_round_soft(pool, probs_k, site_priors=None,
@@ -1218,24 +1396,33 @@ def _run_subtraction_round_soft(pool, probs_k, site_priors=None,
 
     L0_list = []
     L1_list = []
-    for h in pool:
-        hb = np.asarray(h).astype(np.bool_)                       # (L,)
-        # Soft cleanness screen from the POSTERIOR (admissible mass).
-        adm = np.where(hb[None, :], P1 + P2, P0 + P1)             # (N, L)
-        keep = adm.mean(axis=1) >= cleanness_threshold            # (N,)
-        if not keep.any():
-            continue
-        # Other-strand likelihoods (un-renormalised; per-site scale cancels):
-        #   h=0: o=0 -> g=0, o=1 -> g=1 ;  h=1: o=0 -> g=1, o=1 -> g=2
-        l0 = np.where(hb[None, :], Lk1, Lk0)                      # (N, L)
-        l1 = np.where(hb[None, :], Lk2, Lk1)                      # (N, L)
-        L0_list.append(l0[keep])
-        L1_list.append(l1[keep])
+    # Parallelise the per-pool work: stack the pool and make the per-genotype
+    # arrays contiguous, then hand off to the kernel, which prange's over pool
+    # and returns the admitted (L0, L1) rows in (pool-outer, sample-inner)
+    # order -- exactly the order the old `for h in pool` + vstack produced.
+    # The likelihood VALUES are element-wise selects of the same Lk0/Lk1/Lk2
+    # numpy computed above, so they are bit-identical; only the cleanness
+    # screen's per-row mean is summed in a different order (sequential vs
+    # numpy's pairwise `adm.mean`), a sanctioned ULP-level difference that
+    # could only matter for a sample whose admissible mass sits within a few
+    # ULP of the threshold.  (L0_list / L1_list are retained as the empty
+    # sentinels the no-candidate paths below still reference.)
+    pool_arr = np.empty((len(pool), L), dtype=np.int64)
+    for p in range(len(pool)):
+        pool_arr[p] = np.asarray(pool[p])
+    L0_out, L1_out = _run_subtraction_round_soft_kernel(
+        pool_arr,
+        np.ascontiguousarray(P0, dtype=np.float64),
+        np.ascontiguousarray(P1, dtype=np.float64),
+        np.ascontiguousarray(P2, dtype=np.float64),
+        np.ascontiguousarray(Lk0, dtype=np.float64),
+        np.ascontiguousarray(Lk1, dtype=np.float64),
+        np.ascontiguousarray(Lk2, dtype=np.float64),
+        float(cleanness_threshold))
 
-    if not L0_list:
+    if L0_out.shape[0] == 0:
         return empty, empty
-    return (np.ascontiguousarray(np.vstack(L0_list), dtype=np.float64),
-            np.ascontiguousarray(np.vstack(L1_list), dtype=np.float64))
+    return L0_out, L1_out
 
 
 @njit(cache=True)
@@ -1376,6 +1563,46 @@ def _bernoulli_mixture_ml_em(L0, L1, K, init_theta,
     return theta, pi, float(ll), int(n_iter), resp
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _run_ml_em_restarts_kernel(L0, L1, K, all_inits, max_iter, tol, eps):
+    """ML-marginalised analogue of _run_em_restarts_kernel: run all EM
+    restarts for a fixed K in parallel ACROSS restarts.
+
+    `prange` is over the restart axis; each restart calls the serial
+    _bernoulli_mixture_ml_em_kernel on its own pre-generated init and writes
+    only its own output rows.  The kernel is deterministic given init_theta
+    (no internal RNG), so each restart's (ll, theta) is bit-identical to the
+    serial path.  Only ll and theta are retained — the ML K-sweep discards pi
+    and resp — so this returns just those two, but the kernel is invoked with
+    its full signature.
+
+    Arguments:
+        L0, L1:    (M, L) float64 — per-strand "other-strand" likelihoods,
+                   contiguous (the caller passes the same ascontiguousarray
+                   copies the _bernoulli_mixture_ml_em wrapper would build).
+        K:         number of mixture components.
+        all_inits: (R, K, L) float64 — per-restart K-means++ init profiles,
+                   generated SERIALLY by the caller to preserve the RNG stream.
+        max_iter, tol, eps: EM hyper-parameters.
+
+    Returns:
+        lls:    (R,)      final log-likelihood per restart.
+        thetas: (R, K, L) final theta per restart.
+    The caller selects the best restart with a strict-> lowest-index reduction
+    over `lls`, reproducing the old `if best is None or ll > best[0]` semantic.
+    """
+    R = all_inits.shape[0]
+    L = L0.shape[1]
+    lls = np.empty(R, dtype=np.float64)
+    thetas = np.empty((R, K, L), dtype=np.float64)
+    for r in prange(R):
+        theta_r, pi_r, ll_r, n_iter_r, resp_r = _bernoulli_mixture_ml_em_kernel(
+            L0, L1, K, all_inits[r], max_iter, tol, eps)
+        lls[r] = ll_r
+        thetas[r] = theta_r
+    return lls, thetas
+
+
 def _fit_bernoulli_mixture_ml_select_K(L0, L1,
                                          K_max=RECOVERY_MIXTURE_K_MAX,
                                          n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
@@ -1443,17 +1670,36 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
     for K in range(1, K_max_effective + 1):
         # Re-check thread allocation at each K of the ML-mixture sweep.
         dynamic_threads.apply_dynamic_threads()
-        best_for_K = None   # (LL, theta)
+        # Multi-restart, parallelised across restarts (same construction and
+        # bit-identity argument as _run_em_restarts_kernel in the argmax path).
+        # The K-means++ inits are generated SERIALLY here, consuming `rng` in
+        # the same order as the old per-restart loop (one draw per restart,
+        # rows of Eo as the initial profiles), so the inits are identical; the
+        # EM runs are dispatched together via _run_ml_em_restarts_kernel whose
+        # prange is over restarts.  Each EM is deterministic given its init, so
+        # every restart's (ll, theta) is bit-identical to the old serial loop,
+        # and the strict-> lowest-index reduction picks the same restart the
+        # old `if best is None or ll > best[0]` loop did.  L0/L1 are made
+        # contiguous float64 exactly as the _bernoulli_mixture_ml_em wrapper
+        # does so the kernel sees identical inputs.
+        L0c = np.ascontiguousarray(L0, dtype=np.float64)
+        L1c = np.ascontiguousarray(L1, dtype=np.float64)
+        all_inits = np.empty((n_restarts, K, L), dtype=np.float64)
         for restart in range(n_restarts):
-            # _kmeans_pp_init returns the selected centers themselves
-            # (rows of Eo), which serve directly as the initial profiles.
-            init_theta = _kmeans_pp_init(Eo, K, rng)
-            theta, pi, ll, _n_iter, _resp = _bernoulli_mixture_ml_em(
-                L0, L1, K, init_theta=init_theta)
-            if best_for_K is None or ll > best_for_K[0]:
-                best_for_K = (ll, theta)
-
-        ll, theta = best_for_K
+            all_inits[restart] = _kmeans_pp_init(Eo, K, rng)
+        lls, thetas = _run_ml_em_restarts_kernel(
+            L0c, L1c, K, all_inits,
+            int(RECOVERY_MIXTURE_MAX_ITER), float(RECOVERY_MIXTURE_TOL),
+            float(RECOVERY_MIXTURE_THETA_EPS))
+        best_r = 0
+        for r in range(1, n_restarts):
+            if lls[r] > lls[best_r]:
+                best_r = r
+        ll = float(lls[best_r])
+        # .copy() so theta is a standalone array (as the per-restart
+        # _bernoulli_mixture_ml_em returned), not a view into the per-K batch
+        # buffer reallocated on the next K.
+        theta = thetas[best_r].copy()
         n_params = K * L + (K - 1)
         bic = -2 * ll + n_params * np.log(max(M, 2))
         bic_trace.append((K, bic, ll))
@@ -1489,7 +1735,7 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
     return [binary_thetas[k].copy() for k in range(best_K)]
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, fastmath=False)
 def _generate_carrier_residuals_kernel(argmax_dosage, H, A,
                                           low_idx_mask, cleanness_threshold):
     """Numba kernel for _generate_carrier_residuals (verbose=False only).
@@ -1520,12 +1766,19 @@ def _generate_carrier_residuals_kernel(argmax_dosage, H, A,
     """
     N, L = argmax_dosage.shape
     K = H.shape[0]
-    # Worst case: every (s, slot, partner_idx) triple accepted.
-    # At production N=320, K=6 this is 3840 rows — tiny.
-    out_buf = np.empty((N * 2 * K, L), dtype=np.int64)
-    out_count = 0
-
-    for s in range(N):
+    # Parallelised over samples (prange), two-pass so the append positions
+    # are deterministic (a shared counter would race).  Pass 1 records the
+    # accept decision per (sample, slot, partner_idx) and counts accepted
+    # triples per sample; cumsum gives per-sample output offsets; pass 2 has
+    # each sample write its accepted clipped residuals into its own disjoint
+    # block, in (slot, partner_idx) order.  The offsets reproduce the
+    # s-outer order and the inner loops the slot-middle / partner-inner
+    # order, so the output is byte-identical to the serial single-counter
+    # version.
+    keep = np.zeros((N, 2, K), dtype=np.bool_)
+    counts = np.zeros(N, dtype=np.int64)
+    for s in prange(N):
+        cnt = 0
         for slot in range(2):
             a_idx = A[s, slot]
             # A entries: integers in [0, K] where K is the wildcard
@@ -1552,23 +1805,39 @@ def _generate_carrier_residuals_kernel(argmax_dosage, H, A,
                     if 0 <= r <= 1:
                         n_in_01 += 1
                 cleanness = n_in_01 / L
-                if cleanness < cleanness_threshold:
+                if cleanness >= cleanness_threshold:
+                    keep[s, slot, partner_idx] = True
+                    cnt += 1
+        counts[s] = cnt
+
+    offsets = np.zeros(N, dtype=np.int64)
+    total = 0
+    for s in range(N):
+        offsets[s] = total
+        total += counts[s]
+
+    out_buf = np.empty((total, L), dtype=np.int64)
+    for s in prange(N):
+        pos = offsets[s]
+        for slot in range(2):
+            for partner_idx in range(K):
+                if not keep[s, slot, partner_idx]:
                     continue
                 # Accepted — write clipped residual
                 for l in range(L):
                     r = argmax_dosage[s, l] - H[partner_idx, l]
                     if r < 0:
-                        out_buf[out_count, l] = 0
+                        out_buf[pos, l] = 0
                     elif r > 1:
-                        out_buf[out_count, l] = 1
+                        out_buf[pos, l] = 1
                     else:
-                        out_buf[out_count, l] = r
-                out_count += 1
+                        out_buf[pos, l] = r
+                pos += 1
 
-    return out_buf[:out_count], out_count
+    return out_buf, total
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True, fastmath=False)
 def _generate_all_sample_residuals_kernel(argmax_dosage, H, A,
                                           cleanness_threshold):
     """Numba kernel for _generate_all_sample_residuals (verbose=False path).
@@ -1607,13 +1876,17 @@ def _generate_all_sample_residuals_kernel(argmax_dosage, H, A,
     """
     N, L = argmax_dosage.shape
     K = H.shape[0]
-    # Worst case: every (s, slot) pair accepted.  At N=320 this is 640
-    # rows — tiny.  Each row is L int64 = 1.6 KB at L=200 → 1 MB total
-    # worst case, well within budget.
-    out_buf = np.empty((N * 2, L), dtype=np.int64)
-    out_count = 0
-
-    for s in range(N):
+    # Parallelised over samples (prange), two-pass so the append positions
+    # are deterministic.  Pass 1 records the accept decision per (sample,
+    # slot) and counts accepted slots per sample; cumsum gives per-sample
+    # output offsets; pass 2 has each sample write its accepted clipped
+    # residuals into its own disjoint block in slot order.  Byte-identical
+    # to the serial single-counter version (same values, same s-outer /
+    # slot-inner sequence).
+    keep = np.zeros((N, 2), dtype=np.bool_)
+    counts = np.zeros(N, dtype=np.int64)
+    for s in prange(N):
+        cnt = 0
         for slot in range(2):
             # The partner is the OTHER slot's H row.  We want to expose
             # the founder at `slot` so we subtract A[s, 1 - slot].
@@ -1630,8 +1903,24 @@ def _generate_all_sample_residuals_kernel(argmax_dosage, H, A,
                 if 0 <= r <= 1:
                     n_in_01 += 1
             cleanness = n_in_01 / L
-            if cleanness < cleanness_threshold:
+            if cleanness >= cleanness_threshold:
+                keep[s, slot] = True
+                cnt += 1
+        counts[s] = cnt
+
+    offsets = np.zeros(N, dtype=np.int64)
+    total = 0
+    for s in range(N):
+        offsets[s] = total
+        total += counts[s]
+
+    out_buf = np.empty((total, L), dtype=np.int64)
+    for s in prange(N):
+        pos = offsets[s]
+        for slot in range(2):
+            if not keep[s, slot]:
                 continue
+            partner_idx = A[s, 1 - slot]
             # Accepted — write clipped residual.  Clipping is defensive:
             # if cleanness_threshold < 1.0 some sites can be out-of-
             # range; we clip to {0, 1} so downstream consumers see a
@@ -1641,14 +1930,14 @@ def _generate_all_sample_residuals_kernel(argmax_dosage, H, A,
             for l in range(L):
                 r = argmax_dosage[s, l] - H[partner_idx, l]
                 if r < 0:
-                    out_buf[out_count, l] = 0
+                    out_buf[pos, l] = 0
                 elif r > 1:
-                    out_buf[out_count, l] = 1
+                    out_buf[pos, l] = 1
                 else:
-                    out_buf[out_count, l] = r
-            out_count += 1
+                    out_buf[pos, l] = r
+            pos += 1
 
-    return out_buf[:out_count], out_count
+    return out_buf, total
 
 
 def _generate_carrier_residuals(probs_k, H, A, low_idx_list,
@@ -1847,16 +2136,24 @@ def _greedy_bic_select(cache, cc_scale=RECOVERY_OUTER_CC_SCALE,
               f'cc={cc:.1f}, threshold cc/2={cc/2:.1f}')
 
     while len(selected_indices) < min(len(candidate_haps), max_k):
+        # Evaluate adding each still-unused candidate, parallelised ACROSS
+        # candidates (prange in cache.batch_nll_for_subsets) instead of a
+        # sequential Python loop of one tiny per-sample Viterbi each — the
+        # latter pins ~1 core on pathological large-pool blocks.  `unused` is
+        # built in increasing-ci order and the reduction below uses strict <,
+        # so the chosen candidate (and lowest-ci tie-break) is identical to the
+        # old loop; each NLL is bit-identical to cache.nll_for_subset.
+        unused = [ci for ci in range(len(candidate_haps)) if ci not in used]
         best_ci = -1
         best_nll = float('inf')
-        for ci in range(len(candidate_haps)):
-            if ci in used:
-                continue
-            trial_indices = selected_indices + [ci]
-            trial_nll = cache.nll_for_subset(trial_indices)
-            if trial_nll < best_nll:
-                best_nll = trial_nll
-                best_ci = ci
+        if unused:
+            trial_subsets = np.array(
+                [selected_indices + [ci] for ci in unused], dtype=np.int64)
+            trial_nlls = cache.batch_nll_for_subsets(trial_subsets)
+            for j in range(len(unused)):
+                if trial_nlls[j] < best_nll:
+                    best_nll = float(trial_nlls[j])
+                    best_ci = unused[j]
 
         if best_ci < 0:
             break
@@ -1927,20 +2224,26 @@ def _swap_refine(cache, selected_indices, current_nll,
     for pass_num in range(max_passes):
         improved_in_pass = False
         for si in range(K):
+            # Sweep all unused pool members for position si, parallelised
+            # ACROSS candidates (prange) instead of a sequential per-candidate
+            # Python loop.  Threshold start (current_nll - nll_tolerance) and
+            # strict-< reduction over `unused` in increasing-ci order reproduce
+            # the old loop exactly (same accepted swap, same lowest-ci
+            # tie-break); each NLL is bit-identical to cache.nll_for_subset.
+            unused = [ci for ci in range(pool_size) if ci not in sel_ind]
             best_ci = -1
             best_nll = current_nll - nll_tolerance
-            for ci in range(pool_size):
-                if ci in sel_ind:
-                    continue
-                # Trial: replace pool index at position si with ci.
-                # Build the trial subset by index substitution and score
-                # it through the cache (no emission rebuild).
-                trial_indices = list(sel_ind)
-                trial_indices[si] = ci
-                trial_nll = cache.nll_for_subset(trial_indices)
-                if trial_nll < best_nll:
-                    best_nll = trial_nll
-                    best_ci = ci
+            if unused:
+                base = np.array(sel_ind, dtype=np.int64)
+                trial_subsets = np.empty((len(unused), K), dtype=np.int64)
+                for j in range(len(unused)):
+                    trial_subsets[j] = base
+                    trial_subsets[j, si] = unused[j]
+                trial_nlls = cache.batch_nll_for_subsets(trial_subsets)
+                for j in range(len(unused)):
+                    if trial_nlls[j] < best_nll:
+                        best_nll = float(trial_nlls[j])
+                        best_ci = unused[j]
             if best_ci >= 0:
                 if verbose:
                     print(f'    Swap: pos {si} (cand[{sel_ind[si]}]) -> cand[{best_ci}], '
@@ -2002,13 +2305,31 @@ def _bic_prune(cache, selected_indices,
         best_drop_idx = -1
         best_dnll = cc / 2   # threshold; only drop if dnll_increase < this
 
-        for i in range(K):
-            trial = sel_ind[:i] + sel_ind[i+1:]
-            nll_trial = cache.nll_for_subset(trial)
-            dnll = nll_trial - nll_full   # NLL increase from dropping
-            if dnll < best_dnll:
-                best_dnll = dnll
-                best_drop_idx = i
+        # Evaluate every leave-one-out drop in parallel across positions
+        # (prange in cache.batch_nll_for_subsets) instead of a sequential
+        # Python loop.  Trials are built in increasing-position order and the
+        # reduction uses strict <, so the dropped position (and lowest-index
+        # tie-break) matches the old loop; each leave-one-out NLL is
+        # bit-identical to cache.nll_for_subset.  K == 1's only trial is the
+        # empty subset, scored via nll_for_subset (the precomputed K=0 NLL),
+        # since the batch kernel's contract is K_sub >= 1.
+        if K == 1:
+            nll_trial = cache.nll_for_subset([])
+            if nll_trial - nll_full < best_dnll:
+                best_dnll = float(nll_trial - nll_full)
+                best_drop_idx = 0
+        else:
+            sel_arr = np.array(sel_ind, dtype=np.int64)
+            trial_subsets = np.empty((K, K - 1), dtype=np.int64)
+            for i in range(K):
+                trial_subsets[i, :i] = sel_arr[:i]
+                trial_subsets[i, i:] = sel_arr[i + 1:]
+            trial_nlls = cache.batch_nll_for_subsets(trial_subsets)
+            for i in range(K):
+                dnll = trial_nlls[i] - nll_full   # NLL increase from dropping
+                if dnll < best_dnll:
+                    best_dnll = float(dnll)
+                    best_drop_idx = i
 
         if best_drop_idx < 0:
             break
@@ -2023,6 +2344,46 @@ def _bic_prune(cache, selected_indices,
     sel_haps = [cache.pool_haps[i] for i in sel_ind]
     return sel_ind, sel_haps, final_nll, n_dropped
 
+
+
+@njit(cache=True, parallel=True, fastmath=False)
+def _dedup_vs_refset_kernel(cands, refset, threshold_pct):
+    """For each row of `cands`, flag whether it duplicates ANY row of
+    `refset` -- i.e. lies within threshold_pct Hamming-% of it.
+
+    Parallel pre-screen for the rescue dedup loops.  The per-pair distance
+    is computed exactly as _hamming_pct_kept: count differing sites, divide
+    by L, multiply by 100.  prange is over candidates; each candidate scans
+    the reference rows with an early break on the first match.  Because the
+    "within threshold of ANY reference row" decision does not depend on the
+    order of candidates, it is safe to compute for all candidates in
+    parallel -- unlike the dedup-vs-already-accepted check, which is
+    order-dependent and stays sequential in the caller.
+
+    Args:
+        cands: (n, L) int64 -- candidate haps.
+        refset: (R, L) int64 -- reference haps (e.g. the current founders).
+        threshold_pct: float -- duplicate if Hamming-% < this.
+
+    Returns:
+        (n,) bool -- True where the candidate duplicates some reference row.
+    """
+    n = cands.shape[0]
+    L = cands.shape[1]
+    R = refset.shape[0]
+    out = np.zeros(n, dtype=np.bool_)
+    for i in prange(n):
+        dup = False
+        for r in range(R):
+            diff = 0
+            for l in range(L):
+                if cands[i, l] != refset[r, l]:
+                    diff += 1
+            if (diff / L) * 100.0 < threshold_pct:
+                dup = True
+                break
+        out[i] = dup
+    return out
 
 
 @njit(cache=True)
@@ -2884,15 +3245,30 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
         return H, A, costs, wcs, NLL
 
     H_list = [H[k] for k in range(K)]
+    # The dedup-vs-current-H decision is order-independent (a candidate within
+    # 0.5% Hamming of ANY current founder is dropped regardless of accept
+    # order), so flag all such candidates in one parallel kernel pass (prange
+    # over candidates x founders) instead of the nested Python loop.  The
+    # dedup-vs-already-accepted check is inherently order-dependent and stays
+    # sequential, but it now only runs over the H-survivors with the same
+    # cheap early-break.  The resulting new_candidates is identical to the old
+    # loop: the per-pair Hamming-% is computed the same way
+    # (_dedup_vs_refset_kernel mirrors _hamming_pct_kept exactly), and a
+    # candidate is admitted iff it duplicates neither H nor an earlier accept.
+    raw_arr = np.empty((len(raw_pool_candidates), L_kept), dtype=np.int64)
+    for ci in range(len(raw_pool_candidates)):
+        raw_arr[ci] = np.asarray(raw_pool_candidates[ci])
+    if K > 0:
+        H_ref = np.ascontiguousarray(np.asarray(H_list), dtype=np.int64)
+    else:
+        H_ref = np.empty((0, L_kept), dtype=np.int64)
+    dup_vs_H = _dedup_vs_refset_kernel(raw_arr, H_ref, 0.5)
     new_candidates = []
-    for cand in raw_pool_candidates:
-        is_dup = False
-        for h in H_list:
-            if _hamming_pct_kept(cand, h) < 0.5:
-                is_dup = True
-                break
-        if is_dup:
+    for ci in range(len(raw_pool_candidates)):
+        if dup_vs_H[ci]:
             continue
+        cand = raw_pool_candidates[ci]
+        is_dup = False
         for nc in new_candidates:
             if _hamming_pct_kept(cand, nc) < 0.5:
                 is_dup = True
