@@ -27,6 +27,7 @@ import warnings
 from multiprocessing.shared_memory import SharedMemory
 
 import bhd_kernels
+import bhd_chimera
 import block_haplotypes
 import block_haplotype_refinement
 
@@ -742,7 +743,7 @@ def _quality_check(block, block_probs, new_hap, num_samples, min_rr):
     new_hap_2d[np.arange(n_sites), new_hap] = 1.0
     expanded_hap_dict[len(hap_keys)] = new_hap_2d
     
-    pruned = bhd_kernels.prune_chimeras(
+    pruned = bhd_chimera.prune_chimeras(
         expanded_hap_dict, block_probs,
         max_recombs=1, max_mismatch_percent=0.5,
         min_mean_delta_to_protect=0.25
@@ -830,7 +831,7 @@ def _quality_check_from_arrays(base_hap_array, hap_dict_2d, block_probs,
     new_hap_2d[np.arange(n_sites), new_hap] = 1.0
     expanded_hap_dict[len(hap_keys)] = new_hap_2d
     
-    pruned = bhd_kernels.prune_chimeras(
+    pruned = bhd_chimera.prune_chimeras(
         expanded_hap_dict, block_probs,
         max_recombs=1, max_mismatch_percent=0.5,
         min_mean_delta_to_protect=0.25
@@ -1594,7 +1595,7 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
         block = output_list[bi]
         if block.probs_array is None or len(block.haplotypes) < 3:
             continue
-        pruned_haps = bhd_kernels.prune_chimeras(
+        pruned_haps = bhd_chimera.prune_chimeras(
             block.haplotypes, block.probs_array,
             max_recombs=1,
             max_mismatch_percent=0.25,
