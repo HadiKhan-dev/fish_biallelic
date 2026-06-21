@@ -5,8 +5,7 @@ discovery.  As of the 4-file split, this file contains:
 
   - Multi-start constants (K_MEDOID_STARTS_DEFAULT,
     MEDOID_MIN_N_FOR_MULTISTART, SEED_SOFT_MIN_CLUSTER_SIZE)
-  - Forkserver pool scaffolding (_ForkserverPool, _init_block_worker,
-    _BH_ACTIVE_COUNTER, _BH_TOTAL_CORES)
+  - Forkserver pool scaffolding (_ForkserverPool, _init_block_worker)
   - _grow_K — the main K-growth coordinate-descent orchestrator
   - _soft_cluster_seed_haps, _initial_kgrowth_with_medoids — soft-cluster
     multi-start seeding
@@ -61,11 +60,10 @@ import bhd_pairwise
 # Explicit named imports for symbols used directly in this file's
 # function bodies (function/constant references that don't need
 # runtime mutation).  Cross-module ENABLED-flag reads use module-
-# attribute lookup (e.g. bhd_pairwise.PAIRWISE_RECOVERY_ENABLED) to
+# attribute lookup (e.g. PAIRWISE_RECOVERY_ENABLED) to
 # preserve runtime-mutation semantics.
 from bhd_kernels import (
     MASK,
-    DEFAULT_LAMBDA,
     LOG_EPS,
     _safe_neg_log,
     _init_hap_from_sample_dosage,
@@ -79,30 +77,39 @@ from bhd_fit import (
 )
 from bhd_pool import PoolEmissionCache
 from bhd_recovery import (
-    RECOVERY_HAPS_EQUAL_EPS_PCT,
-    RECOVERY_OUTER_CC_SCALE,
-    RECOVERY_MAX_K,
-    RECOVERY_MAX_ROUNDS,
-    RECOVERY_INTRA_ROUND_DEDUP_PCT,
-    RECOVERY_MIXTURE_K_MAX,
-    RECOVERY_MIXTURE_N_RESTARTS,
-    RECOVERY_MIXTURE_RNG_SEED,
-    RECOVERY_MIXTURE_PATIENCE,
-    RECOVERY_CLEANNESS_THRESHOLD,
-    RECOVERY_SWAP_NLL_TOLERANCE,
-    RECOVERY_MAX_OUTER_ITERATIONS,
-    RECOVERY_LOW_CARRIER_TRIGGER_FRAC,
-    RESIDUAL_TRIO_ENABLED,
-    _greedy_bic_select,
-    _swap_refine,
-    _bic_prune,
     _subtraction_recovery_round_loop,
     _late_low_carrier_rescue,
     _residual_trio_rescue,
+)
+from bhd_recovery_select import (
+    _greedy_bic_select,
+    _swap_refine,
+    _bic_prune,
     _hamming_pct_kept,
     _haps_equal,
 )
 from bhd_trio import _trio_recovery_candidate_haps
+from bhd_config import (
+    DEFAULT_LAMBDA,
+    K_MEDOID_STARTS_DEFAULT,
+    MEDOID_MIN_N_FOR_MULTISTART,
+    PAIRWISE_RECOVERY_ENABLED,
+    RECOVERY_CLEANNESS_THRESHOLD,
+    RECOVERY_HAPS_EQUAL_EPS_PCT,
+    RECOVERY_INTRA_ROUND_DEDUP_PCT,
+    RECOVERY_MAX_K,
+    RECOVERY_MAX_OUTER_ITERATIONS,
+    RECOVERY_MAX_ROUNDS,
+    RECOVERY_MIXTURE_K_MAX,
+    RECOVERY_MIXTURE_N_RESTARTS,
+    RECOVERY_MIXTURE_PATIENCE,
+    RECOVERY_MIXTURE_RNG_SEED,
+    RECOVERY_OUTER_CC_SCALE,
+    RECOVERY_SWAP_NLL_TOLERANCE,
+    RESIDUAL_TRIO_ENABLED,
+    SEED_SOFT_MIN_CLUSTER_SIZE,
+    TRIO_RECOVERY_ENABLED,
+)
 
 # BlockResult, BlockResults, and consolidate_similar_candidates were migrated
 # out of the retired legacy block_haplotypes.py into this module — see the
@@ -173,23 +180,7 @@ np.seterr(divide='ignore', invalid='ignore')
 # K=5 seeds, stage 3 cost is roughly 5x the single-trajectory cost.
 # Per-block parallelism unchanged.
 
-# Number of cluster-seed starts at the initial K=0 -> K=1 transition.
-# Reducing to 1 disables multi-start (recovers single-start behavior).
-# Increasing improves robustness on blocks with very heterogeneous truth
-# founders but costs proportionally more time.
-K_MEDOID_STARTS_DEFAULT = 5
 
-# Minimum sample count for multi-start to be applied.  Below this we fall
-# back to a single branch (soft clustering needs at least a few samples
-# per pair-type to form clusters).
-MEDOID_MIN_N_FOR_MULTISTART = 3
-
-# HDBSCAN minimum cluster size for the soft seed front-end — the minimum
-# number of samples that must share a pair-type for that pair-type to seed a
-# branch.  Mirrors the trio front-end's TRIO_SOFT_MIN_CLUSTER_SIZE.  Other
-# HDBSCAN parameters use the library defaults, matching block_haplotypes.py's
-# precomputed-metric usage.
-SEED_SOFT_MIN_CLUSTER_SIZE = 3
 # =============================================================================
 # REJECTED EXPERIMENT — POST-CD TWO-STEP REFINEMENT
 # =============================================================================
@@ -253,25 +244,17 @@ class _ForkserverPool(multiprocessing.pool.Pool):
         super().__init__(*args, **kwargs)
 
 
-_BH_ACTIVE_COUNTER = None
-_BH_TOTAL_CORES = None
-
-
 def _init_block_worker(total_cores, active_counter, extra_counter=None):
     """Initializer for worker processes — sets up dynamic numba thread
     allocation based on number of currently-active workers.
 
-    Wires both this module's _BH_* globals (used to increment/decrement the
-    active count around each block) and dynamic_threads' shared dynamic-thread
-    state, which is read by dynamic_threads.apply_dynamic_threads() at every
+    Wires dynamic_threads' shared dynamic-thread state, which is read by
+    dynamic_threads.apply_dynamic_threads() at every
     phase boundary across this module + bhd_recovery + bhd_trio.  That lets a
     straggler block GROW into cores freed as its peers finish, instead of
     being pinned for its whole run to the thread count it got at start.
     extra_counter drives the remainder distribution (total threads in use ==
     total_cores, zero idle cores); None falls back to floor-only."""
-    global _BH_ACTIVE_COUNTER, _BH_TOTAL_CORES
-    _BH_ACTIVE_COUNTER = active_counter
-    _BH_TOTAL_CORES = total_cores
     try:
         import os, numba
         os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
@@ -1218,12 +1201,12 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
     # candidates fail BIC trim).  In that case we fall through to step
     # 1's multistart path.
     H_seed = np.zeros((0, probs_k.shape[1]), dtype=np.int64)
-    if bhd_trio.TRIO_RECOVERY_ENABLED or bhd_pairwise.PAIRWISE_RECOVERY_ENABLED:
+    if TRIO_RECOVERY_ENABLED or PAIRWISE_RECOVERY_ENABLED:
         # Gather trio candidates (XOR-triangle algebraic algorithm — see
         # _trio_recovery_candidate_haps above).  When TRIO_RECOVERY_ENABLED
         # is False, trio is skipped entirely (production behavior before
         # trio integration).
-        if bhd_trio.TRIO_RECOVERY_ENABLED:
+        if TRIO_RECOVERY_ENABLED:
             H_trio_candidates = _trio_recovery_candidate_haps(
                 probs_k, verbose=verbose)
         else:
@@ -1238,7 +1221,7 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
         # strong there).  Feeding both into the combined seed gives BIC-
         # trim a richer pool.  See pairwise_common_hap.py for the v6
         # algorithm and the 50-block integration test results.
-        if bhd_pairwise.PAIRWISE_RECOVERY_ENABLED:
+        if PAIRWISE_RECOVERY_ENABLED:
             pairwise_list = bhd_pairwise.pairwise_recovery_candidate_haps(
                 probs_k, verbose=verbose)
         else:
@@ -2276,9 +2259,7 @@ def _worker_generate_block_direct(args):
     # (here + bhd_recovery / bhd_trio) re-checks this allocation at every
     # phase boundary via dynamic_threads.apply_dynamic_threads(), so a straggler
     # block grows into cores freed as its peers finish.
-    if _BH_ACTIVE_COUNTER is not None:
-        with _BH_ACTIVE_COUNTER.get_lock():
-            _BH_ACTIVE_COUNTER.value += 1
+    dynamic_threads.increment_active()
     dynamic_threads.apply_dynamic_threads()
 
     try:
@@ -2293,9 +2274,7 @@ def _worker_generate_block_direct(args):
         # tasks (set once in _init_block_worker) for Pool worker reuse — only
         # the per-task extra-claim is released here.
         dynamic_threads.release_dynamic_extra()
-        if _BH_ACTIVE_COUNTER is not None:
-            with _BH_ACTIVE_COUNTER.get_lock():
-                _BH_ACTIVE_COUNTER.value -= 1
+        dynamic_threads.decrement_active()
 
 
 def generate_all_block_haplotypes(genomic_data,

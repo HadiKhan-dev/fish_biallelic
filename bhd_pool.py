@@ -8,14 +8,17 @@ import math
 from numba import njit, prange
 
 from bhd_kernels import (
-    DEFAULT_LAMBDA,
-    VITERBI_SNPS_PER_BIN,
-    VITERBI_SWITCH_PENALTY,
     _log_probs_kernel,
     _per_site_cost_W_W,
 )
 from bhd_fit import (
     _compute_nll_for_subset,
+)
+from bhd_config import (
+    DEFAULT_LAMBDA,
+    POOL_EMISSION_CACHE_MAX_BYTES,
+    VITERBI_SNPS_PER_BIN,
+    VITERBI_SWITCH_PENALTY,
 )
 
 
@@ -264,25 +267,6 @@ def _viterbi_partial_binned_emissions_kernel(
                 out_tensor[s, WW_state_slot, b] = acc
 
     return out_tensor
-
-
-# Per-cache byte budget for the precomputed full-pool emission tensor built
-# in PoolEmissionCache.__init__.  When the tensor would exceed this, the
-# cache skips the allocation and falls back to on-the-fly per-subset scoring
-# (see the MEMORY GUARD block in __init__).  The tensor's state axis is
-# K_states = K_pool*(K_pool+1)//2 + K_pool + 1, i.e. O(K_pool^2); at the
-# small pools (<= ~30) that block discovery produces at normal read depth it
-# is a ~30 MB speed win, but at low read depth the trio/pairwise candidate
-# pool can balloon to thousands and the tensor then runs to hundreds of GiB
-# (K_pool=3398, N=320, n_bins=20 -> 276 GiB), OOM-killing the worker.
-# 256 MiB caps a single cache's tensor at K_pool ~ 100 (at N=320, n_bins=20).
-# Block discovery runs up to n_processes workers concurrently, each of which
-# may hold one seed-trim cache, so the worst-case aggregate is bounded by
-# ~256 MiB * n_processes (~29 GiB at 112 workers) rather than the unbounded
-# hundreds-of-GiB a single low-depth block could otherwise demand.  Tunable:
-# raise it on large-memory nodes to keep the fast path for bigger pools,
-# lower it when running many workers on a memory-tight node.
-POOL_EMISSION_CACHE_MAX_BYTES = 256 * 1024 * 1024
 
 
 @njit(cache=True, parallel=True, fastmath=False)

@@ -100,6 +100,20 @@
 import warnings
 
 import numpy as np
+from bhd_config import (
+    CROSS_CLUSTER_DEDUP_PCT,
+    MAX_CLUSTER_GROW_ITER,
+    MAX_LENIENT_EXCESS_RATIO,
+    MIN_CARRIERS_FOR_OUTPUT,
+    MIN_CLUSTER_OVERLAP_FRAC,
+    MIN_CLUSTER_SIZE,
+    MIN_DETERMINED_FOR_OUTPUT_FRAC,
+    MIN_PARTIAL_DETERMINED_FRAC,
+    MIN_STRICT_CARRIER_FRAC,
+    NOISE_SLACK_FRAC,
+    PAIRWISE_RESIDUAL_MODE,
+    PAIRWISE_SOFT_CONFLICT_TAU,
+)
 
 # Defensive numba import matching the project convention (see
 # analysis_utils.py, block_haplotypes.py, bhd_trio.py).  If numba is
@@ -136,67 +150,6 @@ except ImportError:
 # MASTER ENABLE FLAG (consumed by block_haplotypes.py and bhd_recovery.py)
 # =============================================================================
 
-# Master switch — set to False to bypass v6 pairwise common-hap recovery
-# entirely.  When True (the default), pairwise candidates are merged into
-# the trio seed pool at the start of _grow_K_with_recovery AND into the
-# rescue pool inside _late_low_carrier_rescue.  Integration testing on a
-# 50-block sample (see integration test summary in bhd_pairwise.py)
-# showed +1 truth captured and -1 spurious vs trio-only baseline, driven
-# by chr4:1739 where trio produced 0 candidates and pairwise produced 2
-# clean ones.  No blocks regressed.  Pairwise adds ~0.4 sec/block to
-# stage-3 founder discovery.
-PAIRWISE_RECOVERY_ENABLED = True
-
-# -----------------------------------------------------------------------------
-# Residual mode for pairwise recovery (low-read-depth)
-# -----------------------------------------------------------------------------
-# PAIRWISE_RESIDUAL_MODE selects how the two argmax-dosage hard-call gates in
-# this module decide pair compatibility and carrier consistency:
-#
-#   "argmax" (default) — the behaviour documented throughout: a pair is
-#            compatible if its ARGMAX dosages conflict (one 0, the other 2)
-#            at <= MAX_PAIR_INCOMPAT sites, and a sample is a carrier of a
-#            hap if its ARGMAX dosage is incompatible (h=0 & dosage=2, or
-#            h=1 & dosage=0) at <= max_incompat sites.  This is the validated
-#            production path; selecting "argmax" leaves build_pairwise_partial_
-#            haps and apply_quality_filters bit-identical to before.
-#
-#   "soft" — a low-read-depth front-end that keeps the genotype posteriors
-#            instead of hard-calling the dosage.  Both gates count, per site,
-#            only CONFIDENT conflicts/incompatibilities — sites where the
-#            posterior probability of the offending genotype exceeds
-#            PAIRWISE_SOFT_CONFLICT_TAU — rather than hard argmax events:
-#              pair compat:   conflict prob = P_i(0)P_j(2) + P_i(2)P_j(0)
-#              carrier h=0:   incompat prob = P_s(2)   (sample hom-alt)
-#              carrier h=1:   incompat prob = P_s(0)   (sample hom-ref)
-#            At low depth a diffuse posterior contributes a small probability,
-#            not a hard +1, so argmax noise no longer spuriously rejects
-#            truly-compatible pairs (which collapses the partial-hap pool to
-#            nothing at ~3x) or destroys the strict-carrier counts Filters
-#            D/E rely on.  Summing the per-site PROBABILITY directly would
-#            overcount (it accumulates tiny residual-mass products across all
-#            L sites); thresholding each site at tau first — the "more likely
-#            than not to conflict here" boundary — is the correct analogue of
-#            the hard count.  Determination (the partial-hap VALUES) and the
-#            clustering stay argmax; the cluster majority-vote denoises them.
-#            Filter A's determined-fraction floor is also left as argmax.
-#
-# Same rationale as the trio / seed / recovery soft front-ends.  "soft" is
-# RESULT-AFFECTING at every read depth and must be validated against ground
-# truth before use; it is opt-in for that reason.  NOTE: the strict-carrier
-# threshold (Filter D, MIN_STRICT_CARRIER_FRAC) is hand-calibrated against
-# real-data argmax strict-carrier distributions; the soft count is larger at
-# low depth, so this threshold likely needs RECALIBRATION on real data when
-# "soft" is enabled.
-PAIRWISE_RESIDUAL_MODE = "argmax"
-
-# Per-site posterior threshold for the "soft" gates: a site counts as a
-# confident conflict / incompatibility only when the offending-genotype
-# posterior probability exceeds this value.  0.5 is the principled "more
-# likely than not" boundary and the empirically-best value (lower values are
-# too strict — they flag too many sites and over-reject pairs).
-PAIRWISE_SOFT_CONFLICT_TAU = 0.5
-
 
 # -----------------------------------------------------------------------
 # Algorithm-parameter constants (v6 verbatim from
@@ -224,226 +177,9 @@ PAIRWISE_SOFT_CONFLICT_TAU = 0.5
 #
 # So the v6 numerics on the v5 dataset are byte-identical to v5.
 
-# Read-error / noise tolerance budget, as a fraction of L.  Used as
-# the absolute-count threshold (after `round(NOISE_SLACK_FRAC * L)`)
-# in three places where the algorithm needs to absorb sequencing-noise
-# sites:
-#   1. Pair compatibility in build_pairwise_partial_haps (the v5 name
-#      was MAX_PAIR_INCOMPATIBILITIES) — a pair of samples whose
-#      argmax dosages conflict at more than this many sites cannot
-#      share a strand and is rejected.
-#   2. Cluster compatibility in grow_cluster_iterative (was
-#      MAX_CLUSTER_DISAGREEMENTS) — a candidate partial-hap may
-#      disagree with the running cluster consensus at up to this many
-#      sites in their overlap region.
-#   3. Carrier consistency in count_carriers (was MAX_CARRIER_INCOMPAT)
-#      — the lenient-carrier threshold; a sample's argmax dosage may
-#      be diploid-incompatible with a candidate hap at up to this many
-#      sites and still count as a "lenient carrier".  Used by Filter B
-#      and as the lenient count in Filter E.
-#
-# 0.01 was calibrated for the project's sequencing depth (~5x to 20x),
-# at which per-site dosage error is roughly 0.5-1.5%.  At L=200 it
-# resolves to 2 sites — matching v5's three absolute-2 constants
-# exactly.
-#
-# History — why 1% (= 2 sites at L=200) and not tighter:
-#
-# v5 UPDATE (post-v4-testing, 2026-05): REVERTED MAX_PAIR_INCOMPATIBILITIES
-# from 1 back to 2 based on actual data.  The v4 run with this set to
-# 1 showed essentially no improvement vs v3 with this set to 2:
-#   v3 (p=2): 235 captured, 49 spurious filt
-#   v4 (p=1): 235 captured, 50 spurious filt
-# Partial-haps built dropped only ~3.7% (from 37828/block to
-# 36421/block).  The Poisson estimate predicted a 4.4x reduction in
-# cross-truth pair admission; in practice it didn't materialise.
-#
-# Why the math was wrong: the estimate assumed cross-truth pairs are
-# admitted at the margin (right at p=2).  In reality, most cross-truth
-# pairs that get admitted at p=2 also satisfy p=1, while most pairs
-# near the boundary are real shared-strand pairs with more variable
-# read-error counts.  So tightening just excluded some real pairs at
-# the margin (slight noise) and didn't dent the chimera cluster sizes.
-#
-# Lesson: the chimeras come from population-modal admission at the
-# cluster-merge stage, not the pair-admission stage.  Tightening here
-# is the wrong knob.
-NOISE_SLACK_FRAC = 0.01
-MIN_PARTIAL_DETERMINED_FRAC = 0.15      # require ≥ this fraction of L
-                                        # bits to be determined in a
-                                        # partial-hap to consider it
-                                        # (drops low-info pairs).
-                                        # v6: was MIN_PARTIAL_DETERMINED
-                                        # = 30 absolute; at L=200, 0.15
-                                        # resolves to 30 exactly.
-MIN_CLUSTER_OVERLAP_FRAC = 0.10         # for cluster merging: a candidate
-                                        # partial-hap must share ≥ this
-                                        # fraction of L determined sites
-                                        # with the current consensus (so
-                                        # the compatibility check is
-                                        # meaningful).
-                                        # v6: was MIN_CLUSTER_OVERLAP =
-                                        # 20 absolute; at L=200, 0.10
-                                        # resolves to 20 exactly.
-# (Cluster-merge disagreement budget — v5's MAX_CLUSTER_DISAGREEMENTS = 2
-# — is the same noise-tolerance concept as pair compatibility above.  It
-# resolves from NOISE_SLACK_FRAC at the consumer call site in
-# pairwise_common_hap_recover; no separate constant is needed.)
-MIN_CLUSTER_SIZE = 3                    # emit consensus only for clusters
-                                        # of ≥ this many partial-haps.
-                                        # v6: kept as absolute count.
-                                        # This is a minimum statistical
-                                        # support count for emitting a
-                                        # consensus at all, not a
-                                        # fraction of N or L; 3 is the
-                                        # minimum that distinguishes a
-                                        # genuine cluster from a single
-                                        # partial-hap or a transient pair.
-MAX_CLUSTER_GROW_ITER = 10              # cap on the iterative consensus-
                                         # refinement loop per cluster.
                                         # v6: kept as absolute (iteration
                                         # cap, not L/N-dependent).
-
-# -----------------------------------------------------------------------
-# Quality-filter configuration (v2-v5; verbatim from
-# test_pairwise_common_hap_v6.py lines 180-319)
-# -----------------------------------------------------------------------
-# Filter A — determination floor.  A cluster's consensus must have at
-# least this fraction of L bits actually determined by the cluster's
-# pair-of-carriers evidence (i.e., not population-frequency tiebreak
-# filled).  Spurious haps frequently have low determination because the
-# cluster admitted few pair-of-carrier instances and most sites came
-# from the pop-frequency fallback, which drifts from any specific truth
-# at sites where the truth disagrees with the population mode.  In the
-# v1 run, every CAPTURED hap had determined ≥ 195/200, while ~30
-# spurious haps had determined < 190 — so 190 is a clean cutoff.
-#
-# v6: was MIN_DETERMINED_FOR_OUTPUT = 190 absolute; at L=200, the
-# fraction 0.95 resolves to 190 exactly.
-MIN_DETERMINED_FOR_OUTPUT_FRAC = 0.95
-
-# Filter B — carrier-count floor.  A "carrier" of hap h is a sample
-# whose argmax dosage is consistent with carrying h as one of its two
-# diploid strands — specifically, at most `noise_slack` sites violate
-# the diploid constraint (h[l]=0 AND dosage[s,l]=2) or (h[l]=1 AND
-# dosage[s,l]=0), where `noise_slack = round(NOISE_SLACK_FRAC * L)`.
-# The noise_slack budget allows for read-error noise; the same
-# threshold is used for pair compatibility in build_pairwise_partial_haps,
-# so the criterion is internally consistent.  Real founders typically
-# have 30-100 carriers; chimeric haps (the dominant Pattern 2 spurious
-# in the v1 trace) have very few real carriers because the chimera
-# disagrees with each true founder at enough sites to push their
-# carriers past the incompat threshold.
-#
-# v6: MAX_CARRIER_INCOMPAT = 2 absolute is replaced by per-block
-# resolution from NOISE_SLACK_FRAC at the call site (inside
-# count_carriers and apply_quality_filters).  MIN_CARRIERS_FOR_OUTPUT
-# stays absolute — 3 is the minimum statistical support count below
-# which any "carrier set" is indistinguishable from random consistency
-# noise; this is not an N-fraction threshold.
-MIN_CARRIERS_FOR_OUTPUT = 3
-
-# Filter C — cross-cluster dedup.  After A and B, merge clusters whose
-# consensus haps are within this Hamming pct of each other; keep the
-# one with more carriers (and, as tiebreak, larger cluster size).
-# Catches the chr2-block-1210 case where the same truth produced two
-# nearby clusters at slightly different Hammings (e.g., 0% and 4.5%)
-# because partial-haps with seed-error patterns formed a separate cluster
-# that didn't fully merge with the clean truth's cluster.
-#
-# v3 UPDATE (post-v2-testing, 2026-05): SET TO 0.0 TO DISABLE.  The v2
-# run with CROSS_CLUSTER_DEDUP_PCT = 5.0 lost 37 real captures (capture
-# rate dropped from 91.1% raw to 77.1% filtered) while only removing 9
-# spurious — net negative.  Two reasons the 5%-by-carriers approach
-# fails on this dataset:
-#
-#   (1) Distinct real founders within a 200-site block are commonly only
-#       1-5% apart in Hamming because they share chromosomal background
-#       and differ at only a handful of sites.  A 5% threshold collapses
-#       these distinct truths into one — e.g., chr13 block 500 truth #0
-#       and truth #5 are both at Hamming 0% from their own truth and
-#       2.0% from each other; chr16 block 764 truth #4 and truth #1 are
-#       2.0% apart; chr3 block 6393 truth #5 and truth #2 are 3.5%
-#       apart.  All got collapsed in v2.
-#
-#   (2) The "keep the cluster with more carriers" tiebreaker is
-#       systematically inverted for this dataset.  Population-modal
-#       chimeras score HIGHER on the carriers metric (with
-#       max_incompat = 2) than truth-specific haps do, because the
-#       carrier check at max_incompat = 2 is dominated by hom-position
-#       compatibility with the population mode.  E.g., chr2 block 1210:
-#       chimera at 4.5% from truth #5 has carriers = 226, while real
-#       truth #5 has carriers = 83 — so dedup kept the chimera and
-#       dropped the truth.
-#
-# Setting to 0.0 makes the merge condition (ham_pct < 0.0) never
-# satisfied, so apply_quality_filters runs through the dedup loop as
-# a no-op.  Filter A (determination floor) is the only filter doing
-# useful work in v3, with Filter B retained at MAX_CARRIER_INCOMPAT = 2
-# as a no-op for now (a future v4 may try MAX_CARRIER_INCOMPAT = 0 to
-# count strict-fit carriers, which the v2 trace suggests would be a
-# better discriminator between real and chimeric haps).
-CROSS_CLUSTER_DEDUP_PCT = 0.0
-
-
-# Filter D — strict-carriers floor.  A "strict carrier" of hap h is a
-# sample whose argmax dosage is consistent with carrying h as one of
-# its two diploid strands with NO incompatibility slack: at every site
-# l, hap h does NOT take the value (0 with dosage 2) or (1 with dosage
-# 0).  This is the same as count_carriers(..., max_incompat=0).
-#
-# v5 UPDATE: ADDED based on programmatic analysis of the v4 trace.
-# The v4 strict-carrier diagnostic showed:
-#   bucket    n  min  p25  med  p75  max
-#    <2.0%  236   36   79  101  133  314   ← captures
-#     2-5%    8   29   58   81   99  120   ← borderline
-#    5-10%   23   21   41   76   92  128   ← chimeras
-#   10-25%   18   14   43   77  104  157   ← chimeras
-#
-# The minimum strict-carrier value among captures is 36 (chr4 block
-# 1381 truth #1, a low-frequency real founder).  Setting the threshold
-# at 35 leaves a safety margin of 1 above that minimum and:
-#   - captures lost: 0 (next capture above 35 is at strict=36)
-#   - spurious dropped: 8 (those at strict ∈ [14, 30] across all
-#     spurious-Hamming buckets)
-#
-# This is a strictly Pareto-improving filter on this dataset.
-#
-# v6: was MIN_STRICT_CARRIERS_FOR_OUTPUT = 35 absolute; at N=320, the
-# fraction 0.11 resolves via round(0.11 * 320) = round(35.2) = 35
-# exactly.  This fraction encodes a population-structure assumption
-# (roughly: "we expect each real founder to be carried by at least 11%
-# of samples") rather than a noise-floor or block-length assumption.
-# For a study with substantially different K (founder count) or
-# admixture structure, this is the parameter most likely to need
-# recalibration.
-MIN_STRICT_CARRIER_FRAC = 0.11
-
-
-# Filter E — lenient-excess ratio cap.  A real founder's lenient
-# carriers (those passing max_incompat=2) are mostly the same set as
-# its strict carriers (max_incompat=0); the difference reflects sample-
-# specific read errors at a small number of sites.  A chimera's
-# lenient carriers include many samples that pass at max_incompat=2
-# only because they fail at exactly 1-2 sites — typically the sites
-# where the chimera drifted away from the true founder.  So:
-#
-#   ratio := (carriers - strict) / carriers
-#
-# is the fraction of "lenient-only" carriers.  Real founders have low
-# ratio (~0.10 typical, max 0.57 in the v4 trace); chimeras have
-# higher ratio (median 0.40-0.45 across spurious buckets, max 0.85).
-# Threshold at 0.60:
-#   - captures lost: 0 (max capture ratio in v4 is 0.569; safety
-#     margin 0.03 — small but nonzero)
-#   - spurious dropped: ~12 net additional vs Filter D alone
-#     (combined spurious_remaining = 38, vs 50 raw and 42 with D only)
-#
-# A tighter threshold (0.55) would catch 1-2 more spurious but at the
-# cost of dropping 1-2 captures, which is not worth it given the
-# downstream BIC selection can absorb spurious cheaply but cannot
-# recover dropped captures.
-MAX_LENIENT_EXCESS_RATIO = 0.60
 
 
 # -----------------------------------------------------------------------
@@ -1678,7 +1414,6 @@ def apply_quality_filters(recovered, dosage,
         rejected.append(r2)
 
     return deduped, rejected
-
 
 
 # -----------------------------------------------------------------------
