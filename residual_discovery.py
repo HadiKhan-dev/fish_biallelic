@@ -29,7 +29,7 @@ from multiprocessing.shared_memory import SharedMemory
 import bhd_kernels
 import bhd_chimera
 import block_haplotypes
-import block_haplotype_refinement
+import small_block_refine
 
 
 # =============================================================================
@@ -1579,7 +1579,7 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
     
     # Dedup: merge near-identical haplotypes (catches duplicate FPs at 0% error)
     t_dedup_start = time.time()
-    output_br = block_haplotype_refinement.dedup_blocks(
+    output_br = small_block_refine.dedup_blocks(
         block_haplotypes.BlockResults(output_blocks),
         threshold_pct=1.0,
         verbose=verbose

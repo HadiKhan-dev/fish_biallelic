@@ -17,6 +17,7 @@ results_real/
 results_tropheops_withFounders/
 path_plots/
 debug_hierarchical/
+recombination_map/
 
 # Pedigree depth-sweep (per-(depth,seed) checkpoints are many GB; CSVs are reproducible)
 pedigree_depth_sweep/

@@ -81,7 +81,7 @@ if __name__ == '__main__':
     import thread_config
     import vcf_data_loader
     import block_haplotypes_new as block_haplotypes
-    import block_haplotype_refinement
+    import small_block_refine
     import residual_discovery
     import hierarchical_assembly
     import paint_samples
@@ -905,7 +905,7 @@ if __name__ == '__main__':
                     return l2_fn
 
                 t0 = time.time()
-                refinement_results = block_haplotype_refinement.run_refinement_pipeline(
+                refinement_results = small_block_refine.run_refinement_pipeline(
                     raw_blocks=block_results, global_probs=global_probs,
                     global_sites=global_sites, num_samples=num_samples,
                     run_l1_assembly_fn=make_l1_fn(global_probs, global_sites),
@@ -915,7 +915,7 @@ if __name__ == '__main__':
                 print(f"\n  Refinement complete in {time.time()-t0:.0f}s")
 
                 l2_refined = refinement_results['l2_refined']
-                l2_refined_dd = block_haplotype_refinement.dedup_blocks(l2_refined, verbose=True)
+                l2_refined_dd = small_block_refine.dedup_blocks(l2_refined, verbose=True)
                 save_contig(STAGE_T2, r_name, {'block_results': l2_refined_dd})
                 del refinement_results, l2_refined, l2_refined_dd
             else:
