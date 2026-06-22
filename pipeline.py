@@ -186,7 +186,7 @@ if __name__ == '__main__':
     import beam_search_core
     import chimera_resolution
     import hierarchical_assembly
-    import block_haplotype_refinement
+    import small_block_refine
     import paint_samples
     import pedigree_inference
     import phase_correction
@@ -713,7 +713,7 @@ if __name__ == '__main__':
                 
                 # Run full refinement pipeline
                 t0 = time.time()
-                refinement_results = block_haplotype_refinement.run_refinement_pipeline(
+                refinement_results = small_block_refine.run_refinement_pipeline(
                     raw_blocks=raw_blocks,
                     global_probs=global_probs,
                     global_sites=global_sites,
@@ -732,7 +732,7 @@ if __name__ == '__main__':
                 l2_refined = refinement_results['l2_refined']
                 
                 # Dedup before feeding into main assembly
-                l2_refined_dd = block_haplotype_refinement.dedup_blocks(l2_refined, verbose=True)
+                l2_refined_dd = small_block_refine.dedup_blocks(l2_refined, verbose=True)
                 
                 # Store refined blocks as the new starting point
                 multi_contig_results[r_name]['simd_block_results'] = l2_refined_dd
