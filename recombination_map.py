@@ -510,15 +510,19 @@ def decode_crossovers_from_path(path, snp_positions):
 
 # =============================================================================
 # Checkpoint loading + painting normalization
-# Layout (pipeline.py): <ckpt>/<stage>/<contig>.pkl and <ckpt>/<stage>/_global.pkl,
-# each a pickle.  Unpickling the painting objects needs `paint_samples` importable
-# (it defines SamplePainting/PaintedChunk/BlockPainting); run this from the
-# haplotype_reconstruction dir with bio-env active.  `paint_samples` is imported
-# ONLY for those data classes -- no detection machinery is imported.
+# Layout (pipeline.py): <ckpt>/<stage>/<contig>.pkl.b2 and
+# <ckpt>/<stage>/_global.pkl.b2, each a blosc2-compressed pickle read via the
+# shared checkpoint_io module.  Unpickling the painting objects needs
+# `paint_samples` importable (it defines SamplePainting/PaintedChunk/
+# BlockPainting); run this from the haplotype_reconstruction dir with bio-env
+# active.  `paint_samples` is imported ONLY for those data classes -- no
+# detection machinery is imported.
 # =============================================================================
 import os
 import pickle
 import multiprocessing as mp
+
+import checkpoint_io
 
 STAGE_VCF = "01_vcf_discovery"       # naive_long_haps (true founders)
 STAGE_SIM = "02_simulation"          # truth_painting + truth_pedigree
@@ -526,17 +530,12 @@ STAGE_L4 = "09_assembly_L4"          # super_blocks_L4 (discovered founders)
 STAGE_PAINT = "10_viterbi_painting"  # tolerance_result (inferred painting)
 
 
-def _load_pickle(path):
-    with open(path, "rb") as f:
-        return pickle.load(f)
-
-
 def load_global(ckpt_dir, stage):
-    return _load_pickle(os.path.join(ckpt_dir, stage, "_global.pkl"))
+    return checkpoint_io.read(checkpoint_io.global_path(ckpt_dir, stage))
 
 
 def load_contig(ckpt_dir, stage, contig):
-    return _load_pickle(os.path.join(ckpt_dir, stage, f"{contig}.pkl"))
+    return checkpoint_io.read(checkpoint_io.contig_path(ckpt_dir, stage, contig))
 
 
 def _samples_of(painting_obj):

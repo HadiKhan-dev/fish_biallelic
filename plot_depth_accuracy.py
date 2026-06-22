@@ -219,19 +219,39 @@ def make_figure(agg, raw, out_prefix, ci_level, xscale, show_points, title, gen_
         "ytick.direction": "out",
     })
 
-    fig, ax = plt.subplots(figsize=(6.2, 4.4))
+    # Widen with the number of depths so every slot/point has room (especially
+    # in "category" mode, where all depths are shown evenly spaced).
+    n_depths = int(agg["depth"].nunique())
+    width = min(16.0, max(6.2, 0.9 * n_depths + 1.8))
+    # Height scales with width so the figure keeps a sensible (non-flat) aspect
+    # ratio as more depths widen it, instead of staying short and stretched.
+    height = min(8.0, max(5.0, 0.62 * width))
+    fig, ax = plt.subplots(figsize=(width, height))
     ax.set_axisbelow(True)
     ax.grid(True, which="major", color="0.88", lw=0.6)
 
     rng = np.random.default_rng(0)
     depths_all = np.sort(agg["depth"].unique())
+    N = len(depths_all)
+    # In "category" mode every depth gets an evenly-spaced slot, so tightly-valued
+    # depths (e.g. 1.6 vs 1.7) are fully separated instead of piling up on a
+    # log/linear value axis.  pos_of maps each depth to its slot index; on a
+    # quantitative axis _x is the identity (the real depth value).
+    pos_of = {float(d): i for i, d in enumerate(depths_all)}
+
+    def _x(depth_arr):
+        a = np.asarray(depth_arr, float)
+        if xscale == "category":
+            return np.array([pos_of[float(v)] for v in a], float)
+        return a
+
     ymins = []
 
     for key, label, color, marker in _SERIES:
         sub = agg[agg["metric"] == key].sort_values("depth")
         if sub.empty:
             continue
-        d = sub["depth"].to_numpy(float)
+        d = _x(sub["depth"].to_numpy(float))
         m = sub["mean"].to_numpy(float)
         lo = sub["ci_low"].to_numpy(float)
         hi = sub["ci_high"].to_numpy(float)
@@ -244,9 +264,11 @@ def make_figure(agg, raw, out_prefix, ci_level, xscale, show_points, title, gen_
 
         if show_points:
             r = raw.dropna(subset=[key])
-            xs = r["depth"].to_numpy(float)
+            xs = _x(r["depth"].to_numpy(float))
             ys = r[key].to_numpy(float)
-            if xscale == "log":
+            if xscale == "category":
+                xs = xs + rng.uniform(-0.08, 0.08, size=xs.size)
+            elif xscale == "log":
                 xs = xs * np.exp(rng.uniform(-0.018, 0.018, size=xs.size))
             else:
                 span = (depths_all.max() - depths_all.min()) or 1.0
@@ -255,7 +277,12 @@ def make_figure(agg, raw, out_prefix, ci_level, xscale, show_points, title, gen_
             if ys.size:
                 ymins.append(float(np.nanmin(ys)))
 
-    if xscale == "log":
+    if xscale == "category":
+        ax.xaxis.set_major_locator(FixedLocator(np.arange(N)))
+        ax.xaxis.set_major_formatter(FixedFormatter(["%g" % x for x in depths_all]))
+        ax.xaxis.set_minor_locator(NullLocator())
+        ax.set_xlim(-0.5, N - 0.5)
+    elif xscale == "log":
         ax.set_xscale("log")
         ax.xaxis.set_major_locator(FixedLocator(depths_all))
         ax.xaxis.set_major_formatter(FixedFormatter(["%g" % x for x in depths_all]))
@@ -278,12 +305,15 @@ def make_figure(agg, raw, out_prefix, ci_level, xscale, show_points, title, gen_
     if title:
         ax.set_title(title, pad=10)
 
-    ax.text(0.0, -0.155,
-            "Markers: mean across seeds.  Bands: %d%% CI (t-distribution).  "
-            "Faint points: individual seeds." % round(ci_level * 100),
-            transform=ax.transAxes, fontsize=8.3, color="0.4")
-
-    fig.tight_layout()
+    # Reserve a strip at the figure bottom for the caption, lay out the axes
+    # (including the x-label) above it, then place the caption in that strip in
+    # figure coordinates -- so it never collides with the x-label regardless of
+    # figure size or number of depths.
+    fig.tight_layout(rect=(0, 0.10, 1, 1))
+    fig.text(0.012, 0.02,
+             "Markers: mean across seeds.  Bands: %d%% CI (t-distribution).  "
+             "Faint points: individual seeds." % round(ci_level * 100),
+             ha="left", va="bottom", fontsize=8.3, color="0.4")
     png, pdf = out_prefix + ".png", out_prefix + ".pdf"
     fig.savefig(png, dpi=300, bbox_inches="tight")
     fig.savefig(pdf, bbox_inches="tight")          # vector, for the manuscript
@@ -305,8 +335,11 @@ def main():
                     help="output path PREFIX for .png/.pdf/_summary.csv "
                          "(default: <sweep-root>/depth_accuracy)")
     ap.add_argument("--ci", type=float, default=0.95, help="CI level (default 0.95)")
-    ap.add_argument("--xscale", choices=["log", "linear"], default="log",
-                    help="depth-axis scale (default log)")
+    ap.add_argument("--xscale", choices=["category", "log", "linear"], default="category",
+                    help="x-axis layout (default 'category'): 'category' spaces every "
+                         "depth evenly (best when depths are many or tightly spaced, "
+                         "e.g. 1.6 vs 1.7); 'log'/'linear' use a quantitative axis "
+                         "(closely-valued depths will crowd)")
     ap.add_argument("--no-points", action="store_true",
                     help="hide the per-seed scatter, show only mean + CI band")
     ap.add_argument("--gen-scope", choices=["descendants", "all"],

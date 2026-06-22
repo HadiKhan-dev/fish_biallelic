@@ -24,7 +24,7 @@ import bhd_kernels
 #     _try_claim_extra_bh / _try_release_extra_bh / _BH_* counters) + the
 #     scoring & chimera kernels (incl. prune_chimeras) now live in bhd_kernels;
 #   - BlockResult / BlockResults + consolidate_similar_candidates /
-#     select_optimal_haplotype_set_viterbi now live in block_haplotypes.
+#     select_optimal_haplotype_set_viterbi now live in block_haplotypes
 from bhd_kernels import prune_chimeras
 from block_haplotypes import (
     BlockResult,

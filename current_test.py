@@ -1,142 +1,224 @@
 #!/usr/bin/env python
-"""compare_sim_across_seeds.py -- are the stage-2 simulated inputs identical across seeds?
-
-The pedigree inference came out byte-identical across seeds at a given depth, even
-though the read RNG is seeded per-seed.  This decides WHY:
-
-  * if the stage-2 simulated arrays (simulated_reads / simd_probs / simd_genomic_data)
-    are IDENTICAL across seeds  -> the inference input is seed-invariant: an UPSTREAM
-    simulation / checkpoint-isolation problem (the per-seed reads aren't really
-    per-seed), so re-running won't help until that's fixed;
-
-  * if those arrays DIFFER across seeds but the inferred pedigree is identical
-    -> the INFERENCE is ignoring the genotype data at this depth (a degenerate
-    low-coverage fixed point), i.e. a genuine "no signal below 2x" result.
-
-It loads <sweep-root>/depth<D>/seed<S>/checkpoints/02_simulation/<contig>.pkl for each
-seed and md5s each numpy array it can find, then reports whether they match across seeds.
-Read-only; prints to stdout and (optionally) --out.
-
-    python compare_sim_across_seeds.py --sweep-root /path/to/pedigree_depth_sweep --depth 1
-    python compare_sim_across_seeds.py --sweep-root ... --depth 0.2 --out cmp_d02.txt
 """
-import argparse, glob, hashlib, os, pickle
-import numpy as np
+archive_and_clean_sweep.py -- archive the small, irreplaceable sweep outputs
+(the per-combo ground-truth / inferred pedigree CSVs and the depth-accuracy
+figure) into a new folder, then delete the large per-combo checkpoint trees to
+reclaim disk.
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--sweep-root", required=True)
-ap.add_argument("--depth", default="1", help="depth label as on disk, e.g. 1 or 0.2")
-ap.add_argument("--ckpt-name", default="checkpoints",
-                help="per-seed checkpoint dir name (default: checkpoints)")
-ap.add_argument("--stage", default="02_simulation",
-                help="checkpoint stage subdir to compare (default: 02_simulation)")
-ap.add_argument("--keys", default="simulated_reads,simd_probs,simd_priors,simd_genomic_data",
-                help="comma-separated checkpoint keys to compare (first found per file wins "
-                     "for the headline verdict)")
-ap.add_argument("--out", default=None)
-args = ap.parse_args()
+Layout it expects (as written by pedigree_depth_sweep.py):
 
-keys = [k.strip() for k in args.keys.split(",") if k.strip()]
-ddir = os.path.join(args.sweep_root, "depth" + args.depth)
-seed_dirs = sorted(glob.glob(os.path.join(ddir, "seed*")),
-                   key=lambda p: (int(os.path.basename(p)[4:])
-                                  if os.path.basename(p)[4:].isdigit() else 10**9))
-if not seed_dirs:
-    raise SystemExit("no seed*/ under %s" % ddir)
+    <sweep_root>/depth<D>/seed<S>/results/ground_truth_pedigree.csv
+    <sweep_root>/depth<D>/seed<S>/results/pedigree_inference_discovered.csv
+    <sweep_root>/depth<D>/seed<S>/checkpoints/        <- the multi-TB part, deleted
+    <sweep_root>/depth<D>/seed<S>/run_*.log           <- copied too (tiny run record)
+    <sweep_root>/depth_accuracy.{png,pdf}             <- the figure, copied
+    <sweep_root>/depth_accuracy_summary.csv
 
-out_path = args.out or ("cmp_sim_depth%s.txt" % args.depth)
-_fh = open(out_path, "w")
-def emit(line=""):
-    print(line); _fh.write(line + "\n")
+The archive mirrors that tree minus the checkpoints, so it stays a valid input
+to plot_depth_accuracy.py: `python plot_depth_accuracy.py --sweep-root <archive>`
+will rebuild the figure straight from the archived CSVs.
+
+SAFETY
+  * DRY RUN BY DEFAULT. It prints exactly what it would copy and delete, with
+    sizes, and removes nothing until you re-run with --apply.
+  * A combo's checkpoints are deleted ONLY after both its CSVs are copied AND
+    byte-size-verified in the archive. A combo whose CSVs are missing is left
+    untouched (use --force-delete-unarchived to override).
+  * The stage-1 checkpoint inside each combo is a SYMLINK to the shared
+    .pipeline_checkpoints/01_vcf_discovery. Deletion unlinks it and never
+    follows it, so the shared founders are preserved. The shared checkpoint
+    directory itself is left alone unless you pass --also-shared.
+  * It only ever removes directories literally named 'checkpoints' located
+    inside the sweep root (plus, optionally, the one shared dir you name).
+
+Usage (from the sweep project dir):
+
+    python archive_and_clean_sweep.py                 # DRY RUN: show the plan
+    python archive_and_clean_sweep.py --apply         # archive, verify, then delete
+    python archive_and_clean_sweep.py --apply --also-shared
+    python archive_and_clean_sweep.py --archive /path/to/archive --apply
+"""
+import argparse
+import glob
+import os
+import shutil
+
+RESULT_FILES = ("ground_truth_pedigree.csv", "pedigree_inference_discovered.csv")
 
 
-def arr_md5(obj):
-    """md5 of a numpy array's raw bytes; None if obj isn't array-like."""
-    try:
-        a = np.ascontiguousarray(obj)
-        if a.dtype == object:
-            return None
-        return hashlib.md5(a.tobytes()).hexdigest()[:12] + " shape=%s dtype=%s" % (a.shape, a.dtype)
-    except Exception:
-        return None
+def _dir_size(path):
+    """Sum of real file sizes under path; does NOT follow symlinks."""
+    total = 0
+    for root, _dirs, files in os.walk(path, followlinks=False):
+        for f in files:
+            fp = os.path.join(root, f)
+            if os.path.islink(fp):
+                continue
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total
 
 
-emit("# compare_sim_across_seeds.py   depth=%s   stage=%s" % (args.depth, args.stage))
-emit("# sweep-root: %s" % os.path.abspath(args.sweep_root))
+def _fmt(nbytes):
+    n = float(nbytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024.0 or unit == "TB":
+            return "%.1f %s" % (n, unit)
+        n /= 1024.0
 
-# contig pkl basenames present under seed0's stage dir (use as the comparison set)
-first_stage_dir = os.path.join(seed_dirs[0], args.ckpt_name, args.stage)
-contigs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(first_stage_dir, "*.pkl")))
-if not contigs:
-    emit("\nNo %s/*.pkl under %s" % (args.stage, first_stage_dir))
-    emit("  -> the stage-2 arrays may have been removed from disk, or the per-seed checkpoint")
-    emit("     dir name differs (try --ckpt-name).  Listing what IS there:")
-    for sdir in seed_dirs:
-        cd = os.path.join(sdir, args.ckpt_name)
-        sub = sorted(glob.glob(os.path.join(cd, "*"))) if os.path.isdir(cd) else []
-        emit("    %s/%s : %s" % (os.path.basename(sdir), args.ckpt_name,
-                                 [os.path.basename(x) for x in sub] or "(absent)"))
-    _fh.close(); raise SystemExit(0)
 
-verdict_any_key = {}
-for contig in contigs:
-    emit("\n" + "=" * 72)
-    emit("=== contig pkl: %s ===" % contig)
-    # per key: {seed_name: md5str}
-    per_key = {k: {} for k in keys}
-    for sdir in seed_dirs:
-        sname = os.path.basename(sdir)
-        path = os.path.join(sdir, args.ckpt_name, args.stage, contig)
-        if not os.path.isfile(path):
-            emit("  %s: MISSING %s" % (sname, path)); continue
-        try:
-            with open(path, "rb") as f:
-                d = pickle.load(f)
-        except Exception as exc:                       # noqa: BLE001
-            emit("  %s: could NOT unpickle (%s: %s)" % (sname, type(exc).__name__, exc))
-            emit("       (likely a class moved in a refactor; run this from the project dir "
-                 "in bio-env so the original modules import)")
+def discover_combos(sweep_root):
+    """Return [(depth_dirname, seed_dirname, seed_path), ...] for every depth*/seed*."""
+    combos = []
+    for ddir in sorted(glob.glob(os.path.join(sweep_root, "depth*"))):
+        if not os.path.isdir(ddir):
             continue
-        present = [k for k in keys if isinstance(d, dict) and k in d]
-        if not present:
-            emit("  %s: none of the requested keys present; keys on disk = %s"
-                 % (sname, list(d.keys()) if isinstance(d, dict) else type(d)))
-            continue
-        for k in present:
-            h = arr_md5(d[k])
-            per_key[k][sname] = h if h is not None else "(non-array)"
-    # report per key
-    for k in keys:
-        hashes = per_key[k]
-        if not hashes:
-            continue
-        vals = [v for v in hashes.values() if v and v != "(non-array)"]
-        emit("  key '%s':" % k)
-        for sname, h in hashes.items():
-            emit("    %-8s %s" % (sname, h))
-        if len(vals) > 1:
-            same = len(set(v.split(" ")[0] for v in vals)) == 1
-            emit("    -> %s across seeds" % ("IDENTICAL" if same else "DIFFERENT"))
-            verdict_any_key.setdefault(k, []).append(same)
+        for sdir in sorted(glob.glob(os.path.join(ddir, "seed*"))):
+            if os.path.isdir(sdir):
+                combos.append((os.path.basename(ddir), os.path.basename(sdir), sdir))
+    return combos
 
-emit("\n" + "=" * 72)
-emit("=== VERDICT (depth %s) ===" % args.depth)
-if not verdict_any_key:
-    emit("  No comparable arrays were loaded -- see messages above.")
-else:
-    for k, sames in verdict_any_key.items():
-        allsame = all(sames)
-        emit("  '%s': %s across seeds on all %d contig(s)"
-             % (k, "IDENTICAL" if allsame else "DIFFERENT", len(sames)))
-    any_identical = any(all(s) for s in verdict_any_key.values())
-    emit("")
-    if any_identical:
-        emit("  => Stage-2 simulated input is IDENTICAL across seeds. The per-seed reads are")
-        emit("     not actually per-seed (UPSTREAM simulation / checkpoint-isolation issue).")
-        emit("     The identical inference is a consequence of identical input, not the method.")
-    else:
-        emit("  => Stage-2 simulated input DIFFERS across seeds, yet the inferred pedigree was")
-        emit("     identical -> the INFERENCE is not using the genotype data at this depth")
-        emit("     (degenerate low-coverage solution). That's a real 'no signal' regime.")
-_fh.close()
-print("\nWrote: %s" % os.path.abspath(out_path))
+
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sweep-root", default=os.path.join(here, "pedigree_depth_sweep"),
+                    help="sweep tree with depth*/seed*/{results,checkpoints} "
+                         "(default: ./pedigree_depth_sweep next to this script)")
+    ap.add_argument("--archive", default=None,
+                    help="destination folder for the kept CSVs + figure "
+                         "(default: <sweep-root>_archive, a sibling of the sweep root)")
+    ap.add_argument("--apply", action="store_true",
+                    help="actually copy and DELETE; without it this is a dry run")
+    ap.add_argument("--also-shared", action="store_true",
+                    help="ALSO delete the shared .pipeline_checkpoints dir (the "
+                         "reusable stage-1 founders); off by default so future "
+                         "sweeps can still reuse it")
+    ap.add_argument("--shared-dir", default=os.path.join(here, ".pipeline_checkpoints"),
+                    help="path of the shared checkpoint dir (only deleted with "
+                         "--also-shared)")
+    ap.add_argument("--force-delete-unarchived", action="store_true",
+                    help="delete a combo's checkpoints even if its result CSVs were "
+                         "not found/archived (NOT recommended)")
+    args = ap.parse_args()
+
+    sweep_root = os.path.abspath(args.sweep_root)
+    archive = os.path.abspath(args.archive) if args.archive else sweep_root + "_archive"
+
+    if not os.path.isdir(sweep_root):
+        raise SystemExit("[clean] sweep root not found: %s" % sweep_root)
+    # The archive must live OUTSIDE the sweep tree (else we'd copy into a tree we
+    # are about to prune).
+    if os.path.commonpath([archive, sweep_root]) == sweep_root:
+        raise SystemExit(
+            "[clean] --archive must be outside --sweep-root.\n"
+            "        sweep-root: %s\n        archive:    %s" % (sweep_root, archive))
+
+    combos = discover_combos(sweep_root)
+    if not combos:
+        raise SystemExit("[clean] no depth*/seed* combos under %s" % sweep_root)
+
+    print("[clean] %s" % ("APPLY" if args.apply else "DRY RUN"))
+    print("[clean] sweep root: %s" % sweep_root)
+    print("[clean] archive:    %s" % archive)
+    print("[clean] %d combo(s) found\n" % len(combos))
+
+    # ---- 1. archive CSVs (+ run logs), recording which combos are safe to wipe
+    plan = []                 # (seed_path, ckpt_dir, ckpt_bytes, archived_ok, n_csv)
+    total_ckpt_bytes = 0
+    for ddir, sdir, seed_path in combos:
+        res_src = os.path.join(seed_path, "results")
+        arch_res = os.path.join(archive, ddir, sdir, "results")
+        csvs = [f for f in RESULT_FILES if os.path.isfile(os.path.join(res_src, f))]
+        ok = len(csvs) == len(RESULT_FILES)
+
+        if csvs and args.apply:
+            os.makedirs(arch_res, exist_ok=True)
+            for f in csvs:
+                src, dst = os.path.join(res_src, f), os.path.join(arch_res, f)
+                shutil.copy2(src, dst)
+                if not (os.path.isfile(dst) and os.path.getsize(dst) > 0 and
+                        os.path.getsize(dst) == os.path.getsize(src)):
+                    raise SystemExit(
+                        "[clean] ARCHIVE VERIFY FAILED for %s -- aborting before any "
+                        "deletion." % dst)
+            # tiny run logs: the only record of the runs once checkpoints are gone
+            for lg in sorted(glob.glob(os.path.join(seed_path, "run_*.log"))):
+                shutil.copy2(lg, os.path.join(archive, ddir, sdir, os.path.basename(lg)))
+
+        ckpt_dir = os.path.join(seed_path, "checkpoints")
+        ckpt_bytes = _dir_size(ckpt_dir) if os.path.isdir(ckpt_dir) else 0
+        total_ckpt_bytes += ckpt_bytes
+        plan.append((seed_path, ckpt_dir, ckpt_bytes, ok, len(csvs)))
+        print("  %s/%s: %d/%d CSV(s), checkpoints %s%s"
+              % (ddir, sdir, len(csvs), len(RESULT_FILES), _fmt(ckpt_bytes),
+                 "" if ok else "   <-- results MISSING"))
+
+    # ---- 2. copy the figure(s) from the sweep-root top level
+    graphs = [g for g in sorted(glob.glob(os.path.join(sweep_root, "depth_accuracy*")))
+              if os.path.isfile(g)]
+    print("\n[clean] figure files: %s"
+          % (", ".join(os.path.basename(g) for g in graphs) or "(none found)"))
+    if args.apply and graphs:
+        os.makedirs(archive, exist_ok=True)
+        for g in graphs:
+            shutil.copy2(g, os.path.join(archive, os.path.basename(g)))
+
+    # ---- 3. decide + report deletions
+    deletable = [(sp, cd, b) for (sp, cd, b, ok, n) in plan
+                 if os.path.isdir(cd) and (ok or args.force_delete_unarchived)]
+    skipped = [(cd, b) for (sp, cd, b, ok, n) in plan
+               if os.path.isdir(cd) and not ok and not args.force_delete_unarchived]
+
+    print("\n[clean] total checkpoint size: %s" % _fmt(total_ckpt_bytes))
+    if skipped:
+        print("[clean] WARNING: %d combo(s) have missing CSVs and will be KEPT "
+              "(use --force-delete-unarchived to remove):" % len(skipped))
+        for cd, b in skipped:
+            print("          %s  (%s)" % (cd, _fmt(b)))
+
+    if not args.apply:
+        n_arch = sum(1 for p in plan if p[3])
+        print("\n[clean] DRY RUN -- nothing copied or deleted.")
+        print("[clean] would archive %d combo(s)' CSVs + %d figure file(s) to %s"
+              % (n_arch, len(graphs), archive))
+        print("[clean] would delete %d checkpoint tree(s), freeing ~%s"
+              % (len(deletable), _fmt(sum(b for _, _, b in deletable))))
+        if args.also_shared:
+            print("[clean] would ALSO delete shared %s" % os.path.abspath(args.shared_dir))
+        print("[clean] re-run with --apply to do it.")
+        return
+
+    # ---- 4. delete (archive is complete + verified by here)
+    freed = 0
+    for sp, cd, b in deletable:
+        assert os.path.basename(cd) == "checkpoints"                       # only 'checkpoints'
+        assert os.path.commonpath([os.path.abspath(cd), sweep_root]) == sweep_root
+        assert not os.path.islink(cd)
+        for entry in os.scandir(cd):          # unlink the stage-1 symlink first; never follow it
+            if entry.is_symlink():
+                os.unlink(entry.path)
+        shutil.rmtree(cd)
+        freed += b
+        print("  deleted %s  (freed %s)" % (cd, _fmt(b)))
+
+    if args.also_shared:
+        shared = os.path.abspath(args.shared_dir)
+        if os.path.isdir(shared) and not os.path.islink(shared):
+            sb = _dir_size(shared)
+            shutil.rmtree(shared)
+            freed += sb
+            print("  deleted shared %s  (freed %s)" % (shared, _fmt(sb)))
+        else:
+            print("  [also-shared] not a directory, skipped: %s" % shared)
+
+    print("\n[clean] DONE. archived to %s; freed ~%s." % (archive, _fmt(freed)))
+    if skipped:
+        print("[clean] kept %d unarchived combo(s)' checkpoints." % len(skipped))
+
+
+if __name__ == "__main__":
+    main()

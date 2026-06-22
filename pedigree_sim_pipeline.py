@@ -5,7 +5,7 @@
 # SELF-CONTAINED snapshot of pipeline.py's setup + stages 2-11 (verbatim code
 # and comments), parameterized for the read-depth x seed sweep.  This file has
 # NO runtime dependency on pipeline.py -- you can delete pipeline.py and this
-# still runs.  It was produced by copying pipeline.py lines 1-2083 unchanged
+# still runs.  It was produced by copying pipeline.py's setup + stages 1-11 unchanged
 # except that four knobs are sourced from environment variables (with the
 # defaults below), and the file stops after stage 11 (no phase correction).
 #
@@ -62,7 +62,10 @@ if __name__ == "__main__":   # only the main process prints; workers re-import t
 # top level here.  Keep this section small -- imports here run in every
 # forkserver worker at startup.
 
-CHECKPOINT_DIR = ".pipeline_checkpoints"
+CHECKPOINT_DIR = _BHD_CKPT_DIR
+
+import os
+import checkpoint_io
 
 
 def _load_contig_for_phase_correction(r_name):
@@ -84,16 +87,12 @@ def _load_contig_for_phase_correction(r_name):
     simply omitted from the returned dict; the worker handles
     missing keys by falling back to an identity equivalence matrix.
     """
-    import os
-    import pickle as _pickle
-
     data = {}
 
     # tolerance_result lives in stage 10 (Viterbi painting)
-    tol_path = os.path.join(CHECKPOINT_DIR, "10_viterbi_painting", f"{r_name}.pkl")
+    tol_path = checkpoint_io.contig_path(CHECKPOINT_DIR, "10_viterbi_painting", r_name)
     if os.path.exists(tol_path):
-        with open(tol_path, 'rb') as f:
-            ckpt = _pickle.load(f)
+        ckpt = checkpoint_io.read(tol_path)
         if 'tolerance_result' in ckpt:
             data['tolerance_result'] = ckpt['tolerance_result']
         del ckpt
@@ -107,11 +106,10 @@ def _load_contig_for_phase_correction(r_name):
                              ("08_assembly_L3", "super_blocks_L3")]:
         if 'founder_block' in data:
             break
-        path = os.path.join(CHECKPOINT_DIR, stage, f"{r_name}.pkl")
+        path = checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name)
         if not os.path.exists(path):
             continue
-        with open(path, 'rb') as f:
-            ckpt = _pickle.load(f)
+        ckpt = checkpoint_io.read(path)
         if list_key in ckpt and ckpt[list_key]:
             data['founder_block'] = ckpt[list_key][0]
         del ckpt
@@ -232,7 +230,7 @@ if __name__ == '__main__':
     import vcf_data_loader
     import analysis_utils
     import hap_statistics
-    import block_haplotypes
+    import block_haplotypes  # Discrete coordinate descent w/ wildcard founder (drop-in for block_haplotypes)
     import block_linking_naive
     import block_linking
     import simulate_sequences
@@ -287,7 +285,8 @@ if __name__ == '__main__':
     # =============================================================================
     # PER-CONTIG CHECKPOINTING
     # =============================================================================
-    # Each stage gets a subdirectory.  Each contig gets its own .pkl file.
+    # Each stage gets a subdirectory.  Each contig gets its own checkpoint
+    # file (a blosc2-compressed pickle, suffix ".pkl.b2"; see checkpoint_io).
     # A _done marker indicates the stage completed for ALL contigs.
     #
     # On resume, _ensure_key loads ONLY the keys a stage needs from checkpoints,
@@ -319,45 +318,33 @@ if __name__ == '__main__':
         print(f"  [Checkpoint] Stage '{stage}' marked complete")
 
     def contig_done(stage, r_name):
-        return os.path.exists(os.path.join(_stage_dir(stage), f"{r_name}.pkl"))
+        return os.path.exists(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name))
 
     def save_contig(stage, r_name, data):
-        path = os.path.join(_stage_dir(stage), f"{r_name}.pkl")
-        tmp = path + ".tmp"
+        _stage_dir(stage)  # ensure the stage directory exists
         try:
-            with open(tmp, 'wb') as f:
-                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            os.replace(tmp, path)
-            size_mb = os.path.getsize(path) / (1024 * 1024)
+            size_mb = checkpoint_io.write(
+                checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name), data, nthreads=n_processes
+            ) / (1024 * 1024)
             print(f"    [Checkpoint] {stage}/{r_name} ({size_mb:.1f} MB)")
         except OSError as e:
             print(f"    [Checkpoint] WARNING: {stage}/{r_name}: {e}")
-            try: os.unlink(tmp)
-            except OSError: pass
 
     def load_contig(stage, r_name):
-        path = os.path.join(_stage_dir(stage), f"{r_name}.pkl")
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+        return checkpoint_io.read(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name), nthreads=n_processes)
 
     def save_global(stage, data):
-        path = os.path.join(_stage_dir(stage), "_global.pkl")
-        tmp = path + ".tmp"
+        _stage_dir(stage)  # ensure the stage directory exists
         try:
-            with open(tmp, 'wb') as f:
-                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            os.replace(tmp, path)
-            size_mb = os.path.getsize(path) / (1024 * 1024)
+            size_mb = checkpoint_io.write(
+                checkpoint_io.global_path(CHECKPOINT_DIR, stage), data, nthreads=n_processes
+            ) / (1024 * 1024)
             print(f"  [Checkpoint] {stage}/_global ({size_mb:.1f} MB)")
         except OSError as e:
             print(f"  [Checkpoint] WARNING: {stage}/_global: {e}")
-            try: os.unlink(tmp)
-            except OSError: pass
 
     def load_global(stage):
-        path = os.path.join(_stage_dir(stage), "_global.pkl")
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+        return checkpoint_io.read(checkpoint_io.global_path(CHECKPOINT_DIR, stage), nthreads=n_processes)
 
     # Which stage checkpoint holds each per-contig key.
     # Values can be a single stage string or a list (tried in order, first hit wins).
@@ -588,6 +575,7 @@ if __name__ == '__main__':
             seed=(SIMULATION_SEED + 1_000_000) if SIMULATION_SEED is not None else None
         )
         
+        _stage2_items = []
         for r_name in region_keys:
             result = contig_results[r_name]
             multi_contig_results[r_name]['simulated_reads'] = result['simulated_reads']
@@ -595,13 +583,17 @@ if __name__ == '__main__':
             multi_contig_results[r_name]['simd_probs'] = result['simd_probs']
             multi_contig_results[r_name]['simd_priors'] = result['simd_priors']
             multi_contig_results[r_name]['truth_painting'] = result['truth_painting']
-            save_contig(STAGE_2, r_name, {
+            _stage2_items.append((r_name, {
                 'simulated_reads': result['simulated_reads'],
                 'simd_genomic_data': result['simd_genomic_data'],
                 'simd_probs': result['simd_probs'],
                 'simd_priors': result['simd_priors'],
                 'truth_painting': result['truth_painting'],
-            })
+            }))
+        # All contigs are resident at once here (process_all_contigs_parallel
+        # returned them together), so write them concurrently rather than one
+        # at a time.
+        checkpoint_io.save_contigs_parallel(CHECKPOINT_DIR, STAGE_2, _stage2_items, n_processes)
         
         print(f"Post-processing ({len(region_keys)} contigs parallel): {time.time()-t0:.1f}s")
 
@@ -715,7 +707,9 @@ if __name__ == '__main__':
             _ensure_key(r_name, 'naive_long_haps')
             reads = multi_contig_results[r_name]['simulated_reads']
             avg_depth = np.mean(np.sum(reads, axis=-1))
-            print(f"\n  {r_name}: average read depth = {avg_depth:.1f}x")
+            print(f"\n{'='*60}")
+            print(f"{r_name}: average read depth = {avg_depth:.1f}x")
+            print(f"{'='*60}")
             
             if avg_depth < REFINEMENT_DEPTH_THRESHOLD:
                 print(f"  Depth < {REFINEMENT_DEPTH_THRESHOLD}x → Running L1+L2 refinement")
