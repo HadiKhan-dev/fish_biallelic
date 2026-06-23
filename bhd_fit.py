@@ -360,6 +360,55 @@ def _update_A_baseline_kernel(probs_k, H_k, lam):
     return A, per_sample_cost, wildcard_slots
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _update_A_blas_lp_precompute_kernel(log_probs, lam, snps_per_bin, n_bins, L):
+    """Parallel njit core of _update_A_blas_lp_precompute.
+
+    Computes the five H-independent BLAS inputs in one prange over bins.  The
+    previous implementation built them with a chain of serial numpy ops
+    (reshape + sum + three transpose-and-copy passes over the (N, L) log-prob
+    planes), which ran single-threaded; this fills the same arrays directly,
+    parallel over the n_bins axis.  Bins are the OUTERMOST axis of the three
+    (n_bins, snps_per_bin, N) outputs, so each thread writes its own contiguous
+    block of those (bulk) arrays with no false sharing.
+
+    Bit-identical to the numpy version: each output element is the same scalar
+    expression; the per-bin sums (C0b, kW_Cb) accumulate the bin's real sites in
+    the same site order numpy's sum(axis=2) uses; padded sites (l >= L)
+    contribute exact 0.0 (left at the np.zeros init), matching the numpy
+    zero-pad path; and the m01/m12 ternaries equal np.maximum on these finite
+    log-probabilities.  L is the true (unpadded) site count.
+    """
+    N = log_probs.shape[0]
+    C0b = np.zeros((N, n_bins), dtype=np.float64)
+    kW_Cb = np.zeros((N, n_bins), dtype=np.float64)
+    diff1_bt = np.zeros((n_bins, snps_per_bin, N), dtype=np.float64)
+    w_bt = np.zeros((n_bins, snps_per_bin, N), dtype=np.float64)
+    kWdiff_bt = np.zeros((n_bins, snps_per_bin, N), dtype=np.float64)
+    for b in prange(n_bins):
+        for s in range(N):
+            c0 = 0.0
+            cm01 = 0.0
+            ncnt = 0
+            for t in range(snps_per_bin):
+                l = b * snps_per_bin + t
+                if l < L:
+                    a0 = log_probs[s, l, 0]
+                    a1 = log_probs[s, l, 1]
+                    a2 = log_probs[s, l, 2]
+                    m01 = a0 if a0 > a1 else a1
+                    m12 = a1 if a1 > a2 else a2
+                    diff1_bt[b, t, s] = a1 - a0
+                    w_bt[b, t, s] = a0 - 2.0 * a1 + a2
+                    kWdiff_bt[b, t, s] = m12 - m01
+                    c0 += a0
+                    cm01 += m01
+                    ncnt += 1
+            C0b[s, b] = c0
+            kW_Cb[s, b] = cm01 - ncnt * lam
+    return C0b, diff1_bt, w_bt, kW_Cb, kWdiff_bt
+
+
 def _update_A_blas_lp_precompute(log_probs, lam, snps_per_bin, n_bins):
     """Precompute the log_probs-derived BLAS inputs for
     `_update_A_fused_blas_kernel`.
@@ -410,47 +459,13 @@ def _update_A_blas_lp_precompute(log_probs, lam, snps_per_bin, n_bins):
     the scalar kernel's `if end > L: end = L` clamp exactly.  The kW
     per-bin lam offset uses the REAL (unpadded) site count per bin.
     """
-    N = log_probs.shape[0]
-    L = log_probs.shape[1]
-    Lpad = n_bins * snps_per_bin
-    if Lpad == L:
-        a0 = np.ascontiguousarray(log_probs[:, :, 0])
-        a1 = np.ascontiguousarray(log_probs[:, :, 1])
-        a2 = np.ascontiguousarray(log_probs[:, :, 2])
-    else:
-        a0 = np.zeros((N, Lpad), dtype=np.float64)
-        a1 = np.zeros((N, Lpad), dtype=np.float64)
-        a2 = np.zeros((N, Lpad), dtype=np.float64)
-        a0[:, :L] = log_probs[:, :, 0]
-        a1[:, :L] = log_probs[:, :, 1]
-        a2[:, :L] = log_probs[:, :, 2]
-
-    C0b = np.ascontiguousarray(
-        a0.reshape(N, n_bins, snps_per_bin).sum(axis=2))
-    diff1_bt = np.ascontiguousarray(
-        (a1 - a0).reshape(N, n_bins, snps_per_bin).transpose(1, 2, 0))
-    w_bt = np.ascontiguousarray(
-        (a0 - 2.0 * a1 + a2).reshape(N, n_bins, snps_per_bin).transpose(1, 2, 0))
-
-    m01 = np.maximum(a0, a1)
-    m12 = np.maximum(a1, a2)
-    real_per_bin = np.empty(n_bins, dtype=np.float64)
-    for b in range(n_bins):
-        start = b * snps_per_bin
-        end = start + snps_per_bin
-        if end > L:
-            end = L
-        cnt = end - start
-        if cnt < 0:
-            cnt = 0
-        real_per_bin[b] = cnt
-    kW_Cb = np.ascontiguousarray(
-        m01.reshape(N, n_bins, snps_per_bin).sum(axis=2)
-        - real_per_bin[None, :] * lam)
-    kWdiff_bt = np.ascontiguousarray(
-        (m12 - m01).reshape(N, n_bins, snps_per_bin).transpose(1, 2, 0))
-
-    return C0b, diff1_bt, w_bt, kW_Cb, kWdiff_bt
+    # The five H-independent inputs are now built in one parallel njit kernel
+    # (prange over bins) instead of the serial numpy reshape/sum/transpose
+    # chain below; output is bit-identical (see the kernel docstring).
+    lp_c = _maybe_c_contig(log_probs, np.float64)
+    L = lp_c.shape[1]
+    return _update_A_blas_lp_precompute_kernel(
+        lp_c, float(lam), int(snps_per_bin), int(n_bins), int(L))
 
 
 @njit(cache=True, parallel=True, fastmath=False)
@@ -693,6 +708,52 @@ def _update_H_usage_kernel(A, K):
     return usage
 
 
+@njit(cache=True)
+def _classify_founder_buckets(A, k, W):
+    """Single-pass partner-type bucketing for founder k -- the njit replacement
+    for _update_one_founder's per-call numpy boolean-mask derivation (a serial
+    hot spot at ~13074 calls per block).
+
+    For each sample s with pair A[s] = (a0, a1):
+      bucket H (kk): a0 == k and a1 == k          -> homozygous for k
+      bucket P (kW): a0 == k and a1 == W          -> k paired with wildcard
+      bucket J (kj): k present, neither of the above
+                     -> partner is the non-k entry (np.where(a0==k, a1, a0))
+    These three tests reproduce the previous is_kk / is_kW / (has_k & ~is_kk &
+    ~is_kW) masks EXACTLY, and samples are appended in ascending s order so the
+    returned arrays match np.where(...)[0] ordering bit-for-bit.  A sample not
+    involving k lands in no bucket.
+
+    Returns (kk_idx, kj_idx, kW_idx, partner_J), all int64 and C-contiguous;
+    partner_J is aligned with kj_idx.
+    """
+    N = A.shape[0]
+    kk = np.empty(N, dtype=np.int64)
+    kj = np.empty(N, dtype=np.int64)
+    kW = np.empty(N, dtype=np.int64)
+    partner = np.empty(N, dtype=np.int64)
+    n_kk = 0
+    n_kj = 0
+    n_kW = 0
+    for s in range(N):
+        a0 = A[s, 0]
+        a1 = A[s, 1]
+        is_kk = (a0 == k) and (a1 == k)
+        is_kW = (a0 == k) and (a1 == W)
+        has_k = (a0 == k) or (a1 == k)
+        if is_kk:
+            kk[n_kk] = s
+            n_kk += 1
+        elif is_kW:
+            kW[n_kW] = s
+            n_kW += 1
+        elif has_k:
+            kj[n_kj] = s
+            partner[n_kj] = a1 if a0 == k else a0
+            n_kj += 1
+    return kk[:n_kk], kj[:n_kj], kW[:n_kW], partner[:n_kj]
+
+
 def _update_one_founder(probs_k, H_k, A, k, lam, cost_WW=None, log_probs=None):
     """For founder k, at each kept site, evaluate cost contribution from
     samples carrying k under H_k[k, l] = 0 vs = 1, and pick the lower.
@@ -730,30 +791,20 @@ def _update_one_founder(probs_k, H_k, A, k, lam, cost_WW=None, log_probs=None):
     # entries are k; (k, j) with j != k real means one entry is k and the
     # other is some j with j != k and j != W; (k, W) means one entry is k
     # and the other is W.
-    is_kk = (A[:, 0] == k) & (A[:, 1] == k)
-    is_kW = ((A[:, 0] == k) & (A[:, 1] == W))
-    # A[:, 0] != A[:, 1] and one of them is k and the other is real (not W)
-    has_k = (A[:, 0] == k) | (A[:, 1] == k)
-    is_kj = has_k & ~is_kk & ~is_kW
+    # Classify samples into founder-k's three partner-type buckets in a single
+    # njit pass over A, replacing the per-call chain of numpy boolean-mask ops +
+    # np.where.  Membership, ascending sample order, and bucket-J partners are
+    # identical to the previous is_kk / is_kW / (has_k & ~is_kk & ~is_kW)
+    # derivation (see _classify_founder_buckets).
+    A_c = _maybe_c_contig(A, np.int64)
+    kk_sample_idx, kj_sample_idx, kW_sample_idx, partner_J = \
+        _classify_founder_buckets(A_c, int(k), int(W))
 
-    # If founder k has no support, leave H_k[k] untouched
-    n_supp = int(is_kk.sum() + is_kj.sum() + is_kW.sum())
+    # If founder k has no support, leave H_k[k] untouched.
+    n_supp = (kk_sample_idx.shape[0] + kj_sample_idx.shape[0]
+              + kW_sample_idx.shape[0])
     if n_supp == 0:
         return 0
-
-    # For each sample in bucket J, identify the partner founder index j_s
-    if is_kj.any():
-        # j_s = the entry in A[s] that's NOT k
-        a0 = A[is_kj, 0]
-        a1 = A[is_kj, 1]
-        partner_J = np.where(a0 == k, a1, a0)               # (n_J,)
-        kj_sample_idx = np.where(is_kj)[0]                  # (n_J,)
-    else:
-        partner_J = np.empty(0, dtype=np.int64)
-        kj_sample_idx = np.empty(0, dtype=np.int64)
-
-    kk_sample_idx = np.where(is_kk)[0]
-    kW_sample_idx = np.where(is_kW)[0]
 
     # Compute cost_WW if not supplied.  This is the wrapper's last chance
     # to reuse a precomputed array; the kernel REQUIRES a passed-in
@@ -774,10 +825,11 @@ def _update_one_founder(probs_k, H_k, A, k, lam, cost_WW=None, log_probs=None):
     probs_c = _maybe_c_contig(probs_k, np.float64)
     H_row_c = _maybe_c_contig(H_k[k], np.int64)
     H_c = _maybe_c_contig(H_k, np.int64)
-    kk_idx_c = _maybe_c_contig(kk_sample_idx, np.int64)
-    kj_idx_c = _maybe_c_contig(kj_sample_idx, np.int64)
-    kW_idx_c = _maybe_c_contig(kW_sample_idx, np.int64)
-    partner_J_c = _maybe_c_contig(partner_J, np.int64)
+    # The classifier already returns C-contiguous int64 index/partner arrays.
+    kk_idx_c = kk_sample_idx
+    kj_idx_c = kj_sample_idx
+    kW_idx_c = kW_sample_idx
+    partner_J_c = partner_J
     cost_WW_c = _maybe_c_contig(cost_WW, np.float64)
     log_probs_c = _maybe_c_contig(log_probs, np.float64)
     new_row, n_changes = _update_one_founder_kernel(

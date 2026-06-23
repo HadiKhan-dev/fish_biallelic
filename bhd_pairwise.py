@@ -485,7 +485,7 @@ def build_pairwise_partial_haps(probs,
     return all_values, all_determined
 
 
-@njit(cache=True)
+@njit(parallel=True, cache=True)
 def _cluster_all_seeds_kernel(all_values, all_determined, seed_order,
                                min_cluster_overlap,
                                max_cluster_disagreements,
@@ -629,27 +629,28 @@ def _cluster_all_seeds_kernel(all_values, all_determined, seed_order,
             # min_cluster_overlap AND disagreements(p) <= max_disagreements.
             # Early-exit the inner L-loop on disagreements > max — the
             # partial is rejected regardless of the rest of the L-pass.
-            for p in range(P):
+            for p in prange(P):
                 if not available[p] and p != seed_idx:
                     # Claimed by an earlier cluster.  (seed_idx is always
-                    # forced True below.)
-                    compatible[p] = False
-                    continue
-                overlap_count = 0
-                disagreements = 0
-                rejected = False
-                for l in range(L):
-                    if cur_determined[l] and all_determined[p, l]:
-                        overlap_count += 1
-                        if cur_values[l] != all_values[p, l]:
-                            disagreements += 1
-                            if disagreements > max_cluster_disagreements:
-                                rejected = True
-                                break
-                if rejected:
+                    # forced True below.)  if/else rather than `continue` so the
+                    # loop body is a single block, which prange requires.
                     compatible[p] = False
                 else:
-                    compatible[p] = overlap_count >= min_cluster_overlap
+                    overlap_count = 0
+                    disagreements = 0
+                    rejected = False
+                    for l in range(L):
+                        if cur_determined[l] and all_determined[p, l]:
+                            overlap_count += 1
+                            if cur_values[l] != all_values[p, l]:
+                                disagreements += 1
+                                if disagreements > max_cluster_disagreements:
+                                    rejected = True
+                                    break
+                    if rejected:
+                        compatible[p] = False
+                    else:
+                        compatible[p] = overlap_count >= min_cluster_overlap
             # Always include the seed itself
             compatible[seed_idx] = True
 
@@ -682,7 +683,7 @@ def _cluster_all_seeds_kernel(all_values, all_determined, seed_order,
             # Recompute consensus by majority vote across compatible
             # partial-haps.  L-outer, n_compat-inner; iterate the packed
             # index array rather than all P partials.
-            for l in range(L):
+            for l in prange(L):
                 votes_0 = 0
                 votes_1 = 0
                 for k in range(n_compat):

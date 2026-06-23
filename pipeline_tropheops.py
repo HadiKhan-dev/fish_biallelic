@@ -1,4 +1,81 @@
 #%%
+# =============================================================================
+# MODULE-LEVEL DEFINITIONS (config + PICKLABLE forkserver callbacks)
+# =============================================================================
+# Functions/closures defined inside `if __name__ == '__main__':` cannot be
+# pickled by multiprocessing.  Forkserver workers (phase correction, greedy
+# refinement) receive their callbacks via pickle, so any function that crosses
+# the worker boundary MUST live at module top level here.  This mirrors the
+# module-level section at the top of pipeline.py.
+#
+# The pipeline configuration (USE_KNOWN_FOUNDERS) and the checkpoint/output
+# directories live here too, because the picklable loader below needs
+# CHECKPOINT_DIR at import time.  The __main__ block reads these module-level
+# values rather than redefining them.
+
+import os
+import checkpoint_io
+
+# -----------------------------------------------------------------------------
+# CONFIGURATION — EDIT THIS to switch between the two comparison runs.
+# -----------------------------------------------------------------------------
+# USE_KNOWN_FOUNDERS controls whether the 4 G0 (parental) samples are fed into
+# the reconstruction pipeline:
+#   True  -> all 116 samples go through T01-T10 (easy mode: G0s are mostly
+#            homozygous for distinct parental species and form clean founder
+#            clusters on their own during block discovery)
+#   False -> the 4 G0 sample rows are sliced out, so T01-T10 see only the 112
+#            admixed F1+F2 samples (hard mode: parental haplotypes must be
+#            reconstructed purely from offspring)
+# In BOTH modes the 4 G0 reads are ALSO loaded separately and stashed in the
+# T01 checkpoint so the validation stages can compare against ground truth
+# regardless of the flag.
+USE_KNOWN_FOUNDERS = True
+
+_mode_label = "withFounders" if USE_KNOWN_FOUNDERS else "withoutFounders"
+# Separate checkpoint + results dirs per flag so the two modes do not clobber
+# each other and can be run back-to-back for comparison.
+CHECKPOINT_DIR = f".pipeline_checkpoints_tropheops_{_mode_label}"
+output_dir = f"results_tropheops_{_mode_label}"
+
+
+def _load_contig_for_phase_correction(r_name):
+    """Load tolerance_result + founder_block for one contig directly from
+    checkpoint files.  Top-level (picklable) so forkserver workers in
+    phase_correction can call it; reads checkpoints directly rather than going
+    through main's state (forkserver workers do not inherit it).
+
+    Stage -> key mapping (mirrors the __main__ checkpoint layout):
+        tolerance_result -> T08_viterbi_painting
+        super_blocks_L4  -> T07_assembly_L4   (preferred)
+        super_blocks_L3  -> T06_assembly_L3   (fallback)
+    A missing checkpoint simply omits its key; the worker falls back to an
+    identity equivalence matrix when a key is absent.
+    """
+    data = {}
+    tol_path = checkpoint_io.contig_path(CHECKPOINT_DIR, "T08_viterbi_painting", r_name)
+    if os.path.exists(tol_path):
+        ckpt = checkpoint_io.read(tol_path)
+        if 'tolerance_result' in ckpt:
+            data['tolerance_result'] = ckpt['tolerance_result']
+        del ckpt
+    for stage, list_key in [("T07_assembly_L4", "super_blocks_L4"),
+                            ("T06_assembly_L3", "super_blocks_L3")]:
+        if 'founder_block' in data:
+            break
+        path = checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name)
+        if not os.path.exists(path):
+            continue
+        ckpt = checkpoint_io.read(path)
+        if list_key in ckpt and ckpt[list_key]:
+            fb = ckpt[list_key][0]
+            fb.probs_array = None  # reconstructible from global_probs
+            data['founder_block'] = fb
+        del ckpt
+    return data
+
+
+#%%
 if __name__ == '__main__':
     import os
     import sys
@@ -20,20 +97,12 @@ if __name__ == '__main__':
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
     # =============================================================================
-    # CONFIGURATION — EDIT THIS TO SWITCH BETWEEN THE TWO COMPARISON RUNS
+    # CONFIGURATION
     # =============================================================================
-    # USE_KNOWN_FOUNDERS controls whether the 4 G0 (parental) samples are fed
-    # into the reconstruction pipeline:
-    #   True  -> all 116 samples go through T01-T10 (easy mode: G0s are
-    #            mostly homozygous for distinct parental species and will form
-    #            clean founder clusters on their own during block discovery)
-    #   False -> the 4 G0 sample rows are sliced out of the input, so T01-T10
-    #            only see the 112 admixed F1+F2 samples (hard mode: the pipeline
-    #            must reconstruct parental haplotypes purely from offspring)
-    # In BOTH modes, the 4 G0 sample reads are ALSO loaded separately and
-    # stashed in the T01 checkpoint for use by the T11 validation stage, so
-    # validation-against-ground-truth works regardless of the flag.
-    USE_KNOWN_FOUNDERS = True
+    # USE_KNOWN_FOUNDERS, _mode_label, CHECKPOINT_DIR and output_dir are defined
+    # at MODULE TOP LEVEL (see the top of this file).  The picklable forkserver
+    # callback _load_contig_for_phase_correction needs CHECKPOINT_DIR at import
+    # time, so the config must exist there.  EDIT THE FLAG THERE, not here.
 
     # =============================================================================
     # DUAL LOGGING: Console + File
@@ -57,7 +126,6 @@ if __name__ == '__main__':
         def __getattr__(self, name):
             return getattr(self._original, name)
 
-    _mode_label = "withFounders" if USE_KNOWN_FOUNDERS else "withoutFounders"
     os.makedirs("logs", exist_ok=True)
     run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join("logs", f"run_tropheops_{_mode_label}_{run_timestamp}.log")
@@ -80,7 +148,7 @@ if __name__ == '__main__':
 
     import thread_config
     import vcf_data_loader
-    import block_haplotypes_new as block_haplotypes
+    import block_haplotypes
     import small_block_refine
     import residual_discovery
     import hierarchical_assembly
@@ -129,14 +197,9 @@ if __name__ == '__main__':
         {"contig": "chr23"},
     ]
 
-    # Separate checkpoint + results directories per flag setting so a run with
-    # USE_KNOWN_FOUNDERS=True does not clobber one with USE_KNOWN_FOUNDERS=False
-    # (and vice versa).  Lets the user run both back-to-back and compare outputs.
-    CHECKPOINT_DIR = f".pipeline_checkpoints_tropheops_{_mode_label}"
-    output_dir = f"results_tropheops_{_mode_label}"
-
+    # CHECKPOINT_DIR and output_dir are defined at module top level (above).
     # =========================================================================
-    # Checkpoint Infrastructure (identical to pipeline_real.py)
+    # Checkpoint Infrastructure (blosc2 via checkpoint_io — matches pipeline.py)
     # =========================================================================
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
@@ -155,45 +218,37 @@ if __name__ == '__main__':
         print(f"  [Checkpoint] Stage '{stage}' marked complete")
 
     def contig_done(stage, r_name):
-        return os.path.exists(os.path.join(_stage_dir(stage), f'{r_name}.pkl'))
+        return os.path.exists(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name))
 
     def save_contig(stage, r_name, data_dict):
-        path = os.path.join(_stage_dir(stage), f'{r_name}.pkl')
-        tmp = path + ".tmp"
+        _stage_dir(stage)  # ensure the stage directory exists
         try:
-            with open(tmp, 'wb') as f:
-                pickle.dump(data_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
-            os.replace(tmp, path)
-            sz = os.path.getsize(path) / (1024*1024)
+            sz = checkpoint_io.write(
+                checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name),
+                data_dict, nthreads=n_processes) / (1024*1024)
             print(f"    [Checkpoint] {stage}/{r_name} ({sz:.1f} MB)")
         except OSError as e:
             print(f"    [Checkpoint] WARNING: {stage}/{r_name}: {e}")
-            try: os.unlink(tmp)
-            except OSError: pass
 
     def load_contig(stage, r_name):
-        path = os.path.join(_stage_dir(stage), f'{r_name}.pkl')
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+        return checkpoint_io.read(
+            checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name),
+            nthreads=n_processes)
 
     def save_global(stage, data_dict):
-        path = os.path.join(_stage_dir(stage), '_global.pkl')
-        tmp = path + ".tmp"
+        _stage_dir(stage)  # ensure the stage directory exists
         try:
-            with open(tmp, 'wb') as f:
-                pickle.dump(data_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
-            os.replace(tmp, path)
-            sz = os.path.getsize(path) / (1024*1024)
+            sz = checkpoint_io.write(
+                checkpoint_io.global_path(CHECKPOINT_DIR, stage),
+                data_dict, nthreads=n_processes) / (1024*1024)
             print(f"    [Checkpoint] {stage}/_global ({sz:.1f} MB)")
         except OSError as e:
             print(f"    [Checkpoint] WARNING: {stage}/_global: {e}")
-            try: os.unlink(tmp)
-            except OSError: pass
 
     def load_global(stage):
-        path = os.path.join(_stage_dir(stage), '_global.pkl')
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+        return checkpoint_io.read(
+            checkpoint_io.global_path(CHECKPOINT_DIR, stage),
+            nthreads=n_processes)
 
     def strip_block_probs(blocks):
         """Strip redundant probs_array from blocks to save memory.
@@ -870,28 +925,21 @@ if __name__ == '__main__':
                 num_samples = global_probs.shape[0]
                 chimera_resolution.warmup_jit(num_samples)
 
-                # NOTE: cc_scale=0.5 here (not 0.2 as in pipeline_real.py) per
-                # user direction — 0.5 is the correct value for this assembler
-                # and should be used everywhere.
-                #
-                # DIAGNOSTIC CHANGES (refinement hang investigation):
-                #   - verbose=True on L2 so we can see which block / gap the
-                #     HMM linking is working on when it stalls (was False).
-                #   - maxtasksperchild removed from BOTH L1 and L2 calls so the
-                #     pool uses its default (workers not recycled after every
-                #     batch).  With hundreds of refinement batches, the
-                #     maxtasksperchild=1 setting caused hundreds of forkserver
-                #     spawns which can wedge under high spawn rate; removing
-                #     it trades the glibc-malloc-fragmentation protection for
-                #     pool stability.  Node has 486 GB free so fragmentation
-                #     is not an immediate concern here.
+                # L1/L2 step functions mirror pipeline.py STAGE 4 exactly:
+                # cc_scale=0.5; maxtasksperchild=WORKER_MAXTASKS (recycle workers
+                # to bound glibc-malloc fragmentation); refine_after_stitch=False
+                # (the refinement pipeline below runs its OWN refinement, so the
+                # per-level post-stitch refinement is opted out here to avoid
+                # doing it twice).  verbose=False on L2 to match pipeline.py.
                 def make_l1_fn(gp, gs):
                     def l1_fn(input_blocks):
                         return hierarchical_assembly.run_hierarchical_step(
                             input_blocks=input_blocks, global_probs=gp, global_sites=gs,
                             batch_size=REFINEMENT_BATCH_SIZE, use_hmm_linking=False,
                             beam_width=200, max_founders=12, max_sites_for_linking=2000,
-                            cc_scale=0.5, num_processes=n_processes)
+                            cc_scale=0.5, num_processes=n_processes,
+                            maxtasksperchild=WORKER_MAXTASKS,
+                            refine_after_stitch=False)
                     return l1_fn
 
                 def make_l2_fn(gp, gs):
@@ -901,7 +949,9 @@ if __name__ == '__main__':
                             batch_size=REFINEMENT_BATCH_SIZE, use_hmm_linking=True,
                             recomb_rate=RECOMB_RATE, beam_width=200, max_founders=12,
                             cc_scale=0.5, num_processes=n_processes,
-                            n_generations=N_GENERATIONS, verbose=True)
+                            n_generations=N_GENERATIONS, verbose=False,
+                            maxtasksperchild=WORKER_MAXTASKS,
+                            refine_after_stitch=False)
                     return l2_fn
 
                 t0 = time.time()
@@ -1282,7 +1332,7 @@ if __name__ == '__main__':
 
                 painting_result = painter.paint_chromosome(
                     discovered_block, global_probs, global_sites,
-                    recomb_rate=5e-8, switch_penalty=10.0, batch_size=1)
+                    recomb_rate=5e-8, switch_penalty_per_snp=1.0, batch_size=1)
 
                 # Population painting visualization — uses the ACTIVE sample
                 # names (116 in withFounders mode, 112 in withoutFounders mode)
@@ -1388,27 +1438,24 @@ if __name__ == '__main__':
         if 'pedigree_df' not in dir():
             pedigree_df = load_global(STAGE_T9)['pedigree_df']
 
-        # Define loader callback — workers load their own contig data
-        def _load_contig_for_phase_correction(r_name):
-            t7 = load_contig(STAGE_T7, r_name)
-            t8 = load_contig(STAGE_T8, r_name)
-            founder_block = t7['super_blocks_L4'][0]
-            founder_block.probs_array = None  # not needed for phase correction
-            data = {
-                'tolerance_result': t8['tolerance_result'],
-                'founder_block': founder_block,
-            }
-            del t7, t8
-            return data
+        # _load_contig_for_phase_correction is defined at MODULE TOP LEVEL
+        # (picklable for forkserver workers — a closure here could not be
+        # pickled into the worker initargs under the forkserver start method).
+        # Workers load their own tolerance_result + founder_block from disk.
+        from concurrent.futures import ThreadPoolExecutor
 
-        # Lightweight dict — just contig names, workers load their own data
+        # Lightweight dict — just contig names; workers load their own data.
         mcr = {r_name: {} for r_name in region_keys}
 
-        # Step 1: Viterbi phase correction (3 rounds, workers load via load_fn)
+        # Step 1: Viterbi phase correction.  num_rounds=6 (was 3) to match
+        # pipeline.py — Jacobi within-contig threading needs more rounds to
+        # converge than Gauss-Seidel did, and 3 left contigs short.  max_workers
+        # is REQUIRED by the current phase_correction API (it raises on None) so
+        # the stage respects the pipeline's machine-wide core budget.
         start = time.time()
         mcr = phase_correction.correct_phase_all_contigs(
-            mcr, pedigree_df, sample_names_active, num_rounds=3, verbose=True,
-            load_fn=_load_contig_for_phase_correction)
+            mcr, pedigree_df, sample_names_active, num_rounds=6, verbose=True,
+            max_workers=n_processes, load_fn=_load_contig_for_phase_correction)
         print(f"Phase correction time: {time.time()-start:.1f}s")
 
         # Step 2: Greedy phase refinement
@@ -1419,8 +1466,29 @@ if __name__ == '__main__':
         start_refine = time.time()
         mcr = phase_correction.post_process_phase_greedy_all_contigs(
             mcr, pedigree_df, sample_names_active,
-            snps_per_bin=100, recomb_rate=5e-8, mismatch_cost=4.6, verbose=True)
+            snps_per_bin=100, recomb_rate=5e-8, mismatch_cost=4.6,
+            max_workers=n_processes, load_fn=_load_contig_for_phase_correction,
+            verbose=True)
         print(f"Greedy refinement time: {time.time()-start_refine:.1f}s")
+
+        # Pre-load founder_blocks for the F1 recoloring + propagation loops,
+        # which run in the MAIN process and need founder_block in mcr.  The
+        # phase-correction / greedy workers above no longer return founder_block
+        # (the IPC-cost fix in phase_correction.py), so load it here in parallel
+        # across contigs (parallel disk I/O).
+        print("\n" + "="*60)
+        print("Loading founder_blocks for F1 recoloring + propagation")
+        print("="*60)
+        _t0 = time.time()
+        def _load_founder_block_for_main(r_name):
+            t7 = load_contig(STAGE_T7, r_name)
+            fb = t7['super_blocks_L4'][0]
+            fb.probs_array = None  # reconstructible from global_probs
+            mcr.setdefault(r_name, {})['founder_block'] = fb
+            del t7
+        with ThreadPoolExecutor(max_workers=min(n_processes, len(region_keys))) as _ex:
+            list(_ex.map(_load_founder_block_for_main, region_keys))
+        print(f"Founder block parallel load: {time.time()-_t0:.1f}s")
 
         # Step 3: Parsimonious F1 recoloring
         print("\n" + "="*60)
@@ -1432,13 +1500,13 @@ if __name__ == '__main__':
                 continue
             data = mcr[r_name]
             painting_key = 'refined_painting' if 'refined_painting' in data else 'corrected_painting'
-            if painting_key not in data:
+            if painting_key not in data or 'founder_block' not in data:
                 continue
 
             recolored = phase_correction.apply_parsimonious_f1_recoloring(
                 data[painting_key], data['founder_block'],
                 pedigree_df, sample_names_active,
-                max_mismatch_rate=0.02, verbose=True)
+                max_workers=n_processes, max_mismatch_rate=0.02, verbose=True)
             data['final_painting'] = recolored
 
         # Step 4: Propagate recoloring to offspring
@@ -1456,7 +1524,7 @@ if __name__ == '__main__':
             propagated = phase_correction.propagate_recoloring_to_offspring(
                 data['final_painting'], data['founder_block'],
                 pedigree_df, sample_names_active,
-                max_mismatch_rate=0.02, verbose=True)
+                max_workers=n_processes, max_mismatch_rate=0.02, verbose=True)
             data['final_painting'] = propagated
 
         # Save per-contig results

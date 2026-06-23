@@ -31,6 +31,7 @@ except ImportError:
         return decorator
     prange = range
 
+import dynamic_threads
 from bhd_fit import _compute_cc
 from bhd_config import (
     RECOVERY_HAPS_EQUAL_EPS_PCT,
@@ -93,6 +94,10 @@ def _greedy_bic_select(cache, cc_scale=RECOVERY_OUTER_CC_SCALE,
               f'cc={cc:.1f}, threshold cc/2={cc/2:.1f}')
 
     while len(selected_indices) < min(len(candidate_haps), max_k):
+        # Re-check the live thread budget before this round's parallel batch_nll
+        # sweep, so a straggler block grows into cores freed by finished peers
+        # mid-selection (no-op on the sequential path).
+        dynamic_threads.apply_dynamic_threads()
         # Evaluate adding each still-unused candidate, parallelised ACROSS
         # candidates (prange in cache.batch_nll_for_subsets) instead of a
         # sequential Python loop of one tiny per-sample Viterbi each — the
@@ -179,6 +184,11 @@ def _swap_refine(cache, selected_indices, current_nll,
     pool_size = cache.K_pool
     n_swaps = 0
     for pass_num in range(max_passes):
+        # Re-check the live thread budget once per pass, so a straggler block
+        # grows into cores freed by finished peers mid-refinement (no-op on the
+        # sequential path).  Per-pass, not per-position: keeps the shared-counter
+        # poll off the inner sweep loop.
+        dynamic_threads.apply_dynamic_threads()
         improved_in_pass = False
         for si in range(K):
             # Sweep all unused pool members for position si, parallelised
@@ -256,6 +266,10 @@ def _bic_prune(cache, selected_indices,
     n_dropped = 0
 
     while len(sel_ind) > 0:
+        # Re-check the live thread budget before this round's parallel batch_nll
+        # leave-one-out sweep, so a straggler block grows into cores freed by
+        # finished peers mid-prune (no-op on the sequential path).
+        dynamic_threads.apply_dynamic_threads()
         nll_full = cache.nll_for_subset(sel_ind)
         K = len(sel_ind)
 
