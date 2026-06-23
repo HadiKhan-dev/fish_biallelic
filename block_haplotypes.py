@@ -1044,8 +1044,21 @@ def _worker_generate_block_direct(args):
     dynamic_threads.apply_dynamic_threads()
 
     try:
+        # --- diagnostic: time each block's discovery and print id/size/seconds
+        # as it finishes (lines tagged [block-time]; grep them out of the log).
+        import time as _time
+        import sys as _sys
+        _bt0 = _time.perf_counter()
         result = generate_haplotypes_block_robust(
             positions, reads, keep_flags=flags, **kwargs)
+        _bt = _time.perf_counter() - _bt0
+        try:
+            _nr = reads.shape[0] if hasattr(reads, "shape") else len(reads)
+            _ns = len(positions) if positions is not None else -1
+            print("[block-time] id=%d reads=%s sites=%s seconds=%.2f"
+                  % (block_idx, _nr, _ns, _bt), file=_sys.stderr, flush=True)
+        except Exception:
+            pass
         _malloc_trim()
         return (block_idx, result)
     finally:

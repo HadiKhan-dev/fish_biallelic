@@ -496,50 +496,86 @@ def _bernoulli_mixture_em(cands, K, init_centers,
 
 
 @njit(cache=True, parallel=True, fastmath=False)
-def _run_em_restarts_kernel(cands, K, all_inits, max_iter, tol, eps):
-    """Run all EM restarts for a fixed K in parallel ACROSS restarts.
+def _run_em_all_combos_kernel(cands, combo_K, is_full, uniforms_padded,
+                              K_max_eff, max_iter, tol, eps):
+    """Run K-means++ init + EM for EVERY (K, restart) combo in one prange.
 
-    `prange` is over the restart axis; each restart calls the serial
-    _bernoulli_mixture_em_kernel on its own pre-generated init.  The EM is
-    deterministic given its init (no internal RNG), and each restart writes
-    only its own row of the output arrays, so there is no shared-state race
-    and the per-restart (ll, theta, pi, resp) are bit-identical to running
-    _bernoulli_mixture_em_kernel serially with the same inits.  The kernel's
-    BLAS matmuls (cands @ logit.T, resp.T @ cands) run single-threaded under
-    the pinned BLAS thread count, so dispatching them concurrently from the
-    prange does not oversubscribe — the parallelism is the restart axis.
+    Replaces the per-K _run_em_restarts_kernel.  That kernel parallelised only
+    the n_restarts restarts within a single K, so its prange was at most
+    n_restarts wide (=2 by default) and a block with ~110 free cores still ran
+    the K-sweep almost serially.  This widens the parallel axis to all
+    K_max_eff * n_restarts combos at once, so a straggler block fills the cores
+    it has.
 
-    Arguments:
-        cands:     (N, L) float64 — the candidate matrix (shared, read-only).
-        K:         number of mixture components.
-        all_inits: (R, K, L) float64 — per-restart K-means++ init centers,
-                   generated SERIALLY by the caller so the RNG stream (and
-                   hence the inits) matches the old per-restart loop exactly.
-        max_iter, tol, eps: EM hyper-parameters (the same module constants the
-                   _bernoulli_mixture_em wrapper passes through).
+    Each combo independently builds its own init and runs the SAME serial
+    _bernoulli_mixture_em_kernel as before, writing only its own output rows (no
+    shared state), so every combo's (ll, theta, pi, resp) is bit-identical to
+    the old per-K kernel given the same init.  The init is built here from
+    precomputed uniforms rather than drawn inside the kernel:
 
-    Returns:
-        lls:    (R,)        final log-likelihood per restart.
-        thetas: (R, K, L)   final theta per restart.
-        pis:    (R, K)      final pi per restart.
-        resps:  (R, N, K)   final responsibilities per restart.
-    The caller selects the best restart with a strict-> lowest-index reduction
-    over `lls`, reproducing the old `if best is None or ll > best[0]` semantic.
+      - is_full[c] is True only when K == N (candidate count).  This mirrors
+        _kmeans_pp_init's ``K >= N`` branch, whose init is all N candidates in
+        order (candidates[range(N)]); since the caller caps K <= N, the K > N
+        sub-case (which would draw rng.integers) never occurs, so this branch
+        consumes no randomness -- matching the wrapper exactly.
+      - otherwise the K-means++ centres come from _kmeans_pp_init_kernel fed the
+        first K entries of uniforms_padded[c], i.e. the very rng.random(K) draws
+        the serial wrapper would have made for this (K, restart); identical
+        uniforms -> identical centres.
+
+    Outputs are padded to K_max_eff on the component axis (a combo with K
+    components fills rows/cols [:K]); the caller slices [:K] per combo.
+
+    Args:
+        cands:           (N, L) float64 candidate matrix (shared, read-only).
+        combo_K:         (C,) int64 -- K for each combo, C = K_max_eff*n_restarts,
+                         laid out K-major then restart-minor (combo
+                         (K-1)*n_restarts + r is restart r of K).
+        is_full:         (C,) bool -- True when K == N (all-candidates init).
+        uniforms_padded: (C, K_max_eff) float64 -- first K entries per combo are
+                         this (K, restart)'s rng.random(K) draws.
+        K_max_eff:       component-axis width of the padded outputs.
+        max_iter, tol, eps: EM hyper-parameters.
+
+    Returns (padded to K_max_eff on the component axis):
+        lls:    (C,)                 final LL per combo.
+        thetas: (C, K_max_eff, L)    final theta per combo (rows [:K] valid).
+        pis:    (C, K_max_eff)       final pi per combo (cols [:K] valid).
+        resps:  (C, N, K_max_eff)    final responsibilities (cols [:K] valid).
     """
-    R = all_inits.shape[0]
+    C = combo_K.shape[0]
     N = cands.shape[0]
     L = cands.shape[1]
-    lls = np.empty(R, dtype=np.float64)
-    thetas = np.empty((R, K, L), dtype=np.float64)
-    pis = np.empty((R, K), dtype=np.float64)
-    resps = np.empty((R, N, K), dtype=np.float64)
-    for r in prange(R):
-        theta_r, pi_r, ll_r, n_iter_r, resp_r = _bernoulli_mixture_em_kernel(
-            cands, K, all_inits[r], max_iter, tol, eps)
-        lls[r] = ll_r
-        thetas[r] = theta_r
-        pis[r] = pi_r
-        resps[r] = resp_r
+    lls = np.empty(C, dtype=np.float64)
+    thetas = np.zeros((C, K_max_eff, L), dtype=np.float64)
+    pis = np.zeros((C, K_max_eff), dtype=np.float64)
+    resps = np.zeros((C, N, K_max_eff), dtype=np.float64)
+    for c in prange(C):
+        K = combo_K[c]
+        # Build this combo's (K, L) init centres.
+        init = np.empty((K, L), dtype=np.float64)
+        if is_full[c]:
+            # K == N: all candidates in order (candidates[range(N)].copy()).
+            for i in range(K):
+                for l in range(L):
+                    init[i, l] = cands[i, l]
+        else:
+            centers_idx = _kmeans_pp_init_kernel(cands, K, uniforms_padded[c, :K])
+            for i in range(K):
+                ci = centers_idx[i]
+                for l in range(L):
+                    init[i, l] = cands[ci, l]
+        # EM (serial, deterministic given init).
+        theta_c, pi_c, ll_c, n_iter_c, resp_c = _bernoulli_mixture_em_kernel(
+            cands, K, init, max_iter, tol, eps)
+        lls[c] = ll_c
+        for k in range(K):
+            for l in range(L):
+                thetas[c, k, l] = theta_c[k, l]
+            pis[c, k] = pi_c[k]
+        for i in range(N):
+            for k in range(K):
+                resps[c, i, k] = resp_c[i, k]
     return lls, thetas, pis, resps
 
 
@@ -564,7 +600,7 @@ def _fit_bernoulli_mixture_select_K(candidates,
       verbose: print BIC trace
 
     Returns:
-      list of (L,) binary arrays — the consensus haps for the selected K.
+      list of (L,) binary arrays -- the consensus haps for the selected K.
       Empty list if candidates is empty.
 
     BIC formula:
@@ -573,16 +609,32 @@ def _fit_bernoulli_mixture_select_K(candidates,
         - K-1 params for the mixture weights (one constraint pi.sum() == 1)
       Lower BIC = better.
 
-    The output is INTENTIONALLY over-permissive — inner BIC measures
+    The output is INTENTIONALLY over-permissive -- inner BIC measures
     density of candidates in candidate-space (which can include noise
     components from recombinant or low-cleanness candidates).  The outer
     BIC subset-selection on actual sample data (in the recovery round
     loop) filters these out.
+
+    Parallelism:
+      Every (K, restart) fit is independent up to the final BIC comparison, so
+      all K_max_effective * n_restarts of them run in ONE prange via
+      _run_em_all_combos_kernel -- much wider than the old per-K kernel's
+      n_restarts-only axis, so a straggler block with free cores fills them.
+      Bit-identity with the serial sweep is preserved: ``rng`` is consumed only
+      by the K-means++ inits (the EM is deterministic given its init), so the
+      uniforms for ALL (K, restart) are drawn here up front in exactly the old
+      nested order (K outer, restart inner; rng.random(K) per init, nothing for
+      the K == N branch), giving identical inits; the per-K best-restart pick,
+      BIC, and patience early-stop are then replayed below over the precomputed
+      results, selecting the same K.  Drawing uniforms for K beyond the patience
+      cut-off only advances this local (discarded) rng and never affects the
+      inits of the K actually evaluated.
     """
     if len(candidates) == 0:
         return []
 
-    cands_arr = np.stack(candidates, axis=0).astype(np.float64)               # (N, L)
+    cands_arr = np.ascontiguousarray(
+        np.stack(candidates, axis=0).astype(np.float64))                  # (N, L)
     N, L = cands_arr.shape
 
     # Cap K_max at N (can't have more components than candidates)
@@ -590,49 +642,60 @@ def _fit_bernoulli_mixture_select_K(candidates,
 
     rng = np.random.default_rng(seed)
 
-    best_overall = None   # tuple: (K, BIC, theta, pi, ll, effective_sizes)
-    no_improve = 0        # consecutive increasing-K with no BIC improvement
-    bic_trace = []
-
     if verbose:
         print(f'    Inner mixture fitting: N={N} candidates, L={L}, '
               f'trying K=1..{K_max_effective}, n_restarts={n_restarts}')
 
+    # Set the thread allocation once before the (dominant) parallel sweep --
+    # this fit is one phase of the block, so a straggler grows into freed cores
+    # here rather than at each K of a serial loop.
+    dynamic_threads.apply_dynamic_threads()
+
+    # --- Phase 1: draw all K-means++ uniforms, in the SAME order the old per-K
+    # serial loop consumed them (so the inits are identical). ---
+    n_combos = K_max_effective * n_restarts
+    combo_K = np.empty(n_combos, dtype=np.int64)
+    is_full = np.zeros(n_combos, dtype=np.bool_)
+    uniforms_padded = np.zeros((n_combos, K_max_effective), dtype=np.float64)
+    c = 0
     for K in range(1, K_max_effective + 1):
-        # Re-check thread allocation at each K of the mixture sweep -- this
-        # sweep is the dominant cost for high-K blocks, so a straggler grows
-        # into cores freed as its peers finish.
-        dynamic_threads.apply_dynamic_threads()
-        # Multi-restart: pick the best LL across n_restarts independent
-        # K-means++ inits.  EM has local minima; multi-start gives robustness.
-        #
-        # Parallelised across restarts: the K-means++ inits are generated
-        # SERIALLY here, which consumes `rng` in exactly the same order as the
-        # old per-restart loop (one _kmeans_pp_init draw per restart), so the
-        # inits are identical.  The EM runs are then dispatched together via
-        # _run_em_restarts_kernel, whose prange is over restarts.  Each EM is
-        # deterministic given its init, so every restart's (ll, theta, pi,
-        # resp) is bit-identical to the old serial loop, and the strict->
-        # lowest-index reduction below selects the same restart `best_for_K`
-        # did (which kept the FIRST restart attaining the max LL).
-        all_inits = np.empty((n_restarts, K, L), dtype=np.float64)
-        for restart in range(n_restarts):
-            all_inits[restart] = _kmeans_pp_init(cands_arr, K, rng)
-        lls, thetas, pis, resps = _run_em_restarts_kernel(
-            cands_arr, K, all_inits,
-            int(RECOVERY_MIXTURE_MAX_ITER), float(RECOVERY_MIXTURE_TOL),
-            float(RECOVERY_MIXTURE_THETA_EPS))
+        for _restart in range(n_restarts):
+            combo_K[c] = K
+            if K >= N:
+                # Mirrors _kmeans_pp_init's ``K >= N`` branch (all-candidates
+                # init).  K never exceeds N (K <= K_max_effective = min(K_max,
+                # N)), so this is the K == N case, which draws no randomness.
+                is_full[c] = True
+            else:
+                uniforms_padded[c, :K] = rng.random(K)
+            c += 1
+
+    # --- Phase 2: run init + EM for all (K, restart) combos in parallel. ---
+    lls, thetas_p, pis_p, resps_p = _run_em_all_combos_kernel(
+        cands_arr, combo_K, is_full, uniforms_padded, int(K_max_effective),
+        int(RECOVERY_MIXTURE_MAX_ITER), float(RECOVERY_MIXTURE_TOL),
+        float(RECOVERY_MIXTURE_THETA_EPS))
+
+    # --- Phase 3: replay the per-K best-restart pick + BIC + patience exactly
+    # as the serial sweep did, over the precomputed per-combo results. ---
+    best_overall = None   # tuple: (K, BIC, theta, pi, ll, effective_sizes)
+    no_improve = 0        # consecutive increasing-K with no BIC improvement
+    bic_trace = []
+    for K in range(1, K_max_effective + 1):
+        base = (K - 1) * n_restarts
+        # strict-> lowest-index reduction over restarts (keeps the FIRST restart
+        # attaining the max LL, as the old loop did).
         best_r = 0
         for r in range(1, n_restarts):
-            if lls[r] > lls[best_r]:
+            if lls[base + r] > lls[base + best_r]:
                 best_r = r
-        ll = float(lls[best_r])
-        # .copy() so theta/pi/resp are standalone arrays (as the per-restart
-        # _bernoulli_mixture_em returned), not views into the per-K batch
-        # buffers that are reallocated on the next K.
-        theta = thetas[best_r].copy()
-        pi = pis[best_r].copy()
-        resp = resps[best_r].copy()
+        ci = base + best_r
+        ll = float(lls[ci])
+        # [:K] slice + .copy() so theta/pi/resp are standalone arrays (not views
+        # into the padded per-combo buffers).
+        theta = thetas_p[ci, :K, :].copy()
+        pi = pis_p[ci, :K].copy()
+        resp = resps_p[ci, :, :K].copy()
         n_params = K * L + (K - 1)
         bic = -2 * ll + n_params * np.log(max(N, 2))
 
@@ -644,10 +707,11 @@ def _fit_bernoulli_mixture_select_K(candidates,
             no_improve = 0
         else:
             # No BIC improvement at this K.  Count it; once `patience`
-            # CONSECUTIVE increasing-K values have failed to beat the best
-            # BIC, stop sweeping (the tail is wasted work — see
-            # RECOVERY_MIXTURE_PATIENCE).  patience=None disables this and
-            # restores the full K=1..K_max_effective sweep bit-for-bit.
+            # CONSECUTIVE increasing-K values have failed to beat the best BIC,
+            # stop (the tail is wasted work -- see RECOVERY_MIXTURE_PATIENCE).
+            # patience=None disables this (full sweep).  Computing the cut-off
+            # K's in Phase 2 anyway is cheap speculative work and changes
+            # nothing: they are simply not considered here.
             no_improve += 1
             if patience is not None and no_improve >= patience:
                 if verbose:
@@ -811,42 +875,69 @@ def _bernoulli_mixture_ml_em(L0, L1, K, init_theta,
 
 
 @njit(cache=True, parallel=True, fastmath=False)
-def _run_ml_em_restarts_kernel(L0, L1, K, all_inits, max_iter, tol, eps):
-    """ML-marginalised analogue of _run_em_restarts_kernel: run all EM
-    restarts for a fixed K in parallel ACROSS restarts.
+def _run_ml_em_all_combos_kernel(L0, L1, Eo, combo_K, is_full, uniforms_padded,
+                                 K_max_eff, max_iter, tol, eps):
+    """ML-marginalised analogue of _run_em_all_combos_kernel: K-means++ init +
+    marginal-likelihood EM for EVERY (K, restart) combo in one prange.
 
-    `prange` is over the restart axis; each restart calls the serial
-    _bernoulli_mixture_ml_em_kernel on its own pre-generated init and writes
-    only its own output rows.  The kernel is deterministic given init_theta
-    (no internal RNG), so each restart's (ll, theta) is bit-identical to the
-    serial path.  Only ll and theta are retained — the ML K-sweep discards pi
-    and resp — so this returns just those two, but the kernel is invoked with
-    its full signature.
+    Replaces the per-K _run_ml_em_restarts_kernel (n_restarts-wide axis) with a
+    single prange over all K_max_eff * n_restarts combos, so a straggler block
+    fills its free cores.  Each combo builds its init from precomputed uniforms
+    (on Eo, the expected other strand) and runs the SAME serial
+    _bernoulli_mixture_ml_em_kernel on (L0, L1), writing only its own rows, so
+    every combo's (ll, theta) is bit-identical to the old per-K kernel given the
+    same init.  Only ll and theta are retained (the ML sweep discards pi and
+    resp), but the EM kernel is invoked with its full signature.
 
-    Arguments:
-        L0, L1:    (M, L) float64 — per-strand "other-strand" likelihoods,
-                   contiguous (the caller passes the same ascontiguousarray
-                   copies the _bernoulli_mixture_ml_em wrapper would build).
-        K:         number of mixture components.
-        all_inits: (R, K, L) float64 — per-restart K-means++ init profiles,
-                   generated SERIALLY by the caller to preserve the RNG stream.
+      - is_full[c] is True only when K == M (candidate count); it mirrors
+        _kmeans_pp_init's ``K >= N`` branch (N == M here), an all-Eo-rows init
+        that consumes no randomness (K never exceeds M).
+      - otherwise the centres come from _kmeans_pp_init_kernel on Eo fed the
+        first K entries of uniforms_padded[c] -- the same rng.random(K) draws
+        the serial wrapper made -- so the centres are identical.
+
+    Args:
+        L0, L1:          (M, L) float64 per-strand other-strand likelihoods,
+                         contiguous (same ascontiguousarray copies the wrapper
+                         builds).
+        Eo:              (M, L) float64 expected other strand, the K-means++
+                         init space (rows of Eo are the candidate profiles).
+        combo_K:         (C,) int64 -- K for each combo (K-major, restart-minor).
+        is_full:         (C,) bool -- True when K == M (all-Eo-rows init).
+        uniforms_padded: (C, K_max_eff) float64 -- first K entries per combo are
+                         this (K, restart)'s rng.random(K) draws.
+        K_max_eff:       component-axis width of the padded outputs.
         max_iter, tol, eps: EM hyper-parameters.
 
-    Returns:
-        lls:    (R,)      final log-likelihood per restart.
-        thetas: (R, K, L) final theta per restart.
-    The caller selects the best restart with a strict-> lowest-index reduction
-    over `lls`, reproducing the old `if best is None or ll > best[0]` semantic.
+    Returns (padded to K_max_eff on the component axis):
+        lls:    (C,)               final LL per combo.
+        thetas: (C, K_max_eff, L)  final theta per combo (rows [:K] valid).
     """
-    R = all_inits.shape[0]
+    C = combo_K.shape[0]
+    M = Eo.shape[0]
     L = L0.shape[1]
-    lls = np.empty(R, dtype=np.float64)
-    thetas = np.empty((R, K, L), dtype=np.float64)
-    for r in prange(R):
-        theta_r, pi_r, ll_r, n_iter_r, resp_r = _bernoulli_mixture_ml_em_kernel(
-            L0, L1, K, all_inits[r], max_iter, tol, eps)
-        lls[r] = ll_r
-        thetas[r] = theta_r
+    lls = np.empty(C, dtype=np.float64)
+    thetas = np.zeros((C, K_max_eff, L), dtype=np.float64)
+    for c in prange(C):
+        K = combo_K[c]
+        init = np.empty((K, L), dtype=np.float64)
+        if is_full[c]:
+            # K == M: all Eo rows in order (Eo[range(M)].copy()).
+            for i in range(K):
+                for l in range(L):
+                    init[i, l] = Eo[i, l]
+        else:
+            centers_idx = _kmeans_pp_init_kernel(Eo, K, uniforms_padded[c, :K])
+            for i in range(K):
+                ci = centers_idx[i]
+                for l in range(L):
+                    init[i, l] = Eo[ci, l]
+        theta_c, pi_c, ll_c, n_iter_c, resp_c = _bernoulli_mixture_ml_em_kernel(
+            L0, L1, K, init, max_iter, tol, eps)
+        lls[c] = ll_c
+        for k in range(K):
+            for l in range(L):
+                thetas[c, k, l] = theta_c[k, l]
     return lls, thetas
 
 
@@ -866,7 +957,7 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
     latent other-strand allele (E-step) and updates each profile from the
     informative candidates only (M-step deferral), so low-coverage /
     heterozygous-ambiguous sites neither bias cluster assignment nor pull the
-    consensus toward 0.5 — the failure mode of plugging the posterior mean
+    consensus toward 0.5 -- the failure mode of plugging the posterior mean
     P(o=1) into a plain Bernoulli mixture.  Sub-threshold evidence is still
     used (graded), unlike the binary argmax path which thresholds it away.
 
@@ -888,11 +979,18 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
       verbose: print BIC trace
 
     Returns:
-      list of (L,) binary arrays — consensus haps for the selected K.
+      list of (L,) binary arrays -- consensus haps for the selected K.
       Empty list if there are no candidates.
 
     BIC formula (identical to the binary mixture):
       BIC = -2*LL + (K*L + K - 1) * log(max(M, 2)),  lower = better.
+
+    Parallelism:
+      Identical scheme to _fit_bernoulli_mixture_select_K: all K_max_effective *
+      n_restarts (K, restart) fits run in one prange via
+      _run_ml_em_all_combos_kernel (vs the old per-K, n_restarts-only axis), and
+      bit-identity is preserved by drawing every init's uniforms up front in the
+      old nested order then replaying the best-restart / BIC / patience logic.
     """
     M = L0.shape[0]
     if M == 0:
@@ -902,51 +1000,57 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
     # Expected other strand for the kmeans++ init distance (in [0,1]).
     Eo = L1 / (L0 + L1 + 1e-12)                                   # (M, L)
     Eo = np.ascontiguousarray(Eo, dtype=np.float64)
+    # Contiguous float64 copies of L0/L1, exactly as the _bernoulli_mixture_ml_em
+    # wrapper builds, so the EM kernel sees identical inputs.
+    L0c = np.ascontiguousarray(L0, dtype=np.float64)
+    L1c = np.ascontiguousarray(L1, dtype=np.float64)
 
     K_max_effective = min(K_max, M)
     rng = np.random.default_rng(seed)
-
-    best_overall = None   # (K, BIC, theta)
-    no_improve = 0        # consecutive increasing-K with no BIC improvement
-    bic_trace = []
 
     if verbose:
         print(f'    Inner ML-mixture fitting: M={M} candidates, L={L}, '
               f'trying K=1..{K_max_effective}, n_restarts={n_restarts}')
 
+    dynamic_threads.apply_dynamic_threads()
+
+    # --- Phase 1: draw all K-means++ uniforms in the old per-K serial order. ---
+    n_combos = K_max_effective * n_restarts
+    combo_K = np.empty(n_combos, dtype=np.int64)
+    is_full = np.zeros(n_combos, dtype=np.bool_)
+    uniforms_padded = np.zeros((n_combos, K_max_effective), dtype=np.float64)
+    c = 0
     for K in range(1, K_max_effective + 1):
-        # Re-check thread allocation at each K of the ML-mixture sweep.
-        dynamic_threads.apply_dynamic_threads()
-        # Multi-restart, parallelised across restarts (same construction and
-        # bit-identity argument as _run_em_restarts_kernel in the argmax path).
-        # The K-means++ inits are generated SERIALLY here, consuming `rng` in
-        # the same order as the old per-restart loop (one draw per restart,
-        # rows of Eo as the initial profiles), so the inits are identical; the
-        # EM runs are dispatched together via _run_ml_em_restarts_kernel whose
-        # prange is over restarts.  Each EM is deterministic given its init, so
-        # every restart's (ll, theta) is bit-identical to the old serial loop,
-        # and the strict-> lowest-index reduction picks the same restart the
-        # old `if best is None or ll > best[0]` loop did.  L0/L1 are made
-        # contiguous float64 exactly as the _bernoulli_mixture_ml_em wrapper
-        # does so the kernel sees identical inputs.
-        L0c = np.ascontiguousarray(L0, dtype=np.float64)
-        L1c = np.ascontiguousarray(L1, dtype=np.float64)
-        all_inits = np.empty((n_restarts, K, L), dtype=np.float64)
-        for restart in range(n_restarts):
-            all_inits[restart] = _kmeans_pp_init(Eo, K, rng)
-        lls, thetas = _run_ml_em_restarts_kernel(
-            L0c, L1c, K, all_inits,
-            int(RECOVERY_MIXTURE_MAX_ITER), float(RECOVERY_MIXTURE_TOL),
-            float(RECOVERY_MIXTURE_THETA_EPS))
+        for _restart in range(n_restarts):
+            combo_K[c] = K
+            if K >= M:
+                # _kmeans_pp_init's ``K >= N`` branch (N == M); K == M draws nothing.
+                is_full[c] = True
+            else:
+                uniforms_padded[c, :K] = rng.random(K)
+            c += 1
+
+    # --- Phase 2: init + ML-EM for all (K, restart) combos in parallel. ---
+    lls, thetas_p = _run_ml_em_all_combos_kernel(
+        L0c, L1c, Eo, combo_K, is_full, uniforms_padded, int(K_max_effective),
+        int(RECOVERY_MIXTURE_MAX_ITER), float(RECOVERY_MIXTURE_TOL),
+        float(RECOVERY_MIXTURE_THETA_EPS))
+
+    # --- Phase 3: replay best-restart + BIC + patience over the results. ---
+    best_overall = None   # (K, BIC, theta)
+    no_improve = 0        # consecutive increasing-K with no BIC improvement
+    bic_trace = []
+    for K in range(1, K_max_effective + 1):
+        base = (K - 1) * n_restarts
         best_r = 0
         for r in range(1, n_restarts):
-            if lls[r] > lls[best_r]:
+            if lls[base + r] > lls[base + best_r]:
                 best_r = r
-        ll = float(lls[best_r])
-        # .copy() so theta is a standalone array (as the per-restart
-        # _bernoulli_mixture_ml_em returned), not a view into the per-K batch
-        # buffer reallocated on the next K.
-        theta = thetas[best_r].copy()
+        ci = base + best_r
+        ll = float(lls[ci])
+        # [:K] slice + .copy() so theta is standalone (not a view into the
+        # padded per-combo buffer).
+        theta = thetas_p[ci, :K, :].copy()
         n_params = K * L + (K - 1)
         bic = -2 * ll + n_params * np.log(max(M, 2))
         bic_trace.append((K, bic, ll))
@@ -955,11 +1059,6 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
             best_overall = (K, bic, theta)
             no_improve = 0
         else:
-            # No BIC improvement at this K.  Count it; once `patience`
-            # CONSECUTIVE increasing-K values have failed to beat the best
-            # BIC, stop sweeping (the tail is wasted work — see
-            # RECOVERY_MIXTURE_PATIENCE).  patience=None disables this and
-            # restores the full K=1..K_max_effective sweep bit-for-bit.
             no_improve += 1
             if patience is not None and no_improve >= patience:
                 if verbose:

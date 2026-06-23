@@ -30,12 +30,34 @@ side effects.
 """
 
 import multiprocessing  # noqa: F401  (documents the mp.Value contract)
+import os
+import sys
+import time
 
 
 _ACTIVE_COUNTER = None
 _TOTAL_CORES = None
 _EXTRA_COUNTER = None
 _I_HAVE_EXTRA = False
+
+# Optional diagnostics: set BHD_DYNTHREAD_LOG=1 to trace per-worker thread-count
+# transitions on stderr (one line whenever a worker's applied count changes), so
+# a straggler ramping into freed cores -- or failing to -- is visible without
+# flooding the log.  Off by default: zero overhead beyond an env lookup at import.
+_LOG = "BHD_DYNTHREAD_LOG" in os.environ
+_LAST_LOGGED = None
+
+
+def _counter_read(counter):
+    """Lock-free read of a shared counter's current value.  The pool wires the
+    counters as mp.Value('i') (lock=True), whose `.value` property acquires the
+    value's lock on EVERY read; polled in tight loops across many workers, that
+    one shared lock serialises the whole pool.  Reading the underlying ctypes
+    object skips the lock -- an aligned int read is atomic, and a slightly stale
+    count is fine here (we recheck constantly).  Falls back to `.value` if the
+    counter has no get_obj (e.g. a plain value)."""
+    obj = counter.get_obj() if hasattr(counter, "get_obj") else counter
+    return obj.value
 
 
 # -------------------------------------------------------------------------
@@ -73,14 +95,16 @@ def increment_active():
     """Register this worker as active (atomic).  No-op on the sequential path."""
     if _ACTIVE_COUNTER is not None:
         with _ACTIVE_COUNTER.get_lock():
-            _ACTIVE_COUNTER.value += 1
+            obj = _ACTIVE_COUNTER.get_obj()
+            obj.value += 1
 
 
 def decrement_active():
     """Deregister this worker (atomic).  No-op on the sequential path."""
     if _ACTIVE_COUNTER is not None:
         with _ACTIVE_COUNTER.get_lock():
-            _ACTIVE_COUNTER.value -= 1
+            obj = _ACTIVE_COUNTER.get_obj()
+            obj.value -= 1
 
 
 def active_value():
@@ -88,7 +112,7 @@ def active_value():
     Lock-free read — used for diagnostics/logging."""
     if _ACTIVE_COUNTER is None:
         return 1
-    return _ACTIVE_COUNTER.value
+    return _counter_read(_ACTIVE_COUNTER)
 
 
 # -------------------------------------------------------------------------
@@ -112,8 +136,9 @@ def _try_claim_extra(remainder):
         return False
     try:
         with _EXTRA_COUNTER.get_lock():
-            if _EXTRA_COUNTER.value < remainder:
-                _EXTRA_COUNTER.value += 1
+            obj = _EXTRA_COUNTER.get_obj()
+            if obj.value < remainder:
+                obj.value += 1
                 _I_HAVE_EXTRA = True
                 return True
     except Exception:
@@ -132,7 +157,8 @@ def _try_release_extra():
         return False
     try:
         with _EXTRA_COUNTER.get_lock():
-            _EXTRA_COUNTER.value -= 1
+            obj = _EXTRA_COUNTER.get_obj()
+            obj.value -= 1
             _I_HAVE_EXTRA = False
             return True
     except Exception:
@@ -156,22 +182,23 @@ def get_dynamic_threads():
     floor(total_cores / active) + (1 if this worker holds an extra), clamped
     to >= 1.  floor+extra is always <= total_cores.
 
-    The active read is intentionally lock-free — a slightly stale count is fine
-    since we recheck at every phase.  The extra-counter lock is held only
+    The counter reads are lock-free (via _counter_read) — a slightly stale
+    count is fine since we recheck at every phase, and at high call rates a
+    locking read would serialise the pool.  The extra-counter lock is held only
     briefly on a claim/release transition (not on every call once stabilised).
 
     Returns 1 on the sequential path (active_counter unset).
     """
     if _ACTIVE_COUNTER is None or _TOTAL_CORES is None:
         return 1
-    active = max(_ACTIVE_COUNTER.value, 1)
+    active = max(_counter_read(_ACTIVE_COUNTER), 1)
     floor = _TOTAL_CORES // active
     remainder = _TOTAL_CORES - floor * active
 
     # Adjust the extra-claim based on the current remainder.
     if _EXTRA_COUNTER is not None:
         try:
-            current_extras = _EXTRA_COUNTER.value
+            current_extras = _counter_read(_EXTRA_COUNTER)
         except Exception:
             current_extras = 0
         if not _I_HAVE_EXTRA:
@@ -197,4 +224,28 @@ def apply_dynamic_threads():
         numba.set_num_threads(n)
     except Exception:
         pass
+    _log_alloc(n)
     return n
+
+
+def _log_alloc(n):
+    """Trace thread-count transitions when BHD_DYNTHREAD_LOG is set (diagnostics
+    only): one stderr line per worker whenever its applied count changes, with
+    the live (active, floor, remainder, extra) it was derived from.  No-op when
+    logging is off or the count is unchanged, so it never floods a long run."""
+    global _LAST_LOGGED
+    if not _LOG or n == _LAST_LOGGED:
+        return
+    _LAST_LOGGED = n
+    try:
+        active = _counter_read(_ACTIVE_COUNTER) if _ACTIVE_COUNTER is not None else 1
+        extras = _counter_read(_EXTRA_COUNTER) if _EXTRA_COUNTER is not None else 0
+        floor = (_TOTAL_CORES // max(active, 1)) if _TOTAL_CORES else 1
+        rem = (_TOTAL_CORES - floor * max(active, 1)) if _TOTAL_CORES else 0
+        print("[dynthreads pid=%d t=%.1f] active=%d total=%s floor=%d rem=%d "
+              "extras=%d mine=%s -> threads=%d"
+              % (os.getpid(), time.monotonic(), active, _TOTAL_CORES, floor,
+                 rem, extras, _I_HAVE_EXTRA, n),
+              file=sys.stderr, flush=True)
+    except Exception:
+        pass
