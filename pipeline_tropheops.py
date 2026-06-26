@@ -918,8 +918,10 @@ if __name__ == '__main__':
             if global_probs.dtype == np.float64:
                 global_probs = global_probs.astype(np.float32)
 
-            print(f"\n  {r_name}: average read depth = {avg_depth:.1f}x")
-
+            print(f"\n{'='*60}")
+            print(f"{r_name}: average read depth = {avg_depth:.1f}x")
+            print(f"{'='*60}")
+            
             if avg_depth < REFINEMENT_DEPTH_THRESHOLD:
                 print(f"  Depth < {REFINEMENT_DEPTH_THRESHOLD}x -> Running L1+L2 refinement")
                 num_samples = global_probs.shape[0]
