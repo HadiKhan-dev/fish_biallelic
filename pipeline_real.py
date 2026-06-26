@@ -1,4 +1,58 @@
 #%%
+# =============================================================================
+# Module-level definitions (PICKLABLE by forkserver workers)
+# =============================================================================
+# Functions defined inside `if __name__ == '__main__':` are closures that
+# cannot be pickled by multiprocessing.  Forkserver workers receive their
+# initargs (including callback functions) via pickle, so any function that
+# crosses the worker boundary MUST live at module top level here.  Keep this
+# section small -- imports here run in every forkserver worker at startup.
+
+CHECKPOINT_DIR = ".pipeline_checkpoints_real"
+
+import os
+import checkpoint_io
+
+
+def _load_contig_for_phase_correction(r_name):
+    """Load tolerance_result and founder_block for one contig from checkpoint
+    files on disk.  Top-level (picklable) version used by forkserver workers
+    in phase_correction; reads checkpoints directly because forkserver workers
+    do not inherit main's process state.
+
+        tolerance_result -> R08_viterbi_painting
+        super_blocks_L4  -> R07_assembly_L4   (preferred)
+        super_blocks_L3  -> R06_assembly_L3   (fallback)
+    A missing checkpoint simply omits the corresponding key; the worker then
+    falls back to an identity equivalence matrix.
+    """
+    data = {}
+
+    tol_path = checkpoint_io.contig_path(CHECKPOINT_DIR, "R08_viterbi_painting", r_name)
+    if os.path.exists(tol_path):
+        ckpt = checkpoint_io.read(tol_path)
+        if 'tolerance_result' in ckpt:
+            data['tolerance_result'] = ckpt['tolerance_result']
+        del ckpt
+
+    for stage, list_key in [("R07_assembly_L4", "super_blocks_L4"),
+                            ("R06_assembly_L3", "super_blocks_L3")]:
+        if 'founder_block' in data:
+            break
+        path = checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name)
+        if not os.path.exists(path):
+            continue
+        ckpt = checkpoint_io.read(path)
+        if list_key in ckpt and ckpt[list_key]:
+            fb = ckpt[list_key][0]
+            fb.probs_array = None
+            data['founder_block'] = fb
+        del ckpt
+
+    return data
+
+
+#%%
 if __name__ == '__main__':
     import os
     import sys
@@ -45,7 +99,6 @@ if __name__ == '__main__':
     import time
     import warnings
     import platform
-    import pickle
     import gc
     from cyvcf2 import VCF
 
@@ -54,7 +107,7 @@ if __name__ == '__main__':
 
     import thread_config
     import vcf_data_loader
-    import block_haplotypes_old
+    import block_haplotypes
     import small_block_refine
     import residual_discovery
     import hierarchical_assembly
@@ -98,7 +151,6 @@ if __name__ == '__main__':
         {"contig": "chr23"},
     ]
 
-    CHECKPOINT_DIR = ".pipeline_checkpoints_real"
     output_dir = "results_real"
 
     # =========================================================================
@@ -121,45 +173,35 @@ if __name__ == '__main__':
         print(f"  [Checkpoint] Stage '{stage}' marked complete")
 
     def contig_done(stage, r_name):
-        return os.path.exists(os.path.join(_stage_dir(stage), f'{r_name}.pkl'))
+        return os.path.exists(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name))
 
     def save_contig(stage, r_name, data_dict):
-        path = os.path.join(_stage_dir(stage), f'{r_name}.pkl')
-        tmp = path + ".tmp"
+        _stage_dir(stage)  # ensure the stage directory exists
         try:
-            with open(tmp, 'wb') as f:
-                pickle.dump(data_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
-            os.replace(tmp, path)
-            sz = os.path.getsize(path) / (1024*1024)
-            print(f"    [Checkpoint] {stage}/{r_name} ({sz:.1f} MB)")
+            size_mb = checkpoint_io.write(
+                checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name),
+                data_dict, nthreads=n_processes) / (1024 * 1024)
+            print(f"    [Checkpoint] {stage}/{r_name} ({size_mb:.1f} MB)")
         except OSError as e:
             print(f"    [Checkpoint] WARNING: {stage}/{r_name}: {e}")
-            try: os.unlink(tmp)
-            except OSError: pass
 
     def load_contig(stage, r_name):
-        path = os.path.join(_stage_dir(stage), f'{r_name}.pkl')
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+        return checkpoint_io.read(
+            checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name), nthreads=n_processes)
 
     def save_global(stage, data_dict):
-        path = os.path.join(_stage_dir(stage), '_global.pkl')
-        tmp = path + ".tmp"
+        _stage_dir(stage)  # ensure the stage directory exists
         try:
-            with open(tmp, 'wb') as f:
-                pickle.dump(data_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
-            os.replace(tmp, path)
-            sz = os.path.getsize(path) / (1024*1024)
-            print(f"    [Checkpoint] {stage}/_global ({sz:.1f} MB)")
+            size_mb = checkpoint_io.write(
+                checkpoint_io.global_path(CHECKPOINT_DIR, stage),
+                data_dict, nthreads=n_processes) / (1024 * 1024)
+            print(f"    [Checkpoint] {stage}/_global ({size_mb:.1f} MB)")
         except OSError as e:
             print(f"    [Checkpoint] WARNING: {stage}/_global: {e}")
-            try: os.unlink(tmp)
-            except OSError: pass
 
     def load_global(stage):
-        path = os.path.join(_stage_dir(stage), '_global.pkl')
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+        return checkpoint_io.read(
+            checkpoint_io.global_path(CHECKPOINT_DIR, stage), nthreads=n_processes)
 
     def strip_block_probs(blocks):
         """Strip redundant probs_array from blocks to save memory.
@@ -259,7 +301,7 @@ if __name__ == '__main__':
             del global_reads, site_priors
 
             t0 = time.time()
-            block_results = block_haplotypes_old.generate_all_block_haplotypes(
+            block_results = block_haplotypes.generate_all_block_haplotypes(
                 genomic_data,
                 uniqueness_threshold_percent=1.0,
                 diff_threshold_percent=0.5,
@@ -267,7 +309,7 @@ if __name__ == '__main__':
                 num_processes=n_processes
             )
             valid_blocks = [b for b in block_results if len(b.positions) > 0]
-            block_results = block_haplotypes_old.BlockResults(valid_blocks)
+            block_results = block_haplotypes.BlockResults(valid_blocks)
 
             hap_counts = [len(b.haplotypes) for b in valid_blocks]
             print(f"    [Discovery] {len(valid_blocks)} blocks, haps/block: "
@@ -299,7 +341,7 @@ if __name__ == '__main__':
         print("STAGE R02: Checking Read Depth for Refinement")
         print(f"{'='*60}")
 
-        REFINEMENT_DEPTH_THRESHOLD = 10.0
+        REFINEMENT_DEPTH_THRESHOLD = 100.0
         REFINEMENT_BATCH_SIZE = 10
         REFINEMENT_PENALTY_SCALE = 20.0
         RECOMB_RATE = 5e-8
@@ -323,7 +365,9 @@ if __name__ == '__main__':
             if global_probs.dtype == np.float64:
                 global_probs = global_probs.astype(np.float32)
 
-            print(f"\n  {r_name}: average read depth = {avg_depth:.1f}x")
+            print(f"\n{'='*60}")
+            print(f"{r_name}: average read depth = {avg_depth:.1f}x")
+            print(f"{'='*60}")
 
             if avg_depth < REFINEMENT_DEPTH_THRESHOLD:
                 print(f"  Depth < {REFINEMENT_DEPTH_THRESHOLD}x -> Running L1+L2 refinement")
@@ -336,8 +380,9 @@ if __name__ == '__main__':
                             input_blocks=input_blocks, global_probs=gp, global_sites=gs,
                             batch_size=REFINEMENT_BATCH_SIZE, use_hmm_linking=False,
                             beam_width=200, max_founders=12, max_sites_for_linking=2000,
-                            cc_scale=0.2, num_processes=n_processes,
-                            maxtasksperchild=WORKER_MAXTASKS)
+                            cc_scale=0.5, num_processes=n_processes,
+                            maxtasksperchild=WORKER_MAXTASKS,
+                            refine_after_stitch=False)
                     return l1_fn
 
                 def make_l2_fn(gp, gs):
@@ -346,9 +391,10 @@ if __name__ == '__main__':
                             input_blocks=input_blocks, global_probs=gp, global_sites=gs,
                             batch_size=REFINEMENT_BATCH_SIZE, use_hmm_linking=True,
                             recomb_rate=RECOMB_RATE, beam_width=200, max_founders=12,
-                            cc_scale=0.2, num_processes=n_processes,
+                            cc_scale=0.5, num_processes=n_processes,
                             n_generations=N_GENERATIONS, verbose=False,
-                            maxtasksperchild=WORKER_MAXTASKS)
+                            maxtasksperchild=WORKER_MAXTASKS,
+                            refine_after_stitch=False)
                     return l2_fn
 
                 t0 = time.time()
@@ -454,7 +500,7 @@ if __name__ == '__main__':
             super_blocks = hierarchical_assembly.run_hierarchical_step(
                 block_results, global_probs, global_sites,
                 batch_size=10, use_hmm_linking=False, beam_width=200,
-                max_founders=12, max_sites_for_linking=2000, cc_scale=0.2,
+                max_founders=12, max_sites_for_linking=2000, cc_scale=0.5,
                 num_processes=n_processes, maxtasksperchild=WORKER_MAXTASKS,
                 verbose=False)
 
@@ -502,7 +548,7 @@ if __name__ == '__main__':
             l2_blocks = hierarchical_assembly.run_hierarchical_step(
                 l1_blocks, global_probs, global_sites,
                 batch_size=10, use_hmm_linking=True, recomb_rate=5e-8,
-                beam_width=200, max_founders=12, cc_scale=0.2,
+                beam_width=200, max_founders=12, cc_scale=0.5,
                 num_processes=n_processes, maxtasksperchild=WORKER_MAXTASKS,
                 n_generations=3, verbose=False)
 
@@ -548,7 +594,7 @@ if __name__ == '__main__':
             l3_blocks = hierarchical_assembly.run_hierarchical_step(
                 l2_blocks, global_probs, global_sites,
                 batch_size=10, use_hmm_linking=True, recomb_rate=5e-8,
-                beam_width=200, max_founders=12, cc_scale=0.2,
+                beam_width=200, max_founders=12, cc_scale=0.5,
                 num_processes=n_processes, maxtasksperchild=WORKER_MAXTASKS,
                 n_generations=3, verbose=False)
 
@@ -598,7 +644,7 @@ if __name__ == '__main__':
                 l4_blocks = hierarchical_assembly.run_hierarchical_step(
                     l3_blocks, global_probs, global_sites,
                     batch_size=10, use_hmm_linking=True, recomb_rate=5e-8,
-                    beam_width=200, max_founders=12, cc_scale=0.2,
+                    beam_width=200, max_founders=12, cc_scale=0.5,
                     num_processes=n_processes, maxtasksperchild=WORKER_MAXTASKS,
                     n_generations=3, verbose=False)
                 del global_probs
@@ -645,7 +691,7 @@ if __name__ == '__main__':
 
                 painting_result = painter.paint_chromosome(
                     discovered_block, global_probs, global_sites,
-                    recomb_rate=5e-8, switch_penalty=10.0, batch_size=1)
+                    recomb_rate=5e-8, switch_penalty_per_snp=1.0, batch_size=1)
 
                 # Population painting visualization
                 print(f"  Generating Population Painting Plot...")
@@ -733,27 +779,18 @@ if __name__ == '__main__':
         if 'pedigree_df' not in dir():
             pedigree_df = load_global(STAGE_R9)['pedigree_df']
 
-        # Define loader callback — workers load their own contig data
-        def _load_contig_for_phase_correction(r_name):
-            r7 = load_contig(STAGE_R7, r_name)
-            r8 = load_contig(STAGE_R8, r_name)
-            founder_block = r7['super_blocks_L4'][0]
-            founder_block.probs_array = None  # not needed for phase correction
-            data = {
-                'tolerance_result': r8['tolerance_result'],
-                'founder_block': founder_block,
-            }
-            del r7, r8
-            return data
+        # _load_contig_for_phase_correction is defined at MODULE top level
+        # (above `if __name__`) so forkserver workers can pickle a reference
+        # to it; a closure defined here would not survive pickling.
 
         # Lightweight dict — just contig names, workers load their own data
         mcr = {r_name: {} for r_name in region_keys}
 
-        # Step 1: Viterbi phase correction (3 rounds, workers load via load_fn)
+        # Step 1: Viterbi phase correction (6 rounds, workers load via load_fn)
         start = time.time()
         mcr = phase_correction.correct_phase_all_contigs(
-            mcr, pedigree_df, sample_names, num_rounds=3, verbose=True,
-            load_fn=_load_contig_for_phase_correction)
+            mcr, pedigree_df, sample_names, num_rounds=6, verbose=True,
+            max_workers=n_processes, load_fn=_load_contig_for_phase_correction)
         print(f"Phase correction time: {time.time()-start:.1f}s")
 
         # Step 2: Greedy phase refinement
@@ -764,8 +801,31 @@ if __name__ == '__main__':
         start_refine = time.time()
         mcr = phase_correction.post_process_phase_greedy_all_contigs(
             mcr, pedigree_df, sample_names,
-            snps_per_bin=100, recomb_rate=5e-8, mismatch_cost=4.6, verbose=True)
+            snps_per_bin=100, recomb_rate=5e-8, mismatch_cost=4.6,
+            max_workers=n_processes, load_fn=_load_contig_for_phase_correction,
+            verbose=True)
         print(f"Greedy refinement time: {time.time()-start_refine:.1f}s")
+
+        # Pre-load founder_blocks for the (main-process) F1 recoloring +
+        # propagation steps below.  The greedy workers no longer return
+        # founder_block (IPC-cost fix), so load it here into mcr in parallel
+        # via threads (parallel disk I/O across contigs).
+        from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+        _t0 = time.time()
+        def _load_founder_block_for_main(r_name):
+            for stage, list_key in [(STAGE_R7, 'super_blocks_L4'),
+                                    (STAGE_R6, 'super_blocks_L3')]:
+                if not contig_done(stage, r_name):
+                    continue
+                ckpt = load_contig(stage, r_name)
+                if list_key in ckpt and ckpt[list_key]:
+                    fb = ckpt[list_key][0]
+                    fb.probs_array = None
+                    mcr.setdefault(r_name, {})['founder_block'] = fb
+                    break
+        with _ThreadPoolExecutor(max_workers=min(n_processes, len(region_keys))) as _ex:
+            list(_ex.map(_load_founder_block_for_main, region_keys))
+        print(f"  Founder block parallel load: {time.time()-_t0:.1f}s")
 
         # Step 3: Parsimonious F1 recoloring
         print("\n" + "="*60)
@@ -777,13 +837,13 @@ if __name__ == '__main__':
                 continue
             data = mcr[r_name]
             painting_key = 'refined_painting' if 'refined_painting' in data else 'corrected_painting'
-            if painting_key not in data:
+            if painting_key not in data or 'founder_block' not in data:
                 continue
 
             recolored = phase_correction.apply_parsimonious_f1_recoloring(
                 data[painting_key], data['founder_block'],
                 pedigree_df, sample_names,
-                max_mismatch_rate=0.02, verbose=True)
+                max_workers=n_processes, max_mismatch_rate=0.02, verbose=True)
             data['final_painting'] = recolored
 
         # Step 4: Propagate recoloring to offspring
@@ -801,7 +861,7 @@ if __name__ == '__main__':
             propagated = phase_correction.propagate_recoloring_to_offspring(
                 data['final_painting'], data['founder_block'],
                 pedigree_df, sample_names,
-                max_mismatch_rate=0.02, verbose=True)
+                max_workers=n_processes, max_mismatch_rate=0.02, verbose=True)
             data['final_painting'] = propagated
 
         # Save per-contig results

@@ -1053,10 +1053,11 @@ def _worker_generate_block_direct(args):
             positions, reads, keep_flags=flags, **kwargs)
         _bt = _time.perf_counter() - _bt0
         try:
-            _nr = reads.shape[0] if hasattr(reads, "shape") else len(reads)
-            _ns = len(positions) if positions is not None else -1
-            print("[block-time] id=%d reads=%s sites=%s seconds=%.2f"
-                  % (block_idx, _nr, _ns, _bt), file=_sys.stderr, flush=True)
+            # _nr = reads.shape[0] if hasattr(reads, "shape") else len(reads)
+            # _ns = len(positions) if positions is not None else -1
+            # print("[block-time] id=%d reads=%s sites=%s seconds=%.2f"
+            #       % (block_idx, _nr, _ns, _bt), file=_sys.stderr, flush=True)
+            pass
         except Exception:
             pass
         _malloc_trim()
