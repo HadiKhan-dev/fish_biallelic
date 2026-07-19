@@ -301,57 +301,68 @@ if __name__ == '__main__':
     # A discovered haplotype "matches" a G0 ground-truth haplotype if the
     # allele-level disagreement rate is below this threshold (in %).
     MATCH_THRESHOLD_PCT = 2.0
+    MIN_CONF_SITES = 10   # min confident G0 sites to score a founder in a block
 
     def extract_g0_block_haps(g0_probs, g0_sites, block_positions):
-        """Build ground-truth founder haplotypes for one block.
+        """Build ground-truth founder GENOTYPES for one block.
 
         g0_probs has shape (n_g0, n_global_sites, 3) — genotype probabilities
-        0=homref, 1=het, 2=homalt.  For an inbred founder we expect either
-        the 0 or 2 state to dominate at most sites.  A site is "confidently
-        homozygous" if the max genotype probability > HOM_CONFIDENCE and
-        that max is at state 0 or state 2.  At such sites the consensus
-        allele is 0 or 1 respectively.  Heterozygous-dominant or
-        low-confidence sites are masked to -1.
+        0=homref, 1=het, 2=homalt.  A site is kept when the max genotype
+        probability >= HOM_CONFIDENCE; the stored value is then the genotype
+        dosage 0/1/2 (hom-ref / het / hom-alt).  Low-confidence sites (and
+        positions that fail to match the G0 site list) are masked to -1.
 
-        Returns: (n_g0, n_block_sites) int8, values in {0, 1, -1}
+        Unlike the earlier hom-only version, HETEROZYGOUS sites are retained
+        (dosage 1): a heterozygous founder carries two distinct founder
+        haplotypes, and the pair-reconstruction recall uses exactly these het
+        sites to require that BOTH are present in the discovered set.
+
+        Returns: (n_g0, n_block_sites) int8 genotypes, values in {0, 1, 2, -1}
         """
-        # Index of each block position within g0_sites
         pos_idx = np.searchsorted(g0_sites, block_positions)
-        # Guard against off-by-one at the ends
         pos_idx = np.clip(pos_idx, 0, len(g0_sites) - 1)
-        # Confirm positions actually match (after de-dup sort in T01 they should)
         matched = (g0_sites[pos_idx] == block_positions)
 
         n_g0 = g0_probs.shape[0]
         n_block = len(block_positions)
-        g0_haps = np.full((n_g0, n_block), -1, dtype=np.int8)
+        g0_geno = np.full((n_g0, n_block), -1, dtype=np.int8)
 
         for g in range(n_g0):
-            # probs for this G0 at block sites: (n_block, 3)
             probs_g = g0_probs[g, pos_idx, :]
-            argmax = np.argmax(probs_g, axis=1)
+            argmax = np.argmax(probs_g, axis=1)          # 0/1/2 = dosage
             maxp = probs_g[np.arange(n_block), argmax]
-            # Confident homozygous ref (state 0) -> allele 0
-            # Confident homozygous alt (state 2) -> allele 1
-            # Anything else (het, or low confidence) -> -1 (masked)
             conf = (maxp >= HOM_CONFIDENCE) & matched
-            hom_ref = conf & (argmax == 0)
-            hom_alt = conf & (argmax == 2)
-            g0_haps[g, hom_ref] = 0
-            g0_haps[g, hom_alt] = 1
+            g0_geno[g, conf] = argmax[conf].astype(np.int8)
 
-        return g0_haps
+        return g0_geno
 
     def validate_block_list_against_g0(blocks, g0_probs, g0_sites,
                                        g0_names, stage_label, contig_name):
-        """Validate a list of blocks (raw, refined, L1/L2/L3/L4 super-blocks, ...)
-        against G0 ground-truth founder haplotypes.
+        """Validate a list of blocks against G0 ground-truth founders.
 
-        Returns a list of dicts, one per non-empty block.  Each dict has:
-          stage, contig, block, n_sites, block_start, block_end,
-          n_true_founders, n_discovered,
-          founders_found_under_<X>pct, good_haps, chimeras,
-          and per-G0 best-match columns (discovered-hap id, error %, valid site count).
+        Two recall metrics are reported per block, side by side:
+
+          * hom-only single-haplotype (legacy, A/B reference): each founder's
+            confident HOMOZYGOUS consensus is matched to the single best
+            discovered haplotype.  Columns: founders_found_under_<X>pct and the
+            per-G0 *_err_pct / *_valid_sites.  A founder with < MIN_CONF_SITES
+            confident hom sites is unscored (NaN) — this is what previously
+            depressed the count for heterozygous founders.
+
+          * pair-reconstruction (genotype-aware, PRIMARY): each founder's
+            confident GENOTYPE (dosage 0/1/2, het sites kept) is matched to the
+            best PAIR of discovered haplotypes (i <= j) by summed dosage
+            d_i + d_j.  A heterozygous founder is "found" only when BOTH of its
+            haplotypes are present in the discovered set; a homozygous founder
+            reduces to the legacy check (best pair is one hap used twice).
+            Columns: founders_found_pair, n_scorable, per-G0 *_pair /
+            *_pair_err_pct / *_conf_sites.
+
+        'All founders found' (pair) is judged relative to the SCORABLE founders
+        (n_scorable = founders with >= MIN_CONF_SITES confident genotype sites),
+        so a founder that cannot be scored in a block is not counted as a miss.
+
+        good_haps / chimeras (precision) stay on the hom-site basis.
         """
         rows = []
         n_g0 = g0_probs.shape[0]
@@ -362,10 +373,12 @@ if __name__ == '__main__':
             if len(positions) == 0:
                 continue
 
-            # Ground-truth G0 haplotypes at this block's positions
-            g0_block_haps = extract_g0_block_haps(g0_probs, g0_sites, positions)
+            # Ground-truth founder genotypes {0,1,2,-1}; hom-only hap {0,1,-1}
+            g0_geno = extract_g0_block_haps(g0_probs, g0_sites, positions)
+            g0_hom = np.where(g0_geno == 0, 0,
+                              np.where(g0_geno == 2, 1, -1)).astype(np.int8)
 
-            # Discovered haplotypes (convert probabilistic to concrete via argmax)
+            # Discovered haplotypes -> concrete {0,1}
             discovered = []
             for hid, h_arr in block.haplotypes.items():
                 if h_arr.ndim == 2:
@@ -374,14 +387,17 @@ if __name__ == '__main__':
                     concrete = h_arr.astype(np.int8)
                 discovered.append((hid, concrete))
             n_disc = len(discovered)
+            disc_ids = [hid for hid, _ in discovered]
+            if n_disc > 0:
+                D = np.vstack([h for _, h in discovered]).astype(np.int16)  # (n_disc, n_block)
+            else:
+                D = np.zeros((0, len(positions)), dtype=np.int16)
 
-            # For each G0, find the best-matching discovered haplotype.  Only
-            # sites where the G0 ground truth is NOT masked (-1) are counted.
+            # ---- legacy hom-only single-haplotype recall ----
             g0_best_matches = []  # (g, best_disc_id, err_pct, n_valid_sites)
             for g in range(n_g0):
-                g_valid = (g0_block_haps[g] != -1)
-                if np.sum(g_valid) < 10:
-                    # Not enough confident G0 sites — skip this G0 for this block
+                g_valid = (g0_hom[g] != -1)
+                if np.sum(g_valid) < MIN_CONF_SITES:
                     g0_best_matches.append((g, -1, float('nan'), int(np.sum(g_valid))))
                     continue
                 best_err = 101.0
@@ -389,15 +405,15 @@ if __name__ == '__main__':
                 for (hid, disc_h) in discovered:
                     disc_valid = (disc_h != -1) if -1 in disc_h else np.ones_like(disc_h, dtype=bool)
                     mask = g_valid & disc_valid
-                    if np.sum(mask) < 10:
+                    if np.sum(mask) < MIN_CONF_SITES:
                         continue
-                    err = np.mean(g0_block_haps[g, mask] != disc_h[mask]) * 100.0
+                    err = np.mean(g0_hom[g, mask] != disc_h[mask]) * 100.0
                     if err < best_err:
                         best_err = err
                         best_id = hid
                 g0_best_matches.append((g, best_id, best_err, int(np.sum(g_valid))))
 
-            # For each discovered haplotype, find its best-matching G0
+            # ---- precision: each discovered hap's best hom-only G0 match ----
             disc_best_matches = []
             for (hid, disc_h) in discovered:
                 disc_valid = (disc_h != -1) if -1 in disc_h else np.ones_like(disc_h, dtype=bool)
@@ -405,20 +421,52 @@ if __name__ == '__main__':
                 best_g = -1
                 best_n = 0
                 for g in range(n_g0):
-                    g_valid = (g0_block_haps[g] != -1)
+                    g_valid = (g0_hom[g] != -1)
                     mask = g_valid & disc_valid
-                    if np.sum(mask) < 10:
+                    if np.sum(mask) < MIN_CONF_SITES:
                         continue
-                    err = np.mean(g0_block_haps[g, mask] != disc_h[mask]) * 100.0
+                    err = np.mean(g0_hom[g, mask] != disc_h[mask]) * 100.0
                     if err < best_err:
                         best_err = err
                         best_g = g
                         best_n = int(np.sum(mask))
                 disc_best_matches.append((hid, best_g, best_err, best_n))
 
-            # Block-level summary metrics
+            # ---- pair-reconstruction (genotype-aware) recall ----
+            g0_pair_matches = []  # (g, pair_str, err_pct, n_conf_sites)
+            n_scorable = 0
+            for g in range(n_g0):
+                conf = (g0_geno[g] != -1)
+                n_conf = int(conf.sum())
+                if n_conf < MIN_CONF_SITES:
+                    g0_pair_matches.append((g, '', float('nan'), n_conf))
+                    continue
+                n_scorable += 1
+                if n_disc == 0:
+                    g0_pair_matches.append((g, '', float('inf'), n_conf))
+                    continue
+                geno_m = g0_geno[g, conf].astype(np.int16)            # (n_conf,)
+                Dm = D[:, conf]                                       # (n_disc, n_conf)
+                S = Dm[:, None, :] + Dm[None, :, :]                   # (n_disc, n_disc, n_conf)
+                mm = (S != geno_m[None, None, :]).mean(axis=2) * 100.0  # (n_disc, n_disc)
+                iu = np.triu_indices(n_disc)                         # i <= j
+                flat = mm[iu]
+                k = int(np.argmin(flat))
+                best_err = float(flat[k])
+                bi, bj = int(iu[0][k]), int(iu[1][k])
+                g0_pair_matches.append((g, f"{disc_ids[bi]}+{disc_ids[bj]}", best_err, n_conf))
+
+            # ---- block-level metrics ----
             founders_found = sum(
                 1 for (_, _, err, _) in g0_best_matches
+                if not np.isnan(err) and err < MATCH_THRESHOLD_PCT
+            )
+            # founders with >=MIN_CONF_SITES confident HOM sites (hom-only scorable set)
+            n_scorable_homonly = sum(
+                1 for (_, _, err, _) in g0_best_matches if not np.isnan(err)
+            )
+            founders_found_pair = sum(
+                1 for (_, _, err, _) in g0_pair_matches
                 if not np.isnan(err) and err < MATCH_THRESHOLD_PCT
             )
             chimera_count = sum(
@@ -436,8 +484,11 @@ if __name__ == '__main__':
                 'block_start': int(positions[0]),
                 'block_end': int(positions[-1]),
                 'n_true_founders': n_g0,
+                'n_scorable': n_scorable,
+                'n_scorable_homonly': n_scorable_homonly,
                 'n_discovered': n_disc,
                 ff_col: founders_found,
+                'founders_found_pair': founders_found_pair,
                 'good_haps': good_count,
                 'chimeras': chimera_count,
             }
@@ -445,6 +496,10 @@ if __name__ == '__main__':
                 row[f'G0_{g}_{g0_names[g]}_best_disc'] = bid
                 row[f'G0_{g}_{g0_names[g]}_err_pct'] = err
                 row[f'G0_{g}_{g0_names[g]}_valid_sites'] = nsites
+            for g, pair_str, err, nconf in g0_pair_matches:
+                row[f'G0_{g}_{g0_names[g]}_pair'] = pair_str
+                row[f'G0_{g}_{g0_names[g]}_pair_err_pct'] = err
+                row[f'G0_{g}_{g0_names[g]}_conf_sites'] = nconf
             rows.append(row)
 
         return rows
@@ -510,10 +565,14 @@ if __name__ == '__main__':
                 mean_haps = np.mean([r['n_discovered'] for r in rows])
                 mean_good = np.mean([r['good_haps'] for r in rows])
                 mean_chim = np.mean([r['chimeras'] for r in rows])
-                all_found = sum(1 for r in rows if r[ff_col] == r['n_true_founders'])
+                all_found = sum(1 for r in rows if r[ff_col] == r['n_scorable_homonly'])
+                all_found_pair = sum(1 for r in rows if r['founders_found_pair'] == r['n_scorable'])
+                mean_scor = np.mean([r['n_scorable'] for r in rows])
                 print(f"  {r_name}: {len(rows)} blocks, mean {mean_haps:.1f} haps/block, "
-                      f"all-4-G0s: {all_found}/{len(rows)} ({100*all_found/len(rows):.1f}%), "
-                      f"mean good={mean_good:.1f}, chim={mean_chim:.1f}")
+                      f"all-found pair: {all_found_pair}/{len(rows)} ({100*all_found_pair/len(rows):.1f}%), "
+                      f"hom-only: {all_found}/{len(rows)} ({100*all_found/len(rows):.1f}%), "
+                      f"scorable={mean_scor:.1f}/{rows[0]['n_true_founders']}, "
+                      f"good={mean_good:.1f}, chim={mean_chim:.1f}")
 
             del g0_probs, blocks
             gc.collect()
@@ -524,15 +583,21 @@ if __name__ == '__main__':
             df.to_csv(csv_path, index=False)
 
             total_blocks = len(df)
-            total_all_found = int((df[ff_col] == df['n_true_founders']).sum())
+            total_all_found = int((df[ff_col] == df['n_scorable_homonly']).sum())
+            total_all_found_pair = int((df['founders_found_pair'] == df['n_scorable']).sum())
             overall_good = df['good_haps'].mean()
             overall_chim = df['chimeras'].mean()
             overall_disc = df['n_discovered'].mean()
+            overall_scor = df['n_scorable'].mean()
 
             print(f"\n  Overall across {contigs_with_data} contigs:")
             print(f"    Total blocks: {total_blocks}")
             print(f"    Mean discovered haps per block: {overall_disc:.2f}")
-            print(f"    Blocks with ALL {df['n_true_founders'].iloc[0]} G0s recovered "
+            print(f"    Mean scorable founders per block: {overall_scor:.2f} / {df['n_true_founders'].iloc[0]}")
+            print(f"    Blocks with ALL scorable founders recovered, PAIR "
+                  f"(<{MATCH_THRESHOLD_PCT:.0f}% err): {total_all_found_pair} "
+                  f"({100*total_all_found_pair/total_blocks:.1f}%)")
+            print(f"    Blocks with ALL scorable founders recovered, hom-only "
                   f"(<{MATCH_THRESHOLD_PCT:.0f}% err): {total_all_found} "
                   f"({100*total_all_found/total_blocks:.1f}%)")
             print(f"    Mean good haps per block: {overall_good:.2f}")
@@ -1593,8 +1658,18 @@ if __name__ == '__main__':
             continue
 
         n_blocks = len(df_stage)
-        n_all_found = int((df_stage[ff_col] == df_stage['n_true_founders']).sum())
+        if 'n_scorable_homonly' in df_stage.columns:
+            n_all_found = int((df_stage[ff_col] == df_stage['n_scorable_homonly']).sum())
+        else:
+            n_all_found = int((df_stage[ff_col] == df_stage['n_true_founders']).sum())
         pct_all_found = 100.0 * n_all_found / n_blocks
+        if 'founders_found_pair' in df_stage.columns and 'n_scorable' in df_stage.columns:
+            n_all_found_pair = int((df_stage['founders_found_pair'] == df_stage['n_scorable']).sum())
+            pct_all_found_pair = round(100.0 * n_all_found_pair / n_blocks, 2)
+            mean_scor = round(df_stage['n_scorable'].mean(), 3)
+        else:
+            pct_all_found_pair = float('nan')
+            mean_scor = float('nan')
         mean_disc = df_stage['n_discovered'].mean()
         mean_good = df_stage['good_haps'].mean()
         mean_chim = df_stage['chimeras'].mean()
@@ -1603,7 +1678,9 @@ if __name__ == '__main__':
             'stage': stage_label,
             'total_blocks': n_blocks,
             'mean_discovered_haps': round(mean_disc, 3),
-            'all_4_G0s_found_pct': round(pct_all_found, 2),
+            'mean_scorable_founders': mean_scor,
+            'all_found_pair_pct': pct_all_found_pair,
+            'all_found_homonly_pct': round(pct_all_found, 2),
             'mean_good_haps': round(mean_good, 3),
             'mean_chimera_haps': round(mean_chim, 3),
         })

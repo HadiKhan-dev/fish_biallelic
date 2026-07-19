@@ -1,224 +1,140 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-archive_and_clean_sweep.py -- archive the small, irreplaceable sweep outputs
-(the per-combo ground-truth / inferred pedigree CSVs and the depth-accuracy
-figure) into a new folder, then delete the large per-combo checkpoint trees to
-reclaim disk.
+screen_g0_reads.py
 
-Layout it expects (as written by pedigree_depth_sweep.py):
+Read-level screen of G0_1's deep CRAM over the problem window vs a control
+region, to tell a REAL divergent haplotype from a mapping artifact -- using the
+one carrier with high coverage (~50x), so the shallow-F1 noise is irrelevant.
 
-    <sweep_root>/depth<D>/seed<S>/results/ground_truth_pedigree.csv
-    <sweep_root>/depth<D>/seed<S>/results/pedigree_inference_discovered.csv
-    <sweep_root>/depth<D>/seed<S>/checkpoints/        <- the multi-TB part, deleted
-    <sweep_root>/depth<D>/seed<S>/run_*.log           <- copied too (tiny run record)
-    <sweep_root>/depth_accuracy.{png,pdf}             <- the figure, copied
-    <sweep_root>/depth_accuracy_summary.csv
+What to look for over the window, relative to the control region:
+  * per-read mismatch count (NM) goes BIMODAL -- a clean ~0-1 mode (the common
+    haplotype) plus a high mode (~4-10, the divergent haplotype) -> X is a real
+    divergent haplotype, and you can read it straight off G0_1.
+  * NM uniformly low like the control -> no divergent reads; the het calls are
+    not coming from a divergent haplotype (points to a genotyping quirk).
+  * MAPQ collapses toward 0 -> reads multi-map (repeat/paralog), though normal
+    depth already argues against extra copies.
 
-The archive mirrors that tree minus the checkpoints, so it stays a valid input
-to plot_depth_accuracy.py: `python plot_depth_accuracy.py --sweep-root <archive>`
-will rebuild the figure straight from the archived CSVs.
-
-SAFETY
-  * DRY RUN BY DEFAULT. It prints exactly what it would copy and delete, with
-    sizes, and removes nothing until you re-run with --apply.
-  * A combo's checkpoints are deleted ONLY after both its CSVs are copied AND
-    byte-size-verified in the archive. A combo whose CSVs are missing is left
-    untouched (use --force-delete-unarchived to override).
-  * The stage-1 checkpoint inside each combo is a SYMLINK to the shared
-    .pipeline_checkpoints/01_vcf_discovery. Deletion unlinks it and never
-    follows it, so the shared founders are preserved. The shared checkpoint
-    directory itself is left alone unless you pass --also-shared.
-  * It only ever removes directories literally named 'checkpoints' located
-    inside the sweep root (plus, optionally, the one shared dir you name).
-
-Usage (from the sweep project dir):
-
-    python archive_and_clean_sweep.py                 # DRY RUN: show the plan
-    python archive_and_clean_sweep.py --apply         # archive, verify, then delete
-    python archive_and_clean_sweep.py --apply --also-shared
-    python archive_and_clean_sweep.py --archive /path/to/archive --apply
+Needs samtools in PATH and the reference FASTA the CRAM was aligned to.
+Edit CONFIG, then:  python screen_g0_reads.py
+(Untested here -- no CRAM/samtools in the sandbox; the parsing is straightforward.)
 """
-import argparse
-import glob
-import os
-import shutil
+import subprocess, re, sys
+import numpy as np
 
-RESULT_FILES = ("ground_truth_pedigree.csv", "pedigree_inference_discovered.csv")
+# =============================== CONFIG ===============================
+SAMTOOLS  = "samtools"
+CRAM      = "/rds/project/rds-8b3VcZwY7rY/projects/cichlid/alignments/DURB_000005-LabCichlids/X_TmAc/Astcal_F0_2/fAstCal1.2/2021cicX11218978.mem.crumble.cram"  # G0_1
+REFERENCE = "/path/to/fAstCal1.2.fa"          # <-- SET THIS (the .fa the CRAM was aligned to)
+WINDOW    = "chr12:31275584-31279061"          # block 1013
+CONTROL   = ["chr12:5000000-5100000", "chr12:20000000-20100000"]  # normal regions, same sample
+DIV_NM    = 4                                  # reads with NM >= this = "divergent"
+OUT_PNG   = "g0_1_block1013_readscreen.png"
+OUT_TXT   = "g0_1_block1013_readscreen.txt"
+# =====================================================================
 
+class _Tee:
+    def __init__(self, *s): self.s = s
+    def write(self, x):
+        for f in self.s: f.write(x)
+    def flush(self):
+        for f in self.s: f.flush()
+_logf = open(OUT_TXT, "w", buffering=1)
+sys.stdout = _Tee(sys.__stdout__, _logf)
 
-def _dir_size(path):
-    """Sum of real file sizes under path; does NOT follow symlinks."""
-    total = 0
-    for root, _dirs, files in os.walk(path, followlinks=False):
-        for f in files:
-            fp = os.path.join(root, f)
-            if os.path.islink(fp):
-                continue
-            try:
-                total += os.path.getsize(fp)
-            except OSError:
-                pass
-    return total
+_nm = re.compile(r"NM:i:(\d+)")
 
-
-def _fmt(nbytes):
-    n = float(nbytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024.0 or unit == "TB":
-            return "%.1f %s" % (n, unit)
-        n /= 1024.0
-
-
-def discover_combos(sweep_root):
-    """Return [(depth_dirname, seed_dirname, seed_path), ...] for every depth*/seed*."""
-    combos = []
-    for ddir in sorted(glob.glob(os.path.join(sweep_root, "depth*"))):
-        if not os.path.isdir(ddir):
+def collect(region):
+    """primary alignments only (-F 0x904). returns mapq[], nm[], rate[]."""
+    cmd = [SAMTOOLS, "view", "-F", "0x904", "-T", REFERENCE, CRAM, region]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    mapq, nm, rate = [], [], []
+    for line in proc.stdout:
+        f = line.split("\t")
+        if len(f) < 11:
             continue
-        for sdir in sorted(glob.glob(os.path.join(ddir, "seed*"))):
-            if os.path.isdir(sdir):
-                combos.append((os.path.basename(ddir), os.path.basename(sdir), sdir))
-    return combos
+        try:
+            q = int(f[4])
+        except ValueError:
+            continue
+        mapq.append(q)
+        m = _nm.search(line)
+        if m:
+            v = int(m.group(1)); L = len(f[9]) if f[9] != "*" else 0
+            nm.append(v)
+            if L > 0:
+                rate.append(v / L)
+    _, err = proc.communicate()
+    if proc.returncode != 0:
+        print(f"  ** samtools failed for {region}:\n{err.strip()[:400]}")
+    return np.array(mapq), np.array(nm), np.array(rate)
 
+def summarize(tag, mapq, nm, rate):
+    if mapq.size == 0:
+        print(f"{tag}: no reads"); return
+    print(f"{tag}: {mapq.size} reads")
+    print(f"   MAPQ   median {np.median(mapq):.0f} | %MAPQ=0 {100*np.mean(mapq==0):.1f}% | %MAPQ<20 {100*np.mean(mapq<20):.1f}%")
+    if nm.size:
+        print(f"   NM     median {np.median(nm):.0f} | mean {nm.mean():.2f} | %reads NM>={DIV_NM} {100*np.mean(nm>=DIV_NM):.1f}%")
+    if rate.size:
+        print(f"   mism%  mean {100*rate.mean():.2f}% per bp")
 
-def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sweep-root", default=os.path.join(here, "pedigree_depth_sweep"),
-                    help="sweep tree with depth*/seed*/{results,checkpoints} "
-                         "(default: ./pedigree_depth_sweep next to this script)")
-    ap.add_argument("--archive", default=None,
-                    help="destination folder for the kept CSVs + figure "
-                         "(default: <sweep-root>_archive, a sibling of the sweep root)")
-    ap.add_argument("--apply", action="store_true",
-                    help="actually copy and DELETE; without it this is a dry run")
-    ap.add_argument("--also-shared", action="store_true",
-                    help="ALSO delete the shared .pipeline_checkpoints dir (the "
-                         "reusable stage-1 founders); off by default so future "
-                         "sweeps can still reuse it")
-    ap.add_argument("--shared-dir", default=os.path.join(here, ".pipeline_checkpoints"),
-                    help="path of the shared checkpoint dir (only deleted with "
-                         "--also-shared)")
-    ap.add_argument("--force-delete-unarchived", action="store_true",
-                    help="delete a combo's checkpoints even if its result CSVs were "
-                         "not found/archived (NOT recommended)")
-    args = ap.parse_args()
-
-    sweep_root = os.path.abspath(args.sweep_root)
-    archive = os.path.abspath(args.archive) if args.archive else sweep_root + "_archive"
-
-    if not os.path.isdir(sweep_root):
-        raise SystemExit("[clean] sweep root not found: %s" % sweep_root)
-    # The archive must live OUTSIDE the sweep tree (else we'd copy into a tree we
-    # are about to prune).
-    if os.path.commonpath([archive, sweep_root]) == sweep_root:
-        raise SystemExit(
-            "[clean] --archive must be outside --sweep-root.\n"
-            "        sweep-root: %s\n        archive:    %s" % (sweep_root, archive))
-
-    combos = discover_combos(sweep_root)
-    if not combos:
-        raise SystemExit("[clean] no depth*/seed* combos under %s" % sweep_root)
-
-    print("[clean] %s" % ("APPLY" if args.apply else "DRY RUN"))
-    print("[clean] sweep root: %s" % sweep_root)
-    print("[clean] archive:    %s" % archive)
-    print("[clean] %d combo(s) found\n" % len(combos))
-
-    # ---- 1. archive CSVs (+ run logs), recording which combos are safe to wipe
-    plan = []                 # (seed_path, ckpt_dir, ckpt_bytes, archived_ok, n_csv)
-    total_ckpt_bytes = 0
-    for ddir, sdir, seed_path in combos:
-        res_src = os.path.join(seed_path, "results")
-        arch_res = os.path.join(archive, ddir, sdir, "results")
-        csvs = [f for f in RESULT_FILES if os.path.isfile(os.path.join(res_src, f))]
-        ok = len(csvs) == len(RESULT_FILES)
-
-        if csvs and args.apply:
-            os.makedirs(arch_res, exist_ok=True)
-            for f in csvs:
-                src, dst = os.path.join(res_src, f), os.path.join(arch_res, f)
-                shutil.copy2(src, dst)
-                if not (os.path.isfile(dst) and os.path.getsize(dst) > 0 and
-                        os.path.getsize(dst) == os.path.getsize(src)):
-                    raise SystemExit(
-                        "[clean] ARCHIVE VERIFY FAILED for %s -- aborting before any "
-                        "deletion." % dst)
-            # tiny run logs: the only record of the runs once checkpoints are gone
-            for lg in sorted(glob.glob(os.path.join(seed_path, "run_*.log"))):
-                shutil.copy2(lg, os.path.join(archive, ddir, sdir, os.path.basename(lg)))
-
-        ckpt_dir = os.path.join(seed_path, "checkpoints")
-        ckpt_bytes = _dir_size(ckpt_dir) if os.path.isdir(ckpt_dir) else 0
-        total_ckpt_bytes += ckpt_bytes
-        plan.append((seed_path, ckpt_dir, ckpt_bytes, ok, len(csvs)))
-        print("  %s/%s: %d/%d CSV(s), checkpoints %s%s"
-              % (ddir, sdir, len(csvs), len(RESULT_FILES), _fmt(ckpt_bytes),
-                 "" if ok else "   <-- results MISSING"))
-
-    # ---- 2. copy the figure(s) from the sweep-root top level
-    graphs = [g for g in sorted(glob.glob(os.path.join(sweep_root, "depth_accuracy*")))
-              if os.path.isfile(g)]
-    print("\n[clean] figure files: %s"
-          % (", ".join(os.path.basename(g) for g in graphs) or "(none found)"))
-    if args.apply and graphs:
-        os.makedirs(archive, exist_ok=True)
-        for g in graphs:
-            shutil.copy2(g, os.path.join(archive, os.path.basename(g)))
-
-    # ---- 3. decide + report deletions
-    deletable = [(sp, cd, b) for (sp, cd, b, ok, n) in plan
-                 if os.path.isdir(cd) and (ok or args.force_delete_unarchived)]
-    skipped = [(cd, b) for (sp, cd, b, ok, n) in plan
-               if os.path.isdir(cd) and not ok and not args.force_delete_unarchived]
-
-    print("\n[clean] total checkpoint size: %s" % _fmt(total_ckpt_bytes))
-    if skipped:
-        print("[clean] WARNING: %d combo(s) have missing CSVs and will be KEPT "
-              "(use --force-delete-unarchived to remove):" % len(skipped))
-        for cd, b in skipped:
-            print("          %s  (%s)" % (cd, _fmt(b)))
-
-    if not args.apply:
-        n_arch = sum(1 for p in plan if p[3])
-        print("\n[clean] DRY RUN -- nothing copied or deleted.")
-        print("[clean] would archive %d combo(s)' CSVs + %d figure file(s) to %s"
-              % (n_arch, len(graphs), archive))
-        print("[clean] would delete %d checkpoint tree(s), freeing ~%s"
-              % (len(deletable), _fmt(sum(b for _, _, b in deletable))))
-        if args.also_shared:
-            print("[clean] would ALSO delete shared %s" % os.path.abspath(args.shared_dir))
-        print("[clean] re-run with --apply to do it.")
+def nm_hist(nm, width=50, top=20):
+    if nm.size == 0:
         return
+    cap = min(top, int(nm.max()))
+    counts = np.bincount(np.clip(nm, 0, cap), minlength=cap + 1)
+    mx = counts.max() or 1
+    print("   NM histogram (mismatches per read; look for two humps):")
+    for k in range(cap + 1):
+        bar = "#" * int(round(width * counts[k] / mx))
+        lab = f"{k}" if k < cap else f"{k}+"
+        print(f"     {lab:>3} | {bar} {counts[k]}")
 
-    # ---- 4. delete (archive is complete + verified by here)
-    freed = 0
-    for sp, cd, b in deletable:
-        assert os.path.basename(cd) == "checkpoints"                       # only 'checkpoints'
-        assert os.path.commonpath([os.path.abspath(cd), sweep_root]) == sweep_root
-        assert not os.path.islink(cd)
-        for entry in os.scandir(cd):          # unlink the stage-1 symlink first; never follow it
-            if entry.is_symlink():
-                os.unlink(entry.path)
-        shutil.rmtree(cd)
-        freed += b
-        print("  deleted %s  (freed %s)" % (cd, _fmt(b)))
+print(f"=== read-level screen of G0_1 over {WINDOW} ===")
+print(f"CRAM: {CRAM}")
+wq, wn, wr = collect(WINDOW)
+print("\n-- WINDOW --")
+summarize("window", wq, wn, wr)
+nm_hist(wn)
 
-    if args.also_shared:
-        shared = os.path.abspath(args.shared_dir)
-        if os.path.isdir(shared) and not os.path.islink(shared):
-            sb = _dir_size(shared)
-            shutil.rmtree(shared)
-            freed += sb
-            print("  deleted shared %s  (freed %s)" % (shared, _fmt(sb)))
-        else:
-            print("  [also-shared] not a directory, skipped: %s" % shared)
+# baseline = pooled control regions
+cq, cn, cr = [np.array([], int)] * 3
+cq, cn, cr = (np.concatenate(x) if x else np.array([]) for x in zip(*[collect(r) for r in CONTROL]) ) if CONTROL else (cq, cn, cr)
+print("\n-- CONTROL (pooled) --")
+summarize("control", cq, cn, cr)
 
-    print("\n[clean] DONE. archived to %s; freed ~%s." % (archive, _fmt(freed)))
-    if skipped:
-        print("[clean] kept %d unarchived combo(s)' checkpoints." % len(skipped))
+print("\nread:")
+if wn.size and cn.size:
+    fdiv_w = 100 * np.mean(wn >= DIV_NM); fdiv_c = 100 * np.mean(cn >= DIV_NM)
+    fclean_w = 100 * np.mean(wn <= 1)
+    print(f"  divergent reads (NM>={DIV_NM}): window {fdiv_w:.1f}% vs control {fdiv_c:.1f}%")
+    print(f"  clean reads (NM<=1): window {fclean_w:.1f}%")
+    if fdiv_w > fdiv_c + 15 and fclean_w >= 25 and fdiv_w >= 25:
+        print("  -> window has BOTH a clean mode and a divergent mode = REAL divergent 2nd haplotype (het).")
+    elif fdiv_w > fdiv_c + 15:
+        print("  -> window enriched for divergent reads (check the histogram: uniform shift vs two humps).")
+    else:
+        print("  -> window looks like control: no divergent-haplotype read signal.")
+    if wq.size and 100 * np.mean(wq == 0) > 20:
+        print("  -> NOTE: many MAPQ=0 reads -> multi-mapping/repeat contribution.")
 
+# optional plot
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    if wn.size or cn.size:
+        cap = int(max(wn.max() if wn.size else 0, cn.max() if cn.size else 0, 1))
+        cap = min(cap, 20); bins = np.arange(cap + 2) - 0.5
+        plt.figure(figsize=(7, 4))
+        if cn.size: plt.hist(np.clip(cn, 0, cap), bins=bins, density=True, alpha=0.5, label="control")
+        if wn.size: plt.hist(np.clip(wn, 0, cap), bins=bins, density=True, alpha=0.5, label="window")
+        plt.xlabel("per-read mismatches (NM)"); plt.ylabel("density")
+        plt.title("G0_1 reads: window vs control"); plt.legend(); plt.tight_layout()
+        plt.savefig(OUT_PNG, dpi=110); print(f"\nsaved -> {OUT_PNG}")
+except Exception as e:
+    print(f"(plot skipped: {e})")
 
-if __name__ == "__main__":
-    main()
+_logf.flush(); sys.stdout = sys.__stdout__; _logf.close()
+print(f"full text results saved -> {OUT_TXT}  (upload this)")

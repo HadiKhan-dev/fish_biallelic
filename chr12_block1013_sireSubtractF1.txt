@@ -1,0 +1,37 @@
+=== chr12 block 1013: subtract sire G0_3 2021cicX11218980 from F1s ===
+sire het-frac at block: 1/200 (0%) -> homozygous (clean to subtract)
+dam G0_1 2021cicX11218978: 139 divergent (X) sites (het where hap1=common). At X-sites: residual 1 = inherited X, 0 = inherited common.
+
+F1 sample              | inCohort | nconf | sireSubViol% | X-content | maternal hap
+2021cicX13611458       | yes      |   150 |         0.0% |     0.59  | X
+2021cicX13611459       | yes      |   160 |         0.0% |     0.68  | X
+2021cicX13611460       | yes      |   199 |         0.0% |     0.01  | common
+2021cicX13611461       | yes      |   199 |         0.0% |     0.01  | common
+2021cicX13611462       | yes      |   199 |         0.0% |     0.01  | common
+2021cicX13611463       | yes      |   199 |         0.0% |     0.01  | common
+2021cicX13611464       | yes      |   199 |         0.0% |     0.01  | common
+2021cicX13611465       | yes      |   198 |         0.0% |     0.01  | common
+2021cicX13611466       | yes      |   199 |         0.0% |     0.01  | common
+2021cicX13611467       | yes      |   192 |         0.5% |     0.01  | common
+2021cicX13611468       | yes      |   193 |         0.5% |     0.01  | common
+2021cicX13611469       | yes      |   198 |         0.0% |     0.01  | common
+2021cicX13611470       | yes      |   170 |         0.0% |     0.52  | X
+2021cicX13611471       | yes      |   199 |         0.0% |     0.01  | common
+2021cicX13611472       | yes      |   197 |         0.0% |     0.01  | common
+2021cicX13611473       | yes      |   195 |         0.0% |     0.01  | common
+
+F1 inferred to carry X (maternal hap = X): 3
+   2021cicX13611458
+   2021cicX13611459
+   2021cicX13611470
+explicit pairwise comparison of the X-carrier maternal haplotypes:
+  (X-sites = the 139 divergent sites; full = all jointly-confident sites)
+   611458 vs 611459: X-sites  69.2% agree (n=78), full  79.3% agree (n=121)
+   611458 vs 611470: X-sites  65.1% agree (n=86), full  75.9% agree (n=137)
+   611459 vs 611470: X-sites  59.4% agree (n=96), full  68.8% agree (n=138)
+   -> if G0_1 transmits ONE coherent X, every carrier got the SAME haplotype
+      => X-sites agreement ~100%.  ~60% means there is no single coherent X.
+consensus maternal hap at X-sites: mean allele 0.58 (expect ~1.0 if this is G0_1's divergent haplotype X) over 135 sites
+-> if mean ~1.0 and carriers agree, we've read G0_1's divergent haplotype X directly off its F1 offspring (independent of discovery).
+
+saved -> chr12_block1013_F1maternalX.png
