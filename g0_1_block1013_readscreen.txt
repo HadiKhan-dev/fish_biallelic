@@ -1,0 +1,22 @@
+=== read-level screen of G0_1 over chr12:31275584-31279061 ===
+CRAM: /rds/project/rds-8b3VcZwY7rY/projects/cichlid/alignments/DURB_000005-LabCichlids/X_TmAc/Astcal_F0_2/fAstCal1.2/2021cicX11218978.mem.crumble.cram
+  ** samtools failed for chr12:31275584-31279061:
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libtinfow.so.6: no version information available (required by samtools)
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libncursesw.so.6: no version information available (required by samtools)
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libncursesw.so.6: no version information available (require
+
+-- WINDOW --
+window: no reads
+  ** samtools failed for chr12:5000000-5100000:
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libtinfow.so.6: no version information available (required by samtools)
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libncursesw.so.6: no version information available (required by samtools)
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libncursesw.so.6: no version information available (require
+  ** samtools failed for chr12:20000000-20100000:
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libtinfow.so.6: no version information available (required by samtools)
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libncursesw.so.6: no version information available (required by samtools)
+samtools: /rds/user/ahk39/hpc-work/conda_envs/bio-env/bin/../lib/libncursesw.so.6: no version information available (require
+
+-- CONTROL (pooled) --
+control: no reads
+
+read:
