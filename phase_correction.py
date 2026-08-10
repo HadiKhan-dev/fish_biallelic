@@ -22,18 +22,13 @@ import math
 from typing import List, Tuple, Dict, Optional, Set, Callable
 from dataclasses import dataclass, field
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    print("WARNING: Numba not found. Phase correction will be slow.")
-    def njit(*args, **kwargs):
-        def decorator(func): return func
-        return decorator
-    # Fallback prange == range when numba is unavailable so the
-    # parallel-decorated kernels below still execute (just sequentially).
-    prange = range
+import numba
+from numba import njit, prange
+
+from founder_alleles import founder_block_to_dense as _founder_block_to_dense
+from painting_grid_utils import (
+    discretize_painting_to_bins as _discretize_painting_to_bins,
+)
 
 # ThreadPoolExecutor is used to parallelise within-generation sample
 # work in `propagate_recoloring_to_offspring` and across F1 samples in
@@ -90,35 +85,9 @@ from paint_samples import SamplePainting, PaintedChunk, BlockPainting
 # =============================================================================
 
 def founder_block_to_dense(founder_block):
-    """
-    Convert BlockResult to dense matrix for fast allele lookup.
-    
-    Args:
-        founder_block: BlockResult with positions and haplotypes dict
-        
-    Returns:
-        dense_haps: (max_founder_id + 1, n_sites) array of alleles
-        positions: Array of SNP positions
-    """
-    positions = founder_block.positions
-    hap_dict = founder_block.haplotypes
-    
-    if not hap_dict:
-        return np.zeros((0, 0), dtype=np.int8), positions
-
-    max_id = max(hap_dict.keys())
-    n_sites = len(positions)
-    
-    dense_haps = np.full((max_id + 1, n_sites), -1, dtype=np.int8)
-    
-    for fid, hap_arr in hap_dict.items():
-        if hap_arr.ndim == 2:
-            concrete = np.argmax(hap_arr, axis=1)
-        else:
-            concrete = hap_arr
-        dense_haps[fid, :] = concrete
-        
-    return dense_haps, positions
+    """Convert a founder block to its historical dense allele representation."""
+    dense_haps, _ = _founder_block_to_dense(founder_block)
+    return dense_haps, founder_block.positions
 
 
 @njit(parallel=True, cache=True)
@@ -336,47 +305,8 @@ class SampleCorrectionState:
 # =============================================================================
 
 def discretize_painting_to_bins(painting: SamplePainting, bin_edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Discretize a SamplePainting to fixed bins.
-    
-    Args:
-        painting: SamplePainting with chunks
-        bin_edges: Array of bin boundaries (n_bins + 1,)
-    
-    Returns:
-        id_grid: (n_bins, 2) array of founder IDs per bin
-        hom_mask: (n_bins,) boolean array - True where hap1 == hap2 or either is -1
-    """
-    num_bins = len(bin_edges) - 1
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    
-    id_grid = np.full((num_bins, 2), -1, dtype=np.int32)
-    
-    chunks = painting.chunks if hasattr(painting, 'chunks') else []
-    if not chunks:
-        hom_mask = np.ones(num_bins, dtype=np.bool_)
-        return id_grid, hom_mask
-    
-    # Build arrays for vectorized lookup
-    c_ends = np.array([c.end for c in chunks], dtype=np.int64)
-    c_starts = np.array([c.start for c in chunks], dtype=np.int64)
-    c_h1 = np.array([c.hap1 for c in chunks], dtype=np.int32)
-    c_h2 = np.array([c.hap2 for c in chunks], dtype=np.int32)
-    
-    # Find chunk for each bin center
-    indices = np.searchsorted(c_ends, bin_centers, side='right')
-    indices = np.clip(indices, 0, len(chunks) - 1)
-    
-    # Check if bin center is actually within the chunk
-    valid_mask = (bin_centers >= c_starts[indices]) & (bin_centers < c_ends[indices])
-    
-    id_grid[:, 0] = np.where(valid_mask, c_h1[indices], -1)
-    id_grid[:, 1] = np.where(valid_mask, c_h2[indices], -1)
-    
-    # Homozygosity mask: True if IDs match or either is -1 (uncertain)
-    hom_mask = (id_grid[:, 0] == id_grid[:, 1]) | (id_grid[:, 0] == -1) | (id_grid[:, 1] == -1)
-    
-    return id_grid, hom_mask
+    """Discretize half-open painting chunks at bin centres."""
+    return _discretize_painting_to_bins(painting, bin_edges)
 
 
 def compute_bin_edges(start_pos: int, end_pos: int, snps_per_bin: int = 100) -> np.ndarray:
@@ -1925,7 +1855,6 @@ def _init_phase_worker(total_cores, active_counter, parallel_data):
     of this module for the full rationale.
     """
     try:
-        import numba
         # Set ceiling so set_num_threads can scale up later
         numba.config.NUMBA_NUM_THREADS = total_cores
         # Start conservative — each phase will set the real value
@@ -2009,11 +1938,6 @@ def _process_contig_worker(r_name):
         with _PHASE_ACTIVE_COUNTER.get_lock():
             _PHASE_ACTIVE_COUNTER.value += 1
     try:
-        try:
-            import numba
-        except ImportError:
-            numba = None
-
         # Compute bin edges
         _t0 = _t.time()
         bin_edges = compute_bin_edges(start_pos, end_pos, snps_per_bin=snps_per_bin)
@@ -2028,9 +1952,8 @@ def _process_contig_worker(r_name):
         # uses every core currently allocated to this worker.
         # ----------------------------------------------------------------
         _t0 = _t.time()
-        if numba is not None:
-            dyn_threads = _phase_get_dynamic_threads()
-            numba.set_num_threads(dyn_threads)
+        dyn_threads = _phase_get_dynamic_threads()
+        numba.set_num_threads(dyn_threads)
 
         # Compute founder equivalence matrix
         if 'founder_block' in data:
@@ -2068,8 +1991,7 @@ def _process_contig_worker(r_name):
         # _phase_get_dynamic_threads() at the start of every round so
         # late-finishing peers' freed cores are picked up between rounds.
         # ----------------------------------------------------------------
-        if numba is not None:
-            numba.set_num_threads(1)
+        numba.set_num_threads(1)
 
         # Run correction rounds
         final_round = num_rounds
@@ -3547,20 +3469,14 @@ def _greedy_contig_worker(task):
         with _PHASE_ACTIVE_COUNTER.get_lock():
             _PHASE_ACTIVE_COUNTER.value += 1
     try:
-        try:
-            import numba
-        except ImportError:
-            numba = None
-
         bin_edges = compute_bin_edges(start_pos, end_pos, snps_per_bin=snps_per_bin)
 
         # ----------------------------------------------------------------
         # Phase 1: Founder equivalence matrix (numba-parallel, prange).
         # Give it the full dynamic budget.
         # ----------------------------------------------------------------
-        if numba is not None:
-            dyn_threads = _phase_get_dynamic_threads()
-            numba.set_num_threads(dyn_threads)
+        dyn_threads = _phase_get_dynamic_threads()
+        numba.set_num_threads(dyn_threads)
 
         # Compute founder equivalence matrix
         if 'founder_block' in data:
@@ -3587,8 +3503,7 @@ def _greedy_contig_worker(task):
         # running single-threaded.  Numba threads = 1 to avoid
         # over-subscription with the python thread pool.
         # ----------------------------------------------------------------
-        if numba is not None:
-            numba.set_num_threads(1)
+        numba.set_num_threads(1)
         dyn_threads = _phase_get_dynamic_threads()
 
         refined_painting = post_process_phase_greedy(

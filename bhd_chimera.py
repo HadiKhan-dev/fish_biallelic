@@ -4,9 +4,6 @@ bhd_kernels.  Uses dynamic_threads for the scoring-loop thread hook."""
 import numpy as np
 from numba import njit, prange
 
-from bhd_kernels import (
-    HAS_NUMBA,
-)
 import dynamic_threads
 
 
@@ -298,77 +295,30 @@ def prune_chimeras(hap_dict, probs_array,
     # _argmax3_numba is bit-identical to np.argmax(probs_array, axis=2) (same
     # first-occurrence tie-break) but parallel; the numpy reduction scans the
     # whole probs_array single-threaded (~5.4 GB at L4).
-    if HAS_NUMBA:
-        try:
-            sample_geno_stack = _argmax3_numba(probs_array)
-        except Exception as _argmax_err:
-            # _argmax3_numba is @njit(cache=True, parallel=True).  Under heavy
-            # forkserver worker recycling with the numba cache on a network
-            # filesystem, a freshly-spawned worker can intermittently fail to
-            # unbox its argument ("can't unbox array from PyObject into native
-            # value") even for a perfectly valid (num_samples, num_sites, 3)
-            # float32 array -- a numba cache/runtime glitch in that worker, not
-            # bad data.  np.argmax over axis=2 is bit-identical to the kernel
-            # (same first-occurrence tie-break, see the comment above), so fall
-            # back to it rather than aborting the whole hierarchical-assembly
-            # batch.  The array's signature is logged so a *genuine* wrong-type
-            # input would still be visible: np.argmax raises loudly on object /
-            # ragged / wrong-ndim arrays and never silently mis-reduces a valid
-            # one, so the fallback can only produce the identical result or fail.
-            print(f"  [prune_chimeras] _argmax3_numba raised "
-                  f"{type(_argmax_err).__name__}: {_argmax_err} | probs_array "
-                  f"type={type(probs_array).__name__} "
-                  f"dtype={getattr(probs_array, 'dtype', None)} "
-                  f"shape={getattr(probs_array, 'shape', None)} "
-                  f"C_contig={getattr(getattr(probs_array, 'flags', None), 'c_contiguous', None)} "
-                  f"-> using bit-identical np.argmax fallback", flush=True)
-            sample_geno_stack = np.argmax(probs_array, axis=2).astype(np.int8)
-    else:
+    try:
+        sample_geno_stack = _argmax3_numba(probs_array)
+    except Exception as _argmax_err:
+        # _argmax3_numba is @njit(cache=True, parallel=True).  Under heavy
+        # forkserver worker recycling with the numba cache on a network
+        # filesystem, a freshly-spawned worker can intermittently fail to
+        # unbox its argument ("can't unbox array from PyObject into native
+        # value") even for a perfectly valid (num_samples, num_sites, 3)
+        # float32 array -- a numba cache/runtime glitch in that worker, not
+        # bad data.  np.argmax over axis=2 is bit-identical to the kernel
+        # (same first-occurrence tie-break, see the comment above), so fall
+        # back to it rather than aborting the whole hierarchical-assembly
+        # batch.  The array's signature is logged so a *genuine* wrong-type
+        # input would still be visible: np.argmax raises loudly on object /
+        # ragged / wrong-ndim arrays and never silently mis-reduces a valid
+        # one, so the fallback can only produce the identical result or fail.
+        print(f"  [prune_chimeras] _argmax3_numba raised "
+              f"{type(_argmax_err).__name__}: {_argmax_err} | probs_array "
+              f"type={type(probs_array).__name__} "
+              f"dtype={getattr(probs_array, 'dtype', None)} "
+              f"shape={getattr(probs_array, 'shape', None)} "
+              f"C_contig={getattr(getattr(probs_array, 'flags', None), 'c_contiguous', None)} "
+              f"-> using bit-identical np.argmax fallback", flush=True)
         sample_geno_stack = np.argmax(probs_array, axis=2).astype(np.int8)
-    
-    def compute_best_pair_errors(hap_dict_local, sample_geno_stack_local):
-        """For each sample, compute error of best haplotype pair (no recomb within block).
-        
-        Uses the JIT kernel when numba is available; falls back to the
-        original pure-Python triply-nested loop otherwise.  The two
-        paths are byte-identical because the inner work is integer-only
-        (concretised haps + integer sample genotypes, integer mismatch
-        count, then a single float64 division).
-        """
-        # Convert the hap_dict's values to a stacked (K, n_sites) int8 array
-        # matching what the kernel (and the original Python loop) expects.
-        hap_list = [np.argmax(h, axis=1) if h.ndim > 1 else h for h in hap_dict_local.values()]
-        num_haps = len(hap_list)
-        
-        if HAS_NUMBA:
-            # Build H_stack as int8 (values in {0, 1}).  hap_list elements
-            # may already be int8 (if 1D) or int64 (from np.argmax of 2D);
-            # vstack-then-cast unifies to int8.
-            H_stack = np.vstack(hap_list).astype(np.int8)
-            return _compute_best_pair_errors_kernel(H_stack, sample_geno_stack_local)
-        
-        # ---- Pure-Python fallback ----
-        # Identical math to the JIT kernel and to the original
-        # implementation (just reads from the pre-computed sample_geno_stack
-        # rather than recomputing argmax per sample).
-        num_samples = sample_geno_stack_local.shape[0]
-        num_sites = sample_geno_stack_local.shape[1]
-        sample_errors = np.zeros(num_samples)
-        
-        for s in range(num_samples):
-            sample_geno = sample_geno_stack_local[s]
-            best_error = 100.0
-            
-            for i in range(num_haps):
-                for j in range(i, num_haps):
-                    geno = hap_list[i] + hap_list[j]
-                    error = np.mean(geno != sample_geno) * 100
-                    if error < best_error:
-                        best_error = error
-            
-            sample_errors[s] = best_error
-        
-        return sample_errors
     
     kept_keys = sorted(list(hap_dict.keys()))
     n_sites = next(iter(hap_dict.values())).shape[0]
@@ -388,18 +338,10 @@ def prune_chimeras(hap_dict, probs_array,
         # min operations, eliminating the K-fold redundant work that the
         # original closure-per-call structure incurred.
         # 
-        # When numba is unavailable, fall back to calling the closure
-        # baseline call only and computing reduced calls per candidate
-        # later (slow path; preserves correctness).
         # ----------------------------------------------------------------
-        if HAS_NUMBA:
-            H_stack_i8 = H_stack.astype(np.int8) if H_stack.dtype != np.int8 else H_stack
-            pair_error_matrix = _compute_pair_errors_matrix_kernel(H_stack_i8, sample_geno_stack)
-            baseline_errors = _min_pair_error_excluding(pair_error_matrix, -1)
-        else:
-            pair_error_matrix = None
-            current_dict = {k: hap_dict[k] for k in kept_keys}
-            baseline_errors = compute_best_pair_errors(current_dict, sample_geno_stack)
+        H_stack_i8 = H_stack.astype(np.int8) if H_stack.dtype != np.int8 else H_stack
+        pair_error_matrix = _compute_pair_errors_matrix_kernel(H_stack_i8, sample_geno_stack)
+        baseline_errors = _min_pair_error_excluding(pair_error_matrix, -1)
         
         # Find candidate chimeras
         candidate_chimeras = []
@@ -427,13 +369,7 @@ def prune_chimeras(hap_dict, probs_array,
             
             if is_chimera:
                 # Compute mean_delta: how much does removing this haplotype hurt?
-                if HAS_NUMBA:
-                    # Cheap O(K^2 * num_samples) min over the precomputed matrix.
-                    reduced_errors = _min_pair_error_excluding(pair_error_matrix, i)
-                else:
-                    # Slow fallback: rebuild from scratch (matches original behaviour).
-                    reduced_dict = {k: hap_dict[k] for k in kept_keys if k != target_key}
-                    reduced_errors = compute_best_pair_errors(reduced_dict, sample_geno_stack)
+                reduced_errors = _min_pair_error_excluding(pair_error_matrix, i)
                 delta_errors = reduced_errors - baseline_errors
                 mean_delta = np.mean(delta_errors)
                 

@@ -1,0 +1,9 @@
+name = "pragmatic_implementer"
+description = "Implements an agreed scientific or operational change clearly, directly, and efficiently while preserving unrelated behaviour and existing user work."
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+Before doing task work, read `.agent-profiles/pragmatic-implementer.md` from the repository root and follow it as your canonical role definition. Also read every applicable repository instruction file, including `AGENTS.md`. If the profile cannot be read, stop and report that instead of improvising a replacement role.
+"""

@@ -98,21 +98,9 @@ Outputs (under --out-dir, default ./recombination_map/):
 import math
 
 import numpy as np
+from numba import njit
 
-# numba is optional: if unavailable, @njit degrades to a no-op so the pure-Python
-# path still runs (slower).  Mirrors the guard in the pipeline modules.
-try:
-    from numba import njit
-    HAS_NUMBA = True
-except Exception:  # pragma: no cover
-    HAS_NUMBA = False
-
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        if len(args) == 1 and callable(args[0]) and not kwargs:
-            return args[0]
-        return decorator
+from founder_alleles import founder_allele_matrix
 
 
 # =============================================================================
@@ -187,26 +175,9 @@ def get_snp_level_founder_ids(painting_chunks, snp_positions):
 
 
 def build_founder_allele_lookup(positions, haplotypes):
-    """COPIED from pedigree_inference.build_founder_allele_lookup, adapted to take
-    (positions, haplotypes-dict) directly instead of a FounderBlock object so we
-    don't depend on the pipeline's block class.
-
-    haplotypes: {int founder_id: hap_array}, each 1-D (alleles) or 2-D (prob,
-    argmax'd here).  founder_ids are used as row indices (may be non-contiguous).
-    """
+    """Build the founder-ID-indexed deterministic allele lookup."""
     snp_positions = positions
-    n_snps = len(snp_positions)
-    hap_keys = sorted(list(haplotypes.keys()))
-    max_id = max(hap_keys) if hap_keys else 0
-    allele_lookup = np.full((max_id + 1, n_snps), -1, dtype=np.int8)
-    for fid, h_arr in haplotypes.items():
-        h_arr = np.asarray(h_arr)
-        if h_arr.ndim == 2:
-            raw_alleles = np.argmax(h_arr, axis=1)
-        else:
-            raw_alleles = h_arr
-        allele_lookup[fid, :] = raw_alleles.astype(np.int8)
-    return allele_lookup, snp_positions
+    return founder_allele_matrix(haplotypes, len(snp_positions)), snp_positions
 
 
 def diploid_alleles_for_sample(painting_chunks, allele_lookup, snp_positions):

@@ -8,6 +8,7 @@ import pandas as pd
 
 from .design import CONTIGS
 from .provenance import validate_cache_manifest
+from .ranking import descending_rank_votes
 from . import model
 
 
@@ -19,16 +20,6 @@ CHROMOSOME_CONTAMINATION = 0.01
 TIER_B_VARIANT_MINIMUM = 5
 TIER_B_LOCO_MINIMUM = 18
 
-
-def descending_rank_votes(scores):
-    """Convert candidate scores to equally spaced within-contig rank votes."""
-    values = np.asarray(scores, dtype=np.float64)
-    n_candidates = values.shape[-1]
-    if n_candidates < 2:
-        return np.ones_like(values)
-    order = np.argsort(-values, axis=-1, kind="stable")
-    ranks = np.argsort(order, axis=-1, kind="stable")
-    return 1.0 - ranks / float(n_candidates - 1)
 
 def robust_information_weighted_utilities(
     scores,

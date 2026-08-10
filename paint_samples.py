@@ -34,23 +34,25 @@ noise) rather than as evidence (systematic bias).
 import thread_config
 from thread_config import numba_thread_scope
 
-import os
 import numpy as np
+import numba
 import math
-import pandas as pd
 import warnings
-from typing import List, Tuple, Dict, NamedTuple, Set, DefaultDict, Counter, Optional, Union
-from collections import defaultdict
-import copy
+from typing import List, Tuple, NamedTuple
 import multiprocessing as _mp
 try:
     _forkserver_ctx = _mp.get_context('forkserver')
 except ValueError:
     _forkserver_ctx = _mp.get_context('fork')
 from tqdm import tqdm
-from functools import partial
 
 import analysis_utils
+from founder_alleles import founder_block_to_dense as _founder_block_to_dense
+from painting_grid_utils import (
+    ibs_homozygosity_mask as _ibs_homozygosity_mask,
+    id_grid_to_allele_grid as _id_grid_to_allele_grid,
+    id_grid_to_allele_grid_multisnp as _id_grid_to_allele_grid_multisnp,
+)
 
 # --- VISUALIZATION IMPORTS ---
 try:
@@ -66,16 +68,7 @@ except ImportError:
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid='ignore')
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    print("WARNING: Numba not found. Painting will be slow.")
-    def njit(*args, **kwargs):
-        def decorator(func): return func
-        return decorator
-    prange = range
+from numba import njit, prange
 
 # =============================================================================
 # 1. DATA STRUCTURES
@@ -123,19 +116,9 @@ class BlockPainting:
 
 def founder_block_to_dense(block_result):
     """Convert probabilistic haplotypes to dense integer matrix via argmax."""
-    positions = np.array(block_result.positions, dtype=np.int64)
-    hap_dict = block_result.haplotypes
-    if not hap_dict: return np.zeros((0, 0), dtype=np.int8), positions
-    max_id = max(hap_dict.keys())
-    n_sites = len(positions)
-    dense_haps = np.full((max_id + 1, n_sites), -1, dtype=np.int8)
-    for fid, hap_arr in hap_dict.items():
-        if hap_arr.ndim == 2: 
-            concrete = np.argmax(hap_arr, axis=1)
-        else: 
-            concrete = hap_arr
-        dense_haps[fid, :] = concrete.astype(np.int8)
-    return dense_haps, positions
+    dense_haps, positions = _founder_block_to_dense(block_result)
+    # Preserve this wrapper's historical int64 position normalization.
+    return dense_haps, np.asarray(positions, dtype=np.int64)
 
 # =============================================================================
 # 5. BINNED EMISSION CALCULATOR (NEW - MEMORY EFFICIENT)
@@ -566,7 +549,6 @@ def _init_persistent_paint_worker(total_cores=None, active_counter=None):
     _PAINT_TOTAL_CORES = total_cores
     # Cap numba threads to 1 initially — workers scale up dynamically
     try:
-        import numba
         numba.set_num_threads(1)
     except Exception:
         pass
@@ -976,178 +958,25 @@ def plot_population_painting(block_painting, output_file=None,
 
 def convert_id_grid_to_allele_grid_multisnp(id_grid, bin_centers, founder_block,
                                              bin_width_bp=None, max_snps_per_bin=10):
-    """
-    Convert founder ID grid to allele grid with multiple SNPs per bin.
-    
-    For each bin, samples up to max_snps_per_bin SNPs and looks up the
-    actual allele (0/1) for the assigned founder.
-    
-    Returns:
-        allele_grid: (num_bins, 2, max_snps_per_bin) int8
-    """
-    num_bins = id_grid.shape[0]
-    snp_positions = founder_block.positions
-    n_snps = len(snp_positions)
-    allele_grid = np.full((num_bins, 2, max_snps_per_bin), -1, dtype=np.int8)
-    
-    if n_snps == 0:
-        return allele_grid
-    
-    if bin_width_bp is None:
-        if len(bin_centers) > 1:
-            bin_width_bp = bin_centers[1] - bin_centers[0]
-        else:
-            bin_width_bp = 10000
-    
-    half_width = bin_width_bp / 2.0
-    
-    # Build founder allele lookup
-    hap_keys = sorted(list(founder_block.haplotypes.keys()))
-    max_id = max(hap_keys) if hap_keys else 0
-    founder_alleles = np.full((max_id + 1, n_snps), -1, dtype=np.int8)
-    for fid, h_arr in founder_block.haplotypes.items():
-        if h_arr.ndim == 2:
-            founder_alleles[fid, :] = np.argmax(h_arr, axis=1).astype(np.int8)
-        else:
-            founder_alleles[fid, :] = h_arr.astype(np.int8)
-    
-    # Assign alleles to bins
-    bin_starts = bin_centers - half_width
-    bin_ends = bin_centers + half_width
-    start_indices = np.searchsorted(snp_positions, bin_starts, side='left')
-    end_indices = np.searchsorted(snp_positions, bin_ends, side='right')
-    
-    for b in range(num_bins):
-        s_start = start_indices[b]
-        s_end = end_indices[b]
-        bin_n_snps = s_end - s_start
-        if bin_n_snps == 0:
-            continue
-        
-        if bin_n_snps <= max_snps_per_bin:
-            sampled_indices = list(range(s_start, s_end))
-        else:
-            step = bin_n_snps / max_snps_per_bin
-            sampled_indices = [s_start + int(i * step) for i in range(max_snps_per_bin)]
-        
-        f0 = id_grid[b, 0]
-        f1 = id_grid[b, 1]
-        # NOTE: founder_alleles has shape (num_real_haps, n_snps).  The
-        # bounds check below treats negative ids (unfilled bins, the
-        # historical "no painted founder here" sentinel) AND any
-        # too-large ids as missing-data positions, leaving the
-        # allele_grid entry at -1.  Downstream HMM scoring functions
-        # (run_phase_agnostic_hmm{_multisnp}, run_trio_phase_aware_hmm
-        # {_multisnp} in pedigree_inference.py) already skip -1 entries
-        # as missing.
-        n_real_founders = founder_alleles.shape[0]
-        for k_idx, snp_idx in enumerate(sampled_indices):
-            if k_idx >= max_snps_per_bin:
-                break
-            if 0 <= f0 < n_real_founders:
-                allele_grid[b, 0, k_idx] = founder_alleles[f0, snp_idx]
-            if 0 <= f1 < n_real_founders:
-                allele_grid[b, 1, k_idx] = founder_alleles[f1, snp_idx]
-    
-    return allele_grid
+    """Convert a founder-ID grid to sampled within-bin founder alleles."""
+    return _id_grid_to_allele_grid_multisnp(
+        id_grid, bin_centers, founder_block.positions, founder_block.haplotypes,
+        bin_width_bp=bin_width_bp, max_snps_per_bin=max_snps_per_bin,
+        check_founder_bounds=True,
+    )
 
 
 def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_width_bp=None):
-    """
-    Convert founder ID grid to single-SNP allele grid.
-    
-    Returns:
-        allele_grid: (num_bins, 2) int8
-    """
-    num_bins = id_grid.shape[0]
-    bin_indices = np.searchsorted(founder_block.positions, bin_centers)
-    bin_indices = np.clip(bin_indices, 0, len(founder_block.positions) - 1)
-    
-    if bin_width_bp is None:
-        if len(bin_centers) > 1:
-            bin_width_bp = bin_centers[1] - bin_centers[0]
-        else:
-            bin_width_bp = 10000
-    
-    found_snps_pos = founder_block.positions[bin_indices]
-    dist_to_center = np.abs(found_snps_pos - bin_centers)
-    valid_snp_mask = dist_to_center <= (bin_width_bp / 2.0)
-    
-    hap_keys = sorted(list(founder_block.haplotypes.keys()))
-    max_id = max(hap_keys) if hap_keys else 0
-    allele_lookup = np.full((max_id + 1, num_bins), -1, dtype=np.int8)
-    for fid, h_arr in founder_block.haplotypes.items():
-        if h_arr.ndim == 2:
-            raw_alleles = np.argmax(h_arr, axis=1)
-        else:
-            raw_alleles = h_arr
-        extracted = raw_alleles[bin_indices]
-        extracted[~valid_snp_mask] = -1
-        allele_lookup[fid, :] = extracted
-    
-    allele_grid = np.full_like(id_grid, -1, dtype=np.int8)
-    b_indices = np.arange(num_bins)
-    # NOTE: allele_lookup has shape (num_real_haps, num_bins).  Bin-painted
-    # ids in {0, ..., num_real_haps - 1} are real founders.  Out-of-range
-    # ids (including the historical -1 sentinel for "no painted founder")
-    # are treated as missing data and the corresponding allele_grid entry
-    # stays at -1.
-    n_real_founders = allele_lookup.shape[0]
-    for chrom in [0, 1]:
-        ids = id_grid[:, chrom]
-        valid_mask = (ids >= 0) & (ids < n_real_founders)
-        safe_ids = ids.copy()
-        safe_ids[~valid_mask] = 0
-        alleles = allele_lookup[safe_ids, b_indices]
-        alleles[~valid_mask] = -1
-        allele_grid[:, chrom] = alleles
-    
-    return allele_grid
+    """Convert a founder-ID grid to one founder allele per bin and track."""
+    return _id_grid_to_allele_grid(
+        id_grid, bin_centers, founder_block.positions, founder_block.haplotypes,
+        bin_width_bp=bin_width_bp, check_founder_bounds=True,
+    )
 
 
 def compute_ibs_hom_mask(allele_grid):
-    """
-    Derive homozygosity mask from allele identity across tracks.
-    
-    A bin is marked as potentially homozygous (phase-ambiguous) if the
-    alleles on track 1 and track 2 are identical at ALL SNPs in the bin.
-    This captures both:
-      - True homozygosity (same founder on both tracks)
-      - Effective homozygosity from IBS (different founders, same alleles)
-    
-    When the HMM sees a homozygous bin, it allows free phase switches,
-    which is correct because the data cannot resolve which parental
-    chromosome contributed which track.
-    
-    Args:
-        allele_grid: (num_bins, 2, max_snps_per_bin) int8 for multi-SNP,
-                     or (num_bins, 2) int8 for single-SNP
-    
-    Returns:
-        hom_mask: (num_bins,) bool
-    """
-    if allele_grid.ndim == 3:
-        # Multi-SNP: check all SNPs in each bin
-        num_bins = allele_grid.shape[0]
-        hom_mask = np.ones(num_bins, dtype=np.bool_)
-        for b in range(num_bins):
-            a0 = allele_grid[b, 0, :]  # track 1 alleles
-            a1 = allele_grid[b, 1, :]  # track 2 alleles
-            # Valid SNPs: both tracks have data
-            valid = (a0 != -1) & (a1 != -1)
-            if not np.any(valid):
-                # No valid SNPs → treat as homozygous (no information)
-                hom_mask[b] = True
-            else:
-                # Homozygous if ALL valid SNPs match
-                hom_mask[b] = np.all(a0[valid] == a1[valid])
-    else:
-        # Single-SNP
-        hom_mask = ((allele_grid[:, 0] == allele_grid[:, 1]) |
-                    (allele_grid[:, 0] == -1) |
-                    (allele_grid[:, 1] == -1))
-    
-    return hom_mask
+    """Derive the phase-ambiguous IBS homozygosity mask for an allele grid."""
+    return _ibs_homozygosity_mask(allele_grid)
 
 
 def process_contig_for_pedigree(contig_idx, sample_start, sample_end,

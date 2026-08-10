@@ -3,8 +3,8 @@
 Single source of truth for the pipeline's tunable knobs, thresholds, and feature
 flags.  Logic-free: imports nothing, so every bhd_* module (and block_haplotypes)
 can pull its constants from here without import cycles.  Low-level numerical
-sentinels that are not user-tuned (bhd_kernels.MASK, bhd_kernels.LOG_EPS) and the
-per-module HAS_NUMBA capability flag deliberately stay in their home modules.
+sentinels that are not user-tuned (bhd_kernels.MASK, bhd_kernels.LOG_EPS)
+deliberately stay in their home modules.
 """
 
 
@@ -120,6 +120,19 @@ POOLED_ALT_HI = 0.75
 # the 0.25 / 0.75 dosage boundaries that are still essentially hom calls.
 CLUSTER_HOM_BAND_LO = 0.35
 CLUSTER_HOM_BAND_HI = 0.65
+
+# ============================================================================
+# Fixed-K fitter execution
+# ============================================================================
+# Maximum Numba threads used by one fixed-K coordinate-descent fit. Independent
+# blocks still occupy the full pool in bulk; this cap only prevents one tail
+# block from driving the memory-bandwidth-bound A/H kernels past their measured
+# scaling optimum. The cavity-scoring phase remains uncapped and can consume
+# every dynamically available core. Calibrated at 16 on 76-core Ice Lake; keep
+# this explicit so another architecture can be benchmarked and adjusted without
+# changing the statistical model.
+FIXED_K_FIT_MAX_THREADS = 16
+
 
 # ============================================================================
 # Pool emission cache

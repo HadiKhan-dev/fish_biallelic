@@ -97,8 +97,6 @@
 # adds nothing.  Parallelism comes from the worker pool, not numba.
 # =======================================================================
 
-import warnings
-
 import numpy as np
 from bhd_config import (
     CROSS_CLUSTER_DEDUP_PCT,
@@ -115,36 +113,7 @@ from bhd_config import (
     PAIRWISE_SOFT_CONFLICT_TAU,
 )
 
-# Defensive numba import matching the project convention (see
-# analysis_utils.py, block_haplotypes.py, bhd_trio.py).  If numba is
-# unavailable, all @njit decorators become no-ops and the per-kernel
-# scalar loops run as pure Python (slow but correct).  The wrappers
-# preserve the exact same input/output shapes either way.
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    warnings.warn(
-        "Numba not found.  bhd_pairwise will fall back to pure-Python "
-        "paths for build_pairwise_partial_haps, the clustering kernel, "
-        "count_carriers, and apply_quality_filters "
-        "(typically 3-33x slower per call).",
-        ImportWarning,
-    )
-    # Dummy decorator that accepts arguments (like cache=True or
-    # parallel=True) but does nothing — same pattern as analysis_utils.py
-    # and bhd_trio.py.
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        # Support both @njit and @njit(cache=True) forms
-        if len(args) == 1 and callable(args[0]) and not kwargs:
-            return args[0]
-        return decorator
-    # prange falls back to the builtin range when numba is unavailable, so
-    # the parallel build kernels run correctly as (serial) pure Python.
-    prange = range
+from numba import njit, prange
 
 # =============================================================================
 # MASTER ENABLE FLAG (consumed by block_haplotypes.py and bhd_recovery.py)

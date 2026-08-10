@@ -22,17 +22,7 @@ DEFAULT_ROBUSTNESS_EPSILON = 1e-2
 # =============================================================================
 # 0. NUMBA SETUP
 # =============================================================================
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    print("WARNING: Numba not found. Recombination scanning will be slow.")
-    # Dummy decorators
-    def njit(*args, **kwargs):
-        def decorator(func): return func
-        return decorator
-    prange = range
+from numba import njit, prange
 
 # =============================================================================
 # 1. CORE MATH & VITERBI (MULTI-STATE INTRA-BLOCK RECOMBINATION)

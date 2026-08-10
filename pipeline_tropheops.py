@@ -14,7 +14,7 @@
 # values rather than redefining them.
 
 import os
-import checkpoint_io
+import pipeline_runtime
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION — EDIT THIS to switch between the two comparison runs.
@@ -28,51 +28,32 @@ import checkpoint_io
 #            admixed F1+F2 samples (hard mode: parental haplotypes must be
 #            reconstructed purely from offspring)
 # In BOTH modes the 4 G0 reads are ALSO loaded separately and stashed in the
-# T01 checkpoint so the validation stages can compare against ground truth
-# regardless of the flag.
+# T01 checkpoint as genotype-reference rows. Their comparison is independent
+# only when those rows are excluded from reconstruction.
 USE_KNOWN_FOUNDERS = True
 
 _mode_label = "withFounders" if USE_KNOWN_FOUNDERS else "withoutFounders"
-# Separate checkpoint + results dirs per flag so the two modes do not clobber
-# each other and can be run back-to-back for comparison.
-CHECKPOINT_DIR = f".pipeline_checkpoints_tropheops_{_mode_label}"
-output_dir = f"results_tropheops_{_mode_label}"
+# This label is part of the checkpoint/output identity. Bump it whenever the
+# T01 scientific backend or its routine configuration changes, so a run cannot
+# silently resume legacy or otherwise incompatible T01 contigs.
+BLOCK_DISCOVERY_BACKEND = "reversible_cavity_cap_free_v1"
+_run_label = f"{_mode_label}_{BLOCK_DISCOVERY_BACKEND}"
+CHECKPOINT_DIR = f".pipeline_checkpoints_tropheops_{_run_label}"
+output_dir = f"results_tropheops_{_run_label}"
 
 
 def _load_contig_for_phase_correction(r_name):
-    """Load tolerance_result + founder_block for one contig directly from
-    checkpoint files.  Top-level (picklable) so forkserver workers in
-    phase_correction can call it; reads checkpoints directly rather than going
-    through main's state (forkserver workers do not inherit it).
-
-    Stage -> key mapping (mirrors the __main__ checkpoint layout):
-        tolerance_result -> T08_viterbi_painting
-        super_blocks_L4  -> T07_assembly_L4   (preferred)
-        super_blocks_L3  -> T06_assembly_L3   (fallback)
-    A missing checkpoint simply omits its key; the worker falls back to an
-    identity equivalence matrix when a key is absent.
-    """
-    data = {}
-    tol_path = checkpoint_io.contig_path(CHECKPOINT_DIR, "T08_viterbi_painting", r_name)
-    if os.path.exists(tol_path):
-        ckpt = checkpoint_io.read(tol_path)
-        if 'tolerance_result' in ckpt:
-            data['tolerance_result'] = ckpt['tolerance_result']
-        del ckpt
-    for stage, list_key in [("T07_assembly_L4", "super_blocks_L4"),
-                            ("T06_assembly_L3", "super_blocks_L3")]:
-        if 'founder_block' in data:
-            break
-        path = checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name)
-        if not os.path.exists(path):
-            continue
-        ckpt = checkpoint_io.read(path)
-        if list_key in ckpt and ckpt[list_key]:
-            fb = ckpt[list_key][0]
-            fb.probs_array = None  # reconstructible from global_probs
-            data['founder_block'] = fb
-        del ckpt
-    return data
+    """Picklable wrapper around the standard checkpoint traversal."""
+    return pipeline_runtime.load_phase_correction_inputs(
+        CHECKPOINT_DIR,
+        r_name,
+        tolerance_stage="T08_viterbi_painting",
+        founder_stage_keys=(
+            ("T07_assembly_L4", "super_blocks_L4"),
+            ("T06_assembly_L3", "super_blocks_L3"),
+        ),
+        strip_founder_probs=True,
+    )
 
 
 #%%
@@ -107,32 +88,15 @@ if __name__ == '__main__':
     # =============================================================================
     # DUAL LOGGING: Console + File
     # =============================================================================
-    class TeeOutput:
-        """Writes to both the original stdout and a log file."""
-        def __init__(self, log_path, original_stdout):
-            object.__setattr__(self, '_log_file', open(log_path, 'a', buffering=1))
-            object.__setattr__(self, '_original', original_stdout)
-        def write(self, message):
-            self._original.write(message)
-            try: self._log_file.write(message)
-            except (ValueError, OSError): pass
-            return None
-        def flush(self):
-            self._original.flush()
-            try: self._log_file.flush()
-            except (ValueError, OSError): pass
-        def close(self):
-            self._log_file.close()
-        def __getattr__(self, name):
-            return getattr(self._original, name)
 
     os.makedirs("logs", exist_ok=True)
     run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join("logs", f"run_tropheops_{_mode_label}_{run_timestamp}.log")
-    sys.stdout = TeeOutput(log_path, sys.stdout)
+    log_path = os.path.join("logs", f"run_tropheops_{_run_label}_{run_timestamp}.log")
+    sys.stdout = pipeline_runtime.TeeOutput(log_path, sys.stdout)
     print(f"Logging to: {log_path}")
     print(f"Run started: {run_timestamp}")
     print(f"USE_KNOWN_FOUNDERS = {USE_KNOWN_FOUNDERS}  (mode: {_mode_label})")
+    print(f"BLOCK_DISCOVERY_BACKEND = {BLOCK_DISCOVERY_BACKEND}")
 
     import numpy as np
     import pandas as pd
@@ -141,6 +105,7 @@ if __name__ == '__main__':
     import platform
     import pickle
     import gc
+    from dataclasses import asdict
     from cyvcf2 import VCF
 
     warnings.filterwarnings("ignore")
@@ -149,6 +114,7 @@ if __name__ == '__main__':
     import thread_config
     import vcf_data_loader
     import block_haplotypes
+    from bhd_reversible_cavity import ReversibleCavitySearchConfig
     import small_block_refine
     import residual_discovery
     import hierarchical_assembly
@@ -164,6 +130,10 @@ if __name__ == '__main__':
         print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
     n_processes = 112
+    # T01 uses the complete allocation: one block worker per Numba thread.
+    # Dynamic reallocation gives the full budget to remaining stragglers.
+    block_discovery_processes = n_processes
+    block_discovery_numba_threads = n_processes
     # Recycle workers after each batch to prevent memory accumulation
     # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
     WORKER_MAXTASKS = 1
@@ -201,92 +171,34 @@ if __name__ == '__main__':
     # =========================================================================
     # Checkpoint Infrastructure (blosc2 via checkpoint_io — matches pipeline.py)
     # =========================================================================
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    checkpoint_store = pipeline_runtime.CheckpointStore(
+        CHECKPOINT_DIR, nthreads=n_processes, global_log_indent="    "
+    )
     os.makedirs(output_dir, exist_ok=True)
+    stage_complete = checkpoint_store.stage_complete
+    mark_stage_complete = checkpoint_store.mark_stage_complete
+    contig_done = checkpoint_store.contig_done
+    save_contig = checkpoint_store.save_contig
+    load_contig = checkpoint_store.load_contig
+    save_global = checkpoint_store.save_global
+    load_global = checkpoint_store.load_global
 
-    def _stage_dir(stage):
-        d = os.path.join(CHECKPOINT_DIR, stage)
-        os.makedirs(d, exist_ok=True)
-        return d
-
-    def stage_complete(stage):
-        return os.path.exists(os.path.join(_stage_dir(stage), '_done'))
-
-    def mark_stage_complete(stage):
-        with open(os.path.join(_stage_dir(stage), '_done'), 'w') as f:
-            f.write(datetime.now().isoformat())
-        print(f"  [Checkpoint] Stage '{stage}' marked complete")
-
-    def contig_done(stage, r_name):
-        return os.path.exists(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name))
-
-    def save_contig(stage, r_name, data_dict):
-        _stage_dir(stage)  # ensure the stage directory exists
-        try:
-            sz = checkpoint_io.write(
-                checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name),
-                data_dict, nthreads=n_processes) / (1024*1024)
-            print(f"    [Checkpoint] {stage}/{r_name} ({sz:.1f} MB)")
-        except OSError as e:
-            print(f"    [Checkpoint] WARNING: {stage}/{r_name}: {e}")
-
-    def load_contig(stage, r_name):
-        return checkpoint_io.read(
-            checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name),
-            nthreads=n_processes)
-
-    def save_global(stage, data_dict):
-        _stage_dir(stage)  # ensure the stage directory exists
-        try:
-            sz = checkpoint_io.write(
-                checkpoint_io.global_path(CHECKPOINT_DIR, stage),
-                data_dict, nthreads=n_processes) / (1024*1024)
-            print(f"    [Checkpoint] {stage}/_global ({sz:.1f} MB)")
-        except OSError as e:
-            print(f"    [Checkpoint] WARNING: {stage}/_global: {e}")
-
-    def load_global(stage):
-        return checkpoint_io.read(
-            checkpoint_io.global_path(CHECKPOINT_DIR, stage),
-            nthreads=n_processes)
-
-    def strip_block_probs(blocks):
-        """Strip redundant probs_array from blocks to save memory.
-        Workers access sample data via global_probs in shared memory."""
-        for block in blocks:
-            if hasattr(block, 'probs_array') and block.probs_array is not None:
-                block.probs_array = None
-        return blocks
+    strip_block_probs = pipeline_runtime.strip_block_probs
 
     def load_global_arrays(r_name):
-        """Load only global_probs and global_sites from T01, freeing block_results immediately.
-        T01 checkpoints are huge (many GB per contig) because they contain block_results
-        with probs_array. This extracts just what's needed and frees the rest.
-        Downcasts global_probs to float32 (float64 only needed for HDBSCAN in T01)."""
-        import ctypes
-        t1 = load_contig(STAGE_T1, r_name)
-        global_probs = t1['global_probs']
-        global_sites = t1['global_sites']
-        # Drop the heavy block_results (with redundant probs_array)
-        del t1
-        gc.collect()
-        try:
-            ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
-        # Downcast: float64 only needed for HDBSCAN (T01). Assembly, painting,
-        # pedigree, phase correction all work fine with float32 precision.
-        if global_probs.dtype == np.float64:
-            global_probs = global_probs.astype(np.float32)
-        return global_probs, global_sites
+        return pipeline_runtime.load_global_arrays(
+            checkpoint_store, STAGE_T1, r_name
+        )
 
     # =========================================================================
     # VALIDATION HELPERS (module-level, shared across stages)
     # =========================================================================
     # Each pipeline stage that produces a block-shaped output (T01-T07) calls
-    # `run_stage_validation` at the end to compare those blocks against the
-    # 4 G0 ground-truth founder haplotypes (which are stashed in every T01
-    # per-contig checkpoint regardless of USE_KNOWN_FOUNDERS).  T09 calls
+    # `run_stage_validation` at the end to compare those blocks with the four
+    # observed G0 genotype references stashed in every T01 per-contig checkpoint
+    # regardless of USE_KNOWN_FOUNDERS.  This is a non-independent post-hoc
+    # consistency check when G0 rows participated in discovery, and a held-out
+    # reference comparison when they were excluded.  T09 calls
     # `run_pedigree_validation` on the inferred pedigree_df to cross-check
     # it against the metafile's biological generation column.
     #
@@ -296,15 +208,16 @@ if __name__ == '__main__':
 
     # Min argmax-prob to treat a G0 site as confidently homozygous.  Sites
     # below this confidence, or where the max state is heterozygous (state=1),
-    # are masked out of the G0 ground-truth comparison.
+    # are masked out of the G0 reference comparison.
     HOM_CONFIDENCE = 0.85
-    # A discovered haplotype "matches" a G0 ground-truth haplotype if the
-    # allele-level disagreement rate is below this threshold (in %).
+    # A discovered haplotype is considered consistent with a homozygous G0
+    # reference call if the allele-level disagreement rate is below this
+    # threshold (in %).
     MATCH_THRESHOLD_PCT = 2.0
     MIN_CONF_SITES = 10   # min confident G0 sites to score a founder in a block
 
     def extract_g0_block_haps(g0_probs, g0_sites, block_positions):
-        """Build ground-truth founder GENOTYPES for one block.
+        """Build observed G0 reference genotypes for one block.
 
         g0_probs has shape (n_g0, n_global_sites, 3) — genotype probabilities
         0=homref, 1=het, 2=homalt.  A site is kept when the max genotype
@@ -338,7 +251,11 @@ if __name__ == '__main__':
 
     def validate_block_list_against_g0(blocks, g0_probs, g0_sites,
                                        g0_names, stage_label, contig_name):
-        """Validate a list of blocks against G0 ground-truth founders.
+        """Compare a list of blocks with observed G0 genotype references.
+
+        The comparison is a non-independent post-hoc consistency check when
+        G0 rows participated in discovery and a held-out reference comparison
+        when those rows were excluded.
 
         Two recall metrics are reported per block, side by side:
 
@@ -373,7 +290,8 @@ if __name__ == '__main__':
             if len(positions) == 0:
                 continue
 
-            # Ground-truth founder genotypes {0,1,2,-1}; hom-only hap {0,1,-1}
+            # Observed G0 reference genotypes {0,1,2,-1}; hom-only calls
+            # {0,1,-1}.
             g0_geno = extract_g0_block_haps(g0_probs, g0_sites, positions)
             g0_hom = np.where(g0_geno == 0, 0,
                               np.where(g0_geno == 2, 1, -1)).astype(np.int8)
@@ -483,7 +401,11 @@ if __name__ == '__main__':
                 'n_sites': len(positions),
                 'block_start': int(positions[0]),
                 'block_end': int(positions[-1]),
+                # Retained for CSV compatibility; these are observed G0
+                # reference rows, not independent truth when included above.
                 'n_true_founders': n_g0,
+                'n_g0_reference_samples': n_g0,
+                'g0_reference_is_independent': not USE_KNOWN_FOUNDERS,
                 'n_scorable': n_scorable,
                 'n_scorable_homonly': n_scorable_homonly,
                 'n_discovered': n_disc,
@@ -505,8 +427,8 @@ if __name__ == '__main__':
         return rows
 
     def load_g0_from_t1(r_name):
-        """Cheaply load only the ground-truth fields from T01 (skips the big
-        global_probs / block_results / site priors).  Used by every post-stage
+        """Cheaply load only the G0-reference fields from T01 (skips the big
+        global_probs / block_results / site priors). Used by every post-stage
         validation pass so we don't reload the full T01 pickle just to get
         g0_probs."""
         t1 = load_contig("T01_vcf_discovery", r_name)
@@ -517,7 +439,11 @@ if __name__ == '__main__':
         return g0_probs, g0_sites, g0_names
 
     def run_stage_validation(stage_label, stage_key, blocks_loader_fn, csv_filename):
-        """Run block-level validation against G0 truth for one completed stage.
+        """Compare block haplotypes with observed G0 genotype references.
+
+        This is a post-hoc consistency diagnostic when ``USE_KNOWN_FOUNDERS``
+        is true because the same rows participated in reconstruction. It is
+        an independent held-out comparison only when those rows were excluded.
 
         Args:
             stage_label: human-readable tag that goes into the CSV 'stage' column
@@ -536,7 +462,12 @@ if __name__ == '__main__':
         analysis.
         """
         print(f"\n{'='*60}")
-        print(f"VALIDATION: {stage_label} vs G0 Ground Truth")
+        validation_kind = (
+            "post-hoc G0 consistency (non-independent)"
+            if USE_KNOWN_FOUNDERS
+            else "held-out G0 reference comparison"
+        )
+        print(f"VALIDATION: {stage_label} — {validation_kind}")
         print(f"{'='*60}")
 
         all_rows = []
@@ -548,7 +479,7 @@ if __name__ == '__main__':
                 print(f"  [skip] {r_name}: no checkpoint in {stage_key}")
                 continue
             if not contig_done("T01_vcf_discovery", r_name):
-                print(f"  [skip] {r_name}: no T01 checkpoint (needed for G0 truth)")
+                print(f"  [skip] {r_name}: no T01 checkpoint (needed for G0 reference)")
                 continue
 
             g0_probs, g0_sites, g0_names = load_g0_from_t1(r_name)
@@ -818,98 +749,273 @@ if __name__ == '__main__':
         print("STAGE T01: VCF Loading + Block Haplotype Discovery")
         print(f"{'='*60}")
         start = time.time()
+        reversible_cavity_config = ReversibleCavitySearchConfig()
+        reversible_cavity_config_record = asdict(reversible_cavity_config)
+        print(
+            "  Cap-free reversible cavity discovery: no explicit K grid or "
+            "scientific K cap; "
+            f"beam_width={reversible_cavity_config.beam_width}, "
+            f"max_expansions={reversible_cavity_config.max_expansions}, "
+            f"max_exact_scores={reversible_cavity_config.max_exact_scores}, "
+            "max_proposals_per_expansion="
+            f"{reversible_cavity_config.max_proposals_per_expansion}"
+        )
+        print(
+            "  Block discovery parallelism: "
+            f"workers={block_discovery_processes}, "
+            f"Numba budget={block_discovery_numba_threads}"
+        )
 
-        for r_name in region_keys:
-            if contig_done(STAGE_T1, r_name):
-                print(f"  [RESUME] {r_name} already done")
-                continue
-            print(f"\n  Processing {r_name}...")
+        with block_haplotypes.BlockDiscoveryPool(
+            block_discovery_processes,
+            block_discovery_numba_threads,
+        ) as block_pool:
+            for r_name in region_keys:
+                if contig_done(STAGE_T1, r_name):
+                    print(f"  [RESUME] {r_name} already done")
+                    continue
+                print(f"\n  Processing {r_name}...")
 
-            t0 = time.time()
-            genomic_data = vcf_data_loader.cleanup_block_reads_list(
-                vcf_path, r_name,
-                use_snp_count=True, snps_per_block=200, snp_shift=200,
-                num_processes=16
-            )
-            print(f"    [Loader] {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
+                t0 = time.time()
+                genomic_data = vcf_data_loader.cleanup_block_reads_list(
+                    vcf_path, r_name,
+                    use_snp_count=True, snps_per_block=200, snp_shift=200,
+                    num_processes=16
+                )
+                print(f"    [Loader] {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
 
-            all_positions, all_reads = [], []
-            for i in range(len(genomic_data)):
-                pos_i = genomic_data.positions[i]
-                reads_i = genomic_data.reads[i]
-                if len(pos_i) > 0:
-                    all_positions.append(pos_i)
-                    all_reads.append(reads_i)
+                all_positions, all_reads = [], []
+                for i in range(len(genomic_data)):
+                    pos_i = genomic_data.positions[i]
+                    reads_i = genomic_data.reads[i]
+                    if len(pos_i) > 0:
+                        all_positions.append(pos_i)
+                        all_reads.append(reads_i)
 
-            if not all_positions:
-                print(f"    WARNING: No data for {r_name}, skipping")
-                continue
+                if not all_positions:
+                    print(f"    WARNING: No data for {r_name}, skipping")
+                    continue
 
-            global_sites = np.concatenate(all_positions)
-            # Full reads: (n_samples_total, n_sites, 2) — all 116 samples
-            global_reads_full = np.concatenate(all_reads, axis=1)
+                global_sites = np.concatenate(all_positions)
+                # Full reads: (n_samples_total, n_sites, 2) — all 116 samples
+                global_reads_full = np.concatenate(all_reads, axis=1)
 
-            # De-duplicate sites (overlapping blocks can repeat positions)
-            _, unique_idx = np.unique(global_sites, return_index=True)
-            unique_idx = np.sort(unique_idx)
-            global_sites = global_sites[unique_idx]
-            global_reads_full = global_reads_full[:, unique_idx, :]
+                # De-duplicate sites (overlapping blocks can repeat positions)
+                _, unique_idx = np.unique(global_sites, return_index=True)
+                unique_idx = np.sort(unique_idx)
+                global_sites = global_sites[unique_idx]
+                global_reads_full = global_reads_full[:, unique_idx, :]
 
-            # ALWAYS extract G0 reads separately for T11 validation.  This slice
-            # is independent of the USE_KNOWN_FOUNDERS flag — we want ground
-            # truth available regardless of what the pipeline sees.
-            g0_reads = global_reads_full[g0_vcf_indices, :, :]
-            (_, g0_probs) = analysis_utils.reads_to_probabilities(g0_reads)
-            # Downcast G0 probs to float32 — we only use argmax for validation,
-            # so float64 precision is wasted.
-            if g0_probs.dtype == np.float64:
-                g0_probs = g0_probs.astype(np.float32)
+                # ALWAYS extract G0 reads separately for T11 validation.  This slice
+                # is independent of the USE_KNOWN_FOUNDERS flag — we want ground
+                # truth available regardless of what the pipeline sees.
+                g0_reads = global_reads_full[g0_vcf_indices, :, :]
+                (_, g0_probs) = analysis_utils.reads_to_probabilities(g0_reads)
+                # Downcast G0 probs to float32 — we only use argmax for validation,
+                # so float64 precision is wasted.
+                if g0_probs.dtype == np.float64:
+                    g0_probs = g0_probs.astype(np.float32)
 
-            # Select which samples the pipeline will see (116 or 112).
-            # IMPORTANT: we also need to slice genomic_data.reads along the
-            # sample axis so block_haplotypes.generate_all_block_haplotypes
-            # operates on the filtered sample set.  The GenomicData container
-            # stores per-block (samples, sites, 2) arrays.
-            if USE_KNOWN_FOUNDERS:
-                active_reads_full = global_reads_full
-            else:
-                active_reads_full = global_reads_full[active_vcf_indices, :, :]
-                # Also filter genomic_data in place so block discovery sees 112 samples
-                for bi in range(len(genomic_data.reads)):
-                    if genomic_data.reads[bi].shape[0] == n_samples_total:
-                        genomic_data.reads[bi] = genomic_data.reads[bi][active_vcf_indices, :, :]
+                # Select which samples the pipeline will see (116 or 112).
+                # IMPORTANT: we also need to slice genomic_data.reads along the
+                # sample axis so block_haplotypes.generate_all_block_haplotypes
+                # operates on the filtered sample set.  The GenomicData container
+                # stores per-block (samples, sites, 2) arrays.
+                if USE_KNOWN_FOUNDERS:
+                    active_reads_full = global_reads_full
+                else:
+                    active_reads_full = global_reads_full[active_vcf_indices, :, :]
+                    # Also filter genomic_data in place so block discovery sees 112 samples
+                    for bi in range(len(genomic_data.reads)):
+                        if genomic_data.reads[bi].shape[0] == n_samples_total:
+                            genomic_data.reads[bi] = genomic_data.reads[bi][active_vcf_indices, :, :]
 
-            (site_priors, global_probs) = analysis_utils.reads_to_probabilities(active_reads_full)
-            avg_depth = np.mean(np.sum(active_reads_full, axis=-1))
-            print(f"    Sites: {len(global_sites)}, Samples (active): {global_probs.shape[0]}, "
-                  f"Depth: {avg_depth:.1f}x")
-            del global_reads_full, active_reads_full, g0_reads, site_priors
+                (site_priors, global_probs) = analysis_utils.reads_to_probabilities(active_reads_full)
+                avg_depth = np.mean(np.sum(active_reads_full, axis=-1))
+                print(f"    Sites: {len(global_sites)}, Samples (active): {global_probs.shape[0]}, "
+                      f"Depth: {avg_depth:.1f}x")
+                del global_reads_full, active_reads_full, g0_reads, site_priors
 
-            t0 = time.time()
-            block_results = block_haplotypes.generate_all_block_haplotypes(
-                genomic_data,
-                uniqueness_threshold_percent=1.0,
-                diff_threshold_percent=0.5,
-                wrongness_threshold=1.0,
-                num_processes=n_processes
-            )
-            valid_blocks = [b for b in block_results if len(b.positions) > 0]
-            block_results = block_haplotypes.BlockResults(valid_blocks)
+                t0 = time.time()
+                block_results = block_haplotypes.generate_all_block_haplotypes(
+                    genomic_data,
+                    uniqueness_threshold_percent=1.0,
+                    diff_threshold_percent=0.5,
+                    wrongness_threshold=1.0,
+                    num_processes=block_discovery_processes,
+                    reversible_cavity_config=reversible_cavity_config,
+                    total_numba_threads=block_discovery_numba_threads,
+                    block_pool=block_pool,
+                )
+                valid_blocks = [b for b in block_results if len(b.positions) > 0]
+                block_results = block_haplotypes.BlockResults(valid_blocks)
 
-            hap_counts = [len(b.haplotypes) for b in valid_blocks]
-            print(f"    [Discovery] {len(valid_blocks)} blocks, haps/block: "
-                  f"min={min(hap_counts)}, max={max(hap_counts)}, "
-                  f"mean={np.mean(hap_counts):.1f} in {time.time()-t0:.1f}s")
+                hap_counts = [len(b.haplotypes) for b in valid_blocks]
+                print(f"    [Discovery] {len(valid_blocks)} blocks, haps/block: "
+                      f"min={min(hap_counts)}, max={max(hap_counts)}, "
+                      f"mean={np.mean(hap_counts):.1f} in {time.time()-t0:.1f}s")
 
-            # Checkpoint bundle.  g0_probs is always saved (T11 ground truth).
-            save_contig(STAGE_T1, r_name, {
-                'global_probs': global_probs, 'global_sites': global_sites,
-                'block_results': block_results, 'avg_depth': avg_depth,
-                'g0_probs': g0_probs, 'g0_sample_names': g0_sample_names,
-                'active_vcf_indices': active_vcf_indices,
-            })
-            del genomic_data, block_results, global_probs, global_sites, g0_probs
-            gc.collect()
+                selected_k = np.asarray(
+                    [int(block.K_final) for block in valid_blocks],
+                    dtype=np.int64,
+                )
+                k_values, k_counts = np.unique(
+                    selected_k, return_counts=True
+                )
+                k_distribution = {
+                    int(k): int(count)
+                    for k, count in zip(k_values, k_counts)
+                }
+                cavity_blocks = [
+                    block
+                    for block in valid_blocks
+                    if hasattr(block, 'cavity_discovery_diagnostics')
+                    and hasattr(block, 'cavity_selection')
+                ]
+                cavity_diagnostics = [
+                    block.cavity_discovery_diagnostics
+                    for block in cavity_blocks
+                ]
+                cavity_selections = [
+                    block.cavity_selection for block in cavity_blocks
+                ]
+                boundary_count = sum(
+                    bool(diagnostic['boundary_limited'])
+                    for diagnostic in cavity_diagnostics
+                )
+                candidate_searches = [
+                    diagnostic.get('candidate_search', {})
+                    for diagnostic in cavity_diagnostics
+                ]
+                search_limited_count = sum(
+                    bool(candidate_search.get('search_limited', False))
+                    for candidate_search in candidate_searches
+                )
+                search_limit_reason_counts = {}
+                for candidate_search in candidate_searches:
+                    for reason in candidate_search.get(
+                        'search_limit_reasons', ()
+                    ):
+                        search_limit_reason_counts[reason] = (
+                            search_limit_reason_counts.get(reason, 0) + 1
+                        )
+                legacy_fallback_count = (
+                    len(valid_blocks) - len(cavity_blocks)
+                )
+                score_margins = np.asarray([
+                    float(selection.log_score_by_k[selection.map_k])
+                    - float(selection.log_score_by_k[selection.runner_up_k])
+                    for selection in cavity_selections
+                    if selection.runner_up_k is not None
+                ], dtype=np.float64)
+                mode_cap_count = sum(
+                    bool(selection.mode_cap_applied)
+                    for selection in cavity_selections
+                )
+                uncertainty_count = sum(
+                    bool(block.uncertainty_flag)
+                    for block in cavity_blocks
+                )
+                nonconverged_count = sum(
+                    not bool(selection.all_mean_field_converged)
+                    for selection in cavity_selections
+                )
+                shortlist_sizes = np.asarray([
+                    len(selection.hybrid_diagnostic.shortlisted_k)
+                    for selection in cavity_selections
+                    if selection.hybrid_diagnostic is not None
+                ], dtype=np.int64)
+                uncertainty_reason_counts = {}
+                for diagnostic in cavity_diagnostics:
+                    for reason in diagnostic['uncertainty_reasons']:
+                        uncertainty_reason_counts[reason] = (
+                            uncertainty_reason_counts.get(reason, 0) + 1
+                        )
+                score_margin_summary = (
+                    "unavailable"
+                    if len(score_margins) == 0
+                    else "min/median/max=" + "/".join(
+                        f"{value:.6f}" for value in (
+                            np.min(score_margins),
+                            np.median(score_margins),
+                            np.max(score_margins),
+                        )
+                    )
+                )
+                shortlist_size_summary = (
+                    "unavailable"
+                    if len(shortlist_sizes) == 0
+                    else "min/median/max=" + "/".join(
+                        f"{value:.0f}" for value in (
+                            np.min(shortlist_sizes),
+                            np.median(shortlist_sizes),
+                            np.max(shortlist_sizes),
+                        )
+                    )
+                )
+                wildcard_mass = np.asarray(
+                    [float(block.wildcard_mass) for block in valid_blocks],
+                    dtype=np.float64,
+                )
+                wildcard_quartiles = np.quantile(
+                    wildcard_mass, [0.0, 0.25, 0.5, 0.75, 1.0]
+                )
+                print(
+                    "    [Cavity audit] selected K distribution="
+                    f"{k_distribution}, mean={np.mean(selected_k):.3f}"
+                )
+                print(
+                    "    [Cavity audit] search-boundary blocks="
+                    f"{boundary_count}/{len(cavity_diagnostics)}; "
+                    "operationally search-limited blocks="
+                    f"{search_limited_count}/{len(candidate_searches)}; "
+                    "legacy empty/no-kept fallbacks="
+                    f"{legacy_fallback_count}"
+                )
+                print(
+                    "    [Cavity audit] search-limit reasons="
+                    f"{search_limit_reason_counts}"
+                )
+                print(
+                    "    [Cavity audit] winner/runner-up log-score margin "
+                    f"{score_margin_summary}; hybrid shortlist size "
+                    f"{shortlist_size_summary}"
+                )
+                print(
+                    "    [Cavity audit] mode-cap blocks="
+                    f"{mode_cap_count}/{len(cavity_selections)}; "
+                    "materialization uncertainty="
+                    f"{uncertainty_count}/{len(cavity_blocks)}; "
+                    "mean-field nonconverged="
+                    f"{nonconverged_count}/{len(cavity_selections)}"
+                )
+                print(
+                    "    [Cavity audit] uncertainty reasons="
+                    f"{uncertainty_reason_counts}"
+                )
+                print(
+                    "    [Cavity audit] wildcard nonzero="
+                    f"{np.count_nonzero(wildcard_mass > 0.0)}/"
+                    f"{len(wildcard_mass)}; "
+                    "q0/q25/q50/q75/q100="
+                    + "/".join(
+                        f"{value:.6f}" for value in wildcard_quartiles
+                    )
+                )
+
+                # G0 probabilities are retained as an explicit reference; they are
+                # non-independent when G0 rows entered reconstruction above.
+                save_contig(STAGE_T1, r_name, {
+                    'global_probs': global_probs, 'global_sites': global_sites,
+                    'block_results': block_results, 'avg_depth': avg_depth,
+                    'g0_probs': g0_probs, 'g0_sample_names': g0_sample_names,
+                    'active_vcf_indices': active_vcf_indices,
+                    'block_discovery_backend': BLOCK_DISCOVERY_BACKEND,
+                    'reversible_cavity_config': (
+                        reversible_cavity_config_record),
+                })
+                del genomic_data, block_results, global_probs, global_sites, g0_probs
+                gc.collect()
 
         save_global(STAGE_T1, {
             'sample_names_active': sample_names_active,
@@ -919,6 +1025,8 @@ if __name__ == '__main__':
             'g0_sample_names': g0_sample_names,
             'active_vcf_indices': active_vcf_indices,
             'use_known_founders': USE_KNOWN_FOUNDERS,
+            'block_discovery_backend': BLOCK_DISCOVERY_BACKEND,
+            'reversible_cavity_config': reversible_cavity_config_record,
         })
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
         mark_stage_complete(STAGE_T1)
@@ -928,9 +1036,8 @@ if __name__ == '__main__':
     # =========================================================================
     # VALIDATION: After T01 Block Discovery
     # =========================================================================
-    # Compare the raw 200-SNP block haplotypes against the 4 G0 founders.
-    # This is the first-stage quality gate: "did HDBSCAN on the reads produce
-    # clusters that correspond to the true founder haplotypes?"
+    # Compare raw 200-SNP haplotypes with the four observed G0 references.
+    # In withFounders mode this is explicitly post-hoc and non-independent.
     run_stage_validation(
         stage_label="T01_block_discovery",
         stage_key="T01_vcf_discovery",
@@ -998,35 +1105,26 @@ if __name__ == '__main__':
                 # (the refinement pipeline below runs its OWN refinement, so the
                 # per-level post-stitch refinement is opted out here to avoid
                 # doing it twice).  verbose=False on L2 to match pipeline.py.
-                def make_l1_fn(gp, gs):
-                    def l1_fn(input_blocks):
-                        return hierarchical_assembly.run_hierarchical_step(
-                            input_blocks=input_blocks, global_probs=gp, global_sites=gs,
-                            batch_size=REFINEMENT_BATCH_SIZE, use_hmm_linking=False,
-                            beam_width=200, max_founders=12, max_sites_for_linking=2000,
-                            cc_scale=0.5, num_processes=n_processes,
-                            maxtasksperchild=WORKER_MAXTASKS,
-                            refine_after_stitch=False)
-                    return l1_fn
-
-                def make_l2_fn(gp, gs):
-                    def l2_fn(input_blocks):
-                        return hierarchical_assembly.run_hierarchical_step(
-                            input_blocks=input_blocks, global_probs=gp, global_sites=gs,
-                            batch_size=REFINEMENT_BATCH_SIZE, use_hmm_linking=True,
-                            recomb_rate=RECOMB_RATE, beam_width=200, max_founders=12,
-                            cc_scale=0.5, num_processes=n_processes,
-                            n_generations=N_GENERATIONS, verbose=False,
-                            maxtasksperchild=WORKER_MAXTASKS,
-                            refine_after_stitch=False)
-                    return l2_fn
+                l1_fn, l2_fn = pipeline_runtime.make_refinement_assembly_functions(
+                    hierarchical_assembly.run_hierarchical_step,
+                    global_probs,
+                    global_sites,
+                    batch_size=REFINEMENT_BATCH_SIZE,
+                    recomb_rate=RECOMB_RATE,
+                    n_generations=N_GENERATIONS,
+                    beam_width=200,
+                    max_founders=12,
+                    cc_scale=0.5,
+                    num_processes=n_processes,
+                    maxtasksperchild=WORKER_MAXTASKS,
+                )
 
                 t0 = time.time()
                 refinement_results = small_block_refine.run_refinement_pipeline(
                     raw_blocks=block_results, global_probs=global_probs,
                     global_sites=global_sites, num_samples=num_samples,
-                    run_l1_assembly_fn=make_l1_fn(global_probs, global_sites),
-                    run_l2_assembly_fn=make_l2_fn(global_probs, global_sites),
+                    run_l1_assembly_fn=l1_fn,
+                    run_l2_assembly_fn=l2_fn,
                     batch_size=REFINEMENT_BATCH_SIZE, penalty_scale=REFINEMENT_PENALTY_SCALE,
                     recomb_rate=RECOMB_RATE, n_generations=N_GENERATIONS, verbose=True)
                 print(f"\n  Refinement complete in {time.time()-t0:.0f}s")
@@ -1359,7 +1457,8 @@ if __name__ == '__main__':
     # VALIDATION: After T07 L4 Assembly (final founder-block validation)
     # =========================================================================
     # L4 is the final assembly level.  Ideally one chromosome-scale super-block
-    # per contig containing all 4 founder haplotypes at low error.
+    # per contig whose haplotypes are consistent with all four observed G0
+    # genotype references at low error.
     run_stage_validation(
         stage_label="T07_L4_assembly",
         stage_key="T07_assembly_L4",
@@ -1408,7 +1507,7 @@ if __name__ == '__main__':
                 plot_filename = os.path.join(output_dir, f"{r_name}_viterbi_population.png")
                 paint_samples.plot_population_painting(
                     painting_result, output_file=plot_filename,
-                    title=f"Viterbi Painting - {r_name} ({_mode_label})",
+                    title=f"Viterbi Painting - {r_name} ({_run_label})",
                     sample_names=sample_names_active, figsize_width=20,
                     row_height_per_sample=0.25)
 
@@ -1624,7 +1723,8 @@ if __name__ == '__main__':
     #     stacked into one long table for downstream plotting/analysis)
     #   - validation_all_stages_summary.csv    (one row per stage with
     #     aggregate metrics: block count, mean discovered haps, % of blocks
-    #     where all 4 G0s were recovered, mean good/chimera haps)
+    #     matching all four observed G0 genotype references, mean good/chimera
+    #     haps)
     #   - validation_summary.txt               (human-readable overview
     #     including the pedigree validation result from T09)
     # Runs unconditionally at each invocation — no checkpointing, cheap.
@@ -1676,6 +1776,7 @@ if __name__ == '__main__':
 
         stage_summary_rows.append({
             'stage': stage_label,
+            'g0_reference_is_independent': not USE_KNOWN_FOUNDERS,
             'total_blocks': n_blocks,
             'mean_discovered_haps': round(mean_disc, 3),
             'mean_scorable_founders': mean_scor,
@@ -1715,6 +1816,7 @@ if __name__ == '__main__':
     summary_lines = []
     summary_lines.append(f"Tropheops Pipeline Validation Summary")
     summary_lines.append(f"Mode: {_mode_label} (USE_KNOWN_FOUNDERS={USE_KNOWN_FOUNDERS})")
+    summary_lines.append(f"Block discovery: {BLOCK_DISCOVERY_BACKEND}")
     summary_lines.append(f"Timestamp: {datetime.now().isoformat()}")
     summary_lines.append(f"")
     summary_lines.append(f"Input:")
@@ -1722,13 +1824,15 @@ if __name__ == '__main__':
     summary_lines.append(f"  Metafile: {meta_path}")
     summary_lines.append(f"  Total VCF samples: {n_samples_total}")
     summary_lines.append(f"  Active (pipeline-visible) samples: {n_samples}")
-    summary_lines.append(f"  G0 samples (ground truth): {len(g0_sample_names)}")
+    summary_lines.append(f"  G0 genotype-reference samples: {len(g0_sample_names)}")
     for nm in g0_sample_names:
         summary_lines.append(f"    - {nm}")
     summary_lines.append(f"  Contigs processed: {len(region_keys)}")
     summary_lines.append(f"")
-    summary_lines.append(f"Block-level Founder Recovery Progression")
-    summary_lines.append(f"  (G0 match threshold: <{MATCH_THRESHOLD_PCT:.0f}% allele error)")
+    summary_lines.append(f"Post-hoc G0 Consistency Progression")
+    summary_lines.append(
+        "  (non-independent when USE_KNOWN_FOUNDERS=True; legacy "
+        f"match threshold: <{MATCH_THRESHOLD_PCT:.0f}% allele error)")
     if len(summary_df) > 0:
         summary_lines.append(summary_df.to_string(index=False))
     else:
@@ -1779,6 +1883,7 @@ if __name__ == '__main__':
     print("TROPHEOPS PIPELINE COMPLETE")
     print(f"{'='*60}")
     print(f"Mode: {_mode_label} (USE_KNOWN_FOUNDERS={USE_KNOWN_FOUNDERS})")
+    print(f"Block discovery: {BLOCK_DISCOVERY_BACKEND}")
     print(f"Total time: {hours}h {minutes}m ({elapsed:.0f}s)")
     print(f"Checkpoints: {CHECKPOINT_DIR}/")
     print(f"Results: {output_dir}/")

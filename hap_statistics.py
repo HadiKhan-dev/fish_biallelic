@@ -10,17 +10,7 @@ import analysis_utils
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    print("WARNING: Numba not found. Model selection will be extremely slow.")
-    # Dummy decorator
-    def njit(*args, **kwargs):
-        def decorator(func): return func
-        return decorator
-    prange = range
+from numba import njit, prange
 
 #%% --- CORE MATCHING FUNCTIONS ---
 

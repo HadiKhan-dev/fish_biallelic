@@ -396,127 +396,58 @@ def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
     return final_results[:beam_width]
 
 
-def _select_beam_mmr_forward(candidates, beam_width, mmr_lambda=0.7):
-    """
-    MMR-based beam selection for the forward pass.
-    
-    Greedily selects paths that balance high score with diversity.
-    Similarity between two partial paths = fraction of blocks where they agree.
-    
-    Args:
-        candidates: list of (path, score, tip)
-        beam_width: number to select
-        mmr_lambda: weight on score vs novelty (0=pure diversity, 1=pure score)
-    
-    Returns:
-        list of (path, score, tip) of size min(beam_width, len(candidates))
-    """
+def _select_beam_mmr(candidates, beam_width, mmr_lambda=0.7):
+    """Select high-scoring diverse path tuples with stable greedy MMR."""
     if not candidates or beam_width <= 0:
         return []
-    
-    n = len(candidates)
-    if n <= beam_width:
+    n_candidates = len(candidates)
+    if n_candidates <= beam_width:
         return candidates
-    
-    # Convert paths to numpy for vectorized similarity
-    all_paths = np.array([c[0] for c in candidates], dtype=np.int32)  # (N, path_len)
-    all_scores = np.array([c[1] for c in candidates], dtype=np.float64)
-    
-    # Normalize scores to [0, 1]
-    score_min, score_max = all_scores.min(), all_scores.max()
+
+    all_paths = np.array([candidate[0] for candidate in candidates],
+                         dtype=np.int32)
+    all_scores = np.array([candidate[1] for candidate in candidates],
+                          dtype=np.float64)
+    score_min = all_scores.min()
+    score_max = all_scores.max()
     if score_max > score_min:
-        norm_scores = (all_scores - score_min) / (score_max - score_min)
+        normalized_scores = ((all_scores - score_min)
+                             / (score_max - score_min))
     else:
-        norm_scores = np.ones(n, dtype=np.float64)
-    
-    selected_indices = []
-    remaining_mask = np.ones(n, dtype=bool)
-    
-    # Track max similarity to any selected path for each candidate
-    max_sim_to_selected = np.full(n, -1.0, dtype=np.float64)
-    
-    for _ in range(min(beam_width, n)):
-        if not np.any(remaining_mask):
+        normalized_scores = np.ones(n_candidates, dtype=np.float64)
+
+    selected = []
+    remaining = np.ones(n_candidates, dtype=np.bool_)
+    max_similarity = np.full(n_candidates, -1.0, dtype=np.float64)
+    for _ in range(min(beam_width, n_candidates)):
+        if not np.any(remaining):
             break
-        
-        if not selected_indices:
-            # First pick: pure score
-            rem_scores = np.where(remaining_mask, all_scores, -np.inf)
-            best = np.argmax(rem_scores)
+        if not selected:
+            candidate_scores = np.where(remaining, all_scores, -np.inf)
+            best = np.argmax(candidate_scores)
         else:
-            # MMR: lambda*score + (1-lambda)*(1 - max_sim)
-            novelty = 1.0 - max_sim_to_selected
-            mmr = mmr_lambda * norm_scores + (1.0 - mmr_lambda) * novelty
-            mmr[~remaining_mask] = -np.inf
+            novelty = 1.0 - max_similarity
+            mmr = (mmr_lambda * normalized_scores
+                   + (1.0 - mmr_lambda) * novelty)
+            mmr[~remaining] = -np.inf
             best = np.argmax(mmr)
-        
-        selected_indices.append(best)
-        remaining_mask[best] = False
-        
-        # Update max_sim for all remaining candidates against newly selected path
-        # Vectorized: compare all paths against the selected path
-        new_path = all_paths[best]  # (path_len,)
-        sims = np.mean(all_paths == new_path[None, :], axis=1)  # (N,)
-        max_sim_to_selected = np.maximum(max_sim_to_selected, sims)
-    
-    return [candidates[i] for i in selected_indices]
+        selected.append(best)
+        remaining[best] = False
+        similarities = np.mean(
+            all_paths == all_paths[best][None, :], axis=1
+        )
+        max_similarity = np.maximum(max_similarity, similarities)
+    return [candidates[index] for index in selected]
+
+
+def _select_beam_mmr_forward(candidates, beam_width, mmr_lambda=0.7):
+    """Compatibility wrapper for forward path tuples."""
+    return _select_beam_mmr(candidates, beam_width, mmr_lambda)
 
 
 def _select_beam_mmr_backward(candidates, beam_width, mmr_lambda=0.7):
-    """
-    MMR-based beam selection for the backward refinement pass.
-    
-    Same MMR logic but operates on (path, total_score, step_scores) tuples.
-    
-    Args:
-        candidates: list of (path_list, total_score, step_scores_array)
-        beam_width: number to select
-        mmr_lambda: weight on score vs novelty
-    
-    Returns:
-        list of (path_list, total_score, step_scores_array)
-    """
-    if not candidates or beam_width <= 0:
-        return []
-    
-    n = len(candidates)
-    if n <= beam_width:
-        return candidates
-    
-    all_paths = np.array([c[0] for c in candidates], dtype=np.int32)
-    all_scores = np.array([c[1] for c in candidates], dtype=np.float64)
-    
-    score_min, score_max = all_scores.min(), all_scores.max()
-    if score_max > score_min:
-        norm_scores = (all_scores - score_min) / (score_max - score_min)
-    else:
-        norm_scores = np.ones(n, dtype=np.float64)
-    
-    selected_indices = []
-    remaining_mask = np.ones(n, dtype=bool)
-    max_sim_to_selected = np.full(n, -1.0, dtype=np.float64)
-    
-    for _ in range(min(beam_width, n)):
-        if not np.any(remaining_mask):
-            break
-        
-        if not selected_indices:
-            rem_scores = np.where(remaining_mask, all_scores, -np.inf)
-            best = np.argmax(rem_scores)
-        else:
-            novelty = 1.0 - max_sim_to_selected
-            mmr = mmr_lambda * norm_scores + (1.0 - mmr_lambda) * novelty
-            mmr[~remaining_mask] = -np.inf
-            best = np.argmax(mmr)
-        
-        selected_indices.append(best)
-        remaining_mask[best] = False
-        
-        new_path = all_paths[best]
-        sims = np.mean(all_paths == new_path[None, :], axis=1)
-        max_sim_to_selected = np.maximum(max_sim_to_selected, sims)
-    
-    return [candidates[i] for i in selected_indices]
+    """Compatibility wrapper for backward path tuples."""
+    return _select_beam_mmr(candidates, beam_width, mmr_lambda)
 
 
 def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100, 

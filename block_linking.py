@@ -1,20 +1,11 @@
 import numpy as np
 import math
 import time
-import ctypes
 from scipy.special import logsumexp
 from functools import partial
 
 import analysis_utils
-
-# glibc malloc_trim — releases freed pages back to OS
-try:
-    _libc = ctypes.CDLL("libc.so.6")
-    def _malloc_trim():
-        _libc.malloc_trim(0)
-except OSError:
-    def _malloc_trim():
-        pass
+from memory_utils import malloc_trim as _malloc_trim
 
 # Module-level shared data for sequential _gap_worker invocations.
 # Populated by generate_transition_probability_mesh before the gap loop
@@ -34,16 +25,7 @@ DEFAULT_ROBUSTNESS_EPSILON = 1e-2
 # likelihood is independent, so chunking has zero computational overhead.
 SAMPLE_CHUNK_SIZE = 10
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    print("WARNING: Numba not found. Computations will be extremely slow.")
-    def njit(*args, **kwargs):
-        def decorator(func): return func
-        return decorator
-    prange = range
+from numba import njit, prange
 
 
 # %% --- NUMBA KERNELS ---

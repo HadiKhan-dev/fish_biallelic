@@ -10,25 +10,22 @@ kernels explicitly declare ``cache=True``, preserving their validated policy.
 
 import thread_config as _thread_config
 
+import numba as _numba
+
+_project_njit_wrapper = _numba.njit
+_real_njit = getattr(
+    _thread_config, "_original_njit", _project_njit_wrapper
+)
 try:
-    import numba as _numba
+    _numba.njit = _real_njit
 
-    _project_njit_wrapper = _numba.njit
-    _real_njit = getattr(
-        _thread_config, "_original_njit", _project_njit_wrapper
-    )
-    try:
-        _numba.njit = _real_njit
+    @_real_njit(cache=False)
+    def _pedigree_v7_numba_registry_warmup(value):
+        return value + 1
 
-        @_real_njit(cache=False)
-        def _pedigree_v7_numba_registry_warmup(value):
-            return value + 1
-
-        _pedigree_v7_numba_registry_warmup(0)
-    finally:
-        _numba.njit = _project_njit_wrapper
-except ImportError:
-    _numba = None
+    _pedigree_v7_numba_registry_warmup(0)
+finally:
+    _numba.njit = _project_njit_wrapper
 
 from .aggregation import (
     V7MarginResult,

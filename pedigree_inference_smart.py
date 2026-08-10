@@ -69,36 +69,24 @@ import dynamic_threads
 # opt into disk caching; importing this module must not change the caching
 # policy for modules imported later in the pipeline.
 
+import numba
+from numba import prange
+
+_project_njit_wrapper = numba.njit
+_real_njit = getattr(thread_config, "_original_njit", _project_njit_wrapper)
 try:
-    import numba
-    from numba import prange
+    numba.njit = _real_njit
 
-    _project_njit_wrapper = numba.njit
-    _real_njit = getattr(thread_config, "_original_njit", _project_njit_wrapper)
-    try:
-        numba.njit = _real_njit
+    # A tiny compile forces all lazily imported CPU registries (including
+    # numba.typed dict/list helpers) to bind the real decorator now.
+    @_real_njit(cache=False)
+    def _smart_numba_registry_warmup(value):
+        return value + 1
 
-        # A tiny compile forces all lazily imported CPU registries (including
-        # numba.typed dict/list helpers) to bind the real decorator now.
-        @_real_njit(cache=False)
-        def _smart_numba_registry_warmup(value):
-            return value + 1
-
-        _smart_numba_registry_warmup(0)
-    finally:
-        numba.njit = _project_njit_wrapper
-    njit = _real_njit
-    SMART_HAS_NUMBA = True
-except ImportError:
-    numba = None
-    SMART_HAS_NUMBA = False
-
-    def njit(*args, **kwargs):
-        def decorator(function):
-            return function
-        return decorator
-
-    prange = range
+    _smart_numba_registry_warmup(0)
+finally:
+    numba.njit = _project_njit_wrapper
+njit = _real_njit
 
 import numpy as np
 import pandas as pd
@@ -2158,8 +2146,6 @@ def _score_genotype_likelihood_reference(
 
 def smart_numba_thread_capacity() -> int:
     """Return the active Numba thread capacity without changing it."""
-    if not SMART_HAS_NUMBA:
-        return 1
     return int(numba.get_num_threads())
 
 
@@ -4430,9 +4416,7 @@ def _run_parent_state_bootstraps(
         available_cpus = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         available_cpus = os.cpu_count() or 1
-    capacity = (
-        int(numba.config.NUMBA_NUM_THREADS) if SMART_HAS_NUMBA else 1
-    )
+    capacity = int(numba.config.NUMBA_NUM_THREADS)
     if n_workers is None:
         cpu_budget = min(available_cpus, capacity)
     else:
@@ -6130,8 +6114,7 @@ def _init_smart_state_worker(
     dynamic_threads.set_dynamic_thread_state(
         total_cores, active_counter, extra_counter
     )
-    if SMART_HAS_NUMBA:
-        numba.set_num_threads(1)
+    numba.set_num_threads(1)
 
 
 def _score_standard_contig_state_worker(bundle):
@@ -6186,8 +6169,6 @@ def _score_standard_contig_state_worker(bundle):
 
 def _warm_smart_parent_state_kernels():
     """Compile each standard-input smart signature once before forkserver."""
-    if not SMART_HAS_NUMBA:
-        return
     previous_threads = int(numba.get_num_threads())
     numba.set_num_threads(1)
     try:
@@ -6310,13 +6291,11 @@ def _score_standard_state_contigs(
             raise SmartEvidenceError("state_worker_count must be positive")
         worker_count = min(worker_count, n_contigs)
     use_pool = (
-        SMART_HAS_NUMBA
-        and worker_count > 1
+        worker_count > 1
         and requested_threads >= worker_count
     )
     if not use_pool:
-        if SMART_HAS_NUMBA:
-            numba.set_num_threads(requested_threads)
+        numba.set_num_threads(requested_threads)
         return [
             score_parent_state_hmms(
                 cache.stacked_alleles,
@@ -6424,27 +6403,19 @@ def _standard_contig_evidence(
         [cache.informative_markers for cache in caches], dtype=np.float64
     )
 
-    previous_threads = None
-    if SMART_HAS_NUMBA:
-        capacity = int(numba.config.NUMBA_NUM_THREADS)
-        try:
-            available_cpus = len(os.sched_getaffinity(0))
-        except (AttributeError, OSError):
-            available_cpus = os.cpu_count() or 1
-        if n_workers is None:
-            requested_threads = min(
-                capacity, available_cpus
-            )
-        else:
-            if int(n_workers) != n_workers or n_workers < 1:
-                raise SmartEvidenceError("n_workers must be a positive integer")
-            requested_threads = min(
-                int(n_workers), available_cpus, capacity
-            )
-        previous_threads = int(numba.get_num_threads())
-        numba.set_num_threads(requested_threads)
+    capacity = int(numba.config.NUMBA_NUM_THREADS)
+    try:
+        available_cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available_cpus = os.cpu_count() or 1
+    if n_workers is None:
+        requested_threads = min(capacity, available_cpus)
     else:
-        requested_threads = 1
+        if int(n_workers) != n_workers or n_workers < 1:
+            raise SmartEvidenceError("n_workers must be a positive integer")
+        requested_threads = min(int(n_workers), available_cpus, capacity)
+    previous_threads = int(numba.get_num_threads())
+    numba.set_num_threads(requested_threads)
     try:
         pair_scores = np.asarray([
             _score_pair_hmm_contig(cache, mismatch_penalty)

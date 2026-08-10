@@ -14,31 +14,13 @@ import thread_config
 import numpy as np
 import math
 import time
-import warnings
 import block_haplotypes
 
 
 # =============================================================================
 # NUMBA JIT KERNELS (parallelize over samples)
 # =============================================================================
-# paint_viterbi and deconvolve both have hot Python loops over samples/carriers
-# that were running single-threaded despite being embarrassingly parallel.
-# These numba kernels move those loops into prange-parallel code so they use
-# all available cores.  Fallback to pure Python if numba is unavailable --
-# matches the style of block_haplotypes.py's numba guard.
-
-try:
-    from numba import njit, prange
-    _HAS_NUMBA = True
-except ImportError:
-    _HAS_NUMBA = False
-    warnings.warn("Numba not found. Refinement will be extremely slow.",
-                  ImportWarning)
-    # Dummy decorators so the @njit-decorated defs below still import cleanly
-    def njit(*args, **kwargs):
-        def decorator(func): return func
-        return decorator
-    prange = range
+from numba import njit, prange
 
 
 @njit(parallel=True, fastmath=False)
@@ -506,48 +488,12 @@ def paint_viterbi(super_blocks, raw_blocks, raw_per_super,
         # switch counter -- use the array directly.  pair_indices_arr is
         # built once here so the fancy-index conversion is a single numpy op.
         pair_indices_arr = np.array(pair_indices, dtype=np.int32)  # (n_pairs, 2)
-        if _HAS_NUMBA:
-            sample_paths_int = _paint_viterbi_samples_numba(
-                block_emissions, switch_penalties)
-            # Fancy index: pair_indices_arr[sample_paths_int] gives
-            # (num_samples, n_raw_local, 2) -- one numpy op, no Python loop.
-            sample_paintings = pair_indices_arr[sample_paths_int]
-        else:
-            # Pure-Python fallback (original code path, with array output)
-            sample_paintings = np.empty((num_samples, n_raw_local, 2),
-                                        dtype=np.int32)
-            for s in range(num_samples):
-                scores = np.full((n_pairs, n_raw_local), -np.inf)
-                backptr = np.zeros((n_pairs, n_raw_local), dtype=np.int32)
-                
-                scores[:, 0] = block_emissions[s, :, 0]
-                
-                for t in range(1, n_raw_local):
-                    pen_t = switch_penalties[t - 1]
-                    for p in range(n_pairs):
-                        stay = scores[p, t - 1] + block_emissions[s, p, t]
-                        best_switch = (np.max(scores[:, t - 1]) - pen_t
-                                       + block_emissions[s, p, t])
-                        if stay >= best_switch:
-                            scores[p, t] = stay
-                            backptr[p, t] = p
-                        else:
-                            scores[p, t] = best_switch
-                            backptr[p, t] = np.argmax(scores[:, t - 1])
-                
-                # Traceback
-                path = np.zeros(n_raw_local, dtype=np.int32)
-                path[-1] = np.argmax(scores[:, -1])
-                for t in range(n_raw_local - 1, 0, -1):
-                    path[t - 1] = backptr[path[t], t]
-                
-                # Write into the (num_samples, n_raw_local, 2) array rather
-                # than appending tuples to a list (array is the new format)
-                for t in range(n_raw_local):
-                    a, b = pair_indices[path[t]]
-                    sample_paintings[s, t, 0] = a
-                    sample_paintings[s, t, 1] = b
-        
+        sample_paths_int = _paint_viterbi_samples_numba(
+            block_emissions, switch_penalties)
+        # Fancy index: pair_indices_arr[sample_paths_int] gives
+        # (num_samples, n_raw_local, 2) -- one numpy op, no Python loop.
+        sample_paintings = pair_indices_arr[sample_paths_int]
+
         all_paintings.append({
             'raw_start': raw_start_idx,
             'raw_end': raw_end_idx,
@@ -624,9 +570,9 @@ def deconvolve(super_blocks, viterbi_paintings, raw_blocks,
         # raw_block_starts[n_raw_local] == total_sb_sites_in_paint_data.
         # This encoding handles variable raw-block sizes naturally (raw
         # blocks at chromosome ends may be shorter than the standard 200
-        # SNPs) and is shared by both the numba and fallback deconvolve
-        # paths so per-raw-block BlockResult construction can slice it
-        # cheaply at the end.
+        # SNPs); the Numba deconvolution kernel uses it so per-raw-block
+        # BlockResult construction can slice the combined result cheaply at
+        # the end.
         n_raw_local = raw_end - raw_start
         raw_block_starts = np.zeros(n_raw_local + 1, dtype=np.int32)
         _offset = 0
@@ -644,92 +590,13 @@ def deconvolve(super_blocks, viterbi_paintings, raw_blocks,
         # parallelism, filling the 112-core pool much more completely.
         # Preserves the NaN-fix by casting sample_probs_sb to float64 ONCE
         # per super-block (previously done n_raw_local times per super-block).
-        if _HAS_NUMBA:
-            sample_probs_sb_f64 = sample_probs_sb.astype(np.float64)
-            new_haps_flat = _deconvolve_super_block_numba(
-                sample_probs_sb_f64, haps_sb,
-                sample_paintings, raw_block_starts)
-        else:
-            # Pure-Python fallback (original code path, per-raw-block).
-            # Writes into the same new_haps_flat buffer the numba branch
-            # produces, so the downstream BlockResult construction below is
-            # shared between both branches.
-            new_haps_flat = np.zeros((K, n_sb_sites_total, 2), dtype=np.float64)
-            for ri in range(raw_start, raw_end):
-                ri_local = ri - raw_start
-                site_start = int(raw_block_starts[ri_local])
-                site_end = int(raw_block_starts[ri_local + 1])
-                n_raw_sites = site_end - site_start
-                site_slice = slice(site_start, site_end)
-                site_idx_local = np.arange(site_start, site_end)
-                
-                # Build per-haplotype carrier list for this raw block
-                carriers = {ki: [] for ki in range(K)}
-                for s in range(num_samples):
-                    # sample_paintings is now an int32 array of shape
-                    # (num_samples, n_raw_local, 2); explicit int() casts
-                    # ensure numpy scalar dict keys interoperate cleanly
-                    # with the Python-int ki keys in the carriers dict.
-                    a = int(sample_paintings[s, ri_local, 0])
-                    b = int(sample_paintings[s, ri_local, 1])
-                    if a == b:
-                        carriers[a].append((s, a, True))
-                    else:
-                        carriers[a].append((s, b, False))
-                        carriers[b].append((s, a, False))
-                
-                # Deconvolve each haplotype
-                new_haps_block = np.zeros((K, n_raw_sites, 2), dtype=np.float64)
-                
-                for ki in range(K):
-                    if not carriers[ki]:
-                        # No carriers: use super-block alleles as fallback
-                        alleles = haps_sb[ki, site_slice]
-                        new_haps_block[ki, :, 0] = 1.0 - alleles
-                        new_haps_block[ki, :, 1] = alleles.astype(np.float64)
-                        continue
-                    
-                    log_p0 = np.zeros(n_raw_sites, dtype=np.float64)
-                    log_p1 = np.zeros(n_raw_sites, dtype=np.float64)
-                    
-                    for s, partner_ki, is_hom in carriers[ki]:
-                        # Cast to float64 before the 1e-300 floor: global_probs
-                        # (and thus sample_probs_sb) is float32 in the pipeline,
-                        # and 1e-300 underflows to 0.0 in float32.  Without the
-                        # cast, sites where a sample's genotype prob rounds to
-                        # float32-zero produce -inf log values, which accumulate
-                        # to -inf log_p0/log_p1 and cascade to NaN downstream via
-                        # max_log = -inf → log_p - max_log = -inf - -inf = NaN.
-                        if is_hom:
-                            log_p0 += np.log(np.maximum(
-                                sample_probs_sb[s, site_idx_local, 0].astype(np.float64),
-                                1e-300))
-                            log_p1 += np.log(np.maximum(
-                                sample_probs_sb[s, site_idx_local, 2].astype(np.float64),
-                                1e-300))
-                        else:
-                            pa = haps_sb[partner_ki, site_slice]
-                            log_p0 += np.log(np.maximum(
-                                sample_probs_sb[s, site_idx_local, pa].astype(np.float64),
-                                1e-300))
-                            log_p1 += np.log(np.maximum(
-                                sample_probs_sb[s, site_idx_local, pa + 1].astype(np.float64),
-                                1e-300))
-                    
-                    max_log = np.maximum(log_p0, log_p1)
-                    p0 = np.exp(log_p0 - max_log)
-                    p1 = np.exp(log_p1 - max_log)
-                    total = p0 + p1
-                    new_haps_block[ki, :, 0] = p0 / total
-                    new_haps_block[ki, :, 1] = p1 / total
-                
-                # Write this raw block's result into the flat output so the
-                # downstream BlockResult construction below handles it the
-                # same way as the numba branch.
-                new_haps_flat[:, site_start:site_end, :] = new_haps_block
-        
-        # Split new_haps_flat into per-raw-block BlockResults (common path
-        # for both numba and fallback branches).  .copy() ensures each
+        sample_probs_sb_f64 = sample_probs_sb.astype(np.float64)
+        new_haps_flat = _deconvolve_super_block_numba(
+            sample_probs_sb_f64, haps_sb,
+            sample_paintings, raw_block_starts)
+
+        # Split the Numba kernel's combined result into per-raw-block
+        # BlockResults.  .copy() ensures each
         # BlockResult owns an independent (K, n_raw_sites, 2) array rather
         # than a view into new_haps_flat (which would keep the big array
         # alive and share storage between unrelated raw blocks).

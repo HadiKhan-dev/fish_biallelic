@@ -1,8 +1,8 @@
 import thread_config
-from thread_config import numba_thread_scope
 import dynamic_threads
 
 import numpy as np
+import numba
 import math
 import gc
 import time
@@ -18,6 +18,7 @@ import hmm_matching
 import beam_search_core
 import analysis_utils
 import chimera_resolution
+from memory_utils import malloc_trim as _malloc_trim
 
 import os
 
@@ -144,7 +145,6 @@ def _init_worker_meta(meta_dict, total_cores, active_counter, extra_counter):
     import os
     os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
     try:
-        import numba
         numba.config.NUMBA_NUM_THREADS = total_cores
         numba.set_num_threads(1)
     except Exception:
@@ -344,10 +344,6 @@ def _process_single_batch(args):
 
     Returns dict with 'batch_idx', 'super_block', and 'status'.
     """
-    import ctypes
-    import numba
-    _libc = ctypes.CDLL("libc.so.6")
-
     (b_idx, start_i, end_i, original_blocks_list,
      use_hmm_linking, recomb_rate, beam_width, max_founders,
      max_sites_for_linking, n_generations, recomb_tolerance,
@@ -474,7 +470,7 @@ def _process_single_batch(args):
 
         # Free mesh — fast_mesh has what it needs.
         del mesh
-        _libc.malloc_trim(0)
+        _malloc_trim()
 
         # =================================================================
         # 6. Selection + Swap + CR — NUMBA-ONLY phase.
@@ -498,7 +494,7 @@ def _process_single_batch(args):
         if _prof: _acc('select_and_resolve(CR)', _t)
 
         del beam_results
-        _libc.malloc_trim(0)
+        _malloc_trim()
 
         # =================================================================
         # 7. Reconstruction — NUMBA-ONLY phase.
@@ -511,7 +507,7 @@ def _process_single_batch(args):
         if _prof: _acc('reconstruction', _t)
 
         del resolved_beam, fast_mesh
-        _libc.malloc_trim(0)
+        _malloc_trim()
 
         # 8. Package.
         _t = time.perf_counter()
@@ -521,7 +517,7 @@ def _process_single_batch(args):
         if _prof: _acc('package', _t)
 
         del reconstructed_data, batch_probs, batch_sites, portion_proxy, proxy_list
-        _libc.malloc_trim(0)
+        _malloc_trim()
 
         # 9. Structural chimera pruning.
         _t = time.perf_counter()
@@ -658,7 +654,6 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     # global_probs in shared memory, so probs_array in blocks is
     # redundant.  Stripping reduces parent process memory AND pickle
     # size when sending blocks to workers as task arguments.
-    import ctypes as _ctypes
     _stripped_bytes = 0
     for block in input_blocks:
         if hasattr(block, 'probs_array') and block.probs_array is not None:
@@ -666,10 +661,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             block.probs_array = None
     if _stripped_bytes > 0:
         gc.collect()
-        try:
-            _ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
+        _malloc_trim()
         print(f"  Stripped probs_array from blocks ({_stripped_bytes / (1024**3):.1f} GB freed)")
 
     # Downcast to float32: global_probs is float64 from R01 (HDBSCAN

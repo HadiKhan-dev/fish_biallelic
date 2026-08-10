@@ -39,11 +39,14 @@ from bhd_kernels import (
     _select_initial_seed,
 )
 from bhd_fit import (
-    _compute_bic,
-    _compute_cc,
     _fit_at_fixed_K,
+    _prepare_fixed_k_fit_workspace,
 )
 from bhd_pool import PoolEmissionCache
+from bhd_model_selection import (
+    compute_founder_complexity_cost as _compute_cc,
+    compute_outer_bic as _compute_bic,
+)
 from bhd_trio import _trio_recovery_candidate_haps
 from bhd_recovery import (
     _subtraction_recovery_round_loop,
@@ -66,7 +69,8 @@ def _grow_K(probs_k, kept_mask_full, lam,
             cc_scale=0.5,
             use_log_bic=False,
             min_nll_improvement=1e-6,
-            H_init=None):
+            H_init=None,
+            workspace=None):
     """Iteratively grow K, starting at K=0 (empty founder set), seeding
     each new founder from the current worst-fit sample's subtraction
     against existing founders.  Stops when either:
@@ -217,6 +221,8 @@ def _grow_K(probs_k, kept_mask_full, lam,
             recovery iteration in _grow_K_with_recovery, where each
             K-growth call starts from the previous recovery output.
             Default None = original empty-set behaviour.
+        workspace: optional evidence-local fixed-K workspace, prepared once
+            for this complete growth path when omitted.
 
     Returns:
         H:               final (K, L_kept)
@@ -250,6 +256,10 @@ def _grow_K(probs_k, kept_mask_full, lam,
                 H_out.shape[0],                            # K_final
                 0.0,                                        # wildcard_mass
                 history)
+
+    if workspace is None:
+        workspace = _prepare_fixed_k_fit_workspace(
+            probs_k, lam, binary_patterns=False)
 
     # === BIC-based acceptance threshold ===
     # Linear BIC: cc = cc_scale * (L_kept/200) * N
@@ -287,7 +297,7 @@ def _grow_K(probs_k, kept_mask_full, lam,
             raise ValueError(
                 f"H_init has L={H.shape[1]} but probs_k has L_kept={L_kept}")
     H, A, per_sample_cost, wildcard_slots, n_iter, nll = _fit_at_fixed_K(
-        probs_k, H, lam, max_iter=max_iter_per_K)
+        probs_k, H, lam, max_iter=max_iter_per_K, workspace=workspace)
     wildcard_mass = float(wildcard_slots.sum()) / max(2 * N, 1)
     # History entries record BIC = K*cc + 2*NLL so callers can compare
     # entries across different K values directly.  At fixed K this is
@@ -362,7 +372,8 @@ def _grow_K(probs_k, kept_mask_full, lam,
             # CD once on the chosen seed.
             H_try = np.vstack([H, new_h[None, :]])         # (K+1, L_kept)
             H_try, A_try, cost_try, wcs_try, n_iter_try, nll_try = \
-                _fit_at_fixed_K(probs_k, H_try, lam, max_iter=max_iter_per_K)
+                _fit_at_fixed_K(probs_k, H_try, lam,
+                                max_iter=max_iter_per_K, workspace=workspace)
             wm_try = float(wcs_try.sum()) / max(2 * N, 1)
         else:
             adjusted_cost = np.where(worst_candidate_mask,
@@ -442,7 +453,8 @@ def _grow_K(probs_k, kept_mask_full, lam,
             for cand in seed_candidates:
                 H_cand = np.vstack([H, cand[None, :]])
                 fit_state = _fit_at_fixed_K(probs_k, H_cand, lam,
-                                             max_iter=max_iter_per_K)
+                                             max_iter=max_iter_per_K,
+                                             workspace=workspace)
                 cand_nll = float(fit_state[5])     # nll_try is index 5
                 # Hamming to each existing founder, for tie-break
                 ds = [float(np.mean(cand != H[i])) for i in range(K_cur)]
@@ -608,7 +620,8 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
                                     recovery_cleanness_threshold=RECOVERY_CLEANNESS_THRESHOLD,
                                     recovery_swap_nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
                                     recovery_haps_equal_eps_pct=RECOVERY_HAPS_EQUAL_EPS_PCT,
-                                    verbose=False):
+                                    verbose=False,
+                                    workspace=None):
     """Run K-growth (optionally seeded from H_trio_seed) with k-medoid
     multi-start over sample seeds, plus optional per-branch subtraction
     recovery before BIC arbitration.
@@ -692,6 +705,9 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
     [recovery] / [medoid] tag prints.
     """
     N, L_kept, _ = probs_k.shape
+    if workspace is None and N > 0:
+        workspace = _prepare_fixed_k_fit_workspace(
+            probs_k, lam, binary_patterns=False)
 
     has_trio = (H_trio_seed is not None) and (H_trio_seed.shape[0] >= 1)
     K_trio = int(H_trio_seed.shape[0]) if has_trio else 0
@@ -709,7 +725,8 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
             cc_scale=cc_scale,
             use_log_bic=use_log_bic,
             min_nll_improvement=min_nll_improvement,
-            H_init=H_init)
+            H_init=H_init,
+            workspace=workspace)
         if not run_per_branch_recovery:
             return result
         # result tuple: (H, A, per_sample_cost, wildcard_slots,
@@ -733,7 +750,8 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
             swap_nll_tolerance=recovery_swap_nll_tolerance,
             haps_equal_eps_pct=recovery_haps_equal_eps_pct,
             use_log_bic=use_log_bic,
-            verbose=verbose)
+            verbose=verbose,
+            workspace=workspace)
         if H_after_recov.shape[0] < 1:
             # Recovery returned empty (degenerate case) — keep K-growth result
             return result
@@ -743,7 +761,7 @@ def _initial_kgrowth_with_medoids(probs_k, kept_mask_full, lam,
         # uses by adding K_final and wildcard_mass.
         H_final, A_final, costs_final, wcs_final, _it, _nll_final = \
             _fit_at_fixed_K(probs_k, H_after_recov, lam,
-                              max_iter=max_iter_per_K)
+                              max_iter=max_iter_per_K, workspace=workspace)
         K_final_recov = H_final.shape[0]
         wm_final = float(wcs_final.sum()) / max(2 * N, 1)
         # History follows _grow_K's contract (list of (K, BIC, wm,
@@ -897,7 +915,8 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
                             recovery_mixture_patience=RECOVERY_MIXTURE_PATIENCE,
                             recovery_swap_nll_tolerance=RECOVERY_SWAP_NLL_TOLERANCE,
                             recovery_haps_equal_eps_pct=RECOVERY_HAPS_EQUAL_EPS_PCT,
-                            verbose=False):
+                            verbose=False,
+                            workspace=None):
     """Drop-in replacement for _grow_K with subtraction-recovery iteration.
 
     Algorithm:
@@ -971,6 +990,9 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
       (H, A, per_sample_cost, wildcard_slots, K_final, wildcard_mass, history)
     """
     N = probs_k.shape[0]
+    if workspace is None and N > 0:
+        workspace = _prepare_fixed_k_fit_workspace(
+            probs_k, lam, binary_patterns=False)
 
     # 0. Trio recovery: generate candidate founder haps and BIC-trim.
     #
@@ -1120,7 +1142,8 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
         recovery_cleanness_threshold=recovery_cleanness_threshold,
         recovery_swap_nll_tolerance=recovery_swap_nll_tolerance,
         recovery_haps_equal_eps_pct=recovery_haps_equal_eps_pct,
-        verbose=verbose)
+        verbose=verbose,
+        workspace=workspace)
 
     if verbose:
         print(f'[recovery] Initial K-growth: K_final={K_final}, '
@@ -1149,7 +1172,8 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
             swap_nll_tolerance=recovery_swap_nll_tolerance,
             haps_equal_eps_pct=recovery_haps_equal_eps_pct,
             use_log_bic=use_log_bic,
-            verbose=verbose)
+            verbose=verbose,
+            workspace=workspace)
 
         # 2b. Did recovery change H?
         H_list = [H[k] for k in range(H.shape[0])] if H.shape[0] > 0 else []
@@ -1176,7 +1200,8 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
             cc_scale=cc_scale,
             use_log_bic=use_log_bic,
             min_nll_improvement=min_nll_improvement,
-            H_init=H_after_recovery)
+            H_init=H_after_recovery,
+            workspace=workspace)
         history.extend(hist_grow)
 
         # 2d. Did K-growth add anything?
@@ -1197,7 +1222,8 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
 
     # 3. Final fit to populate return values consistently
     H_final, A_final, costs_final, wcs_final, n_iter_final, nll_final = \
-        _fit_at_fixed_K(probs_k, H, lam, max_iter=max_iter_per_K)
+        _fit_at_fixed_K(probs_k, H, lam, max_iter=max_iter_per_K,
+                        workspace=workspace)
 
     # 3.5. Late low-carrier rescue (added May 2026): targeted post-
     # convergence pass that detects suspect low-carrier haps (potential
@@ -1211,7 +1237,8 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
     H_final, A_final, costs_final, wcs_final, nll_final = _late_low_carrier_rescue(
         probs_k, H_final, A_final, costs_final, wcs_final, nll_final,
         lam=lam, cc_scale=cc_scale, use_log_bic=use_log_bic,
-        max_iter=max_iter_per_K, verbose=verbose)
+        max_iter=max_iter_per_K, verbose=verbose,
+        workspace=workspace)
 
     # 3.6. Residual-trio rescue (added 2026-05): post-convergence pass
     # that mines per-sample residuals across ALL samples (not just low-
@@ -1228,7 +1255,8 @@ def _grow_K_with_recovery(probs_k, kept_mask_full, lam,
         H_final, A_final, costs_final, wcs_final, nll_final = _residual_trio_rescue(
             probs_k, H_final, A_final, costs_final, wcs_final, nll_final,
             lam=lam, cc_scale=cc_scale, use_log_bic=use_log_bic,
-            max_iter=max_iter_per_K, verbose=verbose)
+            max_iter=max_iter_per_K, verbose=verbose,
+            workspace=workspace)
 
     wm_final = float(wcs_final.sum()) / max(2 * N, 1)
 

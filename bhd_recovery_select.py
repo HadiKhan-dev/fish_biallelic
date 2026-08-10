@@ -11,28 +11,12 @@
 # context.
 
 import numpy as np
-
-import warnings
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    warnings.warn(
-        "Numba not found; bhd_recovery_select kernels fall back to pure Python "
-        "(slower but numerically identical).",
-        ImportWarning,
-    )
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        if len(args) == 1 and callable(args[0]) and not kwargs:
-            return args[0]
-        return decorator
-    prange = range
+from numba import njit, prange
 
 import dynamic_threads
-from bhd_fit import _compute_cc
+from bhd_model_selection import (
+    compute_founder_complexity_cost as _compute_cc,
+)
 from bhd_config import (
     RECOVERY_HAPS_EQUAL_EPS_PCT,
     RECOVERY_MAX_K,
@@ -98,10 +82,10 @@ def _greedy_bic_select(cache, cc_scale=RECOVERY_OUTER_CC_SCALE,
         # sweep, so a straggler block grows into cores freed by finished peers
         # mid-selection (no-op on the sequential path).
         dynamic_threads.apply_dynamic_threads()
-        # Evaluate adding each still-unused candidate, parallelised ACROSS
-        # candidates (prange in cache.batch_nll_for_subsets) instead of a
-        # sequential Python loop of one tiny per-sample Viterbi each — the
-        # latter pins ~1 core on pathological large-pool blocks.  `unused` is
+        # Evaluate adding every still-unused candidate in one batch.  The
+        # cache kernel parallelises across samples and reuses each sample's
+        # pool-emission rows while scoring all candidates, instead of one tiny
+        # per-sample Viterbi launch per candidate.  `unused` is
         # built in increasing-ci order and the reduction below uses strict <,
         # so the chosen candidate (and lowest-ci tie-break) is identical to the
         # old loop; each NLL is bit-identical to cache.nll_for_subset.
@@ -276,10 +260,10 @@ def _bic_prune(cache, selected_indices,
         best_drop_idx = -1
         best_dnll = cc / 2   # threshold; only drop if dnll_increase < this
 
-        # Evaluate every leave-one-out drop in parallel across positions
-        # (prange in cache.batch_nll_for_subsets) instead of a sequential
-        # Python loop.  Trials are built in increasing-position order and the
-        # reduction uses strict <, so the dropped position (and lowest-index
+        # Evaluate every leave-one-out drop in one sample-parallel batch
+        # instead of a sequential Python loop.  Trials are built in
+        # increasing-position order and the reduction uses strict <, so the
+        # dropped position (and lowest-index
         # tie-break) matches the old loop; each leave-one-out NLL is
         # bit-identical to cache.nll_for_subset.  K == 1's only trial is the
         # empty subset, scored via nll_for_subset (the precomputed K=0 NLL),

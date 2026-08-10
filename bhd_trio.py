@@ -34,13 +34,11 @@
 #   _find_grouped_trios        — 8.6 ms -> ~1 ms (8x) at G=16
 #   _consensus_recovery_blind  — 7.8 ms -> ~1 ms (8x) at typical pool
 # Output equivalence:  these kernels produce byte-identical results to the
-# Python fallback paths (validated end-to-end against the pre-numba
+# reference Python implementation (validated end-to-end against the pre-Numba
 # version as part of integration validation).
 # See the long docstring below the constants for algorithm details and
 # validation results.
 # =======================================================================
-
-import warnings
 
 import numpy as np
 
@@ -60,29 +58,7 @@ from bhd_config import (
     TRIO_SOFT_MIN_CLUSTER_SIZE,
 )
 
-# Defensive numba import matching the project convention (see
-# analysis_utils.py, block_haplotypes.py).  If numba is unavailable,
-# all @njit decorators become no-ops and the Python fallback paths
-# inside the wrapper functions run.
-try:
-    from numba import njit
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    warnings.warn(
-        "Numba not found.  bhd_trio will fall back to pure-Python paths "
-        "(typically 2-10x slower per trio call).",
-        ImportWarning,
-    )
-    # Dummy decorator that accepts arguments (like cache=True) but does
-    # nothing — same pattern as analysis_utils.py.
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        # Support both @njit and @njit(cache=True) forms
-        if len(args) == 1 and callable(args[0]) and not kwargs:
-            return args[0]
-        return decorator
+from numba import njit
 
 
 # =============================================================================
@@ -204,8 +180,8 @@ except ImportError:
 #   the shared primitives section of bhd_kernels.py.
 #
 # The hdbscan and bhd_kernels imports are performed lazily inside
-# _soft_unified_recovery, keeping this module's import surface (numpy +
-# warnings) minimal at load time.
+# _soft_unified_recovery, keeping this module's import surface minimal at
+# load time.
 
 
 @njit(cache=True)
@@ -738,8 +714,8 @@ def _soft_unified_recovery(probs_k,
     candidate.
 
     hdbscan and bhd_kernels are imported lazily here so that the default
-    "xor" mode leaves this module's import surface (numpy + warnings)
-    unchanged.  Matches block_haplotypes.py's standalone-hdbscan usage.
+    "xor" mode keeps this module's import surface minimal.  Matches
+    block_haplotypes.py's standalone-hdbscan usage.
     """
     import bhd_kernels as _bk
     import hdbscan as _hdbscan

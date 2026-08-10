@@ -132,11 +132,14 @@ import bhd_trio
 import bhd_pairwise
 from bhd_trio import _trio_recovery_candidate_haps
 from bhd_fit import (
-    _compute_cc,
-    _compute_bic,
     _fit_at_fixed_K,
+    _prepare_fixed_k_fit_workspace,
 )
 from bhd_pool import PoolEmissionCache
+from bhd_model_selection import (
+    compute_founder_complexity_cost as _compute_cc,
+    compute_outer_bic as _compute_bic,
+)
 from bhd_config import (
     PAIRWISE_RECOVERY_ENABLED,
     RECOVERY_CLEANNESS_THRESHOLD,
@@ -254,7 +257,8 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
                                        haps_equal_eps_pct=RECOVERY_HAPS_EQUAL_EPS_PCT,
                                        use_log_bic=False,
                                        site_priors=None,
-                                       verbose=False):
+                                       verbose=False,
+                                       workspace=None):
     """Iterative subtraction-recovery rounds until convergence.
 
     Each round:
@@ -296,6 +300,9 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
         marginal-likelihood mixture (real data); None is correct when
         probs_k already is the likelihood (flat prior, e.g. synthetic).
       verbose: print per-round trace
+      workspace: optional evidence-local fixed-K workspace.  When omitted,
+        one is prepared once and reused by every coordinate-descent refit in
+        this recovery call.
 
     Returns:
       H_final: (K_final, L_kept) — refined hap set after recovery
@@ -303,6 +310,10 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
     if H_init is None or len(H_init) == 0:
         # Nothing to subtract from; recovery has no anchor
         return np.empty((0, probs_k.shape[1]), dtype=np.int64)
+
+    if workspace is None:
+        workspace = _prepare_fixed_k_fit_workspace(
+            probs_k, lam, binary_patterns=False)
 
     selected = [np.asarray(H_init[k], dtype=np.int64).copy() for k in range(H_init.shape[0])]
 
@@ -430,7 +441,8 @@ def _subtraction_recovery_round_loop(probs_k, H_init, lam,
         if len(sel_haps) > 0:
             H_sel = np.stack(sel_haps, axis=0)
             H_refined, A_ref, costs_ref, wcs_ref, n_iter_ref, nll_ref = \
-                _fit_at_fixed_K(probs_k, H_sel, lam, max_iter=max_iter_per_K)
+                _fit_at_fixed_K(probs_k, H_sel, lam, max_iter=max_iter_per_K,
+                                workspace=workspace)
             new_selected = [H_refined[k].copy() for k in range(H_refined.shape[0])]
         else:
             new_selected = sel_haps
@@ -457,7 +469,8 @@ def _residual_trio_rescue(probs_k, H, A, costs, wcs, NLL,
                           dedup_pct=RESIDUAL_TRIO_DEDUP_PCT,
                           dedup_vs_h_pct=RESIDUAL_TRIO_DEDUP_VS_H_PCT,
                           min_cluster_size=RESIDUAL_TRIO_MIN_CLUSTER_SIZE,
-                          verbose=False):
+                          verbose=False,
+                          workspace=None):
     """Post-K-growth pass surfacing near-clone founders via per-sample
     residual mining + clustering.
 
@@ -611,7 +624,7 @@ def _residual_trio_rescue(probs_k, H, A, costs, wcs, NLL,
     # float-noise oscillation.
     H_new = np.array(sel_haps, dtype=np.int64)
     H_new, A_new, costs_new, wcs_new, n_iter_new, NLL_new = _fit_at_fixed_K(
-        probs_k, H_new, lam, max_iter=max_iter)
+        probs_k, H_new, lam, max_iter=max_iter, workspace=workspace)
     K_new = H_new.shape[0]
     BIC_new = _compute_bic(K_new, NLL_new, cc)
 
@@ -641,7 +654,8 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
                               lam, cc_scale, use_log_bic, max_iter,
                               low_carrier_frac=RECOVERY_LOW_CARRIER_TRIGGER_FRAC,
                               cleanness_threshold=RECOVERY_CLEANNESS_THRESHOLD,
-                              verbose=False):
+                              verbose=False,
+                              workspace=None):
     """Late targeted refinement for blocks with a low-carrier hap that
     may be a chimeric stand-in for a low-frequency founder.
 
@@ -948,7 +962,7 @@ def _late_low_carrier_rescue(probs_k, H, A, costs, wcs, NLL,
     # K=6 state).
     H_new = np.array(sel_haps, dtype=np.int64)
     H_new, A_new, costs_new, wcs_new, n_iter_new, NLL_new = _fit_at_fixed_K(
-        probs_k, H_new, lam, max_iter=max_iter)
+        probs_k, H_new, lam, max_iter=max_iter, workspace=workspace)
     K_new = H_new.shape[0]
     BIC_new = _compute_bic(K_new, NLL_new, cc)
 

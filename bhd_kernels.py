@@ -43,9 +43,6 @@ from bhd_config import (
 )
 
 
-HAS_NUMBA = True  # bhd_kernels hard-imports numba; flag kept for the migrated prune_chimeras fast/slow branch
-
-
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid='ignore')
 

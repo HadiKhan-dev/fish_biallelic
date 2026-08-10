@@ -20,8 +20,11 @@ from typing import NamedTuple
 import numpy as np
 from numba import njit, prange
 
-
-_TINY = np.finfo(np.float64).tiny
+from .transmission_math import (
+    TINY as _TINY,
+    recombination_fraction as _recombination_fraction,
+    state_emission as _state_emission,
+)
 
 
 class InheritedTrackPosterior(NamedTuple):
@@ -50,33 +53,6 @@ class MissingParentTransmissionScores(NamedTuple):
     mother_only: np.ndarray
     unknown_father_alt_probability: np.ndarray
     unknown_mother_alt_probability: np.ndarray
-
-
-@njit(cache=True, inline="always")
-def _recombination_fraction(distance_bp, recombination_rate):
-    value = 0.5 * (1.0 - math.exp(-2.0 * distance_bp * recombination_rate))
-    if value < 1e-15:
-        return 1e-15
-    if value > 0.5:
-        return 0.5
-    return value
-
-
-@njit(cache=True, inline="always")
-def _state_emission(child_likelihood, first_alt, second_alt, error_rate):
-    first_ref = 1.0 - first_alt
-    second_ref = 1.0 - second_alt
-    p0 = first_ref * second_ref
-    p1 = first_alt * second_ref + first_ref * second_alt
-    p2 = first_alt * second_alt
-    retained = 1.0 - error_rate
-    background = error_rate / 3.0
-    value = (
-        child_likelihood[0] * (retained * p0 + background)
-        + child_likelihood[1] * (retained * p1 + background)
-        + child_likelihood[2] * (retained * p2 + background)
-    )
-    return max(value, _TINY)
 
 
 @njit(cache=True, inline="always")

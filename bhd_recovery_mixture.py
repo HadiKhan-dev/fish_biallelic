@@ -11,30 +11,14 @@
 # dynamic_threads, and mixture tuning constants from bhd_config.  See
 # bhd_recovery.py for subsystem context and the numba-optimisation history.
 
+from collections import OrderedDict
 import numpy as np
 
+from numba import njit, prange, set_num_threads
 # Shared dynamic-thread reallocation, re-checked at the mixture K-sweep restart
 # boundaries; no-ops on the sequential path until a pool wires the counters.
 import dynamic_threads
 
-import warnings
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    warnings.warn(
-        "Numba not found; bhd_recovery_mixture kernels fall back to pure Python "
-        "(slower but numerically identical).",
-        ImportWarning,
-    )
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        if len(args) == 1 and callable(args[0]) and not kwargs:
-            return args[0]
-        return decorator
-    prange = range
 
 from bhd_config import (
     RECOVERY_MIXTURE_K_MAX,
@@ -45,6 +29,33 @@ from bhd_config import (
     RECOVERY_MIXTURE_THETA_EPS,
     RECOVERY_MIXTURE_TOL,
 )
+
+
+def _bernoulli_mixture_bic(
+    log_likelihood, k, n_features, n_observations
+):
+    """BIC for the candidate-space Bernoulli mixture (lower is better)."""
+
+    n_parameters = k * n_features + (k - 1)
+    return -2 * log_likelihood + n_parameters * np.log(max(n_observations, 2))
+
+
+# A K <= 10, two-restart sweep exposes at most 20 independent prange tasks.
+# Representative N=116, L=200 profiling on the target Sapphire Rapids node
+# found that this kernel stops scaling at 16 threads; larger Numba teams add
+# scheduling overhead (112 threads was ~1.7x slower than 16).  This is an
+# implementation-only cap: the live pool-wide allocation is restored at the
+# next phase boundary immediately after the sweep.
+_EM_COMBO_THREAD_CAP = 16
+
+# Robust cross-fitting can revisit an identical ordered residual matrix with
+# identical mixture controls.  Keep a small per-worker exact-result cache: the
+# byte-string key preserves row multiplicity and order (deduplicating rows
+# would change the fitted statistical model), while the bound prevents a long
+# chromosome worker from retaining every block.  Verbose calls bypass the
+# cache so their historical diagnostic trace is always replayed in full.
+_BINARY_MIXTURE_CACHE_MAXSIZE = 32
+_BINARY_MIXTURE_CACHE = OrderedDict()
 
 
 # =============================================================================
@@ -313,8 +324,9 @@ def _logsumexp_axis1_kernel(x):
 
 
 @njit(cache=True)
-def _bernoulli_mixture_em_kernel(cands, K, init_centers,
-                                    max_iter, tol, eps):
+def _bernoulli_mixture_em_core(cands, K, init_centers,
+                               max_iter, tol, eps,
+                               materialize_final_responsibilities):
     """Numba kernel for _bernoulli_mixture_em.
 
     Faithfully reproduces the EM math step by step, with two changes
@@ -353,12 +365,13 @@ def _bernoulli_mixture_em_kernel(cands, K, init_centers,
     n_iter = 0
     ll = 0.0    # initialised in case max_iter=0 (defensive)
 
-    # Pre-allocate resp so the function has a value to return even
-    # when max_iter=0.  The original returns resp=None in that case;
-    # we return all-zeros here and the wrapper handles the None
-    # substitution.  In practice production never sets max_iter=0
-    # so this code path is purely defensive.
-    resp = np.zeros((N, K), dtype=np.float64)
+    # Reuse one responsibility buffer across iterations.  The diagnostic path
+    # retains the historical zero value for max_iter=0; the lean production
+    # path never consumes the buffer and can leave it uninitialised.
+    if materialize_final_responsibilities:
+        resp = np.zeros((N, K), dtype=np.float64)
+    else:
+        resp = np.empty((N, K), dtype=np.float64)
 
     for it in range(max_iter):
         n_iter = it + 1
@@ -393,12 +406,6 @@ def _bernoulli_mixture_em_kernel(cands, K, init_centers,
         log_p_weighted = log_p + log_pi  # numba broadcasts (N, K) + (K,)
 
         log_norm = _logsumexp_axis1_kernel(log_p_weighted)                       # (N,)
-        # log_resp = log_p_weighted - log_norm[:, None]; then resp = exp(log_resp).
-        # We don't actually need log_resp as a separate variable here.
-        resp = np.empty((N, K), dtype=np.float64)
-        for i in range(N):
-            for k in range(K):
-                resp[i, k] = np.exp(log_p_weighted[i, k] - log_norm[i])
 
         # ll = float(log_norm.sum())
         ll_acc = 0.0
@@ -409,8 +416,19 @@ def _bernoulli_mixture_em_kernel(cands, K, init_centers,
         # Convergence check (relative).  Break BEFORE updating prev_ll so
         # the caller receives the most recent ll value.
         if prev_ll != -np.inf and abs(ll - prev_ll) < tol * max(abs(ll), 1.0):
+            if materialize_final_responsibilities:
+                for i in range(N):
+                    for k in range(K):
+                        resp[i, k] = np.exp(
+                            log_p_weighted[i, k] - log_norm[i])
             break
         prev_ll = ll
+
+        # Responsibilities are required for the M-step.  The same buffer is
+        # completely overwritten on each non-converged iteration.
+        for i in range(N):
+            for k in range(K):
+                resp[i, k] = np.exp(log_p_weighted[i, k] - log_norm[i])
 
         # M-step
         # N_k = resp.sum(axis=0)
@@ -437,6 +455,30 @@ def _bernoulli_mixture_em_kernel(cands, K, init_centers,
                     theta[k, l] = 1 - eps
 
     return theta, pi, ll, n_iter, resp
+
+
+
+@njit(cache=True)
+def _bernoulli_mixture_em_kernel(cands, K, init_centers,
+                                 max_iter, tol, eps):
+    return _bernoulli_mixture_em_core(
+        cands, K, init_centers,
+        max_iter, tol, eps,
+        True,
+    )
+
+
+@njit(cache=True)
+def _bernoulli_mixture_em_lean_kernel(cands, K, init_centers,
+                                      max_iter, tol, eps):
+    theta, _pi, ll, _n_iter, _resp = (
+        _bernoulli_mixture_em_core(
+            cands, K, init_centers,
+            max_iter, tol, eps,
+            False,
+        )
+    )
+    return theta, ll
 
 
 def _bernoulli_mixture_em(cands, K, init_centers,
@@ -579,6 +621,55 @@ def _run_em_all_combos_kernel(cands, combo_K, is_full, uniforms_padded,
     return lls, thetas, pis, resps
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _run_em_all_combos_lean_kernel(cands, combo_K, is_full, uniforms_padded,
+                                   K_max_eff, max_iter, tol, eps):
+    """Production form of :func:`_run_em_all_combos_kernel`.
+
+    The mixture selection and returned haplotypes use only each combo's final
+    log-likelihood and theta.  Mixture weights and responsibilities are needed
+    solely for the optional verbose effective-size trace.  Avoiding their
+    padded, pool-wide output buffers and the associated copies materially
+    reduces this hot sweep's memory traffic.  The same initializer and the
+    same serial EM kernel are used, so ``lls`` and ``thetas`` remain bitwise
+    identical to the diagnostic/reference kernel above.
+    """
+    C = combo_K.shape[0]
+    L = cands.shape[1]
+    lls = np.empty(C, dtype=np.float64)
+    thetas = np.zeros((C, K_max_eff, L), dtype=np.float64)
+    for c in prange(C):
+        K = combo_K[c]
+        init = np.empty((K, L), dtype=np.float64)
+        if is_full[c]:
+            for i in range(K):
+                for l in range(L):
+                    init[i, l] = cands[i, l]
+        else:
+            centers_idx = _kmeans_pp_init_kernel(
+                cands, K, uniforms_padded[c, :K])
+            for i in range(K):
+                ci = centers_idx[i]
+                for l in range(L):
+                    init[i, l] = cands[ci, l]
+        theta_c, ll_c = (
+            _bernoulli_mixture_em_lean_kernel(
+                cands, K, init, max_iter, tol, eps))
+        lls[c] = ll_c
+        for k in range(K):
+            for l in range(L):
+                thetas[c, k, l] = theta_c[k, l]
+    return lls, thetas
+
+
+def _bounded_em_combo_threads(live_threads, n_combos):
+    """Apply the measured useful Numba-team bound for the combo sweep."""
+    sweep_threads = min(live_threads, n_combos, _EM_COMBO_THREAD_CAP)
+    if sweep_threads != live_threads:
+        set_num_threads(sweep_threads)
+    return sweep_threads
+
+
 def _fit_bernoulli_mixture_select_K(candidates,
                                       K_max=RECOVERY_MIXTURE_K_MAX,
                                       n_restarts=RECOVERY_MIXTURE_N_RESTARTS,
@@ -638,7 +729,30 @@ def _fit_bernoulli_mixture_select_K(candidates,
     N, L = cands_arr.shape
 
     # Cap K_max at N (can't have more components than candidates)
-    K_max_effective = min(K_max, N)
+    K_max_effective = min(int(K_max), N)
+
+    cache_key = None
+    seed_key = int(seed) if isinstance(seed, (int, np.integer)) else None
+    if not verbose and seed_key is not None:
+        # Exact bytes retain candidate order and duplicate-row weights.  Cache
+        # only the non-diagnostic production path; verbose mode must print the
+        # same complete per-K trace on every invocation.
+        cache_key = (
+            cands_arr.shape,
+            cands_arr.tobytes(order="C"),
+            K_max_effective,
+            int(n_restarts),
+            seed_key,
+            patience,
+            int(RECOVERY_MIXTURE_MAX_ITER),
+            float(RECOVERY_MIXTURE_TOL),
+            float(RECOVERY_MIXTURE_THETA_EPS),
+        )
+        cached = _BINARY_MIXTURE_CACHE.get(cache_key)
+        if cached is not None:
+            _BINARY_MIXTURE_CACHE.move_to_end(cache_key)
+            dynamic_threads.apply_dynamic_threads()
+            return [row.copy() for row in cached]
 
     rng = np.random.default_rng(seed)
 
@@ -649,7 +763,7 @@ def _fit_bernoulli_mixture_select_K(candidates,
     # Set the thread allocation once before the (dominant) parallel sweep --
     # this fit is one phase of the block, so a straggler grows into freed cores
     # here rather than at each K of a serial loop.
-    dynamic_threads.apply_dynamic_threads()
+    live_threads = dynamic_threads.apply_dynamic_threads()
 
     # --- Phase 1: draw all K-means++ uniforms, in the SAME order the old per-K
     # serial loop consumed them (so the inits are identical). ---
@@ -671,10 +785,26 @@ def _fit_bernoulli_mixture_select_K(candidates,
             c += 1
 
     # --- Phase 2: run init + EM for all (K, restart) combos in parallel. ---
-    lls, thetas_p, pis_p, resps_p = _run_em_all_combos_kernel(
-        cands_arr, combo_K, is_full, uniforms_padded, int(K_max_effective),
-        int(RECOVERY_MIXTURE_MAX_ITER), float(RECOVERY_MIXTURE_TOL),
-        float(RECOVERY_MIXTURE_THETA_EPS))
+    _bounded_em_combo_threads(live_threads, n_combos)
+    try:
+        if verbose:
+            # Retain responsibilities only for the diagnostic effective-size
+            # trace; the full kernel is also the exact reference path.
+            lls, thetas_p, pis_p, resps_p = _run_em_all_combos_kernel(
+                cands_arr, combo_K, is_full, uniforms_padded,
+                int(K_max_effective), int(RECOVERY_MIXTURE_MAX_ITER),
+                float(RECOVERY_MIXTURE_TOL),
+                float(RECOVERY_MIXTURE_THETA_EPS))
+        else:
+            lls, thetas_p = _run_em_all_combos_lean_kernel(
+                cands_arr, combo_K, is_full, uniforms_padded,
+                int(K_max_effective), int(RECOVERY_MIXTURE_MAX_ITER),
+                float(RECOVERY_MIXTURE_TOL),
+                float(RECOVERY_MIXTURE_THETA_EPS))
+    finally:
+        # The cap is local to this 20-task phase.  Re-read the live pool state
+        # so a tail worker can immediately grow again for subsequent phases.
+        dynamic_threads.apply_dynamic_threads()
 
     # --- Phase 3: replay the per-K best-restart pick + BIC + patience exactly
     # as the serial sweep did, over the precomputed per-combo results. ---
@@ -691,15 +821,18 @@ def _fit_bernoulli_mixture_select_K(candidates,
                 best_r = r
         ci = base + best_r
         ll = float(lls[ci])
-        # [:K] slice + .copy() so theta/pi/resp are standalone arrays (not views
-        # into the padded per-combo buffers).
+        # [:K] slice + .copy() keeps theta standalone rather than a view into
+        # the padded per-combo buffer.
         theta = thetas_p[ci, :K, :].copy()
-        pi = pis_p[ci, :K].copy()
-        resp = resps_p[ci, :, :K].copy()
-        n_params = K * L + (K - 1)
-        bic = -2 * ll + n_params * np.log(max(N, 2))
+        if verbose:
+            pi = pis_p[ci, :K].copy()
+            resp = resps_p[ci, :, :K].copy()
+            effective_sizes = resp.sum(axis=0)
+        else:
+            pi = None
+            effective_sizes = None
+        bic = _bernoulli_mixture_bic(ll, K, L, N)
 
-        effective_sizes = resp.sum(axis=0)
         bic_trace.append((K, bic, ll, effective_sizes))
 
         if best_overall is None or bic < best_overall[1]:
@@ -733,7 +866,13 @@ def _fit_bernoulli_mixture_select_K(candidates,
 
     # Round theta to binary haps (consensus founder profiles)
     binary_thetas = (best_theta > 0.5).astype(np.int64)
-    return [binary_thetas[k].copy() for k in range(best_K)]
+    output = [binary_thetas[k].copy() for k in range(best_K)]
+    if cache_key is not None:
+        _BINARY_MIXTURE_CACHE[cache_key] = tuple(row.copy() for row in output)
+        _BINARY_MIXTURE_CACHE.move_to_end(cache_key)
+        while len(_BINARY_MIXTURE_CACHE) > _BINARY_MIXTURE_CACHE_MAXSIZE:
+            _BINARY_MIXTURE_CACHE.popitem(last=False)
+    return output
 
 
 @njit(cache=True)
@@ -1051,8 +1190,7 @@ def _fit_bernoulli_mixture_ml_select_K(L0, L1,
         # [:K] slice + .copy() so theta is standalone (not a view into the
         # padded per-combo buffer).
         theta = thetas_p[ci, :K, :].copy()
-        n_params = K * L + (K - 1)
-        bic = -2 * ll + n_params * np.log(max(M, 2))
+        bic = _bernoulli_mixture_bic(ll, K, L, M)
         bic_trace.append((K, bic, ll))
 
         if best_overall is None or bic < best_overall[1]:

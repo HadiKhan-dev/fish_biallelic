@@ -1,0 +1,1 @@
+../../.agent-profiles/scientific-validator.md

@@ -37,15 +37,14 @@ import multiprocessing as mp
 import multiprocessing.pool
 import warnings
 import gc
+import os
 import ctypes
 
+import numba
 from numba import njit, prange
 
 import thread_config
 import dynamic_threads
-
-import analysis_utils
-import hap_statistics
 
 # Cross-module imports from the 4 split bhd subsystems.  The atomic
 # BIC/CD kernel, recovery pipeline, trio recovery, and pairwise common-
@@ -61,7 +60,7 @@ import bhd_pairwise
 # attribute lookup (e.g. PAIRWISE_RECOVERY_ENABLED) to
 # preserve runtime-mutation semantics.
 from bhd_kernels import MASK
-from bhd_fit import _update_A
+from bhd_fit import _fit_at_fixed_K, _update_A
 from bhd_recovery_select import _hamming_pct_kept
 from bhd_config import (
     DEFAULT_LAMBDA,
@@ -76,13 +75,33 @@ from bhd_kgrowth import _grow_K_with_recovery
 # BlockResult, BlockResults, and consolidate_similar_candidates were migrated
 # out of the retired legacy block_haplotypes.py into this module — see the
 # "MIGRATED FROM block_haplotypes.py" section at the end of the file.
-# (find_missing_haplotypes_iterative is still imported lazily from the legacy
-# module inside the residual loop, where present.)  Dynamic-thread rescaling
-# uses the standalone dynamic_threads module (apply_dynamic_threads), wired in
-# _init_block_worker.
+# find_missing_haplotypes_iterative also lives locally below and is invoked
+# directly by the residual loop.  Dynamic-thread rescaling uses the standalone
+# dynamic_threads module (apply_dynamic_threads), wired in _init_block_worker.
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid='ignore')
+
+GENOTYPE_EVIDENCE_MODES = frozenset({"hwe_posterior", "raw_likelihood"})
+DEFAULT_READ_ERROR_PROBABILITY = 0.02
+
+
+def _validate_genotype_evidence_mode(mode):
+    """Validate and return the genotype-evidence representation name."""
+    if mode not in GENOTYPE_EVIDENCE_MODES:
+        raise ValueError(
+            "genotype_evidence_mode must be one of "
+            f"{sorted(GENOTYPE_EVIDENCE_MODES)}"
+        )
+    return mode
+
+
+def _validate_read_error_prob(read_error_prob):
+    """Validate the per-read sequencing-error probability."""
+    value = float(read_error_prob)
+    if not np.isfinite(value) or not 0.0 < value < 0.5:
+        raise ValueError("read_error_prob must be finite and between 0 and 0.5")
+    return value
 
 
 # =============================================================================
@@ -184,13 +203,79 @@ np.seterr(divide='ignore', invalid='ignore')
 # FORKSERVER POOL SCAFFOLDING (mirrors block_haplotypes_em_foothold.py)
 # =============================================================================
 
+def _nonnegative_env_int(name, default):
+    """Read a non-negative operational tuning value from the environment."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default)
+    try:
+        value = int(raw)
+    except ValueError:
+        return int(default)
+    return value if value >= 0 else int(default)
+
+
+# Retain reusable Numba/pattern-table arenas between blocks.  With the default
+# 1.5-GiB per-worker threshold, even 112 workers remain well inside the normal
+# 512-GiB production allocation; a 32-block periodic trim bounds fragmentation
+# on smaller allocations and long-lived pools.  Both controls are operationally
+# configurable without changing the scientific configuration or checkpoints.
+_MALLOC_TRIM_RSS_BYTES = 1024 * 1024 * _nonnegative_env_int(
+    "BHD_MALLOC_TRIM_RSS_MB", 1536
+)
+_MALLOC_TRIM_INTERVAL = _nonnegative_env_int(
+    "BHD_MALLOC_TRIM_EVERY_BLOCKS", 32
+)
+_BLOCKS_SINCE_MALLOC_TRIM = 0
+try:
+    _RSS_PAGE_SIZE = int(os.sysconf("SC_PAGE_SIZE"))
+except (AttributeError, OSError, ValueError):
+    _RSS_PAGE_SIZE = 0
+
+
 try:
     _libc = ctypes.CDLL("libc.so.6")
-    def _malloc_trim():
+
+    def _trim_process_heap():
         _libc.malloc_trim(0)
 except OSError:
-    def _malloc_trim():
+    def _trim_process_heap():
         pass
+
+
+def _current_process_rss_bytes():
+    """Return current Linux RSS cheaply; zero when unavailable."""
+    if not _RSS_PAGE_SIZE:
+        return 0
+    try:
+        with open("/proc/self/statm", "rt", encoding="ascii") as handle:
+            fields = handle.readline().split()
+        return int(fields[1]) * _RSS_PAGE_SIZE
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def _maybe_malloc_trim(*, completed_block=False):
+    """Trim only for high RSS or periodically after completed blocks.
+
+    The old unconditional trim discarded reusable arenas after every block,
+    forcing persistent workers to fault and allocate them again immediately.
+    """
+    global _BLOCKS_SINCE_MALLOC_TRIM
+    if completed_block:
+        _BLOCKS_SINCE_MALLOC_TRIM += 1
+    over_rss_limit = (
+        _MALLOC_TRIM_RSS_BYTES > 0
+        and _current_process_rss_bytes() >= _MALLOC_TRIM_RSS_BYTES
+    )
+    periodic = (
+        completed_block
+        and _MALLOC_TRIM_INTERVAL > 0
+        and _BLOCKS_SINCE_MALLOC_TRIM >= _MALLOC_TRIM_INTERVAL
+    )
+    if over_rss_limit or periodic:
+        _trim_process_heap()
+        _BLOCKS_SINCE_MALLOC_TRIM = 0
 
 
 try:
@@ -206,7 +291,17 @@ class _ForkserverPool(multiprocessing.pool.Pool):
         super().__init__(*args, **kwargs)
 
 
-def _init_block_worker(total_cores, active_counter, extra_counter=None):
+def _init_block_worker(
+    total_cores,
+    active_counter,
+    extra_counter=None,
+    started_counter=None,
+    participant_counter=None,
+    batch_generation=None,
+    batch_task_count=None,
+    startup_target=None,
+    startup_ready=None,
+):
     """Initializer for worker processes — sets up dynamic numba thread
     allocation based on number of currently-active workers.
 
@@ -218,7 +313,6 @@ def _init_block_worker(total_cores, active_counter, extra_counter=None):
     extra_counter drives the remainder distribution (total threads in use ==
     total_cores, zero idle cores); None falls back to floor-only."""
     try:
-        import os, numba
         os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
         numba.config.NUMBA_NUM_THREADS = total_cores
         numba.set_num_threads(1)
@@ -226,7 +320,188 @@ def _init_block_worker(total_cores, active_counter, extra_counter=None):
         pass
     # Wire the shared state so every phase boundary across this module +
     # bhd_recovery + bhd_trio re-checks the SAME pool-wide active count.
-    dynamic_threads.set_dynamic_thread_state(total_cores, active_counter, extra_counter)
+    dynamic_threads.set_dynamic_thread_state(
+        total_cores,
+        active_counter,
+        extra_counter,
+        started_counter,
+        participant_counter,
+        batch_generation,
+        batch_task_count,
+        startup_target,
+        startup_ready,
+    )
+
+def _validate_block_parallelism(
+    num_processes: int,
+    total_numba_threads: int | None,
+) -> tuple[int, int]:
+    if (
+        isinstance(num_processes, bool)
+        or int(num_processes) != num_processes
+        or int(num_processes) < 1
+    ):
+        raise ValueError("num_processes must be a positive integer")
+    processes = int(num_processes)
+    total_threads = (
+        processes
+        if total_numba_threads is None
+        else total_numba_threads
+    )
+    if (
+        isinstance(total_threads, bool)
+        or int(total_threads) != total_threads
+        or int(total_threads) < processes
+    ):
+        raise ValueError(
+            "total_numba_threads must be an integer at least as large as "
+            "num_processes"
+        )
+    total_threads = int(total_threads)
+    available_cpus = len(os.sched_getaffinity(0))
+    if processes > available_cpus or total_threads > available_cpus:
+        raise ValueError(
+            "block workers and Numba thread budget must lie within the "
+            "current CPU affinity"
+        )
+    return processes, total_threads
+
+
+class BlockDiscoveryPool:
+    """Reusable block-worker pool with one bounded dynamic thread budget."""
+
+    def __init__(
+        self,
+        num_processes: int,
+        total_numba_threads: int | None = None,
+    ) -> None:
+        (
+            self.num_processes,
+            self.total_numba_threads,
+        ) = _validate_block_parallelism(
+            num_processes, total_numba_threads
+        )
+        self._closed = False
+        self._active_counter = _forkserver_ctx.Value("i", 0)
+        self._extra_counter = _forkserver_ctx.Value("i", 0)
+        self._started_counter = _forkserver_ctx.Value("i", 0)
+        self._participant_counter = _forkserver_ctx.Value("i", 0)
+        self._batch_generation = _forkserver_ctx.Value("i", 0)
+        self._batch_task_count = _forkserver_ctx.Value("i", 0)
+        self._startup_target = _forkserver_ctx.Value("i", 1)
+        self._startup_ready = _forkserver_ctx.Value("i", 0)
+        self._batch_in_progress = False
+
+        # Prevent forkserver workers from re-executing a pipeline entry point.
+        import sys as _sys
+
+        main_module = _sys.modules.get("__main__")
+        saved_main_file = getattr(main_module, "__file__", None)
+        saved_main_spec = getattr(main_module, "__spec__", None)
+        if main_module is not None:
+            if hasattr(main_module, "__file__"):
+                del main_module.__file__
+            main_module.__spec__ = None
+        try:
+            self._pool = _ForkserverPool(
+                processes=self.num_processes,
+                initializer=_init_block_worker,
+                initargs=(
+                    self.total_numba_threads,
+                    self._active_counter,
+                    self._extra_counter,
+                    self._started_counter,
+                    self._participant_counter,
+                    self._batch_generation,
+                    self._batch_task_count,
+                    self._startup_target,
+                    self._startup_ready,
+                ),
+            )
+        finally:
+            if main_module is not None:
+                if saved_main_file is not None:
+                    main_module.__file__ = saved_main_file
+                main_module.__spec__ = saved_main_spec
+
+    @staticmethod
+    def _store_counter(counter, value):
+        with counter.get_lock():
+            counter.get_obj().value = int(value)
+
+    def _prepare_task_batch(self, n_tasks):
+        if self._batch_in_progress:
+            raise RuntimeError(
+                "block-discovery pool already has an unfinished task batch"
+            )
+        if self._active_counter.value != 0:
+            raise RuntimeError(
+                "block-discovery workers from the preceding batch are still active"
+            )
+        task_count = int(n_tasks)
+        initial_target = min(task_count, self.num_processes)
+        self._store_counter(self._started_counter, 0)
+        self._store_counter(self._participant_counter, 0)
+        self._store_counter(self._batch_task_count, task_count)
+        self._store_counter(self._startup_target, initial_target)
+        self._store_counter(self._startup_ready, initial_target <= 1)
+        with self._batch_generation.get_lock():
+            generation = self._batch_generation.get_obj()
+            generation.value += 1
+
+    def imap_unordered(self, tasks):
+        if self._closed:
+            raise RuntimeError("block-discovery pool is closed")
+        if not hasattr(tasks, "__len__"):
+            tasks = tuple(tasks)
+        self._prepare_task_batch(len(tasks))
+        try:
+            raw_results = self._pool.imap_unordered(
+                _worker_generate_block_direct, tasks, chunksize=1
+            )
+        except Exception:
+            raise
+        self._batch_in_progress = True
+
+        def consume_batch():
+            completed = False
+            try:
+                for result in raw_results:
+                    yield result
+                completed = True
+            finally:
+                # An abandoned or failed iterator may still have queued work.
+                # Keep the pool guarded in that case; close/terminate remains
+                # available, but a new batch cannot corrupt the startup gate.
+                if completed:
+                    self._batch_in_progress = False
+
+        return consume_batch()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._pool.close()
+        self._pool.join()
+        self._closed = True
+
+    def terminate(self) -> None:
+        if self._closed:
+            return
+        self._pool.terminate()
+        self._pool.join()
+        self._closed = True
+
+    def __enter__(self) -> "BlockDiscoveryPool":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if exc_type is None:
+            self.close()
+        else:
+            self.terminate()
+
+
 
 
 
@@ -538,6 +813,10 @@ def _final_cleanup(haps_dict, probs_array, diff_threshold_percent,
     #
     # Original code (preserved for record):
     #     min_samples = max(2, int(probs_array.shape[0] * 0.01))
+    # Legacy probability-array cleanup only.  Keep its pandas-bearing helper
+    # outside the reversible worker startup path.
+    import hap_statistics
+
     final_matches = hap_statistics.match_best_vectorised(selected, probs_array)
     usage_counts = final_matches[1]
     min_samples = 1
@@ -600,6 +879,375 @@ def _final_cleanup(haps_dict, probs_array, diff_threshold_percent,
     return used
 
 
+def _cleanup_source_indices(haps_dict, cleaned):
+    """Map cleanup survivors back to their pre-cleanup discrete rows.
+
+    ``_final_cleanup`` only retains references to input candidate arrays; it
+    does not synthesize or average rows. Recovering those source coordinates
+    lets us seed a fresh discrete fit whenever cleanup changes K or row order.
+    Identity is preferred so byte-identical duplicate rows remain unambiguous;
+    exact equality is a defensive fallback for callers that copy arrays.
+    """
+    source_rows = list(haps_dict.values())
+    used = set()
+    indices = []
+    for cleaned_row in cleaned.values():
+        match = next(
+            (
+                index
+                for index, source_row in enumerate(source_rows)
+                if index not in used and cleaned_row is source_row
+            ),
+            None,
+        )
+        if match is None:
+            match = next(
+                (
+                    index
+                    for index, source_row in enumerate(source_rows)
+                    if index not in used
+                    and np.array_equal(cleaned_row, source_row)
+                ),
+                None,
+            )
+        if match is None:
+            raise AssertionError(
+                "final cleanup returned a haplotype outside its input rows"
+            )
+        used.add(match)
+        indices.append(match)
+    return tuple(indices)
+
+
+def _refit_cleaned_discrete_model(probs_k, H_seed,
+                                  lambda_wildcard_penalty,
+                                  coord_descent_max_iter):
+    """Refit cleanup survivors and remove any rows that collapse on refit."""
+    n_samples = probs_k.shape[0]
+    H = np.ascontiguousarray(H_seed, dtype=np.int64)
+    if len(H) == 0:
+        A = np.zeros((n_samples, 2), dtype=np.int64)
+        wildcard_slots = np.full(n_samples, 2, dtype=np.int64)
+        return H, A, wildcard_slots
+
+    H, A, _costs, wildcard_slots, _n_iter, _nll = _fit_at_fixed_K(
+        probs_k,
+        H,
+        lambda_wildcard_penalty,
+        max_iter=coord_descent_max_iter,
+    )
+
+    # A fixed-K refit can make two seeds identical or leave a component with
+    # no assigned strand. Prune and refit until row and assignment coordinates
+    # stabilize, matching the cleanup's zero-use intent.
+    while len(H) > 0:
+        real_assignments = A[A < len(H)]
+        usage = np.bincount(real_assignments, minlength=len(H))
+        keep = []
+        for index in range(len(H)):
+            if usage[index] == 0:
+                continue
+            if any(np.array_equal(H[index], H[prior]) for prior in keep):
+                continue
+            keep.append(index)
+        if len(keep) == len(H):
+            break
+        H = np.ascontiguousarray(H[np.asarray(keep, dtype=np.int64)])
+        if len(H) == 0:
+            A = np.zeros((n_samples, 2), dtype=np.int64)
+            wildcard_slots = np.full(n_samples, 2, dtype=np.int64)
+            break
+        H, A, _costs, wildcard_slots, _n_iter, _nll = _fit_at_fixed_K(
+            probs_k,
+            H,
+            lambda_wildcard_penalty,
+            max_iter=coord_descent_max_iter,
+        )
+
+    return (
+        np.ascontiguousarray(H),
+        np.ascontiguousarray(A),
+        np.ascontiguousarray(wildcard_slots),
+    )
+
+
+def _validate_synchronized_block_result(result, min_supporters):
+    """Raise if public and discrete block payloads use different models."""
+    reads = np.asarray(result.reads_count_matrix)
+    n_samples, n_sites, allele_count = reads.shape
+    if allele_count != 2:
+        raise AssertionError("reads_count_matrix must end in a ref/alt axis")
+    k = int(result.K_final)
+    if len(result.positions) != n_sites:
+        raise AssertionError("positions and reads disagree on site count")
+    if tuple(sorted(result.haplotypes)) != tuple(range(k)):
+        raise AssertionError("haplotype keys must be contiguous 0..K-1")
+    if result.discrete_haps.shape != (k, n_sites):
+        raise AssertionError("discrete_haps and K_final disagree")
+    if result.per_site_confidence.shape != (k, n_sites):
+        raise AssertionError("per-site confidence and K_final disagree")
+    if result.n_site_supporters.shape != (k, n_sites):
+        raise AssertionError("per-site support and K_final disagree")
+
+    assignments = np.asarray(result.pair_assignments)
+    if assignments.shape != (n_samples, 2):
+        raise AssertionError("pair_assignments has the wrong shape")
+    if np.any(assignments < 0) or np.any(assignments > k):
+        raise AssertionError("pair_assignments contains an invalid final index")
+    if np.any(assignments[:, 0] > assignments[:, 1]):
+        raise AssertionError("pair_assignments must be canonically sorted")
+    expected_wildcard_mass = (
+        float(np.count_nonzero(assignments == k)) / max(2 * n_samples, 1)
+    )
+    if not np.isclose(
+        float(result.wildcard_mass),
+        expected_wildcard_mass,
+        rtol=0.0,
+        atol=np.finfo(np.float64).eps,
+    ):
+        raise AssertionError("wildcard_mass and pair_assignments disagree")
+
+    supporters = np.asarray(result.n_site_supporters)
+    expected_mask = supporters < int(min_supporters)
+    if not np.array_equal(result.discrete_haps == MASK, expected_mask):
+        raise AssertionError("discrete MASK cells and support counts disagree")
+    for index in range(k):
+        haplotype = np.asarray(result.haplotypes[index])
+        if haplotype.shape != (n_sites, 2):
+            raise AssertionError("a public haplotype has the wrong shape")
+        if not np.all(haplotype[expected_mask[index]] == 0.5):
+            raise AssertionError("low-support public cells must be uninformative")
+        known = ~expected_mask[index]
+        if np.any(known):
+            expected_alt = result.discrete_haps[index, known]
+            if not np.array_equal(haplotype[known, 1], expected_alt):
+                raise AssertionError(
+                    "public and discrete haplotype alleles disagree"
+                )
+            if not np.array_equal(haplotype[known, 0], 1 - expected_alt):
+                raise AssertionError(
+                    "public and discrete haplotype alleles disagree"
+                )
+
+    candidate_rows = np.asarray(result.precleanup_candidate_discrete_haps)
+    if candidate_rows.ndim != 2 or candidate_rows.shape[1] != n_sites:
+        raise AssertionError(
+            "pre-cleanup candidate rows use wrong site coordinates"
+        )
+    if int(result.precleanup_candidate_k) != candidate_rows.shape[0]:
+        raise AssertionError("pre-cleanup candidate K and rows disagree")
+    if candidate_rows.shape[0] < k:
+        raise AssertionError(
+            "pre-cleanup candidate K cannot be smaller than final K"
+        )
+    if np.shares_memory(candidate_rows, np.asarray(result.discrete_haps)):
+        raise AssertionError(
+            "pre-cleanup candidate rows must not alias final rows"
+        )
+    if not np.all(
+        (candidate_rows == 0) | (candidate_rows == 1) | (candidate_rows == MASK)
+    ):
+        raise AssertionError("pre-cleanup candidate rows contain invalid alleles")
+    candidate_filtered = (
+        np.zeros(n_sites, dtype=bool)
+        if result.keep_flags is None
+        else np.asarray(result.keep_flags) <= 0
+    )
+    if np.any(candidate_filtered) and not np.all(
+        candidate_rows[:, candidate_filtered] == MASK
+    ):
+        raise AssertionError(
+            "pre-cleanup candidate rows must mask filtered sites"
+        )
+
+
+def _selftest_cleanup_synchronization():
+    """Focused regression checks for cleanup/refit result coordinates."""
+    duplicate_a = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    duplicate_b = duplicate_a.copy()
+    other = np.array([[0.5, 0.5], [1.0, 0.0]], dtype=np.float64)
+    source = {0: duplicate_a, 1: duplicate_b, 2: other}
+
+    # Identity wins over an earlier equal row; cleanup may drop and reorder.
+    assert _cleanup_source_indices(source, {0: duplicate_b}) == (1,)
+    assert _cleanup_source_indices(
+        source, {0: other, 1: duplicate_b}
+    ) == (2, 1)
+    # Equality fallback consumes each duplicate source coordinate only once.
+    assert _cleanup_source_indices(
+        source, {0: duplicate_a.copy(), 1: duplicate_b.copy()}
+    ) == (0, 1)
+    try:
+        _cleanup_source_indices(
+            source,
+            {
+                0: duplicate_a.copy(),
+                1: duplicate_b.copy(),
+                2: duplicate_a.copy(),
+            },
+        )
+    except AssertionError as exc:
+        assert "outside its input rows" in str(exc)
+    else:
+        raise AssertionError("cleanup accepted an excess duplicate row")
+
+    # Decisive homozygotes make one duplicate and one unsupported seed
+    # removable. Final assignments must use the refitted K=2 coordinates.
+    probs = np.full((4, 3, 3), 0.0005, dtype=np.float64)
+    probs[:2, :, 0] = 0.999
+    probs[2:, :, 2] = 0.999
+    seed_haps = np.array(
+        [[0, 0, 0], [0, 0, 0], [1, 1, 1], [0, 1, 0]],
+        dtype=np.int64,
+    )
+    final_haps, assignments, wildcard_slots = (
+        _refit_cleaned_discrete_model(
+            probs, seed_haps, DEFAULT_LAMBDA, 20
+        )
+    )
+    assert np.array_equal(
+        final_haps, np.array([[0, 0, 0], [1, 1, 1]], dtype=np.int64)
+    )
+    assert np.array_equal(
+        assignments,
+        np.array([[0, 0], [0, 0], [1, 1], [1, 1]], dtype=np.int64),
+    )
+    assert np.array_equal(wildcard_slots, np.zeros(4, dtype=np.int64))
+
+    supporters = np.full(final_haps.shape, 2, dtype=np.int64)
+    confidence = np.ones(final_haps.shape, dtype=np.float64)
+    public_haps = _discrete_haps_to_prob_arrays(
+        final_haps,
+        final_haps.shape[1],
+        np.ones(final_haps.shape[1], dtype=bool),
+        confidence,
+        supporters,
+        min_supporters=2,
+    )
+    result = BlockResult(
+        np.arange(final_haps.shape[1], dtype=np.int64),
+        public_haps,
+        np.zeros(
+            (len(assignments), final_haps.shape[1], 2), dtype=np.int64
+        ),
+    )
+    result.discrete_haps = final_haps.copy()
+    result.per_site_confidence = confidence
+    result.n_site_supporters = supporters
+    result.pair_assignments = assignments
+    result.wildcard_mass = 0.0
+    result.K_final = len(final_haps)
+    result.precleanup_candidate_discrete_haps = seed_haps.copy()
+    result.precleanup_candidate_k = len(seed_haps)
+    _validate_synchronized_block_result(result, min_supporters=2)
+
+    # Candidate-only provenance deliberately keeps a single-carrier binary
+    # row on retained sites even though the public two-supporter representation
+    # remains completely uncertainty-masked.
+    singleton_haplotype = np.array([[0, 1, 0]], dtype=np.int64)
+    singleton_keep = np.array([1, 0, 1], dtype=np.int64)
+    singleton_supporters = np.array([[1, 0, 1]], dtype=np.int64)
+    singleton_confidence = np.ones((1, 3), dtype=np.float64)
+    singleton_public = _discrete_haps_to_prob_arrays(
+        singleton_haplotype,
+        3,
+        singleton_keep > 0,
+        singleton_confidence,
+        singleton_supporters,
+        min_supporters=2,
+    )
+    singleton_result = BlockResult(
+        np.arange(3, dtype=np.int64),
+        singleton_public,
+        np.zeros((1, 3, 2), dtype=np.int64),
+        keep_flags=singleton_keep,
+    )
+    singleton_result.discrete_haps = np.full((1, 3), MASK, dtype=np.int64)
+    singleton_result.per_site_confidence = singleton_confidence
+    singleton_result.n_site_supporters = singleton_supporters
+    singleton_result.pair_assignments = np.array([[0, 0]], dtype=np.int64)
+    singleton_result.wildcard_mass = 0.0
+    singleton_result.K_final = 1
+    singleton_result.precleanup_candidate_discrete_haps = np.array(
+        [[0, MASK, 0]], dtype=np.int64
+    )
+    singleton_result.precleanup_candidate_k = 1
+    _validate_synchronized_block_result(singleton_result, min_supporters=2)
+    assert np.all(singleton_result.haplotypes[0] == 0.5)
+    assert np.array_equal(
+        singleton_result.precleanup_candidate_discrete_haps,
+        np.array([[0, MASK, 0]], dtype=np.int64),
+    )
+
+    def expect_validation_failure(expected_text):
+        try:
+            _validate_synchronized_block_result(result, min_supporters=2)
+        except AssertionError as exc:
+            assert expected_text in str(exc), str(exc)
+        else:
+            raise AssertionError(
+                f"validator accepted invalid provenance: {expected_text}"
+            )
+
+    result.precleanup_candidate_k = len(seed_haps) - 1
+    expect_validation_failure("candidate K and rows disagree")
+    result.precleanup_candidate_discrete_haps = final_haps[:1].copy()
+    result.precleanup_candidate_k = 1
+    expect_validation_failure("cannot be smaller than final K")
+    result.precleanup_candidate_discrete_haps = seed_haps.copy()
+    result.precleanup_candidate_discrete_haps[0, 0] = 7
+    result.precleanup_candidate_k = len(seed_haps)
+    expect_validation_failure("contain invalid alleles")
+    result.precleanup_candidate_discrete_haps = result.discrete_haps
+    result.precleanup_candidate_k = len(final_haps)
+    expect_validation_failure("must not alias final rows")
+
+    # Exercise every production branch that previously aliased provenance.
+    empty = generate_haplotypes_block(
+        np.empty(0, dtype=np.int64),
+        np.empty((0, 0, 2), dtype=np.int64),
+    )
+    assert empty.precleanup_candidate_discrete_haps is not empty.discrete_haps
+    no_kept = generate_haplotypes_block(
+        np.arange(3, dtype=np.int64),
+        np.ones((2, 3, 2), dtype=np.int64),
+        keep_flags=np.zeros(3, dtype=np.int64),
+    )
+    assert (
+        no_kept.precleanup_candidate_discrete_haps
+        is not no_kept.discrete_haps
+    )
+    simple_reads = np.array(
+        [
+            [[8, 0]] * 3,
+            [[7, 0]] * 3,
+            [[0, 8]] * 3,
+            [[0, 7]] * 3,
+        ],
+        dtype=np.int64,
+    )
+    unchanged = generate_haplotypes_block(
+        np.arange(3, dtype=np.int64),
+        simple_reads,
+        K_max=2,
+        n_medoid_starts=1,
+        recovery_max_K=2,
+        recovery_mixture_K_max=2,
+        recovery_mixture_patience=1,
+        min_supporters_for_confidence=1,
+        coord_descent_max_iter=10,
+    )
+    assert unchanged.precleanup_candidate_k == unchanged.K_final
+    assert (
+        unchanged.precleanup_candidate_discrete_haps
+        is not unchanged.discrete_haps
+    )
+    assert not np.shares_memory(
+        unchanged.precleanup_candidate_discrete_haps,
+        unchanged.discrete_haps,
+    )
+
+
 # =============================================================================
 # TOP-LEVEL ENTRY: generate_haplotypes_block
 # =============================================================================
@@ -642,7 +1290,9 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
                               max_intermediate_haps=25,
                               known_haplotypes=None,
                               uniqueness_threshold_percent=2.0,
-                              wrongness_threshold=10.0):
+                              wrongness_threshold=10.0,
+                              genotype_evidence_mode="hwe_posterior",
+                              read_error_prob=DEFAULT_READ_ERROR_PROBABILITY):
     """Discrete-hap founder discovery for a single block.
 
     Implements an alternative to EM: discrete coordinate descent over
@@ -663,10 +1313,19 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
         result.growth_history:       list of (K, BIC, wildcard_mass, n_iter)
                                      where BIC = K * cc + 2 * NLL with the
                                      same cc as used in K-growth acceptance
+        result.precleanup_candidate_discrete_haps:
+                                     candidate-only (K_pre, L_full) rows from
+                                     K-growth, before cleanup/refit; these are
+                                     provenance and do not share final assignment
+                                     coordinates when cleanup changes the model
 
     The `haplotypes` attribute uses the legacy (n_sites_full, 2)
     [P(0), P(1)] format for backward compat.
     """
+    genotype_evidence_mode = _validate_genotype_evidence_mode(
+        genotype_evidence_mode
+    )
+    read_error_prob = _validate_read_error_prob(read_error_prob)
     n_sites_full = reads_array.shape[1]
 
     # --- 1. SETUP ---
@@ -677,12 +1336,21 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     kept_mask = keep_flags > 0
 
     # --- 2. PROBS FROM READS ---
-    site_priors, probs_array = analysis_utils.reads_to_probabilities(reads_array)
+    # Probability conversion is needed only after a block enters this legacy
+    # generator; reversible worker startup does not require analysis_utils.
+    import analysis_utils
+
+    site_priors, probs_array = analysis_utils.reads_to_probabilities(
+        reads_array,
+        read_error_prob=read_error_prob,
+        use_hwe_prior=(genotype_evidence_mode == "hwe_posterior"),
+    )
 
     if len(positions) == 0:
         empty_haps = {}
         result = BlockResult(np.array([]), empty_haps, reads_array,
-                              keep_flags=keep_flags, probs_array=probs_array)
+                             keep_flags=keep_flags, probs_array=probs_array,
+                             genotype_evidence_mode=genotype_evidence_mode)
         result.discrete_haps = np.empty((0, 0), dtype=np.int64)
         result.per_site_confidence = np.empty((0, 0), dtype=np.float64)
         result.n_site_supporters = np.empty((0, 0), dtype=np.int64)
@@ -691,6 +1359,8 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
         result.uncertainty_flag = True
         result.K_final = 0
         result.growth_history = []
+        result.precleanup_candidate_discrete_haps = result.discrete_haps.copy()
+        result.precleanup_candidate_k = 0
         return result
 
     # --- 3. RESTRICT TO KEPT SITES FOR INFERENCE ---
@@ -712,7 +1382,8 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
         # Truly nothing to infer
         empty_haps = {}
         result = BlockResult(positions, empty_haps, reads_array,
-                              keep_flags=keep_flags, probs_array=probs_array)
+                             keep_flags=keep_flags, probs_array=probs_array,
+                             genotype_evidence_mode=genotype_evidence_mode)
         result.discrete_haps = np.empty((0, n_sites_full), dtype=np.int64)
         result.per_site_confidence = np.empty((0, n_sites_full), dtype=np.float64)
         result.n_site_supporters = np.empty((0, n_sites_full), dtype=np.int64)
@@ -721,6 +1392,8 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
         result.uncertainty_flag = True
         result.K_final = 0
         result.growth_history = []
+        result.precleanup_candidate_discrete_haps = result.discrete_haps.copy()
+        result.precleanup_candidate_k = 0
         return result
 
     # --- 4. K-GROWTH WITH COORDINATE DESCENT + SUBTRACTION-RECOVERY ITERATION ---
@@ -783,6 +1456,15 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
         confidence_full, n_supporters_full,
         min_supporters=min_supporters_for_confidence)
 
+    # Candidate-only provenance: preserve the training-fitted binary rows on
+    # every retained site before public-output uncertainty masking.  A genuine
+    # haplotype carried by one individual has only one supporter by design;
+    # applying the public two-supporter mask here would erase that entire row
+    # before a later nested held-out selector could test it.  Filtered sites
+    # remain MASK, while standard output fields keep the conservative mask.
+    precleanup_candidate_discrete_haps = H_full.copy()
+    precleanup_candidate_discrete_haps[:, ~kept_mask] = MASK
+
     # --- 8. FINAL CLEANUP (legacy machinery, safety net) ---
     if len(haps_dict) > 1:
         cleaned = _final_cleanup(
@@ -794,6 +1476,62 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
             chimera_min_delta_to_protect=chimera_min_delta_to_protect)
     else:
         cleaned = haps_dict
+
+    cleaned_source_indices = _cleanup_source_indices(haps_dict, cleaned)
+    cleanup_changed_model = (
+        cleaned_source_indices != tuple(range(H_k.shape[0]))
+    )
+    if cleanup_changed_model:
+        H_seed = np.ascontiguousarray(
+            H_k[np.asarray(cleaned_source_indices, dtype=np.int64)]
+        )
+        H_k, A, wildcard_slots = _refit_cleaned_discrete_model(
+            probs_k,
+            H_seed,
+            lambda_wildcard_penalty,
+            coord_descent_max_iter,
+        )
+        K_final = int(H_k.shape[0])
+        wildcard_mass = (
+            float(np.sum(wildcard_slots, dtype=np.int64))
+            / max(2 * probs_k.shape[0], 1)
+        )
+        if K_final:
+            confidence_k, n_supporters_k = _compute_per_site_confidence(
+                probs_k,
+                H_k,
+                A,
+                lam=lambda_wildcard_penalty,
+                min_supporters=min_supporters_for_confidence,
+            )
+        else:
+            confidence_k = np.empty(
+                (0, probs_k.shape[1]), dtype=np.float64
+            )
+            n_supporters_k = np.empty(
+                (0, probs_k.shape[1]), dtype=np.int64
+            )
+
+        H_full = np.zeros((K_final, n_sites_full), dtype=np.int64)
+        confidence_full = np.zeros(
+            (K_final, n_sites_full), dtype=np.float64
+        )
+        n_supporters_full = np.zeros(
+            (K_final, n_sites_full), dtype=np.int64
+        )
+        if kept_mask.any():
+            kept_idx = np.where(kept_mask)[0]
+            H_full[:, kept_idx] = H_k
+            confidence_full[:, kept_idx] = confidence_k
+            n_supporters_full[:, kept_idx] = n_supporters_k
+        cleaned = _discrete_haps_to_prob_arrays(
+            H_full,
+            n_sites_full,
+            kept_mask,
+            confidence_full,
+            n_supporters_full,
+            min_supporters=min_supporters_for_confidence,
+        )
 
     # --- 9. APPLY MASK FOR LOW-SUPPORT SITES IN DISCRETE OUTPUT ---
     H_with_mask = H_full.copy()
@@ -810,7 +1548,8 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
 
     # --- 11. CONSTRUCT RESULT ---
     result = BlockResult(positions, cleaned, reads_array,
-                          keep_flags=keep_flags, probs_array=probs_array)
+                         keep_flags=keep_flags, probs_array=probs_array,
+                         genotype_evidence_mode=genotype_evidence_mode)
     result.discrete_haps = H_with_mask
     result.per_site_confidence = confidence_full
     result.n_site_supporters = n_supporters_full
@@ -819,8 +1558,17 @@ def generate_haplotypes_block(positions, reads_array, keep_flags=None,
     result.uncertainty_flag = bool(uncertainty_flag)
     result.K_final = int(K_final)
     result.growth_history = history
+    result.precleanup_candidate_discrete_haps = (
+        precleanup_candidate_discrete_haps.copy()
+    )
+    result.precleanup_candidate_k = int(
+        result.precleanup_candidate_discrete_haps.shape[0]
+    )
+    _validate_synchronized_block_result(
+        result, min_supporters_for_confidence
+    )
 
-    _malloc_trim()
+    _maybe_malloc_trim()
     return result
 
 
@@ -862,6 +1610,7 @@ def find_missing_haplotypes_iterative(positions, reads_array, current_haps,
                                       lambda_wildcard_penalty=DEFAULT_LAMBDA,
                                       min_residual_samples=None,
                                       dedup_threshold_percent=RECOVERY_HAPS_EQUAL_EPS_PCT,
+                                      read_error_prob=DEFAULT_READ_ERROR_PROBABILITY,
                                       **generation_kwargs):
     """Find founders the current set cannot explain, using discrete machinery.
 
@@ -893,6 +1642,10 @@ def find_missing_haplotypes_iterative(positions, reads_array, current_haps,
         {new_idx: (n_sites_full, 2)} newly discovered founders (possibly empty),
         in the same [P(0), P(1)] format as generate_haplotypes_block output.
     """
+    evidence_mode = _validate_genotype_evidence_mode(
+        generation_kwargs.get('genotype_evidence_mode', 'hwe_posterior')
+    )
+    read_error_prob = _validate_read_error_prob(read_error_prob)
     if len(current_haps) == 0:
         return {}
 
@@ -913,7 +1666,15 @@ def find_missing_haplotypes_iterative(positions, reads_array, current_haps,
     # Probs on kept sites only, materialised C-contiguous so the assignment /
     # CD kernels fast-path their contiguity checks (boolean masking yields a
     # non-contiguous view).  Pure layout change — values are identical.
-    (_, probs_array) = analysis_utils.reads_to_probabilities(reads_array)
+    # Residual recovery is a legacy compatibility path and imports its
+    # probability conversion machinery only if the path is actually used.
+    import analysis_utils
+
+    (_, probs_array) = analysis_utils.reads_to_probabilities(
+        reads_array,
+        read_error_prob=read_error_prob,
+        use_hwe_prior=(evidence_mode == 'hwe_posterior'),
+    )
     probs_k = np.ascontiguousarray(probs_array[:, kept_mask, :])
     if probs_k.shape[0] == 0 or probs_k.shape[1] == 0:
         return {}
@@ -950,6 +1711,7 @@ def find_missing_haplotypes_iterative(positions, reads_array, current_haps,
     sub_block_result = generate_haplotypes_block(
         positions, reads_array[residual_idx], keep_flags=keep_flags,
         lambda_wildcard_penalty=lambda_wildcard_penalty,
+        read_error_prob=read_error_prob,
         **generation_kwargs)
 
     # Keep only founders not already present: minimum kept-site Hamming (%) to
@@ -1033,34 +1795,54 @@ def _worker_generate_block_direct(args):
     directly, returns (idx, result).  Matches the worker signature of
     block_haplotypes_em_foothold._worker_generate_block_direct so the
     orchestrator scaffolding can be reused."""
-    block_idx, positions, reads, flags, kwargs = args
-
-    # Register this worker as active, then take an initial thread allocation
-    # from the shared dynamic-thread state.  The per-block recovery path
-    # (here + bhd_recovery / bhd_trio) re-checks this allocation at every
-    # phase boundary via dynamic_threads.apply_dynamic_threads(), so a straggler
-    # block grows into cores freed as its peers finish.
+    # Register before decoding the task so even an early malformed-task failure
+    # contributes to batch-start accounting and is always balanced in finally.
+    # Later recovery phases re-check the live allocation, allowing true tail
+    # stragglers to consume cores released by completed workers.
     dynamic_threads.increment_active()
     dynamic_threads.apply_dynamic_threads()
 
     try:
-        # --- diagnostic: time each block's discovery and print id/size/seconds
-        # as it finishes (lines tagged [block-time]; grep them out of the log).
-        import time as _time
-        import sys as _sys
-        _bt0 = _time.perf_counter()
-        result = generate_haplotypes_block_robust(
-            positions, reads, keep_flags=flags, **kwargs)
-        _bt = _time.perf_counter() - _bt0
-        try:
-            # _nr = reads.shape[0] if hasattr(reads, "shape") else len(reads)
-            # _ns = len(positions) if positions is not None else -1
-            # print("[block-time] id=%d reads=%s sites=%s seconds=%.2f"
-            #       % (block_idx, _nr, _ns, _bt), file=_sys.stderr, flush=True)
-            pass
-        except Exception:
-            pass
-        _malloc_trim()
+        block_idx, positions, reads, flags, kwargs, discard_reads_after = args
+        worker_kwargs = kwargs.copy()
+        reversible_cavity_config = worker_kwargs.pop(
+            'reversible_cavity_config', None
+        )
+
+        has_kept_sites = (
+            flags is None or np.any(np.asarray(flags) > 0)
+        )
+        if len(positions) == 0 or not has_kept_sites:
+            # Preserve the historical empty/no-kept result construction; the
+            # reversible protocol intentionally requires a kept site.
+            result = generate_haplotypes_block_robust(
+                positions, reads, keep_flags=flags, **worker_kwargs
+            )
+        elif reversible_cavity_config is not None:
+            from bhd_reversible_discovery import (
+                discover_block_reversible_cavity,
+            )
+
+            cavity_result = discover_block_reversible_cavity(
+                positions,
+                reads,
+                keep_flags=flags,
+                config=reversible_cavity_config,
+            )
+            result = cavity_result.to_block_result(
+                block_result_class=BlockResult
+            )
+        else:
+            result = generate_haplotypes_block_robust(
+                positions, reads, keep_flags=flags, **worker_kwargs
+            )
+        # When callers discard the read matrix, clear it before the result is
+        # serialized through the multiprocessing pipe.  The parent has always
+        # observed ``None`` in this mode; doing the same operation here avoids
+        # transmitting roughly samples * sites * 2 int64 values per block.
+        if discard_reads_after:
+            result.reads_count_matrix = None
+        _maybe_malloc_trim(completed_block=True)
         return (block_idx, result)
     finally:
         # Release any held extra FIRST, then decrement the active counter, so
@@ -1103,10 +1885,34 @@ def generate_all_block_haplotypes(genomic_data,
                                     wrongness_threshold=10.0,
                                     max_intermediate_haps=100,
                                     num_processes=16,
-                                    discard_reads_after=True):
+                                    discard_reads_after=True,
+                                    genotype_evidence_mode="hwe_posterior",
+                                    read_error_prob=DEFAULT_READ_ERROR_PROBABILITY,
+                                    total_numba_threads=None,
+                                    block_pool=None,
+                                    reversible_cavity_config=None):
     """Parallel orchestrator — drop-in replacement for the legacy
     generate_all_block_haplotypes contract."""
     from tqdm import tqdm
+
+    genotype_evidence_mode = _validate_genotype_evidence_mode(
+        genotype_evidence_mode
+    )
+    read_error_prob = _validate_read_error_prob(read_error_prob)
+
+    num_processes, total_numba_threads = _validate_block_parallelism(
+        num_processes, total_numba_threads
+    )
+    if block_pool is not None:
+        if not isinstance(block_pool, BlockDiscoveryPool):
+            raise TypeError("block_pool must be a BlockDiscoveryPool")
+        if (
+            block_pool.num_processes != num_processes
+            or block_pool.total_numba_threads != total_numba_threads
+        ):
+            raise ValueError(
+                "block_pool worker and thread budgets must match this call"
+            )
 
     kwargs = {
         'lambda_wildcard_penalty': lambda_wildcard_penalty,
@@ -1115,6 +1921,8 @@ def generate_all_block_haplotypes(genomic_data,
         'K_max': K_max,
         'coord_descent_max_iter': coord_descent_max_iter,
         'min_supporters_for_confidence': min_supporters_for_confidence,
+        'genotype_evidence_mode': genotype_evidence_mode,
+        'read_error_prob': read_error_prob,
         'recovery_max_K': recovery_max_K,
         'recovery_mixture_K_max': recovery_mixture_K_max,
         'recovery_mixture_patience': recovery_mixture_patience,
@@ -1126,47 +1934,42 @@ def generate_all_block_haplotypes(genomic_data,
         'uniqueness_threshold_percent': uniqueness_threshold_percent,
         'wrongness_threshold': wrongness_threshold,
         'max_intermediate_haps': max_intermediate_haps,
+        'reversible_cavity_config': reversible_cavity_config,
     }
 
     n_blocks = len(genomic_data)
     task_args = []
     for i in range(n_blocks):
         positions, reads, flags = genomic_data[i]
-        task_args.append((i, positions, reads, flags, kwargs))
+        task_args.append((
+            i,
+            positions,
+            reads,
+            flags,
+            kwargs,
+            bool(discard_reads_after),
+        ))
 
-    # Belt-and-suspenders: clear __main__ to prevent forkserver from
-    # re-executing the entry script
-    import sys as _sys
-    _main_mod = _sys.modules.get('__main__')
-    _saved_main_file = getattr(_main_mod, '__file__', None)
-    _saved_main_spec = getattr(_main_mod, '__spec__', None)
-    if _main_mod is not None:
-        if hasattr(_main_mod, '__file__'):
-            del _main_mod.__file__
-        _main_mod.__spec__ = None
+    description = (
+        "Block Haplotypes (reversible cavity)"
+        if reversible_cavity_config is not None
+        else "Block Haplotypes (discrete)"
+    )
 
-    try:
-        active_counter = _forkserver_ctx.Value('i', 0)
-        # extra_counter: # workers currently holding the +1 remainder thread,
-        # so total threads in use across the pool stays == num_processes with
-        # no idle cores as the active-block count changes (see dynamic_threads'
-        # dynamic-thread mechanism).
-        extra_counter = _forkserver_ctx.Value('i', 0)
-        with _ForkserverPool(processes=num_processes,
-                              initializer=_init_block_worker,
-                              initargs=(num_processes, active_counter, extra_counter)) as pool:
-            results = []
-            for result in tqdm(
-                pool.imap_unordered(_worker_generate_block_direct, task_args, chunksize=1),
-                total=n_blocks,
-                desc="Block Haplotypes (discrete)"
-            ):
-                results.append(result)
-    finally:
-        if _main_mod is not None:
-            if _saved_main_file is not None:
-                _main_mod.__file__ = _saved_main_file
-            _main_mod.__spec__ = _saved_main_spec
+    def collect(pool):
+        return list(tqdm(
+            pool.imap_unordered(task_args),
+            total=n_blocks,
+            desc=description,
+        ))
+
+    if block_pool is None:
+        with BlockDiscoveryPool(
+            num_processes, total_numba_threads
+        ) as local_pool:
+            results = collect(local_pool)
+    else:
+        results = collect(block_pool)
 
     results.sort(key=lambda x: x[0])
     overall_haplotypes = [r[1] for r in results]
@@ -1190,12 +1993,17 @@ class BlockResult:
     """
     Container for the reconstructed haplotypes of a single genomic block.
     """
-    def __init__(self, positions, haplotypes, reads_count_matrix=None, keep_flags=None, probs_array=None):
+    def __init__(self, positions, haplotypes, reads_count_matrix=None,
+                 keep_flags=None, probs_array=None,
+                 genotype_evidence_mode=None):
         self.positions = positions
         self.haplotypes = haplotypes # Dictionary {id: numpy_array}
         self.reads_count_matrix = reads_count_matrix # Optional: source reads (Samples x Sites x 2)
         self.keep_flags = keep_flags
         self.probs_array = probs_array # New Optional: genotype probabilities (Samples x Sites x 3)
+        # Provenance for probs_array; None preserves compatibility with
+        # historical BlockResult objects whose evidence mode was not recorded.
+        self.genotype_evidence_mode = genotype_evidence_mode
         
     def __len__(self):
         return len(self.haplotypes)
@@ -1261,3 +2069,144 @@ def consolidate_similar_candidates(candidates, diff_threshold_percent=1.0):
             
     # Rebuild dictionary with sequential keys
     return {i: h for i, h in enumerate(unique_haps)}
+
+
+def _selftest_reversible_orchestration():
+    """Check reversible, default-legacy, and empty-block dispatch."""
+    import bhd_reversible_discovery as reversible_discovery
+
+    class InlineBlockDiscoveryPool(BlockDiscoveryPool):
+        def __init__(self):
+            self.num_processes = 1
+            self.total_numba_threads = 1
+            self.tasks = []
+
+        def imap_unordered(self, tasks):
+            self.tasks.extend(tasks)
+            for task in tasks:
+                yield _worker_generate_block_direct(task)
+
+    reversible_calls = []
+    materialization_classes = []
+    legacy_calls = []
+
+    class FakeReversibleResult:
+        def __init__(self, positions, reads, flags):
+            self.positions = positions
+            self.reads = reads
+            self.flags = flags
+
+        def to_block_result(self, *, block_result_class=None):
+            materialization_classes.append(block_result_class)
+            result = block_result_class(
+                self.positions,
+                {},
+                self.reads,
+                keep_flags=self.flags,
+            )
+            result.dispatch_marker = "reversible"
+            return result
+
+    def fake_reversible_discovery(
+        positions,
+        reads,
+        keep_flags=None,
+        *,
+        config=None,
+    ):
+        reversible_calls.append((positions, reads, keep_flags, config))
+        return FakeReversibleResult(positions, reads, keep_flags)
+
+    def fake_legacy_discovery(
+        positions,
+        reads,
+        keep_flags=None,
+        **kwargs,
+    ):
+        legacy_calls.append((positions, reads, keep_flags, kwargs))
+        assert "reversible_cavity_config" not in kwargs
+        result = BlockResult(
+            positions,
+            {},
+            reads,
+            keep_flags=keep_flags,
+        )
+        result.dispatch_marker = "legacy"
+        return result
+
+    original_reversible = (
+        reversible_discovery.discover_block_reversible_cavity
+    )
+    original_legacy = globals()["generate_haplotypes_block_robust"]
+    reversible_discovery.discover_block_reversible_cavity = (
+        fake_reversible_discovery
+    )
+    globals()["generate_haplotypes_block_robust"] = fake_legacy_discovery
+    try:
+        positions = np.asarray([10, 20], dtype=np.int64)
+        reads = np.zeros((1, 2, 2), dtype=np.int64)
+        flags = np.ones(2, dtype=np.int64)
+        empty_positions = np.asarray([], dtype=np.int64)
+        empty_reads = np.zeros((1, 0, 2), dtype=np.int64)
+        empty_flags = np.asarray([], dtype=np.int64)
+        filtered_positions = np.asarray([30], dtype=np.int64)
+        filtered_reads = np.zeros((1, 1, 2), dtype=np.int64)
+        filtered_flags = np.zeros(1, dtype=np.int64)
+        genomic_data = (
+            (positions, reads, flags),
+            (empty_positions, empty_reads, empty_flags),
+            (filtered_positions, filtered_reads, filtered_flags),
+        )
+        reversible_marker = object()
+
+        reversible_pool = InlineBlockDiscoveryPool()
+        reversible_results = generate_all_block_haplotypes(
+            genomic_data,
+            num_processes=1,
+            total_numba_threads=1,
+            block_pool=reversible_pool,
+            discard_reads_after=False,
+            reversible_cavity_config=reversible_marker,
+        )
+        assert len(reversible_pool.tasks) == 3
+        assert all(
+            task[4]["reversible_cavity_config"] is reversible_marker
+            for task in reversible_pool.tasks
+        )
+        assert len(reversible_calls) == 1
+        call = reversible_calls[0]
+        assert call[0] is positions
+        assert call[1] is reads
+        assert call[2] is flags
+        assert call[3] is reversible_marker
+        assert materialization_classes == [BlockResult]
+        assert len(legacy_calls) == 2
+        assert reversible_results[0].dispatch_marker == "reversible"
+        assert reversible_results[1].dispatch_marker == "legacy"
+        assert reversible_results[2].dispatch_marker == "legacy"
+        assert reversible_results[0].reads_count_matrix is reads
+
+        legacy_pool = InlineBlockDiscoveryPool()
+        legacy_results = generate_all_block_haplotypes(
+            ((positions, reads, flags),),
+            num_processes=1,
+            total_numba_threads=1,
+            block_pool=legacy_pool,
+            discard_reads_after=False,
+        )
+        assert len(reversible_calls) == 1
+        assert len(legacy_calls) == 3
+        assert legacy_results[0].dispatch_marker == "legacy"
+        assert legacy_results[0].reads_count_matrix is reads
+    finally:
+        globals()["generate_haplotypes_block_robust"] = original_legacy
+        reversible_discovery.discover_block_reversible_cavity = (
+            original_reversible
+        )
+
+    return {
+        "legacy_dispatch_unchanged": "pass",
+        "empty_and_no_kept_legacy_fallback": "pass",
+        "reversible_forwarding_and_exact_materialization": "pass",
+        "reversible_no_refit": "pass",
+    }

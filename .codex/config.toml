@@ -1,0 +1,11 @@
+# Project-scoped Codex configuration.
+# Keep the primary-thread model and reasoning level under user/UI control.
+# AGENTS.md is intentionally detailed and exceeds Codex's default 32 KiB budget.
+project_doc_max_bytes = 65536
+
+[agents]
+enabled = true
+default_subagent_model = "gpt-5.6-sol"
+default_subagent_reasoning_effort = "high"
+interrupt_message = true
+# No max_concurrent_threads_per_session is set: use the orchestrator default.

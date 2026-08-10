@@ -5,6 +5,7 @@ fallback / equivalence reference)."""
 
 import numpy as np
 import math
+import numba
 from numba import njit, prange
 
 from bhd_kernels import (
@@ -345,20 +346,90 @@ def _viterbi_subset_from_pool_kernel(pool_tensor, pool_state_indices, penalty):
 
 
 @njit(cache=True, parallel=True, fastmath=False)
+def _batch_subset_scores_candidate_kernel(
+        pool_tensor, subsets, K_pool, penalty):
+    """Exact candidate-parallel batch scorer for small teams or wide batches.
+
+    This is the original batch layout: each ``prange`` task builds one
+    candidate's state map, then scores all samples serially.  It is retained
+    when the live Numba team has at most four threads, or for batches wide
+    enough to keep a large team occupied without sacrificing the sample-local
+    cache reuse of the usual path.
+    """
+    n_cand = subsets.shape[0]
+    K_sub = subsets.shape[1]
+    N = pool_tensor.shape[0]
+    n_sites = pool_tensor.shape[2]
+    n_rr_pool = K_pool * (K_pool + 1) // 2
+    n_rr_sub = K_sub * (K_sub + 1) // 2
+    K_sub_states = n_rr_sub + K_sub + 1
+
+    out = np.empty((n_cand, N), dtype=np.float64)
+
+    for c in prange(n_cand):
+        sidx = subsets[c]
+        psi = np.empty(K_sub_states, dtype=np.int64)
+        slot = 0
+        for a in range(K_sub):
+            pa = sidx[a]
+            for b in range(a, K_sub):
+                pb = sidx[b]
+                if pa <= pb:
+                    lo = pa
+                    hi = pb
+                else:
+                    lo = pb
+                    hi = pa
+                psi[slot] = (
+                    lo * K_pool - lo * (lo - 1) // 2 + (hi - lo)
+                )
+                slot += 1
+        for k_sub in range(K_sub):
+            psi[slot] = n_rr_pool + sidx[k_sub]
+            slot += 1
+        psi[slot] = n_rr_pool + K_pool
+
+        for s in range(N):
+            current = np.empty(K_sub_states, dtype=np.float64)
+            for k in range(K_sub_states):
+                current[k] = pool_tensor[s, psi[k], 0]
+            for i in range(1, n_sites):
+                best_prev = -np.inf
+                for k in range(K_sub_states):
+                    if current[k] > best_prev:
+                        best_prev = current[k]
+                switch_base = best_prev - penalty
+                for k in range(K_sub_states):
+                    emission = pool_tensor[s, psi[k], i]
+                    stay = current[k]
+                    if stay > switch_base:
+                        current[k] = stay + emission
+                    else:
+                        current[k] = switch_base + emission
+            final_max = -np.inf
+            for k in range(K_sub_states):
+                if current[k] > final_max:
+                    final_max = current[k]
+            out[c, s] = final_max
+
+    return out
+
+
+@njit(cache=True, parallel=True, fastmath=False)
 def _batch_subset_scores_kernel(pool_tensor, subsets, K_pool, penalty):
     """Batched _viterbi_subset_from_pool_kernel: score MANY equal-size
-    subsets at once, parallelised across candidates.
+    subsets at once, parallelised across samples.
 
-    `prange` is over the candidate axis (the outer loop), with the
-    per-sample Viterbi DP run SERIALLY inside each candidate (no nested
-    prange).  This is the win on pathological large-pool blocks where the
-    greedy / swap selection evaluates many candidate subsets: instead of a
-    sequential Python loop launching one tiny per-sample-parallel kernel per
-    candidate (Python + dispatch overhead dominating, few cores busy), all
-    candidates run concurrently here.
+    The pool-state map for every candidate is built once, then `prange` spans
+    the sample axis.  This provides N independent tasks even when a greedy or
+    pruning round contains only a few candidates, while the serial candidate
+    loop inside one sample reuses that sample's pool-emission rows in cache.
+    A single current-score buffer is overwritten and reused for every
+    candidate handled by the sample task.
 
-    Each candidate inlines _build_pool_state_index_map_kernel followed by the
-    exact _viterbi_subset_from_pool_kernel recurrence, reading the SAME
+    Each candidate's map uses the same loop as
+    _build_pool_state_index_map_kernel, followed by the exact
+    _viterbi_subset_from_pool_kernel recurrence, reading the SAME
     pool_tensor scalars in the SAME left-to-right order, so out[c, s] equals
     the best-path score _viterbi_subset_from_pool_kernel would return for
     subset c, sample s — to the last bit.
@@ -387,11 +458,13 @@ def _batch_subset_scores_kernel(pool_tensor, subsets, K_pool, penalty):
 
     out = np.empty((n_cand, N), dtype=np.float64)
 
-    for c in prange(n_cand):
-        # --- build this subset's pool-state-index map (inline of
-        # _build_pool_state_index_map_kernel) ---
+    # Build every candidate's state map once before the parallel scoring
+    # region.  The previous candidate-parallel layout built the same values
+    # inside each candidate task; moving them here changes neither their
+    # order nor their values.
+    state_maps = np.empty((n_cand, K_sub_states), dtype=np.int64)
+    for c in range(n_cand):
         sidx = subsets[c]
-        psi = np.empty(K_sub_states, dtype=np.int64)
         slot = 0
         for a in range(K_sub):
             pa = sidx[a]
@@ -403,19 +476,23 @@ def _batch_subset_scores_kernel(pool_tensor, subsets, K_pool, penalty):
                 else:
                     lo = pb
                     hi = pa
-                psi[slot] = lo * K_pool - lo * (lo - 1) // 2 + (hi - lo)
+                state_maps[c, slot] = (
+                    lo * K_pool - lo * (lo - 1) // 2 + (hi - lo)
+                )
                 slot += 1
         for k_sub in range(K_sub):
-            psi[slot] = n_rr_pool + sidx[k_sub]
+            state_maps[c, slot] = n_rr_pool + sidx[k_sub]
             slot += 1
-        psi[slot] = n_rr_pool + K_pool
+        state_maps[c, slot] = n_rr_pool + K_pool
 
-        # --- Viterbi DP over samples, SERIAL here (inline of
-        # _viterbi_subset_from_pool_kernel with range instead of prange) ---
-        for s in range(N):
-            current = np.empty(K_sub_states, dtype=np.float64)
+    # Score all candidates for one sample while that sample's pool tensor is
+    # hot.  N=116 in the primary real workload, so the sample axis still has
+    # enough independent work to fill the 112-core allocation.
+    for s in prange(N):
+        current = np.empty(K_sub_states, dtype=np.float64)
+        for c in range(n_cand):
             for k in range(K_sub_states):
-                current[k] = pool_tensor[s, psi[k], 0]
+                current[k] = pool_tensor[s, state_maps[c, k], 0]
             for i in range(1, n_sites):
                 best_prev = -np.inf
                 for k in range(K_sub_states):
@@ -423,7 +500,7 @@ def _batch_subset_scores_kernel(pool_tensor, subsets, K_pool, penalty):
                         best_prev = current[k]
                 switch_base = best_prev - penalty
                 for k in range(K_sub_states):
-                    emission = pool_tensor[s, psi[k], i]
+                    emission = pool_tensor[s, state_maps[c, k], i]
                     stay = current[k]
                     if stay > switch_base:
                         current[k] = stay + emission
@@ -919,11 +996,14 @@ class PoolEmissionCache:
             is identical, and the per-sample sum reuses the same numpy
             pairwise reduction (-scores.sum(axis=1)).
 
-        Parallelised across candidates (prange in _batch_subset_scores_kernel)
-        rather than per-candidate-over-samples — the win on pathological
-        large-pool blocks where there are many candidates but each one's
-        Viterbi is tiny.  In the memory-guard / empty-pool paths the tensor is
-        absent, so scoring goes through _fused_subset_scores_kernel instead,
+        The normal tensor-cache path is sample-parallel, with candidate state
+        maps built once and each sample's emission rows reused across the
+        candidate batch.  The exact candidate-parallel kernel is faster for
+        live Numba teams of at most four threads, and is also used for a team
+        of at least 32 threads when the batch has at least both 256 candidates
+        and four candidates per live thread.  In the memory-guard / empty-pool
+        paths the tensor is absent, so scoring goes
+        _fused_subset_scores_kernel instead,
         which keeps the same candidate-parallel shape (and the same per-
         candidate result, to a couple of ULP) while fusing emissions into the
         Viterbi in one log-free pass; empty subsets short-circuit to the
@@ -944,6 +1024,17 @@ class PoolEmissionCache:
                 self._pool_haps_arr, self._log_probs_c, subsets,
                 self.snps_per_bin, self.n_bins, self.lam, self.penalty)
             return -scores.sum(axis=1)
-        scores = _batch_subset_scores_kernel(
-            self._pool_tensor, subsets, self.K_pool, self.penalty)
+        team_size = int(numba.get_num_threads())
+        if (
+            team_size <= 4
+            or (
+                team_size >= 32
+                and n_cand >= max(256, 4 * team_size)
+            )
+        ):
+            scores = _batch_subset_scores_candidate_kernel(
+                self._pool_tensor, subsets, self.K_pool, self.penalty)
+        else:
+            scores = _batch_subset_scores_kernel(
+                self._pool_tensor, subsets, self.K_pool, self.penalty)
         return -scores.sum(axis=1)

@@ -4,6 +4,11 @@ primitives it needs from the bhd_kernels foundation."""
 
 import numpy as np
 import math
+import numba
+import dynamic_threads
+from collections import OrderedDict
+from functools import lru_cache
+from threading import RLock
 from numba import njit, prange
 
 from bhd_kernels import (
@@ -13,7 +18,12 @@ from bhd_kernels import (
     _viterbi_nll,
     _ww_bin_emis_from_cost_ww,
 )
+from bhd_model_selection import (
+    compute_founder_complexity_cost,
+    compute_outer_bic,
+)
 from bhd_config import (
+    FIXED_K_FIT_MAX_THREADS,
     VITERBI_SNPS_PER_BIN,
     VITERBI_SWITCH_PENALTY,
     _VITERBI_BIC_ENABLED,
@@ -24,8 +34,27 @@ from bhd_config import (
 # UPDATE STEP A: pair assignments per sample
 # =============================================================================
 
+@lru_cache(maxsize=32)
+def _pair_indices_for_K(K):
+    """Return immutable row-major ``i <= j`` pair indices for one K.
+
+    These arrays depend only on K but are consumed by every assignment update
+    in every fixed-K fit.  Keeping one process-local copy avoids rebuilding
+    the same triangular geometry thousands of times per block.  The cached
+    arrays have exactly the dtype, values, and order returned by
+    ``np.triu_indices``; making them read-only prevents accidental mutation.
+    """
+    rr_i, rr_j = np.triu_indices(int(K))
+    rr_i = np.ascontiguousarray(rr_i, dtype=np.int64)
+    rr_j = np.ascontiguousarray(rr_j, dtype=np.int64)
+    rr_i.setflags(write=False)
+    rr_j.setflags(write=False)
+    return rr_i, rr_j
+
+
 def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
-              blas_lp_cache=None):
+              blas_lp_cache=None, binary_pattern_cache=None,
+              WW_total_cost=None):
     """For each sample, pick the pair assignment that minimises its
     capped cost.
 
@@ -43,6 +72,10 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
                   emissions for the WW state.  Derived from cost_WW via
                   `_ww_bin_emis_from_cost_ww`; if cost_WW is supplied
                   but WW_bin_emis is None, the latter is derived here.
+        WW_total_cost: (N,) optional — exact left-to-right per-sample sum of
+                  ``cost_WW``.  The table-fed kernel reuses this evidence-only
+                  value rather than resumming all sites during every
+                  coordinate-descent assignment update.
         log_probs: (N, L_kept, 3) optional — precomputed
                   log(max(probs_k[s, l, g], LOG_EPS_LOCAL)).  When
                   provided, the fused kernel reads it instead of
@@ -63,6 +96,14 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
                   them through; standalone callers leave this None and
                   it is computed internally.  Consulted only on the
                   K > 0 production path; ignored at K = 0.
+        binary_pattern_cache: optional immutable evidence-local contraction
+                  tables prepared by `_prepare_fixed_k_fit_workspace`.  For
+                  exactly binary H with K >= 1, all possible within-bin
+                  binary patterns were contracted by the same BLAS operation
+                  once, so per-fit H-dependent GEMMs become exact table
+                  lookups.  K=0, non-integer/nonbinary H, incompatible
+                  tables, and standalone calls fall back to the existing
+                  GEMM path.
 
     Returns:
         A: (N, 2) int array — A[s, *] in {0..K-1, K} where K = wildcard
@@ -127,6 +168,9 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
             WW_bin_emis = _ww_bin_emis_from_cost_ww(
                 cost_WW_c, int(snps_per_bin), int(n_bins))
         WW_bin_emis_c = _maybe_c_contig(WW_bin_emis, np.float64)
+        if WW_total_cost is None:
+            WW_total_cost = _ww_total_cost_kernel(cost_WW_c)
+        WW_total_cost_c = _maybe_c_contig(WW_total_cost, np.float64)
 
         # Precompute log_probs once if not provided (Tier 0).  Like
         # cost_WW, log_probs is invariant across CD iterations because
@@ -151,9 +195,63 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
         # rr pair indices (i, j) with i <= j in row-major order — matches
         # the rr state order of _update_A_fused_blas_kernel.
         n_rr = K * (K + 1) // 2
-        rr_i, rr_j = np.triu_indices(K)
-        rr_i = rr_i.astype(np.int64)
-        rr_j = rr_j.astype(np.int64)
+        rr_i, rr_j = _pair_indices_for_K(K)
+
+        # Exact binary-pattern path.  The table workspace is tied by object
+        # identity to this evidence's BLAS precompute and is never mutated.
+        # Restrict the shortcut to integer/bool binary H with K>=1. The
+        # canonical recurrence is deliberately independent of BLAS row shape;
+        # general/nonbinary callers retain the established GEMM behaviour.
+        H_input = np.asarray(H_k)
+        use_binary_patterns = (
+            K >= 1
+            and isinstance(
+                binary_pattern_cache,
+                _BinaryPatternContractionWorkspace,
+            )
+            and binary_pattern_cache.blas_lp_reference is blas_lp_cache
+            and binary_pattern_cache.n_bins == int(n_bins)
+            and binary_pattern_cache.snps_per_bin == int(snps_per_bin)
+            and binary_pattern_cache.n_samples == int(N)
+            and binary_pattern_cache.supports_k(K)
+            and H_input.dtype.kind in "biu"
+        )
+        if use_binary_patterns:
+            is_binary, h_patterns, pair_patterns = (
+                _binary_haplotype_patterns(
+                    H_c, rr_i, rr_j,
+                    int(snps_per_bin), int(n_bins), int(L),
+                )
+            )
+            if is_binary:
+                pattern_kernel = _update_A_fused_pattern_kernel
+                if numba.get_num_threads() == 1:
+                    pattern_kernel = _update_A_fused_pattern_kernel_serial
+                A, per_sample_cost, wildcard_slots = (
+                    pattern_kernel(
+                        C0b,
+                        binary_pattern_cache.diff1_table,
+                        binary_pattern_cache.w_table,
+                        kW_Cb,
+                        binary_pattern_cache.kWdiff_table,
+                        h_patterns,
+                        pair_patterns,
+                        WW_bin_emis_c,
+                        WW_total_cost_c,
+                        rr_i,
+                        rr_j,
+                        float(VITERBI_SWITCH_PENALTY),
+                        K,
+                        int(n_bins),
+                    )
+                )
+                per_sample_cost_unc = per_sample_cost
+                return (
+                    A,
+                    per_sample_cost,
+                    per_sample_cost_unc,
+                    wildcard_slots,
+                )
 
         # H-dependent GEMM inputs.  Pad H to n_bins*snps_per_bin with
         # zeros when L is not a multiple of snps_per_bin; padded sites
@@ -468,7 +566,199 @@ def _update_A_blas_lp_precompute(log_probs, lam, snps_per_bin, n_bins):
         lp_c, float(lam), int(snps_per_bin), int(n_bins), int(L))
 
 
-@njit(cache=True, parallel=True, fastmath=False)
+_BINARY_PATTERN_MAX_SNPS_PER_BIN = 10
+
+
+class _BinaryPatternContractionWorkspace:
+    """Read-only evidence-local contractions for every binary bin pattern.
+
+    For production N=116, L=200, and ten sites per bin, each of the three
+    arrays has shape ``(20, 1024, 116)`` and occupies 18.125 MiB; retained
+    table storage is therefore exactly 54.375 MiB (57,016,320 bytes).  Storage
+    is fixed at construction and never grows with the number of fits.
+    """
+
+    __slots__ = (
+        "blas_lp_reference",
+        "snps_per_bin",
+        "n_bins",
+        "n_samples",
+        "n_patterns",
+        "diff1_table",
+        "w_table",
+        "kWdiff_table",
+        "nbytes",
+    )
+
+    def __init__(self, blas_lp_reference, snps_per_bin, n_bins,
+                 diff1_table, w_table, kWdiff_table):
+        self.blas_lp_reference = blas_lp_reference
+        self.snps_per_bin = int(snps_per_bin)
+        self.n_bins = int(n_bins)
+        self.n_samples = int(diff1_table.shape[2])
+        self.n_patterns = int(diff1_table.shape[1])
+        self.diff1_table = diff1_table
+        self.w_table = w_table
+        self.kWdiff_table = kWdiff_table
+        self.nbytes = int(
+            diff1_table.nbytes + w_table.nbytes + kWdiff_table.nbytes
+        )
+
+    def __setattr__(self, name, value):
+        if hasattr(self, name):
+            raise AttributeError("binary-pattern workspace is immutable")
+        object.__setattr__(self, name, value)
+
+    def supports_k(self, k):
+        """Return whether the canonical contraction supports this K.
+
+        Every within-bin binary pattern is contracted once with one fixed
+        numerical definition, independent of the K values subsequently
+        visited by adaptive search. Reconstructing three complete tables at
+        every new K to test a BLAS row-shape implementation detail added no
+        statistical information and made results route-dependent.
+
+        K=0 has no founder state. Every positive K uses the canonical table
+        with unchanged state ordering, accumulation order, and tie rules.
+        """
+        return int(k) >= 1
+
+
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
+def _canonical_binary_pattern_contractions(
+        diff1_bt, w_bt, kWdiff_bt, previous_pattern, added_bit):
+    """Build all binary contractions with one K-independent reduction.
+
+    For each pattern, the highest set bit extends the already-computed lower
+    prefix. This is the ascending-set-bit sum for that pattern, costs one
+    addition per output rather than a dense ten-term dot product, and is
+    independent of BLAS microkernels, thread count, and the K search route.
+    """
+    n_bins, snps_per_bin, n_samples = diff1_bt.shape
+    n_patterns = 1 << snps_per_bin
+    diff1_table = np.empty(
+        (n_bins, n_patterns, n_samples), dtype=np.float64
+    )
+    w_table = np.empty_like(diff1_table)
+    kWdiff_table = np.empty_like(diff1_table)
+    for flat_index in prange(n_bins * n_samples):
+        b = flat_index // n_samples
+        s = flat_index - b * n_samples
+        diff1_table[b, 0, s] = 0.0
+        w_table[b, 0, s] = 0.0
+        kWdiff_table[b, 0, s] = 0.0
+        for pattern in range(1, n_patterns):
+            highest_bit = added_bit[pattern]
+            previous = previous_pattern[pattern]
+            diff1_table[b, pattern, s] = (
+                diff1_table[b, previous, s]
+                + diff1_bt[b, highest_bit, s]
+            )
+            w_table[b, pattern, s] = (
+                w_table[b, previous, s]
+                + w_bt[b, highest_bit, s]
+            )
+            kWdiff_table[b, pattern, s] = (
+                kWdiff_table[b, previous, s]
+                + kWdiff_bt[b, highest_bit, s]
+            )
+    return diff1_table, w_table, kWdiff_table
+
+def _prepare_binary_pattern_contractions(blas_lp_cache, snps_per_bin, n_bins):
+    """Contract every supported binary within-bin pattern exactly once.
+
+    A compiled subset recurrence gives every pattern one fixed ascending-bit
+    float64 reduction, independent of K, BLAS implementation, and thread
+    allocation. Wider bins would grow exponentially and deliberately fall
+    back to the existing direct path.
+    """
+    spb = int(snps_per_bin)
+    bins = int(n_bins)
+    if spb < 1 or spb > _BINARY_PATTERN_MAX_SNPS_PER_BIN or bins < 1:
+        return None
+    if blas_lp_cache is None or len(blas_lp_cache) != 5:
+        return None
+    _C0b, diff1_bt, w_bt, _kW_Cb, kWdiff_bt = blas_lp_cache
+    if (
+        diff1_bt.ndim != 3
+        or w_bt.shape != diff1_bt.shape
+        or kWdiff_bt.shape != diff1_bt.shape
+        or diff1_bt.shape[0] != bins
+        or diff1_bt.shape[1] != spb
+        or diff1_bt.dtype != np.float64
+        or w_bt.dtype != np.float64
+        or kWdiff_bt.dtype != np.float64
+    ):
+        return None
+
+    n_patterns = 1 << spb
+    previous_pattern = np.zeros(n_patterns, dtype=np.int64)
+    added_bit = np.zeros(n_patterns, dtype=np.int64)
+    for pattern in range(1, n_patterns):
+        highest_bit = int(pattern).bit_length() - 1
+        added_bit[pattern] = highest_bit
+        previous_pattern[pattern] = pattern ^ (1 << highest_bit)
+    diff1_table, w_table, kWdiff_table = (
+        _canonical_binary_pattern_contractions(
+            np.ascontiguousarray(diff1_bt),
+            np.ascontiguousarray(w_bt),
+            np.ascontiguousarray(kWdiff_bt),
+            previous_pattern,
+            added_bit,
+        )
+    )
+    for table in (diff1_table, w_table, kWdiff_table):
+        table.setflags(write=False)
+
+
+    expected_nbytes = (
+        3 * bins * n_patterns * int(diff1_bt.shape[2])
+        * np.dtype(np.float64).itemsize
+    )
+    actual_nbytes = int(
+        diff1_table.nbytes + w_table.nbytes + kWdiff_table.nbytes
+    )
+    if actual_nbytes != expected_nbytes:
+        raise AssertionError("binary-pattern table byte accounting mismatch")
+    return _BinaryPatternContractionWorkspace(
+        blas_lp_cache,
+        spb,
+        bins,
+        diff1_table,
+        w_table,
+        kWdiff_table,
+    )
+
+
+@njit(cache=True, nogil=True)
+def _binary_haplotype_patterns(H, rr_i, rr_j,
+                               snps_per_bin, n_bins, L):
+    """Encode binary H rows and pairwise products, or request fallback."""
+    K = H.shape[0]
+    n_rr = rr_i.shape[0]
+    h_patterns = np.zeros((K, n_bins), dtype=np.int64)
+    pair_patterns = np.empty((n_rr, n_bins), dtype=np.int64)
+    for k in range(K):
+        for b in range(n_bins):
+            pattern = 0
+            for t in range(snps_per_bin):
+                l = b * snps_per_bin + t
+                if l < L:
+                    value = H[k, l]
+                    if value == 1:
+                        pattern |= 1 << t
+                    elif value != 0:
+                        return False, h_patterns, pair_patterns
+            h_patterns[k, b] = pattern
+    for p in range(n_rr):
+        i = rr_i[p]
+        j = rr_j[p]
+        for b in range(n_bins):
+            pair_patterns[p, b] = h_patterns[i, b] & h_patterns[j, b]
+    return True, h_patterns, pair_patterns
+
+
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
 def _update_A_fused_blas_kernel(C0b, Ub, Mb, kW_Cb, kW_Ub,
                                  cost_WW, WW_bin_emis,
                                  rr_i, rr_j, penalty, K, n_bins, L):
@@ -628,11 +918,294 @@ def _update_A_fused_blas_kernel(C0b, Ub, Mb, kW_Cb, kW_Ub,
     return A, baseline_cost, wildcard_slots, viterbi_ll
 
 
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
+def _update_A_fused_pattern_kernel(C0b, diff1_table, w_table,
+                                    kW_Cb, kWdiff_table,
+                                    h_patterns, pair_patterns,
+                                    WW_bin_emis, WW_total_cost,
+                                    rr_i, rr_j, penalty, K, n_bins):
+    """Exact table-fed counterpart of `_update_A_fused_blas_kernel`.
+
+    Table entries are the same float64 BLAS contractions formerly supplied as
+    Ub, Mb, and kW_Ub.  State order, emission-expression order, baseline
+    argmin, Viterbi forward pass, strict tie rules, WW summation, and returned
+    arrays are otherwise identical to the established kernel.
+    """
+    N = C0b.shape[0]
+    n_rr = pair_patterns.shape[0]
+    K_states = n_rr + K + 1
+    W = K   # wildcard sentinel
+
+    A = np.empty((N, 2), dtype=np.int64)
+    wildcard_slots = np.empty(N, dtype=np.int64)
+    viterbi_ll = np.empty(N, dtype=np.float64)
+
+    for s in prange(N):
+        # Each founder contraction is reused in every rr state containing
+        # that founder.  Above very small K, gather those scattered pattern-
+        # table reads once into a compact sample-local array: this changes no
+        # arithmetic (the exact same table scalar enters the exact same
+        # expression) while reducing diff1 lookups from 2*n_rr*n_bins to
+        # K*n_bins.  K<4 retains the direct route because the gather setup is
+        # not amortised there.
+        gather_founder_terms = K >= 4
+        if gather_founder_terms:
+            founder_diff1 = np.empty((K, n_bins), dtype=np.float64)
+            for k in range(K):
+                for b in range(n_bins):
+                    founder_diff1[k, b] = diff1_table[
+                        b, h_patterns[k, b], s
+                    ]
+
+        bin_emis = np.empty((K_states, n_bins), dtype=np.float64)
+        best_cost = np.inf
+        best_state_idx = 0
+        st = 0
+
+        # ----- Real-real pairs (i, j) with i <= j (row-major) -----
+        # Per-bin emission C0b + Ub[i] + Ub[j] + Mb[pair]; state cost is
+        # the negated sum over bins (= -total LL under this pair).
+        for p in range(n_rr):
+            i = rr_i[p]
+            j = rr_j[p]
+            cost_total = 0.0
+            for b in range(n_bins):
+                if gather_founder_terms:
+                    e = (
+                        C0b[s, b]
+                        + founder_diff1[i, b]
+                        + founder_diff1[j, b]
+                        + w_table[b, pair_patterns[p, b], s]
+                    )
+                else:
+                    e = (
+                        C0b[s, b]
+                        + diff1_table[b, h_patterns[i, b], s]
+                        + diff1_table[b, h_patterns[j, b], s]
+                        + w_table[b, pair_patterns[p, b], s]
+                    )
+                bin_emis[st, b] = e
+                cost_total += e
+            candidate_cost = -cost_total
+            if candidate_cost < best_cost:
+                best_cost = candidate_cost
+                best_state_idx = st
+            st += 1
+
+        # ----- Real-W pairs (k, W) -----
+        for k in range(K):
+            cost_total = 0.0
+            for b in range(n_bins):
+                e = (
+                    kW_Cb[s, b]
+                    + kWdiff_table[b, h_patterns[k, b], s]
+                )
+                bin_emis[st, b] = e
+                cost_total += e
+            candidate_cost = -cost_total
+            if candidate_cost < best_cost:
+                best_cost = candidate_cost
+                best_state_idx = st
+            st += 1
+
+        # ----- (W, W) — bit-identical to the scalar fused kernel -----
+        # State cost: sum_l cost_WW[s, l] left-to-right; bin emissions are
+        # the precomputed WW_bin_emis row.
+        for b in range(n_bins):
+            bin_emis[st, b] = WW_bin_emis[s, b]
+        candidate_cost = WW_total_cost[s]
+        if candidate_cost < best_cost:
+            best_cost = candidate_cost
+            best_state_idx = st
+
+        if best_state_idx < n_rr:
+            A[s, 0] = rr_i[best_state_idx]
+            A[s, 1] = rr_j[best_state_idx]
+            wildcard_slots[s] = 0
+        elif best_state_idx < n_rr + K:
+            A[s, 0] = best_state_idx - n_rr
+            A[s, 1] = W
+            wildcard_slots[s] = 1
+        else:
+            A[s, 0] = W
+            A[s, 1] = W
+            wildcard_slots[s] = 2
+
+        # ----- Viterbi forward on bin_emis (in-place alpha) -----
+        # Reuse the dead first emission column as the Viterbi alpha row.
+        for b in range(1, n_bins):
+            best_prev = -np.inf
+            for st_iter in range(K_states):
+                if bin_emis[st_iter, 0] > best_prev:
+                    best_prev = bin_emis[st_iter, 0]
+            switch_base = best_prev - penalty
+            for st_iter in range(K_states):
+                em = bin_emis[st_iter, b]
+                stay = bin_emis[st_iter, 0]
+                if stay > switch_base:
+                    bin_emis[st_iter, 0] = stay + em
+                else:
+                    bin_emis[st_iter, 0] = switch_base + em
+        best_final = -np.inf
+        for st_iter in range(K_states):
+            if bin_emis[st_iter, 0] > best_final:
+                best_final = bin_emis[st_iter, 0]
+        viterbi_ll[s] = best_final
+
+    return A, -viterbi_ll, wildcard_slots
+
+
+
+# A true serial loop avoids Numba parallel-scheduler overhead at one thread.
+# Keep this localized clone aligned with the parallel kernel above; only the
+# decorator, function name, and outer sample loop intentionally differ.
+@njit(cache=True, parallel=False, fastmath=False, nogil=True)
+def _update_A_fused_pattern_kernel_serial(C0b, diff1_table, w_table,
+                                           kW_Cb, kWdiff_table,
+                                           h_patterns, pair_patterns,
+                                           WW_bin_emis, WW_total_cost,
+                                           rr_i, rr_j, penalty, K, n_bins):
+    """Serial one-thread clone of `_update_A_fused_pattern_kernel`.
+
+    Table entries are the same float64 BLAS contractions formerly supplied as
+    Ub, Mb, and kW_Ub.  State order, emission-expression order, baseline
+    argmin, Viterbi forward pass, strict tie rules, WW summation, and returned
+    arrays are otherwise identical to the established kernel.
+    """
+    N = C0b.shape[0]
+    n_rr = pair_patterns.shape[0]
+    K_states = n_rr + K + 1
+    W = K   # wildcard sentinel
+
+    A = np.empty((N, 2), dtype=np.int64)
+    wildcard_slots = np.empty(N, dtype=np.int64)
+    viterbi_ll = np.empty(N, dtype=np.float64)
+
+    # The serial driver reuses one scratch slab across samples. Every entry
+    # is overwritten before it is read, so this removes N heap allocations
+    # per transition without changing any state or bin arithmetic.
+    gather_founder_terms = K >= 4
+    founder_diff1 = np.empty((K, n_bins), dtype=np.float64)
+    bin_emis = np.empty((K_states, n_bins), dtype=np.float64)
+
+    for s in range(N):
+        # Each founder contraction is reused in every rr state containing
+        # that founder.  Above very small K, gather those scattered pattern-
+        # table reads once into a compact sample-local array: this changes no
+        # arithmetic (the exact same table scalar enters the exact same
+        # expression) while reducing diff1 lookups from 2*n_rr*n_bins to
+        # K*n_bins.  K<4 retains the direct route because the gather setup is
+        # not amortised there.
+        if gather_founder_terms:
+            for k in range(K):
+                for b in range(n_bins):
+                    founder_diff1[k, b] = diff1_table[
+                        b, h_patterns[k, b], s
+                    ]
+
+        best_cost = np.inf
+        best_state_idx = 0
+        st = 0
+
+        # ----- Real-real pairs (i, j) with i <= j (row-major) -----
+        # Per-bin emission C0b + Ub[i] + Ub[j] + Mb[pair]; state cost is
+        # the negated sum over bins (= -total LL under this pair).
+        for p in range(n_rr):
+            i = rr_i[p]
+            j = rr_j[p]
+            cost_total = 0.0
+            for b in range(n_bins):
+                if gather_founder_terms:
+                    e = (
+                        C0b[s, b]
+                        + founder_diff1[i, b]
+                        + founder_diff1[j, b]
+                        + w_table[b, pair_patterns[p, b], s]
+                    )
+                else:
+                    e = (
+                        C0b[s, b]
+                        + diff1_table[b, h_patterns[i, b], s]
+                        + diff1_table[b, h_patterns[j, b], s]
+                        + w_table[b, pair_patterns[p, b], s]
+                    )
+                bin_emis[st, b] = e
+                cost_total += e
+            candidate_cost = -cost_total
+            if candidate_cost < best_cost:
+                best_cost = candidate_cost
+                best_state_idx = st
+            st += 1
+
+        # ----- Real-W pairs (k, W) -----
+        for k in range(K):
+            cost_total = 0.0
+            for b in range(n_bins):
+                e = (
+                    kW_Cb[s, b]
+                    + kWdiff_table[b, h_patterns[k, b], s]
+                )
+                bin_emis[st, b] = e
+                cost_total += e
+            candidate_cost = -cost_total
+            if candidate_cost < best_cost:
+                best_cost = candidate_cost
+                best_state_idx = st
+            st += 1
+
+        # ----- (W, W) — bit-identical to the scalar fused kernel -----
+        # State cost: sum_l cost_WW[s, l] left-to-right; bin emissions are
+        # the precomputed WW_bin_emis row.
+        for b in range(n_bins):
+            bin_emis[st, b] = WW_bin_emis[s, b]
+        candidate_cost = WW_total_cost[s]
+        if candidate_cost < best_cost:
+            best_cost = candidate_cost
+            best_state_idx = st
+
+        if best_state_idx < n_rr:
+            A[s, 0] = rr_i[best_state_idx]
+            A[s, 1] = rr_j[best_state_idx]
+            wildcard_slots[s] = 0
+        elif best_state_idx < n_rr + K:
+            A[s, 0] = best_state_idx - n_rr
+            A[s, 1] = W
+            wildcard_slots[s] = 1
+        else:
+            A[s, 0] = W
+            A[s, 1] = W
+            wildcard_slots[s] = 2
+
+        # ----- Viterbi forward on bin_emis (in-place alpha) -----
+        # Reuse the dead first emission column as the Viterbi alpha row.
+        for b in range(1, n_bins):
+            best_prev = -np.inf
+            for st_iter in range(K_states):
+                if bin_emis[st_iter, 0] > best_prev:
+                    best_prev = bin_emis[st_iter, 0]
+            switch_base = best_prev - penalty
+            for st_iter in range(K_states):
+                em = bin_emis[st_iter, b]
+                stay = bin_emis[st_iter, 0]
+                if stay > switch_base:
+                    bin_emis[st_iter, 0] = stay + em
+                else:
+                    bin_emis[st_iter, 0] = switch_base + em
+        best_final = -np.inf
+        for st_iter in range(K_states):
+            if bin_emis[st_iter, 0] > best_final:
+                best_final = bin_emis[st_iter, 0]
+        viterbi_ll[s] = best_final
+
+    return A, -viterbi_ll, wildcard_slots
+
+
 # =============================================================================
 # UPDATE STEP H: founder allele updates
 # =============================================================================
 
-def _update_H(probs_k, H_k, A, lam, cost_WW=None, log_probs=None):
+def _update_H(probs_k, H_k, A, lam, cost_WW=None, log_probs=None,
+              h_genotype_cost=None, h_wildcard_cost=None):
     """For each (founder, kept site), pick the binary value that minimises
     NLL contribution from samples carrying that founder.
 
@@ -675,19 +1248,48 @@ def _update_H(probs_k, H_k, A, lam, cost_WW=None, log_probs=None):
     if log_probs is None:
         log_probs = _log_probs_kernel(_maybe_c_contig(probs_k, np.float64))
 
+    if h_genotype_cost is None or h_wildcard_cost is None:
+        (_, h_genotype_cost, h_wildcard_cost) = _prepare_fit_cost_tables(
+            _maybe_c_contig(cost_WW, np.float64),
+            _maybe_c_contig(log_probs, np.float64),
+            float(lam),
+        )
+        h_genotype_cost = np.ascontiguousarray(
+            h_genotype_cost.transpose(1, 0, 2)
+        )
+        h_wildcard_cost = np.ascontiguousarray(
+            h_wildcard_cost.transpose(1, 0, 2)
+        )
+
     # We update founders in decreasing order of usage.  Compute usage from A
     # via an njit kernel — the inner Python loop over K with two boolean-
     # mask sums per K was a small hot spot (4K mask scans, each scanning
     # N entries).  The kernel does it in a single pass over A.
     A_c = _maybe_c_contig(A, np.int64)
-    usage = _update_H_usage_kernel(A_c, K)
+    (kk_idx, kj_idx, kW_idx, partner_J,
+     n_kk, n_J, n_P, usage) = _classify_all_founder_buckets(A_c, K)
     update_order = np.argsort(-usage, kind='stable')
+    update_order = update_order[usage[update_order] > 0]
 
-    n_changes = 0
-    for k in update_order:
-        n_changes += _update_one_founder(probs_k, H_k, A, int(k), lam,
-                                          cost_WW=cost_WW, log_probs=log_probs)
-    return n_changes
+    # A full H sweep is Gauss-Seidel in founder order but independent across
+    # sites.  Run one parallel site kernel for the whole ordered sweep instead
+    # of launching and synchronising a separate prange kernel for every
+    # founder.  Within each site the kernel preserves the exact founder order,
+    # H/J/P bucket order, ascending sample order, cap, accumulation order, and
+    # tie rule of the historical per-founder path.
+    H_c = _maybe_c_contig(H_k, np.int64)
+    sweep_kernel = _update_H_ordered_sweep_kernel
+    if numba.get_num_threads() == 1:
+        sweep_kernel = _update_H_ordered_sweep_kernel_serial
+    n_changes = sweep_kernel(
+        H_c, np.ascontiguousarray(update_order, dtype=np.int64),
+        kk_idx, kj_idx, kW_idx, partner_J, n_kk, n_J, n_P,
+        _maybe_c_contig(h_genotype_cost, np.float64),
+        _maybe_c_contig(h_wildcard_cost, np.float64),
+    )
+    if H_c is not H_k:
+        H_k[...] = H_c
+    return int(n_changes)
 
 
 @njit(cache=True)
@@ -706,6 +1308,229 @@ def _update_H_usage_kernel(A, K):
             if f != K:
                 usage[f] += 1
     return usage
+
+
+@njit(cache=True, nogil=True)
+def _classify_all_founder_buckets(A, K):
+    """Classify every founder's supporting samples in one compiled pass.
+
+    This is the all-founder equivalent of :func:`_classify_founder_buckets`.
+    Rows within each H/J/P bucket are appended in ascending sample order, so
+    the downstream floating-point accumulation order is unchanged.  The
+    returned ``usage`` is exactly the count used for the stable decreasing-
+    usage Gauss-Seidel order; a homozygous pair contributes two copies.
+
+    The four dense ``(K, N)`` buffers are bounded: at experimental K=16 and
+    N=116 they occupy under 60 KiB in total, while replacing K allocations and
+    K compiled-dispatch boundaries.
+    """
+    N = A.shape[0]
+    W = K
+    kk = np.empty((K, N), dtype=np.int64)
+    kj = np.empty((K, N), dtype=np.int64)
+    kW = np.empty((K, N), dtype=np.int64)
+    partner = np.empty((K, N), dtype=np.int64)
+    n_kk = np.zeros(K, dtype=np.int64)
+    n_J = np.zeros(K, dtype=np.int64)
+    n_P = np.zeros(K, dtype=np.int64)
+    usage = np.zeros(K, dtype=np.int64)
+
+    # Each assignment contains at most two real founders.  Visit samples once
+    # and append directly to the one or two affected founder rows.  Because s
+    # is ascending, every per-founder bucket retains the established sample
+    # accumulation order even for unsorted but otherwise valid A rows.
+    for s in range(N):
+        a0 = A[s, 0]
+        a1 = A[s, 1]
+        if a0 != W:
+            usage[a0] += 1
+        if a1 != W:
+            usage[a1] += 1
+
+        if a0 != W:
+            if a0 == a1:
+                position = n_kk[a0]
+                kk[a0, position] = s
+                n_kk[a0] = position + 1
+            elif a1 == W:
+                position = n_P[a0]
+                kW[a0, position] = s
+                n_P[a0] = position + 1
+            else:
+                position = n_J[a0]
+                kj[a0, position] = s
+                partner[a0, position] = a1
+                n_J[a0] = position + 1
+
+        if a1 != W and a1 != a0:
+            position = n_J[a1]
+            kj[a1, position] = s
+            partner[a1, position] = a0
+            n_J[a1] = position + 1
+
+    return kk, kj, kW, partner, n_kk, n_J, n_P, usage
+
+
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
+def _update_H_ordered_sweep_kernel(H_full, update_order,
+                                    kk_idx, kj_idx, kW_idx, partner_J,
+                                    n_kk, n_J, n_P,
+                                    genotype_cost, real_wildcard_cost):
+    """Parallel ordered founder sweep using evidence-only cost tables."""
+    L = H_full.shape[1]
+    n_changes = 0
+    for l in prange(L):
+        for order_position in range(update_order.shape[0]):
+            k = update_order[order_position]
+            cur_val = H_full[k, l]
+            nll0 = 0.0
+            nll1 = 0.0
+
+            for ii in range(n_kk[k]):
+                s = kk_idx[k, ii]
+                nll0 += genotype_cost[l, s, 0]
+                nll1 += genotype_cost[l, s, 2]
+
+            for ii in range(n_J[k]):
+                s = kj_idx[k, ii]
+                j = partner_J[k, ii]
+                partner_h = H_full[j, l]
+                nll0 += genotype_cost[l, s, partner_h]
+                nll1 += genotype_cost[l, s, partner_h + 1]
+
+            for ii in range(n_P[k]):
+                s = kW_idx[k, ii]
+                nll0 += real_wildcard_cost[l, s, 0]
+                nll1 += real_wildcard_cost[l, s, 1]
+
+            diff = nll0 - nll1
+            if diff < 0.0:
+                diff = -diff
+            if diff < 1e-9:
+                new_val = cur_val
+            elif nll0 < nll1:
+                new_val = 0
+            else:
+                new_val = 1
+            H_full[k, l] = new_val
+            if new_val != cur_val:
+                n_changes += 1
+    return n_changes
+
+
+@njit(cache=True, parallel=False, fastmath=False, nogil=True)
+def _update_H_ordered_sweep_kernel_serial(H_full, update_order,
+                                           kk_idx, kj_idx, kW_idx, partner_J,
+                                           n_kk, n_J, n_P,
+                                           genotype_cost,
+                                           real_wildcard_cost):
+    """One-thread counterpart of `_update_H_ordered_sweep_kernel`."""
+    L = H_full.shape[1]
+    n_changes = 0
+    for l in range(L):
+        for order_position in range(update_order.shape[0]):
+            k = update_order[order_position]
+            cur_val = H_full[k, l]
+            nll0 = 0.0
+            nll1 = 0.0
+
+            for ii in range(n_kk[k]):
+                s = kk_idx[k, ii]
+                nll0 += genotype_cost[l, s, 0]
+                nll1 += genotype_cost[l, s, 2]
+
+            for ii in range(n_J[k]):
+                s = kj_idx[k, ii]
+                j = partner_J[k, ii]
+                partner_h = H_full[j, l]
+                nll0 += genotype_cost[l, s, partner_h]
+                nll1 += genotype_cost[l, s, partner_h + 1]
+
+            for ii in range(n_P[k]):
+                s = kW_idx[k, ii]
+                nll0 += real_wildcard_cost[l, s, 0]
+                nll1 += real_wildcard_cost[l, s, 1]
+
+            diff = nll0 - nll1
+            if diff < 0.0:
+                diff = -diff
+            if diff < 1e-9:
+                new_val = cur_val
+            elif nll0 < nll1:
+                new_val = 0
+            else:
+                new_val = 1
+            H_full[k, l] = new_val
+            if new_val != cur_val:
+                n_changes += 1
+    return n_changes
+
+@njit(cache=True, nogil=True)
+def _stable_descending_usage_order(usage):
+    """Stable decreasing positive-usage order with lower index on ties.
+
+    A zero-use founder has empty H/J/P buckets and therefore retains every
+    allele under the established tie rule; omitting it is exact.
+    """
+    K = usage.shape[0]
+    order = np.arange(K, dtype=np.int64)
+    for index in range(1, K):
+        current = order[index]
+        position = index
+        while position > 0 and usage[current] > usage[order[position - 1]]:
+            order[position] = order[position - 1]
+            position -= 1
+        order[position] = current
+    positive = 0
+    while positive < K and usage[order[positive]] > 0:
+        positive += 1
+    return order[:positive]
+
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
+def _fixed_k_transition_batch_pattern_kernel(
+        C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
+        WW_bin_emis, WW_total_cost, rr_i, rr_j, penalty, snps_per_bin, n_bins,
+        h_genotype_cost, h_wildcard_cost, H_batch):
+    """Evaluate independent ordered-H coordinate transitions in parallel."""
+    B = H_batch.shape[0]
+    K = H_batch.shape[1]
+    N = C0b.shape[0]
+    H_next = np.empty_like(H_batch)
+    A_batch = np.empty((B, N, 2), dtype=np.int64)
+    cost_batch = np.empty((B, N), dtype=np.float64)
+    wildcard_batch = np.empty((B, N), dtype=np.int64)
+    h_changes = np.empty(B, dtype=np.int64)
+    for start in prange(B):
+        is_binary, h_patterns, pair_patterns = _binary_haplotype_patterns(
+            H_batch[start], rr_i, rr_j,
+            snps_per_bin, n_bins, H_batch.shape[2],
+        )
+        if not is_binary:
+            h_changes[start] = -1
+            continue
+        A, cost, wildcard = _update_A_fused_pattern_kernel_serial(
+            C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
+            h_patterns, pair_patterns, WW_bin_emis, WW_total_cost,
+            rr_i, rr_j, penalty, K, n_bins,
+        )
+        A_batch[start] = A
+        cost_batch[start] = cost
+        wildcard_batch[start] = wildcard
+        H_work = H_batch[start].copy()
+        (kk_idx, kj_idx, kW_idx, partner_J,
+         n_kk, n_J, n_P, usage) = _classify_all_founder_buckets(A, K)
+        update_order = _stable_descending_usage_order(usage)
+        changes = _update_H_ordered_sweep_kernel_serial(
+            H_work, update_order,
+            kk_idx, kj_idx, kW_idx, partner_J,
+            n_kk, n_J, n_P,
+            h_genotype_cost, h_wildcard_cost,
+        )
+        H_next[start] = H_work
+        h_changes[start] = changes
+    return (
+        H_next, A_batch, cost_batch, wildcard_batch, h_changes,
+    )
 
 
 @njit(cache=True)
@@ -1022,7 +1847,602 @@ def _update_one_founder_kernel(probs_k, H_row, H_full,
 # COORDINATE DESCENT AT FIXED K
 # =============================================================================
 
-def _fit_at_fixed_K(probs_k, H_init, lam, max_iter=50):
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
+def _prepare_fit_cost_tables(cost_WW, log_probs, lam):
+    """Precompute evidence-only costs reused by every A/H fit iteration."""
+    N, L = cost_WW.shape
+    ww_total_cost = np.empty(N, dtype=np.float64)
+    genotype_cost = np.empty((N, L, 3), dtype=np.float64)
+    real_wildcard_cost = np.empty((N, L, 2), dtype=np.float64)
+    for s in prange(N):
+        total = 0.0
+        for l in range(L):
+            cap = cost_WW[s, l]
+            total += cap
+            lp0 = log_probs[s, l, 0]
+            lp1 = log_probs[s, l, 1]
+            lp2 = log_probs[s, l, 2]
+            for genotype in range(3):
+                value = -log_probs[s, l, genotype]
+                if value > cap:
+                    value = cap
+                genotype_cost[s, l, genotype] = value
+            best_lp0 = lp0 if lp0 > lp1 else lp1
+            best_lp1 = lp1 if lp1 > lp2 else lp2
+            value0 = -best_lp0 + lam
+            value1 = -best_lp1 + lam
+            if value0 > cap:
+                value0 = cap
+            if value1 > cap:
+                value1 = cap
+            real_wildcard_cost[s, l, 0] = value0
+            real_wildcard_cost[s, l, 1] = value1
+        ww_total_cost[s] = total
+    return ww_total_cost, genotype_cost, real_wildcard_cost
+
+
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
+def _ww_total_cost_kernel(cost_WW):
+    """Exact left-to-right WW row sums for standalone assignment updates."""
+    N, L = cost_WW.shape
+    totals = np.empty(N, dtype=np.float64)
+    for s in prange(N):
+        total = 0.0
+        for l in range(L):
+            total += cost_WW[s, l]
+        totals[s] = total
+    return totals
+
+
+class _FixedKFitWorkspace:
+    """Immutable evidence-only inputs shared by repeated fixed-K fits.
+
+    The posterior successor evaluates thousands of initial haplotype matrices
+    against the same evidence tensor.  The wildcard costs, log probabilities,
+    binned wildcard emissions, and BLAS inputs do not depend on ``H_init``.
+    Keeping them in a call-scoped workspace removes that repeated work without
+    changing any coordinate-descent operation or floating-point reduction.
+
+    ``probs_reference`` deliberately keeps the exact source object alive and
+    lets :func:`_fit_at_fixed_K` reject accidental reuse with another tensor.
+    """
+
+    __slots__ = (
+        "probs_reference",
+        "lam",
+        "fit_config_key",
+        "cost_WW",
+        "log_probs",
+        "WW_bin_emis",
+        "WW_total_cost",
+        "h_genotype_cost",
+        "h_wildcard_cost",
+        "blas_lp_cache",
+        "binary_pattern_cache",
+        "fit_result_cache",
+        "fixed_point_keys",
+        "assignment_cache",
+        "transition_cache",
+        "cache_lock",
+    )
+
+    def __init__(
+        self,
+        probs_reference,
+        lam,
+        cost_WW,
+        log_probs,
+        WW_bin_emis,
+        WW_total_cost,
+        h_genotype_cost,
+        h_wildcard_cost,
+        blas_lp_cache,
+        binary_pattern_cache,
+    ):
+        self.probs_reference = probs_reference
+        self.lam = float(lam)
+        self.fit_config_key = (
+            bool(_VITERBI_BIC_ENABLED),
+            int(VITERBI_SNPS_PER_BIN),
+            float(VITERBI_SWITCH_PENALTY),
+        )
+        self.cost_WW = cost_WW
+        self.log_probs = log_probs
+        self.WW_bin_emis = WW_bin_emis
+        self.WW_total_cost = WW_total_cost
+        self.h_genotype_cost = h_genotype_cost
+        self.h_wildcard_cost = h_wildcard_cost
+        self.blas_lp_cache = blas_lp_cache
+        self.binary_pattern_cache = binary_pattern_cache
+        # This cache is intentionally scoped to one exact evidence workspace.
+        # Its key additionally contains every per-fit input that can change the
+        # coordinate-descent trajectory.  Stored arrays are private read-only
+        # copies so callers retain the historical freedom to mutate returned
+        # arrays without corrupting a later reuse.
+        self.fit_result_cache = OrderedDict()
+        # Fixed-point certificates retain exact founder-row order because
+        # assignment tie-breaking is index ordered.  A key enters this set only
+        # after a complete A/H pass has proved zero H changes for this evidence
+        # and wildcard penalty in that exact order.
+        self.fixed_point_keys = set()
+        # Coordinate descent is a deterministic map on an *ordered* binary
+        # founder panel for fixed evidence. Different proposal starts often
+        # enter the same trajectory, so retain the expensive A(H) evaluation
+        # and the following H(A) transition separately from complete-fit
+        # results. Keys bit-pack values in row-major order: founder order is
+        # preserved (tie-breaking depends on it) without retaining an int64
+        # K-by-L matrix for every visited state.
+        self.assignment_cache = OrderedDict()
+        self.transition_cache = OrderedDict()
+        self.cache_lock = RLock()
+
+    @staticmethod
+    def _ordered_h_key(haplotypes):
+        matrix = np.asarray(haplotypes)
+        if matrix.ndim != 2:
+            raise ValueError("fixed-K haplotypes must be two-dimensional")
+        contiguous = np.ascontiguousarray(matrix)
+        return (
+            contiguous.dtype.str,
+            tuple(int(value) for value in contiguous.shape),
+            contiguous.tobytes(),
+        )
+
+    @staticmethod
+    def _binary_state_key(haplotypes):
+        """Compact exact key for an ordered binary founder panel."""
+        matrix = np.asarray(haplotypes)
+        if matrix.ndim != 2 or matrix.dtype.kind not in "biu":
+            return None
+        if np.any((matrix != 0) & (matrix != 1)):
+            return None
+        flat = np.ascontiguousarray(matrix, dtype=np.uint8).reshape(-1)
+        packed = np.packbits(flat, bitorder="little")
+        return (int(matrix.shape[0]), int(matrix.shape[1]), packed.tobytes())
+
+    @staticmethod
+    def _binary_state_from_key(key):
+        """Decode a compact state key to the production int64 H dtype."""
+        K, L, packed = key
+        bits = np.unpackbits(
+            np.frombuffer(packed, dtype=np.uint8),
+            count=int(K) * int(L),
+            bitorder="little",
+        )
+        return np.ascontiguousarray(
+            bits.reshape((int(K), int(L))), dtype=np.int64
+        )
+
+    @staticmethod
+    def _store_assignment_record(A, cost, uncapped_cost, wildcard_slots):
+        stored_A = np.array(A, copy=True, order="K")
+        stored_cost = np.array(cost, copy=True, order="K")
+        stored_wildcard = np.array(wildcard_slots, copy=True, order="K")
+        if uncapped_cost is cost:
+            stored_uncapped = stored_cost
+        else:
+            stored_uncapped = np.array(
+                uncapped_cost, copy=True, order="K"
+            )
+        for array in (stored_A, stored_cost, stored_uncapped, stored_wildcard):
+            array.setflags(write=False)
+        return (
+            stored_A, stored_cost, stored_uncapped, stored_wildcard,
+            float(stored_uncapped.sum()),
+        )
+
+    def cached_assignment(self, state_key):
+        with self.cache_lock:
+            record = self.assignment_cache.get(state_key)
+            if record is not None:
+                self.assignment_cache.move_to_end(state_key)
+            return record
+
+    def cached_transition(self, state_key):
+        with self.cache_lock:
+            record = self.transition_cache.get(state_key)
+            if record is not None:
+                self.transition_cache.move_to_end(state_key)
+            return record
+
+    def remember_transition(self, state_key, assignment_record,
+                            next_state_key, h_changes):
+        """Remember one exact A(H), H(A) step using immutable records."""
+        transition = (assignment_record, next_state_key, int(h_changes))
+        with self.cache_lock:
+            self.assignment_cache[state_key] = assignment_record
+            self.assignment_cache.move_to_end(state_key)
+            self.transition_cache[state_key] = transition
+            self.transition_cache.move_to_end(state_key)
+            while len(self.assignment_cache) > 16384:
+                self.assignment_cache.popitem(last=False)
+            while len(self.transition_cache) > 16384:
+                self.transition_cache.popitem(last=False)
+        return transition
+
+    def remember_assignment(self, state_key, assignment_record):
+        with self.cache_lock:
+            self.assignment_cache[state_key] = assignment_record
+            self.assignment_cache.move_to_end(state_key)
+            while len(self.assignment_cache) > 16384:
+                self.assignment_cache.popitem(last=False)
+
+    def supports_binary_transition_engine(self, haplotypes):
+        matrix = np.asarray(haplotypes)
+        return (
+            matrix.ndim == 2
+            and matrix.dtype == np.dtype(np.int64)
+            and matrix.shape[0] >= 1
+            and self.binary_pattern_cache is not None
+            and self._binary_state_key(matrix) is not None
+        )
+
+    def compute_transition_batch(self, haplotypes):
+        """Compute and cache exact transitions for int64 binary starts."""
+        matrices = tuple(haplotypes)
+        if not matrices:
+            return []
+        H_batch = np.ascontiguousarray(np.stack(matrices), dtype=np.int64)
+        K = H_batch.shape[1]
+        rr_i, rr_j = _pair_indices_for_K(K)
+        cache = self.binary_pattern_cache
+        C0b, _diff, _w, kW_Cb, _kwdiff = self.blas_lp_cache
+        # This kernel parallelizes only over independent starts. Waking a
+        # much larger Numba team adds scheduler cost without exposing more
+        # work; four threads is the measured low-frontier saturation point.
+        active_threads = numba.get_num_threads()
+        batch_threads = min(active_threads, max(4, H_batch.shape[0]))
+        if batch_threads != active_threads:
+            numba.set_num_threads(batch_threads)
+        try:
+            (H_next, A_batch, cost_batch, wildcard_batch,
+             h_changes) = _fixed_k_transition_batch_pattern_kernel(
+                C0b,
+                cache.diff1_table, cache.w_table,
+                kW_Cb, cache.kWdiff_table,
+                self.WW_bin_emis, self.WW_total_cost,
+                rr_i, rr_j,
+                float(VITERBI_SWITCH_PENALTY),
+                int(cache.snps_per_bin), int(cache.n_bins),
+                self.h_genotype_cost, self.h_wildcard_cost,
+                H_batch,
+            )
+        finally:
+            if batch_threads != active_threads:
+                numba.set_num_threads(active_threads)
+        results = []
+        for index in range(H_batch.shape[0]):
+            if int(h_changes[index]) < 0:
+                raise ValueError("batch transition received a nonbinary start")
+            state_key = self._binary_state_key(H_batch[index])
+            # The fused binary Viterbi path has no capped/uncapped split.
+            # Reuse the one immutable stored array instead of copying an
+            # identical second B x N slab for every frontier transition.
+            cost = cost_batch[index]
+            assignment = self._store_assignment_record(
+                A_batch[index], cost, cost, wildcard_batch[index]
+            )
+            next_key = self._binary_state_key(H_next[index])
+            transition = self.remember_transition(
+                state_key, assignment, next_key, int(h_changes[index])
+            )
+            results.append(transition)
+        return results
+
+
+    def compute_assignment_scalar(
+            self, haplotypes, *, state_key=None, known_missing=False):
+        """Compute and cache A(H) without performing an unused H sweep."""
+        matrix = np.ascontiguousarray(haplotypes, dtype=np.int64)
+        if state_key is None:
+            state_key = self._binary_state_key(matrix)
+        if not known_missing:
+            cached = self.cached_assignment(state_key)
+            if cached is not None:
+                return cached
+        A, cost, uncapped_cost, wildcard = _update_A(
+            self.probs_reference, matrix, self.lam,
+            cost_WW=self.cost_WW,
+            WW_bin_emis=self.WW_bin_emis,
+            log_probs=self.log_probs,
+            blas_lp_cache=self.blas_lp_cache,
+            binary_pattern_cache=self.binary_pattern_cache,
+            WW_total_cost=self.WW_total_cost,
+        )
+        assignment = self._store_assignment_record(
+            A, cost, uncapped_cost, wildcard
+        )
+        self.remember_assignment(state_key, assignment)
+        return assignment
+
+
+    def compute_transition_scalar(
+            self, haplotypes, *, state_key=None, known_missing=False):
+        """Compute one transition with the live internally parallel kernels."""
+        matrix = np.ascontiguousarray(haplotypes, dtype=np.int64)
+        if state_key is None:
+            state_key = self._binary_state_key(matrix)
+        if not known_missing:
+            cached = self.cached_transition(state_key)
+            if cached is not None:
+                return cached
+        A, cost, uncapped_cost, wildcard = _update_A(
+            self.probs_reference, matrix, self.lam,
+            cost_WW=self.cost_WW,
+            WW_bin_emis=self.WW_bin_emis,
+            log_probs=self.log_probs,
+            blas_lp_cache=self.blas_lp_cache,
+            binary_pattern_cache=self.binary_pattern_cache,
+            WW_total_cost=self.WW_total_cost,
+        )
+        H_next = matrix.copy()
+        h_changes = _update_H(
+            self.probs_reference, H_next, A, self.lam,
+            cost_WW=self.cost_WW,
+            log_probs=self.log_probs,
+            h_genotype_cost=self.h_genotype_cost,
+            h_wildcard_cost=self.h_wildcard_cost,
+        )
+        assignment = self._store_assignment_record(
+            A, cost, uncapped_cost, wildcard
+        )
+        next_key = self._binary_state_key(H_next)
+        return self.remember_transition(
+            state_key, assignment, next_key, h_changes
+        )
+
+    def _fit_key(self, haplotypes, max_iter):
+        matrix = np.asarray(haplotypes)
+        contiguous = np.ascontiguousarray(matrix)
+        # The A/H kernels partition independent samples or sites and retain
+        # identical scalar reduction order within each item. Thread count is
+        # therefore an execution detail, not part of fit identity; including
+        # it fragmented the cache whenever a tail block gained free cores.
+        return (
+            self.fit_config_key,
+            int(max_iter),
+            contiguous.dtype.str,
+            tuple(int(value) for value in contiguous.shape),
+            contiguous.tobytes(),
+        )
+
+    @staticmethod
+    def _store_fit_result(result):
+        stored = []
+        for index, value in enumerate(result):
+            if index < 4:
+                array = np.array(value, copy=True, order="K")
+                array.setflags(write=False)
+                stored.append(array)
+            elif index == 4:
+                stored.append(int(value))
+            else:
+                stored.append(float(value))
+        return tuple(stored)
+
+    @staticmethod
+    def _copy_fit_result(result):
+        return (
+            np.array(result[0], copy=True, order="K"),
+            np.array(result[1], copy=True, order="K"),
+            np.array(result[2], copy=True, order="K"),
+            np.array(result[3], copy=True, order="K"),
+            int(result[4]),
+            float(result[5]),
+        )
+
+    def cached_fit(self, haplotypes, max_iter):
+        key = self._fit_key(haplotypes, max_iter)
+        with self.cache_lock:
+            result = self.fit_result_cache.get(key)
+            if result is None:
+                return key, None
+            self.fit_result_cache.move_to_end(key)
+            return key, self._copy_fit_result(result)
+
+    def remember_fit(self, key, result, *, fixed_point):
+        stored = self._store_fit_result(result)
+        with self.cache_lock:
+            self.fit_result_cache[key] = stored
+            self.fit_result_cache.move_to_end(key)
+            # A bounded cache prevents a long-lived caller from retaining an
+            # unbounded number of sample-level arrays.  Complete-mode searches
+            # normally stay well below this evidence-local ceiling.
+            while len(self.fit_result_cache) > 4096:
+                self.fit_result_cache.popitem(last=False)
+            if fixed_point:
+                self.fixed_point_keys.add(
+                    self._ordered_h_key(result[0])
+                )
+
+    def certifies_fixed_point(self, haplotypes):
+        key = self._ordered_h_key(haplotypes)
+        with self.cache_lock:
+            return key in self.fixed_point_keys
+
+
+def _prepare_fixed_k_fit_workspace(probs_k, lam, *, binary_patterns=True):
+    """Prepare quantities invariant across fixed-K initializations.
+
+    ``binary_patterns`` is reserved for an explicitly shared evidence
+    workspace.  One-off fits set it false so they do not pay the bounded table
+    construction cost for a table that cannot be amortised.
+    """
+
+    probs_reference = probs_k
+    L = probs_k.shape[1]
+    cost_WW = _per_site_cost_W_W(probs_k, lam)
+    probs_c = _maybe_c_contig(probs_k, np.float64)
+    log_probs = _log_probs_kernel(probs_c)
+    (
+        WW_total_cost,
+        h_genotype_cost,
+        h_wildcard_cost,
+    ) = _prepare_fit_cost_tables(
+        _maybe_c_contig(cost_WW, np.float64),
+        _maybe_c_contig(log_probs, np.float64),
+        float(lam),
+    )
+    h_genotype_cost = np.ascontiguousarray(
+        h_genotype_cost.transpose(1, 0, 2)
+    )
+    h_wildcard_cost = np.ascontiguousarray(
+        h_wildcard_cost.transpose(1, 0, 2)
+    )
+    if _VITERBI_BIC_ENABLED:
+        if VITERBI_SNPS_PER_BIN > 1 and VITERBI_SNPS_PER_BIN < L:
+            snps_per_bin = VITERBI_SNPS_PER_BIN
+            n_bins = int(math.ceil(L / VITERBI_SNPS_PER_BIN))
+        else:
+            snps_per_bin = 1
+            n_bins = L
+        cost_WW_c = _maybe_c_contig(cost_WW, np.float64)
+        WW_bin_emis = _ww_bin_emis_from_cost_ww(
+            cost_WW_c, int(snps_per_bin), int(n_bins)
+        )
+        blas_lp_cache = _update_A_blas_lp_precompute(
+            _maybe_c_contig(log_probs, np.float64),
+            float(lam),
+            int(snps_per_bin),
+            int(n_bins),
+        )
+        binary_pattern_cache = (
+            _prepare_binary_pattern_contractions(
+                blas_lp_cache, int(snps_per_bin), int(n_bins)
+            )
+            if binary_patterns
+            else None
+        )
+    else:
+        WW_bin_emis = None
+        blas_lp_cache = None
+        binary_pattern_cache = None
+    return _FixedKFitWorkspace(
+        probs_reference,
+        lam,
+        cost_WW,
+        log_probs,
+        WW_bin_emis,
+        WW_total_cost,
+        h_genotype_cost,
+        h_wildcard_cost,
+        blas_lp_cache,
+        binary_pattern_cache,
+    )
+
+
+
+def _fit_result_from_assignment(haplotypes, assignment, n_iter):
+    """Build the public fit tuple from one immutable assignment record."""
+    return (
+        np.array(haplotypes, copy=True, order="K"),
+        np.array(assignment[0], copy=True, order="K"),
+        np.array(assignment[1], copy=True, order="K"),
+        np.array(assignment[3], copy=True, order="K"),
+        int(n_iter),
+        float(assignment[4]),
+    )
+
+
+def _fit_binary_cached_trajectory(
+        H_init, max_iter, workspace, capture_initial, *,
+        initial_key=None, initial_transition=None):
+    """Follow the exact coordinate map, reusing transitions and local cycles."""
+    if initial_key is None:
+        initial_key = workspace._binary_state_key(H_init)
+    state_key = initial_key
+    path = [state_key]
+    first_visit = {state_key: 0}
+    previous_A = None
+    captured_initial = None
+    completed = 0
+    fixed_point = False
+
+    def transition_for(key, matrix=None):
+        transition = initial_transition if key == initial_key else None
+        if transition is None:
+            transition = workspace.cached_transition(key)
+        if transition is None:
+            if matrix is None:
+                matrix = workspace._binary_state_from_key(key)
+            transition = workspace.compute_transition_scalar(
+                matrix, state_key=key, known_missing=True)
+        return transition
+
+    if int(max_iter) <= 0:
+        assignment = workspace.cached_assignment(state_key)
+        if assignment is None:
+            assignment = workspace.compute_assignment_scalar(
+                H_init, state_key=state_key, known_missing=True
+            )
+        result = _fit_result_from_assignment(H_init, assignment, 0)
+        captured = (_FixedKFitWorkspace._copy_fit_result(result)
+                    if capture_initial else None)
+        return captured, result, False
+
+    result = None
+    while completed < int(max_iter):
+        assignment, next_key, h_changes = transition_for(
+            state_key, H_init if completed == 0 else None
+        )
+        if capture_initial and captured_initial is None:
+            captured_initial = _fit_result_from_assignment(
+                H_init, assignment, 0
+            )
+
+        completed += 1
+        if h_changes == 0:
+            final_H = workspace._binary_state_from_key(state_key)
+            reported_iterations = completed
+            if previous_A is None or not np.array_equal(
+                    assignment[0], previous_A):
+                if completed < int(max_iter):
+                    reported_iterations += 1
+            result = _fit_result_from_assignment(
+                final_H, assignment, reported_iterations
+            )
+            fixed_point = True
+            break
+
+        previous_A = assignment[0]
+        cycle_start = first_visit.get(next_key)
+        if cycle_start is not None:
+            period = completed - int(cycle_start)
+            if period <= 1:
+                raise AssertionError(
+                    "nonzero H changes produced a one-state transition cycle"
+                )
+            remaining = int(max_iter) - completed
+            endpoint_key = path[
+                int(cycle_start) + (remaining % period)
+            ]
+            endpoint_assignment = workspace.cached_assignment(endpoint_key)
+            if endpoint_assignment is None:
+                endpoint_assignment = transition_for(endpoint_key)[0]
+            final_H = workspace._binary_state_from_key(endpoint_key)
+            result = _fit_result_from_assignment(
+                final_H, endpoint_assignment, int(max_iter)
+            )
+            break
+
+        state_key = next_key
+        first_visit[state_key] = completed
+        path.append(state_key)
+
+    if result is None:
+        endpoint_assignment = workspace.cached_assignment(state_key)
+        if endpoint_assignment is None:
+            endpoint_H = workspace._binary_state_from_key(state_key)
+            endpoint_assignment = workspace.compute_assignment_scalar(endpoint_H)
+        final_H = workspace._binary_state_from_key(state_key)
+        result = _fit_result_from_assignment(
+            final_H, endpoint_assignment, int(max_iter)
+        )
+    return captured_initial, result, fixed_point
+
+def _fit_at_fixed_K(
+        probs_k, H_init, lam, max_iter=50, *, workspace=None,
+        _return_initial=False):
     """Run discrete coordinate descent at the K determined by H_init.shape[0].
 
     Alternates updating A (pair assignments) and H (founder bits) until
@@ -1033,6 +2453,9 @@ def _fit_at_fixed_K(probs_k, H_init, lam, max_iter=50):
         H_init:  (K, L_kept) discrete {0, 1} — initial founder values
         lam:     wildcard penalty
         max_iter: cap on coordinate descent iterations
+        workspace: optional evidence-local precomputation shared across fits
+                   of different H initializations against this exact probs_k
+                   object and lambda
 
     Returns:
         H:               final (K, L_kept)
@@ -1047,9 +2470,11 @@ def _fit_at_fixed_K(probs_k, H_init, lam, max_iter=50):
                           converts samples from "way over cost_WW" to
                           "still over cost_WW but less so")
     """
+    shared_workspace = workspace is not None
     H = H_init.copy()
     A_prev = None
     n_iter = 0
+    fixed_point_certified = False
 
     # Initialise result variables so the post-loop block can refer to
     # them whether or not the loop body executed (max_iter=0 edge case)
@@ -1076,90 +2501,516 @@ def _fit_at_fixed_K(probs_k, H_init, lam, max_iter=50):
     # reads cost_WW[s, l] for the cap value and log_probs[s, l, g] for the
     # per-genotype cost.
     # ---------------------------------------------------------------------
-    L = probs_k.shape[1]
-    cost_WW = _per_site_cost_W_W(probs_k, lam)
-    probs_c = _maybe_c_contig(probs_k, np.float64)
-    log_probs = _log_probs_kernel(probs_c)
-    if _VITERBI_BIC_ENABLED:
-        if VITERBI_SNPS_PER_BIN > 1 and VITERBI_SNPS_PER_BIN < L:
-            _snps_per_bin = VITERBI_SNPS_PER_BIN
-            _n_bins = int(math.ceil(L / VITERBI_SNPS_PER_BIN))
-        else:
-            _snps_per_bin = 1
-            _n_bins = L
-        cost_WW_c = _maybe_c_contig(cost_WW, np.float64)
-        WW_bin_emis = _ww_bin_emis_from_cost_ww(
-            cost_WW_c, int(_snps_per_bin), int(_n_bins))
-        # Pre-bake the BLAS-hybrid kernel's log_probs-derived inputs ONCE
-        # (invariant across CD iterations, exactly like cost_WW /
-        # WW_bin_emis / log_probs above).  _update_A threads these through
-        # so only the H-dependent GEMMs run per iteration — the bulk of
-        # the K-growth speedup.  Skipped at K=0, where the baseline
-        # _update_A path doesn't invoke the kernel.
-        if H.shape[0] > 0:
-            _blas_lp_cache = _update_A_blas_lp_precompute(
-                _maybe_c_contig(log_probs, np.float64), float(lam),
-                int(_snps_per_bin), int(_n_bins))
-        else:
-            _blas_lp_cache = None
-    else:
-        WW_bin_emis = None
-        _blas_lp_cache = None
+    if workspace is None:
+        workspace = _prepare_fixed_k_fit_workspace(
+            probs_k, lam, binary_patterns=False
+        )
+    elif not isinstance(workspace, _FixedKFitWorkspace):
+        raise TypeError("workspace must be a _FixedKFitWorkspace")
+    elif workspace.probs_reference is not probs_k:
+        raise ValueError(
+            "fixed-K workspace was prepared for a different evidence tensor"
+        )
+    elif workspace.lam != float(lam):
+        raise ValueError(
+            "fixed-K workspace wildcard penalty does not match this fit"
+        )
+    fit_cache_key = None
+    initial_cache_key = None
+    initial_result = None
+    if shared_workspace:
+        fit_cache_key, cached_result = workspace.cached_fit(
+            H_init, max_iter
+        )
+        if not _return_initial and cached_result is not None:
+            return cached_result
+        if _return_initial:
+            initial_cache_key, initial_result = workspace.cached_fit(
+                H_init, 0
+            )
+            if cached_result is not None:
+                if initial_result is None:
+                    initial_result = _fit_at_fixed_K(
+                        probs_k, H_init, lam, max_iter=0,
+                        workspace=workspace,
+                    )
+                return initial_result, cached_result
+    cost_WW = workspace.cost_WW
+    log_probs = workspace.log_probs
+    WW_bin_emis = workspace.WW_bin_emis
+    WW_total_cost = workspace.WW_total_cost
+    h_genotype_cost = workspace.h_genotype_cost
+    h_wildcard_cost = workspace.h_wildcard_cost
+    # K=0 never enters the BLAS founder-state path.
+    _blas_lp_cache = (
+        workspace.blas_lp_cache if H.shape[0] > 0 else None
+    )
+    _binary_pattern_cache = (
+        workspace.binary_pattern_cache if H.shape[0] > 0 else None
+    )
 
-    # Tracks whether we need to recompute A and per-sample costs after
-    # the loop exits.  When the loop exits via CD CONVERGENCE
-    # (not a_changed and h_changes == 0 at the break point), the last
-    # _update_H call did NOT change H, so the A computed earlier in the
-    # same loop iteration is still consistent with the (unchanged) H.
-    # In that case we can skip the post-loop _update_A — a clean win of
-    # one _update_A call per converged _fit_at_fixed_K invocation, which
-    # is the common case (most blocks converge in 3-10 iterations, well
-    # under max_iter=50).
-    #
-    # When the loop exits via max_iter (no convergence), the LAST
-    # _update_H call MAY have changed H, in which case A is now stale
-    # and must be recomputed.  We can't tell whether h_changes was 0 at
-    # the final iteration of the max_iter path, so we conservatively
-    # recompute in that case.  (Cheap insurance — max_iter is rarely
-    # reached.)
+    # Cold scalar fits retain the direct recurrence. Enter the trajectory
+    # engine only when this exact ordered panel has a reusable transition.
+    initial_transition_key = None
+    initial_transition = None
+    if (shared_workspace and workspace.transition_cache
+            and H.dtype == np.dtype(np.int64)
+            and H.shape[0] >= 1
+            and workspace.binary_pattern_cache is not None):
+        initial_transition_key = workspace._binary_state_key(H)
+        if initial_transition_key is not None:
+            initial_transition = workspace.cached_transition(
+                initial_transition_key)
+    if initial_transition is not None:
+        captured, result, certified = _fit_binary_cached_trajectory(
+            H, max_iter, workspace, _return_initial,
+            initial_key=initial_transition_key,
+            initial_transition=initial_transition,
+        )
+        if _return_initial:
+            if initial_result is None:
+                initial_result = captured
+                workspace.remember_fit(
+                    initial_cache_key, initial_result, fixed_point=False
+                )
+            workspace.remember_fit(
+                fit_cache_key, result, fixed_point=certified
+            )
+            return initial_result, result
+        workspace.remember_fit(
+            fit_cache_key, result, fixed_point=certified
+        )
+        return result
+
+
+    # Tracks whether A and the per-sample costs are stale after the final
+    # H update.  max_iter=0 starts stale because no A update has run.
     need_recompute = True
 
+    captured_initial = initial_result
     for it in range(max_iter):
         # Update A given H — pass precomputed WW arrays and log_probs
         # for the fused kernel to consume; identical results to
         # recomputing inside.
-        A, per_sample_cost, per_sample_cost_unc, wildcard_slots = _update_A(
-            probs_k, H, lam, cost_WW=cost_WW, WW_bin_emis=WW_bin_emis,
-            log_probs=log_probs, blas_lp_cache=_blas_lp_cache)
+        if it == 0 and initial_result is not None:
+            # A cached max_iter=0 result is exactly the A(H_init) evaluation
+            # that begins coordinate descent.  Reuse private copies rather
+            # than evaluating the same assignments a second time.
+            A = np.array(initial_result[1], copy=True, order="K")
+            per_sample_cost = np.array(
+                initial_result[2], copy=True, order="K"
+            )
+            wildcard_slots = np.array(
+                initial_result[3], copy=True, order="K"
+            )
+            # The public fit tuple exposes only total uncapped NLL.  If H is
+            # already fixed, that exact total is reused below; if H changes,
+            # the final A(H) recomputation supplies per-sample uncapped costs.
+            per_sample_cost_unc = None
+        else:
+            A, per_sample_cost, per_sample_cost_unc, wildcard_slots = _update_A(
+                probs_k, H, lam, cost_WW=cost_WW, WW_bin_emis=WW_bin_emis,
+                log_probs=log_probs, blas_lp_cache=_blas_lp_cache,
+                binary_pattern_cache=_binary_pattern_cache,
+                WW_total_cost=WW_total_cost)
 
-        # Convergence check via A
-        a_changed = (A_prev is None) or (not np.array_equal(A, A_prev))
-        A_prev = A.copy()
+        if _return_initial and captured_initial is None:
+            captured_initial = (
+                np.array(H, copy=True, order="K"),
+                np.array(A, copy=True, order="K"),
+                np.array(per_sample_cost, copy=True, order="K"),
+                np.array(wildcard_slots, copy=True, order="K"),
+                0,
+                float(per_sample_cost_unc.sum()),
+            )
+            if shared_workspace:
+                workspace.remember_fit(
+                    initial_cache_key,
+                    captured_initial,
+                    fixed_point=False,
+                )
+
+        # Retain the preceding assignments by reference.  Equality is needed
+        # only after H makes zero changes; comparing on every nonterminal
+        # iteration was pure memory traffic.
+        previous_A = A_prev
+        A_prev = A
 
         # Update H given A — pass precomputed cost_WW and log_probs for
         # the kernel to use directly.
         h_changes = _update_H(probs_k, H, A, lam, cost_WW=cost_WW,
-                              log_probs=log_probs)
+                              log_probs=log_probs,
+                              h_genotype_cost=h_genotype_cost,
+                              h_wildcard_cost=h_wildcard_cost)
 
         n_iter = it + 1
-        if not a_changed and h_changes == 0:
-            # Converged: H didn't change in this iteration's _update_H
-            # call, so the A computed above is still consistent.  Skip
-            # the post-loop recompute.
+        if h_changes == 0:
+            a_changed = (
+                previous_A is None
+                or not np.array_equal(A, previous_A)
+            )
+            # H is unchanged, so this iteration's A and costs already match
+            # the final H even when this is the max_iter boundary.  This is a
+            # complete A(H), H(A) fixed-point certificate, including when the
+            # iteration cap is reached on this pass.
             need_recompute = False
-            break
+            fixed_point_certified = True
+            if not a_changed:
+                break
+            if it + 1 < max_iter:
+                # With identical H, the old next iteration deterministically
+                # repeated this A, then made zero H changes and converged.
+                # Skip that redundant A/H pass while preserving its reported
+                # iteration count exactly.
+                n_iter = it + 2
+                break
 
     if need_recompute:
-        # Either we never entered the loop (max_iter=0) or we exited via
-        # max_iter without converging (in which case the final _update_H
-        # call may have changed H, making A stale).  Recompute.
+        # Either the loop never ran (max_iter=0), or its last H update
+        # changed H and left A stale.
         A, per_sample_cost, per_sample_cost_unc, wildcard_slots = _update_A(
             probs_k, H, lam, cost_WW=cost_WW, WW_bin_emis=WW_bin_emis,
-            log_probs=log_probs, blas_lp_cache=_blas_lp_cache)
-    # Use UNCAPPED NLL as the K-growth signal (see docstring).
-    total_NLL = float(per_sample_cost_unc.sum())
+            log_probs=log_probs, blas_lp_cache=_blas_lp_cache,
+            binary_pattern_cache=_binary_pattern_cache,
+            WW_total_cost=WW_total_cost)
+    # Use UNCAPPED NLL as the K-growth signal (see docstring).  When the
+    # synchronized endpoint came from the workspace and H did not change,
+    # that cached endpoint already holds the same uncapped total.
+    total_NLL = (
+        float(initial_result[5])
+        if per_sample_cost_unc is None
+        else float(per_sample_cost_unc.sum())
+    )
 
-    return H, A, per_sample_cost, wildcard_slots, n_iter, total_NLL
+    result = (H, A, per_sample_cost, wildcard_slots, n_iter, total_NLL)
+    if _return_initial and captured_initial is None:
+        captured_initial = _FixedKFitWorkspace._copy_fit_result(result)
+    if shared_workspace:
+        workspace.remember_fit(
+            fit_cache_key,
+            result,
+            fixed_point=fixed_point_certified,
+        )
+    if _return_initial:
+        return captured_initial, result
+    return result
+
+
+def _fit_at_fixed_K_with_initial(
+        probs_k, H_init, lam, max_iter=50, *, workspace=None):
+    """Fit once and return the synchronized start plus the final endpoint.
+
+    The first A update of the ordinary positive-iteration fit is exactly the
+    ``max_iter=0`` endpoint.  Returning it here avoids evaluating that same
+    update twice while retaining the normal cache entries for both iteration
+    budgets.
+    """
+    return _fit_at_fixed_K(
+        probs_k,
+        H_init,
+        lam,
+        max_iter=max_iter,
+        workspace=workspace,
+        _return_initial=True,
+    )
+
+
+
+def _fit_at_fixed_K_many_binary_frontier(
+        starts, max_iter, workspace, return_initial):
+    """Fit a same-K batch by sharing exact deterministic trajectory states."""
+    count = len(starts)
+    iteration_limit = max(0, int(max_iter))
+    final_results = [None] * count
+    initial_results = [None] * count
+    cached_finals = [None] * count
+    fit_keys = [None] * count
+    initial_keys = [None] * count
+    state_keys = [None] * count
+    previous_assignments = [None] * count
+    completed = [0] * count
+    paths = [None] * count
+    first_visits = [None] * count
+    active = []
+
+    for index, start in enumerate(starts):
+        fit_key, cached_final = workspace.cached_fit(start, max_iter)
+        fit_keys[index] = fit_key
+        cached_finals[index] = cached_final
+        cached_initial = None
+        if return_initial:
+            initial_key, cached_initial = workspace.cached_fit(start, 0)
+            initial_keys[index] = initial_key
+            initial_results[index] = cached_initial
+        if cached_final is not None and (
+                not return_initial or cached_initial is not None):
+            final_results[index] = cached_final
+            continue
+        state_key = workspace._binary_state_key(start)
+        state_keys[index] = state_key
+        paths[index] = [state_key]
+        first_visits[index] = {state_key: 0}
+        active.append(index)
+
+    def finish(index, result, fixed_point):
+        if return_initial and initial_results[index] is None:
+            raise AssertionError("batch fit finished before initial assignment")
+        final_results[index] = result
+        workspace.remember_fit(
+            fit_keys[index], result, fixed_point=fixed_point
+        )
+        if return_initial:
+            workspace.remember_fit(
+                initial_keys[index], initial_results[index],
+                fixed_point=False,
+            )
+
+    assignment_only = iteration_limit == 0
+    while active:
+        missing = OrderedDict()
+        for index in active:
+            key = state_keys[index]
+            cached = (
+                workspace.cached_assignment(key)
+                if assignment_only
+                else workspace.cached_transition(key)
+            )
+            if cached is None:
+                missing.setdefault(key, None)
+        if missing:
+            matrices = [
+                workspace._binary_state_from_key(key) for key in missing
+            ]
+            if assignment_only:
+                for matrix in matrices:
+                    workspace.compute_assignment_scalar(matrix)
+            else:
+                # At one thread the scalar kernels avoid the batch slab's
+                # packing/scattering overhead. A singleton frontier likewise
+                # needs sample/site parallelism rather than an outer B=1 team.
+                if numba.get_num_threads() == 1 or len(matrices) == 1:
+                    for matrix in matrices:
+                        workspace.compute_transition_scalar(matrix)
+                else:
+                    workspace.compute_transition_batch(matrices)
+
+        next_active = []
+        for index in active:
+            state_key = state_keys[index]
+            if assignment_only:
+                assignment = workspace.cached_assignment(state_key)
+                next_key = None
+                h_changes = 0
+            else:
+                assignment, next_key, h_changes = (
+                    workspace.cached_transition(state_key)
+                )
+            if return_initial and initial_results[index] is None:
+                initial_results[index] = _fit_result_from_assignment(
+                    starts[index], assignment, 0
+                )
+
+            if cached_finals[index] is not None:
+                finish(index, cached_finals[index], False)
+                continue
+
+            if completed[index] >= iteration_limit:
+                final_H = workspace._binary_state_from_key(state_key)
+                result = _fit_result_from_assignment(
+                    final_H, assignment, iteration_limit
+                )
+                finish(index, result, False)
+                continue
+
+            completed[index] += 1
+            if h_changes == 0:
+                reported = completed[index]
+                previous_A = previous_assignments[index]
+                if previous_A is None or not np.array_equal(
+                        assignment[0], previous_A):
+                    if completed[index] < iteration_limit:
+                        reported += 1
+                final_H = workspace._binary_state_from_key(state_key)
+                result = _fit_result_from_assignment(
+                    final_H, assignment, reported
+                )
+                finish(index, result, True)
+                continue
+
+            previous_assignments[index] = assignment[0]
+            cycle_start = first_visits[index].get(next_key)
+            if cycle_start is not None:
+                period = completed[index] - int(cycle_start)
+                if period <= 1:
+                    raise AssertionError(
+                        "nonzero H changes produced a one-state batch cycle"
+                    )
+                remaining = iteration_limit - completed[index]
+                endpoint_key = paths[index][
+                    int(cycle_start) + (remaining % period)
+                ]
+                endpoint_assignment = workspace.cached_assignment(endpoint_key)
+                if endpoint_assignment is None:
+                    endpoint_H = workspace._binary_state_from_key(endpoint_key)
+                    endpoint_assignment = workspace.compute_transition_scalar(
+                        endpoint_H
+                    )[0]
+                final_H = workspace._binary_state_from_key(endpoint_key)
+                result = _fit_result_from_assignment(
+                    final_H, endpoint_assignment, iteration_limit
+                )
+                finish(index, result, False)
+                continue
+
+            state_keys[index] = next_key
+            first_visits[index][next_key] = completed[index]
+            paths[index].append(next_key)
+            next_active.append(index)
+        active = next_active
+
+    if return_initial:
+        return list(zip(initial_results, final_results))
+    return final_results
+
+def _fit_at_fixed_K_many_impl(
+        probs_k, H_starts, lam, max_iter=50, *, workspace=None,
+        return_initial=False):
+    """Fit an ordered batch of same-shaped binary starts at one fixed K.
+
+    Exact duplicate starts are fitted once and replayed with independent result
+    arrays. Production int64 binary starts use a frontier over the deterministic
+    ordered-H coordinate map: equal trajectory states are evaluated once, and
+    uncached states in the same frontier are processed by one compiled kernel
+    whose only parallel dimension is the independent start. Each start retains
+    the scalar sample/site accumulation, stable founder-update order, strict tie
+    rules, convergence semantics, and max-iteration cycle endpoint.
+
+    Unsupported dtypes/workspaces use the established scalar path, whose A/H
+    kernels retain their internal sample/site parallelism. Results are exact
+    scalar ``_fit_at_fixed_K`` tuples in input order; evidence and the
+    workspace are shared read-only.
+    """
+    starts = tuple(H_starts)
+    if not starts:
+        return []
+
+    first = np.asarray(starts[0])
+    if first.ndim != 2:
+        raise ValueError("fixed-K starts must be two-dimensional")
+    start_shape = first.shape
+    unique_starts = []
+    unique_by_key = {}
+    replay_indices = []
+    for start in starts:
+        matrix = np.asarray(start)
+        if matrix.ndim != 2 or matrix.shape != start_shape:
+            raise ValueError(
+                "all fixed-K starts must have the same two-dimensional shape"
+            )
+        if np.any((matrix != 0) & (matrix != 1)):
+            raise ValueError("fixed-K starts must be binary")
+        contiguous = np.ascontiguousarray(matrix)
+        start_key = (
+            contiguous.dtype.str,
+            tuple(int(value) for value in contiguous.shape),
+            contiguous.tobytes(),
+        )
+        unique_index = unique_by_key.get(start_key)
+        if unique_index is None:
+            unique_index = len(unique_starts)
+            unique_by_key[start_key] = unique_index
+            unique_starts.append(start)
+        replay_indices.append(unique_index)
+
+    if workspace is None:
+        # Share inexpensive evidence invariants across the batch.  Do not
+        # construct the 54 MiB binary-pattern table implicitly for a small
+        # one-off batch; callers that amortise it pass their existing workspace.
+        workspace = _prepare_fixed_k_fit_workspace(
+            probs_k, lam, binary_patterns=False
+        )
+
+    n_unique = len(unique_starts)
+    # Refresh at this phase boundary so tail blocks can consume cores released
+    # by completed workers.  Parallelism stays inside each numerical fit: a
+    # matched N=116/N=320 benchmark showed no gain from competing Python
+    # executor tasks on the shared OpenMP runtime.
+    dynamic_threads.apply_dynamic_threads(
+        max_threads=FIXED_K_FIT_MAX_THREADS
+    )
+    use_binary_frontier = all(
+        workspace.supports_binary_transition_engine(start)
+        for start in unique_starts
+    )
+    if use_binary_frontier:
+        unique_results = _fit_at_fixed_K_many_binary_frontier(
+            unique_starts, max_iter, workspace, return_initial
+        )
+    else:
+        scalar_fit = (
+            _fit_at_fixed_K_with_initial
+            if return_initial else _fit_at_fixed_K
+        )
+        unique_results = [
+            scalar_fit(
+                probs_k, start, lam, max_iter=max_iter, workspace=workspace
+            ) for start in unique_starts
+        ]
+
+    if n_unique == len(starts):
+        return unique_results
+
+    # Preserve the historical non-aliasing of results from separate scalar
+    # calls.  The first occurrence can use the computed tuple directly; later
+    # duplicate positions receive independent array copies.
+    occurrence_counts = [0] * n_unique
+    results = []
+    for unique_index in replay_indices:
+        result = unique_results[unique_index]
+        if occurrence_counts[unique_index] == 0:
+            results.append(result)
+        else:
+            if return_initial:
+                initial_result, final_result = result
+                results.append(
+                    (
+                        _FixedKFitWorkspace._copy_fit_result(initial_result),
+                        _FixedKFitWorkspace._copy_fit_result(final_result),
+                    )
+                )
+            else:
+                results.append(_FixedKFitWorkspace._copy_fit_result(result))
+        occurrence_counts[unique_index] += 1
+    return results
+
+
+def _fit_at_fixed_K_many(
+        probs_k, H_starts, lam, max_iter=50, *, workspace=None):
+    """Fit an ordered batch of same-shaped binary starts at one fixed K."""
+    return _fit_at_fixed_K_many_impl(
+        probs_k,
+        H_starts,
+        lam,
+        max_iter=max_iter,
+        workspace=workspace,
+    )
+
+
+def _fit_at_fixed_K_many_with_initial(
+        probs_k, H_starts, lam, max_iter=50, *, workspace=None):
+    """Fit a batch once, returning synchronized and final endpoints.
+
+    Each result is ``(initial_fit, final_fit)`` in input order.  The initial
+    endpoint has exactly the public ``max_iter=0`` fit-tuple representation.
+    """
+    return _fit_at_fixed_K_many_impl(
+        probs_k,
+        H_starts,
+        lam,
+        max_iter=max_iter,
+        workspace=workspace,
+        return_initial=True,
+    )
 
 
 # =============================================================================
@@ -1196,11 +3047,9 @@ def _compute_cc(cc_scale, N, L_kept, use_log_bic=False):
     chimera_resolution.compute_cc and _grow_K's docstring for the full
     rationale.
     """
-    snp_growth = L_kept / 200.0
-    if use_log_bic:
-        log_n = math.log(max(N * L_kept, 2))
-        return cc_scale * log_n * snp_growth
-    return cc_scale * snp_growth * N
+    return compute_founder_complexity_cost(
+        cc_scale, N, L_kept, use_log_bic=use_log_bic
+    )
 
 
 def _compute_bic(K, nll, cc):
@@ -1211,7 +3060,7 @@ def _compute_bic(K, nll, cc):
     this is a constant offset from NLL (so ordering is preserved) but
     the absolute number is informative when comparing across K.
     """
-    return K * cc + 2.0 * nll
+    return compute_outer_bic(K, nll, cc)
 
 
 def _compute_nll_for_subset(haps_list, probs_k, lam):

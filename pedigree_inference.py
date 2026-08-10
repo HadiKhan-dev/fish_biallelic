@@ -20,6 +20,7 @@ import os
 from itertools import combinations, product
 from tqdm import tqdm
 from sklearn.cluster import KMeans
+import numba
 
 # Visualization Imports
 try:
@@ -32,16 +33,12 @@ except ImportError:
 
 warnings.filterwarnings("ignore")
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    print("WARNING: Numba not found. Pedigree inference will be slow.")
-    def njit(*args, **kwargs):
-        def decorator(func): return func
-        return decorator
-    prange = range
+from numba import njit, prange
+
+from painting_grid_utils import (
+    id_grid_to_allele_grid as _id_grid_to_allele_grid,
+    id_grid_to_allele_grid_multisnp as _id_grid_to_allele_grid_multisnp,
+)
 
 # =============================================================================
 # FORKSERVER POOL + SHARED MEMORY
@@ -300,12 +297,10 @@ def _update_dynamic_threads():
 
     n = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
     try:
-        import numba
         numba.set_num_threads(n)
     except Exception:
-        # Numba import or set_num_threads failure -- silently ignore.
-        # Same robustness posture as the helpers above; the next call
-        # will retry.
+        # A transient set_num_threads failure affects only dynamic scaling;
+        # the next call retries and the numerical work remains unchanged.
         pass
 
 
@@ -453,13 +448,12 @@ def _init_pedigree_shared(shared_dict, active_counter=None, total_cores=None,
     # based on the live active count.  Mirrors block_linking._init_bl_shared.
     if total_cores is not None:
         try:
-            import os as _os, numba as _numba
-            _os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
-            _numba.config.NUMBA_NUM_THREADS = total_cores
-            _numba.set_num_threads(1)
+            os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
+            numba.config.NUMBA_NUM_THREADS = total_cores
+            numba.set_num_threads(1)
         except Exception:
-            # Numba unavailable or thread-set failure -- silently ignore,
-            # same robustness posture as _update_dynamic_threads.
+            # Thread-pool configuration failure leaves the worker usable;
+            # task-entry scaling below will retry set_num_threads().
             pass
 
 
@@ -487,7 +481,6 @@ def _check_trio_consistency_worker(args):
     counter_inc = False
     if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
         try:
-            import numba as _numba
             with _PEDIGREE_ACTIVE_COUNTER.get_lock():
                 _PEDIGREE_ACTIVE_COUNTER.value += 1
             counter_inc = True
@@ -496,10 +489,10 @@ def _check_trio_consistency_worker(args):
             remainder = _PEDIGREE_TOTAL_CORES - floor * active
             _try_claim_extra(remainder)
             n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-            _numba.set_num_threads(n_threads)
+            numba.set_num_threads(n_threads)
         except Exception:
-            # Numba unavailable or any other transient issue -- fall
-            # through and run the task without dynamic scaling.
+            # A transient counter or thread-resize failure falls through to
+            # the task body; the finally block still releases any claim made.
             pass
 
     try:
@@ -915,86 +908,19 @@ class PedigreeResult:
 
 
 def convert_id_grid_to_allele_grid(id_grid, bin_centers, founder_block, bin_width_bp=None):
-    num_bins = id_grid.shape[0]
-    bin_indices = np.searchsorted(founder_block.positions, bin_centers)
-    bin_indices = np.clip(bin_indices, 0, len(founder_block.positions) - 1)
-    if bin_width_bp is None:
-        if len(bin_centers) > 1:
-            bin_width_bp = bin_centers[1] - bin_centers[0]
-        else:
-            bin_width_bp = 10000 
-    found_snps_pos = founder_block.positions[bin_indices]
-    dist_to_center = np.abs(found_snps_pos - bin_centers)
-    valid_snp_mask = dist_to_center <= (bin_width_bp / 2.0)
-    hap_keys = sorted(list(founder_block.haplotypes.keys()))
-    max_id = max(hap_keys) if hap_keys else 0
-    allele_lookup = np.full((max_id + 1, num_bins), -1, dtype=np.int8)
-    for fid, h_arr in founder_block.haplotypes.items():
-        if h_arr.ndim == 2: raw_alleles = np.argmax(h_arr, axis=1)
-        else: raw_alleles = h_arr
-        extracted = raw_alleles[bin_indices]
-        extracted[~valid_snp_mask] = -1
-        allele_lookup[fid, :] = extracted
-    allele_grid = np.full_like(id_grid, -1, dtype=np.int8)
-    b_indices = np.arange(num_bins)
-    for chrom in [0, 1]:
-        ids = id_grid[:, chrom]
-        valid_mask = (ids != -1)
-        safe_ids = ids.copy()
-        safe_ids[~valid_mask] = 0
-        alleles = allele_lookup[safe_ids, b_indices]
-        alleles[~valid_mask] = -1
-        allele_grid[:, chrom] = alleles
-    return allele_grid
+    return _id_grid_to_allele_grid(
+        id_grid, bin_centers, founder_block.positions, founder_block.haplotypes,
+        bin_width_bp=bin_width_bp, check_founder_bounds=False,
+    )
 
 
 def convert_id_grid_to_allele_grid_multisnp(id_grid, bin_centers, founder_block, 
                                              bin_width_bp=None, max_snps_per_bin=10):
-    num_bins = id_grid.shape[0]
-    snp_positions = founder_block.positions
-    n_snps = len(snp_positions)
-    allele_grid = np.full((num_bins, 2, max_snps_per_bin), -1, dtype=np.int8)
-    if n_snps == 0:
-        return allele_grid
-    if bin_width_bp is None:
-        if len(bin_centers) > 1:
-            bin_width_bp = bin_centers[1] - bin_centers[0]
-        else:
-            bin_width_bp = 10000
-    half_width = bin_width_bp / 2.0
-    hap_keys = sorted(list(founder_block.haplotypes.keys()))
-    max_id = max(hap_keys) if hap_keys else 0
-    founder_alleles = np.full((max_id + 1, n_snps), -1, dtype=np.int8)
-    for fid, h_arr in founder_block.haplotypes.items():
-        if h_arr.ndim == 2:
-            founder_alleles[fid, :] = np.argmax(h_arr, axis=1).astype(np.int8)
-        else:
-            founder_alleles[fid, :] = h_arr.astype(np.int8)
-    bin_starts = bin_centers - half_width
-    bin_ends = bin_centers + half_width
-    start_indices = np.searchsorted(snp_positions, bin_starts, side='left')
-    end_indices = np.searchsorted(snp_positions, bin_ends, side='right')
-    for b in range(num_bins):
-        s_start = start_indices[b]
-        s_end = end_indices[b]
-        bin_n_snps = s_end - s_start
-        if bin_n_snps == 0:
-            continue
-        if bin_n_snps <= max_snps_per_bin:
-            sampled_indices = list(range(s_start, s_end))
-        else:
-            step = bin_n_snps / max_snps_per_bin
-            sampled_indices = [s_start + int(i * step) for i in range(max_snps_per_bin)]
-        f0 = id_grid[b, 0]
-        f1 = id_grid[b, 1]
-        for k_idx, snp_idx in enumerate(sampled_indices):
-            if k_idx >= max_snps_per_bin:
-                break
-            if f0 >= 0:
-                allele_grid[b, 0, k_idx] = founder_alleles[f0, snp_idx]
-            if f1 >= 0:
-                allele_grid[b, 1, k_idx] = founder_alleles[f1, snp_idx]
-    return allele_grid
+    return _id_grid_to_allele_grid_multisnp(
+        id_grid, bin_centers, founder_block.positions, founder_block.haplotypes,
+        bin_width_bp=bin_width_bp, max_snps_per_bin=max_snps_per_bin,
+        check_founder_bounds=False,
+    )
 
 
 # =============================================================================
@@ -1471,7 +1397,6 @@ def _process_contig_batch(args):
     counter_inc = False
     if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
         try:
-            import numba as _numba
             with _PEDIGREE_ACTIVE_COUNTER.get_lock():
                 _PEDIGREE_ACTIVE_COUNTER.value += 1
             counter_inc = True
@@ -1480,7 +1405,7 @@ def _process_contig_batch(args):
             remainder = _PEDIGREE_TOTAL_CORES - floor * active
             _try_claim_extra(remainder)
             n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-            _numba.set_num_threads(n_threads)
+            numba.set_num_threads(n_threads)
         except Exception:
             pass
 
@@ -1548,7 +1473,6 @@ def _score_pairs_by_children(child_indices):
     counter_inc = False
     if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
         try:
-            import numba as _numba
             with _PEDIGREE_ACTIVE_COUNTER.get_lock():
                 _PEDIGREE_ACTIVE_COUNTER.value += 1
             counter_inc = True
@@ -1557,7 +1481,7 @@ def _score_pairs_by_children(child_indices):
             remainder = _PEDIGREE_TOTAL_CORES - floor * active
             _try_claim_extra(remainder)
             n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-            _numba.set_num_threads(n_threads)
+            numba.set_num_threads(n_threads)
         except Exception:
             pass
 
@@ -1633,7 +1557,6 @@ def _score_trios_batch(batch_sample_args):
     counter_inc = False
     if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
         try:
-            import numba as _numba
             with _PEDIGREE_ACTIVE_COUNTER.get_lock():
                 _PEDIGREE_ACTIVE_COUNTER.value += 1
             counter_inc = True
@@ -1642,7 +1565,7 @@ def _score_trios_batch(batch_sample_args):
             remainder = _PEDIGREE_TOTAL_CORES - floor * active
             _try_claim_extra(remainder)
             n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-            _numba.set_num_threads(n_threads)
+            numba.set_num_threads(n_threads)
         except Exception:
             pass
 

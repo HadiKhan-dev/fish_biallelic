@@ -23,7 +23,8 @@ import math
 import time
 import multiprocessing as mp
 import multiprocessing.pool
-import warnings
+import numba
+from numba import njit, prange
 from multiprocessing.shared_memory import SharedMemory
 
 import bhd_kernels
@@ -53,20 +54,6 @@ import small_block_refine
 # downstream MAD threshold (which has a hard floor of 0.01) and
 # do not affect any production output.
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    warnings.warn("Numba not found in residual_discovery; falling back to Python loops.",
-                  ImportWarning)
-    def njit(*args, **kwargs):
-        # Support both @njit and @njit(...) forms.
-        if len(args) == 1 and callable(args[0]) and not kwargs:
-            return args[0]
-        def decorator(func): return func
-        return decorator
-    prange = range
 
 
 @njit(cache=True, parallel=True, fastmath=False)
@@ -270,11 +257,7 @@ def _init_pass1_worker(probs_shm_name, probs_shape, probs_dtype, num_samples):
     _RD_SHM_REF = SharedMemory(name=probs_shm_name, create=False)
     _RD_GLOBAL_PROBS = np.ndarray(probs_shape, dtype=probs_dtype, buffer=_RD_SHM_REF.buf)
     _RD_NUM_SAMPLES = num_samples
-    try:
-        import numba
-        numba.set_num_threads(1)
-    except Exception:
-        pass
+    numba.set_num_threads(1)
 
 
 def _pass1_worker(args):
@@ -401,66 +384,23 @@ def _paint_samples_fast(hap_array, block_probs, num_samples):
         best_ll: (num_samples,) log-likelihood of best pair.
         residuals: (num_samples,) mean per-site residual.
     """
-    if HAS_NUMBA:
-        # JIT path: cast inputs to expected dtypes and call kernel.
-        # block_probs cast to float64 means math is f64 throughout
-        # (slightly more precise than the original which silently used
-        # f32 for log when block_probs was f32).
-        if hap_array.dtype != np.int8:
-            hap_array_k = hap_array.astype(np.int8)
-        else:
-            hap_array_k = hap_array
-        if block_probs.dtype != np.float64:
-            block_probs_k = block_probs.astype(np.float64)
-        else:
-            block_probs_k = block_probs
-        
-        best_pair_idx, best_ll, residuals, pair_i, pair_j = _paint_kernel(
-            hap_array_k, block_probs_k, num_samples)
-        
-        best_pairs_decoded = [
-            (int(pair_i[best_pair_idx[si]]), int(pair_j[best_pair_idx[si]]))
-            for si in range(num_samples)
-        ]
-        return best_pairs_decoded, best_ll, residuals
-    
-    # ---- Pure-Python fallback (used when numba is not available) ----
-    # Cast block_probs to float64 so the fallback produces byte-identical
-    # output to the JIT path.  Without this cast, when block_probs is
-    # float32, np.log(np.maximum(...)) operates in float32 and the
-    # subsequent ll += ... mixes f32 and f64 — slightly different
-    # numerics from the JIT kernel, which works in f64 throughout.
+    # Cast inputs to the compiled kernels expected dtypes.
+    if hap_array.dtype != np.int8:
+        hap_array_k = hap_array.astype(np.int8)
+    else:
+        hap_array_k = hap_array
     if block_probs.dtype != np.float64:
-        block_probs = block_probs.astype(np.float64)
-    K, n_sites = hap_array.shape
-    
-    pairs = []
-    for i in range(K):
-        for j in range(i, K):
-            pairs.append((i, j))
-    
-    best_pair = np.zeros(num_samples, dtype=int)
-    best_ll = np.full(num_samples, -np.inf)
-    
-    for pi, (i, j) in enumerate(pairs):
-        expected = hap_array[i] + hap_array[j]
-        ll = np.zeros(num_samples)
-        for s in range(n_sites):
-            ll += np.log(np.maximum(block_probs[:, s, expected[s]], 1e-10))
-        better = ll > best_ll
-        best_ll[better] = ll[better]
-        best_pair[better] = pi
-    
-    residuals = np.zeros(num_samples)
-    for si in range(num_samples):
-        pi = best_pair[si]
-        i, j = pairs[pi]
-        expected = hap_array[i] + hap_array[j]
-        for s in range(n_sites):
-            residuals[si] += 1.0 - block_probs[si, s, expected[s]]
-    residuals /= n_sites
-    
-    best_pairs_decoded = [pairs[best_pair[si]] for si in range(num_samples)]
+        block_probs_k = block_probs.astype(np.float64)
+    else:
+        block_probs_k = block_probs
+
+    best_pair_idx, best_ll, residuals, pair_i, pair_j = _paint_kernel(
+        hap_array_k, block_probs_k, num_samples
+    )
+    best_pairs_decoded = [
+        (int(pair_i[best_pair_idx[si]]), int(pair_j[best_pair_idx[si]]))
+        for si in range(num_samples)
+    ]
     return best_pairs_decoded, best_ll, residuals
 
 
@@ -480,43 +420,19 @@ def _extract_missing_hap(hap_array, block_probs, sample_indices, partner_indices
     Returns:
         (n_sites,) int8 array of the extracted haplotype.
     """
-    if HAS_NUMBA:
-        # JIT path.
-        if hap_array.dtype != np.int8:
-            hap_array_k = hap_array.astype(np.int8)
-        else:
-            hap_array_k = hap_array
-        if block_probs.dtype != np.float64:
-            block_probs_k = block_probs.astype(np.float64)
-        else:
-            block_probs_k = block_probs
-        sample_indices_k = np.asarray(sample_indices, dtype=np.int64)
-        partner_indices_k = np.asarray(partner_indices, dtype=np.int64)
-        return _extract_missing_hap_kernel(
-            hap_array_k, block_probs_k, sample_indices_k, partner_indices_k)
-    
-    # ---- Pure-Python fallback ----
-    # Cast block_probs to float64 so the fallback produces byte-identical
-    # output to the JIT path.  See note in _paint_samples_fast above.
+    if hap_array.dtype != np.int8:
+        hap_array_k = hap_array.astype(np.int8)
+    else:
+        hap_array_k = hap_array
     if block_probs.dtype != np.float64:
-        block_probs = block_probs.astype(np.float64)
-    K, n_sites = hap_array.shape
-    allele_votes_0 = np.zeros(n_sites, dtype=np.float64)
-    allele_votes_1 = np.zeros(n_sites, dtype=np.float64)
-    
-    for idx, si in enumerate(sample_indices):
-        partner = hap_array[partner_indices[idx]]
-        for s in range(n_sites):
-            a = partner[s]
-            p0 = block_probs[si, s, a]
-            p1 = block_probs[si, s, min(a + 1, 2)]
-            total = p0 + p1
-            if total > 1e-10:
-                allele_votes_0[s] += p0 / total
-                allele_votes_1[s] += p1 / total
-    
-    new_hap = (allele_votes_1 > allele_votes_0).astype(np.int8)
-    return new_hap
+        block_probs_k = block_probs.astype(np.float64)
+    else:
+        block_probs_k = block_probs
+    sample_indices_k = np.asarray(sample_indices, dtype=np.int64)
+    partner_indices_k = np.asarray(partner_indices, dtype=np.int64)
+    return _extract_missing_hap_kernel(
+        hap_array_k, block_probs_k, sample_indices_k, partner_indices_k
+    )
 
 
 def _find_partners(hap_array, block_probs, sample_indices):
@@ -539,43 +455,18 @@ def _find_partners(hap_array, block_probs, sample_indices):
         Returned as a Python list to match the call sites that
         previously built up `partner_indices = []` then `.append(...)`.
     """
-    if HAS_NUMBA:
-        if hap_array.dtype != np.int8:
-            hap_array_k = hap_array.astype(np.int8)
-        else:
-            hap_array_k = hap_array
-        if block_probs.dtype != np.float64:
-            block_probs_k = block_probs.astype(np.float64)
-        else:
-            block_probs_k = block_probs
-        sample_indices_k = np.asarray(sample_indices, dtype=np.int64)
-        return _find_partners_kernel(
-            hap_array_k, block_probs_k, sample_indices_k).tolist()
-    
-    # ---- Pure-Python fallback (matches the original inlined loops
-    # in _residual_discover_core / _seeded_discover / _seeded_discover_from_arrays) ----
-    # Cast block_probs to float64 so the fallback produces byte-identical
-    # output to the JIT path.  See note in _paint_samples_fast above.
+    if hap_array.dtype != np.int8:
+        hap_array_k = hap_array.astype(np.int8)
+    else:
+        hap_array_k = hap_array
     if block_probs.dtype != np.float64:
-        block_probs = block_probs.astype(np.float64)
-    K, n_sites = hap_array.shape
-    partner_indices = []
-    for si in sample_indices:
-        best_ki = -1
-        best_ki_ll = -np.inf
-        for ki in range(K):
-            partner = hap_array[ki]
-            ll = 0.0
-            for s in range(n_sites):
-                a = partner[s]
-                p0 = block_probs[si, s, a]
-                p1 = block_probs[si, s, min(a + 1, 2)]
-                ll += np.log(max(p0 + p1, 1e-10))
-            if ll > best_ki_ll:
-                best_ki_ll = ll
-                best_ki = ki
-        partner_indices.append(best_ki)
-    return partner_indices
+        block_probs_k = block_probs.astype(np.float64)
+    else:
+        block_probs_k = block_probs
+    sample_indices_k = np.asarray(sample_indices, dtype=np.int64)
+    return _find_partners_kernel(
+        hap_array_k, block_probs_k, sample_indices_k
+    ).tolist()
 
 
 def _iterative_refine(base_hap_array, new_hap, block_probs, num_samples, max_rounds=10):
@@ -682,21 +573,10 @@ def _seeded_discover(block, block_probs, seed_samples, num_samples):
     Returns:
         (new_hap, n_assigned, assigned_set) or (None, 0, set()) if too few seeds.
     """
-    base_hap_array, hap_keys = _get_block_hap_array(block)
-    K_base = len(hap_keys)
-    n_sites = block_probs.shape[1]
-    
-    seed_list = sorted(seed_samples)
-    if len(seed_list) < 3:
-        return None, 0, set()
-    
-    partner_indices = _find_partners(base_hap_array, block_probs, seed_list)
-    
-    new_hap = _extract_missing_hap(
-        base_hap_array, block_probs, seed_list, partner_indices)
-    new_hap, n_assigned, assigned_set = _iterative_refine(
-        base_hap_array, new_hap, block_probs, num_samples)
-    return new_hap, n_assigned, assigned_set
+    base_hap_array, _hap_keys = _get_block_hap_array(block)
+    return _seeded_discover_from_arrays(
+        base_hap_array, block_probs, seed_samples, num_samples
+    )
 
 
 def _sample_overlap(set_a, set_b):
@@ -718,43 +598,11 @@ def _quality_check(block, block_probs, new_hap, num_samples, min_rr):
     Returns:
         (passed, residual_reduction, reason_if_failed)
     """
-    base_hap_array, hap_keys = _get_block_hap_array(block)
-    n_sites = block_probs.shape[1]
-    
-    # Residual reduction check
-    _, _, base_residuals = _paint_samples_fast(base_hap_array, block_probs, num_samples)
-    base_total = np.sum(base_residuals)
-    
-    expanded_array = np.vstack([base_hap_array, new_hap.reshape(1, -1)])
-    _, _, new_residuals = _paint_samples_fast(expanded_array, block_probs, num_samples)
-    new_total = np.sum(new_residuals)
-    
-    rr = base_total - new_total
-    
-    if rr < min_rr:
-        return False, rr, 'low_residual_reduction'
-    
-    # Structural chimera pruning check
-    expanded_hap_dict = {}
-    for ki, k in enumerate(hap_keys):
-        expanded_hap_dict[ki] = block.haplotypes[k]
-    
-    new_hap_2d = np.zeros((n_sites, 2), dtype=np.float32)
-    new_hap_2d[np.arange(n_sites), new_hap] = 1.0
-    expanded_hap_dict[len(hap_keys)] = new_hap_2d
-    
-    pruned = bhd_chimera.prune_chimeras(
-        expanded_hap_dict, block_probs,
-        max_recombs=1, max_mismatch_percent=0.5,
-        min_mean_delta_to_protect=0.25
+    base_hap_array, _hap_keys = _get_block_hap_array(block)
+    return _quality_check_from_arrays(
+        base_hap_array, block.haplotypes, block_probs,
+        new_hap, num_samples, min_rr,
     )
-    
-    survived = len(pruned) > len(hap_keys)
-    
-    if not survived:
-        return False, rr, 'pruned'
-    
-    return True, rr, None
 
 
 # -----------------------------------------------------------------------------

@@ -3,22 +3,14 @@ import thread_config
 import numpy as np
 import math
 import warnings
-import ctypes
 from concurrent.futures import ThreadPoolExecutor
 
+import numba
 from numba import njit, prange
 
 import analysis_utils
 import block_linking
-
-# glibc malloc_trim — releases freed pages back to OS
-try:
-    _libc = ctypes.CDLL("libc.so.6")
-    def _malloc_trim():
-        _libc.malloc_trim(0)
-except OSError:
-    def _malloc_trim():
-        pass
+from memory_utils import malloc_trim as _malloc_trim
 
 # Suppress divide-by-zero warnings in log-space calculations
 np.seterr(divide='ignore', invalid='ignore')
@@ -1436,8 +1428,7 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         # before processing this block.  See the function docstring.
         if dynamic_cores_fn is not None:
             try:
-                import numba as _numba
-                _numba.set_num_threads(dynamic_cores_fn())
+                numba.set_num_threads(dynamic_cores_fn())
             except Exception:
                 pass
 
@@ -1521,8 +1512,7 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         # Dynamic thread reallocation hook (same rationale as Loop 1).
         if dynamic_cores_fn is not None:
             try:
-                import numba as _numba
-                _numba.set_num_threads(dynamic_cores_fn())
+                numba.set_num_threads(dynamic_cores_fn())
             except Exception:
                 pass
 
@@ -1644,8 +1634,7 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
         # posture in block_haplotypes._update_dynamic_threads).
         if dynamic_cores_fn is not None:
             try:
-                import numba as _numba
-                _numba.set_num_threads(dynamic_cores_fn())
+                numba.set_num_threads(dynamic_cores_fn())
             except Exception:
                 pass
 
@@ -1771,11 +1760,10 @@ def generate_transition_probability_mesh_double_hmm(full_samples_data, sample_si
 
     results = []
     if dynamic_cores_fn is not None:
-        import numba as _numba
         for args in worker_args:
             # Coarse-grained between-gap reset.  Fine-grained rescaling
             # happens inside the EM loop via the same callback.
-            _numba.set_num_threads(dynamic_cores_fn())
+            numba.set_num_threads(dynamic_cores_fn())
             results.append(_gap_worker(args))
             _malloc_trim()
     else:

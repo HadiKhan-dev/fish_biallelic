@@ -10,24 +10,7 @@
 
 import numpy as np
 
-import warnings
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    warnings.warn(
-        "Numba not found; bhd_recovery_candidates kernels fall back to pure Python "
-        "(slower but numerically identical).",
-        ImportWarning,
-    )
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        if len(args) == 1 and callable(args[0]) and not kwargs:
-            return args[0]
-        return decorator
-    prange = range
+from numba import njit, prange
 
 from bhd_config import (
     RECOVERY_CLEANNESS_THRESHOLD,

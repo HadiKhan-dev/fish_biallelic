@@ -6,6 +6,8 @@ fish_vcf_restriped/
 .pipeline_checkpoints/
 .pipeline_checkpoints_real/
 .pipeline_checkpoints_tropheops_withFounders
+# Backend-qualified TroMau checkpoint directories.
+.pipeline_checkpoints_tropheops_*/
 
 # Pickled checkpoints anywhere (the multi-GB stage pickles) — global safety net
 *.pkl
@@ -15,6 +17,8 @@ fish_vcf_restriped/
 results_simulation/
 results_real/
 results_tropheops_withFounders/
+# Backend-qualified TroMau result directories.
+results_tropheops_*/
 path_plots/
 debug_hierarchical/
 recombination_map/
@@ -48,10 +52,17 @@ model_logs/
 .~lock.*
 *.swp
 *~
+*.orig
+*.rej
+*.codex-patched*
 
 # Old/scratch
 old_files/
 prev_versions/
+
+# Isolated, disposable chromosome-1 reversible-cavity comparisons.
+results_chr1_reversible_comparison_*/
+.pipeline_checkpoints_chr1_reversible_comparison_*/
 untitled*.py
 
 # Jupyter

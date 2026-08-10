@@ -96,6 +96,9 @@ try:
         # Project modules used by workers
         'thread_config', 'dynamic_threads',
         'block_haplotypes', 'block_linking', 'hmm_matching',
+        'bhd_candidate_pool', 'bhd_cavity_selection',
+        'bhd_factorization_modes', 'bhd_fit',
+        'bhd_reversible_cavity', 'bhd_reversible_discovery',
         'beam_search_core', 'analysis_utils', 'chimera_resolution',
         # paint_samples + pedigree_inference: the pedigree-inference stage now
         # runs its Phase 1/2/3 and consistency-cutoff pools on forkserver too,
@@ -109,23 +112,56 @@ except (AttributeError, RuntimeError):
     pass
 
 # =========================================================================
-# Numba caching — inject cache=True into all @njit decorators
+# Numba caching — inject cache=True into project @njit decorators
 # =========================================================================
 # Workers recycled via maxtasksperchild lose compiled numba code.
 # cache=True persists compiled functions to disk (__pycache__), so
 # respawned workers load in ~0.1s instead of recompiling in 5-15s.
-# setdefault respects explicit cache=False if ever needed.
-try:
-    import numba as _numba
-    _original_njit = _numba.njit
+# Numba also imports some of its own decorated registry functions lazily.  Do
+# not force caching onto those (or onto third-party code): generated/library
+# functions may have no cache locator.  Explicit cache= settings remain
+# authoritative everywhere.
+import numba as _numba
+_original_njit = _numba.njit
+_project_source_root = os.path.dirname(os.path.realpath(__file__))
 
-    def _caching_njit(*args, **kwargs):
-        kwargs.setdefault('cache', True)
+def _is_project_njit_function(function):
+    code = getattr(function, '__code__', None)
+    filename = None if code is None else code.co_filename
+    if not filename or filename.startswith('<'):
+        return False
+    try:
+        source_path = os.path.realpath(filename)
+        return os.path.commonpath((
+            _project_source_root, source_path
+        )) == _project_source_root
+    except ValueError:
+        return False
+
+def _caching_njit(*args, **kwargs):
+    if 'cache' in kwargs:
         return _original_njit(*args, **kwargs)
 
-    _numba.njit = _caching_njit
-except ImportError:
-    pass
+    # Bare @njit passes the function directly.  Parameterized forms such
+    # as @njit(parallel=True) need to defer the source-path decision until
+    # Numba calls the returned decorator with the function.
+    if args and hasattr(args[0], '__code__'):
+        resolved_kwargs = kwargs.copy()
+        if _is_project_njit_function(args[0]):
+            resolved_kwargs['cache'] = True
+        return _original_njit(*args, **resolved_kwargs)
+
+    def _decorate(function):
+        resolved_kwargs = kwargs.copy()
+        if _is_project_njit_function(function):
+            resolved_kwargs['cache'] = True
+        return _original_njit(
+            *args, **resolved_kwargs
+        )(function)
+
+    return _decorate
+
+_numba.njit = _caching_njit
 
 
 @contextmanager
@@ -139,10 +175,9 @@ def numba_thread_scope(n_threads):
             # prange loops use 37 threads here
         # restored to previous count here
     """
-    import numba
-    old = numba.get_num_threads()
-    numba.set_num_threads(n_threads)
+    old = _numba.get_num_threads()
+    _numba.set_num_threads(n_threads)
     try:
         yield
     finally:
-        numba.set_num_threads(old)
+        _numba.set_num_threads(old)

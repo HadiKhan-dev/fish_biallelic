@@ -40,6 +40,7 @@ Usage (from the sweep project dir, with bio-env active):
 """
 import argparse
 import glob
+from pedigree_evaluation import parent_columns_match
 import os
 import sys
 
@@ -73,14 +74,7 @@ def _metric_label(key, gen_scope):
 # ---------------------------------------------------------------------------
 def _parents_match(row):
     """True iff the inferred parent set matches truth (pipeline's rule)."""
-    true_p = {row["Parent1_True"], row["Parent2_True"]}
-    true_p = {x for x in true_p if pd.notna(x)}
-    inf_p = {row["Parent1_Inf"], row["Parent2_Inf"]}
-    inf_p = {x for x in inf_p if pd.notna(x)}
-    # F1: truth parents are Founders -> correct iff inferred gave it no parents.
-    if any("Founder" in str(x) for x in true_p):
-        return len(inf_p) == 0
-    return true_p == inf_p
+    return parent_columns_match(row)
 
 
 def combo_accuracy(truth_csv, inf_csv, gen_scope="descendants"):

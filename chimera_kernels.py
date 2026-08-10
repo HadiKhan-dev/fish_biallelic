@@ -17,9 +17,11 @@ orchestration code in that module — keep resolving unchanged.
 
 import numpy as np
 import math
-import ctypes
+import numba
 
 from numba import njit, prange
+
+from memory_utils import malloc_trim as _malloc_trim
 
 
 # -----------------------------------------------------------------------------
@@ -27,14 +29,6 @@ from numba import njit, prange
 # scoring machinery (chimera_scoring) and the orchestrator (chimera_resolution).
 # Kept here, in the leaf module, so both can import them without a cycle.
 # -----------------------------------------------------------------------------
-# glibc malloc_trim — releases freed pages back to OS
-try:
-    _libc = ctypes.CDLL("libc.so.6")
-    def _malloc_trim():
-        _libc.malloc_trim(0)
-except OSError:
-    def _malloc_trim():
-        pass
 
 # Maximum samples to process at once in emission scoring tensors.
 # Bounds peak memory per worker: (n_candidates, _SAMPLE_CHUNK, K², n_bins).
@@ -58,7 +52,6 @@ def _resolve_threads(num_threads):
     if callable(num_threads):
         n = num_threads()
         try:
-            import numba
             numba.set_num_threads(n)
         except Exception:
             pass

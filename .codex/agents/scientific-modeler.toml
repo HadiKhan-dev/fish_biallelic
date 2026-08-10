@@ -1,0 +1,9 @@
+name = "scientific_modeler"
+description = "Deep specialist for biological, statistical, mathematical, algorithmic, and computational reasoning in haplotype reconstruction, local ancestry, pedigree inference, phase, recombination, simulations, and scientific interpretation."
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+sandbox_mode = "read-only"
+
+developer_instructions = """
+Before doing task work, read `.agent-profiles/scientific-modeler.md` from the repository root and follow it as your canonical role definition. Also read every applicable repository instruction file, including `AGENTS.md`. If the profile cannot be read, stop and report that instead of improvising a replacement role.
+"""

@@ -13,55 +13,20 @@ CHECKPOINT_DIR = ".pipeline_checkpoints"
 
 import os
 import checkpoint_io
+import pipeline_runtime
 
 
 def _load_contig_for_phase_correction(r_name):
-    """
-    Load tolerance_result and founder_block for one contig from
-    checkpoint files on disk.
-
-    Top-level (picklable) version used by forkserver workers in
-    phase_correction.  Reads checkpoints DIRECTLY rather than
-    going through main's `multi_contig_results` cache, because
-    forkserver workers do not inherit main's process state.
-
-    The stage->key mapping mirrors `_KEY_SOURCE` inside the
-    `__main__` block:
-        tolerance_result -> 10_viterbi_painting
-        super_blocks_L4  -> 09_assembly_L4    (preferred)
-        super_blocks_L3  -> 08_assembly_L3    (fallback)
-    If a checkpoint file is missing the corresponding data key is
-    simply omitted from the returned dict; the worker handles
-    missing keys by falling back to an identity equivalence matrix.
-    """
-    data = {}
-
-    # tolerance_result lives in stage 10 (Viterbi painting)
-    tol_path = checkpoint_io.contig_path(CHECKPOINT_DIR, "10_viterbi_painting", r_name)
-    if os.path.exists(tol_path):
-        ckpt = checkpoint_io.read(tol_path)
-        if 'tolerance_result' in ckpt:
-            data['tolerance_result'] = ckpt['tolerance_result']
-        del ckpt
-
-    # founder_block lives in stage 9 (L4 assembly), falling back to
-    # stage 8 (L3 assembly) when L4 is absent.  We take element [0]
-    # because super_blocks is a list of BlockResults; in the
-    # phase-correction flow there is exactly one block per contig
-    # (the whole-chromosome merged block).
-    for stage, list_key in [("09_assembly_L4", "super_blocks_L4"),
-                             ("08_assembly_L3", "super_blocks_L3")]:
-        if 'founder_block' in data:
-            break
-        path = checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name)
-        if not os.path.exists(path):
-            continue
-        ckpt = checkpoint_io.read(path)
-        if list_key in ckpt and ckpt[list_key]:
-            data['founder_block'] = ckpt[list_key][0]
-        del ckpt
-
-    return data
+    """Picklable wrapper around the standard checkpoint traversal."""
+    return pipeline_runtime.load_phase_correction_inputs(
+        CHECKPOINT_DIR,
+        r_name,
+        tolerance_stage="10_viterbi_painting",
+        founder_stage_keys=(
+            ("09_assembly_L4", "super_blocks_L4"),
+            ("08_assembly_L3", "super_blocks_L3"),
+        ),
+    )
 
 
 #%%
@@ -86,43 +51,11 @@ if __name__ == '__main__':
     # tqdm progress bars still display on the terminal only (they use stderr).
     # If the SSH connection drops, the log file preserves all output.
 
-    class TeeOutput:
-        """Writes to both the original stdout and a log file.
-        
-        Proxies all attributes from the original stdout so that VS Code's
-        IPython kernel still recognises the object as a valid output stream.
-        """
-        def __init__(self, log_path, original_stdout):
-            # Use object.__setattr__ to avoid triggering our __getattr__
-            object.__setattr__(self, '_log_file', open(log_path, 'a', buffering=1))
-            object.__setattr__(self, '_original', original_stdout)
-        
-        def write(self, message):
-            self._original.write(message)
-            try:
-                self._log_file.write(message)
-            except (ValueError, OSError):
-                pass  # log file closed or disk error — don't break output
-            return getattr(self._original, 'write', lambda m: len(m))(message) if False else None
-        
-        def flush(self):
-            self._original.flush()
-            try:
-                self._log_file.flush()
-            except (ValueError, OSError):
-                pass
-        
-        def close(self):
-            self._log_file.close()
-        
-        def __getattr__(self, name):
-            # Proxy everything else (encoding, fileno, isatty, etc.) to original
-            return getattr(self._original, name)
 
     os.makedirs("logs", exist_ok=True)
     run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join("logs", f"run_{run_timestamp}.log")
-    sys.stdout = TeeOutput(log_path, sys.stdout)
+    sys.stdout = pipeline_runtime.TeeOutput(log_path, sys.stdout)
     print(f"Logging to: {log_path}")
     print(f"Run started: {run_timestamp}")
 
@@ -249,49 +182,16 @@ if __name__ == '__main__':
     # To re-run from stage N:  delete that stage's dir and all later ones.
 
     CHECKPOINT_DIR = ".pipeline_checkpoints"
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-
-    def _stage_dir(stage):
-        d = os.path.join(CHECKPOINT_DIR, stage)
-        os.makedirs(d, exist_ok=True)
-        return d
-
-    def stage_complete(stage):
-        return os.path.exists(os.path.join(_stage_dir(stage), "_done"))
-
-    def mark_stage_complete(stage):
-        with open(os.path.join(_stage_dir(stage), "_done"), 'w') as f:
-            f.write(datetime.now().isoformat())
-        print(f"  [Checkpoint] Stage '{stage}' marked complete")
-
-    def contig_done(stage, r_name):
-        return os.path.exists(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name))
-
-    def save_contig(stage, r_name, data):
-        _stage_dir(stage)  # ensure the stage directory exists
-        try:
-            size_mb = checkpoint_io.write(
-                checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name), data, nthreads=n_processes
-            ) / (1024 * 1024)
-            print(f"    [Checkpoint] {stage}/{r_name} ({size_mb:.1f} MB)")
-        except OSError as e:
-            print(f"    [Checkpoint] WARNING: {stage}/{r_name}: {e}")
-
-    def load_contig(stage, r_name):
-        return checkpoint_io.read(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name), nthreads=n_processes)
-
-    def save_global(stage, data):
-        _stage_dir(stage)  # ensure the stage directory exists
-        try:
-            size_mb = checkpoint_io.write(
-                checkpoint_io.global_path(CHECKPOINT_DIR, stage), data, nthreads=n_processes
-            ) / (1024 * 1024)
-            print(f"  [Checkpoint] {stage}/_global ({size_mb:.1f} MB)")
-        except OSError as e:
-            print(f"  [Checkpoint] WARNING: {stage}/_global: {e}")
-
-    def load_global(stage):
-        return checkpoint_io.read(checkpoint_io.global_path(CHECKPOINT_DIR, stage), nthreads=n_processes)
+    checkpoint_store = pipeline_runtime.CheckpointStore(
+        CHECKPOINT_DIR, nthreads=n_processes
+    )
+    stage_complete = checkpoint_store.stage_complete
+    mark_stage_complete = checkpoint_store.mark_stage_complete
+    contig_done = checkpoint_store.contig_done
+    save_contig = checkpoint_store.save_contig
+    load_contig = checkpoint_store.load_contig
+    save_global = checkpoint_store.save_global
+    load_global = checkpoint_store.load_global
 
     # Which stage checkpoint holds each per-contig key.
     # Values can be a single stage string or a list (tried in order, first hit wins).
@@ -669,47 +569,19 @@ if __name__ == '__main__':
                 # Warmup numba JIT
                 chimera_resolution.warmup_jit(num_samples)
                 
-                # Define assembly functions as callables
-                def make_l1_fn(gp, gs):
-                    def l1_fn(input_blocks):
-                        return hierarchical_assembly.run_hierarchical_step(
-                            input_blocks=input_blocks,
-                            global_probs=gp,
-                            global_sites=gs,
-                            batch_size=REFINEMENT_BATCH_SIZE,
-                            use_hmm_linking=False,
-                            beam_width=200,
-                            max_founders=12,
-                            max_sites_for_linking=2000,
-                            cc_scale=0.5,
-                            num_processes=n_processes,
-                            maxtasksperchild=WORKER_MAXTASKS,
-                            refine_after_stitch=False  # STAGE_4 runs its own refinement pipeline; opt out
-                        )
-                    return l1_fn
-                
-                def make_l2_fn(gp, gs):
-                    def l2_fn(input_blocks):
-                        return hierarchical_assembly.run_hierarchical_step(
-                            input_blocks=input_blocks,
-                            global_probs=gp,
-                            global_sites=gs,
-                            batch_size=REFINEMENT_BATCH_SIZE,
-                            use_hmm_linking=True,
-                            recomb_rate=RECOMB_RATE,
-                            beam_width=200,
-                            max_founders=12,
-                            cc_scale=0.5,
-                            num_processes=n_processes,
-                            n_generations=N_GENERATIONS,
-                            verbose=False,
-                            maxtasksperchild=WORKER_MAXTASKS,
-                            refine_after_stitch=False  # STAGE_4 runs its own refinement pipeline; opt out
-                        )
-                    return l2_fn
-                
-                l1_fn = make_l1_fn(global_probs, global_sites)
-                l2_fn = make_l2_fn(global_probs, global_sites)
+                l1_fn, l2_fn = pipeline_runtime.make_refinement_assembly_functions(
+                    hierarchical_assembly.run_hierarchical_step,
+                    global_probs,
+                    global_sites,
+                    batch_size=REFINEMENT_BATCH_SIZE,
+                    recomb_rate=RECOMB_RATE,
+                    n_generations=N_GENERATIONS,
+                    beam_width=200,
+                    max_founders=12,
+                    cc_scale=0.5,
+                    num_processes=n_processes,
+                    maxtasksperchild=WORKER_MAXTASKS,
+                )
                 
                 # Run full refinement pipeline
                 t0 = time.time()

@@ -28,6 +28,7 @@ from .multigeneration import (
     reconstruct_parental_origin_tracks_unphased,
     score_binned_missing_parent_models,
 )
+from .ranking import descending_rank_votes as _descending_rank_votes
 
 
 SCHEMA_VERSION = 7
@@ -52,17 +53,6 @@ VARIANT_LABELS = (
 )
 DEFAULT_BOOTSTRAPS = 2000
 BOOTSTRAP_SEED = 20260723
-
-
-def _descending_rank_votes(scores):
-    """Convert candidate scores to exact equally spaced V7 rank utility."""
-    values = np.asarray(scores, dtype=np.float64)
-    n_candidates = values.shape[-1]
-    if n_candidates < 2:
-        return np.ones_like(values)
-    order = np.argsort(-values, axis=-1, kind="stable")
-    ranks = np.argsort(order, axis=-1, kind="stable")
-    return 1.0 - ranks / float(n_candidates - 1)
 
 
 def _variant_specifications():

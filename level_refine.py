@@ -73,6 +73,7 @@ import copy
 import thread_config  # noqa: F401  (forkserver preload + single-thread BLAS; before numpy/numba)
 
 import numpy as np
+import numba
 
 # Optional per-block phase profiling for the refinement -- DIAGNOSTIC ONLY, OFF by
 # default and with zero effect on results.  Set BHD_REFINE_PROFILE=1 to print, for
@@ -265,7 +266,6 @@ def _refine_one_block(task):
     import hierarchical_assembly as _ha
     try:
         import chimera_resolution
-        import numba
         # Register this worker as active and take an initial dynamic thread allocation,
         # mirroring hierarchical_assembly._process_single_batch.  This is what lets the
         # inner numba kernels (emissions/paint/score) use total_cores//active_workers
@@ -519,7 +519,6 @@ def _init_worker(meta, global_sites, opt, total_cores, active_counter, extra_cou
     # --- dynamic-thread state (mirror _ha._init_worker_meta) ---
     os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
     try:
-        import numba
         numba.config.NUMBA_NUM_THREADS = total_cores  # ceiling so set_num_threads scales up
         numba.set_num_threads(1)                       # start conservative
     except Exception:
