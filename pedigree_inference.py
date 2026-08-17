@@ -11,6 +11,7 @@ Pedigree inference using tolerance paintings from paint_samples.py.
 The 16-state HMM and free switches in homozygous regions are preserved.
 """
 import thread_config
+import dynamic_threads
 
 import numpy as np
 import pandas as pd
@@ -56,49 +57,16 @@ from painting_grid_utils import (
 # args or initializer args.  This avoids the O(num_workers × data_size)
 # pickle blow-up that forkserver's per-worker initarg serialization would
 # otherwise incur on the big founder_blocks / stacked allele grids.
-import multiprocessing as _mp
-import multiprocessing.pool
-from multiprocessing import shared_memory as _shm
-from contextlib import contextmanager as _contextmanager
-
-try:
-    _forkserver_ctx = _mp.get_context('forkserver')
-except (ValueError, AttributeError):
-    _forkserver_ctx = _mp.get_context('fork')
-
-
-class _ForkserverPool(multiprocessing.pool.Pool):
-    """A Pool using the forkserver context (mirrors block_linking_naive)."""
-    def __init__(self, *args, **kwargs):
-        kwargs['context'] = _forkserver_ctx
-        super().__init__(*args, **kwargs)
-
-
-@_contextmanager
-def _safe_forkserver_pool(processes, initializer=None, initargs=()):
-    """Create a forkserver pool with __main__ safety.
-
-    Temporarily clears __main__.__file__/__spec__ so forkserver workers do
-    not re-execute the entry script, restoring them on exit.  Same guard
-    block_linking_naive / block_haplotypes already use.
-    """
-    import sys as _sys
-    _main_mod = _sys.modules.get('__main__')
-    _saved_file = getattr(_main_mod, '__file__', None)
-    _saved_spec = getattr(_main_mod, '__spec__', None)
-    if _main_mod is not None:
-        if hasattr(_main_mod, '__file__'):
-            del _main_mod.__file__
-        _main_mod.__spec__ = None
-    try:
-        with _ForkserverPool(processes=processes, initializer=initializer,
-                             initargs=initargs) as pool:
-            yield pool
-    finally:
-        if _main_mod is not None:
-            if _saved_file is not None:
-                _main_mod.__file__ = _saved_file
-            _main_mod.__spec__ = _saved_spec
+from multiprocessing_runtime import (
+    forkserver_context as _forkserver_ctx,
+    safe_forkserver_pool as _safe_forkserver_pool,
+)
+from shared_array import (
+    attach_shared_array as _attach_shared_array,
+    close_shared_memory as _close_shared_memory,
+    create_shared_array as _create_shared_array,
+    shared_memory_cleanup as _shared_memory_cleanup,
+)
 
 
 def _create_shm_array(arr):
@@ -110,15 +78,9 @@ def _create_shm_array(arr):
     initargs; _init_pedigree_shared reconstructs a zero-copy ndarray view
     from it.  Mirrors block_linking_naive._create_shm_array.
     """
-    arr = np.ascontiguousarray(arr)
-    shm = _shm.SharedMemory(create=True, size=max(int(arr.nbytes), 1))
-    view = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
-    np.copyto(view, arr)
-    meta = {'shm_name': shm.name, 'shape': tuple(arr.shape), 'dtype': str(arr.dtype)}
-    return shm, meta
+    return _create_shared_array(arr, name_key='shm_name', dtype_as_string=True)
 
 
-@_contextmanager
 def _shm_cleanup(shm_handles):
     """Close + unlink the given SharedMemory segments on exit.
 
@@ -127,15 +89,7 @@ def _shm_cleanup(shm_handles):
     the pool's workers all exit BEFORE the segments are unlinked, and the
     segments are released even if the pool body raises.
     """
-    try:
-        yield
-    finally:
-        for _h in shm_handles:
-            try:
-                _h.close()
-                _h.unlink()
-            except Exception:
-                pass
+    return _shared_memory_cleanup(shm_handles)
 
 
 # =============================================================================
@@ -147,161 +101,8 @@ _PEDIGREE_SHARED = {}
 # closed at the start of the next initializer call (workers may be recycled).
 _SHM_REFS = []
 
-# ---------------------------------------------------------------------------
-# Two-step dynamic thread reallocation for straggler tasks.
-#
-# Adapted from the same pattern in block_haplotypes.py and block_linking.py
-# (May 2026).  The setup:
-#   - When a worker enters a task, it atomically increments
-#     _PEDIGREE_ACTIVE_COUNTER; on exit it decrements.  At any moment the
-#     counter holds the number of workers currently processing a task.
-#   - Each worker computes its fair-share thread budget as
-#         floor     = total_cores // active
-#         remainder = total_cores % active
-#         my_share  = floor + (1 if I hold an "extra" else 0)
-#     and calls numba.set_num_threads(my_share).
-#   - At most `remainder` workers can hold an extra at any time; they
-#     claim/release atomically via _PEDIGREE_EXTRA_COUNTER.  This makes
-#     the per-worker allocation EXACTLY total_cores in total -- no idle
-#     cores -- even when total_cores % active != 0.
-#   - As peer workers finish (active drops), in-flight stragglers can
-#     re-check at periodic hooks (`_update_dynamic_threads()`) inserted
-#     inside long-running task bodies, claim newly-available extras, and
-#     scale up.  The reverse also works: if active grows, holders that
-#     are now over-budget release their extras.
-#
-# All four globals are None outside a pool worker (or in a pool that
-# wasn't initialized with counters) -- in that case the helpers and the
-# worker entry/exit wrapping are no-ops, preserving the pre-existing
-# behavior exactly for any legacy caller.  The batched HMM kernels work
-# regardless: they use prange but with numba.set_num_threads(1) they
-# behave as a single-threaded for-loop (numba's prange tolerates a
-# single-thread schedule with no measurable overhead vs. range).
-# ---------------------------------------------------------------------------
-_PEDIGREE_ACTIVE_COUNTER = None
-_PEDIGREE_EXTRA_COUNTER = None
-_PEDIGREE_TOTAL_CORES = None
-_PEDIGREE_I_HAVE_EXTRA = False
-
-
-def _try_claim_extra(remainder):
-    """Atomically attempt to claim an extra thread from the remainder pool.
-
-    Returns True if successfully claimed (and sets _PEDIGREE_I_HAVE_EXTRA
-    True as a side effect).  Returns False if the remainder pool is
-    already exhausted (current extra-count >= remainder).
-
-    Atomicity is provided by _PEDIGREE_EXTRA_COUNTER.get_lock(); without
-    the lock, two workers could both pass the "< remainder" check and
-    over-claim, oversubscribing CPU.
-
-    Idempotent: returns True without re-claiming if _PEDIGREE_I_HAVE_EXTRA
-    is already True (each worker holds at most one extra at any time).
-    """
-    global _PEDIGREE_I_HAVE_EXTRA
-    if _PEDIGREE_I_HAVE_EXTRA:
-        return True
-    if _PEDIGREE_EXTRA_COUNTER is None:
-        return False
-    try:
-        with _PEDIGREE_EXTRA_COUNTER.get_lock():
-            if _PEDIGREE_EXTRA_COUNTER.value < remainder:
-                _PEDIGREE_EXTRA_COUNTER.value += 1
-                _PEDIGREE_I_HAVE_EXTRA = True
-                return True
-    except Exception:
-        # Lock acquisition or counter mutation failed -- fall back to
-        # floor-only.  Same robustness posture as _update_dynamic_threads.
-        pass
-    return False
-
-
-def _try_release_extra():
-    """Atomically release this worker's extra claim, if held.
-
-    Returns True if a claim was released.  Used (a) at worker exit via
-    try/finally (release on the way out so the pool stays accurate)
-    and (b) in _update_dynamic_threads when active grew and the
-    remainder shrank below the current extras-in-circulation count.
-    """
-    global _PEDIGREE_I_HAVE_EXTRA
-    if not _PEDIGREE_I_HAVE_EXTRA:
-        return False
-    if _PEDIGREE_EXTRA_COUNTER is None:
-        _PEDIGREE_I_HAVE_EXTRA = False  # defensive
-        return False
-    try:
-        with _PEDIGREE_EXTRA_COUNTER.get_lock():
-            _PEDIGREE_EXTRA_COUNTER.value -= 1
-            _PEDIGREE_I_HAVE_EXTRA = False
-            return True
-    except Exception:
-        # Defensive: still clear the local flag even if counter mutation
-        # failed.  Otherwise the worker thinks it holds an extra forever,
-        # leading to under-claim by peers on subsequent rechecks.
-        _PEDIGREE_I_HAVE_EXTRA = False
-        return False
-
-
-def _update_dynamic_threads():
-    """Recheck active worker count and rescale this worker's numba threads.
-
-    Called from inside long-running task bodies (top of the contig
-    loop in `_score_trios_batch`, `_score_pairs_by_children`, and
-    `_check_trio_consistency_worker`) so that stragglers re-evaluate
-    their thread budget as peers finish.
-
-    Computes:
-        floor     = total_cores // active
-        remainder = total_cores % active
-        my_share  = floor + (1 if I currently hold an extra else 0)
-    and calls numba.set_num_threads(my_share).
-
-    Also adjusts the extra-claim status:
-      - If I don't hold an extra and the pool has room
-        (current_extras < remainder), try to claim one.
-      - If I hold an extra but extras-in-circulation already exceeds
-        the current remainder budget, release it.
-
-    Behavior:
-      - Outside a pool worker, or in a pool not initialized with
-        counters: silent no-op.
-      - Inside a properly-initialized worker: rebalances live as peer
-        activity changes.
-
-    The counter read for `active` is intentionally lock-free.  A torn
-    read can only return a stale value; either over- or under-allocate
-    by 1, both harmless (extra threads sleep on OMP PASSIVE / next call
-    corrects).  The extra-claim lock IS acquired briefly because the
-    extras counter must be mutated atomically.
-    """
-    if _PEDIGREE_ACTIVE_COUNTER is None or _PEDIGREE_TOTAL_CORES is None:
-        return
-    active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
-    floor = _PEDIGREE_TOTAL_CORES // active
-    remainder = _PEDIGREE_TOTAL_CORES - floor * active
-
-    # Adjust extra-claim if needed.  Lock-free read first to avoid the
-    # lock when no action is plausibly required.
-    if _PEDIGREE_EXTRA_COUNTER is not None:
-        try:
-            current_extras = _PEDIGREE_EXTRA_COUNTER.value
-        except Exception:
-            current_extras = 0
-        if not _PEDIGREE_I_HAVE_EXTRA:
-            if current_extras < remainder:
-                _try_claim_extra(remainder)
-        else:
-            if current_extras > remainder:
-                _try_release_extra()
-
-    n = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-    try:
-        numba.set_num_threads(n)
-    except Exception:
-        # A transient set_num_threads failure affects only dynamic scaling;
-        # the next call retries and the numerical work remains unchanged.
-        pass
+# Dynamic worker allocation is provided by dynamic_threads.  Pedigree pools
+# pass an extra counter, preserving exact floor-plus-remainder distribution.
 
 
 class _FounderBlockView:
@@ -359,9 +160,7 @@ def _attach_shm_view(meta):
     of shared memory (the convert functions fancy-index / .astype / argmax),
     so the mapping is treated as read-only.
     """
-    seg = _shm.SharedMemory(name=meta['shm_name'], create=False)
-    arr = np.ndarray(meta['shape'], dtype=np.dtype(meta['dtype']), buffer=seg.buf)
-    return seg, arr
+    return _attach_shared_array(meta)
 
 
 def _init_pedigree_shared(shared_dict, active_counter=None, total_cores=None,
@@ -374,14 +173,14 @@ def _init_pedigree_shared(shared_dict, active_counter=None, total_cores=None,
             Stored in module-global _PEDIGREE_SHARED.
         active_counter: optional multiprocessing.Value('i', 0) shared
             across workers.  When provided, workers increment on task
-            entry and decrement on task exit, and _update_dynamic_threads
+            entry and decrement on task exit, and dynamic_threads.apply_dynamic_threads
             uses it to compute fair-share allocation.  Default None
             (preserves the pre-existing behavior bit-identically).
         total_cores: optional int -- the original n_workers budget for
             the entire pool.  When provided alongside active_counter,
             configures the per-worker numba pool ceiling to total_cores
             and starts the worker at 1 thread; subsequent
-            _update_dynamic_threads() calls scale up to total_cores
+            dynamic_threads.apply_dynamic_threads() calls scale up to total_cores
             when peers free their share.  Default None.
         extra_counter: optional multiprocessing.Value('i', 0) shared
             across workers, used for remainder distribution (see the
@@ -392,16 +191,10 @@ def _init_pedigree_shared(shared_dict, active_counter=None, total_cores=None,
     original pre-counter behavior exactly.
     """
     global _PEDIGREE_SHARED, _SHM_REFS
-    global _PEDIGREE_ACTIVE_COUNTER, _PEDIGREE_EXTRA_COUNTER
-    global _PEDIGREE_TOTAL_CORES, _PEDIGREE_I_HAVE_EXTRA
     _PEDIGREE_SHARED.clear()
     # Detach any SharedMemory segments attached by a previous initializer
     # call on this worker (workers may be recycled across pools).
-    for _ref in _SHM_REFS:
-        try:
-            _ref.close()
-        except Exception:
-            pass
+    _close_shared_memory(_SHM_REFS)
     _SHM_REFS = []
     # Store shared values, reconstructing zero-copy numpy views for any
     # SharedMemory-backed arrays.  Large arrays (the Phase 2/3 contig_caches
@@ -416,30 +209,22 @@ def _init_pedigree_shared(shared_dict, active_counter=None, total_cores=None,
                 _new_cache = {}
                 for _ck, _cv in _cache.items():
                     if isinstance(_cv, dict) and 'shm_name' in _cv:
-                        _seg = _shm.SharedMemory(name=_cv['shm_name'], create=False)
+                        _seg, _array = _attach_shared_array(_cv)
                         _SHM_REFS.append(_seg)
-                        _new_cache[_ck] = np.ndarray(
-                            _cv['shape'], dtype=np.dtype(_cv['dtype']),
-                            buffer=_seg.buf)
+                        _new_cache[_ck] = _array
                     else:
                         _new_cache[_ck] = _cv
                 _rebuilt.append(_new_cache)
             _PEDIGREE_SHARED[_key] = _rebuilt
         elif isinstance(_val, dict) and 'shm_name' in _val:
-            _seg = _shm.SharedMemory(name=_val['shm_name'], create=False)
+            _seg, _array = _attach_shared_array(_val)
             _SHM_REFS.append(_seg)
-            _PEDIGREE_SHARED[_key] = np.ndarray(
-                _val['shape'], dtype=np.dtype(_val['dtype']), buffer=_seg.buf)
+            _PEDIGREE_SHARED[_key] = _array
         else:
             _PEDIGREE_SHARED[_key] = _val
-    _PEDIGREE_ACTIVE_COUNTER = active_counter
-    _PEDIGREE_TOTAL_CORES = total_cores
-    _PEDIGREE_EXTRA_COUNTER = extra_counter
-    # Defensive: ensure no stale claim carries into the new worker context.
-    # fork() copies the parent's globals; if the parent had set
-    # _PEDIGREE_I_HAVE_EXTRA=True before forking (shouldn't happen, but
-    # defensive), the child must start with a clean slate.
-    _PEDIGREE_I_HAVE_EXTRA = False
+    dynamic_threads.set_dynamic_thread_state(
+        total_cores, active_counter, extra_counter
+    )
 
     # When dynamic threads are wired up, configure the per-worker numba
     # pool ceiling to total_cores so set_num_threads() can later scale
@@ -464,10 +249,10 @@ def _check_trio_consistency_worker(args):
     Returns (df_idx, child_name, mean_explained).
 
     Dynamic thread reallocation (when the pool was initialized with
-    counters): on entry, atomically increment _PEDIGREE_ACTIVE_COUNTER
+    counters): on entry, register with the shared active-worker counter
     and claim an extra thread if remainder allows; rescale numba
     threads to floor+extra.  On exit, release the extra and decrement.
-    Inside the per-contig loop, _update_dynamic_threads() lets the
+    Inside the per-contig loop, the shared allocator lets the
     worker rebalance as peers finish.
 
     Math is unchanged: the per-contig _check_trio_on_chromosome call
@@ -478,22 +263,11 @@ def _check_trio_consistency_worker(args):
     # Track whether we successfully incremented so the finally clause
     # only decrements if the increment actually happened.  This avoids
     # a spurious decrement if counters are None (legacy path).
-    counter_inc = False
-    if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
-        try:
-            with _PEDIGREE_ACTIVE_COUNTER.get_lock():
-                _PEDIGREE_ACTIVE_COUNTER.value += 1
-            counter_inc = True
-            active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
-            floor = _PEDIGREE_TOTAL_CORES // active
-            remainder = _PEDIGREE_TOTAL_CORES - floor * active
-            _try_claim_extra(remainder)
-            n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-            numba.set_num_threads(n_threads)
-        except Exception:
-            # A transient counter or thread-resize failure falls through to
-            # the task body; the finally block still releases any claim made.
-            pass
+    dynamic_threads.increment_active()
+    try:
+        dynamic_threads.apply_dynamic_threads()
+    except Exception:
+        pass
 
     try:
         df_idx, child_name, child_i, p1_i, p2_i = args
@@ -506,7 +280,7 @@ def _check_trio_consistency_worker(args):
             # straggler picks up their freed-share by reclaiming
             # extras.  Cost is one atomic counter read (~ns) per
             # contig iteration.
-            _update_dynamic_threads()
+            dynamic_threads.apply_dynamic_threads()
 
             tol = contig_data['tolerance_painting']
             child_tol = tol[child_i]
@@ -528,17 +302,8 @@ def _check_trio_consistency_worker(args):
         # Always release any held extra and decrement active count,
         # regardless of whether the body succeeded.  Release-first so
         # peers see the freed extra-slot before the decremented active.
-        _try_release_extra()
-        if counter_inc and _PEDIGREE_ACTIVE_COUNTER is not None:
-            try:
-                with _PEDIGREE_ACTIVE_COUNTER.get_lock():
-                    _PEDIGREE_ACTIVE_COUNTER.value -= 1
-            except Exception:
-                # Counter lock acquisition failed -- very unlikely.
-                # Silently ignore; the lost decrement only causes peers
-                # to slightly under-scale on their next rebalance call,
-                # benign perf issue rather than a correctness issue.
-                pass
+        dynamic_threads.release_dynamic_extra()
+        dynamic_threads.decrement_active()
 
 
 def _check_trio_on_chromosome(child_painting, p1_painting, p2_painting, step=1000):
@@ -781,7 +546,7 @@ class PedigreeResult:
 
         actual_workers = min(n_workers, len(tasks))
         # Counters for the two-step dynamic-thread reallocation pattern
-        # (see module-level _PEDIGREE_ACTIVE_COUNTER docstring).  Fresh
+        # (see dynamic_threads module documentation).  Fresh
         # _forkserver_ctx.Value('i', 0) per pool so stale state from previous
         # pools doesn't leak in.  total_cores=actual_workers tells worker
         # processes the maximum thread budget they can ever request.
@@ -1383,7 +1148,7 @@ def _process_contig_batch(args):
     # Counter inc / threads-up on entry.  Same two-step dynamic-thread
     # reallocation pattern as _score_pairs_by_children and
     # _check_trio_consistency_worker (see the module-level
-    # _PEDIGREE_ACTIVE_COUNTER docstring): when the pool was initialized with
+    # dynamic_threads allocator): when the pool was initialized with
     # counters, atomically bump the active count, claim an extra from the
     # remainder pool, and set this worker's numba threads to its fair share.
     # process_contig_for_pedigree's heavy step is the
@@ -1394,20 +1159,11 @@ def _process_contig_batch(args):
     # with no Python-level loop to re-check from -- so the share is fixed at
     # entry (a task starting while few peers are active gets more threads).
     # No-op when the pool has no counters, preserving legacy behavior exactly.
-    counter_inc = False
-    if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
-        try:
-            with _PEDIGREE_ACTIVE_COUNTER.get_lock():
-                _PEDIGREE_ACTIVE_COUNTER.value += 1
-            counter_inc = True
-            active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
-            floor = _PEDIGREE_TOTAL_CORES // active
-            remainder = _PEDIGREE_TOTAL_CORES - floor * active
-            _try_claim_extra(remainder)
-            n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-            numba.set_num_threads(n_threads)
-        except Exception:
-            pass
+    dynamic_threads.increment_active()
+    try:
+        dynamic_threads.apply_dynamic_threads()
+    except Exception:
+        pass
 
     # Rebuild the founder block from its per-contig SharedMemory segments.
     # The proxy exposes the same .positions / .haplotypes surface the convert
@@ -1429,17 +1185,12 @@ def _process_contig_batch(args):
         # process_contig_for_pedigree has already copied the founder data into
         # the returned allele grids (the convert functions copy), so detaching
         # here is safe; the parent still owns + unlinks the segments.
-        pos_seg.close()
-        hap_seg.close()
+        _close_shared_memory([pos_seg, hap_seg])
         # Release this worker's extra claim and decrement the active count so
-        # peers re-checking _update_dynamic_threads() see a core free up.
-        _try_release_extra()
-        if counter_inc and _PEDIGREE_ACTIVE_COUNTER is not None:
-            try:
-                with _PEDIGREE_ACTIVE_COUNTER.get_lock():
-                    _PEDIGREE_ACTIVE_COUNTER.value -= 1
-            except Exception:
-                pass
+        # peers re-checking dynamic_threads.apply_dynamic_threads() see a core
+        # free up.
+        dynamic_threads.release_dynamic_extra()
+        dynamic_threads.decrement_active()
 
 
 def _score_pairs_by_children(child_indices):
@@ -1461,29 +1212,20 @@ def _score_pairs_by_children(child_indices):
         rather than scalar Python).
 
     Dynamic thread reallocation (when the pool was initialized with
-    counters): on entry, atomically increment _PEDIGREE_ACTIVE_COUNTER
+    counters): on entry, register with the shared active-worker counter
     and claim an extra thread; rescale numba threads to floor+extra.
     On exit, release the extra and decrement.  Inside the per-contig
-    loop, _update_dynamic_threads() lets the worker rebalance as peers
+    loop, the shared allocator lets the worker rebalance as peers
     finish.  When parallel=True is enabled on the batched kernels, this
     gives stragglers a dynamic share of the freed cores.
     """
     # Counter inc/threads-up on entry.  See _check_trio_consistency_worker
     # for the full rationale; this is the same pattern.
-    counter_inc = False
-    if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
-        try:
-            with _PEDIGREE_ACTIVE_COUNTER.get_lock():
-                _PEDIGREE_ACTIVE_COUNTER.value += 1
-            counter_inc = True
-            active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
-            floor = _PEDIGREE_TOTAL_CORES // active
-            remainder = _PEDIGREE_TOTAL_CORES - floor * active
-            _try_claim_extra(remainder)
-            n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-            numba.set_num_threads(n_threads)
-        except Exception:
-            pass
+    dynamic_threads.increment_active()
+    try:
+        dynamic_threads.apply_dynamic_threads()
+    except Exception:
+        pass
 
     try:
         contig_caches = _PEDIGREE_SHARED['contig_caches']
@@ -1504,7 +1246,7 @@ def _score_pairs_by_children(child_indices):
                 # tasks, this worker re-checks the active count and may
                 # claim newly-available extras (or release if active
                 # grew).  Cost is one atomic counter read (~ns).
-                _update_dynamic_threads()
+                dynamic_threads.apply_dynamic_threads()
 
                 stacked = cache['stacked_alleles']
                 hom = cache['stacked_hom_mask']
@@ -1532,42 +1274,28 @@ def _score_pairs_by_children(child_indices):
 
         return child_indices, scores
     finally:
-        _try_release_extra()
-        if counter_inc and _PEDIGREE_ACTIVE_COUNTER is not None:
-            try:
-                with _PEDIGREE_ACTIVE_COUNTER.get_lock():
-                    _PEDIGREE_ACTIVE_COUNTER.value -= 1
-            except Exception:
-                pass
+        dynamic_threads.release_dynamic_extra()
+        dynamic_threads.decrement_active()
 
 
 def _score_trios_batch(batch_sample_args):
     """Worker: score trios for a batch of samples. Reads from shared data.
 
     Dynamic thread reallocation (when the pool was initialized with
-    counters): on entry, atomically increment _PEDIGREE_ACTIVE_COUNTER
+    counters): on entry, register with the shared active-worker counter
     and claim an extra thread; rescale numba threads to floor+extra.
     On exit, release the extra and decrement.  Inside the per-contig
-    loop, _update_dynamic_threads() lets the worker rebalance as peers
+    loop, the shared allocator lets the worker rebalance as peers
     finish -- the major Phase 3 win because that's where the bulk of
     pipeline time is spent and where the work-distribution tail is.
     """
     # Counter inc/threads-up on entry.  See _check_trio_consistency_worker
     # for the full rationale; this is the same pattern.
-    counter_inc = False
-    if _PEDIGREE_ACTIVE_COUNTER is not None and _PEDIGREE_TOTAL_CORES is not None:
-        try:
-            with _PEDIGREE_ACTIVE_COUNTER.get_lock():
-                _PEDIGREE_ACTIVE_COUNTER.value += 1
-            counter_inc = True
-            active = max(_PEDIGREE_ACTIVE_COUNTER.value, 1)
-            floor = _PEDIGREE_TOTAL_CORES // active
-            remainder = _PEDIGREE_TOTAL_CORES - floor * active
-            _try_claim_extra(remainder)
-            n_threads = max(1, floor + (1 if _PEDIGREE_I_HAVE_EXTRA else 0))
-            numba.set_num_threads(n_threads)
-        except Exception:
-            pass
+    dynamic_threads.increment_active()
+    try:
+        dynamic_threads.apply_dynamic_threads()
+    except Exception:
+        pass
 
     try:
         contig_caches = _PEDIGREE_SHARED['contig_caches']
@@ -1638,7 +1366,7 @@ def _score_trios_batch(batch_sample_args):
                 # claim newly-available extras (or release if active
                 # grew).  This is the most impactful hook in the file --
                 # Phase 3 tail dynamics depend on it.
-                _update_dynamic_threads()
+                dynamic_threads.apply_dynamic_threads()
 
                 stacked = cache['stacked_alleles']
                 hom = cache['stacked_hom_mask']
@@ -1671,13 +1399,8 @@ def _score_trios_batch(batch_sample_args):
             results.append((sample_idx, best_trio, best_trio_score, top_indices))
         return results
     finally:
-        _try_release_extra()
-        if counter_inc and _PEDIGREE_ACTIVE_COUNTER is not None:
-            try:
-                with _PEDIGREE_ACTIVE_COUNTER.get_lock():
-                    _PEDIGREE_ACTIVE_COUNTER.value -= 1
-            except Exception:
-                pass
+        dynamic_threads.release_dynamic_extra()
+        dynamic_threads.decrement_active()
 
 
 def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20,
@@ -1779,11 +1502,11 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
 
     # Workers spawn from the forkserver (single-threaded, numba imported but
     # not launched) instead of forking the parent — see the module-level
-    # _ForkserverPool note.  _shm_cleanup is the OUTER context manager so the
+    # shared forkserver-pool note.  _shm_cleanup is the OUTER context manager so the
     # founder segments are unlinked only after every worker has exited.
     # Counters for the two-step dynamic-thread reallocation pattern, matching
     # Phase 2/3 and the consistency cutoff (see the module-level
-    # _PEDIGREE_ACTIVE_COUNTER docstring).  Fresh _forkserver_ctx.Value('i', 0)
+    # dynamic_threads allocator).  Fresh _forkserver_ctx.Value('i', 0)
     # per pool.  total_cores=n_workers tells each worker its maximum thread
     # budget; _process_contig_batch starts at its fair share and the share is
     # larger for tasks that begin once peers have finished.  Phase 1 passes an
@@ -1918,7 +1641,7 @@ def infer_pedigree_multi_contig_tolerance(contig_data_list, sample_ids, top_k=20
     total_scores = np.zeros((num_samples, num_samples))
 
     # Counters for the two-step dynamic-thread reallocation pattern
-    # (see module-level _PEDIGREE_ACTIVE_COUNTER docstring).  Fresh
+    # (see dynamic_threads module documentation).  Fresh
     # _forkserver_ctx.Value('i', 0) per pool.  This pool services BOTH
     # Phase 2 and Phase 3, so the same counters tracking active workers
     # carry across the two phases -- by design, since at the boundary

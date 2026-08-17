@@ -1,31 +1,12 @@
 """Standalone metadata-aware Tropheops V7-margin pedigree package.
 
 Importing :mod:`thread_config` before NumPy/Numba preserves the repository's
-oversubscription and disk-cache safeguards. Numba decorates some internal CPU
-registry helpers lazily, and those helpers do not always have a cache locator.
-The tiny scoped warm-up below binds those internal helpers to Numba's original
-decorator without changing the process-wide project wrapper. The selected V7
-kernels explicitly declare ``cache=True``, preserving their validated policy.
+oversubscription, registry warm-up, and disk-cache safeguards.  V7 kernels
+explicitly declare ``cache=True``, preserving their validated policy.
 """
 
 import thread_config as _thread_config
-
-import numba as _numba
-
-_project_njit_wrapper = _numba.njit
-_real_njit = getattr(
-    _thread_config, "_original_njit", _project_njit_wrapper
-)
-try:
-    _numba.njit = _real_njit
-
-    @_real_njit(cache=False)
-    def _pedigree_v7_numba_registry_warmup(value):
-        return value + 1
-
-    _pedigree_v7_numba_registry_warmup(0)
-finally:
-    _numba.njit = _project_njit_wrapper
+_thread_config.ensure_numba_registry_warmup()
 
 from .aggregation import (
     V7MarginResult,

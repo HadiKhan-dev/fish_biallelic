@@ -1,98 +1,40 @@
 #!/usr/bin/env python3
 """
-recombination_map.py  --  Marey-style recombination map for the BHD pipeline.
+Marey-style recombination-rate recovery analysis for BHD simulations.
 
-Builds, per chromosome, a genetic map (cumulative genetic distance in cM versus
-physical position in Mb) with two overlaid curves:
+The map separates five scientifically distinct sources of information (six
+when the complete raw event log is present):
 
-    * TRUTH    -- from the simulation's true ancestry (stage 02 `truth_painting`)
-                  + the TRUE pedigree.
-    * INFERRED -- from the pipeline's recovered painting (stage 10
-                  `tolerance_result`) + the INFERRED pedigree.
+* analytic process expectation from Stage-2 ``recombination_model``;
+* raw realized simulator events, both all gametes and the F2/F3 subset that the
+  painting decoder can observe;
+* true painting decoded with the true pedigree;
+* reconstructed painting decoded with the true pedigree (painting ablation);
+* reconstructed painting decoded with the inferred pedigree (end-to-end map).
 
-This is the panel-B "Marey map" adapted as a pipeline recovery check: the
-simulation uses a constant recombination rate (5e-8 / bp), so the true map is
-~linear in physical distance, and the figure shows whether the pipeline recovers
-that (linear) map.  The same construction carries to real data, where only the
-inferred curve exists and the shape is no longer linear.
+Decoded tracks use the same phase-aware 16-state trio HMM and backtracking
+crossover localization as the original map.  The HMM always receives one
+scalar mean recombination rate.  It is intentionally blind to any simulated
+piecewise profile, so recovery of elevated chromosome ends is not built into
+the decoder.  Analytic and regional calculations use exact profile boundaries;
+physical plotting bins always terminate at the recorded modeled span.
 
-================================ METHOD ======================================
-A recombination map is a per-meiosis crossover rate per physical interval,
-cumulated into cM.  We obtain per-meiosis crossovers from parent->child trios
-using a phase-aware trio HMM (this is the BHD pipeline's own pedigree-scoring
-model, `run_trio_phase_aware_hmm`, here COPIED and extended with backtracking):
+Legacy checkpoints without model metadata remain supported as a constant
+5e-8/bp process and retain the historic ``process``, ``truth``, and ``inferred``
+map keys and CSV column names.
 
-  Per eligible child + its two parents, we reconstruct diploid alleles for the
-  child and both parents at every marker (from each one's painting + the shared
-  founder set), then Viterbi-decode the 16-state trio HMM.  Its 8 inheritance
-  states jointly encode, at every marker, which parental haplotype each child
-  strand follows (and the phase); its 8 burst states absorb error/IBD runs.
-  Reading the decoded path:
-    * a change in which p1-haplotype the p1-derived strand follows = a
-      p1-meiosis crossover,
-    * a change in which p2-haplotype the p2-derived strand follows = a
-      p2-meiosis crossover,
-    * phase flips (free at homozygous markers) are NOT crossovers (they only
-      relabel which child strand is "strand 0"),
-    * burst-state runs are uninformative gaps (no crossover counted inside).
-  One decode thus yields both parental gametes' crossovers; there is no separate
-  assignment step.  Each crossover is localized between its flanking markers
-  (midpoint used for binning).  Crossovers are aggregated per physical bin per
-  chromosome, divided by the meiosis count -> Morgans -> cM; the Marey curve is
-  the cumulative cM along the chromosome.
+Usage::
 
-PER-SNP, not binned: we lift the per-SNP trio HMM (`run_trio_phase_aware_hmm`),
-not the binned `_multisnp` variant the pipeline uses for pedigree scoring, so
-crossovers localize between adjacent markers rather than adjacent bins -- finer,
-which is what a map wants.  Both maps use it identically.
+    python recombination_map.py --ckpt-dir .pipeline_checkpoints --workers 22
+    python recombination_map.py --bin-mb 1.0 --out-dir recombination_map
+    python recombination_map.py --true-pedigree-for-inferred
+    python recombination_map.py --selftest
 
-ELIGIBLE TRANSMISSIONS: only offspring (F1/F2/F3) are painted; founders are not.
-So a gamete can only be followed against a parent that is itself a painted
-sample: F1->F2 and F2->F3 (every F2 and F3 individual's two gametes, ~600
-meioses).  Both maps use the transmissions their own pedigree makes eligible.
-
-UNDERCOUNTING: with only ~3 founders, by F2->F3 a parent's two haplotypes are
-often identical-by-descent in a region; a crossover between two IBD segments is
-invisible to ANY method (allele or label), so the F2->F3 contribution is
-slightly deflated.  This is identical for both maps, so the comparison holds.
-
-PEDIGREE: truth curve uses the TRUE pedigree (stage 02 `truth_pedigree`);
-inferred curve uses the INFERRED pedigree (results CSV
-`pedigree_inference_discovered.csv`).  Crossover detection needs parent links,
-and on real data only the inferred pedigree exists, so the inferred curve is
-built end-to-end from the pipeline's own pedigree.
-
-============================ PROVENANCE ======================================
-This file is deliberately SELF-CONTAINED: the crossover-detection machinery is
-COPIED here (not imported from the pipeline) so future changes to the map's
-method live in one place and cannot perturb production pedigree inference.
-Copied verbatim (with light adaptation noted at each):
-  * concretify_haps, pairup_haps                      <- simulate_sequences.py
-  * get_snp_level_founder_ids, build_founder_allele_lookup,
-    run_trio_phase_aware_hmm (the scorer)             <- pedigree_inference.py
-  * the switch/stay cost formula + compute_hom_mask   <- paint_samples.py
-  * penalty constants (error/phase/mismatch, recomb_rate) <- pedigree_inference.py
-Written fresh: run_trio_phase_aware_hmm_backtrack (backtracking sibling of the
-scorer), decode_crossovers_from_path, the loader/driver/plot.
-
-Only `paint_samples` is imported (for the SamplePainting/PaintedChunk/
-BlockPainting classes needed to unpickle the checkpoints); none of the
-detection machinery is imported.
-
-=============================== USAGE ========================================
-    python recombination_map.py                  # uses ./.pipeline_checkpoints
-    python recombination_map.py --ckpt-dir PATH
-    python recombination_map.py --bin-mb 1.0     # physical bin width (Mb)
-    python recombination_map.py --out-dir my_map # output directory (see below)
-    python recombination_map.py --true-pedigree-for-inferred  # ablation
-    python recombination_map.py --selftest       # synthetic validation only
-
-Outputs (under --out-dir, default ./recombination_map/):
-    composite.png              faceted all-chromosome figure (the panel-B view)
-    map_data.pkl               all cM curves (re-style without re-running the HMM)
-    chromosomes/<contig>.png   per-chromosome Marey figure
-    chromosomes/<contig>.csv   per-chromosome curve: position_mb, cum_cM_truth,
-                               cum_cM_inferred
+Outputs under ``--out-dir`` include ``composite.png``, ``map_data.pkl``,
+per-chromosome PNG/CSV files, a normalized-position local-rate plot and CSV,
+regional rate/ratio CSV+JSON summaries, and ``README.txt``.  ``map_data.pkl``
+stores compact crossover midpoints and explicit meiosis exposure so aggregate
+analyses can be reproduced without rerunning the HMM.
 """
 
 import math
@@ -101,6 +43,7 @@ import numpy as np
 from numba import njit
 
 from founder_alleles import founder_allele_matrix
+from pedigree_hmm import poisson_switch_stay_terms
 
 
 # =============================================================================
@@ -207,14 +150,10 @@ def build_switch_stay_costs(snp_positions, recomb_rate=RECOMB_RATE):
         theta = clip(1 - exp(-dist*recomb_rate), 1e-15, 0.5)
         sw_costs = log(theta) ; st_costs = log(1-theta)
     """
-    n = len(snp_positions)
-    dists = np.zeros(n)
-    if n > 1:
-        dists[1:] = np.diff(np.asarray(snp_positions, dtype=np.float64))
-    theta = np.clip(1.0 - np.exp(-dists * recomb_rate), 1e-15, 0.5)
-    sw_costs = np.log(theta)
-    st_costs = np.log(1.0 - theta)
-    return sw_costs, st_costs
+    _, switch_costs, stay_costs = poisson_switch_stay_terms(
+        snp_positions, recomb_rate
+    )
+    return switch_costs, stay_costs
 
 
 def compute_hom_mask(child_dip_alleles):
@@ -489,6 +428,8 @@ def decode_crossovers_from_path(path, snp_positions):
 # active.  `paint_samples` is imported ONLY for those data classes -- no
 # detection machinery is imported.
 # =============================================================================
+import csv
+import json
 import os
 import pickle
 import multiprocessing as mp
@@ -572,7 +513,8 @@ def build_inferred_founder_lookup(super_blocks_L4):
 # Per-painting crossover collection
 # =============================================================================
 def collect_crossovers(samples_by_name, links, allele_lookup, snp_positions,
-                       recomb_rate=RECOMB_RATE, verbose=False):
+                       recomb_rate=RECOMB_RATE, verbose=False,
+                       diploid_by_name=None):
     """Collect per-meiosis crossover midpoints for one painting on one contig.
 
     For every child whose BOTH parents (per `links`) are painted samples,
@@ -589,6 +531,13 @@ def collect_crossovers(samples_by_name, links, allele_lookup, snp_positions,
     n_meioses = 0
     n_children = 0
 
+    if diploid_by_name is None:
+        diploid_by_name = {
+            name: diploid_alleles_for_sample(sample.chunks, allele_lookup,
+                                              snp_positions)
+            for name, sample in samples_by_name.items()
+        }
+
     for child, (p1, p2) in links.items():
         cs = samples_by_name.get(child)
         ps1 = samples_by_name.get(p1)
@@ -596,9 +545,9 @@ def collect_crossovers(samples_by_name, links, allele_lookup, snp_positions,
         if cs is None or ps1 is None or ps2 is None:
             continue
 
-        child_dip = diploid_alleles_for_sample(cs.chunks, allele_lookup, snp_positions)
-        p1_dip = diploid_alleles_for_sample(ps1.chunks, allele_lookup, snp_positions)
-        p2_dip = diploid_alleles_for_sample(ps2.chunks, allele_lookup, snp_positions)
+        child_dip = diploid_by_name[child]
+        p1_dip = diploid_by_name[p1]
+        p2_dip = diploid_by_name[p2]
         hom = compute_hom_mask(child_dip)
 
         _score, path = run_trio_phase_aware_hmm_backtrack(
@@ -619,7 +568,68 @@ def collect_crossovers(samples_by_name, links, allele_lookup, snp_positions,
     return midpoints, n_meioses, n_children
 
 
-def cumulative_cM(midpoints, n_meioses, lo, hi, bin_bp):
+def _profile_segments(recombination_model):
+    """Return fractional ``(start, end, rate_per_bp)`` process segments.
+
+    Stage-2 checkpoints created before spatially varying simulations have no
+    model metadata; those remain a single constant-rate segment.  New-schema
+    ``rate_multiplier`` values are already normalized and directly multiply
+    ``mean_rate_per_bp``.
+    """
+    if not recombination_model:
+        return [(0.0, 1.0, RECOMB_RATE)]
+
+    mean_rate = float(recombination_model.get("mean_rate_per_bp", RECOMB_RATE))
+    raw = recombination_model.get("profile_segments") or []
+    if not raw:
+        return [(0.0, 1.0, mean_rate)]
+
+    parsed = []
+    for item in raw:
+        if isinstance(item, dict):
+            start = float(item.get("start_fraction", item.get("start", 0.0)))
+            end = float(item.get("end_fraction", item.get("end", 1.0)))
+            absolute = item.get("rate_per_bp")
+            multiplier = item.get("rate_multiplier", item.get("multiplier", 1.0))
+        else:
+            if len(item) != 3:
+                raise ValueError(f"Invalid recombination profile segment: {item!r}")
+            start, end, multiplier = map(float, item)
+            absolute = None
+        if not (0.0 <= start < end <= 1.0):
+            raise ValueError(f"Invalid recombination profile interval [{start}, {end}]")
+        rate = float(absolute) if absolute is not None else mean_rate * float(multiplier)
+        if rate < 0.0:
+            raise ValueError("Recombination rates must be non-negative")
+        parsed.append((start, end, rate))
+
+    parsed.sort(key=lambda x: x[0])
+    if abs(parsed[0][0]) > 1e-12 or abs(parsed[-1][1] - 1.0) > 1e-12:
+        raise ValueError("Recombination profile must cover fractional interval [0, 1]")
+    for left, right in zip(parsed[:-1], parsed[1:]):
+        if abs(left[1] - right[0]) > 1e-12:
+            raise ValueError("Recombination profile segments must be contiguous")
+    return parsed
+
+
+def _physical_edges(lo, hi, bin_bp, recombination_model=None):
+    """Regular bins plus exact process boundaries, ending exactly at ``hi``."""
+    if hi <= lo:
+        return np.asarray([lo, hi], dtype=np.float64)
+    n_bins = max(1, int(np.ceil((hi - lo) / float(bin_bp))))
+    regular = lo + np.arange(n_bins + 1, dtype=np.float64) * float(bin_bp)
+    # ceil normally places the final regular edge above hi.  Always replacing
+    # it fixes the supported final-bin overshoot and its excess exposure.
+    regular[-1] = hi
+    span = hi - lo
+    segments = _profile_segments(recombination_model)
+    boundaries = [lo + start * span for start, _, _ in segments]
+    boundaries.extend(lo + end * span for _, end, _ in segments)
+    return np.unique(np.clip(np.concatenate((regular, boundaries)), lo, hi))
+
+
+def cumulative_cM(midpoints, n_meioses, lo, hi, bin_bp,
+                  recombination_model=None):
     """Bin crossover midpoints -> cumulative cM along [lo, hi].
 
     cM per bin = 100 * (#crossovers in bin) / n_meioses  (Morgans -> cM);
@@ -627,48 +637,36 @@ def cumulative_cM(midpoints, n_meioses, lo, hi, bin_bp):
     """
     if n_meioses == 0 or hi <= lo:
         return np.array([lo, hi], dtype=float), np.array([0.0, 0.0])
-    n_bins = max(1, int(np.ceil((hi - lo) / float(bin_bp))))
-    edges = lo + np.arange(n_bins + 1) * float(bin_bp)
-    if edges[-1] < hi:
-        edges[-1] = hi
+    edges = _physical_edges(lo, hi, bin_bp, recombination_model)
     counts, _ = np.histogram(midpoints, bins=edges)
     cm_per_bin = 100.0 * counts / float(n_meioses)
     cum = np.concatenate([[0.0], np.cumsum(cm_per_bin)])
     return edges, cum
 
 
-def process_truth_cM(lo, hi, bin_bp, recomb_rate=RECOMB_RATE):
-    """Underlying generative genetic map -- the recombination process itself.
+def process_truth_cM(lo, hi, bin_bp, recomb_rate=RECOMB_RATE,
+                     recombination_model=None):
+    """Analytic cumulative genetic map under the recorded simulation model.
 
-    The simulator lays crossovers as a Poisson process at a CONSTANT per-bp
-    rate `recomb_rate` (no hotspots; see recombine_haps), so the expected
-    genetic distance over a physical span d (bp) is E[#crossovers] =
-    d * recomb_rate Morgans, i.e. 100 * d * recomb_rate cM.  This is the ground
-    truth the map is trying to estimate, and it is INDEPENDENT of any pedigree,
-    painting, or HMM decode: a straight line at 100 * recomb_rate * 1e6 cM/Mb
-    (= 5 cM/Mb at recomb_rate = 5e-8).
-
-    This is the third curve.  It differs from the two DECODED curves:
-      * 'truth'    = trio-HMM crossovers off the TRUE ancestry painting; this
-                     can only see crossovers between segments of DIFFERENT
-                     founder ancestry, so it sits slightly BELOW the process
-                     line by the invisible-crossover (IBD) fraction.
-      * 'inferred' = trio-HMM crossovers off the RECONSTRUCTED painting; painting
-                     switch errors add spurious ancestry transitions, inflating
-                     it ABOVE 'truth' (and often above the process line too).
-
-    Returned on the SAME bin edges as cumulative_cM so all three curves share an
-    x-axis.  Values are the exact model expectation; for a uniform-rate sim this
-    equals the realized per-meiosis truth in expectation (finite-sample noise
-    aside), so no per-meiosis breakpoint record is needed.
+    Legacy checkpoints use a constant ``recomb_rate``.  New checkpoints carry
+    fractional piecewise-constant segments in ``recombination_model``.  Exact
+    segment boundaries are included in the returned edges, so the curve and
+    regional analysis do not smear the 20/80-percent changes across a bin.
     """
     if hi <= lo:
         return np.array([lo, hi], dtype=float), np.array([0.0, 0.0])
-    n_bins = max(1, int(np.ceil((hi - lo) / float(bin_bp))))
-    edges = lo + np.arange(n_bins + 1) * float(bin_bp)
-    if edges[-1] < hi:
-        edges[-1] = hi
-    cum = 100.0 * float(recomb_rate) * (edges - lo)
+    if recombination_model is None:
+        recombination_model = {"mean_rate_per_bp": recomb_rate}
+    edges = _physical_edges(lo, hi, bin_bp, recombination_model)
+    segments = _profile_segments(recombination_model)
+    span = hi - lo
+    cum = np.zeros(len(edges), dtype=np.float64)
+    for j in range(1, len(edges)):
+        a, b = edges[j - 1], edges[j]
+        midpoint_fraction = ((a + b) * 0.5 - lo) / span
+        rate = next(rate for seg_start, seg_end, rate in segments
+                    if seg_start - 1e-12 <= midpoint_fraction <= seg_end + 1e-12)
+        cum[j] = cum[j - 1] + 100.0 * rate * (b - a)
     return edges, cum
 
 
@@ -729,53 +727,181 @@ def _warmup_hmm():
         pass
 
 
+TRACK_ORDER = (
+    "process", "raw_all", "raw", "truth", "reconstructed_true", "inferred",
+)
+TRACK_LABELS = {
+    "process": "Analytic process expectation",
+    "raw_all": "Raw realized (all simulated meioses)",
+    "raw": "Raw realized (decoder-eligible meioses)",
+    "truth": "True painting + true pedigree",
+    "reconstructed_true": "Reconstructed painting + true pedigree",
+    "inferred": "Reconstructed painting + inferred pedigree",
+}
+TRACK_STYLES = {
+    "process": dict(color="#2e7d32", linestyle="--", linewidth=1.5),
+    "raw_all": dict(color="#777777", linestyle=":", linewidth=1.1),
+    "raw": dict(color="#111111", linestyle="-.", linewidth=1.3),
+    "truth": dict(color="#1f4e8c", linestyle="-", linewidth=1.4),
+    "reconstructed_true": dict(color="#d17c00", linestyle="-", linewidth=1.3),
+    "inferred": dict(color="#c0392b", linestyle="-", linewidth=1.4),
+}
+
+
+def _modeled_span(recombination_model, contig, truth_positions):
+    spans = (recombination_model or {}).get("modeled_spans_bp", {})
+    span = spans.get(contig) if hasattr(spans, "get") else None
+    if span is None:
+        return float(truth_positions[0]), float(truth_positions[-1])
+    lo, hi = map(float, span)
+    if hi <= lo:
+        raise ValueError(f"Invalid modeled span for {contig}: {span!r}")
+    return lo, hi
+
+
+def _raw_event_track(records, eligible_children=None):
+    """Flatten one event-log record per gamete, retaining zero-event meioses."""
+    if records is None:
+        return None
+    selected = []
+    for record in records:
+        if eligible_children is not None:
+            if record.get("child") not in eligible_children:
+                continue
+            # Explicit generation filter documents the current decoder's scope.
+            if record.get("generation") not in (None, "F2", "F3"):
+                continue
+        selected.append(record)
+    arrays = [np.asarray(r.get("crossover_positions_bp", ()), dtype=np.float64)
+              for r in selected]
+    nonempty = [a for a in arrays if a.size]
+    midpoints = np.concatenate(nonempty) if nonempty else np.empty(0, dtype=np.float64)
+    return midpoints, len(selected), len({r.get("child") for r in selected})
+
+
+def _compact_midpoints(midpoints):
+    """Float32 is sub-marker precision here while halving stored map-data size."""
+    return np.asarray(midpoints, dtype=np.float32)
+
+
 def _build_one_contig(args):
-    """Worker: build one contig's truth + inferred + process curves.
+    """Build all process, raw-event, painting, and pedigree ablation tracks."""
+    (contig, ckpt_dir, bin_bp, true_links, inferred_links, sample_names,
+     recombination_model, raw_records) = args
 
-    Module-level and picklable so build_maps can fan the (embarrassingly
-    parallel) per-chromosome work across a process pool.  Each worker loads ONLY
-    its own contig from the checkpoint tree -- nothing large is serialised from
-    the parent -- runs the trio-HMM crossover decode for both the truth and the
-    inferred paintings, and returns the contig's curve dict.  The crossover /
-    HMM / cM math is identical to the original serial loop body.
-    """
-    (contig, ckpt_dir, bin_bp, true_links, inferred_links, sample_names) = args
-
-    # Founder allele lookups (truth: rebuilt sim founders; inferred: L4).
-    naive = load_contig(ckpt_dir, STAGE_VCF, contig)["naive_long_haps"]
+    vcf_payload = load_contig(ckpt_dir, STAGE_VCF, contig)
+    naive = vcf_payload["naive_long_haps"]
     truth_lookup, truth_pos = build_truth_founder_lookup(naive)
-    l4 = load_contig(ckpt_dir, STAGE_L4, contig)["super_blocks_L4"]
+    del naive, vcf_payload
+
+    # L4 can be several GB.  Materialize only its compact int8 lookup and
+    # positions, then release the full payload before loading Stage 2.
+    l4_payload = load_contig(ckpt_dir, STAGE_L4, contig)
+    l4 = l4_payload["super_blocks_L4"]
     inf_lookup, inf_pos = build_inferred_founder_lookup(l4)
+    del l4, l4_payload
 
-    # Paintings.
-    truth_samples = _samples_of(load_contig(ckpt_dir, STAGE_SIM, contig)["truth_painting"])
+    simulation_payload = load_contig(ckpt_dir, STAGE_SIM, contig)
+    truth_painting = simulation_payload["truth_painting"]
+    truth_samples = _samples_of(truth_painting)
+    del truth_painting, simulation_payload
     truth_by_name = _index_by_name(truth_samples, sample_names)
-    inf_obj = load_contig(ckpt_dir, STAGE_PAINT, contig)["tolerance_result"]
-    inf_by_name = _index_by_name(_samples_of(inf_obj), sample_names)
 
-    # Crossovers (truth uses true links + sim founders; inferred uses inferred
-    # links + L4 founders).
-    t_mid, t_n, t_nc = collect_crossovers(truth_by_name, true_links, truth_lookup, truth_pos)
-    i_mid, i_n, i_nc = collect_crossovers(inf_by_name, inferred_links, inf_lookup, inf_pos)
+    painting_payload = load_contig(ckpt_dir, STAGE_PAINT, contig)
+    inf_obj = painting_payload["tolerance_result"]
+    inf_samples = _samples_of(inf_obj)
+    del inf_obj, painting_payload
+    inf_by_name = _index_by_name(inf_samples, sample_names)
 
-    lo = float(min(truth_pos[0], inf_pos[0]))
-    hi = float(max(truth_pos[-1], inf_pos[-1]))
-    t_edges, t_cum = cumulative_cM(t_mid, t_n, lo, hi, bin_bp)
-    i_edges, i_cum = cumulative_cM(i_mid, i_n, lo, hi, bin_bp)
-    # Underlying generative truth (constant-rate process); shares the x-axis.
-    p_edges, p_cum = process_truth_cM(lo, hi, bin_bp)
-
-    return contig, {
-        "truth": (t_edges, t_cum), "inferred": (i_edges, i_cum),
-        "process": (p_edges, p_cum),
-        "n_meioses_truth": t_n, "n_meioses_inferred": i_n,
-        # crossover COUNTS (numerator) + children, so the truth/inferred gap can
-        # be split into numerator (more decoded crossovers) vs denominator
-        # (different #meioses from the inferred pedigree).
-        "n_crossovers_truth": len(t_mid), "n_crossovers_inferred": len(i_mid),
-        "n_children_truth": t_nc, "n_children_inferred": i_nc,
-        "lo": lo, "hi": hi,
+    decoder_rate = float((recombination_model or {}).get(
+        "decoder_rate_per_bp", RECOMB_RATE))
+    # Deliberately scalar: the decoder remains blind to the simulated profile.
+    truth_dip = {
+        name: diploid_alleles_for_sample(sample.chunks, truth_lookup, truth_pos)
+        for name, sample in truth_by_name.items()
     }
+    inf_dip = {
+        name: diploid_alleles_for_sample(sample.chunks, inf_lookup, inf_pos)
+        for name, sample in inf_by_name.items()
+    }
+    t_mid, t_n, t_nc = collect_crossovers(
+        truth_by_name, true_links, truth_lookup, truth_pos, decoder_rate,
+        diploid_by_name=truth_dip)
+    rt_mid, rt_n, rt_nc = collect_crossovers(
+        inf_by_name, true_links, inf_lookup, inf_pos, decoder_rate,
+        diploid_by_name=inf_dip)
+    i_mid, i_n, i_nc = collect_crossovers(
+        inf_by_name, inferred_links, inf_lookup, inf_pos, decoder_rate,
+        diploid_by_name=inf_dip)
+
+    lo, hi = _modeled_span(recombination_model, contig, truth_pos)
+    track_events = {
+        "truth": (t_mid, t_n, t_nc),
+        "reconstructed_true": (rt_mid, rt_n, rt_nc),
+        "inferred": (i_mid, i_n, i_nc),
+    }
+    eligible_children = {
+        child for child, (p1, p2) in true_links.items()
+        if child in truth_by_name and p1 in truth_by_name and p2 in truth_by_name
+    }
+    raw_all = _raw_event_track(raw_records)
+    raw_eligible = _raw_event_track(raw_records, eligible_children)
+    if raw_all is not None:
+        track_events["raw_all"] = raw_all
+        track_events["raw"] = raw_eligible
+
+    curves = {}
+    compact_midpoints = {}
+    n_meioses = {}
+    n_children = {}
+    for key, (midpoints, meioses, children) in track_events.items():
+        curves[key] = cumulative_cM(midpoints, meioses, lo, hi, bin_bp,
+                                    recombination_model)
+        compact_midpoints[key] = _compact_midpoints(midpoints)
+        n_meioses[key] = int(meioses)
+        n_children[key] = int(children)
+    curves["process"] = process_truth_cM(
+        lo, hi, bin_bp, recombination_model=recombination_model)
+
+    profile_boundaries = np.asarray(
+        [lo + f * (hi - lo)
+         for segment in _profile_segments(recombination_model)
+         for f in segment[:2]], dtype=np.float64)
+    out = dict(curves)
+    out.update({
+        "track_labels": {
+            **{key: TRACK_LABELS[key] for key in curves},
+            "process": (f"Analytic expectation ({recombination_model.get('name', 'legacy_constant')})"
+                        if recombination_model else TRACK_LABELS["process"]),
+        },
+        "track_provenance": {
+            "process": "Stage-2 analytic recombination_model",
+            "raw_all": "Stage-2 raw event log; all simulated gametes",
+            "raw": "Stage-2 raw event log; F2/F3 decoder-eligible gametes",
+            "truth": "Stage-2 truth painting decoded with the true pedigree",
+            "reconstructed_true": "Stage-10 reconstructed painting decoded with the true pedigree",
+            "inferred": "Stage-10 reconstructed painting decoded with the selected pedigree",
+        },
+        "crossover_midpoints_bp": compact_midpoints,
+        "n_meioses_by_track": n_meioses,
+        "n_children_by_track": n_children,
+        "exposure_bp_by_track": {
+            key: float(value) * (hi - lo) for key, value in n_meioses.items()
+        },
+        "profile_boundaries_bp": np.unique(profile_boundaries),
+        "recombination_model": recombination_model,
+        "decoder_rate_per_bp": decoder_rate,
+        "lo": lo,
+        "hi": hi,
+        # Backward-compatible scalar fields used by earlier plotting notebooks.
+        "n_meioses_truth": t_n,
+        "n_meioses_inferred": i_n,
+        "n_crossovers_truth": len(t_mid),
+        "n_crossovers_inferred": len(i_mid),
+        "n_children_truth": t_nc,
+        "n_children_inferred": i_nc,
+    })
+    return contig, out
 
 
 # =============================================================================
@@ -783,23 +909,22 @@ def _build_one_contig(args):
 # =============================================================================
 def build_maps(ckpt_dir, bin_bp, use_inferred_pedigree=True, inferred_csv=None,
                contigs=None, verbose=True, n_workers=None):
-    """Build truth + inferred + process Marey maps for every contig.
-
-    Per-chromosome work is embarrassingly parallel (each contig loads its own
-    checkpoint data and decodes independently), so contigs are fanned across a
-    process pool of `n_workers` (default: min(#contigs, CPU count)).  Pass
-    n_workers=1 to force the original serial path.
-
-    Returns {contig: {'truth': (edges, cum), 'inferred': (edges, cum),
-                      'process': (edges, cum), 'n_meioses_truth',
-                      'n_meioses_inferred', 'n_crossovers_truth',
-                      'n_crossovers_inferred', 'n_children_truth',
-                      'n_children_inferred', 'lo', 'hi'}}.
-    """
+    """Build backward-compatible maps plus raw and pedigree/painting ablations."""
     g = load_global(ckpt_dir, STAGE_SIM)
     truth_pedigree = g["truth_pedigree"]
     region_keys = g["region_keys"]
     sample_names = list(truth_pedigree["Sample"])
+    recombination_model = g.get("recombination_model") or {
+        "name": "legacy_constant",
+        "mean_rate_per_bp": RECOMB_RATE,
+        "decoder_rate_per_bp": RECOMB_RATE,
+        "profile_segments": [
+            {"start_fraction": 0.0, "end_fraction": 1.0,
+             "rate_multiplier": 1.0}
+        ],
+        "normalization": "legacy_constant",
+    }
+    raw_by_contig = g.get("raw_recombination_events") or {}
 
     true_links = {r.Sample: (r.Parent1, r.Parent2)
                   for r in truth_pedigree.itertuples(index=False)}
@@ -812,65 +937,72 @@ def build_maps(ckpt_dir, bin_bp, use_inferred_pedigree=True, inferred_csv=None,
 
     if contigs is None:
         contigs = region_keys
-
+    contigs = list(contigs)
     if n_workers is None:
         n_workers = min(len(contigs), os.cpu_count() or 1)
     n_workers = max(1, int(n_workers))
-
-    tasks = [(contig, ckpt_dir, bin_bp, true_links, inferred_links, sample_names)
-             for contig in contigs]
+    tasks = [
+        (contig, ckpt_dir, bin_bp, true_links, inferred_links, sample_names,
+         recombination_model, raw_by_contig.get(contig))
+        for contig in contigs
+    ]
 
     if n_workers == 1 or len(tasks) == 1:
-        results = [_build_one_contig(t) for t in tasks]
+        results = [_build_one_contig(task) for task in tasks]
     else:
-        # Warm the numba HMM once so forked workers load the cached compile
-        # rather than each triggering it simultaneously.
         _warmup_hmm()
         ctx = mp.get_context("fork")
         with ctx.Pool(processes=n_workers) as pool:
             results = pool.map(_build_one_contig, tasks)
 
-    # Reassemble in the requested contig order (Pool.map preserves order, but be
-    # explicit so the dict + plots are deterministic regardless of scheduling).
-    by_contig = {c: d for (c, d) in results}
+    by_contig = {contig: data for contig, data in results}
     out = {}
     for contig in contigs:
-        d = by_contig[contig]
-        out[contig] = d
+        data = by_contig[contig]
+        if use_inferred_pedigree:
+            data["pedigree_source"] = (inferred_csv or
+                                         "pedigree_inference_discovered.csv")
+        else:
+            data["pedigree_source"] = "true_pedigree_cli_ablation"
+            data["track_labels"]["inferred"] = (
+                "Reconstructed painting + true pedigree (CLI ablation duplicate)")
+        out[contig] = data
         if verbose:
-            span_mb = (d["hi"] - d["lo"]) / 1e6
-            t_cm, i_cm = d["truth"][1][-1], d["inferred"][1][-1]
-            p_cm = d["process"][1][-1]
-            t_rate = t_cm / span_mb if span_mb > 0 else 0.0
-            i_rate = i_cm / span_mb if span_mb > 0 else 0.0
-            t_xpm = (d["n_crossovers_truth"] / d["n_meioses_truth"]
-                     if d["n_meioses_truth"] else 0.0)
-            i_xpm = (d["n_crossovers_inferred"] / d["n_meioses_inferred"]
-                     if d["n_meioses_inferred"] else 0.0)
-            print(f"  {contig}: process {p_cm:6.1f} cM "
-                  f"({100.0 * RECOMB_RATE * 1e6:.2f} cM/Mb) | "
-                  f"truth {t_cm:6.1f} cM = {t_rate:4.2f} cM/Mb "
-                  f"[{d['n_crossovers_truth']} xo / {d['n_meioses_truth']} mei "
-                  f"= {t_xpm:.3f} xo/mei] | "
-                  f"inferred {i_cm:6.1f} cM = {i_rate:4.2f} cM/Mb "
-                  f"[{d['n_crossovers_inferred']} xo / {d['n_meioses_inferred']} mei "
-                  f"= {i_xpm:.3f} xo/mei]")
+            span_mb = (data["hi"] - data["lo"]) / 1e6
+            pieces = [f"{contig}: process {data['process'][1][-1]:.1f} cM"]
+            for key in ("raw", "truth", "reconstructed_true", "inferred"):
+                if key not in data:
+                    continue
+                total_cm = data[key][1][-1]
+                meioses = data["n_meioses_by_track"][key]
+                count = len(data["crossover_midpoints_bp"][key])
+                rate = total_cm / span_mb if span_mb > 0 else 0.0
+                pieces.append(f"{key} {rate:.2f} cM/Mb ({count} xo/{meioses} mei)")
+            print("  " + " | ".join(pieces))
     return out
 
 
 # =============================================================================
 # Plotting (basic faceted Marey map; detailed styling is a later pass)
 # =============================================================================
+def _available_tracks(data):
+    return [key for key in TRACK_ORDER
+            if key in data and isinstance(data[key], tuple) and len(data[key]) == 2]
+
+
+def _label(data, key):
+    return data.get("track_labels", {}).get(key, TRACK_LABELS.get(key, key))
+
+
 def plot_maps(maps, out_path, title="Recombination map (cumulative genetic distance)"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    contigs = [c for c in maps.keys()]
-    n = len(contigs)
+    contigs = list(maps)
     ncols = 5
-    nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.0 * ncols, 2.4 * nrows),
+    nrows = int(np.ceil(len(contigs) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.15 * ncols, 2.5 * nrows),
                              squeeze=False)
     for ax in axes.flat:
         ax.set_visible(False)
@@ -878,117 +1010,392 @@ def plot_maps(maps, out_path, title="Recombination map (cumulative genetic dista
     for j, contig in enumerate(contigs):
         ax = axes[j // ncols][j % ncols]
         ax.set_visible(True)
-        t_edges, t_cum = maps[contig]["truth"]
-        i_edges, i_cum = maps[contig]["inferred"]
-        # Underlying generative truth (constant-rate process): a smooth dashed
-        # reference line, plotted first so the two decoded step-curves sit on
-        # top of it.
-        if "process" in maps[contig]:
-            p_edges, p_cum = maps[contig]["process"]
-            ax.plot(np.asarray(p_edges) / 1e6, p_cum,
-                    color="#2e7d32", lw=1.3, ls="--", label="Process (5 cM/Mb)")
-        ax.step(np.asarray(t_edges) / 1e6, t_cum, where="post",
-                color="#1f4e8c", lw=1.4, label="Truth")
-        ax.step(np.asarray(i_edges) / 1e6, i_cum, where="post",
-                color="#c0392b", lw=1.4, label="Inferred")
+        data = maps[contig]
+        for key in _available_tracks(data):
+            edges, cumulative = data[key]
+            style = TRACK_STYLES[key]
+            if key == "process":
+                ax.plot(np.asarray(edges) / 1e6, cumulative,
+                        label=_label(data, key), **style)
+            else:
+                ax.step(np.asarray(edges) / 1e6, cumulative, where="post",
+                        label=_label(data, key), **style)
         ax.set_title(str(contig), fontsize=9)
         ax.tick_params(labelsize=7)
 
     fig.supxlabel("Physical position (Mb)")
     fig.supylabel("Genetic distance (cM)")
     fig.suptitle(title, fontsize=12)
-    h, l = axes[0][0].get_legend_handles_labels()
-    if h:
-        fig.legend(h, l, loc="upper right", fontsize=9, frameon=False)
-    fig.tight_layout(rect=[0.02, 0.02, 0.98, 0.95])
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="upper right", fontsize=7.5, frameon=False)
+    fig.tight_layout(rect=[0.02, 0.02, 0.98, 0.94])
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"Wrote figure: {out_path}")
 
 
 def plot_one_chromosome(contig, data, path):
-    """Single-chromosome Marey map (truth + inferred), larger than a facet."""
+    """Single-chromosome map with every available provenance track."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    t_edges, t_cum = data["truth"]
-    i_edges, i_cum = data["inferred"]
-    fig, ax = plt.subplots(figsize=(5.5, 4.0))
-    if "process" in data:
-        p_edges, p_cum = data["process"]
-        ax.plot(np.asarray(p_edges) / 1e6, p_cum, color="#2e7d32", lw=1.4,
-                ls="--", label=f"Process ({100.0 * RECOMB_RATE * 1e6:.0f} cM/Mb)")
-    ax.step(np.asarray(t_edges) / 1e6, t_cum, where="post", color="#1f4e8c",
-            lw=1.6, label=f"Truth ({data['n_meioses_truth']} meioses)")
-    ax.step(np.asarray(i_edges) / 1e6, i_cum, where="post", color="#c0392b",
-            lw=1.6, label=f"Inferred ({data['n_meioses_inferred']} meioses)")
+    fig, ax = plt.subplots(figsize=(6.4, 4.5))
+    for key in _available_tracks(data):
+        edges, cumulative = data[key]
+        style = TRACK_STYLES[key]
+        label = _label(data, key)
+        if key in data.get("n_meioses_by_track", {}):
+            label += f" ({data['n_meioses_by_track'][key]} meioses)"
+        if key == "process":
+            ax.plot(np.asarray(edges) / 1e6, cumulative, label=label, **style)
+        else:
+            ax.step(np.asarray(edges) / 1e6, cumulative, where="post",
+                    label=label, **style)
+    for boundary in data.get("profile_boundaries_bp", ())[1:-1]:
+        ax.axvline(boundary / 1e6, color="#bbbbbb", linewidth=0.7, zorder=0)
     ax.set_xlabel("Physical position (Mb)")
     ax.set_ylabel("Genetic distance (cM)")
     ax.set_title(f"Recombination map - {contig}")
-    ax.legend(fontsize=9, frameon=False)
+    ax.legend(fontsize=7.5, frameon=False)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
 def write_chromosome_csv(contig, data, path):
-    """Per-chromosome cM curve as CSV:
-    position_mb, cum_cM_process, cum_cM_truth, cum_cM_inferred.
+    """Write aligned cumulative curves, retaining legacy column names."""
+    ordered = [key for key in ("process", "truth", "inferred", "raw_all", "raw",
+                               "reconstructed_true") if key in data]
+    all_edges = np.unique(np.concatenate([np.asarray(data[key][0], dtype=float)
+                                          for key in ordered]))
+    columns = [all_edges / 1e6]
+    names = ["position_mb"]
+    legacy_names = {
+        "process": "cum_cM_process",
+        "truth": "cum_cM_truth",
+        "inferred": "cum_cM_inferred",
+    }
+    for key in ordered:
+        edges, cumulative = data[key]
+        columns.append(np.interp(all_edges, np.asarray(edges), np.asarray(cumulative)))
+        names.append(legacy_names.get(key, f"cum_cM_{key}"))
+    np.savetxt(path, np.column_stack(columns), delimiter=",", comments="",
+               header=",".join(names), fmt="%.8g")
 
-    All three curves share the same bin edges (same lo/hi/bin_bp), so one
-    position column suffices; aligned on the shortest length defensively.
-    `cum_cM_process` is the underlying generative truth (constant-rate line);
-    it is omitted gracefully for any legacy map dict that predates it.
-    """
-    t_edges, t_cum = data["truth"]
-    i_edges, i_cum = data["inferred"]
-    if "process" in data:
-        p_edges, p_cum = data["process"]
-        n = min(len(t_edges), len(i_edges), len(p_edges),
-                len(t_cum), len(i_cum), len(p_cum))
-        arr = np.column_stack([np.asarray(t_edges[:n]) / 1e6,
-                               np.asarray(p_cum[:n]),
-                               np.asarray(t_cum[:n]),
-                               np.asarray(i_cum[:n])])
-        header = "position_mb,cum_cM_process,cum_cM_truth,cum_cM_inferred"
-    else:
-        n = min(len(t_edges), len(i_edges), len(t_cum), len(i_cum))
-        arr = np.column_stack([np.asarray(t_edges[:n]) / 1e6,
-                               np.asarray(t_cum[:n]),
-                               np.asarray(i_cum[:n])])
-        header = "position_mb,cum_cM_truth,cum_cM_inferred"
-    np.savetxt(path, arr, delimiter=",", comments="", header=header, fmt="%.6g")
+
+def _expected_rate(model, start_fraction, end_fraction):
+    width = end_fraction - start_fraction
+    integrated = 0.0
+    for seg_start, seg_end, rate in _profile_segments(model):
+        overlap = max(0.0, min(end_fraction, seg_end) - max(start_fraction, seg_start))
+        integrated += overlap * rate
+    return 100.0 * 1e6 * integrated / width if width > 0.0 else float("nan")
+
+
+def _empirical_region_components(data, key, intervals):
+    mids = np.asarray(data.get("crossover_midpoints_bp", {}).get(key, ()), dtype=float)
+    n_meioses = int(data.get("n_meioses_by_track", {}).get(key, 0))
+    lo, hi = float(data["lo"]), float(data["hi"])
+    span = hi - lo
+    count = 0
+    width_bp = 0.0
+    for start_fraction, end_fraction in intervals:
+        left = lo + start_fraction * span
+        right = lo + end_fraction * span
+        is_last = abs(end_fraction - 1.0) < 1e-12
+        count += int(np.count_nonzero((mids >= left) &
+                                     ((mids <= right) if is_last else (mids < right))))
+        width_bp += right - left
+    return count, n_meioses * width_bp
+
+
+def _bootstrap_rate_ci(components, n_bootstrap=2000, seed=104729):
+    if len(components) < 2:
+        return (float("nan"), float("nan"))
+    counts = np.asarray([item[0] for item in components], dtype=float)
+    exposures = np.asarray([item[1] for item in components], dtype=float)
+    rng = np.random.default_rng(seed)
+    indices = rng.integers(0, len(components), size=(n_bootstrap, len(components)))
+    boot_counts = counts[indices].sum(axis=1)
+    boot_exposure = exposures[indices].sum(axis=1)
+    valid = boot_exposure > 0.0
+    values = 100.0 * 1e6 * boot_counts[valid] / boot_exposure[valid]
+    if values.size == 0:
+        return (float("nan"), float("nan"))
+    return tuple(np.percentile(values, [2.5, 97.5]))
+
+
+def _bootstrap_ratio_ci(end_components, middle_components,
+                        n_bootstrap=2000, seed=130363):
+    if len(end_components) < 2:
+        return (float("nan"), float("nan"))
+    ec = np.asarray([item[0] for item in end_components], dtype=float)
+    ee = np.asarray([item[1] for item in end_components], dtype=float)
+    mc = np.asarray([item[0] for item in middle_components], dtype=float)
+    me = np.asarray([item[1] for item in middle_components], dtype=float)
+    rng = np.random.default_rng(seed)
+    indices = rng.integers(0, len(ec), size=(n_bootstrap, len(ec)))
+    ec_b, ee_b = ec[indices].sum(axis=1), ee[indices].sum(axis=1)
+    mc_b, me_b = mc[indices].sum(axis=1), me[indices].sum(axis=1)
+    valid = (ee_b > 0.0) & (me_b > 0.0) & (mc_b > 0.0)
+    end_rate = np.divide(ec_b, ee_b, out=np.full_like(ec_b, np.nan), where=ee_b > 0.0)
+    mid_rate = np.divide(mc_b, me_b, out=np.full_like(mc_b, np.nan), where=me_b > 0.0)
+    ratios = end_rate[valid] / mid_rate[valid]
+    ratios = ratios[np.isfinite(ratios)]
+    if ratios.size == 0:
+        return (float("nan"), float("nan"))
+    return tuple(np.percentile(ratios, [2.5, 97.5]))
+
+
+def regional_summary(maps, n_bootstrap=2000):
+    """Pooled regional rates and chromosome-bootstrap uncertainty."""
+    model = next(iter(maps.values())).get("recombination_model") or {}
+    regions = {
+        "left20": [(0.0, 0.2)],
+        "middle60": [(0.2, 0.8)],
+        "right20": [(0.8, 1.0)],
+        "pooled_ends": [(0.0, 0.2), (0.8, 1.0)],
+    }
+    tracks = _available_tracks(next(iter(maps.values())))
+    rate_rows = []
+    ratio_rows = []
+    components = {}
+    for key in tracks:
+        components[key] = {}
+        for region, intervals in regions.items():
+            if key == "process":
+                if region == "pooled_ends":
+                    rate = 0.5 * (_expected_rate(model, 0.0, 0.2) +
+                                  _expected_rate(model, 0.8, 1.0))
+                else:
+                    rate = _expected_rate(model, intervals[0][0], intervals[0][1])
+                count = exposure = None
+                ci = (None, None)
+                comps = []
+            else:
+                comps = [_empirical_region_components(data, key, intervals)
+                         for data in maps.values()]
+                count = sum(item[0] for item in comps)
+                exposure = sum(item[1] for item in comps)
+                rate = 100.0 * 1e6 * count / exposure if exposure > 0 else float("nan")
+                ci = _bootstrap_rate_ci(comps, n_bootstrap=n_bootstrap)
+            components[key][region] = comps
+            rate_rows.append({
+                "track": key,
+                "label": _label(next(iter(maps.values())), key),
+                "region": region,
+                "n_crossovers": count,
+                "exposure_meiosis_bp": exposure,
+                "rate_cM_per_mb": rate,
+                "bootstrap_ci95_low": ci[0],
+                "bootstrap_ci95_high": ci[1],
+            })
+
+        by_region = {row["region"]: row for row in rate_rows if row["track"] == key}
+        for numerator_region in ("left20", "right20", "pooled_ends"):
+            ratio = (by_region[numerator_region]["rate_cM_per_mb"] /
+                     by_region["middle60"]["rate_cM_per_mb"])
+            if key == "process":
+                ratio_ci = (None, None)
+            else:
+                ratio_ci = _bootstrap_ratio_ci(
+                    components[key][numerator_region],
+                    components[key]["middle60"],
+                    n_bootstrap=n_bootstrap)
+            ratio_rows.append({
+                "track": key,
+                "label": _label(next(iter(maps.values())), key),
+                "contrast": f"{numerator_region}/middle60",
+                "ratio": ratio,
+                "bootstrap_ci95_low": ratio_ci[0],
+                "bootstrap_ci95_high": ratio_ci[1],
+            })
+    return rate_rows, ratio_rows
+
+
+def normalized_local_rates(maps, n_bins=20):
+    """Pool chromosomes on fractional position using meiosis-length exposure."""
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    tracks = _available_tracks(next(iter(maps.values())))
+    rows = []
+    for key in tracks:
+        for idx, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
+            if key == "process":
+                rate = _expected_rate(
+                    next(iter(maps.values())).get("recombination_model") or {},
+                    left, right)
+                count = exposure = None
+            else:
+                pieces = [_empirical_region_components(data, key, [(left, right)])
+                          for data in maps.values()]
+                count = sum(piece[0] for piece in pieces)
+                exposure = sum(piece[1] for piece in pieces)
+                rate = 100.0 * 1e6 * count / exposure if exposure > 0 else float("nan")
+            rows.append({
+                "track": key,
+                "label": _label(next(iter(maps.values())), key),
+                "bin_start_fraction": left,
+                "bin_end_fraction": right,
+                "bin_center_fraction": centers[idx],
+                "n_crossovers": count,
+                "exposure_meiosis_bp": exposure,
+                "rate_cM_per_mb": rate,
+            })
+    return rows
+
+
+def _write_dict_csv(path, rows):
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def plot_normalized_local_rates(rows, path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.8))
+    tracks = []
+    for row in rows:
+        if row["track"] not in tracks:
+            tracks.append(row["track"])
+    for key in tracks:
+        subset = [row for row in rows if row["track"] == key]
+        ax.plot([100.0 * row["bin_center_fraction"] for row in subset],
+                [row["rate_cM_per_mb"] for row in subset],
+                marker=None if key == "process" else "o",
+                markersize=3.0, label=subset[0]["label"], **TRACK_STYLES[key])
+    ax.axvspan(0, 20, color="#e8f5e9", alpha=0.45, zorder=0)
+    ax.axvspan(80, 100, color="#e8f5e9", alpha=0.45, zorder=0)
+    ax.axvline(20, color="#888888", linewidth=0.8)
+    ax.axvline(80, color="#888888", linewidth=0.8)
+    ax.set_xlabel("Normalized chromosome position (%)")
+    ax.set_ylabel("Local recombination rate (cM/Mb)")
+    ax.set_title("Recombination-rate recovery pooled across chromosomes")
+    ax.legend(fontsize=8, frameon=False, ncol=2)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def _json_default(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    raise TypeError(f"Not JSON serializable: {type(value)!r}")
+
+
+def write_analysis_outputs(maps, out_dir):
+    rate_rows, ratio_rows = regional_summary(maps)
+    local_rows = normalized_local_rates(maps)
+    _write_dict_csv(os.path.join(out_dir, "regional_rates.csv"), rate_rows)
+    _write_dict_csv(os.path.join(out_dir, "regional_ratios.csv"), ratio_rows)
+    _write_dict_csv(os.path.join(out_dir, "normalized_local_rates.csv"), local_rows)
+    plot_normalized_local_rates(
+        local_rows, os.path.join(out_dir, "normalized_local_rates.png"))
+
+    model = next(iter(maps.values())).get("recombination_model") or {}
+    payload = {
+        "recombination_model": model,
+        "decoder_prior": {
+            "type": "scalar_poisson_switch_prior",
+            "rate_per_bp": next(iter(maps.values())).get("decoder_rate_per_bp", RECOMB_RATE),
+            "profile_blind": True,
+        },
+        "regional_rates": rate_rows,
+        "regional_ratios": ratio_rows,
+        "bootstrap": {"unit": "chromosome", "replicates": 2000, "ci": 0.95},
+    }
+    with open(os.path.join(out_dir, "regional_summary.json"), "w") as handle:
+        json.dump(payload, handle, indent=2, default=_json_default)
+
+    ratio_lookup = {
+        (row["track"], row["contrast"]): row for row in ratio_rows
+    }
+    lines = [
+        "Variable recombination-rate recovery analysis",
+        "============================================",
+        "",
+        f"Simulation model: {model.get('name', 'legacy_constant')}",
+        f"Mean process rate: {float(model.get('mean_rate_per_bp', RECOMB_RATE)) * 1e8:.4g} cM/Mb",
+        "Decoder prior: one scalar mean rate (profile-blind; no oracle use of the 20/80 boundaries).",
+        "Decoded-eligible raw events use the same F2/F3 meioses accessible to the trio decoder;",
+        "raw-all additionally checks the complete simulated event generator, including F1 meioses.",
+        "",
+        "Regional end/middle rate ratios (95% chromosome-bootstrap CI):",
+    ]
+    contrasts = (
+        "left20/middle60", "right20/middle60", "pooled_ends/middle60",
+    )
+    for key in TRACK_ORDER:
+        rows = [ratio_lookup.get((key, contrast)) for contrast in contrasts]
+        rows = [row for row in rows if row is not None]
+        if not rows:
+            continue
+        lines.append(f"  {rows[0]['label']}:")
+        for row in rows:
+            low, high = row["bootstrap_ci95_low"], row["bootstrap_ci95_high"]
+            ci_text = "analytic" if low is None else f"95% CI {low:.3f}-{high:.3f}"
+            lines.append(
+                f"    {row['contrast']}: {row['ratio']:.3f} ({ci_text})"
+            )
+
+    inferred_left = ratio_lookup.get(("inferred", "left20/middle60"))
+    inferred_right = ratio_lookup.get(("inferred", "right20/middle60"))
+    if inferred_left is not None and inferred_right is not None:
+        separate_end_lows = (
+            inferred_left["bootstrap_ci95_low"],
+            inferred_right["bootstrap_ci95_low"],
+        )
+        both_supported = all(
+            low is not None and np.isfinite(low) and low > 1.0
+            for low in separate_end_lows
+        )
+        if both_supported:
+            lines.extend([
+                "",
+                "Conclusion: both chromosome ends are enriched with chromosome-level support "
+                "(each separate 95% CI excludes 1).",
+            ])
+        else:
+            lines.extend([
+                "",
+                "Conclusion: both separate chromosome ends are not yet supported as enriched; "
+                "at least one end/middle 95% CI includes 1.",
+            ])
+    lines.extend(["", "See regional_rates.csv, regional_ratios.csv, normalized_local_rates.csv,",
+                  "normalized_local_rates.png, composite.png, and chromosomes/ for full results."])
+    with open(os.path.join(out_dir, "README.txt"), "w") as handle:
+        handle.write("\n".join(lines) + "\n")
 
 
 def save_map_data(maps, path):
-    """Pickle the cM curves so the figure can be re-styled without re-running the
-    (expensive) HMM decode."""
-    with open(path, "wb") as f:
-        pickle.dump(maps, f, protocol=pickle.HIGHEST_PROTOCOL)
+    """Store curves, compact crossover midpoints, and exposures for re-analysis."""
+    with open(path, "wb") as handle:
+        pickle.dump(maps, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Wrote map data: {path}")
 
 
 def save_outputs(maps, out_dir,
                  composite_title="Recombination map (cumulative genetic distance)"):
-    """Write the full output tree:
-
-        <out_dir>/composite.png              faceted all-chromosome figure (panel-B)
-        <out_dir>/map_data.pkl               all cM curves (for re-styling)
-        <out_dir>/chromosomes/<contig>.png   per-chromosome Marey figure
-        <out_dir>/chromosomes/<contig>.csv   per-chromosome cM curve (truth+inferred)
-    """
+    """Write comparable chromosome maps plus aggregate rate-recovery analysis."""
     os.makedirs(out_dir, exist_ok=True)
     chrom_dir = os.path.join(out_dir, "chromosomes")
     os.makedirs(chrom_dir, exist_ok=True)
 
     save_map_data(maps, os.path.join(out_dir, "map_data.pkl"))
     plot_maps(maps, os.path.join(out_dir, "composite.png"), title=composite_title)
-
     for contig, data in maps.items():
         plot_one_chromosome(contig, data, os.path.join(chrom_dir, f"{contig}.png"))
         write_chromosome_csv(contig, data, os.path.join(chrom_dir, f"{contig}.csv"))
-    print(f"Wrote composite + {len(maps)} per-chromosome figures/CSVs under {out_dir}/")
+    write_analysis_outputs(maps, out_dir)
+    print(f"Wrote composite, aggregate analysis, and {len(maps)} chromosome outputs under {out_dir}/")
 
 
 # =============================================================================
@@ -1085,19 +1492,111 @@ def _selftest_driver(seed=3):
     return cond_slope and cond_lin
 
 
+def _selftest_variable_profile():
+    """Check variable-profile math, event denominators, and aggregate outputs."""
+    import tempfile
+
+    model = {
+        "name": "ends_2x_mean_preserving",
+        "mean_rate_per_bp": RECOMB_RATE,
+        "decoder_rate_per_bp": RECOMB_RATE,
+        "profile_segments": [
+            {"start_fraction": 0.0, "end_fraction": 0.2,
+             "rate_multiplier": 10.0 / 7.0},
+            {"start_fraction": 0.2, "end_fraction": 0.8,
+             "rate_multiplier": 5.0 / 7.0},
+            {"start_fraction": 0.8, "end_fraction": 1.0,
+             "rate_multiplier": 10.0 / 7.0},
+        ],
+        "normalization": "mean_preserving_weighted_mean_1",
+    }
+    edges = _physical_edges(0.0, 10.5, 4.0, model)
+    edge_ok = (edges[-1] == 10.5 and 2.1 in edges and 8.4 in edges)
+    process_edges, process_cum = process_truth_cM(
+        0.0, 100_000_000.0, 7_000_000.0, recombination_model=model)
+    process_ok = (
+        process_edges[-1] == 100_000_000.0 and
+        np.isclose(process_cum[-1], 500.0) and
+        np.isclose(_expected_rate(model, 0.0, 0.2), 50.0 / 7.0) and
+        np.isclose(_expected_rate(model, 0.2, 0.8), 25.0 / 7.0)
+    )
+
+    records = []
+    for generation, child in (("F1", "C1"), ("F2", "C2"), ("F3", "C3")):
+        for parent_slot in (0, 1):
+            records.append({
+                "generation": generation,
+                "child": child,
+                "parent_slot": parent_slot,
+                "crossover_positions_bp": np.asarray([10.0 + parent_slot]),
+            })
+    raw_all = _raw_event_track(records)
+    raw_eligible = _raw_event_track(records, {"C2", "C3"})
+    denominator_ok = raw_all[1] == 6 and raw_eligible[1] == 4
+
+    def synthetic_contig():
+        lo, hi = 0.0, 100_000_000.0
+        # Pooled ends: 40 events in 40% of the exposure; middle: 30 in 60%.
+        mids = np.concatenate((
+            np.linspace(1.0, 19_000_000.0, 20),
+            np.linspace(21_000_000.0, 79_000_000.0, 30),
+            np.linspace(81_000_000.0, 99_000_000.0, 20),
+        ))
+        data = {
+            "lo": lo, "hi": hi,
+            "recombination_model": model,
+            "decoder_rate_per_bp": RECOMB_RATE,
+            "profile_boundaries_bp": np.asarray([lo, 0.2 * hi, 0.8 * hi, hi]),
+            "track_labels": {"process": TRACK_LABELS["process"],
+                             "inferred": TRACK_LABELS["inferred"]},
+            "track_provenance": {},
+            "crossover_midpoints_bp": {"inferred": mids.astype(np.float32)},
+            "n_meioses_by_track": {"inferred": 100},
+            "n_children_by_track": {"inferred": 50},
+            "process": process_truth_cM(lo, hi, 7_000_000.0,
+                                         recombination_model=model),
+            "inferred": cumulative_cM(mids, 100, lo, hi, 7_000_000.0, model),
+            "n_meioses_truth": 100, "n_meioses_inferred": 100,
+            "n_crossovers_truth": 70, "n_crossovers_inferred": 70,
+            "n_children_truth": 50, "n_children_inferred": 50,
+        }
+        return data
+
+    maps = {"chr1": synthetic_contig(), "chr2": synthetic_contig()}
+    _, ratios = regional_summary(maps, n_bootstrap=100)
+    inferred_ratios = [row["ratio"] for row in ratios
+                       if row["track"] == "inferred"]
+    ratio_ok = (len(inferred_ratios) == 3 and
+                all(np.isclose(ratio, 2.0) for ratio in inferred_ratios))
+    with tempfile.TemporaryDirectory(prefix="recombination_map_selftest_") as out_dir:
+        save_outputs(maps, out_dir)
+        required = {
+            "composite.png", "map_data.pkl", "normalized_local_rates.png",
+            "regional_rates.csv", "regional_ratios.csv", "regional_summary.json",
+            "README.txt",
+        }
+        output_ok = required.issubset(set(os.listdir(out_dir)))
+
+    ok = edge_ok and process_ok and denominator_ok and ratio_ok and output_ok
+    print("[variable] exact edge/profile slopes/raw denominators/ratio/output "
+          f"-> {'OK' if ok else 'FAIL'}")
+    return ok
+
+
 # =============================================================================
 # CLI
 # =============================================================================
 def main(argv=None):
     import argparse
-    p = argparse.ArgumentParser(description="Build a Marey recombination map "
-                                            "(truth vs inferred) from BHD checkpoints.")
+    p = argparse.ArgumentParser(
+        description="Build process, realized, truth-painting, reconstructed, and "
+                    "end-to-end Marey maps from BHD simulation checkpoints.")
     p.add_argument("--ckpt-dir", default=".pipeline_checkpoints",
                    help="completed pipeline.py checkpoint tree (NOT a sweep combo)")
     p.add_argument("--bin-mb", type=float, default=1.0, help="physical bin width (Mb)")
     p.add_argument("--out-dir", default="recombination_map",
-                   help="output directory: composite.png + map_data.pkl + "
-                        "chromosomes/<contig>.{png,csv}")
+                   help="output directory for chromosome maps, aggregate local-rate plot, "
+                        "regional summaries, and map_data.pkl")
     p.add_argument("--contigs", nargs="*", default=None,
                    help="subset of contigs (default: all in stage 02 global)")
     p.add_argument("--true-pedigree-for-inferred", action="store_true",
@@ -1112,7 +1611,7 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     if args.selftest:
-        ok = _selftest_driver()
+        ok = _selftest_driver() and _selftest_variable_profile()
         print("=== DRIVER SELF-TEST", "PASSED" if ok else "FAILED", "===")
         return 0 if ok else 1
 

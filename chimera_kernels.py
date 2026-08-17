@@ -755,6 +755,167 @@ def _gather_samples_numba(probs, indices):
     return out
 
 
+@njit(parallel=True, fastmath=False)
+def _prepare_refinement_log_evidence_numba(block_samples):
+    """Transform genotype likelihoods into refinement scoring emissions.
+
+    This is exactly the robust emission transform used by the bin-emission
+    scorer: ell(g) = max(log(0.99 * p(g) + 0.01 / 3), -2).
+    Preparing it once avoids repeating three logarithms for every carrier,
+    candidate partner, and fixed-point pass.  The float64 output also keeps
+    proposal arithmetic aligned with the float64 whole-block acceptance score.
+    """
+    n_samples = block_samples.shape[0]
+    n_sites = block_samples.shape[1]
+    out = np.empty((n_samples, n_sites, 3), dtype=np.float64)
+    for sample in prange(n_samples):
+        for site in range(n_sites):
+            for genotype in range(3):
+                value = block_samples[sample, site, genotype] * 0.99 + 0.01 / 3.0
+                if value < 1e-300:
+                    value = 1e-300
+                score = math.log(value)
+                if score < -2.0:
+                    score = -2.0
+                out[sample, site, genotype] = score
+    return out
+
+
+@njit(parallel=True, fastmath=False)
+def _viterbi_partner_carriers_likelihood_numba(
+        log_evidence, carrier_idx, cur, target_template, bof, nbins, switch_pen):
+    """Infer carrier partner paths directly from genotype likelihoods.
+
+    Given the current target-haplotype template, candidate partner k has
+    expected genotype dosage target_template[site] + cur[k, site].  Its bin
+    emission is the sum of the corresponding robust log likelihoods.  Flat or
+    missing genotype evidence therefore adds the same value to every partner
+    and is exactly neutral.  The established stay/switch Viterbi recurrence is
+    retained unchanged.
+    """
+    n_carriers = carrier_idx.shape[0]
+    n_sites = log_evidence.shape[1]
+    n_haps = cur.shape[0]
+    partner_site = np.empty((n_carriers, n_sites), dtype=np.int64)
+
+    for carrier_offset in prange(n_carriers):
+        sample = carrier_idx[carrier_offset]
+        emissions = np.zeros((nbins, n_haps), dtype=np.float64)
+        for hap in range(n_haps):
+            for site in range(n_sites):
+                dosage = target_template[site] + cur[hap, site]
+                emissions[bof[site], hap] += log_evidence[sample, site, dosage]
+
+        if n_haps == 1:
+            for site in range(n_sites):
+                partner_site[carrier_offset, site] = 0
+            continue
+
+        values = np.empty((nbins, n_haps), dtype=np.float64)
+        back = np.zeros((nbins, n_haps), dtype=np.int64)
+        for hap in range(n_haps):
+            values[0, hap] = emissions[0, hap]
+
+        for bin_index in range(1, nbins):
+            best = 0
+            for hap in range(1, n_haps):
+                if values[bin_index - 1, hap] > values[bin_index - 1, best]:
+                    best = hap
+            second = -1
+            for hap in range(n_haps):
+                if hap == best:
+                    continue
+                if second < 0 or values[bin_index - 1, hap] > values[bin_index - 1, second]:
+                    second = hap
+
+            best_value = values[bin_index - 1, best]
+            second_value = values[bin_index - 1, second]
+            for hap in range(n_haps):
+                if hap == best:
+                    switch_value = second_value - switch_pen
+                    switch_source = second
+                else:
+                    switch_value = best_value - switch_pen
+                    switch_source = best
+                stay_value = values[bin_index - 1, hap]
+                if stay_value >= switch_value:
+                    values[bin_index, hap] = emissions[bin_index, hap] + stay_value
+                    back[bin_index, hap] = hap
+                else:
+                    values[bin_index, hap] = emissions[bin_index, hap] + switch_value
+                    back[bin_index, hap] = switch_source
+
+        path = np.empty(nbins, dtype=np.int64)
+        last = 0
+        for hap in range(1, n_haps):
+            if values[nbins - 1, hap] > values[nbins - 1, last]:
+                last = hap
+        path[nbins - 1] = last
+        for bin_index in range(nbins - 1, 0, -1):
+            path[bin_index - 1] = back[bin_index, path[bin_index]]
+        for site in range(n_sites):
+            partner_site[carrier_offset, site] = path[bof[site]]
+
+    return partner_site
+
+
+@njit(parallel=True, fastmath=False)
+def _consensus_from_carriers_likelihood_numba(
+        log_evidence, carrier_idx, cur, partner_site, target_template):
+    """Conditional maximum-likelihood target allele at every site.
+
+    For an inferred partner allele a, target allele 0 implies genotype a and
+    target allele 1 implies genotype a + 1.  Log likelihood ratios are summed
+    over carriers.  A strict positive or negative sign selects one or zero; an
+    exact tie retains the current template.  Flat evidence contributes zero
+    and can never manufacture a heterozygous call.
+    """
+    n_carriers = carrier_idx.shape[0]
+    n_sites = log_evidence.shape[1]
+    haplotype = np.empty(n_sites, dtype=np.int8)
+    probability_one = np.empty(n_sites, dtype=np.float64)
+    informative = np.empty(n_sites, dtype=np.bool_)
+    winner_probability = np.empty(n_sites, dtype=np.float64)
+
+    for site in prange(n_sites):
+        score_zero = 0.0
+        score_one = 0.0
+        for carrier_offset in range(n_carriers):
+            sample = carrier_idx[carrier_offset]
+            partner = partner_site[carrier_offset, site]
+            partner_allele = cur[partner, site]
+            score_zero += log_evidence[sample, site, partner_allele]
+            score_one += log_evidence[sample, site, partner_allele + 1]
+
+        delta = score_one - score_zero
+        if delta > 0.0:
+            haplotype[site] = 1
+            if delta >= 700.0:
+                p_one = 1.0
+            else:
+                p_one = 1.0 / (1.0 + math.exp(-delta))
+            informative[site] = True
+        elif delta < 0.0:
+            haplotype[site] = 0
+            if delta <= -700.0:
+                p_one = 0.0
+            else:
+                exp_delta = math.exp(delta)
+                p_one = exp_delta / (1.0 + exp_delta)
+            informative[site] = True
+        else:
+            haplotype[site] = target_template[site]
+            p_one = 0.5
+            informative[site] = False
+        probability_one[site] = p_one
+        if haplotype[site] == 1:
+            winner_probability[site] = p_one
+        else:
+            winner_probability[site] = 1.0 - p_one
+
+    return haplotype, probability_one, informative, winner_probability
+
+
 @njit(parallel=True, fastmath=True)
 def _viterbi_partner_carriers_numba(d_r, carrier_idx, cur, N_tilde, bof, nbins,
                                     log_invalid, near_bonus, switch_pen):
@@ -1184,3 +1345,19 @@ def warmup_jit(num_samples):
     _precompute_base_max_block_numba(tiny_bin_em, tiny_haps)
     tiny_bm = np.zeros((2, 4), dtype=np.float64)
     _cheap_score_all_block_numba(tiny_bin_em, tiny_haps, tiny_bm, 2)
+    # Warm up the likelihood-aware post-stitch refinement kernels before a
+    # refinement pool is created.  Without these calls, many fresh workers can
+    # concurrently compile the same kernels on their first production block.
+    tiny_evidence = np.full((2, 10, 3), 1.0 / 3.0, dtype=np.float32)
+    tiny_log_evidence = _prepare_refinement_log_evidence_numba(tiny_evidence)
+    tiny_carriers = np.array([0, 1], dtype=np.int64)
+    tiny_cur = np.vstack(
+        (np.zeros(10, dtype=np.int8), np.ones(10, dtype=np.int8))
+    )
+    tiny_bof = (np.arange(10) // 5).astype(np.int32)
+    tiny_partner = _viterbi_partner_carriers_likelihood_numba(
+        tiny_log_evidence, tiny_carriers, tiny_cur, tiny_cur[0], tiny_bof, 2, 10.0
+    )
+    _consensus_from_carriers_likelihood_numba(
+        tiny_log_evidence, tiny_carriers, tiny_cur, tiny_partner, tiny_cur[0]
+    )

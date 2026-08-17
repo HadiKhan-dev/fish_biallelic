@@ -33,6 +33,7 @@ import math
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from bhd_config import DEFAULT_READ_ERROR_PROBABILITY
 
 from bhd_cavity_selection import (
     CavityKDiagnostic,
@@ -86,7 +87,7 @@ class ReversibleCavitySearchConfig:
     max_candidate_start_rows: int = 24
     max_replacement_children_per_mode: int = 24
     lambda_wildcard_penalty: float = 0.5
-    read_error_probability: float = 0.02
+    read_error_probability: float = DEFAULT_READ_ERROR_PROBABILITY
     min_supporters_for_confidence: int = 2
     coordinate_descent_max_iter: int = 50
     soft_seed_min_cluster_size: int = 2

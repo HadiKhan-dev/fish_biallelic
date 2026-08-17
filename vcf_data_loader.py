@@ -1,11 +1,13 @@
 import thread_config
 
 import numpy as np
+from bhd_config import DEFAULT_READ_ERROR_PROBABILITY
 import warnings
 from cyvcf2 import VCF
-import multiprocessing as _mp
-import multiprocessing.pool
 from functools import partial
+from multiprocessing_runtime import (
+    safe_forkserver_pool as _safe_forkserver_pool,
+)
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore', invalid="ignore")
@@ -22,16 +24,6 @@ np.seterr(divide='ignore', invalid="ignore")
 # multiprocess doesn't properly support forkserver.  All worker arguments
 # (vcf_path, chrom, start, end, etc.) are basic types — no dill needed.
 
-try:
-    _forkserver_ctx = _mp.get_context('forkserver')
-except (ValueError, AttributeError):
-    _forkserver_ctx = _mp.get_context('fork')
-
-class _ForkserverPool(multiprocessing.pool.Pool):
-    """A Pool using forkserver context."""
-    def __init__(self, *args, **kwargs):
-        kwargs['context'] = _forkserver_ctx
-        super().__init__(*args, **kwargs)
 
 class GenomicData:
     """
@@ -62,6 +54,36 @@ class GenomicData:
         """Allows iterating over blocks as tuples: (pos, reads, flags)"""
         for i in range(len(self)):
             yield self[i]
+
+
+def concatenate_unique_block_reads(genomic_data):
+    """Concatenate non-empty blocks and retain each site's first occurrence.
+
+    Returns:
+        (positions, reads): positions has shape (sites,) and reads has shape
+        (samples, sites, 2). If every block is empty, returns (None, None), so
+        callers can use the existing 'if positions is None' skip convention.
+    """
+    position_blocks = []
+    read_blocks = []
+    for positions, reads, _keep_flags in genomic_data:
+        if len(positions) > 0:
+            position_blocks.append(np.asarray(positions))
+            read_blocks.append(np.asarray(reads))
+
+    if not position_blocks:
+        return None, None
+
+    all_positions = np.concatenate(position_blocks)
+    all_reads = np.concatenate(read_blocks, axis=1)
+
+    # np.unique reports the first index for each value in sorted-value order.
+    # Re-sorting those indices preserves the original block/site traversal
+    # order while keeping the first read tensor for every duplicated site.
+    _, first_indices = np.unique(all_positions, return_index=True)
+    first_indices.sort()
+    return all_positions[first_indices], all_reads[:, first_indices, :]
+
 
 def generate_block_coordinates(vcf_file_path, contig,
                                block_size=100000, shift=50000):
@@ -129,7 +151,7 @@ def generate_snp_count_coordinates(vcf_file_path, contig,
 
 def process_single_block(vcf_path, chrom, start, end, 
                                 min_frequency=0.0, 
-                                read_error_prob=0.02, 
+                                read_error_prob=DEFAULT_READ_ERROR_PROBABILITY,
                                 min_total_reads=5):
     """
     WORKER FUNCTION:
@@ -214,7 +236,7 @@ def cleanup_block_reads_list(vcf_file_path, contig,
                                     use_snp_count=False, snps_per_block=200, snp_shift=100,
                                     num_processes=16,
                                     min_frequency=0.0, 
-                                    read_error_prob=0.02, 
+                                    read_error_prob=DEFAULT_READ_ERROR_PROBABILITY,
                                     min_total_reads=5):
     """
     Multiprocessing driver.
@@ -250,24 +272,8 @@ def cleanup_block_reads_list(vcf_file_path, contig,
                      read_error_prob=read_error_prob, 
                      min_total_reads=min_total_reads)
 
-    # Prevent forkserver workers from re-executing the entry script
-    import sys as _sys
-    _main_mod = _sys.modules.get('__main__')
-    _saved_main_file = getattr(_main_mod, '__file__', None)
-    _saved_main_spec = getattr(_main_mod, '__spec__', None)
-    if _main_mod is not None:
-        if hasattr(_main_mod, '__file__'):
-            del _main_mod.__file__
-        _main_mod.__spec__ = None
-
-    try:
-        with _ForkserverPool(processes=num_processes) as pool:
-            results = pool.starmap(worker, selected_coords)
-    finally:
-        if _main_mod is not None:
-            if _saved_main_file is not None:
-                _main_mod.__file__ = _saved_main_file
-            _main_mod.__spec__ = _saved_main_spec
+    with _safe_forkserver_pool(num_processes) as pool:
+        results = pool.starmap(worker, selected_coords)
     
     # 4. Unpack Results
     # FIX: We NO LONGER filter out empty blocks. 

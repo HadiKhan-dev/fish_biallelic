@@ -20,13 +20,11 @@ itself (it already has .positions and .haplotypes).  Consequences:
   * no l0_blocks argument; integrates identically at L1, L2, L3, L4 with no need to
     reload pruned lower-level blocks.
 
-NOTE on the objective: this self-block likelihood is a DIFFERENT (and, for refining a
-level-n hap, more appropriate) objective than the earlier L0-keypath scoring used by
-the L1->L2 prototype.  It asks "does this level-n haplotype, as a single sequence,
-explain the data better?" rather than "does the best L0-mosaic through this window
-improve?".  Because it is a new objective, it is RE-VALIDATED on truth (the test
-runner's truth-accuracy check) before integration -- the prototype's results are not
-inherited.
+NOTE on the objective: this self-block likelihood asks whether a level-n haplotype,
+as a single sequence, explains the genotype likelihoods better.  Candidate
+re-derivation and whole-block acceptance both consume the same likelihood evidence;
+flat zero-depth evidence is neutral and exact proposal ties retain the current
+template.
 
 WHAT IT DOES (per block, in parallel across blocks)
 ---------------------------------------------------
@@ -64,16 +62,26 @@ Note: NO l0_blocks argument (self-scoring).  paint_penalty default 10.0 is the L
 value; the caller may pass compute_penalty([block])-style values per level, but for
 self-block scoring the penalty governs bin-to-bin recombination within the block.
 
-Workers MUST live in an importable module (forkserver re-imports modules, not
-__main__).  The pool/forkserver bootstrap lives in the caller (pipeline or test).
+``log_invalid`` and ``near_bonus`` remain accepted for compatibility with the
+former hard-dosage proposal path; the likelihood-aware proposal does not use them.
+
+Workers live at module scope because forkserver re-imports modules rather than
+serializing functions from ``__main__``.  ``refine_level`` owns its pool unless
+a compatible caller-managed pool is supplied.
 """
 import os
 import copy
 
 import thread_config  # noqa: F401  (forkserver preload + single-thread BLAS; before numpy/numba)
+import dynamic_threads
 
 import numpy as np
 import numba
+from multiprocessing_runtime import (
+    NonDaemonicForkserverPool,
+    forkserver_context,
+)
+from shared_array import attach_shared_array, close_shared_memory, create_shared_array
 
 # Optional per-block phase profiling for the refinement -- DIAGNOSTIC ONLY, OFF by
 # default and with zero effect on results.  Set BHD_REFINE_PROFILE=1 to print, for
@@ -263,7 +271,6 @@ def _carriers_of(sp, K, rep_idx):
 def _refine_one_block(task):
     """TASK (worker): refine one super-block, SELF-SCORING (no L0 blocks).
     task = (j, positions, seqs, rep_indices_or_None)."""
-    import hierarchical_assembly as _ha
     try:
         import chimera_resolution
         # Register this worker as active and take an initial dynamic thread allocation,
@@ -271,20 +278,14 @@ def _refine_one_block(task):
         # inner numba kernels (emissions/paint/score) use total_cores//active_workers
         # threads -- essential at L2/L3/L4 where blocks < workers (e.g. L4: 1-2 blocks,
         # so 1-2 workers must each use ~all cores, not 1 thread).
-        if _ha._ACTIVE_COUNTER is not None:
-            with _ha._ACTIVE_COUNTER.get_lock():
-                _ha._ACTIVE_COUNTER.value += 1
-        try:
-            numba.set_num_threads(max(1, _ha._get_dynamic_threads()))
-        except Exception:
-            pass
+        dynamic_threads.increment_active()
+        dynamic_threads.apply_dynamic_threads()
         # callable re-resolved by the chimera kernels each phase, so as peers finish a
         # surviving worker scales UP its threads (the remainder-pool reassignment).
-        dyn_fn = _ha._get_dynamic_threads if _ha._ACTIVE_COUNTER is not None else None
+        dyn_fn = dynamic_threads.get_dynamic_threads
 
         j, pos, seqs, rep_indices = task
         gp = _WK['global_probs']; N = gp.shape[0]
-        site_to_idx = _WK['site_to_idx']
         pos = np.asarray(pos)
         present0 = np.asarray(seqs, dtype=np.int8)
         # --- diagnostic per-block phase timing (gated by BHD_REFINE_PROFILE; no
@@ -301,30 +302,10 @@ def _refine_one_block(task):
                 _e[0] += _dt; _e[1] += 1
         cur = present0.copy()
         actions = []
-        # index of each block position within global_sites.  global_sites is
-        # sorted and pos is a subset of it, so searchsorted gives exactly the
-        # site_to_idx[pos] mapping -- vectorised, instead of L (~1.5M at L4)
-        # Python-level dict lookups.
-        idx_g = np.searchsorted(_WK['global_sites'], pos)
-
-        # dosage over this window -- from genotype probs, INDEPENDENT of cur.
-        # _dosage_round_numba is bit-identical to
-        #   np.clip(np.rint(gp[:, idx_g, 1] + 2*gp[:, idx_g, 2]), 0, 2).astype(int16)
-        # but runs across the inner cores and writes a contiguous (N, L) int16
-        # array directly -- avoiding the (N, L) float64 gather/rint/clip/astype
-        # temporaries and the per-block ascontiguousarray copy the numpy path
-        # needed (its astype(order='K') left the fancy-indexed result
-        # non-contiguous, so every carrier/consensus kernel would otherwise
-        # re-copy the whole (N, L) array).
-        if dyn_fn is not None:
-            chimera_resolution._resolve_threads(dyn_fn)
-        d_r = chimera_resolution._dosage_round_numba(gp, idx_g)
 
         eps = _OPT['eps_present']
         support_thresh = _OPT['support_thresh']
         switch_pen = _OPT['switch_pen']
-        log_invalid = _OPT['log_invalid']
-        near_bonus = _OPT['near_bonus']
         min_carriers = _OPT['min_carriers']
         min_dll = _OPT.get('min_dll', 1e-6)
         penalty = float(_OPT['paint_penalty'])
@@ -350,6 +331,19 @@ def _refine_one_block(task):
         em_cur, em_ctx = _emissions_for(pos, cur, spb, num_threads=dyn_fn,
                                         return_ctx=True)
         if _prof: _acc('emission_full', _t)
+        # Proposal generation must consume the same likelihood information as
+        # the acceptance score.  In particular, normalized raw likelihoods at
+        # zero depth are flat; hardening E[G] would turn them into fabricated
+        # heterozygous calls.  Transform the already-gathered block evidence
+        # once and reuse it throughout the fixed-point passes.
+        if dyn_fn is not None:
+            chimera_resolution._resolve_threads(dyn_fn)
+        _t = _time.perf_counter()
+        refinement_log_evidence = (
+            chimera_resolution._prepare_refinement_log_evidence_numba(
+                em_ctx['block_samples'])
+        )
+        if _prof: _acc('evidence_transform', _t)
         _t = _time.perf_counter()
         base_ll = _score_self(pos, cur, spb, penalty, num_threads=dyn_fn, sub_em=em_cur)
         if _prof: _acc('score', _t)
@@ -387,39 +381,28 @@ def _refine_one_block(task):
                 f_side = int(np.argmax(counts))
                 N_tilde = cur[f_side] if f_side < cur.shape[0] else cur[0]
                 nbins = int(bof.max()) + 1
-                # Carrier-derivation, PARALLELISED over carriers: build each
-                # carrier's binned stay-score matrix and run the stay/switch
-                # partner Viterbi inside one prange kernel, instead of the serial
-                # `for k: E[:, :, k] = Lsite @ Bmat` build followed by the
-                # `for c: _viterbi_partner(E[c])` Python loop.  This lets a worker
-                # use its dynamic thread count on this phase too (the emission
-                # kernels already do); _resolve_threads re-syncs the count to
-                # total_cores // active_workers.  Equivalent to the old code up to
-                # ULP (bin-sum order vs BLAS matmul) and the argmax tie-break for
-                # the switch back-pointer (which only reorders equally-scored
-                # partners).  See chimera_resolution._viterbi_partner_carriers_numba.
+                # Infer each carrier's partner path from the full genotype
+                # likelihoods conditional on the current target template.
+                # Flat evidence is identical for all partners and hence neutral.
                 if dyn_fn is not None:
                     chimera_resolution._resolve_threads(dyn_fn)
                 _t = _time.perf_counter()
-                partner_site = chimera_resolution._viterbi_partner_carriers_numba(
-                    d_r, C, np.ascontiguousarray(cur),
+                partner_site = (
+                    chimera_resolution._viterbi_partner_carriers_likelihood_numba(
+                    refinement_log_evidence, C, np.ascontiguousarray(cur),
                     np.ascontiguousarray(N_tilde), np.ascontiguousarray(bof),
-                    int(nbins), float(log_invalid), float(near_bonus),
-                    float(switch_pen))
+                    int(nbins), float(switch_pen))
+                )
                 if _prof: _acc('carrier_kernel', _t)
-                # Consensus, PARALLELISED over sites: derive H (and frac1 / has /
-                # win_frac) by summing each site's carrier partner-dosage support on
-                # the fly, instead of materialising the (C, L) present/Fdiff/Fest/mask
-                # arrays and reducing them in single-threaded numpy -- the dominant
-                # serial cost when L is large (the L4 super-block, L ~ 1.5M).  The
-                # H = num/denom >= 0.5 decision is exact (num, denom are integer
-                # counts); frac1 / win_frac differ only by the ULP of the division.
-                # Both kernels read d_r[C[c]] directly so the (C, L) carrier gather
-                # d_rC is never materialised.
+                # Conditional maximum-likelihood target allele at each site,
+                # given those partner paths.  Exact ties retain the template.
                 _t = _time.perf_counter()
-                H, frac1, has, win_frac = chimera_resolution._consensus_from_carriers_numba(
-                    d_r, C, np.ascontiguousarray(cur),
-                    np.ascontiguousarray(partner_site), np.ascontiguousarray(N_tilde))
+                H, frac1, has, win_frac = (
+                    chimera_resolution._consensus_from_carriers_likelihood_numba(
+                        refinement_log_evidence, C, np.ascontiguousarray(cur),
+                        np.ascontiguousarray(partner_site),
+                        np.ascontiguousarray(N_tilde))
+                )
                 if _prof: _acc('consensus_kernel', _t)
                 # per-hap distance to H, PARALLELISED over haps (== the
                 # [_hamming_pct(cur[k], H) for k] list, same 100*(cnt/L) value)
@@ -476,7 +459,7 @@ def _refine_one_block(task):
         if _prof and cur.shape[1] >= _REFINE_PROFILE_MIN_L:
             _tot = _time.perf_counter() - _t_block
             _sum = sum(v[0] for v in _pt.values())
-            _active = _ha._ACTIVE_COUNTER.value if _ha._ACTIVE_COUNTER is not None else 1
+            _active = dynamic_threads.active_value()
             print(f"  [refine profile] j={j} N={N} K={cur.shape[0]} L={cur.shape[1]} "
                   f"passes={_bi_iter} accepts={len(actions)} | "
                   f"numba_threads={numba.get_num_threads()} active_workers={_active} "
@@ -497,43 +480,32 @@ def _refine_one_block(task):
         # freed slot before the decremented active count), mirroring
         # hierarchical_assembly._process_single_batch.  Runs on EVERY exit path,
         # including the early paint-failed return inside the loop.
-        try:
-            _ha._try_release_extra()
-        except Exception:
-            pass
-        if _ha._ACTIVE_COUNTER is not None:
-            try:
-                with _ha._ACTIVE_COUNTER.get_lock():
-                    _ha._ACTIVE_COUNTER.value -= 1
-            except Exception:
-                pass
+        dynamic_threads.release_dynamic_extra()
+        dynamic_threads.decrement_active()
 
 
 def _init_worker(meta, global_sites, opt, total_cores, active_counter, extra_counter):
-    """Pool initializer: attach shared probs; build site_to_idx from global_sites
-    (not pickled); stash accept options; AND wire hierarchical_assembly's dynamic-
-    thread state (active/extra counters + total_cores + numba ceiling) exactly as its
-    _init_worker_meta does, so _get_dynamic_threads works in this worker and the inner
-    kernels can scale up their thread count as peers finish.  No L0 blocks anywhere."""
-    import hierarchical_assembly as _ha
-    # --- dynamic-thread state (mirror _ha._init_worker_meta) ---
+    """Pool initializer: attach shared probs and wire shared worker state.
+
+    Stash the sorted global sites and accept options, then wire the shared
+    dynamic-thread state (active/extra counters + total_cores + numba ceiling)
+    so the inner kernels can scale up as peers finish.  No L0 blocks anywhere."""
+    # --- dynamic-thread state (same policy as hierarchical assembly) ---
     os.environ['NUMBA_NUM_THREADS'] = str(total_cores)
     try:
         numba.config.NUMBA_NUM_THREADS = total_cores  # ceiling so set_num_threads scales up
         numba.set_num_threads(1)                       # start conservative
     except Exception:
         pass
-    _ha._ACTIVE_COUNTER = active_counter
-    _ha._TOTAL_CORES = total_cores
-    _ha._EXTRA_COUNTER = extra_counter
-    _ha._I_HAVE_EXTRA = False
+    dynamic_threads.set_dynamic_thread_state(
+        total_cores, active_counter, extra_counter
+    )
     # --- our shared data ---
-    shm, gp = _ha._attach_shared_array(meta['probs'])
+    shm, gp = attach_shared_array(meta['probs'])
     _WK.clear()
     _WK['_shm'] = shm
     _WK['global_probs'] = gp
     _WK['global_sites'] = np.asarray(global_sites)
-    _WK['site_to_idx'] = {int(s): i for i, s in enumerate(np.asarray(global_sites))}
     _OPT.clear()
     _OPT.update(opt)
 
@@ -565,8 +537,6 @@ def refine_level(blocks, global_probs, global_sites,
 
     Returns refined_blocks, or (refined_blocks, actions_by_block) if return_actions.
     """
-    import hierarchical_assembly
-
     opt = dict(eps_present=eps_present, paint_penalty=paint_penalty,
                clean_span_frac=clean_span_frac, min_carriers=min_carriers,
                switch_pen=switch_pen, log_invalid=log_invalid, near_bonus=near_bonus,
@@ -585,8 +555,9 @@ def refine_level(blocks, global_probs, global_sites,
             reps = list(rep_selector(j, block_seqs[j], block_pos[j]))
         tasks.append((j, block_pos[j], block_seqs[j].astype(np.int8), reps))
 
-    shm_probs, probs_meta = hierarchical_assembly._create_shared_array(
-        np.ascontiguousarray(global_probs), 'global_probs')
+    shm_probs, probs_meta = create_shared_array(
+        np.ascontiguousarray(global_probs), name_key='name', dtype_as_string=False
+    )
     shared_meta = {'probs': probs_meta}
 
     # Two-level parallelism (mirrors hierarchical_assembly): size the OUTER pool to the
@@ -594,7 +565,7 @@ def refine_level(blocks, global_probs, global_sites,
     # INNER numba threads.  When blocks are MANY (L1: 753) -> ~n_workers workers x 1
     # thread.  When blocks are FEW (L2: 13-76, L3: ~8, L4: 1-2) -> few workers each with
     # MANY threads, so the whole machine stays busy instead of (#blocks) cores doing all
-    # the work while the rest idle.  The active/extra counters drive _get_dynamic_threads
+    # the work while the rest idle.  The active/extra counters drive dynamic threading
     # so a surviving worker scales UP as peers finish (remainder reassignment).
     total_cores = int(n_workers)
     n_blocks = len(blocks)
@@ -602,13 +573,13 @@ def refine_level(blocks, global_probs, global_sites,
     if own_pool:
         outer_workers = max(1, min(total_cores, n_blocks))
         inner_threads = max(1, total_cores // outer_workers)
-        active_counter = hierarchical_assembly._forkserver_ctx.Value('i', 0)
-        extra_counter = hierarchical_assembly._forkserver_ctx.Value('i', 0)
+        active_counter = forkserver_context.Value('i', 0)
+        extra_counter = forkserver_context.Value('i', 0)
         if verbose:
             print(f"      refine_level: {outer_workers} outer workers x ~{inner_threads} "
                   f"inner threads = {outer_workers * inner_threads} cores "
                   f"({n_blocks} blocks)")
-        pool = hierarchical_assembly.NoDaemonPool(
+        pool = NonDaemonicForkserverPool(
             processes=outer_workers, initializer=_init_worker,
             initargs=(shared_meta, np.asarray(global_sites), opt,
                       total_cores, active_counter, extra_counter))
@@ -648,10 +619,7 @@ def refine_level(blocks, global_probs, global_sites,
     finally:
         if own_pool:
             pool.close(); pool.join()
-        try:
-            shm_probs.close(); shm_probs.unlink()
-        except Exception:
-            pass
+        close_shared_memory([shm_probs], unlink=True)
 
     if verbose:
         print(f"      refine_level: {n_modified}/{len(blocks)} blocks modified, "

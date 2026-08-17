@@ -16,6 +16,7 @@ from numba import njit, prange
 import dynamic_threads
 from bhd_model_selection import (
     compute_founder_complexity_cost as _compute_cc,
+    compute_outer_bic,
 )
 from bhd_config import (
     RECOVERY_HAPS_EQUAL_EPS_PCT,
@@ -66,7 +67,7 @@ def _greedy_bic_select(cache, cc_scale=RECOVERY_OUTER_CC_SCALE,
 
     # K=0 baseline NLL via the cache (precomputed at construction).
     nll_K0 = cache.nll_for_subset([])
-    bic_K0 = 0 * cc + 2 * nll_K0
+    bic_K0 = compute_outer_bic(0, nll_K0, cc)
 
     selected_indices = []
     used = set()
@@ -105,7 +106,7 @@ def _greedy_bic_select(cache, cc_scale=RECOVERY_OUTER_CC_SCALE,
             break
 
         k_new = len(selected_indices) + 1
-        bic_new = k_new * cc + 2 * best_nll
+        bic_new = compute_outer_bic(k_new, best_nll, cc)
         d_nll = current_nll - best_nll
 
         if bic_new < current_bic:

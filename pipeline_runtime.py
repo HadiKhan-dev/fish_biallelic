@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gc
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import checkpoint_io
@@ -128,6 +129,67 @@ def strip_block_probs(blocks):
         if hasattr(block, "probs_array") and block.probs_array is not None:
             block.probs_array = None
     return blocks
+
+
+def load_founder_blocks_parallel(
+    store,
+    contigs,
+    stage_keys,
+    *,
+    max_workers,
+    strip_probs=True,
+    require_all=False,
+):
+    """Load the preferred available founder block for each contig.
+
+    ``stage_keys`` contains ordered ``(stage, list_key)`` pairs. Checkpoints
+    are considered in that order independently for each contig, falling back
+    when a checkpoint is absent or its block list is empty. The returned
+    mapping contains only contigs for which a non-empty block list was found.
+    With ``require_all=True``, raise instead if any requested contig has no
+    usable block; this preserves strict production stages that cannot skip one.
+    """
+    contigs = tuple(contigs)
+    stage_keys = tuple(stage_keys)
+    if not contigs or not stage_keys:
+        return {}
+
+    requested_workers = int(max_workers)
+    if requested_workers < 1:
+        raise ValueError("max_workers must be greater than zero")
+    effective_workers = min(requested_workers, len(contigs))
+    missing = object()
+
+    def load_one(contig):
+        for stage, list_key in stage_keys:
+            if not store.contig_done(stage, contig):
+                continue
+            payload = store.load_contig(stage, contig)
+            try:
+                if list_key not in payload or not payload[list_key]:
+                    continue
+                founder_block = payload[list_key][0]
+                if strip_probs:
+                    strip_block_probs((founder_block,))
+                return contig, founder_block
+            finally:
+                del payload
+        return contig, missing
+
+    found = {}
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        for contig, founder_block in executor.map(load_one, contigs):
+            if founder_block is not missing:
+                found[contig] = founder_block
+    if require_all and len(found) != len(contigs):
+        missing_contigs = [
+            str(contig) for contig in contigs if contig not in found
+        ]
+        raise RuntimeError(
+            "No non-empty founder block found for required contigs: "
+            + ", ".join(missing_contigs)
+        )
+    return found
 
 
 def load_global_arrays(store, discovery_stage, contig):

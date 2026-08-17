@@ -13,6 +13,7 @@ CHECKPOINT_DIR = ".pipeline_checkpoints"
 
 import os
 import checkpoint_io
+from thread_env import force_single_threaded_numeric_libraries
 import pipeline_runtime
 
 
@@ -38,11 +39,7 @@ if __name__ == '__main__':
     # FORCE NUMPY/BLAS TO USE 1 THREAD PER PROCESS
     # (Numba threading is now managed by thread_config.py — do NOT set
     #  NUMBA_NUM_THREADS or NUMBA_THREADING_LAYER here)
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    force_single_threaded_numeric_libraries()
 
     # =============================================================================
     # DUAL LOGGING: Console + File
@@ -122,6 +119,7 @@ if __name__ == '__main__':
     import small_block_refine
     import paint_samples
     import pedigree_inference
+    from pedigree_evaluation import parent_columns_match
     import phase_correction
     import residual_discovery
 
@@ -1926,19 +1924,9 @@ if __name__ == '__main__':
                 suffixes=('_True', '_Inf')
             )
 
-            def check_parent_match(row):
-                true_p = {row['Parent1_True'], row['Parent2_True']}
-                true_p = {x for x in true_p if pd.notna(x)}
-                inf_p = {row['Parent1_Inf'], row['Parent2_Inf']}
-                inf_p = {x for x in inf_p if pd.notna(x)}
-                
-                # F1 check (Truth has Founders, Inf has None)
-                if any("Founder" in str(x) for x in true_p):
-                    return len(inf_p) == 0
-                return true_p == inf_p
 
             validation_df['Gen_Match'] = validation_df['Generation_True'] == validation_df['Generation_Inf']
-            validation_df['Parents_Match'] = validation_df.apply(check_parent_match, axis=1)
+            validation_df['Parents_Match'] = validation_df.apply(parent_columns_match, axis=1)
 
             gen_acc = validation_df['Gen_Match'].mean() * 100
             descendant_mask = validation_df['Generation_True'].isin(['F2', 'F3'])

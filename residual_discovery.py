@@ -21,11 +21,14 @@ Main entry point: discover_missing_haplotypes()
 import numpy as np
 import math
 import time
-import multiprocessing as mp
-import multiprocessing.pool
 import numba
 from numba import njit, prange
-from multiprocessing.shared_memory import SharedMemory
+from multiprocessing_runtime import ForkserverPool as _ForkserverPool
+from shared_array import (
+    attach_shared_array as _attach_shared_array,
+    close_shared_memory as _close_shared_memory,
+    create_shared_array as _create_shared_array,
+)
 
 import bhd_kernels
 import bhd_chimera
@@ -226,17 +229,6 @@ def _find_partners_kernel(hap_array, block_probs, sample_indices):
 # MULTIPROCESSING INFRASTRUCTURE
 # =============================================================================
 
-try:
-    _forkserver_ctx = mp.get_context('forkserver')
-except ValueError:
-    _forkserver_ctx = mp.get_context('fork')
-
-
-class _ForkserverPool(multiprocessing.pool.Pool):
-    """A Pool using forkserver context."""
-    def __init__(self, *args, **kwargs):
-        kwargs['context'] = _forkserver_ctx
-        super().__init__(*args, **kwargs)
 
 
 # Worker globals — set by _init_pass1_worker, used by _pass1_worker
@@ -254,8 +246,11 @@ def _init_pass1_worker(probs_shm_name, probs_shape, probs_dtype, num_samples):
     imported modules.
     """
     global _RD_SHM_REF, _RD_GLOBAL_PROBS, _RD_NUM_SAMPLES
-    _RD_SHM_REF = SharedMemory(name=probs_shm_name, create=False)
-    _RD_GLOBAL_PROBS = np.ndarray(probs_shape, dtype=probs_dtype, buffer=_RD_SHM_REF.buf)
+    _RD_SHM_REF, _RD_GLOBAL_PROBS = _attach_shared_array({
+        'name': probs_shm_name,
+        'shape': probs_shape,
+        'dtype': probs_dtype,
+    })
     _RD_NUM_SAMPLES = num_samples
     numba.set_num_threads(1)
 
@@ -1088,10 +1083,9 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
     try:
         if num_processes > 1:
             # Create shared memory for global_probs (~2 GB for chr3 etc.)
-            shm = SharedMemory(create=True, size=global_probs.nbytes)
-            shm_probs = np.ndarray(global_probs.shape, dtype=global_probs.dtype,
-                                   buffer=shm.buf)
-            shm_probs[:] = global_probs
+            shm, shm_meta = _create_shared_array(
+                global_probs, name_key='name', dtype_as_string=False
+            )
             
             if verbose:
                 shm_mb = global_probs.nbytes / (1024 * 1024)
@@ -1100,8 +1094,8 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
             pool = _ForkserverPool(
                 processes=num_processes,
                 initializer=_init_pass1_worker,
-                initargs=(shm.name, global_probs.shape,
-                          global_probs.dtype, num_samples))
+                initargs=(shm_meta['name'], shm_meta['shape'],
+                          shm_meta['dtype'], num_samples))
         
         # =================================================================
         # Pass 1: Residual discovery on all blocks (parallel)
@@ -1406,8 +1400,7 @@ def discover_missing_haplotypes(blocks, global_probs, global_sites,
             pool.close()
             pool.join()
         if shm is not None:
-            shm.close()
-            shm.unlink()
+            _close_shared_memory([shm], unlink=True)
     
     # =====================================================================
     # Build output: add discovered haps, then dedup + chimera prune

@@ -11,6 +11,7 @@ fish_vcf_restriped/
 
 # Pickled checkpoints anywhere (the multi-GB stage pickles) — global safety net
 *.pkl
+*.pkl.b2
 *.pickle
 
 # Outputs

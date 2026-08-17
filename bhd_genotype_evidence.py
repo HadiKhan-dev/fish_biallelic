@@ -1,11 +1,12 @@
 """Raw allele-depth genotype evidence shared by stage-1 discovery paths."""
 
 import numpy as np
+from bhd_config import DEFAULT_READ_ERROR_PROBABILITY
 
 
 def allele_depths_to_raw_genotype_likelihoods(
     allele_depths,
-    read_error_probability=0.02,
+    read_error_probability=DEFAULT_READ_ERROR_PROBABILITY,
     *,
     require_nonempty=False,
     require_integer=False,

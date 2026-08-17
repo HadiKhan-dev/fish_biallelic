@@ -61,35 +61,18 @@ from typing import Any, Mapping, Optional, Sequence
 import thread_config  # must precede NumPy/Numba imports
 import dynamic_threads
 
-# thread_config wraps numba.njit so project kernels default to disk caching.
-# Numba also decorates some package-internal helpers lazily, and those helpers
-# do not always have a cache locator. Temporarily restore Numba's real
-# decorator only while forcing those helpers to import, then put the project's
-# wrapper back. Smart kernels bind the real decorator locally and explicitly
-# opt into disk caching; importing this module must not change the caching
-# policy for modules imported later in the pipeline.
-
 import numba
 from numba import prange
 
-_project_njit_wrapper = numba.njit
-_real_njit = getattr(thread_config, "_original_njit", _project_njit_wrapper)
-try:
-    numba.njit = _real_njit
-
-    # A tiny compile forces all lazily imported CPU registries (including
-    # numba.typed dict/list helpers) to bind the real decorator now.
-    @_real_njit(cache=False)
-    def _smart_numba_registry_warmup(value):
-        return value + 1
-
-    _smart_numba_registry_warmup(0)
-finally:
-    numba.njit = _project_njit_wrapper
-njit = _real_njit
+thread_config.ensure_numba_registry_warmup()
+# Smart kernels explicitly declare their cache policy.  thread_config performs
+# the one process-wide Numba registry warm-up and exposes the unwrapped
+# decorator, so importing this module no longer mutates numba.njit temporarily.
+njit = thread_config.original_njit
 
 import numpy as np
 import pandas as pd
+from pedigree_hmm import poisson_switch_stay_terms
 
 import pedigree_inference as _legacy
 
@@ -2620,6 +2603,14 @@ def _path_exists(adjacency: list[set[int]], start: int, target: int) -> bool:
     return False
 
 
+
+def _observed_parents(
+    alternatives: np.ndarray, row: int
+) -> tuple[int, ...]:
+    return tuple(
+        int(parent) for parent in alternatives[row, 1:] if int(parent) >= 0
+    )
+
 def _acyclic_selection(
     trios: np.ndarray,
     scores: np.ndarray,
@@ -3839,23 +3830,16 @@ def _acyclic_parent_state_selection(
     direction_resolved: set[int] = set()
     role_probabilities: dict[int, float] = {}
 
-    def observed_parents(row: int) -> tuple[int, ...]:
-        return tuple(
-            int(parent)
-            for parent in alternatives[row, 1:]
-            if int(parent) >= 0
-        )
-
     def can_add(row: int) -> bool:
         child = int(alternatives[row, 0])
         return not any(
             _path_exists(adjacency, child, parent)
-            for parent in observed_parents(row)
+            for parent in _observed_parents(alternatives, row)
         )
 
     def add(row: int, displaced_local: bool = False) -> None:
         child = int(alternatives[row, 0])
-        for parent in observed_parents(row):
+        for parent in _observed_parents(alternatives, row):
             adjacency[parent].add(child)
         selected[child] = row
         role_probabilities[child] = _parent_role_probability(
@@ -3871,7 +3855,7 @@ def _acyclic_parent_state_selection(
         role_probabilities.pop(child, None)
         direction_resolved.discard(child)
         if row is not None:
-            for parent in observed_parents(row):
+            for parent in _observed_parents(alternatives, row):
                 adjacency[parent].discard(child)
         return row
 
@@ -3959,13 +3943,6 @@ def _graph_tie_conflict_children(
     active = {int(child): int(row) for child, row in local_rows.items()}
     ambiguous: set[int] = set()
 
-    def observed_parents(row: int) -> tuple[int, ...]:
-        return tuple(
-            int(parent)
-            for parent in alternatives[row, 1:]
-            if int(parent) >= 0
-        )
-
     def confidence(child: int) -> float:
         values = (
             float(state_margins[child]),
@@ -3977,7 +3954,7 @@ def _graph_tie_conflict_children(
         adjacency = [set() for _ in range(n_samples)]
         reverse = [set() for _ in range(n_samples)]
         for child, row in active.items():
-            for parent in observed_parents(row):
+            for parent in _observed_parents(alternatives, row):
                 adjacency[parent].add(child)
                 reverse[child].add(parent)
 
@@ -4012,7 +3989,10 @@ def _graph_tie_conflict_children(
                 child
                 for child, row in active.items()
                 if child in component
-                and any(parent in component for parent in observed_parents(row))
+                and any(
+                    parent in component
+                    for parent in _observed_parents(alternatives, row)
+                )
             ]
             if not implicated:
                 continue
@@ -5836,18 +5816,16 @@ def _build_standard_contig_cache(
     if informative_markers < 1:
         raise SmartEvidenceError("a standard contig contains no sampled markers")
 
-    distances = np.zeros(n_bins, dtype=np.float64)
-    distances[1:] = np.diff(bin_centers)
-    theta = np.clip(
-        1.0 - np.exp(-distances * recombination_rate), 1e-15, 0.5
+    theta, switch_costs, stay_costs = poisson_switch_stay_terms(
+        bin_centers, recombination_rate
     )
     name = str(item.get("contig", f"contig_{contig_index + 1}"))
     return _StandardContigCache(
         contig=name,
         stacked_alleles=np.ascontiguousarray(stacked, dtype=np.int8),
         stacked_hom_mask=np.ascontiguousarray(hom_mask, dtype=np.bool_),
-        switch_costs=np.log(theta),
-        stay_costs=np.log(1.0 - theta),
+        switch_costs=switch_costs,
+        stay_costs=stay_costs,
         informative_markers=informative_markers,
         stacked_labels=np.ascontiguousarray(local_ids, dtype=np.int16),
         founder_alleles=np.ascontiguousarray(

@@ -19,6 +19,9 @@ import time as _time
 from concurrent.futures import ThreadPoolExecutor
 
 import bhd_kernels
+from bhd_model_selection import (
+    compute_outer_bic_from_log_likelihood as _outer_bic_from_log_likelihood,
+)
 
 # env-gated coarse phase timing inside select_and_resolve (no effect on results
 # when off): set BHD_CR_PROFILE=1 to print Step1 / Step2-3-4 / Step5 wall times.
@@ -54,6 +57,9 @@ from chimera_kernels import (
     _update_bin_emissions_one_hap_numba,
     _dosage_round_numba,
     _gather_samples_numba,
+    _prepare_refinement_log_evidence_numba,
+    _viterbi_partner_carriers_likelihood_numba,
+    _consensus_from_carriers_likelihood_numba,
     _viterbi_partner_carriers_numba,
     _consensus_from_carriers_numba,
     _dists_to_H_numba,
@@ -485,7 +491,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         del template
         _malloc_trim()
         best_idx = max(all_scores, key=all_scores.get)
-        new_bic = ((len(selected) + 1) * batch_cc) - (2 * all_scores[best_idx])
+        new_bic = _outer_bic_from_log_likelihood(len(selected) + 1, all_scores[best_idx], batch_cc)
         if new_bic < current_best_bic:
             current_best_bic = new_bic
             selected.append(best_idx)
@@ -786,7 +792,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             if K < 3:
                 return None
         
-            current_bic = K * batch_cc - 2 * cur_score
+            current_bic = _outer_bic_from_log_likelihood(K, cur_score, batch_cc)
             K_result = K - 1
             n_pairs_r = K_result * K_result
             unselected = [x for x in range(n_cands) if x not in selected]
@@ -914,7 +920,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     
                         for j_idx, ci in enumerate(chunk_cands):
                             new_score = float(accum_scores[j_idx])
-                            new_bic = K_result * batch_cc - 2 * new_score
+                            new_bic = _outer_bic_from_log_likelihood(K_result, new_score, batch_cc)
                             if new_bic < best_bic - 1e-4:
                                 best_bic = new_bic
                                 best_2for1 = (selected[i], selected[j], ci)
@@ -988,11 +994,11 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         while len(selected) > 1:
             cur_ll = score_subset(selected)
             k_now = len(selected)
-            cur_bic = (k_now * batch_cc) - (2 * cur_ll)
+            cur_bic = _outer_bic_from_log_likelihood(k_now, cur_ll, batch_cc)
             best_rem, best_bic = None, cur_bic
             for idx in selected:
                 trial = [x for x in selected if x != idx]
-                trial_bic = ((k_now - 1) * batch_cc) - (2 * score_subset(trial))
+                trial_bic = _outer_bic_from_log_likelihood(k_now - 1, score_subset(trial), batch_cc)
                 if trial_bic < best_bic:
                     best_bic = trial_bic; best_rem = idx
             if best_rem is not None:
@@ -1127,13 +1133,13 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     current_paths, sub_em, pen_sel, num_samples,
                     num_threads=num_threads)
                 k_now = len(current_paths)
-                cur_bic = (k_now * batch_cc) - (2 * cur_ll)
+                cur_bic = _outer_bic_from_log_likelihood(k_now, cur_ll, batch_cc)
                 best_rem, best_bic = None, cur_bic
                 for i in range(len(current_paths)):
                     trial = current_paths[:i] + current_paths[i + 1:]
-                    trial_bic = ((k_now - 1) * batch_cc) - (
-                        2 * score_path_set(trial, sub_em, pen_sel, num_samples,
-                                           num_threads=num_threads))
+                    trial_bic = _outer_bic_from_log_likelihood(
+                        k_now - 1, score_path_set(trial, sub_em, pen_sel, num_samples,
+                                                 num_threads=num_threads), batch_cc)
                     if trial_bic < best_bic:
                         best_bic = trial_bic; best_rem = i
                 if best_rem is not None:
@@ -1249,7 +1255,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             _step5_cur_ll = score_path_set(
                 current_paths, sub_em, pen_sel, num_samples,
                 num_threads=num_threads)
-            _step5_cur_bic = K_s5 * batch_cc - 2 * _step5_cur_ll
+            _step5_cur_bic = _outer_bic_from_log_likelihood(K_s5, _step5_cur_ll, batch_cc)
 
             _step5_best_bic = _step5_cur_bic
             _step5_best_paths = current_paths
@@ -1286,7 +1292,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     _step5_new_ll = score_path_set(
                         _step5_new_paths, sub_em, pen_sel, num_samples,
                         num_threads=num_threads)
-                    _step5_new_bic = K_s5 * batch_cc - 2 * _step5_new_ll
+                    _step5_new_bic = _outer_bic_from_log_likelihood(K_s5, _step5_new_ll, batch_cc)
                     _step5_n_evals += 1
                     if _step5_new_bic < _step5_best_bic:
                         _step5_best_bic = _step5_new_bic
@@ -1312,7 +1318,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     _step5_new_ll = score_path_set(
                         _step5_new_paths, sub_em, pen_sel, num_samples,
                         num_threads=num_threads)
-                    _step5_new_bic = K_s5 * batch_cc - 2 * _step5_new_ll
+                    _step5_new_bic = _outer_bic_from_log_likelihood(K_s5, _step5_new_ll, batch_cc)
                     _step5_n_evals += 1
                     if _step5_new_bic < _step5_best_bic:
                         _step5_best_bic = _step5_new_bic

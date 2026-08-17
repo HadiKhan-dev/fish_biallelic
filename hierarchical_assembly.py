@@ -7,9 +7,16 @@ import math
 import gc
 import time
 from tqdm import tqdm
-import multiprocessing as mp
-import multiprocessing.pool
-from multiprocessing.shared_memory import SharedMemory
+from multiprocessing_runtime import (
+    NonDaemonicForkserverPool as NoDaemonPool,
+    forkserver_context as _forkserver_ctx,
+    main_module_guard as _main_module_guard,
+)
+from shared_array import (
+    attach_shared_array as _attach_shared_array_impl,
+    close_shared_memory as _close_shared_memory,
+    create_shared_array as _create_shared_array_impl,
+)
 
 # Import your specific modules
 import block_haplotypes
@@ -47,29 +54,6 @@ _HIER_PROFILE_MIN_L = int(os.environ.get('BHD_HIER_PROFILE_MIN_L', '500000'))
 # IMPORTANT: The parent's entry script must NOT be named main.py,
 # otherwise forkserver workers will re-execute it when importing __main__.
 
-try:
-    # Preloads configured in thread_config.py (imported above).
-    _forkserver_ctx = mp.get_context('forkserver')
-except (ValueError, AttributeError):
-    _forkserver_ctx = mp.get_context('fork')
-
-class _NoDaemonProcess(_forkserver_ctx.Process):
-    @property
-    def daemon(self):
-        return False
-
-    @daemon.setter
-    def daemon(self, value):
-        pass
-
-class _NoDaemonContext(type(_forkserver_ctx)):
-    Process = _NoDaemonProcess
-
-class NoDaemonPool(multiprocessing.pool.Pool):
-    """A Pool using forkserver context with non-daemonic workers."""
-    def __init__(self, *args, **kwargs):
-        kwargs['context'] = _NoDaemonContext()
-        super().__init__(*args, **kwargs)
 
 
 # =============================================================================
@@ -166,15 +150,9 @@ def _create_shared_array(array, label):
     Returns:
         (SharedMemory handle, metadata_dict)
     """
-    shm = SharedMemory(create=True, size=array.nbytes)
-    shared_view = np.ndarray(array.shape, dtype=array.dtype, buffer=shm.buf)
-    np.copyto(shared_view, array)
-    metadata = {
-        'name': shm.name,
-        'shape': array.shape,
-        'dtype': array.dtype,
-    }
-    return shm, metadata
+    return _create_shared_array_impl(
+        array, name_key='name', dtype_as_string=False
+    )
 
 
 def _attach_shared_array(metadata):
@@ -184,9 +162,7 @@ def _attach_shared_array(metadata):
     Returns:
         (SharedMemory handle, numpy array view)
     """
-    shm = SharedMemory(name=metadata['name'], create=False)
-    array = np.ndarray(metadata['shape'], dtype=metadata['dtype'], buffer=shm.buf)
-    return shm, array
+    return _attach_shared_array_impl(metadata)
 
 
 # =============================================================================
@@ -272,7 +248,10 @@ def convert_reconstruction_to_superblock(reconstructed_data, original_blocks, gl
             if b.probs_array is not None:
                 probs_list.append(b.probs_array)
             elif b.reads_count_matrix is not None:
-                _, probs = analysis_utils.reads_to_probabilities(b.reads_count_matrix)
+                _, probs = analysis_utils.reads_to_probabilities(
+                    b.reads_count_matrix,
+                    use_hwe_prior=False,
+                )
                 probs_list.append(probs)
         
         if probs_list:
@@ -555,8 +534,7 @@ def _process_single_batch(args):
         dynamic_threads.release_dynamic_extra()
         dynamic_threads.decrement_active()
         # Detach from shared memory (parent unlinks).
-        shm_probs.close()
-        shm_sites.close()
+        _close_shared_memory([shm_probs, shm_sites])
 
 
 # =============================================================================
@@ -756,15 +734,9 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     # Belt-and-suspenders: temporarily clear __main__.__file__ so
     # forkserver workers don't re-execute the entry script, even if
     # the caller forgot to add main guards to their pipeline file.
-    import sys as _sys
-    _main_mod = _sys.modules.get('__main__')
-    _saved_main_file = getattr(_main_mod, '__file__', None)
-    _saved_main_spec = getattr(_main_mod, '__spec__', None)
-    if _main_mod is not None:
-        if hasattr(_main_mod, '__file__'):
-            del _main_mod.__file__
-        _main_mod.__spec__ = None
-    
+    _main_guard = _main_module_guard()
+    _main_guard.__enter__()
+
     try:
         if num_processes > 1:
             t0 = time.time()
@@ -807,16 +779,11 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             for args in tqdm(worker_args, desc="Processing Batches"):
                 results.append(_process_single_batch(args))
     finally:
-        # Clean up shared memory (always, even on error)
-        shm_probs.close()
-        shm_probs.unlink()
-        shm_sites.close()
-        shm_sites.unlink()
-        # Restore __main__ attributes
-        if _main_mod is not None:
-            if _saved_main_file is not None:
-                _main_mod.__file__ = _saved_main_file
-            _main_mod.__spec__ = _saved_main_spec
+        try:
+            # Clean up shared memory (always, even on error)
+            _close_shared_memory([shm_probs, shm_sites], unlink=True)
+        finally:
+            _main_guard.__exit__(None, None, None)
     
     # Sort by batch index and collect super blocks
     results = sorted(results, key=lambda x: x['batch_idx'])
@@ -849,8 +816,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     # the block count and uses the same dynamic inner-thread machinery as
     # this function, so it stays core-saturated even at L2/L3/L4 where there
     # are few blocks.  Controlled by refine_after_stitch (default True).
-    # See level_refine.py for the validation (converges; net-positive on
-    # truth; 0 founders lost).
+    # See level_refine.py for the likelihood objective and convergence rule.
     # =====================================================================
     if refine_after_stitch and len(output_super_blocks) > 0:
         import level_refine

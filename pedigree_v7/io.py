@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from cyvcf2 import VCF
+from founder_alleles import founder_allele_matrix
 
 
 def json_safe(value):
@@ -108,15 +109,11 @@ def founder_hard_alleles(founder_block):
     keys = sorted(founder_block.haplotypes)
     if keys != list(range(max(keys) + 1)):
         raise RuntimeError(f"Non-contiguous founder labels {keys}")
-    hard = []
-    for key in keys:
-        values = np.asarray(founder_block.haplotypes[key])
-        hard.append(
-            np.argmax(values, axis=1).astype(np.int8)
-            if values.ndim == 2
-            else values.astype(np.int8)
-        )
-    return np.asarray(hard)
+    return founder_allele_matrix(
+        founder_block.haplotypes,
+        len(founder_block.positions),
+        dtype=np.int8,
+    )
 
 
 def select_founder_indices(founder_block, markers_per_contig):

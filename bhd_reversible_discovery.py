@@ -20,6 +20,11 @@ import numpy as np
 from bhd_genotype_evidence import (
     allele_depths_to_raw_genotype_likelihoods,
 )
+from bhd_results import (
+    BlockResult,
+    _compute_per_site_confidence,
+    _discrete_haps_to_prob_arrays,
+)
 from bhd_factorization_modes import FactorizationMode
 from bhd_reversible_cavity import (
     ReversibleCavitySearchConfig,
@@ -313,7 +318,7 @@ class CavityMaterializedBlockData:
 
         self.validate()
         if block_result_class is None:
-            from block_haplotypes import BlockResult as block_result_class
+            block_result_class = BlockResult
 
         parameters = inspect.signature(block_result_class).parameters.values()
         accepts_mode = any(
@@ -430,11 +435,6 @@ class CavityBlockDiscoveryResult:
 
         mode = self.selected_mode
         keep_mask = self.keep_flags > 0
-        from block_haplotypes import (
-            _compute_per_site_confidence,
-            _discrete_haps_to_prob_arrays,
-        )
-
         confidence_kept, supporters_kept = _compute_per_site_confidence(
             self.raw_genotype_likelihoods_kept,
             mode.haplotypes,

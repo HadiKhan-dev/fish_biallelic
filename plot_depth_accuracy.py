@@ -72,11 +72,6 @@ def _metric_label(key, gen_scope):
 # ---------------------------------------------------------------------------
 # Per-combo accuracy -- mirrors pedigree_sim_pipeline.py exactly
 # ---------------------------------------------------------------------------
-def _parents_match(row):
-    """True iff the inferred parent set matches truth (pipeline's rule)."""
-    return parent_columns_match(row)
-
-
 def combo_accuracy(truth_csv, inf_csv, gen_scope="descendants"):
     """Return (parentage_acc%, generation_acc%, n_matched_samples).
 
@@ -107,7 +102,7 @@ def combo_accuracy(truth_csv, inf_csv, gen_scope="descendants"):
     else:
         gen_acc = float(gen_match.mean()) * 100.0
 
-    par_match = v.apply(_parents_match, axis=1)
+    par_match = v.apply(parent_columns_match, axis=1)
     parent_acc = float(par_match[descendants].mean()) * 100.0 if n_desc else np.nan
 
     return parent_acc, gen_acc, int(len(v))

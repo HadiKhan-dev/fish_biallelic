@@ -32,6 +32,7 @@ noise) rather than as evidence (systematic bias).
 """
 
 import thread_config
+import dynamic_threads
 from thread_config import numba_thread_scope
 
 import numpy as np
@@ -39,20 +40,26 @@ import numba
 import math
 import warnings
 from typing import List, Tuple, NamedTuple
-import multiprocessing as _mp
-try:
-    _forkserver_ctx = _mp.get_context('forkserver')
-except ValueError:
-    _forkserver_ctx = _mp.get_context('fork')
 from tqdm import tqdm
+from multiprocessing_runtime import forkserver_context as _forkserver_ctx
+from shared_array import (
+    attach_shared_array,
+    close_shared_memory,
+    create_shared_array,
+)
 
 import analysis_utils
-from founder_alleles import founder_block_to_dense as _founder_block_to_dense
+from founder_alleles import (
+    founder_allele_matrix,
+    founder_block_to_dense as _founder_block_to_dense,
+    hard_alleles,
+)
 from painting_grid_utils import (
     ibs_homozygosity_mask as _ibs_homozygosity_mask,
     id_grid_to_allele_grid as _id_grid_to_allele_grid,
     id_grid_to_allele_grid_multisnp as _id_grid_to_allele_grid_multisnp,
 )
+from pedigree_hmm import poisson_switch_stay_terms
 
 # --- VISUALIZATION IMPORTS ---
 try:
@@ -209,14 +216,7 @@ def calculate_binned_emissions(sample_probs_matrix, hap_dict, positions,
     deterministic_alleles = np.zeros((num_haps, num_sites), dtype=np.int8)
     
     for i, k in enumerate(hap_keys):
-        hap = hap_dict[k]
-        if hap.ndim == 2 and hap.shape[1] == 2:
-            # Probabilistic: (n_sites, 2) with P(allele=0), P(allele=1)
-            # Use argmax to get deterministic allele (0 or 1)
-            deterministic_alleles[i] = np.argmax(hap, axis=1).astype(np.int8)
-        else:
-            # Already deterministic: (n_sites,) with values 0 or 1
-            deterministic_alleles[i] = hap.astype(np.int8)
+        deterministic_alleles[i] = hard_alleles(hap_dict[k])
     
     # Compute deterministic genotypes for all state pairs
     # genotype = allele_i + allele_j (values: 0, 1, or 2)
@@ -444,37 +444,32 @@ def reconstruct_single_best_path_binned(alpha, ll_tensor, bin_centers, bin_edges
 # 9. MULTIPROCESSING DRIVER (SharedMemory + Persistent Pool)
 # =============================================================================
 
-from multiprocessing import shared_memory as _shm
-
 # Worker-local cache for SharedMemory arrays
 _PAINT_SHARED = {}
 _PAINT_SHM_REFS = []
 _PAINT_CHROM_ID = None
 
-# Dynamic thread scaling globals (set by _init_persistent_paint_worker)
-_PAINT_ACTIVE_COUNTER = None
-_PAINT_TOTAL_CORES = None
-
-
-def _paint_get_dynamic_threads():
-    """Recheck active worker count and return optimal numba thread count."""
-    if _PAINT_ACTIVE_COUNTER is None or _PAINT_TOTAL_CORES is None:
-        return 1
-    active = max(_PAINT_ACTIVE_COUNTER.value, 1)
-    return max(1, _PAINT_TOTAL_CORES // active)
 
 def _create_shm_from_array(arr):
     """Create a SharedMemory block from a numpy array. Returns (shm, name, shape, dtype_str)."""
-    shm = _shm.SharedMemory(create=True, size=arr.nbytes)
-    shm_arr = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
-    shm_arr[:] = arr
-    return shm, shm.name, arr.shape, str(arr.dtype)
+    handle, metadata = create_shared_array(
+        arr, name_key="shm_name", dtype_as_string=True
+    )
+    return (
+        handle,
+        metadata["shm_name"],
+        metadata["shape"],
+        metadata["dtype"],
+    )
+
 
 def _array_from_shm(name, shape, dtype_str):
     """Reconstruct a numpy array from SharedMemory. Returns (shm_ref, array)."""
-    shm = _shm.SharedMemory(name=name, create=False)
-    arr = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
-    return shm, arr
+    return attach_shared_array({
+        "shm_name": name,
+        "shape": shape,
+        "dtype": dtype_str,
+    })
 
 
 def _worker_paint_batch_binned(args):
@@ -512,7 +507,7 @@ def _worker_paint_batch_binned(args):
     
     # Control Numba thread count for prange loops in the forward kernel.
     # Dynamic scaling: use more threads when fewer workers are active (tail).
-    dyn_threads = _paint_get_dynamic_threads()
+    dyn_threads = dynamic_threads.get_dynamic_threads()
     effective_threads = max(numba_threads, dyn_threads)
     with numba_thread_scope(effective_threads):
         # Run forward pass on BINNED data (no backward pass needed for single Viterbi)
@@ -541,12 +536,12 @@ def _worker_paint_batch_binned(args):
 def _init_persistent_paint_worker(total_cores=None, active_counter=None):
     """Initializer for persistent pool — sets up globals and dynamic threading."""
     global _PAINT_SHARED, _PAINT_SHM_REFS, _PAINT_CHROM_ID
-    global _PAINT_ACTIVE_COUNTER, _PAINT_TOTAL_CORES
     _PAINT_SHARED = {}
     _PAINT_SHM_REFS = []
     _PAINT_CHROM_ID = None
-    _PAINT_ACTIVE_COUNTER = active_counter
-    _PAINT_TOTAL_CORES = total_cores
+    dynamic_threads.set_dynamic_thread_state(
+        total_cores, active_counter, extra_counter=None
+    )
     # Cap numba threads to 1 initially — workers scale up dynamically
     try:
         numba.set_num_threads(1)
@@ -564,11 +559,7 @@ def _load_shm_for_chromosome(chrom_id, meta):
         return  # Already loaded
     
     # Close old SharedMemory refs (from previous chromosome)
-    for shm_ref in _PAINT_SHM_REFS:
-        try:
-            shm_ref.close()
-        except Exception:
-            pass
+    close_shared_memory(_PAINT_SHM_REFS)
     _PAINT_SHM_REFS = []
     _PAINT_SHARED = {}
     
@@ -601,17 +592,12 @@ def _worker_paint_persistent(args):
     """
     chrom_id, meta, indices, start_idx, end_idx = args
     _load_shm_for_chromosome(chrom_id, meta)
-    
-    if _PAINT_ACTIVE_COUNTER is not None:
-        with _PAINT_ACTIVE_COUNTER.get_lock():
-            _PAINT_ACTIVE_COUNTER.value += 1
-    
+
+    dynamic_threads.increment_active()
     try:
         return _worker_paint_batch_binned((indices, start_idx, end_idx))
     finally:
-        if _PAINT_ACTIVE_COUNTER is not None:
-            with _PAINT_ACTIVE_COUNTER.get_lock():
-                _PAINT_ACTIVE_COUNTER.value -= 1
+        dynamic_threads.decrement_active()
 
 
 class PaintingPoolManager:
@@ -735,12 +721,7 @@ class PaintingPoolManager:
                 all_sample_paintings.extend(batch_result)
         
         finally:
-            for shm in shm_blocks:
-                try:
-                    shm.close()
-                    shm.unlink()
-                except Exception:
-                    pass
+            close_shared_memory(shm_blocks, unlink=True)
         
         all_sample_paintings.sort(key=lambda x: x.sample_index)
         range_tuple = (int(positions[0]), int(positions[-1]))
@@ -1053,12 +1034,9 @@ def process_contig_for_pedigree(contig_idx, sample_start, sample_end,
                     (id_grid[:-1, :] != -1) & (id_grid[1:, :] != -1))
         switch_counts.append(np.sum(switches))
     
-    # Transition costs
-    dists = np.zeros(num_bins)
-    dists[1:] = np.diff(bin_centers)
-    theta = np.clip(1.0 - np.exp(-dists * recomb_rate), 1e-15, 0.5)
-    sw_costs = np.log(theta)
-    st_costs = np.log(1.0 - theta)
+    _, sw_costs, st_costs = poisson_switch_stay_terms(
+        bin_centers, recomb_rate
+    )
     
     return {
         'contig_idx': contig_idx,
@@ -1093,12 +1071,7 @@ def precompute_founder_ibs(founder_block, snps_per_bin=100):
     
     # Build allele matrix (n_haps, n_snps)
     max_id = max(hap_keys) if hap_keys else 0
-    alleles = np.full((max_id + 1, n_snps), -1, dtype=np.int8)
-    for fid, h_arr in founder_block.haplotypes.items():
-        if h_arr.ndim == 2:
-            alleles[fid, :] = np.argmax(h_arr, axis=1).astype(np.int8)
-        else:
-            alleles[fid, :] = h_arr.astype(np.int8)
+    alleles = founder_allele_matrix(founder_block.haplotypes, n_snps)
     
     # Bin structure
     num_bins = max(1, n_snps // snps_per_bin)

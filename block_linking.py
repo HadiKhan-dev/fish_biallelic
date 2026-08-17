@@ -112,13 +112,8 @@ def _batched_baum_welch_mass_kernel(F_batch, B_batch, T_matrix,
     Replaces the original:
 
         T_partner_broad = T_matrix[None, None, :, None, :]
-        hom_hom_mask = zeros((1, n_c, n_c, n_n, n_n), bool)
-        for a in range(n_c):
-            for b in range(n_n):
-                hom_hom_mask[0, a, a, b, b] = True
-        T_partner_corrected = np.where(hom_hom_mask, 0.0, T_partner_broad)
 
-        combined = F_broad + B_broad + T_partner_corrected
+        combined = F_broad + B_broad + T_partner_broad
         if use_standard_baum_welch:
             combined += T_main_broad
 
@@ -126,15 +121,19 @@ def _batched_baum_welch_mass_kernel(F_batch, B_batch, T_matrix,
         mass_2_2 = logsumexp(combined, axis=(1, 3))     # (B, n_c, n_n)
 
     The original allocates a (B, n_c, n_c, n_n, n_n) `combined` array
-    plus a (1, n_c, n_c, n_n, n_n) `hom_hom_mask` plus the broadcast
-    intermediate.  At K=10 BATCH=100 that's ~10 MB per call; at K=36
-    it's ~1.3 GB.  Plus two full logsumexp passes over the 5D array.
+    plus the broadcast intermediate.  At K=10 BATCH=100 that's ~10 MB
+    per call; at K=36 it's ~1.3 GB.  Plus two full logsumexp passes over
+    the 5D array.
 
     Algebraic structure for each (s, u_out, u_in, v_out, v_in) cell:
         combined_cell = F_batch[s, u_out, u_in] + B_batch[s, v_out, v_in]
-                      + (T_matrix[u_in, v_in] if not hom-hom else 0.0)
+                      + T_matrix[u_in, v_in]
                       + (T_matrix[u_out, v_out] if standard_bw else 0.0)
-    where hom-hom means (u_out == u_in and v_out == v_in).
+
+    In the standard Baum-Welch case both transition factors are present,
+    including for a homozygous-to-homozygous diplotype transition.  The
+    forward recursion represents two ordered homologues, so such a state
+    transition has probability T[u_out, v_out] * T[u_in, v_in], not T.
 
     Algorithm — two-pass max-then-sum LSE (replaces the previous online
     logaddexp accumulation, which paid 4 exp() + 2 log() per cell):
@@ -220,12 +219,7 @@ def _batched_baum_welch_mass_kernel(F_batch, B_batch, T_matrix,
                     # FM is invariant w.r.t. v_in — hoist out of innermost loop.
                     FM_val = F_val + main_term
                     for v_in in range(n_n):
-                        # T_partner_corrected term: T_matrix[u_in, v_in],
-                        # zeroed out at hom-hom entries.
-                        if u_out == u_in and v_out == v_in:
-                            partner_term = 0.0
-                        else:
-                            partner_term = T_matrix[u_in, v_in]
+                        partner_term = T_matrix[u_in, v_in]
                         combined_cell = (FM_val
                                          + B_batch[s, v_out, v_in]
                                          + partner_term)
@@ -252,10 +246,7 @@ def _batched_baum_welch_mass_kernel(F_batch, B_batch, T_matrix,
                     m11 = max_11[s, u_out, v_out]
                     m11_finite = np.isfinite(m11)
                     for v_in in range(n_n):
-                        if u_out == u_in and v_out == v_in:
-                            partner_term = 0.0
-                        else:
-                            partner_term = T_matrix[u_in, v_in]
+                        partner_term = T_matrix[u_in, v_in]
                         combined_cell = (FM_val
                                          + B_batch[s, v_out, v_in]
                                          + partner_term)
@@ -1060,8 +1051,7 @@ def get_updated_transition_probabilities_unified(
         BATCH_SIZE=100,
         use_standard_baum_welch=True,
         uniform_prior=None,
-        hap_keys_cache=None,
-        all_block_likelihoods_by_sample=None): 
+        hap_keys_cache=None):
     """
     Performs the Expectation-Maximization (EM) update step (Baum-Welch).
 
@@ -1083,7 +1073,6 @@ def get_updated_transition_probabilities_unified(
         use_standard_baum_welch (bool): If True, applies standard HMM logic.
         uniform_prior (list, optional): Pre-computed uniform prior [fwd, bwd].
         hap_keys_cache (list, optional): Pre-computed sorted hap keys per block.
-        all_block_likelihoods_by_sample (list, optional): Pre-restructured emissions.
 
     Returns:
         tuple: ([new_fwd, new_bwd], total_data_log_likelihood)
@@ -1106,14 +1095,6 @@ def get_updated_transition_probabilities_unified(
     num_samples = len(full_samples_likelihoods)
     num_blocks = len(full_blocks_likelihoods)
     
-    # Per-sample restructure of emissions
-    # (all_block_likelihoods_by_sample) is no longer needed: the batched
-    # F/B passes consume full_blocks_likelihoods[b].likelihood_tensor
-    # directly (already shape (num_samples, K_b, K_b)).  We keep the
-    # variable as None for any downstream code that still inspects the
-    # parameter — every project caller passes None already.
-    if all_block_likelihoods_by_sample is None:
-        pass  # batched path doesn't need it
 
     # PRE-BUILD dense haploid log-T matrices once per EM iteration,
     # shared across all num_samples forward+backward invocations.
@@ -1183,24 +1164,23 @@ def get_updated_transition_probabilities_unified(
         hap_keys_cache, space_gap,
     )
 
-    # Total Data Log-Likelihood: sum over samples of LSE over all
-    # (K, K) cells in the final-block forward matrix.  Equivalent to
-    # the per-sample form
-    #   sum_s lse_scalar(forward_nums[s][last_block_idx].values())
-    # since forward_nums[s][last_block_idx][(.,.)] = forward_dense
-    # [last_block_idx][s][r, c] by construction (dict insertion order
-    # is row-major over (r, c), matching reshape(-1)).
+    # Total Data Log-Likelihood: a stride of `space_gap` creates one
+    # independent HMM chain per residue class.  Sum the terminal-state
+    # likelihood for every chain (the final `space_gap` physical blocks),
+    # then sum across samples.  Looking only at the final physical block
+    # silently ignored the other residue chains whenever space_gap > 1.
     #
     # We use the same scalar lse_scalar kernel and sequential float
-    # accumulation as the old code to preserve bit-exact reduction
-    # order; the cost is negligible (S=320 calls per EM iteration).
-    last_block_idx = num_blocks - 1
-    last_F = forward_dense[last_block_idx]              # (S, K_last, K_last)
+    # accumulation within each terminal block; the cost is negligible.
     total_data_log_likelihood = 0.0
-    for s in range(num_samples):
-        final_states_log_probs = last_F[s].reshape(-1)
-        if final_states_log_probs.size:
-            total_data_log_likelihood += analysis_utils.lse_scalar(final_states_log_probs)
+    first_terminal_idx = max(0, num_blocks - space_gap)
+    for terminal_idx in range(first_terminal_idx, num_blocks):
+        terminal_F = forward_dense[terminal_idx]
+        for s in range(num_samples):
+            terminal_states_log_probs = terminal_F[s].reshape(-1)
+            if terminal_states_log_probs.size:
+                total_data_log_likelihood += analysis_utils.lse_scalar(
+                    terminal_states_log_probs)
     
     
     # 2. M-Step: Vectorized Update (Baum-Welch ξ calculation)
@@ -1250,12 +1230,6 @@ def get_updated_transition_probabilities_unified(
                 B_tensor = forward_dense[next_bundle]    # (num_samples, n_next, n_next)
                 
             batch_results = []
-            
-            # NOTE: The original code allocated a (1, n_curr, n_curr,
-            # n_next, n_next) hom-hom mask and a (1, n_curr, n_curr,
-            # n_next, n_next) T_partner_corrected broadcast intermediate
-            # OUTSIDE the per-batch loop.  The fused kernel below handles
-            # the hom-hom correction inline, so neither array is needed.
             
             # Process batches.  The fused kernel computes mass_1_1 and
             # mass_2_2 directly from F_batch, B_batch, T_matrix without
@@ -1336,6 +1310,18 @@ def get_updated_transition_probabilities_unified(
     
     return ([new_transition_probs_forward, new_transition_probs_backwards], total_data_log_likelihood)
 
+def _max_transition_probability_change(old_probs, new_probs):
+    """Return the largest absolute change across aligned transition entries."""
+    max_change = 0.0
+    for direction_idx in (0, 1):
+        for block_idx, new_block in new_probs[direction_idx].items():
+            old_block = old_probs[direction_idx][block_idx]
+            for transition_key, new_value in new_block.items():
+                change = abs(new_value - old_block[transition_key])
+                if change > max_change:
+                    max_change = change
+    return max_change
+
 def calculate_hap_transition_probabilities(full_samples_data,
             sample_sites,
             haps_data,
@@ -1349,7 +1335,7 @@ def calculate_hap_transition_probabilities(full_samples_data,
             use_standard_baum_welch=True):
     """
     Main loop for calculating transition probabilities between blocks using EM.
-    Iteratively refines the transition matrix until the likelihood converges.
+    Iteratively refines the transition matrix until its entries converge.
     
     Args:
         full_samples_data (list): Sample data arrays.
@@ -1358,8 +1344,11 @@ def calculate_hap_transition_probabilities(full_samples_data,
         full_blocks_likelihoods (StandardBlockLikelihoods, optional): Pre-computed emissions.
         max_num_iterations (int): Maximum EM steps.
         space_gap (int): HMM stride.
-        min_cutoff_change (float): (Unused) Threshold param.
-        ll_improvement_cutoff (float): Convergence threshold for Log Likelihood.
+        min_cutoff_change (float): Stop once every smoothed transition-probability
+            entry changes by no more than this absolute amount.
+        ll_improvement_cutoff (float): Retained for API compatibility; no longer
+            used because relative raw likelihood convergence depends on arbitrary
+            state-independent emission offsets.
         learning_rate (float): Smoothing factor for updates.
 
     Returns:
@@ -1381,29 +1370,15 @@ def calculate_hap_transition_probabilities(full_samples_data,
     # Cache sorted hap keys ONCE (they never change across iterations).
     hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
 
-    # Restructure emissions ONCE into per-sample chains.  Required by
-    # the legacy per-sample E-step code paths
-    # (get_full_probs_forward/backward); the new batched E-step inside
-    # get_updated_transition_probabilities_unified does not consume this
-    # structure but we still construct it here so direct callers of the
-    # per-sample functions continue to work without rewiring.
-    num_samples = len(full_samples_data)
-    num_blocks = len(full_blocks_likelihoods)
-    all_block_likelihoods_by_sample = []
-    for s in range(num_samples):
-        sample_chain = []
-        for b in range(num_blocks):
-            sample_chain.append(full_blocks_likelihoods[b][s])
-        all_block_likelihoods_by_sample.append(sample_chain)
 
     current_probs = start_probs
-    prev_ll = -np.inf
+    del ll_improvement_cutoff
     
     for i in range(max_num_iterations):
         effective_lr = learning_rate * (0.9 ** i)
         effective_lr = max(effective_lr, 0.1)
 
-        new_probs_raw, current_ll = get_updated_transition_probabilities_unified(
+        new_probs_raw, _current_ll = get_updated_transition_probabilities_unified(
             full_samples_data,
             sample_sites,
             haps_data,
@@ -1415,7 +1390,6 @@ def calculate_hap_transition_probabilities(full_samples_data,
             use_standard_baum_welch=use_standard_baum_welch,
             uniform_prior=uniform_prior,
             hap_keys_cache=hap_keys_cache,
-            all_block_likelihoods_by_sample=all_block_likelihoods_by_sample
         )
         
         current_probs_smoothed = analysis_utils.smoothen_probs_vectorized(current_probs, new_probs_raw, effective_lr)
@@ -1425,19 +1399,14 @@ def calculate_hap_transition_probabilities(full_samples_data,
         else:
             current_probs_new = current_probs_smoothed
 
+        max_transition_change = _max_transition_probability_change(
+            current_probs, current_probs_new)
         current_probs = current_probs_new
-        
-        # Relative improvement check
-        rel_improvement = 0.0
-        if prev_ll != -np.inf and prev_ll != 0:
-            rel_improvement = (current_ll - prev_ll) / abs(prev_ll)
-        elif prev_ll == -np.inf:
-            rel_improvement = float('inf') 
-            
-        if i > 0 and 0 <= rel_improvement < ll_improvement_cutoff:
+
+        # Parameter-space convergence is invariant to adding a constant to all
+        # emissions, unlike relative raw log-likelihood improvement.
+        if max_transition_change <= min_cutoff_change:
             break
-            
-        prev_ll = current_ll
             
     return current_probs
 

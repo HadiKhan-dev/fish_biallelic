@@ -13,6 +13,7 @@ CHECKPOINT_DIR = ".pipeline_checkpoints_real"
 import os
 import pipeline_runtime
 
+from thread_env import force_single_threaded_numeric_libraries
 
 def _load_contig_for_phase_correction(r_name):
     """Picklable wrapper around the standard checkpoint traversal."""
@@ -35,11 +36,7 @@ if __name__ == '__main__':
     from datetime import datetime
 
     # FORCE NUMPY/BLAS TO USE 1 THREAD PER PROCESS
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    force_single_threaded_numeric_libraries()
 
     # =============================================================================
     # DUAL LOGGING: Console + File
@@ -174,27 +171,19 @@ if __name__ == '__main__':
             )
             print(f"    [Loader] {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
 
-            all_positions, all_reads = [], []
-            for i in range(len(genomic_data)):
-                pos_i = genomic_data.positions[i]
-                reads_i = genomic_data.reads[i]
-                if len(pos_i) > 0:
-                    all_positions.append(pos_i)
-                    all_reads.append(reads_i)
-
-            if not all_positions:
+            global_sites, global_reads = (
+                vcf_data_loader.concatenate_unique_block_reads(genomic_data)
+            )
+            if global_sites is None:
                 print(f"    WARNING: No data for {r_name}, skipping")
                 continue
 
-            global_sites = np.concatenate(all_positions)
-            global_reads = np.concatenate(all_reads, axis=1)
-
-            _, unique_idx = np.unique(global_sites, return_index=True)
-            unique_idx = np.sort(unique_idx)
-            global_sites = global_sites[unique_idx]
-            global_reads = global_reads[:, unique_idx, :]
-
-            (site_priors, global_probs) = analysis_utils.reads_to_probabilities(global_reads)
+            # Keep cohort-frequency regularization inside block discovery;
+            # linkage and assembly consume the raw genotype likelihoods.
+            (site_priors, global_probs) = analysis_utils.reads_to_probabilities(
+                global_reads,
+                use_hwe_prior=False,
+            )
             avg_depth = np.mean(np.sum(global_reads, axis=-1))
             print(f"    Sites: {len(global_sites)}, Samples: {global_probs.shape[0]}, "
                   f"Depth: {avg_depth:.1f}x")
@@ -701,21 +690,19 @@ if __name__ == '__main__':
         # propagation steps below.  The greedy workers no longer return
         # founder_block (IPC-cost fix), so load it here into mcr in parallel
         # via threads (parallel disk I/O across contigs).
-        from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
         _t0 = time.time()
-        def _load_founder_block_for_main(r_name):
-            for stage, list_key in [(STAGE_R7, 'super_blocks_L4'),
-                                    (STAGE_R6, 'super_blocks_L3')]:
-                if not contig_done(stage, r_name):
-                    continue
-                ckpt = load_contig(stage, r_name)
-                if list_key in ckpt and ckpt[list_key]:
-                    fb = ckpt[list_key][0]
-                    fb.probs_array = None
-                    mcr.setdefault(r_name, {})['founder_block'] = fb
-                    break
-        with _ThreadPoolExecutor(max_workers=min(n_processes, len(region_keys))) as _ex:
-            list(_ex.map(_load_founder_block_for_main, region_keys))
+        founder_blocks = pipeline_runtime.load_founder_blocks_parallel(
+            checkpoint_store,
+            region_keys,
+            (
+                (STAGE_R7, 'super_blocks_L4'),
+                (STAGE_R6, 'super_blocks_L3'),
+            ),
+            max_workers=n_processes,
+        )
+        for r_name, founder_block in founder_blocks.items():
+            mcr.setdefault(r_name, {})['founder_block'] = founder_block
+        del founder_blocks
         print(f"  Founder block parallel load: {time.time()-_t0:.1f}s")
 
         # Step 3: Parsimonious F1 recoloring

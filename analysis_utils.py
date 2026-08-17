@@ -6,6 +6,7 @@ from scipy.special import softmax, gammaln, logsumexp
 from numba import njit, prange
 import warnings
 
+from bhd_config import DEFAULT_READ_ERROR_PROBABILITY
 from bhd_genotype_evidence import (
     allele_depths_to_raw_genotype_likelihoods,
 )
@@ -502,8 +503,9 @@ def log_matmul(A, B):
 
 #%% --- READS TO PROBABILITIES ---
 
-def reads_to_probabilities(reads_array, read_error_prob=0.02, min_total_reads=5,
-                           use_hwe_prior=True):
+def reads_to_probabilities(reads_array,
+                           read_error_prob=DEFAULT_READ_ERROR_PROBABILITY,
+                           min_total_reads=5, use_hwe_prior=True):
     """
     Convert a reads array to a probability of the underlying
     genotype being 0, 1 or 2.

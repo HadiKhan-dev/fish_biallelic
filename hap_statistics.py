@@ -286,7 +286,10 @@ def combined_best_hap_matches(block_result):
     # Determine which probability source to use
     if reads_array is not None and reads_array.size > 0:
         # Prefer computing from reads (original behavior)
-        (site_priors, actual_probs) = analysis_utils.reads_to_probabilities(reads_array)
+        (site_priors, actual_probs) = analysis_utils.reads_to_probabilities(
+            reads_array,
+            use_hwe_prior=False,
+        )
     elif probs_array is not None and probs_array.size > 0:
         # Fallback to pre-computed probs_array (when reads discarded for memory)
         actual_probs = probs_array

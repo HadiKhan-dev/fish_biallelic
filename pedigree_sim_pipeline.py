@@ -6,8 +6,8 @@
 # and comments), parameterized for the read-depth x seed sweep.  This file has
 # NO runtime dependency on pipeline.py -- you can delete pipeline.py and this
 # still runs.  It was produced by copying pipeline.py's setup + stages 1-11 unchanged
-# except that four knobs are sourced from environment variables (with the
-# defaults below), and the file stops after stage 11 (no phase correction).
+# except that its experiment controls are sourced from environment variables
+# (with the defaults below), and the file stops after stage 11 (no phase correction).
 #
 # It still imports the same project modules (block_haplotypes,
 # hierarchical_assembly, pedigree_inference, simulate_sequences, ...), so keep
@@ -20,7 +20,9 @@
 # is reused read-only and never recomputed.
 #
 # RUN STANDALONE (one combo): edit the defaults via env, e.g.
-#     BHD_SWEEP_SEED=0 BHD_SWEEP_DEPTH=5 python pedigree_sim_pipeline.py
+#     BHD_SWEEP_SEED=0 BHD_SWEEP_DEPTH=5 BHD_NUM_PROCESSES=76 \
+#       BHD_RECOMBINATION_PROFILE=ends_2x_mean_preserving \
+#       python pedigree_sim_pipeline.py
 # RUN VIA THE SWEEP: let pedigree_depth_sweep.py set the env vars per seed.
 #
 # NOTE: this is a STATIC snapshot. If you later change pipeline.py's stage 2-11
@@ -31,6 +33,60 @@ _BHD_SEED       = int(_bhd_os.environ.get("BHD_SWEEP_SEED", "0"))
 _BHD_DEPTH      = float(_bhd_os.environ.get("BHD_SWEEP_DEPTH", "5"))
 _BHD_CKPT_DIR   = _bhd_os.environ.get("BHD_SWEEP_CKPT_DIR", "pedigree_sweep_checkpoints")
 _BHD_OUTPUT_DIR = _bhd_os.environ.get("BHD_SWEEP_OUTPUT_DIR", "pedigree_sweep_results")
+_BHD_NUM_PROCESSES = int(_bhd_os.environ.get("BHD_NUM_PROCESSES", "112"))
+_BHD_RECOMBINATION_PROFILE = _bhd_os.environ.get(
+    "BHD_RECOMBINATION_PROFILE", "constant"
+).strip().lower()
+if _BHD_NUM_PROCESSES < 1:
+    raise ValueError("BHD_NUM_PROCESSES must be at least 1")
+if _BHD_RECOMBINATION_PROFILE not in {
+    "constant", "ends_2x_mean_preserving"
+}:
+    raise ValueError(
+        "BHD_RECOMBINATION_PROFILE must be 'constant' or "
+        "'ends_2x_mean_preserving'"
+    )
+
+_BHD_MEAN_RECOMBINATION_RATE = 5e-8
+if _BHD_RECOMBINATION_PROFILE == "ends_2x_mean_preserving":
+    # The physical-length-weighted mean multiplier is exactly one:
+    # 0.2*(10/7) + 0.6*(5/7) + 0.2*(10/7) = 1.
+    _BHD_GENERATOR_RECOMBINATION_PROFILE = (
+        (0.0, 0.2, 10.0 / 7.0),
+        (0.2, 0.8, 5.0 / 7.0),
+        (0.8, 1.0, 10.0 / 7.0),
+    )
+    _BHD_RECOMBINATION_NORMALIZATION = (
+        "physical_length_weighted_mean_multiplier_equals_1"
+    )
+else:
+    _BHD_GENERATOR_RECOMBINATION_PROFILE = None
+    _BHD_RECOMBINATION_NORMALIZATION = "constant_multiplier_equals_1"
+
+
+def _recombination_model_metadata():
+    """Return the exact generative model recorded in the Stage-2 checkpoint."""
+    segments = _BHD_GENERATOR_RECOMBINATION_PROFILE
+    if segments is None:
+        segments = ((0.0, 1.0, 1.0),)
+    return {
+        "name": _BHD_RECOMBINATION_PROFILE,
+        "mean_rate_per_bp": _BHD_MEAN_RECOMBINATION_RATE,
+        "profile_segments": [
+            {
+                "start_fraction": start,
+                "end_fraction": end,
+                "rate_multiplier": multiplier,
+                "rate_per_bp": _BHD_MEAN_RECOMBINATION_RATE * multiplier,
+            }
+            for start, end, multiplier in segments
+        ],
+        "normalization": _BHD_RECOMBINATION_NORMALIZATION,
+        # Reconstruction remains deliberately blind to the simulated profile.
+        "decoder_rate_per_bp": _BHD_MEAN_RECOMBINATION_RATE,
+    }
+
+
 # Quiet tqdm progress bars when stdout/stderr is a file (the sweep logs): default
 # tqdm's `disable` to None so it auto-disables on a non-TTY, while still showing
 # bars if you run this file directly in a terminal. Iteration is unaffected, and
@@ -47,8 +103,9 @@ try:
 except Exception:
     pass
 if __name__ == "__main__":   # only the main process prints; workers re-import this module
-    print("[PEDIGREE-SIM] seed=%s depth=%s ckpt=%s out=%s"
-          % (_BHD_SEED, _BHD_DEPTH, _BHD_CKPT_DIR, _BHD_OUTPUT_DIR), flush=True)
+    print("[PEDIGREE-SIM] seed=%s depth=%s workers=%s recombination=%s ckpt=%s out=%s"
+          % (_BHD_SEED, _BHD_DEPTH, _BHD_NUM_PROCESSES,
+             _BHD_RECOMBINATION_PROFILE, _BHD_CKPT_DIR, _BHD_OUTPUT_DIR), flush=True)
 # ============================================================================
 
 #%%
@@ -122,15 +179,13 @@ if __name__ == '__main__':
     import os
     import sys
     from datetime import datetime
+    from thread_env import force_single_threaded_numeric_libraries
+    import pipeline_runtime
 
     # FORCE NUMPY/BLAS TO USE 1 THREAD PER PROCESS
     # (Numba threading is now managed by thread_config.py — do NOT set
     #  NUMBA_NUM_THREADS or NUMBA_THREADING_LAYER here)
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    force_single_threaded_numeric_libraries()
 
     # =============================================================================
     # DUAL LOGGING: Console + File
@@ -139,43 +194,10 @@ if __name__ == '__main__':
     # tqdm progress bars still display on the terminal only (they use stderr).
     # If the SSH connection drops, the log file preserves all output.
 
-    class TeeOutput:
-        """Writes to both the original stdout and a log file.
-        
-        Proxies all attributes from the original stdout so that VS Code's
-        IPython kernel still recognises the object as a valid output stream.
-        """
-        def __init__(self, log_path, original_stdout):
-            # Use object.__setattr__ to avoid triggering our __getattr__
-            object.__setattr__(self, '_log_file', open(log_path, 'a', buffering=1))
-            object.__setattr__(self, '_original', original_stdout)
-        
-        def write(self, message):
-            self._original.write(message)
-            try:
-                self._log_file.write(message)
-            except (ValueError, OSError):
-                pass  # log file closed or disk error — don't break output
-            return getattr(self._original, 'write', lambda m: len(m))(message) if False else None
-        
-        def flush(self):
-            self._original.flush()
-            try:
-                self._log_file.flush()
-            except (ValueError, OSError):
-                pass
-        
-        def close(self):
-            self._log_file.close()
-        
-        def __getattr__(self, name):
-            # Proxy everything else (encoding, fileno, isatty, etc.) to original
-            return getattr(self._original, name)
-
     os.makedirs("logs", exist_ok=True)
     run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join("logs", f"run_{run_timestamp}.log")
-    sys.stdout = TeeOutput(log_path, sys.stdout)
+    sys.stdout = pipeline_runtime.TeeOutput(log_path, sys.stdout)
     print(f"Logging to: {log_path}")
     print(f"Run started: {run_timestamp}")
 
@@ -239,7 +261,7 @@ if __name__ == '__main__':
     import beam_search_core
     import chimera_resolution
     import hierarchical_assembly
-    import block_haplotype_refinement
+    import small_block_refine
     import paint_samples
     import pedigree_inference
     from pedigree_evaluation import parent_columns_match
@@ -258,7 +280,7 @@ if __name__ == '__main__':
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_rows', None)
 
-    n_processes = 112
+    n_processes = _BHD_NUM_PROCESSES
     # Recycle workers after each batch to prevent memory accumulation
     # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
     WORKER_MAXTASKS = 1
@@ -303,49 +325,16 @@ if __name__ == '__main__':
     # To re-run from stage N:  delete that stage's dir and all later ones.
 
     CHECKPOINT_DIR = _BHD_CKPT_DIR
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-
-    def _stage_dir(stage):
-        d = os.path.join(CHECKPOINT_DIR, stage)
-        os.makedirs(d, exist_ok=True)
-        return d
-
-    def stage_complete(stage):
-        return os.path.exists(os.path.join(_stage_dir(stage), "_done"))
-
-    def mark_stage_complete(stage):
-        with open(os.path.join(_stage_dir(stage), "_done"), 'w') as f:
-            f.write(datetime.now().isoformat())
-        print(f"  [Checkpoint] Stage '{stage}' marked complete")
-
-    def contig_done(stage, r_name):
-        return os.path.exists(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name))
-
-    def save_contig(stage, r_name, data):
-        _stage_dir(stage)  # ensure the stage directory exists
-        try:
-            size_mb = checkpoint_io.write(
-                checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name), data, nthreads=n_processes
-            ) / (1024 * 1024)
-            print(f"    [Checkpoint] {stage}/{r_name} ({size_mb:.1f} MB)")
-        except OSError as e:
-            print(f"    [Checkpoint] WARNING: {stage}/{r_name}: {e}")
-
-    def load_contig(stage, r_name):
-        return checkpoint_io.read(checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name), nthreads=n_processes)
-
-    def save_global(stage, data):
-        _stage_dir(stage)  # ensure the stage directory exists
-        try:
-            size_mb = checkpoint_io.write(
-                checkpoint_io.global_path(CHECKPOINT_DIR, stage), data, nthreads=n_processes
-            ) / (1024 * 1024)
-            print(f"  [Checkpoint] {stage}/_global ({size_mb:.1f} MB)")
-        except OSError as e:
-            print(f"  [Checkpoint] WARNING: {stage}/_global: {e}")
-
-    def load_global(stage):
-        return checkpoint_io.read(checkpoint_io.global_path(CHECKPOINT_DIR, stage), nthreads=n_processes)
+    checkpoint_store = pipeline_runtime.CheckpointStore(
+        CHECKPOINT_DIR, nthreads=n_processes
+    )
+    stage_complete = checkpoint_store.stage_complete
+    mark_stage_complete = checkpoint_store.mark_stage_complete
+    contig_done = checkpoint_store.contig_done
+    save_contig = checkpoint_store.save_contig
+    load_contig = checkpoint_store.load_contig
+    save_global = checkpoint_store.save_global
+    load_global = checkpoint_store.load_global
 
     # Which stage checkpoint holds each per-contig key.
     # Values can be a single stage string or a list (tried in order, first hit wins).
@@ -525,6 +514,11 @@ if __name__ == '__main__':
             data = multi_contig_results[r_name]
             sites, haps_data = data['naive_long_haps']
             concrete_haps = simulate_sequences.concretify_haps(haps_data)
+            # Alleles are binary argmax labels. Retaining NumPy's default int64
+            # here multiplies the all-contig simulation resident set by eight;
+            # int8 preserves every supported genotype operation (0, 1, or 2).
+            for hap_index, hap in enumerate(concrete_haps):
+                concrete_haps[hap_index] = np.asarray(hap, dtype=np.int8)
             parents = simulate_sequences.pairup_haps(concrete_haps)
             founders_list.append(parents)
             sites_list.append(sites)
@@ -542,18 +536,34 @@ if __name__ == '__main__':
             mutate_rate = 1e-10
             print(f"Normal mode: Using mutation rate {mutate_rate} (minimal mutations)")
 
+        recombination_model = _recombination_model_metadata()
+        recombination_model["modeled_spans_bp"] = {
+            r_name: [float(sites[0]), float(sites[-1])]
+            for r_name, sites in zip(region_keys, sites_list)
+        }
+
         t0 = time.time()
-        all_offspring_lists, truth_pedigree, truth_paintings_lists = simulate_sequences.simulate_pedigree(
-            founders_list, 
-            sites_list, 
-            generation_sizes, 
-            recomb_rate=5e-8, 
+        (all_offspring_lists,
+         truth_pedigree,
+         truth_paintings_lists,
+         raw_recombination_events_list) = simulate_sequences.simulate_pedigree(
+            founders_list,
+            sites_list,
+            generation_sizes,
+            recomb_rate=_BHD_MEAN_RECOMBINATION_RATE,
             mutate_rate=mutate_rate,
             output_plot=None,
             parallel=True,
             num_processes=n_processes,
-            seed=SIMULATION_SEED
+            seed=SIMULATION_SEED,
+            recombination_profile=_BHD_GENERATOR_RECOMBINATION_PROFILE,
+            return_crossover_events=True,
         )
+        raw_recombination_events = {
+            r_name: raw_recombination_events_list[contig_index]
+            for contig_index, r_name in enumerate(region_keys)
+        }
+        del raw_recombination_events_list
         print(f"Pedigree simulation: {time.time()-t0:.1f}s")
 
         # 3. Save Truth
@@ -566,37 +576,57 @@ if __name__ == '__main__':
 
         sample_names = truth_pedigree['Sample'].tolist()
 
-        # 4. Process All Contigs in Parallel (read sampling, chunking, probs)
+        # 4. Process and checkpoint one contig at a time. Holding the processed
+        # arrays for all 22 contigs while concurrent pickle copies are made can
+        # exceed a 256-GB allocation. The per-contig read seeds below exactly
+        # match process_all_contigs_parallel for a fixed master seed.
         t0 = time.time()
-        contig_results = simulate_sequences.process_all_contigs_parallel(
-            region_keys, all_offspring_lists, truth_paintings_lists, sites_list,
-            read_depth=_BHD_DEPTH, error_rate=0.02,
-            snps_per_block=200, snp_shift=200,
-            num_processes=n_processes,
-            seed=(SIMULATION_SEED + 1_000_000) if SIMULATION_SEED is not None else None
+        read_seed = ((SIMULATION_SEED + 1_000_000)
+                     if SIMULATION_SEED is not None else None)
+        read_seed_rng = np.random.default_rng(read_seed)
+        contig_read_seeds = [
+            int(read_seed_rng.integers(0, 2**63))
+            for _ in region_keys
+        ]
+        print(
+            "Post-processing one contig at a time for bounded peak memory"
+            + (f" (seed={read_seed})" if read_seed is not None else "")
         )
-        
-        _stage2_items = []
-        for r_name in region_keys:
-            result = contig_results[r_name]
-            multi_contig_results[r_name]['simulated_reads'] = result['simulated_reads']
-            multi_contig_results[r_name]['simd_genomic_data'] = result['simd_genomic_data']
-            multi_contig_results[r_name]['simd_probs'] = result['simd_probs']
-            multi_contig_results[r_name]['simd_priors'] = result['simd_priors']
-            multi_contig_results[r_name]['truth_painting'] = result['truth_painting']
-            _stage2_items.append((r_name, {
-                'simulated_reads': result['simulated_reads'],
-                'simd_genomic_data': result['simd_genomic_data'],
-                'simd_probs': result['simd_probs'],
-                'simd_priors': result['simd_priors'],
-                'truth_painting': result['truth_painting'],
-            }))
-        # All contigs are resident at once here (process_all_contigs_parallel
-        # returned them together), so write them concurrently rather than one
-        # at a time.
-        checkpoint_io.save_contigs_parallel(CHECKPOINT_DIR, STAGE_2, _stage2_items, n_processes)
-        
-        print(f"Post-processing ({len(region_keys)} contigs parallel): {time.time()-t0:.1f}s")
+
+        stage2_payload_keys = (
+            'simulated_reads', 'simd_genomic_data', 'simd_probs',
+            'simd_priors', 'truth_painting',
+        )
+        for contig_index, r_name in enumerate(region_keys):
+            if contig_done(STAGE_2, r_name):
+                print(f"  [RESUME] {r_name} post-processing already done")
+            else:
+                result = simulate_sequences._process_single_contig_postprocessing((
+                    r_name,
+                    all_offspring_lists[contig_index],
+                    truth_paintings_lists[contig_index],
+                    sites_list[contig_index],
+                    _BHD_DEPTH,
+                    0.02,
+                    200,
+                    200,
+                    contig_read_seeds[contig_index],
+                ))
+                payload = {key: result[key] for key in stage2_payload_keys}
+                save_contig(STAGE_2, r_name, payload)
+                del payload, result
+
+            # These arrays are no longer needed once this contig is checkpointed.
+            all_offspring_lists[contig_index] = None
+            truth_paintings_lists[contig_index] = None
+            founders_list[contig_index] = None
+            sites_list[contig_index] = None
+            gc.collect()
+
+        print(
+            f"Post-processing ({len(region_keys)} contigs, bounded): "
+            f"{time.time()-t0:.1f}s"
+        )
 
         print("\nSimulation, Sequencing, and Chunking complete for all regions.")
         print(f"Total time: {time.time()-start:.1f}s")
@@ -605,12 +635,11 @@ if __name__ == '__main__':
             'truth_pedigree': truth_pedigree,
             'sample_names': sample_names,
             'region_keys': region_keys,
+            'recombination_model': recombination_model,
+            'raw_recombination_events': raw_recombination_events,
         })
-        # Free heavy simulation data — all checkpointed, will reload on demand
-        for r_name in region_keys:
-            for _k in ('simulated_reads', 'simd_genomic_data', 'simd_probs', 'simd_priors', 'truth_painting'):
-                multi_contig_results[r_name].pop(_k, None)
-        del contig_results; gc.collect()
+        del all_offspring_lists, truth_paintings_lists, founders_list, sites_list
+        gc.collect()
         mark_stage_complete(STAGE_2)
     
 #%%
@@ -767,7 +796,7 @@ if __name__ == '__main__':
                 
                 # Run full refinement pipeline
                 t0 = time.time()
-                refinement_results = block_haplotype_refinement.run_refinement_pipeline(
+                refinement_results = small_block_refine.run_refinement_pipeline(
                     raw_blocks=raw_blocks,
                     global_probs=global_probs,
                     global_sites=global_sites,
@@ -786,7 +815,7 @@ if __name__ == '__main__':
                 l2_refined = refinement_results['l2_refined']
                 
                 # Dedup before feeding into main assembly
-                l2_refined_dd = block_haplotype_refinement.dedup_blocks(l2_refined, verbose=True)
+                l2_refined_dd = small_block_refine.dedup_blocks(l2_refined, verbose=True)
                 
                 # Store refined blocks as the new starting point
                 multi_contig_results[r_name]['simd_block_results'] = l2_refined_dd
@@ -2108,11 +2137,9 @@ if __name__ == '__main__':
                 suffixes=('_True', '_Inf')
             )
 
-            def check_parent_match(row):
-                return parent_columns_match(row)
 
             validation_df['Gen_Match'] = validation_df['Generation_True'] == validation_df['Generation_Inf']
-            validation_df['Parents_Match'] = validation_df.apply(check_parent_match, axis=1)
+            validation_df['Parents_Match'] = validation_df.apply(parent_columns_match, axis=1)
 
             gen_acc = validation_df['Gen_Match'].mean() * 100
             descendant_mask = validation_df['Generation_True'].isin(['F2', 'F3'])

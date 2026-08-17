@@ -31,16 +31,14 @@ overhead. This must be called before the first Pool creation in the
 session. Subsequent imports of thread_config are no-ops.
 """
 import os
+from thread_env import NUMERIC_THREAD_ENV_VARS
 from contextlib import contextmanager
 
 # =========================================================================
 # BLAS / OpenMP / MKL — always single-threaded
 # =========================================================================
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+for _thread_env_var in NUMERIC_THREAD_ENV_VARS:
+    os.environ.setdefault(_thread_env_var, "1")
 
 # =========================================================================
 # Numba — initialise pool at full machine size so set_num_threads can
@@ -124,6 +122,40 @@ except (AttributeError, RuntimeError):
 import numba as _numba
 _original_njit = _numba.njit
 _project_source_root = os.path.dirname(os.path.realpath(__file__))
+
+# Numba imports a few of its own CPU registry helpers lazily.  Those generated
+# helpers do not necessarily have a source-file cache locator, so they must be
+# bound to Numba's unmodified decorator before the project-wide cache wrapper
+# below is installed.  Doing this once here replaces the two former per-module
+# warm-ups in pedigree_inference_smart and pedigree_v7 and ensures every import
+# order observes the same decorator policy.
+@_original_njit(cache=False)
+def _numba_registry_warmup(value):
+    return value + 1
+
+
+_numba_registry_is_warm = False
+
+
+def ensure_numba_registry_warmup():
+    """Bind Numba's lazy internal registries once, only when requested."""
+    global _numba_registry_is_warm
+    if _numba_registry_is_warm:
+        return
+
+    project_njit_wrapper = _numba.njit
+    try:
+        _numba.njit = _original_njit
+        _numba_registry_warmup(0)
+        _numba_registry_is_warm = True
+    finally:
+        _numba.njit = project_njit_wrapper
+
+
+# Public, read-only alias for modules whose kernels explicitly control their
+# own cache policy and therefore need the original decorator.
+original_njit = _original_njit
+
 
 def _is_project_njit_function(function):
     code = getattr(function, '__code__', None)

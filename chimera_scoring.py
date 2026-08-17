@@ -22,6 +22,10 @@ from scipy.optimize import linear_sum_assignment
 from numba import njit, prange, get_num_threads as _numba_get_num_threads
 
 import bhd_kernels
+from bhd_model_selection import (
+    compute_founder_complexity_cost,
+    compute_outer_bic_from_log_likelihood,
+)
 
 from chimera_kernels import (
     _resolve_threads,
@@ -87,8 +91,9 @@ def compute_cc(batch_blocks, num_samples, cc_scale=0.5):
     CC = cc_scale * (avg_snps / 200) * num_samples * num_blocks
     """
     avg_snps = np.mean([len(b.positions) for b in batch_blocks])
-    snp_growth_factor = avg_snps / 200.0
-    return cc_scale * snp_growth_factor * num_samples * len(batch_blocks)
+    return compute_founder_complexity_cost(
+        cc_scale, num_samples, avg_snps, n_blocks=len(batch_blocks)
+    )
 
 
 # =============================================================================
@@ -578,7 +583,9 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
         ll_cand = score_path_set(
             candidate_set, sub_emissions, penalty, num_samples,
             num_threads=num_threads)
-        bic_cand = len(candidate_set) * batch_cc - 2.0 * ll_cand
+        bic_cand = compute_outer_bic_from_log_likelihood(
+            len(candidate_set), ll_cand, batch_cc
+        )
 
         if bic_cand < bic_S:
             # Accept: bind in the new path, update BIC.
@@ -610,7 +617,11 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
                 lls = score_path_sets_parallel(
                     cand_sets, sub_emissions, penalty, num_samples,
                     num_threads=num_threads)
-                bics = [(K_cur - 1) * batch_cc - 2.0 * ll for ll in lls]
+                bics = [
+                    compute_outer_bic_from_log_likelihood(
+                        K_cur - 1, ll, batch_cc
+                    ) for ll in lls
+                ]
 
                 best_drop_i = -1
                 best_drop_bic = bic_S

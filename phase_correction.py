@@ -15,6 +15,7 @@ Algorithm:
 - Post-round: Select best-LL painting for each sample
 """
 import thread_config
+import dynamic_threads
 
 import numpy as np
 import pandas as pd
@@ -25,7 +26,10 @@ from dataclasses import dataclass, field
 import numba
 from numba import njit, prange
 
-from founder_alleles import founder_block_to_dense as _founder_block_to_dense
+from founder_alleles import (
+    founder_block_to_dense as _founder_block_to_dense,
+    hard_alleles,
+)
 from painting_grid_utils import (
     discretize_painting_to_bins as _discretize_painting_to_bins,
 )
@@ -71,11 +75,7 @@ from concurrent.futures import ThreadPoolExecutor
 # old behaviour (main's state inherited via COW) is restored
 # automatically -- the explicit initargs path still works, just is a
 # little redundant.
-import multiprocessing as mp
-try:
-    _forkserver_ctx = mp.get_context('forkserver')
-except ValueError:
-    _forkserver_ctx = mp.get_context('fork')
+from multiprocessing_runtime import forkserver_context as _forkserver_ctx
 
 # Import standard painting classes
 from paint_samples import SamplePainting, PaintedChunk, BlockPainting
@@ -1440,7 +1440,7 @@ def run_correction_round(
     dynamic_threads_fn: Optional[Callable[[], int]] = None,
                                           # Optional callable returning the
                                           # currently-available thread budget
-                                          # (e.g. _phase_get_dynamic_threads in
+                                          # (e.g. dynamic_threads.get_dynamic_threads in
                                           # the multiprocess driver).  When
                                           # provided, the round is split into
                                           # per-generation sub-batches and the
@@ -1773,8 +1773,8 @@ _PARALLEL_DATA = {}
 # budget we layer DYNAMIC PER-CONTIG SCALING on top:
 #
 #   1) Each contig worker, on entering its task, registers itself in
-#      a shared `mp.Value('i', 0)` counter (`_PHASE_ACTIVE_COUNTER`).
-#   2) Between phases, the worker calls `_phase_get_dynamic_threads()`
+#      a shared `mp.Value('i', 0)` counter managed by dynamic_threads.
+#   2) Between phases, the worker calls `dynamic_threads.get_dynamic_threads()`
 #      which returns `total_cores // active_workers`, giving the
 #      surviving workers a proportional share of the machine as peers
 #      finish.  This is read lock-free; being briefly off by 1 or 2
@@ -1786,7 +1786,7 @@ _PARALLEL_DATA = {}
 # oversubscription):
 #
 #   (a) NUMBA-PARALLEL phases (`compute_founder_equivalence_matrix`):
-#       call `numba.set_num_threads(dyn_threads)`, then let the
+#       call `dynamic_threads.apply_dynamic_threads()`, then let the
 #       `@njit(parallel=True)` kernel use its `prange` loop to fan
 #       out across cores.  No ThreadPoolExecutor.
 #
@@ -1810,26 +1810,6 @@ _PARALLEL_DATA = {}
 #   a consistent view (Jacobi iteration).  Both schemes converge to
 #   the same fixed point; Jacobi may need 1 extra round.  See the
 #   round-loop docstrings for details.
-
-_PHASE_ACTIVE_COUNTER = None   # mp.Value('i', 0) — shared across all workers
-_PHASE_TOTAL_CORES = None      # Total machine cores (e.g. 112)
-
-
-def _phase_get_dynamic_threads():
-    """
-    Compute optimal thread count for this worker based on active peers.
-
-    Uses total_cores // active_workers, clamped to [1, total_cores].
-    Lock-free read of `_PHASE_ACTIVE_COUNTER.value` -- a slightly
-    stale count (off by 1-2) is fine, since we recheck between
-    every major phase.  The cost of being briefly wrong is a few
-    seconds of mild over/under-subscription, not correctness.
-    """
-    if _PHASE_ACTIVE_COUNTER is None or _PHASE_TOTAL_CORES is None:
-        return 1
-    active = max(_PHASE_ACTIVE_COUNTER.value, 1)
-    return max(1, _PHASE_TOTAL_CORES // active)
-
 
 def _init_phase_worker(total_cores, active_counter, parallel_data):
     """
@@ -1862,15 +1842,16 @@ def _init_phase_worker(total_cores, active_counter, parallel_data):
     except Exception:
         pass
 
-    global _PARALLEL_DATA, _PHASE_ACTIVE_COUNTER, _PHASE_TOTAL_CORES
+    global _PARALLEL_DATA
     _PARALLEL_DATA = parallel_data if parallel_data is not None else {}
-    _PHASE_ACTIVE_COUNTER = active_counter
-    _PHASE_TOTAL_CORES = total_cores
+    dynamic_threads.set_dynamic_thread_state(
+        total_cores, active_counter, extra_counter=None
+    )
 
 
 def _process_contig_worker(r_name):
     """Worker function for processing a single contig."""
-    global _PARALLEL_DATA, _PHASE_ACTIVE_COUNTER
+    global _PARALLEL_DATA
 
     # ------------------------------------------------------------------
     # Per-phase timing instrumentation (May 2026 diagnostic).
@@ -1934,9 +1915,7 @@ def _process_contig_worker(r_name):
     # code, with the equivalence matrix and round loop scaled to the
     # currently-available thread budget.
     # =====================================================================
-    if _PHASE_ACTIVE_COUNTER is not None:
-        with _PHASE_ACTIVE_COUNTER.get_lock():
-            _PHASE_ACTIVE_COUNTER.value += 1
+    dynamic_threads.increment_active()
     try:
         # Compute bin edges
         _t0 = _t.time()
@@ -1952,8 +1931,7 @@ def _process_contig_worker(r_name):
         # uses every core currently allocated to this worker.
         # ----------------------------------------------------------------
         _t0 = _t.time()
-        dyn_threads = _phase_get_dynamic_threads()
-        numba.set_num_threads(dyn_threads)
+        dynamic_threads.apply_dynamic_threads()
 
         # Compute founder equivalence matrix
         if 'founder_block' in data:
@@ -1988,7 +1966,7 @@ def _process_contig_worker(r_name):
         # This is a PYTHON-DISPATCH phase: each round runs the per-sample
         # Viterbi via a ThreadPoolExecutor.  Set numba threads to 1 so
         # the python threads do not over-subscribe.  Re-check
-        # _phase_get_dynamic_threads() at the start of every round so
+        # get_dynamic_threads() at the start of every round so
         # late-finishing peers' freed cores are picked up between rounds.
         # ----------------------------------------------------------------
         numba.set_num_threads(1)
@@ -2008,7 +1986,7 @@ def _process_contig_worker(r_name):
         per_round_threads = []
         for round_idx in range(num_rounds):
             _t0 = _t.time()
-            dyn_threads = _phase_get_dynamic_threads()
+            dyn_threads = dynamic_threads.get_dynamic_threads()
             per_round_threads.append(dyn_threads)
             corrections = run_correction_round(
                 states, pedigree_df, sample_names, bin_edges, equiv,
@@ -2027,7 +2005,7 @@ def _process_contig_worker(r_name):
                 # how chr3 (or any other late-finishing contig)
                 # picks up freed cores from peer workers WITHIN a
                 # single round, not just between rounds.
-                dynamic_threads_fn=_phase_get_dynamic_threads,
+                dynamic_threads_fn=dynamic_threads.get_dynamic_threads,
                 verbose=False
             )
             per_round_times.append(_t.time() - _t0)
@@ -2073,9 +2051,7 @@ def _process_contig_worker(r_name):
         # main process never needs the founder_block in memory at all.
         return (r_name, final_painting, multi_consensus, final_round, converged)
     finally:
-        if _PHASE_ACTIVE_COUNTER is not None:
-            with _PHASE_ACTIVE_COUNTER.get_lock():
-                _PHASE_ACTIVE_COUNTER.value -= 1
+        dynamic_threads.decrement_active()
 
 
 def correct_phase_all_contigs(
@@ -2202,7 +2178,7 @@ def correct_phase_all_contigs(
     # max_workers as the dynamic-threading ceiling: with 22 contigs and
     # 112 total cores, each worker starts with 112//22 = 5 threads, and
     # as contigs finish, surviving workers scale up via
-    # `_phase_get_dynamic_threads()`.
+    # `dynamic_threads.get_dynamic_threads()`.
     total_cores = max_workers
     outer_pool_size = max(1, min(total_cores, n_contigs)) if n_contigs > 0 else total_cores
     
@@ -2272,8 +2248,8 @@ def correct_phase_all_contigs(
         # Created from the same forkserver context as the pool so the
         # underlying mp.sharedctypes machinery is consistent (mixing
         # contexts is a known footgun in CPython multiprocessing).
-        # See `_init_phase_worker` and the `_PHASE_ACTIVE_COUNTER`
-        # machinery at the top of the public-API section.
+        # See `_init_phase_worker` and the dynamic_threads
+        # state at the top of the public-API section.
         active_counter = _forkserver_ctx.Value('i', 0)
 
         with _forkserver_ctx.Pool(
@@ -3420,7 +3396,7 @@ def _greedy_contig_worker(task):
         rather than in main's RAM (so we don't pickle them through the
         process boundary at all).
     """
-    global _PARALLEL_DATA, _PHASE_ACTIVE_COUNTER
+    global _PARALLEL_DATA
 
     r_name, corrected_painting, founder_block_from_task = task
 
@@ -3465,9 +3441,7 @@ def _greedy_contig_worker(task):
     # claim freed cores when this one exits.  See "DYNAMIC THREAD
     # REALLOCATION" header comment above for the full design.
     # =====================================================================
-    if _PHASE_ACTIVE_COUNTER is not None:
-        with _PHASE_ACTIVE_COUNTER.get_lock():
-            _PHASE_ACTIVE_COUNTER.value += 1
+    dynamic_threads.increment_active()
     try:
         bin_edges = compute_bin_edges(start_pos, end_pos, snps_per_bin=snps_per_bin)
 
@@ -3475,8 +3449,7 @@ def _greedy_contig_worker(task):
         # Phase 1: Founder equivalence matrix (numba-parallel, prange).
         # Give it the full dynamic budget.
         # ----------------------------------------------------------------
-        dyn_threads = _phase_get_dynamic_threads()
-        numba.set_num_threads(dyn_threads)
+        dynamic_threads.apply_dynamic_threads()
 
         # Compute founder equivalence matrix
         if 'founder_block' in data:
@@ -3504,7 +3477,7 @@ def _greedy_contig_worker(task):
         # over-subscription with the python thread pool.
         # ----------------------------------------------------------------
         numba.set_num_threads(1)
-        dyn_threads = _phase_get_dynamic_threads()
+        dyn_threads = dynamic_threads.get_dynamic_threads()
 
         refined_painting = post_process_phase_greedy(
             corrected_painting,
@@ -3531,9 +3504,7 @@ def _greedy_contig_worker(task):
         
         return (r_name, refined_painting, n_founders, len(sample_grids_before))
     finally:
-        if _PHASE_ACTIVE_COUNTER is not None:
-            with _PHASE_ACTIVE_COUNTER.get_lock():
-                _PHASE_ACTIVE_COUNTER.value -= 1
+        dynamic_threads.decrement_active()
 
 
 def post_process_phase_greedy_all_contigs(
@@ -3692,8 +3663,7 @@ def post_process_phase_greedy_all_contigs(
             print(f"\nProcessing {n_contigs} contigs in parallel...")
 
         # Shared active-worker counter for dynamic thread reallocation;
-        # see `_init_phase_worker` and the `_PHASE_ACTIVE_COUNTER`
-        # machinery for the design.  Created from `_forkserver_ctx`
+        # see `_init_phase_worker` and the dynamic_threads state for the design.  Created from `_forkserver_ctx`
         # for the same reason as in correct_phase_all_contigs.
         active_counter = _forkserver_ctx.Value('i', 0)
 
@@ -3837,19 +3807,12 @@ def _compute_founder_ibs_in_region(founder_block, f1, f2, start_pos, end_pos,
         # No sites in region — assume equivalent (no evidence to distinguish)
         return True
     
-    # Get alleles via argmax
-    h1 = haplotypes[f1]
-    h2 = haplotypes[f2]
-    
-    if h1.ndim == 2:
-        a1 = np.argmax(h1[idx_start:idx_end], axis=1)
-    else:
-        a1 = h1[idx_start:idx_end]
-    
-    if h2.ndim == 2:
-        a2 = np.argmax(h2[idx_start:idx_end], axis=1)
-    else:
-        a2 = h2[idx_start:idx_end]
+    a1 = hard_alleles(
+        haplotypes[f1][idx_start:idx_end]
+    )
+    a2 = hard_alleles(
+        haplotypes[f2][idx_start:idx_end]
+    )
     
     n_sites = len(a1)
     n_mismatches = np.sum(a1 != a2)

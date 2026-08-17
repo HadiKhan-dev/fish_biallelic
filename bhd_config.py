@@ -9,6 +9,14 @@ deliberately stay in their home modules.
 
 
 # ============================================================================
+# Shared sequencing-error model
+# ============================================================================
+# Per-read probability of observing the opposite allele.  All raw genotype-
+# likelihood and VCF-loading entry points use this value unless overridden.
+DEFAULT_READ_ERROR_PROBABILITY = 0.02
+
+
+# ============================================================================
 # Viterbi scoring & similarity-band tuning  (sentinels MASK / LOG_EPS stay in bhd_kernels)
 # ============================================================================
 # Default wildcard penalty.  λ in log-likelihood units per (strand, site)

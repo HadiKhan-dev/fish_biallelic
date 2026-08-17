@@ -13,13 +13,14 @@ import pickle
 import pandas as pd
 import warnings
 import os
-import multiprocessing as mp
-import multiprocessing.pool
 from multiprocessing import Pool
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 from vcf_data_loader import GenomicData
+from multiprocessing_runtime import (
+    NonDaemonicForkserverPool as NoDaemonPool,
+)
 
 # Import painting classes for direct conversion
 from paint_samples import SamplePainting, PaintedChunk, BlockPainting
@@ -31,28 +32,6 @@ from paint_samples import SamplePainting, PaintedChunk, BlockPainting
 # Standard Pool creates daemonic workers that cannot have children.
 # NoDaemonPool overrides this, mirroring hierarchical_assembly.py.
 
-try:
-    _forkserver_ctx = mp.get_context('forkserver')
-except (ValueError, AttributeError):
-    _forkserver_ctx = mp.get_context('fork')
-
-class _NoDaemonProcess(_forkserver_ctx.Process):
-    @property
-    def daemon(self):
-        return False
-    
-    @daemon.setter
-    def daemon(self, value):
-        pass
-
-class _NoDaemonContext(type(_forkserver_ctx)):
-    Process = _NoDaemonProcess
-
-class NoDaemonPool(multiprocessing.pool.Pool):
-    """A Pool whose workers can spawn child pools (non-daemonic)."""
-    def __init__(self, *args, **kwargs):
-        kwargs['context'] = _NoDaemonContext()
-        super().__init__(*args, **kwargs)
 
 # Visualization imports
 try:
@@ -107,100 +86,252 @@ def get_segments_in_range(source_painting, range_start, range_end):
             result.append((overlap_start, overlap_end, fid))
     return result
 
-def recombine_haps(hap_pair, ancestry_pair, site_locs,
-                   recomb_rate=10**-8, mutate_rate=10**-8, rng=None):
+
+def validate_recombination_profile(recombination_profile):
+    """Validate and canonicalise a relative-position recombination profile.
+
+    A profile contains ``(start_fraction, end_fraction, multiplier)`` triples.
+    Segments must be contiguous, cover ``[0, 1]``, and use finite
+    non-negative multipliers. Multipliers are normalised by their
+    length-weighted mean, so
+    the scalar ``recomb_rate`` remains the chromosome-average per-base rate.
+
+    ``None`` selects the historical homogeneous simulator and is returned
+    unchanged so that its API and random-number stream remain exactly intact.
     """
-    Simulates meiosis for ONE gamete.
-    Tracks both ALLELES (0/1) and ANCESTRY (Founder IDs).
+    if recombination_profile is None:
+        return None
+
+    try:
+        profile = tuple(
+            (float(start), float(end), float(multiplier))
+            for start, end, multiplier in recombination_profile
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "recombination_profile must contain "
+            "(start_fraction, end_fraction, multiplier) triples"
+        ) from exc
+
+    if not profile:
+        raise ValueError("recombination_profile must contain at least one segment")
+
+    tolerance = 1e-12
+    previous_end = 0.0
+    weighted_multiplier = 0.0
+    for segment_index, (start, end, multiplier) in enumerate(profile):
+        if not np.isfinite(start) or not np.isfinite(end):
+            raise ValueError("recombination-profile boundaries must be finite")
+        if not np.isfinite(multiplier) or multiplier < 0.0:
+            raise ValueError(
+                "recombination-profile multipliers must be finite and non-negative"
+            )
+        if end <= start:
+            raise ValueError(
+                f"recombination-profile segment {segment_index} has end <= start"
+            )
+        if abs(start - previous_end) > tolerance:
+            raise ValueError(
+                "recombination-profile segments must be ordered, contiguous, "
+                "and begin at 0"
+            )
+        weighted_multiplier += (end - start) * multiplier
+        previous_end = end
+
+    if abs(profile[0][0]) > tolerance or abs(previous_end - 1.0) > tolerance:
+        raise ValueError("recombination_profile must cover the full interval [0, 1]")
+    if weighted_multiplier <= 0.0 or not np.isfinite(weighted_multiplier):
+        raise ValueError("recombination_profile has an invalid weighted mean")
+
+    # Remove harmless boundary round-off so downstream metadata is canonical.
+    canonical = list(profile)
+    canonical[0] = (0.0, canonical[0][1], canonical[0][2])
+    canonical[-1] = (canonical[-1][0], 1.0, canonical[-1][2])
+    return tuple(canonical)
+
+
+def resolve_recombination_profile(recombination_profile, recomb_rate):
+    """Return ``(start_fraction, end_fraction, rate_per_bp)`` segments."""
+    profile = validate_recombination_profile(recombination_profile)
+    if profile is None:
+        return ((0.0, 1.0, float(recomb_rate)),)
+    if not np.isfinite(recomb_rate) or recomb_rate < 0.0:
+        raise ValueError("recomb_rate must be finite and non-negative")
+
+    weighted_multiplier = sum(
+        (end - start) * multiplier
+        for start, end, multiplier in profile
+    )
+    return tuple(
+        (start, end, float(recomb_rate) * multiplier / weighted_multiplier)
+        for start, end, multiplier in profile
+    )
+
+
+def _sample_profile_crossovers(site_locs, recomb_rate,
+                               recombination_profile, rng):
+    """Sample an exact piecewise-constant non-homogeneous Poisson process."""
+    start_phys = float(site_locs[0])
+    end_phys = float(site_locs[-1])
+    chromosome_span = end_phys - start_phys
+    if chromosome_span <= 0.0 or recomb_rate == 0.0:
+        return np.empty(0, dtype=np.float64)
+
+    events = []
+    for start_fraction, end_fraction, segment_rate in resolve_recombination_profile(
+            recombination_profile, recomb_rate):
+        segment_start = start_phys + chromosome_span * start_fraction
+        segment_end = start_phys + chromosome_span * end_fraction
+        event_count = int(rng.poisson(segment_rate * (segment_end - segment_start)))
+        if event_count:
+            events.append(rng.uniform(segment_start, segment_end, size=event_count))
+
+    if not events:
+        return np.empty(0, dtype=np.float64)
+    return np.sort(np.concatenate(events).astype(np.float64, copy=False))
+
+def recombine_haps(hap_pair, ancestry_pair, site_locs,
+                   recomb_rate=10**-8, mutate_rate=10**-8, rng=None,
+                   recombination_profile=None,
+                   return_crossover_events=False):
+    """Simulate one gamete, tracking alleles and founder ancestry.
+
+    ``recombination_profile`` optionally supplies relative-position rate
+    multipliers; see :func:`validate_recombination_profile`. When omitted,
+    the historical homogeneous branch is executed without changing its random
+    draws. If ``return_crossover_events`` is true, a third return value holds
+    the raw physical crossover locations used to construct this gamete.
     """
     if rng is None:
         rng = np.random.default_rng()
-    
-    recomb_scale = 1.0 / recomb_rate
+
     mutate_scale = 1.0 / mutate_rate
-    
+
     assert len(hap_pair[0]) == len(hap_pair[1]), "Length of two haplotypes is different"
     assert len(hap_pair[0]) == len(site_locs), "Different length of hap and of list of site locations"
-    
+
     start_phys = site_locs[0]
     end_phys = site_locs[-1]
-    
+
     cur_loc = start_phys
     cur_loc_index = 0
-    
+
     using_hap = rng.choice([0, 1])
-    
+
     final_hap_alleles = []
     final_hap_ancestry = []
-    
-    while cur_loc <= end_phys:
-        next_break_distance = rng.exponential(recomb_scale)
-        new_loc = cur_loc + np.ceil(next_break_distance)
-        new_loc_index = np.searchsorted(site_locs, new_loc)
-        
-        adding = hap_pair[using_hap][cur_loc_index:new_loc_index]
-        final_hap_alleles.append(adding)
-        
-        segment_phys_end = min(new_loc, end_phys)
-        parent_segments = get_segments_in_range(
-            ancestry_pair[using_hap], cur_loc, segment_phys_end
+    crossover_events = []
+
+    if recombination_profile is None:
+        # Keep this historical path structurally unchanged. Recording events
+        # performs no additional random draws.
+        recomb_scale = 1.0 / recomb_rate
+        while cur_loc <= end_phys:
+            next_break_distance = rng.exponential(recomb_scale)
+            new_loc = cur_loc + np.ceil(next_break_distance)
+            new_loc_index = np.searchsorted(site_locs, new_loc)
+
+            adding = hap_pair[using_hap][cur_loc_index:new_loc_index]
+            final_hap_alleles.append(adding)
+
+            segment_phys_end = min(new_loc, end_phys)
+            parent_segments = get_segments_in_range(
+                ancestry_pair[using_hap], cur_loc, segment_phys_end
+            )
+            final_hap_ancestry.extend(parent_segments)
+
+            if return_crossover_events and new_loc <= end_phys:
+                crossover_events.append(float(new_loc))
+
+            using_hap = 1 - using_hap
+            cur_loc = new_loc
+            cur_loc_index = new_loc_index
+
+            if cur_loc_index >= len(site_locs):
+                break
+    else:
+        sampled_events = _sample_profile_crossovers(
+            site_locs, recomb_rate, recombination_profile, rng
         )
-        final_hap_ancestry.extend(parent_segments)
-        
-        using_hap = 1 - using_hap
-        cur_loc = new_loc
-        cur_loc_index = new_loc_index
-        
-        if cur_loc_index >= len(site_locs):
-            break
-    
+        # A terminal boundary beyond the last marker includes the final allele
+        # while retaining the historical [start, end) ancestry convention.
+        terminal_loc = np.nextafter(float(end_phys), np.inf)
+        for event_index in range(len(sampled_events) + 1):
+            is_crossover = event_index < len(sampled_events)
+            new_loc = (sampled_events[event_index]
+                       if is_crossover else terminal_loc)
+            new_loc_index = np.searchsorted(site_locs, new_loc)
+            final_hap_alleles.append(
+                hap_pair[using_hap][cur_loc_index:new_loc_index]
+            )
+            final_hap_ancestry.extend(get_segments_in_range(
+                ancestry_pair[using_hap], cur_loc, min(new_loc, end_phys)
+            ))
+            if is_crossover:
+                crossover_events.append(float(new_loc))
+                using_hap = 1 - using_hap
+                cur_loc = new_loc
+                cur_loc_index = new_loc_index
+
     return_alleles = np.concatenate(final_hap_alleles)
-    
+
     if len(return_alleles) > len(site_locs):
         return_alleles = return_alleles[:len(site_locs)]
 
     # Apply Mutations (only affects alleles, not ancestry)
     mutation_points = []
     cur_loc = start_phys
-    
+
     while cur_loc <= end_phys:
         next_mutation_distance = rng.exponential(mutate_scale)
         new_loc = cur_loc + np.floor(next_mutation_distance)
         new_loc_index = np.searchsorted(site_locs, new_loc)
-        
+
         if new_loc_index < len(site_locs):
             mutation_points.append(new_loc_index)
-        
+
         cur_loc = new_loc
-        
+
     if len(mutation_points) > 0:
         base_vals = return_alleles[mutation_points]
         mutated_vals = 1 - base_vals
         return_alleles[mutation_points] = mutated_vals
-    
+
+    if return_crossover_events:
+        return (return_alleles, final_hap_ancestry,
+                np.asarray(crossover_events, dtype=np.float64))
     return return_alleles, final_hap_ancestry
 
 def create_offspring(first_pair, second_pair,
                      first_ancestry, second_ancestry,
                      site_locs, recomb_rate=10**-8,
-                     mutate_rate=10**-8, rng=None):
-    """
-    Creates an offspring (Diploid) from two parents.
-    """
+                     mutate_rate=10**-8, rng=None,
+                     recombination_profile=None,
+                     return_crossover_events=False):
+    """Create one diploid offspring from two parents."""
     if rng is None:
         rng = np.random.default_rng()
-    
-    h1_alleles, h1_ancestry = recombine_haps(
-        first_pair, first_ancestry, site_locs, 
-        recomb_rate=recomb_rate, mutate_rate=mutate_rate, rng=rng
+
+    first_result = recombine_haps(
+        first_pair, first_ancestry, site_locs,
+        recomb_rate=recomb_rate, mutate_rate=mutate_rate, rng=rng,
+        recombination_profile=recombination_profile,
+        return_crossover_events=return_crossover_events,
     )
-    
-    h2_alleles, h2_ancestry = recombine_haps(
-        second_pair, second_ancestry, site_locs, 
-        recomb_rate=recomb_rate, mutate_rate=mutate_rate, rng=rng
+
+    second_result = recombine_haps(
+        second_pair, second_ancestry, site_locs,
+        recomb_rate=recomb_rate, mutate_rate=mutate_rate, rng=rng,
+        recombination_profile=recombination_profile,
+        return_crossover_events=return_crossover_events,
     )
-    
-    return [h1_alleles, h2_alleles], [h1_ancestry, h2_ancestry]
+
+    h1_alleles, h1_ancestry = first_result[:2]
+    h2_alleles, h2_ancestry = second_result[:2]
+    offspring = ([h1_alleles, h2_alleles], [h1_ancestry, h2_ancestry])
+    if return_crossover_events:
+        return offspring + ([first_result[2], second_result[2]],)
+    return offspring
 
 def get_reads_from_sample(hap_pair, read_depth, error_rate=0.02):
     """
@@ -498,6 +629,30 @@ def plot_ground_truth_pedigree(relationships_df, output_file="ground_truth_pedig
 # PARALLEL WORKER FUNCTIONS
 # =============================================================================
 
+def _append_crossover_event_metadata(destination, contig_index,
+                                     generation_index, generation,
+                                     child_ids, child_indices, parent_ids,
+                                     offspring_parent_indices,
+                                     child_event_pairs):
+    """Append one compact, fully identified record per simulated gamete."""
+    for child, child_index, parent_indices, event_pair in zip(
+            child_ids, child_indices, offspring_parent_indices,
+            child_event_pairs):
+        for parent_slot in (0, 1):
+            destination.append({
+                'contig_index': int(contig_index),
+                'generation': generation,
+                'generation_index': int(generation_index),
+                'child': child,
+                'child_index': int(child_index),
+                'parent_slot': int(parent_slot),
+                'parent': parent_ids[parent_indices[parent_slot]],
+                'crossover_positions_bp': np.asarray(
+                    event_pair[parent_slot], dtype=np.float64
+                ),
+            })
+
+
 def _process_offspring_batch(args):
     """
     Worker function to process a BATCH of offspring for a single contig.
@@ -507,27 +662,37 @@ def _process_offspring_batch(args):
     """
     (batch_indices, offspring_parent_indices_batch,
      parents, ancestries, site_locs,
-     recomb_rate, mutate_rate, seed) = args
-    
+     recomb_rate, mutate_rate, seed,
+     recombination_profile, return_crossover_events) = args
+
     rng = np.random.default_rng(seed)
-    
+
     batch_haps = []
     batch_ancs = []
-    
+    batch_events = []
+
     for (p1_idx, p2_idx) in offspring_parent_indices_batch:
-        child_haps, child_paintings = create_offspring(
+        child_result = create_offspring(
             parents[p1_idx], parents[p2_idx],
             ancestries[p1_idx], ancestries[p2_idx],
             site_locs,
             recomb_rate=recomb_rate,
             mutate_rate=mutate_rate,
-            rng=rng
+            rng=rng,
+            recombination_profile=recombination_profile,
+            return_crossover_events=return_crossover_events,
         )
-        
+        child_haps, child_paintings = child_result[:2]
+
         batch_haps.append(child_haps)
         batch_ancs.append(child_paintings)
-    
-    return (batch_indices, batch_haps, batch_ancs)
+        if return_crossover_events:
+            batch_events.append(child_result[2])
+
+    result = (batch_indices, batch_haps, batch_ancs)
+    if return_crossover_events:
+        return result + (batch_events,)
+    return result
 
 
 def _process_contig_for_generation(args):
@@ -552,6 +717,8 @@ def _process_contig_for_generation(args):
     mutate_rate = data['mutate_rate']
     seed = data['seed']
     inner_workers = data.get('inner_workers', 1)
+    recombination_profile = data.get('recombination_profile')
+    return_crossover_events = data.get('return_crossover_events', False)
     
     num_offspring = len(offspring_parent_indices)
     
@@ -561,20 +728,29 @@ def _process_contig_for_generation(args):
         
         offspring_haps = []
         offspring_ancs = []
-        
+        offspring_events = []
+
         for (p1_idx, p2_idx) in offspring_parent_indices:
-            child_haps, child_paintings = create_offspring(
+            child_result = create_offspring(
                 parents[p1_idx], parents[p2_idx],
                 ancestries[p1_idx], ancestries[p2_idx],
                 site_locs,
                 recomb_rate=recomb_rate,
                 mutate_rate=mutate_rate,
-                rng=rng
+                rng=rng,
+                recombination_profile=recombination_profile,
+                return_crossover_events=return_crossover_events,
             )
+            child_haps, child_paintings = child_result[:2]
             offspring_haps.append(child_haps)
             offspring_ancs.append(child_paintings)
-        
-        return (contig_idx, offspring_haps, offspring_ancs)
+            if return_crossover_events:
+                offspring_events.append(child_result[2])
+
+        result = (contig_idx, offspring_haps, offspring_ancs)
+        if return_crossover_events:
+            return result + (offspring_events,)
+        return result
     
     # --- Parallel path: split offspring into batches for inner workers ---
     # Derive per-batch seeds deterministically from the contig seed so that
@@ -592,7 +768,8 @@ def _process_contig_for_generation(args):
             (b_start, b_end),
             offspring_parent_indices[b_start:b_end],
             parents, ancestries, site_locs,
-            recomb_rate, mutate_rate, batch_seed
+            recomb_rate, mutate_rate, batch_seed,
+            recombination_profile, return_crossover_events,
         ))
     
     with Pool(processes=min(inner_workers, len(worker_args))) as inner_pool:
@@ -601,20 +778,30 @@ def _process_contig_for_generation(args):
     # Reassemble in original order
     offspring_haps = [None] * num_offspring
     offspring_ancs = [None] * num_offspring
-    
-    for ((b_start, b_end), batch_haps, batch_ancs) in results:
+    offspring_events = [None] * num_offspring if return_crossover_events else None
+
+    for batch_result in results:
+        (b_start, b_end), batch_haps, batch_ancs = batch_result[:3]
+        batch_events = batch_result[3] if return_crossover_events else None
         for local_i, global_i in enumerate(range(b_start, b_end)):
             offspring_haps[global_i] = batch_haps[local_i]
             offspring_ancs[global_i] = batch_ancs[local_i]
-    
-    return (contig_idx, offspring_haps, offspring_ancs)
+            if return_crossover_events:
+                offspring_events[global_i] = batch_events[local_i]
+
+    result = (contig_idx, offspring_haps, offspring_ancs)
+    if return_crossover_events:
+        return result + (offspring_events,)
+    return result
 
 
-def simulate_pedigree(founders, site_locs, generation_sizes, 
-                      recomb_rate=1e-8, mutate_rate=1e-10, 
+def simulate_pedigree(founders, site_locs, generation_sizes,
+                      recomb_rate=1e-8, mutate_rate=1e-10,
                       output_plot="ground_truth_pedigree.png",
                       max_workers=None, parallel=True,
-                      num_processes=None, seed=None):
+                      num_processes=None, seed=None,
+                      recombination_profile=None,
+                      return_crossover_events=False):
     """
     Simulates a multi-generation pedigree while tracking ANCESTRY.
     
@@ -650,7 +837,14 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
               reproducible). Note: the parallel path uses deterministic
               per-batch sub-seeds derived from this seed, so results are
               reproducible regardless of the number of workers.
+        recombination_profile: Optional contiguous relative-position segments
+              ``(start_fraction, end_fraction, multiplier)``. Multipliers are
+              normalised so ``recomb_rate`` stays the chromosome-average rate.
+        return_crossover_events: If true, append raw crossover metadata as a
+              fourth return value. Each contig contains one record per gamete,
+              including gametes with no crossovers.
     """
+    recombination_profile = validate_recombination_profile(recombination_profile)
     # 1. Detect Input Mode (Single vs Multi Contig)
     is_multi_mode = False
     
@@ -709,7 +903,9 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
     # 3. Storage for results
     all_individuals_flat_by_contig = [[] for _ in range(num_contigs)]
     all_paintings_flat_by_contig = [[] for _ in range(num_contigs)]
-    
+    all_crossover_events_by_contig = ([[] for _ in range(num_contigs)]
+                                      if return_crossover_events else None)
+
     relationships = []
     
     num_initial_founders = len(founders_list[0])
@@ -764,6 +960,8 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
                     'mutate_rate': mutate_rate,
                     'seed': master_rng.integers(0, 2**31),
                     'inner_workers': inner_workers,
+                    'recombination_profile': recombination_profile,
+                    'return_crossover_events': return_crossover_events,
                 }
                 worker_args.append((c, contig_data))
             
@@ -777,12 +975,20 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
             next_gen_individuals_list = [None] * num_contigs
             next_gen_ancestries_list = [None] * num_contigs
             
-            for (contig_idx, offspring_haps, offspring_ancs) in results:
+            for contig_result in results:
+                contig_idx, offspring_haps, offspring_ancs = contig_result[:3]
                 next_gen_individuals_list[contig_idx] = offspring_haps
                 next_gen_ancestries_list[contig_idx] = offspring_ancs
-                
+
                 all_individuals_flat_by_contig[contig_idx].extend(offspring_haps)
                 all_paintings_flat_by_contig[contig_idx].extend(offspring_ancs)
+                if return_crossover_events:
+                    _append_crossover_event_metadata(
+                        all_crossover_events_by_contig[contig_idx], contig_idx,
+                        gen_idx, gen_name, next_gen_ids,
+                        range(len(next_gen_ids)), current_parent_ids,
+                        offspring_parent_indices, contig_result[3],
+                    )
         
         else:
             next_gen_individuals_list = [[] for _ in range(num_contigs)]
@@ -798,19 +1004,29 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
                     
                     c_sites = site_locs_list[c]
                     
-                    child_haps, child_paintings = create_offspring(
+                    child_result = create_offspring(
                         p1_pair, p2_pair,
                         p1_anc, p2_anc,
-                        c_sites, 
-                        recomb_rate=recomb_rate, 
-                        mutate_rate=mutate_rate
+                        c_sites,
+                        recomb_rate=recomb_rate,
+                        mutate_rate=mutate_rate,
+                        recombination_profile=recombination_profile,
+                        return_crossover_events=return_crossover_events,
                     )
-                    
+                    child_haps, child_paintings = child_result[:2]
+
                     next_gen_individuals_list[c].append(child_haps)
                     next_gen_ancestries_list[c].append(child_paintings)
-                    
+
                     all_individuals_flat_by_contig[c].append(child_haps)
                     all_paintings_flat_by_contig[c].append(child_paintings)
+                    if return_crossover_events:
+                        p_indices = offspring_parent_indices[i]
+                        _append_crossover_event_metadata(
+                            all_crossover_events_by_contig[c], c,
+                            gen_idx, gen_name, [next_gen_ids[i]], [i],
+                            current_parent_ids, [p_indices], [child_result[2]],
+                        )
                 
         # Move to next generation
         current_parents_list = next_gen_individuals_list
@@ -823,9 +1039,17 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
         plot_ground_truth_pedigree(df, output_file=output_plot)
     
     if is_multi_mode:
-        return all_individuals_flat_by_contig, df, all_paintings_flat_by_contig
-    else:
-        return all_individuals_flat_by_contig[0], df, all_paintings_flat_by_contig[0]
+        result = (all_individuals_flat_by_contig, df,
+                  all_paintings_flat_by_contig)
+        if return_crossover_events:
+            return result + (all_crossover_events_by_contig,)
+        return result
+
+    result = (all_individuals_flat_by_contig[0], df,
+              all_paintings_flat_by_contig[0])
+    if return_crossover_events:
+        return result + (all_crossover_events_by_contig[0],)
+    return result
 
 
 def convert_truth_to_painting_objects(all_paintings_flat, num_workers=8):
@@ -931,12 +1155,17 @@ def _process_single_contig_postprocessing(args):
         min_pos, max_pos, 0, 0,
         use_snp_count=True,
         snps_per_block=snps_per_block,
-        snp_shift=snp_shift
+        snp_shift=snp_shift,
+        error_rate=error_rate,
     )
     
-    # 4. Convert reads to genotype probabilities
+    # 4. Convert reads to raw genotype likelihoods.  Population-frequency
+    # priors are useful during local haplotype discovery, but reusing them as
+    # sample evidence in linkage HMMs counts the cohort information again.
     (simd_site_priors, simd_probabalistic_genotypes) = analysis_utils.reads_to_probabilities(
-        new_reads_array
+        new_reads_array,
+        read_error_prob=error_rate,
+        use_hwe_prior=False,
     )
     
     return {

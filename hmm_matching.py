@@ -46,7 +46,7 @@ def _init_shared_data(data_dict):
 # 1. OPTIMIZED NUMBA KERNELS (O(N^2) Single-Switch)
 # =============================================================================
 
-@njit(parallel=True, fastmath=True)
+@njit(parallel=True, fastmath={"reassoc", "contract", "arcp", "afn"})
 def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definitions, incoming_priors, n_haps):
     """'Micro-HMM' Forward Scan (Log-Sum-Exp) inside a single block.
 
@@ -59,8 +59,8 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
 
     Optimisation tiers:
       A1  Allocation hoisting — per-sample scratch buffers
-          (current/next_normal, current/next_burst, hap_max,
-          hap_exp_sum, hap_sums) allocated once outside the site loop.
+          (current/next normal/burst and the leave-one-out aggregate
+          workspace) allocated once outside the site loop.
           At 2000 sites × 320 samples eliminates ~1.9M small allocs
           per scan call.
       A2  Buffer swap via reference assignment.  Replace K-wide element
@@ -94,9 +94,6 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
           K reads are contiguous (3 cache lines at K=36 vs 36).
           Transpose done once per block in
           _worker_generate_viterbi_emissions.
-      B10 Fold cost_1 into hap_sums once per site
-          (hap_sums_plus_cost1[h] = hap_sums[h] + cost_1), saving
-          K_fold - n_haps adds per site per sample.
 
     Args:
         ll_tensor: (Samples, Sites, K) float32 — log-likelihood of data
@@ -181,13 +178,11 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
         next_burst = np.empty(K_fold, dtype=np.float64)
         # hap aggregation scratch (n_haps-sized, one slot per haplotype
         # — replaces the unfolded kernel's separate row_*/col_* pairs).
-        hap_max = np.empty(n_haps, dtype=np.float64)
-        hap_exp_sum = np.empty(n_haps, dtype=np.float64)
-        hap_sums = np.empty(n_haps, dtype=np.float64)
-        # B10: hap_sums + cost_1 precomputed once per site.  Used in
-        # the state update where we'd otherwise add cost_1 K_fold
-        # times (twice per folded state) instead of n_haps times.
-        hap_sums_plus_cost1 = np.empty(n_haps, dtype=np.float64)
+        hap_max_1 = np.empty(n_haps, dtype=np.float64)
+        hap_argmax = np.empty(n_haps, dtype=np.int32)
+        hap_exp_sum_1 = np.empty(n_haps, dtype=np.float64)
+        hap_max_2 = np.empty(n_haps, dtype=np.float64)
+        hap_exp_sum_2 = np.empty(n_haps, dtype=np.float64)
 
         # 1. INJECTION: Site 0 gets Emission + Incoming Prior (Macro-Transition).
         # We read incoming_priors at the unfolded h1·n+h2 position.  By
@@ -228,47 +223,52 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
             # contribution count per hap_sums[h]: exactly n_haps
             # (matching the unfolded row's n_haps contributions).
             for h in range(n_haps):
-                hap_max[h] = -np.inf
-            # Pass 1: find per-hap max
+                hap_max_1[h] = -np.inf
+                hap_argmax[h] = -1
+                hap_max_2[h] = -np.inf
+            # Pass 1: find each bucket's largest element and the largest
+            # element excluding that chosen argmax.  The second scale makes
+            # leave-one-out stable when the excluded cell dominates its
+            # bucket by many log units.
             for k_fold in range(K_fold):
                 h1 = unpack_h1[k_fold]
                 h2 = unpack_h2[k_fold]
                 v = current_normal[k_fold]
-                if v > hap_max[h1]:
-                    hap_max[h1] = v
-                if h2 != h1 and v > hap_max[h2]:
-                    hap_max[h2] = v
-            # Pass 2: accumulate exp(v - max)
-            for h in range(n_haps):
-                hap_exp_sum[h] = 0.0
-            for k_fold in range(K_fold):
-                h1 = unpack_h1[k_fold]
-                h2 = unpack_h2[k_fold]
-                v = current_normal[k_fold]
-                # When the corresponding max is -inf, every v feeding
-                # that bucket is also -inf (and exp(-inf - -inf) = NaN);
-                # skip to leave hap_exp_sum[h] at 0, then Pass 3
-                # correctly emits -inf for that h.
-                m1 = hap_max[h1]
-                if m1 != -np.inf:
-                    hap_exp_sum[h1] += math.exp(v - m1)
+                if v > hap_max_1[h1]:
+                    hap_max_2[h1] = hap_max_1[h1]
+                    hap_max_1[h1] = v
+                    hap_argmax[h1] = k_fold
+                elif v > hap_max_2[h1]:
+                    hap_max_2[h1] = v
                 if h2 != h1:
-                    m2 = hap_max[h2]
-                    if m2 != -np.inf:
-                        hap_exp_sum[h2] += math.exp(v - m2)
-            # Pass 3: combine + B10 fold cost_1 in.
-            # The state-update loop needs (hap_sums[h] + cost_1) at h1
-            # and h2; precomputing once per site cuts K_fold extra
-            # adds (~21 at n_haps=6) to n_haps adds (~6).  Bit-
-            # identical: same scalars, hoisted.
+                    if v > hap_max_1[h2]:
+                        hap_max_2[h2] = hap_max_1[h2]
+                        hap_max_1[h2] = v
+                        hap_argmax[h2] = k_fold
+                    elif v > hap_max_2[h2]:
+                        hap_max_2[h2] = v
+            # Pass 2: accumulate the full bucket around max_1 and the
+            # argmax-excluded bucket around max_2.
             for h in range(n_haps):
-                if hap_max[h] == -np.inf:
-                    hap_sums[h] = -np.inf
-                    hap_sums_plus_cost1[h] = -np.inf
-                else:
-                    hap_sums[h] = hap_max[h] + math.log(hap_exp_sum[h])
-                    hap_sums_plus_cost1[h] = hap_sums[h] + cost_1
-
+                hap_exp_sum_1[h] = 0.0
+                hap_exp_sum_2[h] = 0.0
+            for k_fold in range(K_fold):
+                h1 = unpack_h1[k_fold]
+                h2 = unpack_h2[k_fold]
+                v = current_normal[k_fold]
+                m1 = hap_max_1[h1]
+                if m1 != -np.inf:
+                    hap_exp_sum_1[h1] += math.exp(v - m1)
+                m2 = hap_max_2[h1]
+                if k_fold != hap_argmax[h1] and m2 != -np.inf:
+                    hap_exp_sum_2[h1] += math.exp(v - m2)
+                if h2 != h1:
+                    m1 = hap_max_1[h2]
+                    if m1 != -np.inf:
+                        hap_exp_sum_1[h2] += math.exp(v - m1)
+                    m2 = hap_max_2[h2]
+                    if k_fold != hap_argmax[h2] and m2 != -np.inf:
+                        hap_exp_sum_2[h2] += math.exp(v - m2)
             # 3. Update States — A4: over folded states ONLY
             # (K_fold = n(n+1)/2 instead of K = n²).  By symmetry,
             # the would-be states (h1, h2) and (h2, h1) get identical
@@ -293,14 +293,43 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
                 # 1. Stay: (h1, h2) -> (h1, h2)
                 term_stay = current_normal[k_fold] + cost_0
                 
-                # 2. Switch into {*, h2}: hap_sums[h1] + cost_1
-                #    handles "remaining hap is h1, other hap switched
-                #    into h2".  B10: hap_sums_plus_cost1 is the same
-                #    scalar precomputed.
-                term_switch1_a = hap_sums_plus_cost1[h1]
+                # 2. Switch into {*, h2}.  The previous partner must
+                #    differ from h2: switching a chromosome to the
+                #    haplotype it already carried is the stay route and
+                #    must not receive switch probability as well.
+                if k_fold == hap_argmax[h1]:
+                    m1 = hap_max_2[h1]
+                    remaining = hap_exp_sum_2[h1]
+                else:
+                    m1 = hap_max_1[h1]
+                    if m1 == -np.inf:
+                        remaining = 0.0
+                    else:
+                        remaining = hap_exp_sum_1[h1] - math.exp(
+                            current_normal[k_fold] - m1)
+                if m1 == -np.inf or remaining <= 0.0:
+                    term_switch1_a = -np.inf
+                else:
+                    term_switch1_a = m1 + math.log(remaining) + cost_1
                 
-                # 3. Switch into {h1, *}: hap_sums[h2] + cost_1.
-                term_switch1_b = hap_sums_plus_cost1[h2]
+                # 3. Switch into {h1, *}, likewise excluding the
+                #    unchanged partner.  For a homozygous target the two
+                #    identical values are retained: they represent the
+                #    two distinguishable homologues that could switch.
+                if k_fold == hap_argmax[h2]:
+                    m2 = hap_max_2[h2]
+                    remaining = hap_exp_sum_2[h2]
+                else:
+                    m2 = hap_max_1[h2]
+                    if m2 == -np.inf:
+                        remaining = 0.0
+                    else:
+                        remaining = hap_exp_sum_1[h2] - math.exp(
+                            current_normal[k_fold] - m2)
+                if m2 == -np.inf or remaining <= 0.0:
+                    term_switch1_b = -np.inf
+                else:
+                    term_switch1_b = m2 + math.log(remaining) + cost_1
                 
                 # Combine (Sum-Product) via 3-term max-subtract LSE
                 # — same FP-summation structure as A3.
@@ -349,48 +378,46 @@ def scan_distance_aware_forward(ll_tensor, positions, recomb_rate, state_definit
             
     return end_probs
 
-@njit(parallel=True, fastmath=True)
+@njit(parallel=True, fastmath={"reassoc", "contract", "arcp", "afn"})
 def scan_distance_aware_backward(ll_tensor, positions, recomb_rate, state_definitions, incoming_priors, n_haps):
-    """
-    Optimized Backward Scan (O(Sites * Haps^2)).
-    Assumes Single-Switch Only.
+    """Reverse the within-block forward profile in folded diploid space.
 
-    See `scan_distance_aware_forward` for the A1/A2/A3/A4/B1/B5/B10
-    optimisation rationale; this kernel applies the same set of
-    transformations to the backward direction.  The scalar math and
-    iteration order are the mirror image of the forward pass; bit-
-    equivalence properties are identical (A1/A2/A3/A4/B1/B5/B10
-    together are byte-equivalent to the pre-A4 kernel under the
-    symmetry of the input priors / emissions, which holds in
-    production by construction).
+    The normal-state transitions use the same single-switch sum-product
+    recurrence as :func:`scan_distance_aware_forward`.  Burst choices remain
+    Viterbi/max choices.  Scores include the emission of their current site:
+
+      normal(i, q) = emission(i, q) + max(
+          sum_r micro(q -> r) normal(i+1, r),
+          GAP_OPEN + sum_r micro(q -> r) burst(i+1, r))
+      burst(i, q) = uniform_emission + max(
+          normal(i+1, q), burst(i+1, q))
+
+    At the left boundary, GAP_OPEN is applied exactly when site zero starts in
+    the burst state.  This is the algebraic reverse of the forward scan and
+    avoids both free bursts and double-counting the uniform burst emission.
+    Unchanged haplotypes are excluded from switch aggregates, matching the
+    theta/(n_haps-1) transition model.  Complexity remains
+    O(samples * sites * n_haps**2).
     """
-    # B5: ll_tensor is (n_samples, n_sites, K) layout — see forward
-    # kernel doc.
     n_samples = ll_tensor.shape[0]
     n_sites = ll_tensor.shape[1]
     K = n_haps * n_haps
     start_probs = np.full((n_samples, K), -np.inf, dtype=np.float64)
     min_prob = 1e-15
-    
-    GAP_OPEN = -10.0 
-    GAP_EXTEND = 0.0 
-    UNIFORM_LOG_PROB = -1.0986 
-    BURST_STEP = UNIFORM_LOG_PROB + GAP_EXTEND
-    
+
+    GAP_OPEN = -10.0
+    UNIFORM_LOG_PROB = -1.0986
+
     if n_haps > 1:
         log_N_minus_1 = math.log(float(n_haps - 1))
     else:
         log_N_minus_1 = 0.0
-    
-    # B1: precompute per-site transition costs (see forward kernel).
-    # Backward uses positions[i+1] - positions[i] (forward step from
-    # site i to i+1) at site i.  cost_0_arr[n_sites-1] is unused (the
-    # backward loop processes i from n_sites-2 down to 0, reading
-    # positions at i+1; the final iteration uses i+1 = n_sites-1).
+
+    # Transition from site i to i+1.  The final array element is unused.
     cost_0_arr = np.empty(n_sites, dtype=np.float64)
     cost_1_arr = np.empty(n_sites, dtype=np.float64)
     for i in range(n_sites - 1):
-        dist_bp = positions[i+1] - positions[i]
+        dist_bp = positions[i + 1] - positions[i]
         if dist_bp < 1:
             dist_bp = 1
         theta = float(dist_bp) * recomb_rate
@@ -405,8 +432,6 @@ def scan_distance_aware_backward(ll_tensor, positions, recomb_rate, state_defini
         cost_0_arr[i] = 2.0 * log_stay
         cost_1_arr[i] = log_switch + log_stay - log_N_minus_1
 
-    # A4: folded-state index tables (see forward-kernel docstring).
-    # Built once outside the prange; shared by all sample workers.
     K_fold = n_haps * (n_haps + 1) // 2
     unpack_h1 = np.empty(K_fold, dtype=np.int32)
     unpack_h2 = np.empty(K_fold, dtype=np.int32)
@@ -421,124 +446,242 @@ def scan_distance_aware_backward(ll_tensor, positions, recomb_rate, state_defini
             unfold_b[kk] = h2 * n_haps + h1
             kk += 1
 
-    for s in prange(n_samples):
-        # A1 + A4: hoist per-sample scratch buffers OUTSIDE the site
-        # loop; all buffers are folded-size (K_fold).  Same pattern
-        # as the forward kernel; "next" / "scratch" naming convention
-        # matches the original backward kernel's data-flow direction.
+    for sample_idx in prange(n_samples):
         next_normal = np.empty(K_fold, dtype=np.float64)
         next_burst = np.empty(K_fold, dtype=np.float64)
-        curr_norm_scratch = np.empty(K_fold, dtype=np.float64)
-        curr_burst_scratch = np.empty(K_fold, dtype=np.float64)
-        hap_max = np.empty(n_haps, dtype=np.float64)
-        hap_exp_sum = np.empty(n_haps, dtype=np.float64)
-        hap_sums = np.empty(n_haps, dtype=np.float64)
-        # B10: hap_sums + cost_1 precomputed (see forward kernel).
-        hap_sums_plus_cost1 = np.empty(n_haps, dtype=np.float64)
+        current_normal = np.empty(K_fold, dtype=np.float64)
+        current_burst = np.empty(K_fold, dtype=np.float64)
 
-        # 1. Init (Site N).  Read incoming_priors and ll_tensor at the
-        # canonical unfolded h1·n+h2 cell (== h2·n+h1 by symmetry).
-        # B5: ll_tensor[s, n_sites-1, k_unfold] — site is middle axis.
+        normal_hap_max_1 = np.empty(n_haps, dtype=np.float64)
+        normal_hap_argmax = np.empty(n_haps, dtype=np.int32)
+        normal_hap_exp_sum_1 = np.empty(n_haps, dtype=np.float64)
+        normal_hap_max_2 = np.empty(n_haps, dtype=np.float64)
+        normal_hap_exp_sum_2 = np.empty(n_haps, dtype=np.float64)
+        burst_hap_max_1 = np.empty(n_haps, dtype=np.float64)
+        burst_hap_argmax = np.empty(n_haps, dtype=np.int32)
+        burst_hap_exp_sum_1 = np.empty(n_haps, dtype=np.float64)
+        burst_hap_max_2 = np.empty(n_haps, dtype=np.float64)
+        burst_hap_exp_sum_2 = np.empty(n_haps, dtype=np.float64)
+
+        # Conditional suffix scores at the final site.  The right-boundary
+        # prior is common to both profiles; each profile contributes its own
+        # final-site emission exactly once.
         for k_fold in range(K_fold):
             k_unfold = unfold_a[k_fold]
-            val = ll_tensor[s, n_sites - 1, k_unfold] + incoming_priors[s, k_unfold]
-            next_normal[k_fold] = val
-            next_burst[k_fold] = UNIFORM_LOG_PROB + incoming_priors[s, k_unfold]
-            
-        # 2. Scan Backwards
-        for i in range(n_sites - 2, -1, -1):
-            # B1: read precomputed per-site costs.
-            cost_0 = cost_0_arr[i]
-            cost_1 = cost_1_arr[i]
-            # Double switch forbidden
-            
-            # --- A3 + A4: AGGREGATES over future states ---
-            # hap_sums[h] = LSE over h' of β(h, h') for the "next"
-            # (future) buffer — same structure as the forward kernel,
-            # acting on next_normal instead of current_normal.
-            for h in range(n_haps):
-                hap_max[h] = -np.inf
+            prior = incoming_priors[sample_idx, k_unfold]
+            next_normal[k_fold] = (
+                prior + ll_tensor[sample_idx, n_sites - 1, k_unfold])
+            next_burst[k_fold] = prior + UNIFORM_LOG_PROB
+
+        for site_idx in range(n_sites - 2, -1, -1):
+            cost_0 = cost_0_arr[site_idx]
+            cost_1 = cost_1_arr[site_idx]
+
+            # Folded row/column aggregates for future normal and burst
+            # profiles.  Each hap bucket contains exactly n_haps states.
+            for hap_idx in range(n_haps):
+                normal_hap_max_1[hap_idx] = -np.inf
+                normal_hap_argmax[hap_idx] = -1
+                normal_hap_max_2[hap_idx] = -np.inf
+                burst_hap_max_1[hap_idx] = -np.inf
+                burst_hap_argmax[hap_idx] = -1
+                burst_hap_max_2[hap_idx] = -np.inf
             for k_fold in range(K_fold):
                 h1 = unpack_h1[k_fold]
                 h2 = unpack_h2[k_fold]
-                v = next_normal[k_fold]
-                if v > hap_max[h1]:
-                    hap_max[h1] = v
-                if h2 != h1 and v > hap_max[h2]:
-                    hap_max[h2] = v
-            for h in range(n_haps):
-                hap_exp_sum[h] = 0.0
-            for k_fold in range(K_fold):
-                h1 = unpack_h1[k_fold]
-                h2 = unpack_h2[k_fold]
-                v = next_normal[k_fold]
-                m1 = hap_max[h1]
-                if m1 != -np.inf:
-                    hap_exp_sum[h1] += math.exp(v - m1)
+                value_normal = next_normal[k_fold]
+                value_burst = next_burst[k_fold]
+                if value_normal > normal_hap_max_1[h1]:
+                    normal_hap_max_2[h1] = normal_hap_max_1[h1]
+                    normal_hap_max_1[h1] = value_normal
+                    normal_hap_argmax[h1] = k_fold
+                elif value_normal > normal_hap_max_2[h1]:
+                    normal_hap_max_2[h1] = value_normal
+                if value_burst > burst_hap_max_1[h1]:
+                    burst_hap_max_2[h1] = burst_hap_max_1[h1]
+                    burst_hap_max_1[h1] = value_burst
+                    burst_hap_argmax[h1] = k_fold
+                elif value_burst > burst_hap_max_2[h1]:
+                    burst_hap_max_2[h1] = value_burst
                 if h2 != h1:
-                    m2 = hap_max[h2]
-                    if m2 != -np.inf:
-                        hap_exp_sum[h2] += math.exp(v - m2)
-            # B10: combine + fold cost_1 in.
-            for h in range(n_haps):
-                if hap_max[h] == -np.inf:
-                    hap_sums[h] = -np.inf
-                    hap_sums_plus_cost1[h] = -np.inf
-                else:
-                    hap_sums[h] = hap_max[h] + math.log(hap_exp_sum[h])
-                    hap_sums_plus_cost1[h] = hap_sums[h] + cost_1
-            
+                    if value_normal > normal_hap_max_1[h2]:
+                        normal_hap_max_2[h2] = normal_hap_max_1[h2]
+                        normal_hap_max_1[h2] = value_normal
+                        normal_hap_argmax[h2] = k_fold
+                    elif value_normal > normal_hap_max_2[h2]:
+                        normal_hap_max_2[h2] = value_normal
+                    if value_burst > burst_hap_max_1[h2]:
+                        burst_hap_max_2[h2] = burst_hap_max_1[h2]
+                        burst_hap_max_1[h2] = value_burst
+                        burst_hap_argmax[h2] = k_fold
+                    elif value_burst > burst_hap_max_2[h2]:
+                        burst_hap_max_2[h2] = value_burst
+
+            for hap_idx in range(n_haps):
+                normal_hap_exp_sum_1[hap_idx] = 0.0
+                normal_hap_exp_sum_2[hap_idx] = 0.0
+                burst_hap_exp_sum_1[hap_idx] = 0.0
+                burst_hap_exp_sum_2[hap_idx] = 0.0
+            for k_fold in range(K_fold):
+                h1 = unpack_h1[k_fold]
+                h2 = unpack_h2[k_fold]
+                value_normal = next_normal[k_fold]
+                value_burst = next_burst[k_fold]
+                normal_max_1 = normal_hap_max_1[h1]
+                if normal_max_1 != -np.inf:
+                    normal_hap_exp_sum_1[h1] += math.exp(
+                        value_normal - normal_max_1)
+                normal_max_2 = normal_hap_max_2[h1]
+                if (k_fold != normal_hap_argmax[h1]
+                        and normal_max_2 != -np.inf):
+                    normal_hap_exp_sum_2[h1] += math.exp(
+                        value_normal - normal_max_2)
+                burst_max_1 = burst_hap_max_1[h1]
+                if burst_max_1 != -np.inf:
+                    burst_hap_exp_sum_1[h1] += math.exp(
+                        value_burst - burst_max_1)
+                burst_max_2 = burst_hap_max_2[h1]
+                if (k_fold != burst_hap_argmax[h1]
+                        and burst_max_2 != -np.inf):
+                    burst_hap_exp_sum_2[h1] += math.exp(
+                        value_burst - burst_max_2)
+                if h2 != h1:
+                    normal_max_1 = normal_hap_max_1[h2]
+                    if normal_max_1 != -np.inf:
+                        normal_hap_exp_sum_1[h2] += math.exp(
+                            value_normal - normal_max_1)
+                    normal_max_2 = normal_hap_max_2[h2]
+                    if (k_fold != normal_hap_argmax[h2]
+                            and normal_max_2 != -np.inf):
+                        normal_hap_exp_sum_2[h2] += math.exp(
+                            value_normal - normal_max_2)
+                    burst_max_1 = burst_hap_max_1[h2]
+                    if burst_max_1 != -np.inf:
+                        burst_hap_exp_sum_1[h2] += math.exp(
+                            value_burst - burst_max_1)
+                    burst_max_2 = burst_hap_max_2[h2]
+                    if (k_fold != burst_hap_argmax[h2]
+                            and burst_max_2 != -np.inf):
+                        burst_hap_exp_sum_2[h2] += math.exp(
+                            value_burst - burst_max_2)
+
             for k_fold in range(K_fold):
                 h1 = unpack_h1[k_fold]
                 h2 = unpack_h2[k_fold]
                 k_unfold = unfold_a[k_fold]
-                
-                # Flow FROM Current TO Future
-                term_stay = next_normal[k_fold] + cost_0
-                # B10: read precomputed hap_sums + cost_1.
-                term_switch1_a = hap_sums_plus_cost1[h1]
-                term_switch1_b = hap_sums_plus_cost1[h2]
-                
-                # A3 3-term max-subtract LSE.  See forward-kernel
-                # comment for the equivalence argument.
-                m = term_stay
-                if term_switch1_a > m:
-                    m = term_switch1_a
-                if term_switch1_b > m:
-                    m = term_switch1_b
-                if m == -np.inf:
-                    total_to_future = -np.inf
+                same_normal = next_normal[k_fold]
+                same_burst = next_burst[k_fold]
+
+                # Normal-profile transition mass: stay plus either
+                # homologue switching to a *different* haplotype.
+                term_stay_normal = same_normal + cost_0
+                if k_fold == normal_hap_argmax[h1]:
+                    max_1 = normal_hap_max_2[h1]
+                    remaining_1 = normal_hap_exp_sum_2[h1]
                 else:
-                    e_stay = math.exp(term_stay - m)
-                    e_a = math.exp(term_switch1_a - m)
-                    e_b = math.exp(term_switch1_b - m)
-                    total_to_future = m + math.log(e_stay + e_a + e_b)
-                
-                # Burst Logic
-                extend = next_burst[k_fold] + BURST_STEP 
-                close_path = next_normal[k_fold]
-                curr_burst_scratch[k_fold] = max(extend, close_path)
-                
-                # Normal Logic.  B5: ll_tensor[s, i, k_unfold].
-                recomb_path = total_to_future 
-                open_path = next_burst[k_fold] + GAP_OPEN + BURST_STEP
-                combined = max(recomb_path, open_path)
-                
-                curr_norm_scratch[k_fold] = combined + ll_tensor[s, i, k_unfold]
-            
-            # A2: Swap scratch <-> "next" buffer references rather
-            # than copying.  Folded-size buffers.
-            next_normal, curr_norm_scratch = curr_norm_scratch, next_normal
-            next_burst, curr_burst_scratch = curr_burst_scratch, next_burst
-        
-        # A4: Unfold output — write the folded scalar to BOTH
-        # (h1, h2) and (h2, h1) cells of start_probs.
+                    max_1 = normal_hap_max_1[h1]
+                    if max_1 == -np.inf:
+                        remaining_1 = 0.0
+                    else:
+                        remaining_1 = normal_hap_exp_sum_1[h1] - math.exp(
+                            same_normal - max_1)
+                if max_1 == -np.inf or remaining_1 <= 0.0:
+                    term_switch_normal_1 = -np.inf
+                else:
+                    term_switch_normal_1 = (
+                        max_1 + math.log(remaining_1) + cost_1)
+                if k_fold == normal_hap_argmax[h2]:
+                    max_2 = normal_hap_max_2[h2]
+                    remaining_2 = normal_hap_exp_sum_2[h2]
+                else:
+                    max_2 = normal_hap_max_1[h2]
+                    if max_2 == -np.inf:
+                        remaining_2 = 0.0
+                    else:
+                        remaining_2 = normal_hap_exp_sum_1[h2] - math.exp(
+                            same_normal - max_2)
+                if max_2 == -np.inf or remaining_2 <= 0.0:
+                    term_switch_normal_2 = -np.inf
+                else:
+                    term_switch_normal_2 = (
+                        max_2 + math.log(remaining_2) + cost_1)
+                max_term = term_stay_normal
+                if term_switch_normal_1 > max_term:
+                    max_term = term_switch_normal_1
+                if term_switch_normal_2 > max_term:
+                    max_term = term_switch_normal_2
+                if max_term == -np.inf:
+                    total_to_normal = -np.inf
+                else:
+                    total_to_normal = max_term + math.log(
+                        math.exp(term_stay_normal - max_term)
+                        + math.exp(term_switch_normal_1 - max_term)
+                        + math.exp(term_switch_normal_2 - max_term))
+
+                # A burst may open after the same micro-transition.  Its
+                # future aggregate therefore needs the complete stay/switch
+                # recurrence too, not only the same diplotype cell.
+                term_stay_burst = same_burst + cost_0
+                if k_fold == burst_hap_argmax[h1]:
+                    max_1 = burst_hap_max_2[h1]
+                    remaining_1 = burst_hap_exp_sum_2[h1]
+                else:
+                    max_1 = burst_hap_max_1[h1]
+                    if max_1 == -np.inf:
+                        remaining_1 = 0.0
+                    else:
+                        remaining_1 = burst_hap_exp_sum_1[h1] - math.exp(
+                            same_burst - max_1)
+                if max_1 == -np.inf or remaining_1 <= 0.0:
+                    term_switch_burst_1 = -np.inf
+                else:
+                    term_switch_burst_1 = (
+                        max_1 + math.log(remaining_1) + cost_1)
+                if k_fold == burst_hap_argmax[h2]:
+                    max_2 = burst_hap_max_2[h2]
+                    remaining_2 = burst_hap_exp_sum_2[h2]
+                else:
+                    max_2 = burst_hap_max_1[h2]
+                    if max_2 == -np.inf:
+                        remaining_2 = 0.0
+                    else:
+                        remaining_2 = burst_hap_exp_sum_1[h2] - math.exp(
+                            same_burst - max_2)
+                if max_2 == -np.inf or remaining_2 <= 0.0:
+                    term_switch_burst_2 = -np.inf
+                else:
+                    term_switch_burst_2 = (
+                        max_2 + math.log(remaining_2) + cost_1)
+                max_term = term_stay_burst
+                if term_switch_burst_1 > max_term:
+                    max_term = term_switch_burst_1
+                if term_switch_burst_2 > max_term:
+                    max_term = term_switch_burst_2
+                if max_term == -np.inf:
+                    total_to_burst = -np.inf
+                else:
+                    total_to_burst = max_term + math.log(
+                        math.exp(term_stay_burst - max_term)
+                        + math.exp(term_switch_burst_1 - max_term)
+                        + math.exp(term_switch_burst_2 - max_term))
+
+                current_normal[k_fold] = (
+                    ll_tensor[sample_idx, site_idx, k_unfold]
+                    + max(total_to_normal, GAP_OPEN + total_to_burst))
+                current_burst[k_fold] = (
+                    UNIFORM_LOG_PROB + max(same_normal, same_burst))
+
+            next_normal, current_normal = current_normal, next_normal
+            next_burst, current_burst = current_burst, next_burst
+
+        # Apply the left-boundary choice.  Entering site zero in the burst
+        # profile incurs GAP_OPEN here, exactly as in forward initialization.
         for k_fold in range(K_fold):
-            final = max(next_normal[k_fold], next_burst[k_fold])
-            start_probs[s, unfold_a[k_fold]] = final
+            final = max(next_normal[k_fold], GAP_OPEN + next_burst[k_fold])
+            start_probs[sample_idx, unfold_a[k_fold]] = final
             if unfold_b[k_fold] != unfold_a[k_fold]:
-                start_probs[s, unfold_b[k_fold]] = final
-            
+                start_probs[sample_idx, unfold_b[k_fold]] = final
+
     return start_probs
 
 # =============================================================================
@@ -793,44 +936,13 @@ def generate_viterbi_block_emissions(samples_matrix, sample_sites, block_results
 # =============================================================================
 
 @njit(cache=True)
-def _build_dense_transition_matrix_kernel(hap_log_T, correct_hom_hom):
-    """Numba kernel for build_dense_transition_matrix.
+def _build_dense_transition_matrix_kernel(hap_log_T):
+    """Assemble independent haploid transitions into diploid log scores.
 
-    Takes the (n_prev, n_curr) haploid log-transition matrix and
-    assembles the diploid log-transition matrix:
-        T[r, c] = hap_log_T[u1, v1] + hap_log_T[u2, v2]
-    where r = u1 * n_prev + u2 and c = v1 * n_curr + v2.
-
-    If correct_hom_hom is True, the diagonal entries where u1 == u2
-    AND v1 == v2 use a SINGLE copy of hap_log_T[a, b] instead of two,
-    preventing the partner prior from double-counting a single
-    transition event when both chromosomes carry the same haplotype.
-
-    Replaces the original's:
-        T_4d = hap_log_T[:, None, :, None] + hap_log_T[None, :, None, :]
-        if correct_hom_hom:
-            for a in range(n_prev):
-                for b in range(n_curr):
-                    T_4d[a, a, b, b] = hap_log_T[a, b]
-        T = T_4d.reshape(n_prev * n_prev, n_curr * n_curr)
-
-    This avoids the (n_prev, n_prev, n_curr, n_curr) broadcast
-    intermediate which is K^4 elements (at K=10 that's 10,000
-    float64 = 80 KB per call; at K=50 that's 6.25M elements = 50 MB).
-
-    Args:
-        hap_log_T: (n_prev, n_curr) float64 — haploid log-transitions.
-        correct_hom_hom: bool — apply the hom->hom correction.
-
-    Returns:
-        (n_prev*n_prev, n_curr*n_curr) float64 — diploid log T matrix.
-
-    Mathematical equivalence to the original:
-        The vectorised 4D broadcast computes the same sum as the
-        nested-loop kernel here.  The reshape is a no-op on memory
-        layout when the 4D array is C-contiguous, which numpy's
-        broadcast produces.  Float64 addition is associative at this
-        precision level; the two paths give bit-identical results.
+    For ordered diploid state ``(u1, u2) -> (v1, v2)``, the probability is
+    ``T[u1, v1] * T[u2, v2]``.  Homozygous states still contain two biological
+    homologues, so the same haploid edge contributes twice when both copies
+    take it.
     """
     n_prev, n_curr = hap_log_T.shape
     K_prev = n_prev * n_prev
@@ -838,68 +950,27 @@ def _build_dense_transition_matrix_kernel(hap_log_T, correct_hom_hom):
     T = np.empty((K_prev, K_curr), dtype=np.float64)
     for u1 in range(n_prev):
         for u2 in range(n_prev):
-            r = u1 * n_prev + u2
+            row = u1 * n_prev + u2
             for v1 in range(n_curr):
+                first_log_prob = hap_log_T[u1, v1]
                 for v2 in range(n_curr):
-                    c = v1 * n_curr + v2
-                    if correct_hom_hom and u1 == u2 and v1 == v2:
-                        # hom->hom correction: single prior instead of double
-                        T[r, c] = hap_log_T[u1, v1]
-                    else:
-                        T[r, c] = hap_log_T[u1, v1] + hap_log_T[u2, v2]
+                    col = v1 * n_curr + v2
+                    T[row, col] = first_log_prob + hap_log_T[u2, v2]
     return T
 
 
-def build_dense_transition_matrix(trans_dict, prev_keys, curr_keys, prev_idx, curr_idx,
-                                  correct_hom_hom=False):
-    """
-    Converts sparse dictionary transition probs to dense log-prob matrix T.
-    
-    For diploid state (u1,u2) -> (v1,v2), the entry is:
-        T[r, c] = log T(u1->v1) + log T(u2->v2)
-    
-    If correct_hom_hom=True, homozygous->homozygous entries (a,a)->(b,b) use
-    only a SINGLE copy of log T(a->b) instead of two.  This prevents the
-    partner prior from double-counting a single transition event when both
-    chromosomes carry the same haplotype at source and destination (no phase
-    ambiguity exists in this case).
-    
-    Vectorized: builds haploid log-transition matrix once, then uses numpy
-    broadcasting to assemble the diploid matrix in one operation.
-    
-    Args:
-        trans_dict: Dictionary {(prev_hap, curr_hap): prob}.
-        prev_keys: List of haplotype IDs in previous block.
-        curr_keys: List of haplotype IDs in current block.
-        prev_idx: Index of previous block.
-        curr_idx: Index of current block.
-        correct_hom_hom: If True, use single prior for hom->hom transitions.
-        
-    Returns:
-        np.ndarray: Matrix of shape (K_prev, K_curr) containing log probabilities.
+def build_dense_transition_matrix(trans_dict, prev_keys, curr_keys, prev_idx,
+                                  curr_idx):
+    """Convert sparse haploid transition probabilities to diploid log scores.
 
-    Implementation: the haploid log-T matrix is built in Python via
-    dict lookups (the dict has nested tuple keys that numba can't
-    handle).  The 4D diploid assembly + hom-hom correction + reshape
-    is delegated to a numba kernel that avoids the (n_prev, n_prev,
-    n_curr, n_curr) broadcast intermediate.
+    The two homologues transition independently.  This remains true for a
+    homozygous source or destination: ``(a, a) -> (b, b)`` therefore has log
+    probability ``2 * log(T[a, b])``.
     """
-    n_prev = len(prev_keys)
-    n_curr = len(curr_keys)
-    
-    # Step 1: Build haploid log-transition matrix (n_prev, n_curr).
-    # Delegated to analysis_utils.  This is the only step that does
-    # dict lookups; numba can't accelerate it (Python dict with
-    # arbitrary tuple keys).
     hap_log_T = analysis_utils._build_haploid_log_T_from_dict(
         trans_dict, prev_keys, curr_keys, prev_idx, curr_idx)
-
-    # Steps 2 + 3: assemble the diploid matrix and apply hom-hom correction
-    # via a numba kernel.  Cast to float64 (kernel signature requires
-    # consistent dtype across call sites).
-    hap_log_T_c = np.ascontiguousarray(hap_log_T, dtype=np.float64)
-    T = _build_dense_transition_matrix_kernel(hap_log_T_c, bool(correct_hom_hom))
-    return T
+    return _build_dense_transition_matrix_kernel(
+        np.ascontiguousarray(hap_log_T, dtype=np.float64))
 
 
 def global_forward_backward_pass(raw_blocks, block_results, transition_probs, space_gap, recomb_rate,
@@ -961,12 +1032,15 @@ def global_forward_backward_pass(raw_blocks, block_results, transition_probs, sp
         # STORE RAW RESULTS FOR RECURSION
         S_results.append(S_raw)
         
-    # --- CALCULATE TOTAL LOG LIKELIHOOD ---
-    # We sum the log-probabilities of the final states of the last block for each sample.
-    # This acts as the P(Data | Model) for convergence checking.
-    last_S = S_results[-1] # Shape (Samples, K)
-    sample_likelihoods = analysis_utils.lse_axis_last(last_S)
-    total_ll = np.sum(sample_likelihoods)
+    # Each residue modulo space_gap is an independent HMM chain.  Its
+    # likelihood is the log-sum of the chain's terminal forward states; the
+    # data likelihood is the sum over every chain and sample.
+    total_ll = 0.0
+    terminal_start = max(0, num_blocks - space_gap)
+    for terminal_idx in range(terminal_start, num_blocks):
+        sample_likelihoods = analysis_utils.lse_axis_last(
+            S_results[terminal_idx])
+        total_ll += float(np.sum(sample_likelihoods))
         
     # --- PHASE 2: BACKWARD (Calculating R) ---
     for i in range(num_blocks - 1, -1, -1):
@@ -1296,9 +1370,7 @@ def _batched_posterior_aggregation_kernel(S, R, T_mat, numerators, S_T, R_T):
         R: (B, K_next_sq) float64 — backward variables for the partner
             block, used in pass 1.
         T_mat: (K_curr_sq, K_next_sq) float64 — diploid log-transition
-            matrix with hom-hom correction already applied by the
-            caller (via build_dense_transition_matrix(...,
-            correct_hom_hom=True)).
+            matrix containing one haploid transition factor per homologue.
         numerators: (K_curr_sq, K_next_sq) float64.  Modified IN-PLACE
             by logaddexp accumulation.  Caller initialises to -inf
             before the first call.
@@ -1439,12 +1511,8 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         curr_keys = hap_keys_cache[i]
         next_keys = hap_keys_cache[next_idx]
         
-        # Build dense transition matrix with hom->hom correction for M-step.
-        # For (a,a)->(b,b) states, uses single prior instead of double.
         T_mat = build_dense_transition_matrix(
-            current_trans[0][i], curr_keys, next_keys, i, next_idx,
-            correct_hom_hom=True
-        )
+            current_trans[0][i], curr_keys, next_keys, i, next_idx)
         
         numerators = np.full((len(curr_keys)**2, len(next_keys)**2), -np.inf)
         
@@ -1525,15 +1593,12 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         prev_keys = hap_keys_cache[prev_idx]
         
         T_mat = build_dense_transition_matrix(
-            current_trans[1][i], curr_keys, prev_keys, i, prev_idx,
-            correct_hom_hom=True
-        )
+            current_trans[1][i], curr_keys, prev_keys, i, prev_idx)
         
         numerators = np.full((len(curr_keys)**2, len(prev_keys)**2), -np.inf)
         
         # Fused E-step accumulation (backward).  Same semantics as the
-        # forward branch with (S, R) → (R_later, S_earlier); T is built
-        # with i,prev_idx and correct_hom_hom=True.
+        # forward branch with (S, R) → (R_later, S_earlier).
         _batched_posterior_aggregation(
             R_later_source, S_earlier_dest, T_mat, numerators
         )
@@ -1578,10 +1643,24 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
 # 4. MAIN LOOP & API
 # =============================================================================
 
+def _max_transition_probability_change(old_probs, new_probs):
+    """Return the largest absolute change across transition entries."""
+    max_change = 0.0
+    for direction_idx in (0, 1):
+        for block_idx, new_block in new_probs[direction_idx].items():
+            old_block = old_probs[direction_idx][block_idx]
+            for transition_key, new_value in new_block.items():
+                change = abs(new_value - old_block[transition_key])
+                if change > max_change:
+                    max_change = change
+    return max_change
+
+
 def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps_data,
                                            max_num_iterations=10, space_gap=1,
                                            recomb_rate=5e-7, learning_rate=1.0,
                                            num_processes=16,
+                                           min_cutoff_change=0.001,
                                            ll_improvement_cutoff=5e-4,
                                            use_standard_baum_welch=True,
                                            precalculated_viterbi_emissions=None,
@@ -1589,18 +1668,17 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
     """Driver for HMM-EM transition calculation.
 
     Runs Baum-Welch (E-step = global_forward_backward_pass, M-step =
-    update_transitions_layered_hmm) for up to max_num_iterations or
-    until the relative log-likelihood improvement drops below
-    ll_improvement_cutoff.
-
-    B6: ll_improvement_cutoff defaults to 5e-4 (was 1e-4).  At the
-    looser threshold, ~5-6 EM iterations per gap on average suffice
-    where ~8 were used at 1e-4.  Downstream beam-search is insensitive
-    to the resulting small transition-probability perturbations
-    (validated metric-equivalent against the L2 reference run).  NOT
-    bit-identical to pre-B6.
+    update_transitions_layered_hmm) for up to max_num_iterations or until
+    every smoothed transition probability changes by at most
+    ``min_cutoff_change``.  Parameter-space convergence is invariant to a
+    state-independent offset in the emission log scores.
 
     Args:
+        min_cutoff_change: Maximum absolute transition-probability change
+            allowed at convergence.
+        ll_improvement_cutoff: Retained for API compatibility; no longer used
+            because relative raw log-likelihood convergence depends on
+            arbitrary state-independent emission offsets.
         precalculated_viterbi_emissions: Required ViterbiBlockList.
             full_samples_data / sample_sites are kept in the signature
             for upstream symmetry but unused.
@@ -1612,7 +1690,7 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
             up the live thread count.  Mirrors the in-flight rescaling
             design used in block_linking.  No-op when None.
     """
-    del full_samples_data, sample_sites, num_processes  # unused
+    del full_samples_data, sample_sites, num_processes, ll_improvement_cutoff
 
     if precalculated_viterbi_emissions is None:
         raise ValueError(
@@ -1625,7 +1703,6 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
     hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
 
     current_trans = block_linking.initial_transition_probabilities(haps_data, space_gap)
-    prev_ll = -np.inf
 
     for it in range(max_num_iterations):
         # Dynamic thread rescaling: pick up freed cores from peer
@@ -1643,7 +1720,7 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
         effective_lr = max(effective_lr, 0.1)
 
         # E-Step
-        S_res, R_res, current_ll = global_forward_backward_pass(
+        S_res, R_res, _current_ll = global_forward_backward_pass(
             raw_blocks, haps_data, current_trans, space_gap, recomb_rate,
             hap_keys_cache=hap_keys_cache
         )
@@ -1656,22 +1733,20 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
             dynamic_cores_fn=dynamic_cores_fn
         )
 
-        # Smoothing
-        smoothed = analysis_utils.smoothen_probs_vectorized(current_trans, new_trans, effective_lr)
+        # Smooth the M-step, then stop in parameter space.  Unlike relative
+        # raw likelihood improvement, this criterion cannot be changed by
+        # adding an irrelevant constant to all emission scores.
+        smoothed = analysis_utils.smoothen_probs_vectorized(
+            current_trans, new_trans, effective_lr)
         if isinstance(smoothed, dict):
-            current_trans = [smoothed[0], smoothed[1]]
+            next_trans = [smoothed[0], smoothed[1]]
         else:
-            current_trans = smoothed
-
-        # Convergence check (B6: cutoff defaults to 5e-4)
-        if prev_ll != -np.inf and prev_ll != 0:
-            rel_improvement = (current_ll - prev_ll) / abs(prev_ll)
-        else:
-            rel_improvement = float('inf')
-        if it > 0 and 0 <= rel_improvement < ll_improvement_cutoff:
+            next_trans = smoothed
+        max_transition_change = _max_transition_probability_change(
+            current_trans, next_trans)
+        current_trans = next_trans
+        if max_transition_change <= min_cutoff_change:
             break
-
-        prev_ll = current_ll
 
     return current_trans
 

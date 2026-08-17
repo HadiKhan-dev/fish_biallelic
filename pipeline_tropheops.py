@@ -16,6 +16,7 @@
 import os
 import pipeline_runtime
 
+from thread_env import force_single_threaded_numeric_libraries
 # -----------------------------------------------------------------------------
 # CONFIGURATION — EDIT THIS to switch between the two comparison runs.
 # -----------------------------------------------------------------------------
@@ -71,11 +72,7 @@ if __name__ == '__main__':
     faulthandler.enable()
 
     # FORCE NUMPY/BLAS TO USE 1 THREAD PER PROCESS
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    force_single_threaded_numeric_libraries()
 
     # =============================================================================
     # CONFIGURATION
@@ -118,6 +115,7 @@ if __name__ == '__main__':
     import small_block_refine
     import residual_discovery
     import hierarchical_assembly
+    from founder_alleles import hard_alleles
     import paint_samples
     import pedigree_inference
     import phase_correction
@@ -299,11 +297,7 @@ if __name__ == '__main__':
             # Discovered haplotypes -> concrete {0,1}
             discovered = []
             for hid, h_arr in block.haplotypes.items():
-                if h_arr.ndim == 2:
-                    concrete = np.argmax(h_arr, axis=1).astype(np.int8)
-                else:
-                    concrete = h_arr.astype(np.int8)
-                discovered.append((hid, concrete))
+                discovered.append((hid, hard_alleles(h_arr)))
             n_disc = len(discovered)
             disc_ids = [hid for hid, _ in discovered]
             if n_disc > 0:
@@ -784,33 +778,22 @@ if __name__ == '__main__':
                 )
                 print(f"    [Loader] {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
 
-                all_positions, all_reads = [], []
-                for i in range(len(genomic_data)):
-                    pos_i = genomic_data.positions[i]
-                    reads_i = genomic_data.reads[i]
-                    if len(pos_i) > 0:
-                        all_positions.append(pos_i)
-                        all_reads.append(reads_i)
-
-                if not all_positions:
+                # Full reads: (n_samples_total, n_sites, 2) — all 116 samples
+                global_sites, global_reads_full = (
+                    vcf_data_loader.concatenate_unique_block_reads(genomic_data)
+                )
+                if global_sites is None:
                     print(f"    WARNING: No data for {r_name}, skipping")
                     continue
-
-                global_sites = np.concatenate(all_positions)
-                # Full reads: (n_samples_total, n_sites, 2) — all 116 samples
-                global_reads_full = np.concatenate(all_reads, axis=1)
-
-                # De-duplicate sites (overlapping blocks can repeat positions)
-                _, unique_idx = np.unique(global_sites, return_index=True)
-                unique_idx = np.sort(unique_idx)
-                global_sites = global_sites[unique_idx]
-                global_reads_full = global_reads_full[:, unique_idx, :]
 
                 # ALWAYS extract G0 reads separately for T11 validation.  This slice
                 # is independent of the USE_KNOWN_FOUNDERS flag — we want ground
                 # truth available regardless of what the pipeline sees.
                 g0_reads = global_reads_full[g0_vcf_indices, :, :]
-                (_, g0_probs) = analysis_utils.reads_to_probabilities(g0_reads)
+                (_, g0_probs) = analysis_utils.reads_to_probabilities(
+                    g0_reads,
+                    use_hwe_prior=False,
+                )
                 # Downcast G0 probs to float32 — we only use argmax for validation,
                 # so float64 precision is wasted.
                 if g0_probs.dtype == np.float64:
@@ -830,7 +813,13 @@ if __name__ == '__main__':
                         if genomic_data.reads[bi].shape[0] == n_samples_total:
                             genomic_data.reads[bi] = genomic_data.reads[bi][active_vcf_indices, :, :]
 
-                (site_priors, global_probs) = analysis_utils.reads_to_probabilities(active_reads_full)
+                # Downstream linkage models require per-sample genotype
+                # likelihoods, not the empirical HWE posterior used as an
+                # optional regularizer within local haplotype discovery.
+                (site_priors, global_probs) = analysis_utils.reads_to_probabilities(
+                    active_reads_full,
+                    use_hwe_prior=False,
+                )
                 avg_depth = np.mean(np.sum(active_reads_full, axis=-1))
                 print(f"    Sites: {len(global_sites)}, Samples (active): {global_probs.shape[0]}, "
                       f"Depth: {avg_depth:.1f}x")
@@ -1608,7 +1597,6 @@ if __name__ == '__main__':
         # (picklable for forkserver workers — a closure here could not be
         # pickled into the worker initargs under the forkserver start method).
         # Workers load their own tolerance_result + founder_block from disk.
-        from concurrent.futures import ThreadPoolExecutor
 
         # Lightweight dict — just contig names; workers load their own data.
         mcr = {r_name: {} for r_name in region_keys}
@@ -1646,14 +1634,16 @@ if __name__ == '__main__':
         print("Loading founder_blocks for F1 recoloring + propagation")
         print("="*60)
         _t0 = time.time()
-        def _load_founder_block_for_main(r_name):
-            t7 = load_contig(STAGE_T7, r_name)
-            fb = t7['super_blocks_L4'][0]
-            fb.probs_array = None  # reconstructible from global_probs
-            mcr.setdefault(r_name, {})['founder_block'] = fb
-            del t7
-        with ThreadPoolExecutor(max_workers=min(n_processes, len(region_keys))) as _ex:
-            list(_ex.map(_load_founder_block_for_main, region_keys))
+        founder_blocks = pipeline_runtime.load_founder_blocks_parallel(
+            checkpoint_store,
+            region_keys,
+            ((STAGE_T7, 'super_blocks_L4'),),
+            max_workers=n_processes,
+            require_all=True,
+        )
+        for r_name, founder_block in founder_blocks.items():
+            mcr.setdefault(r_name, {})['founder_block'] = founder_block
+        del founder_blocks
         print(f"Founder block parallel load: {time.time()-_t0:.1f}s")
 
         # Step 3: Parsimonious F1 recoloring

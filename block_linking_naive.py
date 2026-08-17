@@ -3,16 +3,21 @@ import thread_config
 import numpy as np
 import math
 import copy
-import multiprocessing as _mp
-import multiprocessing.pool
-from multiprocessing import shared_memory as _shm
 import warnings
-from contextlib import contextmanager
 from functools import partial
 
 import analysis_utils
 import hap_statistics
+from bhd_config import DEFAULT_READ_ERROR_PROBABILITY
 import block_haplotypes
+from multiprocessing_runtime import (
+    safe_forkserver_pool as _safe_forkserver_pool,
+)
+from shared_array import (
+    attach_shared_array as _attach_shared_array,
+    close_shared_memory as _close_shared_memory,
+    create_shared_array as _create_shared_array,
+)
 
 warnings.filterwarnings("ignore")
 np.seterr(divide='ignore',invalid="ignore")
@@ -32,42 +37,6 @@ np.seterr(divide='ignore',invalid="ignore")
 #
 # For pool 6 (get_full_match_probs), large numpy arrays are placed in
 # POSIX SharedMemory (/dev/shm) for zero-copy worker access.
-
-try:
-    _forkserver_ctx = _mp.get_context('forkserver')
-except (ValueError, AttributeError):
-    _forkserver_ctx = _mp.get_context('fork')
-
-class _ForkserverPool(multiprocessing.pool.Pool):
-    """A Pool using forkserver context."""
-    def __init__(self, *args, **kwargs):
-        kwargs['context'] = _forkserver_ctx
-        super().__init__(*args, **kwargs)
-
-@contextmanager
-def _safe_forkserver_pool(processes, initializer=None, initargs=()):
-    """
-    Create a forkserver pool with __main__ safety.
-    
-    Temporarily clears __main__.__file__ so forkserver workers don't
-    re-execute the entry script.  Restores it on exit.
-    """
-    import sys as _sys
-    _main_mod = _sys.modules.get('__main__')
-    _saved_file = getattr(_main_mod, '__file__', None)
-    _saved_spec = getattr(_main_mod, '__spec__', None)
-    if _main_mod is not None:
-        if hasattr(_main_mod, '__file__'):
-            del _main_mod.__file__
-        _main_mod.__spec__ = None
-    try:
-        with _ForkserverPool(processes=processes, initializer=initializer, initargs=initargs) as pool:
-            yield pool
-    finally:
-        if _main_mod is not None:
-            if _saved_file is not None:
-                _main_mod.__file__ = _saved_file
-            _main_mod.__spec__ = _saved_spec
 
 
 def _strip_block(block):
@@ -117,29 +86,22 @@ def _init_shared_data(data_dict):
     """
     global _SHARED_DATA, _SHM_REFS
     _SHARED_DATA.clear()
-    for ref in _SHM_REFS:
-        try: ref.close()
-        except Exception: pass
+    _close_shared_memory(_SHM_REFS)
     _SHM_REFS = []
 
     for key, meta in data_dict.items():
         if isinstance(meta, dict) and 'shm_name' in meta:
             # SharedMemory-backed array
-            shm = _shm.SharedMemory(name=meta['shm_name'], create=False)
+            shm, array = _attach_shared_array(meta)
             _SHM_REFS.append(shm)
-            _SHARED_DATA[key] = np.ndarray(meta['shape'], dtype=np.dtype(meta['dtype']), buffer=shm.buf)
+            _SHARED_DATA[key] = array
         else:
             # Small metadata — passed directly
             _SHARED_DATA[key] = meta
 
 def _create_shm_array(arr, label=""):
     """Copy a numpy array into POSIX SharedMemory. Returns (shm_handle, metadata_dict)."""
-    arr = np.ascontiguousarray(arr)
-    shm = _shm.SharedMemory(create=True, size=arr.nbytes)
-    view = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
-    np.copyto(view, arr)
-    meta = {'shm_name': shm.name, 'shape': arr.shape, 'dtype': str(arr.dtype)}
-    return shm, meta
+    return _create_shared_array(arr, name_key='shm_name', dtype_as_string=True)
 
 
 # --- DIRECT WORKER FUNCTIONS (Pools 1–5) ---
@@ -559,7 +521,7 @@ def generate_chained_block_haplotypes(haplotype_data, nodes_list, combined_score
 
 def combine_chained_blocks_to_single_hap(all_haps,
                                          hap_blocks,
-                                         read_error_prob = 0.02,
+                                         read_error_prob = DEFAULT_READ_ERROR_PROBABILITY,
                                          min_total_reads=5):
     """
     Stitches blocks together into a single long haplotype.
@@ -681,7 +643,7 @@ def combine_chained_blocks_to_single_hap(all_haps,
 
 def combine_all_blocks_to_long_haps(all_haps,
                                     hap_blocks_list,
-                                    read_error_prob = 0.02,
+                                    read_error_prob = DEFAULT_READ_ERROR_PROBABILITY,
                                     min_total_reads=5,
                                     num_processes=16):
     """
@@ -745,12 +707,7 @@ def combine_all_blocks_to_long_haps(all_haps,
             processing_results = pool.map(_worker_combine_chained_blocks_direct, task_args)
     
     finally:
-        for shm in shm_handles:
-            try:
-                shm.close()
-                shm.unlink()
-            except Exception:
-                pass
+        _close_shared_memory(shm_handles, unlink=True)
     
     # Filter empty results if any path failed completely
     valid_results = [r for r in processing_results if len(r[0]) > 0]
@@ -1041,11 +998,6 @@ def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations
     
     finally:
         # Clean up SharedMemory segments
-        for shm in shm_handles:
-            try:
-                shm.close()
-                shm.unlink()
-            except Exception:
-                pass
+        _close_shared_memory(shm_handles, unlink=True)
     
     return results

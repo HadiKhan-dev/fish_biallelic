@@ -37,4 +37,14 @@ def compute_outer_bic(k, nll, complexity_cost):
     return k * complexity_cost + 2.0 * nll
 
 
-__all__ = ["compute_founder_complexity_cost", "compute_outer_bic"]
+def compute_outer_bic_from_log_likelihood(k, log_likelihood, complexity_cost):
+    """Return ``k * complexity_cost - 2 * log_likelihood`` (lower is better)."""
+
+    return k * complexity_cost - 2.0 * log_likelihood
+
+
+__all__ = [
+    "compute_founder_complexity_cost",
+    "compute_outer_bic",
+    "compute_outer_bic_from_log_likelihood",
+]

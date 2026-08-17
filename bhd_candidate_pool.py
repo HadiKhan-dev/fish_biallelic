@@ -31,7 +31,10 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from numba import njit
 
-from bhd_config import RECOVERY_HAPS_EQUAL_EPS_PCT
+from bhd_config import (
+    DEFAULT_READ_ERROR_PROBABILITY,
+    RECOVERY_HAPS_EQUAL_EPS_PCT,
+)
 from bhd_kernels import MASK
 from bhd_genotype_evidence import (
     allele_depths_to_raw_genotype_likelihoods,
@@ -59,7 +62,7 @@ _PROPOSAL_MODE_ALIASES = {
 
 def allele_depths_to_likelihoods(
     reads: np.ndarray,
-    read_error_probability: float = 0.02,
+    read_error_probability: float = DEFAULT_READ_ERROR_PROBABILITY,
 ) -> np.ndarray:
     """Return normalized raw P(reads | genotype) for genotypes 0, 1, 2.
 
@@ -233,7 +236,7 @@ class ResidualInputWorkspace:
 
 def prepare_residual_inputs(
     reads_array: np.ndarray,
-    read_error_probability: float = 0.02,
+    read_error_probability: float = DEFAULT_READ_ERROR_PROBABILITY,
     *,
     likelihood: np.ndarray | None = None,
 ) -> ResidualInputWorkspace:
@@ -1963,7 +1966,7 @@ def augment_assigned_residual_candidates(
     *,
     base_candidates: np.ndarray | None = None,
     keep_flags: np.ndarray | None = None,
-    read_error_probability: float = 0.02,
+    read_error_probability: float = DEFAULT_READ_ERROR_PROBABILITY,
     usable_founder_known_fraction: float = 0.80,
     residual_hard_probability: float = 0.80,
     minimum_residual_joint_known_fraction: float = 0.10,
