@@ -19,6 +19,13 @@ piecewise profile, so recovery of elevated chromosome ends is not built into
 the decoder.  Analytic and regional calculations use exact profile boundaries;
 physical plotting bins always terminate at the recorded modeled span.
 
+Production reconstructed tracks consume the atomic Stage-11 H1/Z1 bundle:
+the pre-phase ``tolerance_result`` painting (Z1) and the single canonical
+founder block (H1) it was painted against.
+The bundle's ordered sample IDs must exactly match the Stage-2 global order.
+The map deliberately does not use the Stage-13 Q1 painting because its trio
+decoder already models phase.
+
 Legacy checkpoints without model metadata remain supported as a constant
 5e-8/bp process and retain the historic ``process``, ``truth``, and ``inferred``
 map keys and CSV column names.
@@ -420,8 +427,8 @@ def decode_crossovers_from_path(path, snp_positions):
 
 # =============================================================================
 # Checkpoint loading + painting normalization
-# Layout (pipeline.py): <ckpt>/<stage>/<contig>.pkl.b2 and
-# <ckpt>/<stage>/_global.pkl.b2, each a blosc2-compressed pickle read via the
+# Layout (pipeline.py): <ckpt>/<stage>/<contig>.p5.b2 and
+# <ckpt>/<stage>/_global.p5.b2, each a protocol-5/Blosc frame read via the
 # shared checkpoint_io module.  Unpickling the painting objects needs
 # `paint_samples` importable (it defines SamplePainting/PaintedChunk/
 # BlockPainting); run this from the haplotype_reconstruction dir with bio-env
@@ -435,11 +442,11 @@ import pickle
 import multiprocessing as mp
 
 import checkpoint_io
+import pipeline_runtime
 
 STAGE_VCF = "01_vcf_discovery"       # naive_long_haps (true founders)
 STAGE_SIM = "02_simulation"          # truth_painting + truth_pedigree
-STAGE_L4 = "09_assembly_L4"          # super_blocks_L4 (discovered founders)
-STAGE_PAINT = "10_viterbi_painting"  # tolerance_result (inferred painting)
+STAGE_PAINT = "11_viterbi_painting"  # atomic H1 founder block + Z1 painting
 
 
 def load_global(ckpt_dir, stage):
@@ -450,10 +457,30 @@ def load_contig(ckpt_dir, stage, contig):
     return checkpoint_io.read(checkpoint_io.contig_path(ckpt_dir, stage, contig))
 
 
+def load_stage11_painting_payload(
+    ckpt_dir, contig, *, expected_sample_ids=None, contig_loader=load_contig
+):
+    """Load the required atomic H1/Z1 painting bundle for one contig.
+
+    The Stage-11 checkpoint is the sole production source for both objects.
+    An incomplete bundle is rejected rather than mixing a Z1 painting with an
+    assembly-stage or other founder panel. When expected sample IDs are given,
+    their content and order must exactly match the bundled identifiers.
+    """
+    payload = contig_loader(ckpt_dir, STAGE_PAINT, contig)
+    path = checkpoint_io.contig_path(ckpt_dir, STAGE_PAINT, contig)
+    pipeline_runtime.validate_painting_bundle(
+        payload,
+        expected_sample_ids=expected_sample_ids,
+        context=f"Painting checkpoint {path}",
+    )
+    return payload
+
+
 def _samples_of(painting_obj):
     """Normalize a painting checkpoint to a list of per-sample painting objects.
 
-    Stage 02 `truth_painting` is a list of SamplePainting; stage 10
+    Stage 02 `truth_painting` is a list of SamplePainting; Stage 11 Z1
     `tolerance_result` is a BlockPainting whose `.samples` is that list.
     """
     if isinstance(painting_obj, (list, tuple)):
@@ -501,12 +528,11 @@ def build_truth_founder_lookup(naive_long_haps):
     return build_founder_allele_lookup(np.asarray(sites), haplotypes)
 
 
-def build_inferred_founder_lookup(super_blocks_L4):
-    """Discovered founders: the L4 founder block the painting was painted against
-    (`super_blocks_L4[0]`), whose `.haplotypes` keys are the founder ids used as
-    hap1/hap2 in `tolerance_result`."""
-    fb = super_blocks_L4[0]
-    return build_founder_allele_lookup(np.asarray(fb.positions), dict(fb.haplotypes))
+def build_inferred_founder_lookup(founder_block):
+    """Discovered founders from the single Stage-11 H1 block bundled with Z1."""
+    return build_founder_allele_lookup(
+        np.asarray(founder_block.positions), dict(founder_block.haplotypes)
+    )
 
 
 # =============================================================================
@@ -794,24 +820,23 @@ def _build_one_contig(args):
     truth_lookup, truth_pos = build_truth_founder_lookup(naive)
     del naive, vcf_payload
 
-    # L4 can be several GB.  Materialize only its compact int8 lookup and
-    # positions, then release the full payload before loading Stage 2.
-    l4_payload = load_contig(ckpt_dir, STAGE_L4, contig)
-    l4 = l4_payload["super_blocks_L4"]
-    inf_lookup, inf_pos = build_inferred_founder_lookup(l4)
-    del l4, l4_payload
+    # Load Z1 and its exact H1 founder panel atomically from Stage 11.  Keep
+    # only the compact allele lookup and normalized paintings afterwards.
+    painting_payload = load_stage11_painting_payload(
+        ckpt_dir, contig, expected_sample_ids=sample_names
+    )
+    founder_block = painting_payload[pipeline_runtime.FOUNDER_BLOCK_KEY]
+    inf_lookup, inf_pos = build_inferred_founder_lookup(founder_block)
+    inf_obj = painting_payload["tolerance_result"]
+    inf_samples = _samples_of(inf_obj)
+    del founder_block, inf_obj, painting_payload
+    inf_by_name = _index_by_name(inf_samples, sample_names)
 
     simulation_payload = load_contig(ckpt_dir, STAGE_SIM, contig)
     truth_painting = simulation_payload["truth_painting"]
     truth_samples = _samples_of(truth_painting)
     del truth_painting, simulation_payload
     truth_by_name = _index_by_name(truth_samples, sample_names)
-
-    painting_payload = load_contig(ckpt_dir, STAGE_PAINT, contig)
-    inf_obj = painting_payload["tolerance_result"]
-    inf_samples = _samples_of(inf_obj)
-    del inf_obj, painting_payload
-    inf_by_name = _index_by_name(inf_samples, sample_names)
 
     decoder_rate = float((recombination_model or {}).get(
         "decoder_rate_per_bp", RECOMB_RATE))
@@ -879,8 +904,8 @@ def _build_one_contig(args):
             "raw_all": "Stage-2 raw event log; all simulated gametes",
             "raw": "Stage-2 raw event log; F2/F3 decoder-eligible gametes",
             "truth": "Stage-2 truth painting decoded with the true pedigree",
-            "reconstructed_true": "Stage-10 reconstructed painting decoded with the true pedigree",
-            "inferred": "Stage-10 reconstructed painting decoded with the selected pedigree",
+            "reconstructed_true": "Stage-11 pre-phase Z1 painting + bundled H1 founder block, decoded with the true pedigree",
+            "inferred": "Stage-11 pre-phase Z1 painting + bundled H1 founder block, decoded with the selected pedigree",
         },
         "crossover_midpoints_bp": compact_midpoints,
         "n_meioses_by_track": n_meioses,
@@ -1325,6 +1350,9 @@ def write_analysis_outputs(maps, out_dir):
         f"Simulation model: {model.get('name', 'legacy_constant')}",
         f"Mean process rate: {float(model.get('mean_rate_per_bp', RECOMB_RATE)) * 1e8:.4g} cM/Mb",
         "Decoder prior: one scalar mean rate (profile-blind; no oracle use of the 20/80 boundaries).",
+        "Reconstructed tracks use the atomic Stage-11 pre-phase Z1 painting and bundled H1 founder block;",
+        "its ordered sample IDs must exactly match the Stage-2 global pedigree order.",
+        "Stage-13 Q1 is intentionally not used because the map applies its own phase-aware trio HMM.",
         "Decoded-eligible raw events use the same F2/F3 meioses accessible to the trio decoder;",
         "raw-all additionally checks the complete simulated event generator, including F1 meioses.",
         "",
@@ -1413,6 +1441,73 @@ class _Sample:
     def __init__(self, sample_index, chunks):
         self.sample_index = sample_index
         self.chunks = chunks
+
+
+def _selftest_strict_stage11_loader():
+    """Reject incomplete or sample-misaligned Stage-11 bundles without fallback."""
+    requested_stages = []
+    expected_sample_ids = ["sample_a", "sample_b"]
+
+    def loader_for(payload):
+        def load_payload(_ckpt_dir, stage, _contig):
+            requested_stages.append(stage)
+            if stage != STAGE_PAINT:
+                raise AssertionError(f"unexpected fallback checkpoint stage: {stage}")
+            return payload
+        return load_payload
+
+    missing_founder = {
+        "tolerance_result": object(),
+        pipeline_runtime.SAMPLE_IDS_KEY: expected_sample_ids,
+    }
+    try:
+        load_stage11_painting_payload(
+            "/unused", "chr_test", expected_sample_ids=expected_sample_ids,
+            contig_loader=loader_for(missing_founder),
+        )
+    except KeyError as exc:
+        founder_rejected = pipeline_runtime.FOUNDER_BLOCK_KEY in str(exc)
+    else:
+        founder_rejected = False
+
+    missing_sample_ids = {
+        "tolerance_result": object(),
+        pipeline_runtime.FOUNDER_BLOCK_KEY: object(),
+    }
+    try:
+        load_stage11_painting_payload(
+            "/unused", "chr_test", expected_sample_ids=expected_sample_ids,
+            contig_loader=loader_for(missing_sample_ids),
+        )
+    except KeyError as exc:
+        sample_ids_rejected = pipeline_runtime.SAMPLE_IDS_KEY in str(exc)
+    else:
+        sample_ids_rejected = False
+
+    mismatched_sample_ids = {
+        "tolerance_result": [object(), object()],
+        pipeline_runtime.FOUNDER_BLOCK_KEY: object(),
+        pipeline_runtime.SAMPLE_IDS_KEY: list(reversed(expected_sample_ids)),
+    }
+    try:
+        load_stage11_painting_payload(
+            "/unused", "chr_test", expected_sample_ids=expected_sample_ids,
+            contig_loader=loader_for(mismatched_sample_ids),
+        )
+    except ValueError:
+        mismatch_rejected = True
+    else:
+        mismatch_rejected = False
+
+    ok = (
+        founder_rejected
+        and sample_ids_rejected
+        and mismatch_rejected
+        and requested_stages == [STAGE_PAINT, STAGE_PAINT, STAGE_PAINT]
+    )
+    print("[loader] incomplete/misaligned Stage-11 H1/Z1 bundle rejected "
+          f"without fallback -> {'OK' if ok else 'FAIL'}")
+    return ok
 
 
 def _selftest_driver(seed=3):
@@ -1592,7 +1687,8 @@ def main(argv=None):
         description="Build process, realized, truth-painting, reconstructed, and "
                     "end-to-end Marey maps from BHD simulation checkpoints.")
     p.add_argument("--ckpt-dir", default=".pipeline_checkpoints",
-                   help="completed pipeline.py checkpoint tree (NOT a sweep combo)")
+                   help="completed pipeline.py checkpoint tree with atomic Stage-11 "
+                        "H1/Z1 bundles (NOT a sweep combo)")
     p.add_argument("--bin-mb", type=float, default=1.0, help="physical bin width (Mb)")
     p.add_argument("--out-dir", default="recombination_map",
                    help="output directory for chromosome maps, aggregate local-rate plot, "
@@ -1611,7 +1707,12 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     if args.selftest:
-        ok = _selftest_driver() and _selftest_variable_profile()
+        results = (
+            _selftest_strict_stage11_loader(),
+            _selftest_driver(),
+            _selftest_variable_profile(),
+        )
+        ok = all(results)
         print("=== DRIVER SELF-TEST", "PASSED" if ok else "FAILED", "===")
         return 0 if ok else 1
 

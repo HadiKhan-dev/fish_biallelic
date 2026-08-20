@@ -9,24 +9,117 @@
 # top level here.  Keep this section small -- imports here run in every
 # forkserver worker at startup.
 
-CHECKPOINT_DIR = ".pipeline_checkpoints"
-
 import os
+import hashlib
+
+CHECKPOINT_DIR = os.environ.get(
+    "BHD_SIM_CHECKPOINT_DIR", ".pipeline_checkpoints"
+)
+SIMULATION_OUTPUT_DIR = os.environ.get(
+    "BHD_SIM_OUTPUT_DIR", "results_simulation"
+)
+_SIMULATION_SEED_TEXT = os.environ.get(
+    "BHD_SIMULATION_SEED", "72"
+).strip()
+SIMULATION_SEED = (
+    None
+    if _SIMULATION_SEED_TEXT.lower() in {"none", "random"}
+    else int(_SIMULATION_SEED_TEXT)
+)
+_SIMULATION_CONTIGS_TEXT = os.environ.get("BHD_SIM_CONTIGS")
+_PER_CONTIG_STAGE_NAMES = (
+    "03_block_haplotypes",
+    "04_refinement",
+    "05_residual_discovery",
+    "06_assembly_L1",
+    "07_assembly_L2",
+    "08_assembly_L3",
+    "09_assembly_L4",
+    "10_terminal_cavity",
+    "11_viterbi_painting",
+)
+SIMULATION_STOP_AFTER_STAGE = os.environ.get("BHD_SIM_STOP_AFTER_STAGE")
+if (SIMULATION_STOP_AFTER_STAGE is not None
+        and SIMULATION_STOP_AFTER_STAGE not in _PER_CONTIG_STAGE_NAMES):
+    raise ValueError(
+        "BHD_SIM_STOP_AFTER_STAGE must be one of: "
+        + ", ".join(_PER_CONTIG_STAGE_NAMES)
+    )
+
+
+def _parse_simulation_contig_shard(raw_value):
+    """Parse an explicit comma-separated shard without assigning its order."""
+    if raw_value is None:
+        return None
+    requested = raw_value.split(",")
+    if not requested or any(not name or name != name.strip()
+                            for name in requested):
+        raise ValueError(
+            "BHD_SIM_CONTIGS must be a comma-separated list of exact, "
+            "non-empty contig names without surrounding whitespace"
+        )
+    duplicates = []
+    seen = set()
+    for name in requested:
+        if name in seen and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        raise ValueError(
+            f"BHD_SIM_CONTIGS contains duplicate contigs: {duplicates}"
+        )
+    return tuple(requested)
+
+
+def _select_simulation_contigs(all_contigs, requested_contigs):
+    """Validate requested names and return them in the Stage-2 manifest order."""
+    if requested_contigs is None:
+        return list(all_contigs)
+    known = set(all_contigs)
+    unknown = [name for name in requested_contigs if name not in known]
+    if unknown:
+        raise ValueError(
+            f"BHD_SIM_CONTIGS contains unknown contigs: {unknown}; "
+            f"available contigs: {list(all_contigs)}"
+        )
+    requested = set(requested_contigs)
+    return [name for name in all_contigs if name in requested]
+
+
+SIMULATION_CONTIG_SHARD = _parse_simulation_contig_shard(
+    _SIMULATION_CONTIGS_TEXT
+)
+SIMULATION_SHARD_MODE = SIMULATION_CONTIG_SHARD is not None
+SIMULATION_SHARD_LOG_ID = (
+    hashlib.sha256(",".join(SIMULATION_CONTIG_SHARD).encode()).hexdigest()[:10]
+    if SIMULATION_SHARD_MODE else None
+)
+
+# Run identity overrides: BHD_SIMULATION_SEED, BHD_SIM_CHECKPOINT_DIR,
+# BHD_SIM_OUTPUT_DIR, BHD_NUM_PROCESSES, BHD_SIM_CONTIGS, and
+# BHD_SIM_STOP_AFTER_STAGE. Defaults preserve interactive use.
+
 import checkpoint_io
 from thread_env import force_single_threaded_numeric_libraries
 import pipeline_runtime
+def _finish_simulation_stage_checkpoints(
+        checkpoint_store, stage, contigs, shard_mode):
+    """Require every contig output and publish a marker only for full runs."""
+    pipeline_runtime.require_contig_checkpoints(
+        checkpoint_store, stage, contigs
+    )
+    if not shard_mode and not checkpoint_store.stage_complete(stage):
+        checkpoint_store.mark_stage_complete(stage)
+
+
 
 
 def _load_contig_for_phase_correction(r_name):
-    """Picklable wrapper around the standard checkpoint traversal."""
+    """Load the atomic final-panel painting bundle for phase correction."""
     return pipeline_runtime.load_phase_correction_inputs(
         CHECKPOINT_DIR,
         r_name,
-        tolerance_stage="10_viterbi_painting",
-        founder_stage_keys=(
-            ("09_assembly_L4", "super_blocks_L4"),
-            ("08_assembly_L3", "super_blocks_L3"),
-        ),
+        tolerance_stage="11_viterbi_painting",
     )
 
 
@@ -51,10 +144,30 @@ if __name__ == '__main__':
 
     os.makedirs("logs", exist_ok=True)
     run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join("logs", f"run_{run_timestamp}.log")
+    seed_label = "random" if SIMULATION_SEED is None else str(SIMULATION_SEED)
+    shard_log_suffix = (
+        f"_shard{SIMULATION_SHARD_LOG_ID}" if SIMULATION_SHARD_MODE else ""
+    )
+    log_path = os.path.join(
+        "logs", f"run_sim_seed{seed_label}{shard_log_suffix}_{run_timestamp}.log"
+    )
     sys.stdout = pipeline_runtime.TeeOutput(log_path, sys.stdout)
     print(f"Logging to: {log_path}")
     print(f"Run started: {run_timestamp}")
+    print(
+        f"Simulation run: seed={SIMULATION_SEED}, checkpoints={CHECKPOINT_DIR}, "
+        f"output={SIMULATION_OUTPUT_DIR}"
+    )
+    if SIMULATION_SHARD_MODE:
+        print(
+            f"Simulation chromosome shard {SIMULATION_SHARD_LOG_ID}: "
+            + ", ".join(SIMULATION_CONTIG_SHARD)
+        )
+    if SIMULATION_STOP_AFTER_STAGE is not None:
+        print(
+            "Simulation stop point: "
+            f"after {SIMULATION_STOP_AFTER_STAGE}"
+        )
 
     # =============================================================================
     # RUN-TIME TOGGLES
@@ -74,19 +187,19 @@ if __name__ == '__main__':
     #
     #   SKIP_VALIDATIONS_PAINTING           -- 1 cell:
     #       * Painted Samples Output vs Ground Truth (topology-based)
-    #     Per-sample, per-contig assessment of the Stage 10 Viterbi painting
+    #     Per-sample, per-contig assessment of the Stage 11 Viterbi painting
     #     before any phase correction.  Includes the disc->true founder
     #     relabelling bijection search; the slowest single validation.
     #
     #   SKIP_VALIDATIONS_PHASE_CORRECTION   -- 1 cell:
     #       * Phase Correction vs Ground Truth (allele-level)
-    #     The final BEFORE/AFTER comparison run after Stage 12.  Reports
+    #     The final BEFORE/AFTER comparison run after Stage 13.  Reports
     #     Track1/Track2 accuracy by generation and the perfect-phasing rate.
     #
     # All three default to False (run all validations).
-    SKIP_VALIDATIONS_BLOCK_HAPS = False
-    SKIP_VALIDATIONS_PAINTING = False
-    SKIP_VALIDATIONS_PHASE_CORRECTION = False
+    SKIP_VALIDATIONS_BLOCK_HAPS = SIMULATION_SHARD_MODE
+    SKIP_VALIDATIONS_PAINTING = SIMULATION_SHARD_MODE
+    SKIP_VALIDATIONS_PHASE_CORRECTION = SIMULATION_SHARD_MODE
 
 
     import numpy as np
@@ -122,6 +235,7 @@ if __name__ == '__main__':
     from pedigree_evaluation import parent_columns_match
     import phase_correction
     import residual_discovery
+    import terminal_cavity_refinement
 
 
     warnings.filterwarnings("ignore")
@@ -135,18 +249,26 @@ if __name__ == '__main__':
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_rows', None)
 
-    n_processes = 112
+    n_processes = int(os.environ.get("BHD_NUM_PROCESSES", "112"))
+    available_cpus = pipeline_runtime.available_cpu_count()
+    if not 1 <= n_processes <= available_cpus:
+        raise ValueError(
+            f"BHD_NUM_PROCESSES must lie in [1, {available_cpus}]; "
+            f"received {n_processes}"
+        )
+    print(f"CPU budget: {n_processes} of {available_cpus} available CPUs")
     # Recycle workers after each batch to prevent memory accumulation
     # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
     WORKER_MAXTASKS = 1
 
     # -------------------------------------------------------------------------
-    # REPRODUCIBILITY: Set a master seed for the simulation.
+    # REPRODUCIBILITY: Set BHD_SIMULATION_SEED for the simulation.
     # All random processes (pedigree structure, meiosis, read sampling) derive
-    # deterministic sub-seeds from this value.  Set to None for non-reproducible
-    # runs using system entropy.
+    # deterministic sub-seeds from this value. Use "none" or "random" for
+    # non-reproducible runs using system entropy.
     # -------------------------------------------------------------------------
-    SIMULATION_SEED = 72
+    # SIMULATION_SEED is parsed at module import so forkserver workers and the
+    # main process share one exact run identity.
 
     # Start the forkserver NOW, before any data is loaded.
     # The forkserver process inherits only the current ~500 MB footprint
@@ -164,8 +286,8 @@ if __name__ == '__main__':
     # PER-CONTIG CHECKPOINTING
     # =============================================================================
     # Each stage gets a subdirectory.  Each contig gets its own checkpoint
-    # file (a blosc2-compressed pickle, suffix ".pkl.b2"; see checkpoint_io).
-    # A _done marker indicates the stage completed for ALL contigs.
+    # file (a protocol-5/Blosc frame, suffix ".p5.b2"; see checkpoint_io).
+    # The format-qualified done marker means all contigs completed.
     #
     # On resume, _ensure_key loads ONLY the keys a stage needs from checkpoints,
     # avoiding the monolithic pickle that caused OOM.
@@ -176,10 +298,9 @@ if __name__ == '__main__':
     #   After validations (before stage 9) -> drop simd_block_results, L1, L2, L3
     #   After stage 9 -> drop simd_probs, simd_priors
     #
-    # To force a full re-run:  rm -rf .pipeline_checkpoints/
-    # To re-run from stage N:  delete that stage's dir and all later ones.
+    # To force a full re-run, remove the exact configured checkpoint directory
+    # after verifying its resolved path. To resume, keep completed stage files.
 
-    CHECKPOINT_DIR = ".pipeline_checkpoints"
     checkpoint_store = pipeline_runtime.CheckpointStore(
         CHECKPOINT_DIR, nthreads=n_processes
     )
@@ -190,11 +311,42 @@ if __name__ == '__main__':
     load_contig = checkpoint_store.load_contig
     save_global = checkpoint_store.save_global
     load_global = checkpoint_store.load_global
+    if SIMULATION_SHARD_MODE:
+        missing_shared_stages = [
+            stage for stage in ("01_vcf_discovery", "02_simulation")
+            if not stage_complete(stage)
+        ]
+        if missing_shared_stages:
+            raise RuntimeError(
+                "BHD_SIM_CONTIGS requires globally completed shared "
+                "Stages 1-2; missing format-qualified completion markers for: "
+                f"{missing_shared_stages}"
+            )
+        print(
+            "[SHARD] Verified globally completed shared Stages 1-2; "
+            "diagnostic validations and per-contig plots are disabled"
+        )
+
+    def _finish_per_contig_stage(stage):
+        """Verify a shard/stop boundary and publish only normal-run markers."""
+        _finish_simulation_stage_checkpoints(
+            checkpoint_store, stage, region_keys,
+            shard_mode=SIMULATION_SHARD_MODE,
+        )
+        if SIMULATION_SHARD_MODE:
+            print(
+                f"[SHARD] Verified {stage} outputs for "
+                f"{', '.join(region_keys)}; global completion marker not written"
+            )
+        if SIMULATION_STOP_AFTER_STAGE == stage:
+            print(f"[STOP] Completed and verified {stage}; exiting cleanly")
+            raise SystemExit(0)
+
 
     # Which stage checkpoint holds each per-contig key.
     # Values can be a single stage string or a list (tried in order, first hit wins).
     # simd_block_results lives in 03 before refinement, 04 after refinement,
-    # and 04b after residual discovery.
+    # and 05 after residual discovery.
     _KEY_SOURCE = {
         'naive_long_haps':    '01_vcf_discovery',
         'simulated_reads':    '02_simulation',
@@ -206,8 +358,8 @@ if __name__ == '__main__':
         'super_blocks_L1':    '06_assembly_L1',
         'super_blocks_L2':    '07_assembly_L2',
         'super_blocks_L3':    '08_assembly_L3',
-        'super_blocks_L4':    '09_assembly_L4',
-        'tolerance_result':   '10_viterbi_painting',
+        'super_blocks_L4':    '10_terminal_cavity',
+        'tolerance_result':   '11_viterbi_painting',
     }
 
     def _ensure_key(r_name, key):
@@ -334,6 +486,11 @@ if __name__ == '__main__':
             gc.collect()
 
         print(f"\nAll regions processed in {time.time() - total_start:.2f}s")
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store,
+            STAGE_1,
+            [region['contig'] for region in regions_config],
+        )
         mark_stage_complete(STAGE_1)
 
 #%%
@@ -342,10 +499,112 @@ if __name__ == '__main__':
     # STAGE 2: Simulation + Post-processing
     # =========================================================================
     STAGE_2 = "02_simulation"
+    generation_sizes = (20, 100, 200)
+    STRESS_TEST_MUTATIONS = False
+    mutate_rate = 1e-5 if STRESS_TEST_MUTATIONS else 1e-10
+    current_stage2_region_keys = [
+        region['contig'] for region in regions_config
+    ]
+    stage2_run_spec = {
+        'ordered_regions': tuple(
+            (region['contig'], int(region['start']), int(region['end']))
+            for region in regions_config
+        ),
+        'generation_sizes': generation_sizes,
+        'recombination_rate_per_bp': 5e-8,
+        'mutation_rate_per_bp': mutate_rate,
+        'read_depth': 5.0,
+        'read_error_rate': 0.02,
+        'snps_per_block': 200,
+        'snp_shift': 200,
+    }
+    STAGE_2_REQUIRED_KEYS = frozenset({
+        'truth_pedigree',
+        'sample_names',
+        'region_keys',
+        'simulation_seed',
+        'requested_simulation_seed',
+        'run_spec',
+        'simulation_state',
+    })
+
+    def require_completed_stage2_payload(payload, context):
+        missing_keys = STAGE_2_REQUIRED_KEYS.difference(payload)
+        if missing_keys:
+            raise RuntimeError(
+                f"{context} lacks required keys: {sorted(missing_keys)!r}"
+            )
+        if payload['simulation_state'] != 'complete':
+            raise RuntimeError(
+                f"{context} has simulation_state "
+                f"{payload['simulation_state']!r}, not 'complete'"
+            )
+
+    def require_current_stage2_identity(payload, context):
+        if payload['requested_simulation_seed'] != SIMULATION_SEED:
+            raise RuntimeError(
+                f"{context} was generated for requested seed "
+                f"{payload['requested_simulation_seed']!r}, not "
+                f"{SIMULATION_SEED!r}"
+            )
+        if payload['simulation_seed'] is None:
+            raise RuntimeError(f"{context} has no realized simulation seed")
+        if (SIMULATION_SEED is not None
+                and payload['simulation_seed'] != SIMULATION_SEED):
+            raise RuntimeError(
+                f"{context} has realized seed "
+                f"{payload['simulation_seed']!r}, not requested fixed seed "
+                f"{SIMULATION_SEED!r}"
+            )
+        if payload['run_spec'] != stage2_run_spec:
+            raise RuntimeError(
+                f"{context} run specification does not match this run"
+            )
+        if list(payload['region_keys']) != current_stage2_region_keys:
+            raise RuntimeError(
+                f"{context} contig order does not match this run"
+            )
+
+    # An allocation can end after the complete global payload is durable but
+    # before its tiny marker is published. Validate it, then finish atomically.
+    if (not stage_complete(STAGE_2)
+            and checkpoint_store.global_done(STAGE_2)):
+        durable_stage2_payload = load_global(STAGE_2)
+        if 'simulation_state' not in durable_stage2_payload:
+            raise RuntimeError(
+                f"{STAGE_2} global payload lacks simulation_state"
+            )
+        durable_state = durable_stage2_payload['simulation_state']
+        if durable_state == 'complete':
+            require_completed_stage2_payload(
+                durable_stage2_payload, f"Durable {STAGE_2}"
+            )
+            require_current_stage2_identity(
+                durable_stage2_payload, f"Durable {STAGE_2}"
+            )
+            pipeline_runtime.require_contig_checkpoints(
+                checkpoint_store, STAGE_2,
+                durable_stage2_payload['region_keys'],
+            )
+            mark_stage_complete(STAGE_2)
+            print(f"  [RECOVER] Published completion marker for {STAGE_2}")
+        elif durable_state != 'in_progress':
+            raise RuntimeError(
+                f"{STAGE_2} global payload has invalid simulation_state "
+                f"{durable_state!r}"
+            )
+        del durable_stage2_payload
 
     if stage_complete(STAGE_2):
         print(f"\n[RESUME] Skipping simulation (checkpoint found)")
         g = load_global(STAGE_2)
+        require_completed_stage2_payload(g, STAGE_2)
+        require_current_stage2_identity(g, STAGE_2)
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_2, g['region_keys']
+        )
+        realized_simulation_seed = g["simulation_seed"]
+        requested_simulation_seed = g["requested_simulation_seed"]
         truth_pedigree = g['truth_pedigree']
         sample_names = g['sample_names']
         region_keys = g['region_keys']
@@ -353,7 +612,7 @@ if __name__ == '__main__':
         # Per-contig data loaded on-demand via _ensure_key
     else:
         start = time.time()
-        output_dir = "results_simulation"
+        output_dir = SIMULATION_OUTPUT_DIR
         try:
             os.makedirs(output_dir, exist_ok=True)
         except OSError:
@@ -374,16 +633,76 @@ if __name__ == '__main__':
             sites_list.append(sites)
             region_keys.append(r_name)
 
+        # Bind the checkpoint root to one realized seed before simulation or
+        # any per-contig Stage-2 writes. This makes an entropy-seeded run
+        # reproducible on restart and prevents old partial contigs from being
+        # silently mixed with a newly generated pedigree.
+        if checkpoint_store.global_done(STAGE_2):
+            stage2_provenance = load_global(STAGE_2)
+            partial_required_keys = {
+                'simulation_seed', 'requested_simulation_seed',
+                'region_keys', 'run_spec', 'simulation_state',
+            }
+            missing_keys = partial_required_keys.difference(stage2_provenance)
+            if missing_keys:
+                raise RuntimeError(
+                    f"Partial {STAGE_2} checkpoint lacks required keys: "
+                    f"{sorted(missing_keys)!r}"
+                )
+            if stage2_provenance['simulation_state'] != 'in_progress':
+                raise RuntimeError(
+                    f"Partial {STAGE_2} checkpoint has simulation_state "
+                    f"{stage2_provenance['simulation_state']!r}, not "
+                    "'in_progress'"
+                )
+            require_current_stage2_identity(
+                stage2_provenance, f"Partial {STAGE_2} checkpoint"
+            )
+            realized_simulation_seed = stage2_provenance["simulation_seed"]
+            requested_simulation_seed = (
+                stage2_provenance["requested_simulation_seed"]
+            )
+            del stage2_provenance
+            print(
+                f"  [RESUME] {STAGE_2} realized seed "
+                f"{realized_simulation_seed}"
+            )
+        else:
+            partial_contigs = [
+                r_name for r_name in region_keys
+                if contig_done(STAGE_2, r_name)
+            ]
+            if partial_contigs:
+                raise RuntimeError(
+                    f"Partial {STAGE_2} contigs lack run provenance "
+                    f"({partial_contigs}); use a fresh checkpoint directory"
+                )
+            realized_simulation_seed = (
+                SIMULATION_SEED
+                if SIMULATION_SEED is not None
+                else int.from_bytes(os.urandom(8), "little")
+            )
+            save_global(STAGE_2, {
+                'simulation_seed': realized_simulation_seed,
+                'requested_simulation_seed': SIMULATION_SEED,
+                'region_keys': list(region_keys),
+                'run_spec': stage2_run_spec,
+                'simulation_state': 'in_progress',
+            })
+            if not checkpoint_store.global_done(STAGE_2):
+                raise OSError(
+                    f"Failed to checkpoint early {STAGE_2} provenance"
+                )
+            print(
+                f"  {STAGE_2} realized seed: {realized_simulation_seed}"
+            )
+
         # 2. Run Multi-Contig Simulation
-        generation_sizes = [20, 100, 200]
         print(f"Running Multi-Contig Simulation for {len(region_keys)} regions...")
 
-        STRESS_TEST_MUTATIONS = False
         if STRESS_TEST_MUTATIONS:
-            mutate_rate = 1e-5
             print(f"STRESS TEST MODE: Using mutation rate {mutate_rate} (~1% per generation)")
         else:
-            mutate_rate = 1e-10
             print(f"Normal mode: Using mutation rate {mutate_rate} (minimal mutations)")
 
         t0 = time.time()
@@ -391,12 +710,12 @@ if __name__ == '__main__':
             founders_list, 
             sites_list, 
             generation_sizes, 
-            recomb_rate=5e-8, 
-            mutate_rate=mutate_rate,
+            recomb_rate=stage2_run_spec['recombination_rate_per_bp'],
+            mutate_rate=stage2_run_spec['mutation_rate_per_bp'],
             output_plot=None,
             parallel=True,
             num_processes=n_processes,
-            seed=SIMULATION_SEED
+            seed=realized_simulation_seed
         )
         print(f"Pedigree simulation: {time.time()-t0:.1f}s")
 
@@ -410,57 +729,109 @@ if __name__ == '__main__':
 
         sample_names = truth_pedigree['Sample'].tolist()
 
-        # 4. Process All Contigs in Parallel (read sampling, chunking, probs)
+        # 4. Process and checkpoint one contig at a time. Holding all 22
+        # processed payloads while compression workers make pickle copies can
+        # exceed the intended memory budget. These per-contig seeds exactly
+        # match process_all_contigs_parallel for a fixed master seed.
         t0 = time.time()
-        contig_results = simulate_sequences.process_all_contigs_parallel(
-            region_keys, all_offspring_lists, truth_paintings_lists, sites_list,
-            read_depth=5, error_rate=0.02,
-            snps_per_block=200, snp_shift=200,
-            num_processes=n_processes,
-            seed=(SIMULATION_SEED + 1_000_000) if SIMULATION_SEED is not None else None
+        read_seed = realized_simulation_seed + 1_000_000
+        read_seed_rng = np.random.default_rng(read_seed)
+        contig_read_seeds = [
+            int(read_seed_rng.integers(0, 2**63))
+            for _ in region_keys
+        ]
+        print(
+            "Post-processing one contig at a time for bounded peak memory"
+            + (f" (seed={read_seed})" if read_seed is not None else "")
         )
-        
-        _stage2_items = []
-        for r_name in region_keys:
-            result = contig_results[r_name]
-            multi_contig_results[r_name]['simulated_reads'] = result['simulated_reads']
-            multi_contig_results[r_name]['simd_genomic_data'] = result['simd_genomic_data']
-            multi_contig_results[r_name]['simd_probs'] = result['simd_probs']
-            multi_contig_results[r_name]['simd_priors'] = result['simd_priors']
-            multi_contig_results[r_name]['truth_painting'] = result['truth_painting']
-            _stage2_items.append((r_name, {
-                'simulated_reads': result['simulated_reads'],
-                'simd_genomic_data': result['simd_genomic_data'],
-                'simd_probs': result['simd_probs'],
-                'simd_priors': result['simd_priors'],
-                'truth_painting': result['truth_painting'],
-            }))
-        # All contigs are resident at once here (process_all_contigs_parallel
-        # returned them together), so write them concurrently rather than one
-        # at a time.
-        checkpoint_io.save_contigs_parallel(CHECKPOINT_DIR, STAGE_2, _stage2_items, n_processes)
-        
-        print(f"Post-processing ({len(region_keys)} contigs parallel): {time.time()-t0:.1f}s")
+
+        stage2_payload_keys = (
+            'simulated_reads', 'simd_genomic_data', 'simd_probs',
+            'simd_priors', 'truth_painting',
+        )
+        for contig_index, r_name in enumerate(region_keys):
+            if contig_done(STAGE_2, r_name):
+                print(f"  [RESUME] {r_name} post-processing already done")
+            else:
+                result = (
+                    simulate_sequences._process_single_contig_postprocessing((
+                        r_name,
+                        all_offspring_lists[contig_index],
+                        truth_paintings_lists[contig_index],
+                        sites_list[contig_index],
+                        stage2_run_spec['read_depth'],
+                        stage2_run_spec['read_error_rate'],
+                        stage2_run_spec['snps_per_block'],
+                        stage2_run_spec['snp_shift'],
+                        contig_read_seeds[contig_index],
+                    ))
+                )
+                payload = {
+                    key: result[key] for key in stage2_payload_keys
+                }
+                save_contig(STAGE_2, r_name, payload)
+                if not contig_done(STAGE_2, r_name):
+                    raise OSError(
+                        f"Failed to checkpoint {STAGE_2}/{r_name}"
+                    )
+                del payload, result
+
+            # Release each contig as soon as its checkpoint is durable.
+            all_offspring_lists[contig_index] = None
+            truth_paintings_lists[contig_index] = None
+            founders_list[contig_index] = None
+            sites_list[contig_index] = None
+            gc.collect()
+
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_2, region_keys
+        )
+        print(
+            f"Post-processing ({len(region_keys)} contigs, bounded): "
+            f"{time.time()-t0:.1f}s"
+        )
 
         print("\nSimulation, Sequencing, and Chunking complete for all regions.")
         print(f"Total time: {time.time()-start:.1f}s")
 
-        save_global(STAGE_2, {
+        completed_stage2_payload = {
             'truth_pedigree': truth_pedigree,
             'sample_names': sample_names,
             'region_keys': region_keys,
-        })
+            'simulation_seed': realized_simulation_seed,
+            'requested_simulation_seed': SIMULATION_SEED,
+            'run_spec': stage2_run_spec,
+            'simulation_state': 'complete',
+        }
+        save_global(STAGE_2, completed_stage2_payload)
+        if not checkpoint_store.global_done(STAGE_2):
+            raise OSError(f"Failed to checkpoint {STAGE_2}/_global")
+        persisted_stage2_payload = load_global(STAGE_2)
+        require_completed_stage2_payload(
+            persisted_stage2_payload, f"Persisted {STAGE_2}"
+        )
+        for key in (
+            'sample_names', 'region_keys', 'simulation_seed',
+            'requested_simulation_seed', 'run_spec',
+        ):
+            if persisted_stage2_payload[key] != completed_stage2_payload[key]:
+                raise RuntimeError(
+                    f"Persisted {STAGE_2} changed {key!r} during checkpointing"
+                )
+        del persisted_stage2_payload, completed_stage2_payload
+        mark_stage_complete(STAGE_2)
         # Free heavy simulation data — all checkpointed, will reload on demand
         for r_name in region_keys:
             for _k in ('simulated_reads', 'simd_genomic_data', 'simd_probs', 'simd_priors', 'truth_painting'):
                 multi_contig_results[r_name].pop(_k, None)
-        del contig_results; gc.collect()
-        mark_stage_complete(STAGE_2)
+        del all_offspring_lists, truth_paintings_lists
+        del founders_list, sites_list
+        gc.collect()
     
 #%%
 if __name__ == '__main__':
     # Ensure output_dir and globals exist for all subsequent stages
-    output_dir = "results_simulation"
+    output_dir = SIMULATION_OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)
 
     if 'region_keys' not in dir() or region_keys is None:
@@ -469,13 +840,34 @@ if __name__ == '__main__':
         sample_names = g['sample_names']
         truth_pedigree = g['truth_pedigree']
         del g
+    if SIMULATION_SHARD_MODE:
+        all_region_keys = list(region_keys)
+        if not checkpoint_store.global_done("02_simulation"):
+            raise RuntimeError(
+                "BHD_SIM_CONTIGS requires the global Stage-2 manifest"
+            )
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, "01_vcf_discovery", all_region_keys
+        )
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, "02_simulation", all_region_keys
+        )
+        region_keys = _select_simulation_contigs(
+            all_region_keys, SIMULATION_CONTIG_SHARD
+        )
+        print(
+            f"[SHARD] Processing {len(region_keys)} of "
+            f"{len(all_region_keys)} contigs in Stage-2 manifest order: "
+            f"{', '.join(region_keys)}"
+        )
+
 
     # =========================================================================
     # STAGE 3: Discover Block Haplotypes from Simulated Reads
     # =========================================================================
     STAGE_3 = "03_block_haplotypes"
 
-    if stage_complete(STAGE_3):
+    if stage_complete(STAGE_3) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping block haplotype discovery (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -520,7 +912,10 @@ if __name__ == '__main__':
 
         print(f"\nBlock haplotype discovery complete in {time.time()-start:.1f}s")
         _prune_key('simd_genomic_data')
-        mark_stage_complete(STAGE_3)
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_3, region_keys
+        )
+    _finish_per_contig_stage(STAGE_3)
 
 #%%
 if __name__ == '__main__':
@@ -529,7 +924,7 @@ if __name__ == '__main__':
     # =========================================================================
     STAGE_4 = "04_refinement"
 
-    if stage_complete(STAGE_4):
+    if stage_complete(STAGE_4) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping refinement (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -622,7 +1017,10 @@ if __name__ == '__main__':
 
         _prune_key('simulated_reads')
         _prune_key('simd_probs')
-        mark_stage_complete(STAGE_4)
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_4, region_keys
+        )
+    _finish_per_contig_stage(STAGE_4)
 
 #%%
 if __name__ == '__main__':
@@ -631,7 +1029,7 @@ if __name__ == '__main__':
     # =========================================================================
     STAGE_5 = "05_residual_discovery"
 
-    if stage_complete(STAGE_5):
+    if stage_complete(STAGE_5) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping residual discovery (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -664,6 +1062,7 @@ if __name__ == '__main__':
             )
 
             multi_contig_results[r_name]['simd_block_results'] = blocks_out
+            pipeline_runtime.strip_block_evidence(blocks_out)
             save_contig(STAGE_5, r_name, {'simd_block_results': blocks_out})
 
             print(f"    Output: {len(blocks_out)} blocks, "
@@ -674,7 +1073,10 @@ if __name__ == '__main__':
                 multi_contig_results[r_name].pop(_k, None)
 
         print(f"\nResidual discovery complete in {time.time()-start:.1f}s")
-        mark_stage_complete(STAGE_5)
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_5, region_keys
+        )
+    _finish_per_contig_stage(STAGE_5)
 
 #%%
 if __name__ == '__main__':
@@ -683,7 +1085,7 @@ if __name__ == '__main__':
     # =========================================================================
     STAGE_6 = "06_assembly_L1"
 
-    if stage_complete(STAGE_6):
+    if stage_complete(STAGE_6) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping L1 assembly (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -722,6 +1124,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L1'] = super_blocks
+            pipeline_runtime.strip_block_evidence(super_blocks)
             save_contig(STAGE_6, r_name, {'super_blocks_L1': super_blocks})
             
             hap_counts = [len(b.haplotypes) for b in super_blocks]
@@ -737,7 +1140,10 @@ if __name__ == '__main__':
 
         print(f"\nHierarchical Assembly (Level 1) complete in {time.time()-start:.1f}s")
         _prune_key('simd_block_results')
-        mark_stage_complete(STAGE_6)
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_6, region_keys
+        )
+    _finish_per_contig_stage(STAGE_6)
 
 #%%
 if __name__ == '__main__':
@@ -746,7 +1152,7 @@ if __name__ == '__main__':
     # =========================================================================
     STAGE_7 = "07_assembly_L2"
 
-    if stage_complete(STAGE_7):
+    if stage_complete(STAGE_7) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping L2 assembly (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -787,6 +1193,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L2'] = super_blocks_L2
+            pipeline_runtime.strip_block_evidence(super_blocks_L2)
             save_contig(STAGE_7, r_name, {'super_blocks_L2': super_blocks_L2})
             
             haps_per_block = [len(b.haplotypes) for b in super_blocks_L2]
@@ -802,7 +1209,10 @@ if __name__ == '__main__':
 
         print(f"\nHierarchical Assembly (Level 2) complete in {time.time()-start_time:.1f}s")
         _prune_key('super_blocks_L1')
-        mark_stage_complete(STAGE_7)
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_7, region_keys
+        )
+    _finish_per_contig_stage(STAGE_7)
 
 #%%
 if __name__ == '__main__':
@@ -811,7 +1221,7 @@ if __name__ == '__main__':
     # =========================================================================
     STAGE_8 = "08_assembly_L3"
 
-    if stage_complete(STAGE_8):
+    if stage_complete(STAGE_8) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping L3 assembly (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -852,6 +1262,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L3'] = super_blocks_L3
+            pipeline_runtime.strip_block_evidence(super_blocks_L3)
             save_contig(STAGE_8, r_name, {'super_blocks_L3': super_blocks_L3})
             
             haps_per_block = [len(b.haplotypes) for b in super_blocks_L3]
@@ -865,7 +1276,10 @@ if __name__ == '__main__':
 
         print(f"\nHierarchical Assembly (Level 3) complete in {time.time()-start_time:.1f}s")
         _prune_key('super_blocks_L2')
-        mark_stage_complete(STAGE_8)
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_8, region_keys
+        )
+    _finish_per_contig_stage(STAGE_8)
 
 #%%
 if __name__ == '__main__':
@@ -874,7 +1288,7 @@ if __name__ == '__main__':
     # =========================================================================
     STAGE_9 = "09_assembly_L4"
 
-    if stage_complete(STAGE_9):
+    if stage_complete(STAGE_9) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping L4 assembly (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -926,6 +1340,9 @@ if __name__ == '__main__':
                 print(f"    Sites per block: {[len(b.positions) for b in super_blocks_L4]}")
                 print(f"    Haps per super-block: {haps_per_block}")
 
+            pipeline_runtime.strip_block_evidence(
+                multi_contig_results[r_name]['super_blocks_L4']
+            )
             save_contig(STAGE_9, r_name, {
                 'super_blocks_L4': multi_contig_results[r_name]['super_blocks_L4']
             })
@@ -936,7 +1353,97 @@ if __name__ == '__main__':
 
         print(f"\nHierarchical Assembly (Level 4) complete in {time.time()-start_time:.1f}s")
         _prune_key('super_blocks_L3')
-        mark_stage_complete(STAGE_9)
+        pipeline_runtime.require_contig_checkpoints(
+            checkpoint_store, STAGE_9, region_keys
+        )
+    _finish_per_contig_stage(STAGE_9)
+#%%
+if __name__ == '__main__':
+    # =========================================================================
+    # STAGE 10: Terminal whole-bin cavity refinement (canonical final panel)
+    # =========================================================================
+    # Stage 9 is the raw L4 assembly intermediate. This stage publishes the
+    # only founder panel consumed by painting, pedigree and phase correction.
+    STAGE_10 = "10_terminal_cavity"
+
+    missing_terminal = [r for r in region_keys if not contig_done(STAGE_10, r)]
+    if (stage_complete(STAGE_10) and not SIMULATION_SHARD_MODE
+            and missing_terminal):
+        raise RuntimeError(
+            f"{STAGE_10} is marked complete but lacks: {missing_terminal}"
+        )
+    if stage_complete(STAGE_10) and not SIMULATION_SHARD_MODE:
+        print("\n[RESUME] Skipping terminal cavity refinement "
+              "(checkpoint found)")
+    else:
+        print("\n" + "="*60)
+        print("RUNNING: Terminal Cavity Refinement (canonical final panel)")
+        print("="*60)
+        start_time = time.time()
+        terminal_threads = min(
+            n_processes,
+            pipeline_runtime.available_cpu_count(),
+        )
+        print(f"  Sequential contigs; {terminal_threads} Numba threads/contig")
+
+        for r_name in region_keys:
+            if contig_done(STAGE_10, r_name):
+                print(f"  [RESUME] {r_name} already done")
+                continue
+            print(f"\n  [Terminal] Processing {r_name}...")
+
+            stage9 = load_contig(STAGE_9, r_name)
+            l4_blocks = pipeline_runtime.strip_block_probs(
+                stage9['super_blocks_L4']
+            )
+            del stage9
+            if len(l4_blocks) != 1:
+                raise RuntimeError(
+                    f"{r_name}: terminal refinement requires exactly one "
+                    f"chromosome-length L4 block; found {len(l4_blocks)}"
+                )
+
+            stage2 = load_contig(STAGE_2, r_name)
+            source_probs = stage2['simd_probs']
+            del stage2
+            global_probs = np.ascontiguousarray(source_probs, dtype=np.float32)
+            del source_probs
+            stage1 = load_contig(STAGE_1, r_name)
+            global_sites = np.asarray(stage1['naive_long_haps'][0])
+            del stage1
+
+            final_blocks, diagnostics = (
+                terminal_cavity_refinement.refine_terminal_cavity_blocks(
+                    l4_blocks,
+                    global_sites,
+                    global_probs,
+                    return_diagnostics=True,
+                    num_threads=terminal_threads,
+                )
+            )
+            pipeline_runtime.strip_block_probs(final_blocks)
+            summary = (
+                terminal_cavity_refinement.summarize_terminal_cavity_results(
+                    diagnostics
+                )
+            )
+            pipeline_runtime.strip_block_evidence(final_blocks)
+            save_contig(STAGE_10, r_name, {
+                'super_blocks_L4': final_blocks,
+                'terminal_cavity_summary': summary,
+            })
+            if not contig_done(STAGE_10, r_name):
+                raise OSError(f"Failed to checkpoint {STAGE_10}/{r_name}")
+            print(
+                f"    Changed {summary['changed_founder_cells']} founder "
+                f"cells at {summary['changed_sites']} sites"
+            )
+            del l4_blocks, global_probs, global_sites, final_blocks, diagnostics
+            gc.collect()
+
+        print(f"Terminal refinement complete in {time.time()-start_time:.1f}s")
+    _finish_per_contig_stage(STAGE_10)
+
 
 #%%
 if __name__ == '__main__' and not SKIP_VALIDATIONS_BLOCK_HAPS:
@@ -1289,15 +1796,14 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_BLOCK_HAPS:
     for r_name in region_keys:
         print(f"\n{r_name}:")
         
-        _ensure_key(r_name, 'super_blocks_L4')
         _ensure_key(r_name, 'naive_long_haps')
-        if 'super_blocks_L4' in multi_contig_results[r_name]:
-            final_blocks = multi_contig_results[r_name]['super_blocks_L4']
-            level_name = "L4"
-        else:
-            _ensure_key(r_name, 'super_blocks_L3')
-            final_blocks = multi_contig_results[r_name]['super_blocks_L3']
-            level_name = "L3 (final)"
+        # Validate the canonical Stage-10 terminal panel.  It may have been
+        # evicted from memory after refinement, so require an explicit reload;
+        # falling back to L3 here would silently validate a different panel
+        # from the one used by every downstream stage.
+        _ensure_key(r_name, 'super_blocks_L4')
+        final_blocks = multi_contig_results[r_name]['super_blocks_L4']
+        level_name = "L4 + terminal cavity"
         
         orig_sites, orig_haps = multi_contig_results[r_name]['naive_long_haps']
         orig_haps_concrete = simulate_sequences.concretify_haps(orig_haps)
@@ -1376,11 +1882,21 @@ if __name__ == '__main__':
     gc.collect()
 
     # =============================================================================
-    # STAGE 10: VITERBI PAINTING (using DISCOVERED haplotypes from L4 assembly)
+    # STAGE 11: VITERBI PAINTING (using DISCOVERED haplotypes from L4 assembly)
     # =============================================================================
-    STAGE_10 = "10_viterbi_painting"
+    STAGE_11 = "11_viterbi_painting"
 
-    if stage_complete(STAGE_10):
+    missing_painting = [
+        r for r in region_keys if not contig_done(STAGE_11, r)
+    ]
+    if (stage_complete(STAGE_11) and not SIMULATION_SHARD_MODE
+            and missing_painting):
+        raise RuntimeError(
+            f"{STAGE_11} is marked complete but lacks: "
+            f"{missing_painting}"
+        )
+
+    if stage_complete(STAGE_11) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping Viterbi painting (checkpoint found)")
     else:
         print("\n" + "="*60)
@@ -1389,21 +1905,24 @@ if __name__ == '__main__':
 
         with paint_samples.PaintingPoolManager(num_processes=n_processes) as painter:
             for r_name in region_keys:
-                if contig_done(STAGE_10, r_name):
+                if contig_done(STAGE_11, r_name):
                     print(f"  [RESUME] {r_name} already done")
                     continue
                 print(f"\n[Viterbi Painting] Processing Region: {r_name}")
 
-                # Retrieve Data — use L4 discovered super-block
-                _ensure_key(r_name, 'super_blocks_L4')
+                # Strictly paint the canonical final panel from Stage 10.
+                terminal_payload = load_contig(STAGE_10, r_name)
+                final_blocks = terminal_payload['super_blocks_L4']
+                if len(final_blocks) != 1:
+                    raise RuntimeError(
+                        f"{r_name}: painting requires exactly one final L4 "
+                        f"block; found {len(final_blocks)}"
+                    )
+                discovered_block = final_blocks[0]
+                del terminal_payload, final_blocks
+
                 _ensure_key(r_name, 'simd_probs')
                 _ensure_key(r_name, 'naive_long_haps')
-                if 'super_blocks_L4' in multi_contig_results[r_name]:
-                    discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
-                else:
-                    _ensure_key(r_name, 'super_blocks_L3')
-                    discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
-                
                 global_probs = multi_contig_results[r_name]['simd_probs']
                 sites, _ = multi_contig_results[r_name]['naive_long_haps']
 
@@ -1420,27 +1939,49 @@ if __name__ == '__main__':
                 multi_contig_results[r_name]['tolerance_result'] = painting_result
 
                 # Population painting visualization
-                print(f"  Generating Population Painting Plot...")
-                plot_filename = os.path.join(output_dir, f"{r_name}_viterbi_population.png")
-                paint_samples.plot_population_painting(
-                    painting_result,
-                    output_file=plot_filename,
-                    title=f"Viterbi Painting (Discovered Haplotypes) - {r_name}",
-                    sample_names=sample_names,
-                    figsize_width=20,
-                    row_height_per_sample=0.25
-                )
+                if not SIMULATION_SHARD_MODE:
+                    print(f"  Generating Population Painting Plot...")
+                    plot_filename = os.path.join(output_dir, f"{r_name}_viterbi_population.png")
+                    paint_samples.plot_population_painting(
+                        painting_result,
+                        output_file=plot_filename,
+                        title=f"Viterbi Painting (Discovered Haplotypes) - {r_name}",
+                        sample_names=sample_names,
+                        figsize_width=20,
+                        row_height_per_sample=0.25
+                    )
 
-                save_contig(STAGE_10, r_name, {'tolerance_result': painting_result})
+                founder_block = pipeline_runtime.compact_founder_block(
+                    discovered_block
+                )
+                save_contig(STAGE_11, r_name, {
+                    'tolerance_result': painting_result,
+                    pipeline_runtime.FOUNDER_BLOCK_KEY: founder_block,
+                    pipeline_runtime.SAMPLE_IDS_KEY: tuple(
+                        str(value) for value in sample_names
+                    ),
+                })
+                del founder_block
 
                 # Free this contig's data immediately
                 for _k in ('simd_probs', 'tolerance_result', 'super_blocks_L4'):
                     multi_contig_results[r_name].pop(_k, None)
 
+        missing_painting = [
+            r for r in region_keys if not contig_done(STAGE_11, r)
+        ]
+        if missing_painting:
+            raise OSError(f"Failed to checkpoint {STAGE_11}: {missing_painting}")
         print("\nViterbi Painting complete.")
         _prune_key('simd_probs')
         _prune_key('simd_priors')
-        mark_stage_complete(STAGE_10)
+    _finish_per_contig_stage(STAGE_11)
+    if SIMULATION_SHARD_MODE:
+        print(
+            "[SHARD] Selected contigs completed through Stage 11; "
+            "exiting before global Stage 12"
+        )
+        raise SystemExit(0)
 
 #%%
 if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
@@ -1448,10 +1989,10 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
     # VALIDATE: Painted Samples Output Against Ground Truth (topology-based)
     # ==========================================================================
     # Per-sample, per-contig assessment of paint_samples (Viterbi painting,
-    # Stage 10) output before any downstream correction is applied.
+    # Stage 11) output before any downstream correction is applied.
     #
     # The painting at this stage is an UNORDERED pair of founder IDs at each
-    # position (no phase information; phase is introduced in Stage 12).  The
+    # position (no phase information; phase is introduced in Stage 13).  The
     # discovered founder ID space differs from the truth founder ID space by
     # a relabelling -- a bijection M : disc -> true that is constant across
     # the chromosome (i.e. disc-hap k is "the same biological haplotype" as
@@ -1478,12 +2019,12 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
     #
     # Writes a single CSV: paint_samples_topology_evaluation.csv, with one
     # row per (sample, contig).  No allele-level CSV is produced -- per-site
-    # allele accuracy is reported by Stage 12 BEFORE/AFTER on the same
+    # allele accuracy is reported by Stage 13 BEFORE/AFTER on the same
     # painting and would be redundant here.
     #
     # Validation is read-only -- no checkpointing.
     print(f"\n{'='*60}")
-    print("Validating Painted Samples (paint_samples / Stage 10) Topology")
+    print("Validating Painted Samples (paint_samples / Stage 11) Topology")
     print(f"{'='*60}")
 
     def _compute_disc_to_true_mapping(disc_dense_haps, true_dense_haps):
@@ -1676,7 +2217,7 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
         # Load the inputs needed for this validation from their stage
         # checkpoints if not already in memory.  paint_samples' output is
         # registered as 'tolerance_result' in _KEY_SOURCE, so _ensure_key
-        # will pull it from 10_viterbi_painting whether we just ran Stage 10
+        # will pull it from 11_viterbi_painting whether we just ran Stage 11
         # or are resuming from a completed checkpoint.
         try:
             _ensure_key(r_name, 'tolerance_result')
@@ -1686,19 +2227,13 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
             print(f"  {r_name}: SKIP -- {e}")
             continue
 
-        # Choose the discovered super-block used by paint_samples: Stage 10
-        # used super_blocks_L4 (or L3 fallback) -- match its choice exactly
-        # so positions/dense_haps align with what was painted.
+        # Use the same canonical final panel that Stage 11 painted.
         try:
             _ensure_key(r_name, 'super_blocks_L4')
             discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
-        except FileNotFoundError:
-            try:
-                _ensure_key(r_name, 'super_blocks_L3')
-                discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
-            except FileNotFoundError as e:
-                print(f"  {r_name}: SKIP -- no L4/L3 super_blocks ({e})")
-                continue
+        except FileNotFoundError as e:
+            print(f"  {r_name}: SKIP -- no final L4 panel ({e})")
+            continue
 
         painting = multi_contig_results[r_name]['tolerance_result']
         truth = multi_contig_results[r_name]['truth_painting']
@@ -1740,9 +2275,9 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
 
         # Free this contig's tolerance_result and truth_painting after
         # evaluation to keep RAM in check; they'll be reloaded by later
-        # stages (e.g. Stage 12) if needed.
+        # stages (e.g. Stage 13) if needed.
         multi_contig_results[r_name].pop('tolerance_result', None)
-        # NOTE: truth_painting is also used by Stage 12 evaluation; leave
+        # NOTE: truth_painting is also used by Stage 13 evaluation; leave
         # it in place rather than re-loading (cheaper to keep).
 
     print(f"\nPaint_samples validation finished in "
@@ -1850,13 +2385,15 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
 #%%
 if __name__ == '__main__':
     # =============================================================================
-    # STAGE 11: MULTI-CONTIG PEDIGREE INFERENCE (using DISCOVERED haplotypes)
+    # STAGE 12: MULTI-CONTIG PEDIGREE INFERENCE (using DISCOVERED haplotypes)
     # =============================================================================
-    STAGE_11 = "11_pedigree_inference"
+    STAGE_12 = "12_pedigree_inference"
 
-    if stage_complete(STAGE_11):
+    if stage_complete(STAGE_12) and not checkpoint_store.global_done(STAGE_12):
+        raise RuntimeError(f"{STAGE_12} is complete but lacks _global")
+    if stage_complete(STAGE_12):
         print(f"\n[RESUME] Skipping pedigree inference (checkpoint found)")
-        pedigree_df = load_global(STAGE_11)['pedigree_df']
+        pedigree_df = load_global(STAGE_12)['pedigree_df']
     else:
         print("\n" + "="*60)
         print("RUNNING: Multi-Contig Pedigree Inference (Discovered Haplotypes)")
@@ -1865,33 +2402,24 @@ if __name__ == '__main__':
         # 1. Gather Data from all regions
         contig_inputs = []
         for r_name in region_keys:
-            _ensure_key(r_name, 'tolerance_result')
-            _ensure_key(r_name, 'super_blocks_L4')
-            if 'tolerance_result' in multi_contig_results[r_name]:
-                # Use discovered L4 block instead of ground truth
-                if 'super_blocks_L4' in multi_contig_results[r_name]:
-                    discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
-                else:
-                    _ensure_key(r_name, 'super_blocks_L3')
-                    discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
-                
-                entry = {
-                    'tolerance_painting': multi_contig_results[r_name]['tolerance_result'],
-                    'founder_block': discovered_block
-                }
-                contig_inputs.append(entry)
-            else:
-                print(f"Warning: Tolerance painting missing for {r_name}")
+            painting_payload = load_contig(STAGE_11, r_name)
+            pipeline_runtime.validate_painting_bundle(
+                painting_payload,
+                expected_sample_ids=sample_names,
+                context=f"{STAGE_11}/{r_name}",
+            )
+            discovered_block = pipeline_runtime.compact_founder_block(
+                painting_payload[pipeline_runtime.FOUNDER_BLOCK_KEY]
+            )
+            entry = {
+                'tolerance_painting': painting_payload['tolerance_result'],
+                'founder_block': discovered_block
+            }
+            contig_inputs.append(entry)
+            del painting_payload
 
-        # Founder-block eviction (pairs with the SharedMemory hand-off inside
-        # infer_pedigree_multi_contig_tolerance).  contig_inputs now holds the
-        # only reference to each founder block, so drop the checkpoint-backed
-        # super_blocks_L4 from multi_contig_results: pedigree inference copies
-        # each block into SharedMemory and releases its own reference once
-        # Phase 1 is dispatched, so the large founder set is freed for the
-        # duration of Phase 2/3 + the consistency cutoff instead of sitting
-        # idle in main.  super_blocks_L4 is re-loaded (via _ensure_key) further
-        # below for F1 recoloring / propagation.
+        # Pedigree inference copies each bundled final founder block into
+        # SharedMemory, so release any in-memory panel copies before dispatch.
         for r_name in region_keys:
             multi_contig_results[r_name].pop('super_blocks_L4', None)
 
@@ -1935,24 +2463,35 @@ if __name__ == '__main__':
             print(f"Generation Accuracy: {gen_acc:.2f}%")
             print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
 
-        save_global(STAGE_11, {'pedigree_df': pedigree_df})
-        mark_stage_complete(STAGE_11)
+        save_global(STAGE_12, {'pedigree_df': pedigree_df})
+        if not checkpoint_store.global_done(STAGE_12):
+            raise OSError(f"Failed to checkpoint {STAGE_12}/_global")
+        mark_stage_complete(STAGE_12)
 
 #%%
 if __name__ == '__main__':
     # =============================================================================
-    # STAGE 12: PHASE CORRECTION (using DISCOVERED haplotypes)
+    # STAGE 13: PHASE CORRECTION (using DISCOVERED haplotypes)
     # =============================================================================
-    STAGE_12 = "12_phase_correction"
+    STAGE_13 = "13_phase_correction"
 
-    if stage_complete(STAGE_12):
+    missing_phase = [
+        r for r in region_keys if not contig_done(STAGE_13, r)
+    ]
+    if stage_complete(STAGE_13) and missing_phase:
+        raise RuntimeError(
+            f"{STAGE_13} is marked complete but lacks: "
+            f"{missing_phase}"
+        )
+
+    if stage_complete(STAGE_13):
         print(f"\n[RESUME] Skipping phase correction (checkpoint found)")
         # Load per-contig phase correction results for validation
         for r_name in region_keys:
-            s12 = load_contig(STAGE_12, r_name)
-            for k, v in s12.items():
+            s13 = load_contig(STAGE_13, r_name)
+            for k, v in s13.items():
                 multi_contig_results.setdefault(r_name, {})[k] = v
-            del s12
+            del s13
     else:
         print("\n" + "="*60)
         print("RUNNING: Phase Correction (Discovered Haplotypes)")
@@ -2028,30 +2567,24 @@ if __name__ == '__main__':
         # =============================================================================
         # PARSIMONIOUS F1 RECOLORING
         # =============================================================================
-        # F1 recoloring and the propagation step that follows both run
-        # in the MAIN process (sequentially across contigs).  They
-        # access founder_block from main's multi_contig_results, which
-        # no longer has it after the IPC-cost fix removed founder_block
-        # from the phase correction worker return tuple.  Pre-load it
-        # here in parallel via threads (parallel disk I/O across 22
-        # contigs, typical ~5-15s) so the F1 + propagation loops see
-        # the data they expect.  RAM cost is ~30-40 GB for the full
-        # set of founder_blocks; HPC nodes typically have plenty.
+        # F1 recoloring and propagation use the same final panel bundled with
+        # the Stage-11 painting.
         print("\n" + "="*60)
-        print("LOADING founder_blocks for F1 recoloring + propagation")
+        print("LOADING final founder_blocks for F1 recoloring + propagation")
         print("="*60)
-        from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
         _t0 = time.time()
-        def _load_founder_block_for_main(r_name):
-            _ensure_key(r_name, 'super_blocks_L4')
-            if 'super_blocks_L4' in multi_contig_results[r_name]:
-                multi_contig_results[r_name]['founder_block'] = \
-                    multi_contig_results[r_name]['super_blocks_L4'][0]
-            elif 'super_blocks_L3' in multi_contig_results[r_name]:
-                multi_contig_results[r_name]['founder_block'] = \
-                    multi_contig_results[r_name]['super_blocks_L3'][0]
-        with _ThreadPoolExecutor(max_workers=min(n_processes, len(region_keys))) as _ex:
-            list(_ex.map(_load_founder_block_for_main, region_keys))
+        founder_blocks = pipeline_runtime.load_founder_blocks_parallel(
+            checkpoint_store,
+            region_keys,
+            ((STAGE_11, pipeline_runtime.FOUNDER_BLOCK_KEY),),
+            max_workers=n_processes,
+            require_all=True,
+        )
+        for r_name, founder_block in founder_blocks.items():
+            multi_contig_results.setdefault(r_name, {})[
+                'founder_block'
+            ] = founder_block
+        del founder_blocks
         print(f"Founder block parallel load: {time.time()-_t0:.1f}s")
 
         print("\n" + "="*60)
@@ -2108,13 +2641,19 @@ if __name__ == '__main__':
                  for k in ('corrected_painting', 'refined_painting',
                            'final_painting', 'founder_block')
                  if k in multi_contig_results[r_name]}
-            save_contig(STAGE_12, r_name, d)
+            save_contig(STAGE_13, r_name, d)
+
+        missing_phase = [
+            r for r in region_keys if not contig_done(STAGE_13, r)
+        ]
+        if missing_phase:
+            raise OSError(f"Failed to checkpoint {STAGE_13}: {missing_phase}")
 
         # Free everything — phase validation reloads from checkpoints
         multi_contig_results = {r: {'naive_long_haps': multi_contig_results[r].get('naive_long_haps')}
                                 for r in region_keys if 'naive_long_haps' in multi_contig_results.get(r, {})}
         gc.collect()
-        mark_stage_complete(STAGE_12)
+        mark_stage_complete(STAGE_13)
 
 #%%
 if __name__ == '__main__' and not SKIP_VALIDATIONS_PHASE_CORRECTION:
@@ -2128,20 +2667,20 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PHASE_CORRECTION:
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Reload paintings from stage 12 checkpoints (freed during save)
-    def _load_stage12(r_name):
-        if contig_done(STAGE_12, r_name):
-            s12 = load_contig(STAGE_12, r_name)
-            for k, v in s12.items():
+    # Reload paintings from Stage 13 checkpoints (freed during save)
+    def _load_stage13(r_name):
+        if contig_done(STAGE_13, r_name):
+            s13 = load_contig(STAGE_13, r_name)
+            for k, v in s13.items():
                 multi_contig_results.setdefault(r_name, {})[k] = v
-            del s12
+            del s13
         return r_name
 
     print("\nLoading phase correction + validation data from checkpoints...")
     load_start = time.time()
     with ThreadPoolExecutor(max_workers=min(8, len(region_keys))) as executor:
-        list(executor.map(_load_stage12, region_keys))
-    print(f"Stage 12 reload: {time.time()-load_start:.1f}s")
+        list(executor.map(_load_stage13, region_keys))
+    print(f"Stage 13 reload: {time.time()-load_start:.1f}s")
 
     def extract_founder_ids_at_positions(painting, positions):
         n_pos = len(positions)
@@ -2220,20 +2759,21 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PHASE_CORRECTION:
         v4 = (true_hap2 >= 0) & (true_hap2 < max_true)
         true_allele1[v3] = true_dense_haps[true_hap1[v3], pos_indices[v3]]
         true_allele2[v4] = true_dense_haps[true_hap2[v4], pos_indices[v4]]
-        direct_match = (corr_allele1 == true_allele1) & (corr_allele2 == true_allele2)
-        flipped_match = (corr_allele1 == true_allele2) & (corr_allele2 == true_allele1)
+        valid_mask = ((corr_allele1 != -1) & (corr_allele2 != -1)
+                      & (true_allele1 != -1) & (true_allele2 != -1))
+        direct_match = valid_mask & (corr_allele1 == true_allele1) & (corr_allele2 == true_allele2)
+        flipped_match = valid_mask & (corr_allele1 == true_allele2) & (corr_allele2 == true_allele1)
         correct_either = direct_match | flipped_match
         n_direct = np.sum(direct_match)
         n_flipped = np.sum(flipped_match)
         if n_direct >= n_flipped:
-            track1_correct = (corr_allele1 == true_allele1)
-            track2_correct = (corr_allele2 == true_allele2)
+            track1_correct = valid_mask & (corr_allele1 == true_allele1)
+            track2_correct = valid_mask & (corr_allele2 == true_allele2)
             dominant_phase = "Direct"
         else:
-            track1_correct = (corr_allele1 == true_allele2)
-            track2_correct = (corr_allele2 == true_allele1)
+            track1_correct = valid_mask & (corr_allele1 == true_allele2)
+            track2_correct = valid_mask & (corr_allele2 == true_allele1)
             dominant_phase = "Flipped"
-        valid_mask = (corr_allele1 != -1) & (corr_allele2 != -1) & (true_allele1 != -1) & (true_allele2 != -1)
         n_valid = np.sum(valid_mask)
         if n_valid > 0:
             accuracy = np.sum(correct_either & valid_mask) / n_valid
@@ -2320,39 +2860,39 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PHASE_CORRECTION:
     print("  Paintings use DISCOVERED haplotypes")
     print("  Validation converts to alleles using TRUE founders")
 
-    # Build shared data for each contig (truth, positions, dense haps)
-    # Pre-load any missing keys in parallel
+    # Decode both BEFORE and AFTER paintings against the same canonical
+    # final panel so the comparison measures phase correction alone.
     def _load_validation_keys(r_name):
         _ensure_key(r_name, 'truth_painting')
-        _ensure_key(r_name, 'super_blocks_L4')
         _ensure_key(r_name, 'naive_long_haps')
         _ensure_key(r_name, 'tolerance_result')
         return r_name
-    
+
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=min(8, len(region_keys))) as executor:
         list(executor.map(_load_validation_keys, region_keys))
     print(f"  Validation data loaded in {time.time()-t0:.1f}s")
-    
+
     contig_shared = {}
     for r_name in region_keys:
-        if 'truth_painting' not in multi_contig_results[r_name]:
+        data = multi_contig_results[r_name]
+        if 'truth_painting' not in data or 'founder_block' not in data:
             continue
-        truth = multi_contig_results[r_name]['truth_painting']
-        if 'super_blocks_L4' in multi_contig_results[r_name]:
-            discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
-        else:
-            discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
-        positions = discovered_block.positions
-        dense_haps, _ = phase_correction.founder_block_to_dense(discovered_block)
-        
-        orig_sites, orig_haps = multi_contig_results[r_name]['naive_long_haps']
+        truth = data['truth_painting']
+        final_block = data['founder_block']
+        positions = np.asarray(final_block.positions)
+        dense_haps, _ = phase_correction.founder_block_to_dense(final_block)
+
+        orig_sites, orig_haps = data['naive_long_haps']
         orig_haps_concrete = simulate_sequences.concretify_haps(orig_haps)
         site_indices = np.searchsorted(orig_sites, positions)
         site_indices = np.clip(site_indices, 0, len(orig_sites) - 1)
-        true_dense_haps = np.array([h[site_indices] for h in orig_haps_concrete], dtype=np.int8)
-        
-        contig_shared[r_name] = (truth, positions, dense_haps, true_dense_haps)
+        true_dense_haps = np.array(
+            [h[site_indices] for h in orig_haps_concrete], dtype=np.int8
+        )
+        contig_shared[r_name] = (
+            truth, positions, dense_haps, true_dense_haps
+        )
 
     # --- BEFORE: evaluate uncorrected painting (raw Viterbi output) ---
     # Per-sample parallelism: flatten the 22-contig x 320-sample

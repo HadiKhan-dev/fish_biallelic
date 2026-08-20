@@ -1849,6 +1849,25 @@ def _init_phase_worker(total_cores, active_counter, parallel_data):
     )
 
 
+def _require_loaded_sample_order(data, sample_names, r_name):
+    """Require a checkpoint-loaded painting bundle to match caller order."""
+    if data is None or "sample_ids" not in data:
+        raise KeyError(f"{r_name}: loaded painting bundle lacks sample_ids")
+    observed = tuple(str(value) for value in data["sample_ids"])
+    expected = tuple(str(value) for value in sample_names)
+    if observed != expected:
+        mismatch = next(
+            (index for index, pair in enumerate(zip(observed, expected))
+             if pair[0] != pair[1]),
+            min(len(observed), len(expected)),
+        )
+        raise ValueError(
+            f"{r_name}: loaded painting sample order does not match the "
+            f"current pipeline order (observed={len(observed)}, "
+            f"expected={len(expected)}, first_mismatch_index={mismatch})"
+        )
+
+
 def _process_contig_worker(r_name):
     """Worker function for processing a single contig."""
     global _PARALLEL_DATA
@@ -1877,6 +1896,8 @@ def _process_contig_worker(r_name):
 
     pedigree_df = _PARALLEL_DATA['pedigree_df']
     sample_names = _PARALLEL_DATA['sample_names']
+    if load_fn is not None:
+        _require_loaded_sample_order(data, sample_names, r_name)
     num_rounds = _PARALLEL_DATA['num_rounds']
     snps_per_bin = _PARALLEL_DATA['snps_per_bin']
     recomb_rate = _PARALLEL_DATA['recomb_rate']
@@ -2140,8 +2161,9 @@ def correct_phase_all_contigs(
             so the phase-correction stages respect the pipeline's
             machine-wide worker budget.  Passing None will raise.
         parallel: Use parallel processing
-        load_fn: Optional callable(r_name) -> dict with 'tolerance_result' and 'founder_block'.
-                 If provided, workers load their own data (parallelizes I/O).
+        load_fn: Optional callable(r_name) -> dict with 'tolerance_result',
+            'founder_block', and ordered 'sample_ids'. If provided, workers
+            load their own data and require sample_ids to equal sample_names.
     
     Returns:
         Updated multi_contig_results with 'corrected_painting' key added
@@ -2202,11 +2224,11 @@ def correct_phase_all_contigs(
         #
         # CRITICAL (May 2026 hot-fix):  `multi_contig_results` MUST
         # be omitted from the payload when `load_fn` is set.  At this
-        # point in the pipeline -- after pedigree inference (Stage 11)
-        # has populated multi_contig_results with stage-9 founder
-        # blocks (~30-50 GB across 22 contigs) and stage-10
-        # tolerance_result paintings (~5+ GB per chr3) -- the dict can
-        # hold tens of GB of data.  Pickling it into initargs for
+        # point in the pipeline -- after pedigree inference -- a caller may
+        # have populated multi_contig_results with chromosome-scale founder
+        # blocks and painting objects.  Across 22 contigs that dict can hold
+        # tens of GB of data; exact stage numbers differ between entry points.
+        # Pickling it into initargs for
         # 22 workers blows main-process RAM (the pickle byte string
         # alone is tens of GB, peak ~2x during serialization) and
         # hangs the pipeline before any worker is spawned.
@@ -2288,6 +2310,7 @@ def correct_phase_all_contigs(
         for r_name in contig_names:
             if load_fn is not None:
                 data = load_fn(r_name)
+                _require_loaded_sample_order(data, sample_names, r_name)
             else:
                 data = multi_contig_results[r_name]
             
@@ -3371,8 +3394,8 @@ def _greedy_contig_worker(task):
         for the lifetime of the pool.  Putting per-contig data here
         means the pickle payload scales with N_contigs and is
         replicated across all worker processes -- which on a warm
-        pipeline (multi_contig_results holding tens of GB of stage-9
-        founder_blocks + stage-10 paintings) causes the main process
+        pipeline (multi_contig_results holding tens of GB of
+        chromosome-scale founder blocks and paintings) causes the main process
         to spend minutes serialising tens of GB of pickle bytes
         before any worker can start.
 
@@ -3419,6 +3442,7 @@ def _greedy_contig_worker(task):
     load_fn = _PARALLEL_DATA.get('load_fn')
     if 'founder_block' not in data and load_fn is not None:
         loaded = load_fn(r_name)
+        _require_loaded_sample_order(loaded, sample_names, r_name)
         if loaded is not None and 'founder_block' in loaded:
             data['founder_block'] = loaded['founder_block']
 
@@ -3546,8 +3570,9 @@ def post_process_phase_greedy_all_contigs(
             so the greedy refinement respects the pipeline's machine-wide
             worker budget.  Passing None will raise.
         parallel: Use parallel processing
-        load_fn: Optional callable(r_name) -> dict with 'founder_block'.
-            When provided, each worker loads its own founder_block from
+        load_fn: Optional callable(r_name) -> dict with 'founder_block' and
+            ordered 'sample_ids'. When provided, each worker validates the
+            sample order and loads its own founder_block from
             checkpoint via this function rather than expecting it in
             multi_contig_results.  Mirrors the load_fn pattern used by
             `correct_phase_all_contigs`.  Added May 2026 alongside the
@@ -3607,9 +3632,9 @@ def post_process_phase_greedy_all_contigs(
         #     data here means total pickle volume scales with
         #     N_workers * (full per-contig payload).  Pickling
         #     multi_contig_results -- which on a warm pipeline holds
-        #     stage-9 founder_blocks (~30-50 GB) and stage-10
-        #     tolerance_result (~5+ GB on chr3, more with wildcard
-        #     enabled) -- into 22 worker initargs is a guaranteed
+        #     chromosome-scale founder blocks (~30-50 GB) and
+        #     paintings (~5+ GB on chr3, more with wildcard enabled)
+        #     -- into 22 worker initargs is a guaranteed
         #     OOM.  This was the May 2026 phase-correction hang.
         #
         #   task args are pickled per dispatch to a worker, ONE TASK
@@ -3693,6 +3718,7 @@ def post_process_phase_greedy_all_contigs(
             # the sequential path too.
             if 'founder_block' not in data and load_fn is not None:
                 loaded = load_fn(r_name)
+                _require_loaded_sample_order(loaded, sample_names, r_name)
                 if loaded is not None and 'founder_block' in loaded:
                     data = dict(data)
                     data['founder_block'] = loaded['founder_block']

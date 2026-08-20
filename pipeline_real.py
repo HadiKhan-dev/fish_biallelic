@@ -16,15 +16,11 @@ import pipeline_runtime
 from thread_env import force_single_threaded_numeric_libraries
 
 def _load_contig_for_phase_correction(r_name):
-    """Picklable wrapper around the standard checkpoint traversal."""
+    """Load the atomic final-panel painting bundle for phase correction."""
     return pipeline_runtime.load_phase_correction_inputs(
         CHECKPOINT_DIR,
         r_name,
-        tolerance_stage="R08_viterbi_painting",
-        founder_stage_keys=(
-            ("R07_assembly_L4", "super_blocks_L4"),
-            ("R06_assembly_L3", "super_blocks_L3"),
-        ),
+        tolerance_stage="R09_viterbi_painting",
         strip_founder_probs=True,
     )
 
@@ -70,6 +66,7 @@ if __name__ == '__main__':
     import pedigree_inference
     import phase_correction
     import analysis_utils
+    import terminal_cavity_refinement
 
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_rows', None)
@@ -341,6 +338,7 @@ if __name__ == '__main__':
             print(f"    Output: {len(blocks_out)} blocks, "
                   f"avg haps: {np.mean([len(b.haplotypes) for b in blocks_out]):.1f}")
 
+            pipeline_runtime.strip_block_evidence(blocks_out)
             save_contig(STAGE_R3, r_name, {'block_results': blocks_out})
             del blocks, blocks_out, global_probs, global_sites
             gc.collect()
@@ -389,6 +387,7 @@ if __name__ == '__main__':
                   f"haps: min={min(hap_counts)}, max={max(hap_counts)}, "
                   f"mean={np.mean(hap_counts):.1f}")
 
+            pipeline_runtime.strip_block_evidence(super_blocks)
             save_contig(STAGE_R4, r_name, {'super_blocks_L1': super_blocks})
             del block_results, global_probs, super_blocks
             gc.collect()
@@ -435,6 +434,7 @@ if __name__ == '__main__':
             hap_counts = [len(b.haplotypes) for b in l2_blocks]
             print(f"    Output: {len(l2_blocks)} L2 super-blocks, haps: {hap_counts}")
 
+            pipeline_runtime.strip_block_evidence(l2_blocks)
             save_contig(STAGE_R5, r_name, {'super_blocks_L2': l2_blocks})
             del l1_blocks, global_probs, l2_blocks
             gc.collect()
@@ -481,6 +481,7 @@ if __name__ == '__main__':
             hap_counts = [len(b.haplotypes) for b in l3_blocks]
             print(f"    Output: {len(l3_blocks)} L3 super-blocks, haps: {hap_counts}")
 
+            pipeline_runtime.strip_block_evidence(l3_blocks)
             save_contig(STAGE_R6, r_name, {'super_blocks_L3': l3_blocks})
             del l2_blocks, global_probs, l3_blocks
             gc.collect()
@@ -532,40 +533,130 @@ if __name__ == '__main__':
             hap_counts = [len(b.haplotypes) for b in l4_blocks]
             print(f"    Output: {len(l4_blocks)} L4 super-blocks, haps: {hap_counts}")
 
+            pipeline_runtime.strip_block_evidence(l4_blocks)
             save_contig(STAGE_R7, r_name, {'super_blocks_L4': l4_blocks})
             del l3_blocks, l4_blocks
             gc.collect()
 
         print(f"\nL4 assembly complete in {time.time()-start:.1f}s")
         mark_stage_complete(STAGE_R7)
+#%%
+if __name__ == '__main__':
+    # =========================================================================
+    # STAGE R08: Terminal whole-bin cavity refinement (canonical final panel)
+    # =========================================================================
+    # R07 is the raw L4 intermediate; R08 publishes the only downstream panel.
+    STAGE_R8 = "R08_terminal_cavity"
+
+    missing_terminal = [r for r in region_keys if not contig_done(STAGE_R8, r)]
+    if stage_complete(STAGE_R8) and missing_terminal:
+        raise RuntimeError(
+            f"{STAGE_R8} is marked complete but lacks: {missing_terminal}"
+        )
+    if stage_complete(STAGE_R8):
+        print("\n[RESUME] Skipping terminal cavity refinement "
+              "(checkpoint found)")
+    else:
+        print(f"\n{'='*60}")
+        print("STAGE R08: Terminal Cavity Refinement (canonical final panel)")
+        print(f"{'='*60}")
+        start = time.time()
+        terminal_threads = min(
+            n_processes,
+            pipeline_runtime.available_cpu_count(),
+        )
+        print(f"  Sequential contigs; {terminal_threads} Numba threads/contig")
+
+        for r_name in region_keys:
+            if contig_done(STAGE_R8, r_name):
+                print(f"  [RESUME] {r_name} already done")
+                continue
+            print(f"\n  [Terminal] Processing {r_name}...")
+
+            r7 = load_contig(STAGE_R7, r_name)
+            l4_blocks = strip_block_probs(r7['super_blocks_L4'])
+            del r7
+            if len(l4_blocks) != 1:
+                raise RuntimeError(
+                    f"{r_name}: terminal refinement requires exactly one "
+                    f"chromosome-length L4 block; found {len(l4_blocks)}"
+                )
+            global_probs, global_sites = load_global_arrays(r_name)
+
+            final_blocks, diagnostics = (
+                terminal_cavity_refinement.refine_terminal_cavity_blocks(
+                    l4_blocks,
+                    global_sites,
+                    global_probs,
+                    return_diagnostics=True,
+                    num_threads=terminal_threads,
+                )
+            )
+            strip_block_probs(final_blocks)
+            summary = (
+                terminal_cavity_refinement.summarize_terminal_cavity_results(
+                    diagnostics
+                )
+            )
+            pipeline_runtime.strip_block_evidence(final_blocks)
+            save_contig(STAGE_R8, r_name, {
+                'super_blocks_L4': final_blocks,
+                'terminal_cavity_summary': summary,
+            })
+            if not contig_done(STAGE_R8, r_name):
+                raise OSError(f"Failed to checkpoint {STAGE_R8}/{r_name}")
+            print(
+                f"    Changed {summary['changed_founder_cells']} founder "
+                f"cells at {summary['changed_sites']} sites"
+            )
+            del l4_blocks, global_probs, global_sites, final_blocks, diagnostics
+            gc.collect()
+
+        mark_stage_complete(STAGE_R8)
+        print(f"Terminal refinement complete in {time.time()-start:.1f}s")
+
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE R08: Viterbi Painting
+    # STAGE R09: Viterbi Painting
     # =========================================================================
-    STAGE_R8 = "R08_viterbi_painting"
+    STAGE_R9 = "R09_viterbi_painting"
 
-    if stage_complete(STAGE_R8):
+    missing_painting = [
+        r for r in region_keys if not contig_done(STAGE_R9, r)
+    ]
+    if stage_complete(STAGE_R9) and missing_painting:
+        raise RuntimeError(
+            f"{STAGE_R9} is marked complete but lacks: "
+            f"{missing_painting}"
+        )
+
+    if stage_complete(STAGE_R9):
         print(f"\n[RESUME] Skipping Viterbi painting (checkpoint found)")
     else:
         print(f"\n{'='*60}")
-        print("STAGE R08: Viterbi Painting (Real Data)")
+        print("STAGE R09: Viterbi Painting (Real Data)")
         print(f"{'='*60}")
         start = time.time()
 
         with paint_samples.PaintingPoolManager(num_processes=n_processes) as painter:
             for r_name in region_keys:
-                if contig_done(STAGE_R8, r_name):
+                if contig_done(STAGE_R9, r_name):
                     print(f"  [RESUME] {r_name} already done")
                     continue
 
                 print(f"\n  [Viterbi Painting] Processing Region: {r_name}")
 
-                r7 = load_contig(STAGE_R7, r_name)
-                discovered_block = r7['super_blocks_L4'][0]
-                discovered_block.probs_array = None  # reconstructible from global_probs
-                del r7
+                terminal_payload = load_contig(STAGE_R8, r_name)
+                final_blocks = terminal_payload['super_blocks_L4']
+                if len(final_blocks) != 1:
+                    raise RuntimeError(
+                        f"{r_name}: painting requires exactly one final L4 "
+                        f"block; found {len(final_blocks)}"
+                    )
+                discovered_block = final_blocks[0]
+                del terminal_payload, final_blocks
 
                 global_probs, global_sites = load_global_arrays(r_name)
 
@@ -582,40 +673,61 @@ if __name__ == '__main__':
                     sample_names=sample_names, figsize_width=20,
                     row_height_per_sample=0.25)
 
-                save_contig(STAGE_R8, r_name, {'tolerance_result': painting_result})
-                del discovered_block, global_probs, painting_result
+                founder_block = pipeline_runtime.compact_founder_block(
+                    discovered_block
+                )
+                save_contig(STAGE_R9, r_name, {
+                    'tolerance_result': painting_result,
+                    pipeline_runtime.FOUNDER_BLOCK_KEY: founder_block,
+                    pipeline_runtime.SAMPLE_IDS_KEY: tuple(
+                        str(value) for value in sample_names
+                    ),
+                })
+                del discovered_block, founder_block, global_probs, painting_result
                 gc.collect()
 
+        missing_painting = [
+            r for r in region_keys if not contig_done(STAGE_R9, r)
+        ]
+        if missing_painting:
+            raise OSError(f"Failed to checkpoint {STAGE_R9}: {missing_painting}")
         print(f"\nViterbi painting complete in {time.time()-start:.1f}s")
-        mark_stage_complete(STAGE_R8)
+        mark_stage_complete(STAGE_R9)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE R09: Pedigree Inference
+    # STAGE R10: Pedigree Inference
     # =========================================================================
-    STAGE_R9 = "R09_pedigree_inference"
+    STAGE_R10 = "R10_pedigree_inference"
 
-    if stage_complete(STAGE_R9):
+    if stage_complete(STAGE_R10) and not checkpoint_store.global_done(STAGE_R10):
+        raise RuntimeError(f"{STAGE_R10} is complete but lacks _global")
+    if stage_complete(STAGE_R10):
         print(f"\n[RESUME] Skipping pedigree inference (checkpoint found)")
-        pedigree_df = load_global(STAGE_R9)['pedigree_df']
+        pedigree_df = load_global(STAGE_R10)['pedigree_df']
     else:
         print(f"\n{'='*60}")
-        print("STAGE R09: Multi-Contig Pedigree Inference (Real Data)")
+        print("STAGE R10: Multi-Contig Pedigree Inference (Real Data)")
         print(f"{'='*60}")
 
         contig_inputs = []
         for r_name in region_keys:
-            r8 = load_contig(STAGE_R8, r_name)
-            r7 = load_contig(STAGE_R7, r_name)
-            founder_block = r7['super_blocks_L4'][0]
-            founder_block.probs_array = None  # not needed for pedigree inference
+            painting_payload = load_contig(STAGE_R9, r_name)
+            pipeline_runtime.validate_painting_bundle(
+                painting_payload,
+                expected_sample_ids=sample_names,
+                context=f"{STAGE_R9}/{r_name}",
+            )
+            founder_block = pipeline_runtime.compact_founder_block(
+                painting_payload[pipeline_runtime.FOUNDER_BLOCK_KEY]
+            )
             entry = {
-                'tolerance_painting': r8['tolerance_result'],
+                'tolerance_painting': painting_payload['tolerance_result'],
                 'founder_block': founder_block
             }
             contig_inputs.append(entry)
-            del r8, r7
+            del painting_payload
 
         start = time.time()
         pedigree_result = pedigree_inference.infer_pedigree_multi_contig_tolerance(
@@ -637,27 +749,38 @@ if __name__ == '__main__':
         output_tree = os.path.join(output_dir, "pedigree_tree_real.png")
         pedigree_inference.draw_pedigree_tree(pedigree_df, output_file=output_tree)
 
-        save_global(STAGE_R9, {'pedigree_df': pedigree_df})
+        save_global(STAGE_R10, {'pedigree_df': pedigree_df})
+        if not checkpoint_store.global_done(STAGE_R10):
+            raise OSError(f"Failed to checkpoint {STAGE_R10}/_global")
         del contig_inputs
         gc.collect()
-        mark_stage_complete(STAGE_R9)
+        mark_stage_complete(STAGE_R10)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE R10: Phase Correction + Greedy Refinement + F1 Recoloring + Propagation
+    # STAGE R11: Phase Correction + Greedy Refinement + F1 Recoloring + Propagation
     # =========================================================================
-    STAGE_R10 = "R10_phase_correction"
+    STAGE_R11 = "R11_phase_correction"
 
-    if stage_complete(STAGE_R10):
+    missing_phase = [
+        r for r in region_keys if not contig_done(STAGE_R11, r)
+    ]
+    if stage_complete(STAGE_R11) and missing_phase:
+        raise RuntimeError(
+            f"{STAGE_R11} is marked complete but lacks: "
+            f"{missing_phase}"
+        )
+
+    if stage_complete(STAGE_R11):
         print(f"\n[RESUME] Skipping phase correction (checkpoint found)")
     else:
         print("\n" + "="*60)
-        print("STAGE R10: Phase Correction (Real Data)")
+        print("STAGE R11: Phase Correction (Real Data)")
         print("="*60)
 
         if 'pedigree_df' not in dir():
-            pedigree_df = load_global(STAGE_R9)['pedigree_df']
+            pedigree_df = load_global(STAGE_R10)['pedigree_df']
 
         # _load_contig_for_phase_correction is defined at MODULE top level
         # (above `if __name__`) so forkserver workers can pickle a reference
@@ -694,11 +817,9 @@ if __name__ == '__main__':
         founder_blocks = pipeline_runtime.load_founder_blocks_parallel(
             checkpoint_store,
             region_keys,
-            (
-                (STAGE_R7, 'super_blocks_L4'),
-                (STAGE_R6, 'super_blocks_L3'),
-            ),
+            ((STAGE_R9, pipeline_runtime.FOUNDER_BLOCK_KEY),),
             max_workers=n_processes,
+            require_all=True,
         )
         for r_name, founder_block in founder_blocks.items():
             mcr.setdefault(r_name, {})['founder_block'] = founder_block
@@ -749,11 +870,17 @@ if __name__ == '__main__':
                      for k in ('corrected_painting', 'refined_painting',
                                'final_painting', 'founder_block')
                      if k in mcr[r_name]}
-                save_contig(STAGE_R10, r_name, d)
+                save_contig(STAGE_R11, r_name, d)
+
+        missing_phase = [
+            r for r in region_keys if not contig_done(STAGE_R11, r)
+        ]
+        if missing_phase:
+            raise OSError(f"Failed to checkpoint {STAGE_R11}: {missing_phase}")
 
         del mcr
         gc.collect()
-        mark_stage_complete(STAGE_R10)
+        mark_stage_complete(STAGE_R11)
 
 #%%
 if __name__ == '__main__':

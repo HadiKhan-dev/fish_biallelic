@@ -43,6 +43,8 @@ import argparse
 import subprocess
 from datetime import datetime
 
+import checkpoint_io
+
 # =============================================================================
 # CONFIG  -- set the depth for THIS node here (one node == one depth).
 # =============================================================================
@@ -52,7 +54,7 @@ SEEDS = [0, 1, 2, 3, 4]               # five replicate simulations per depth
 SWEEP_ROOT_NAME = "pedigree_depth_sweep"   # new top-level dir for ALL sweep data
 SOURCE_CHECKPOINTS = ".pipeline_checkpoints"   # reuse stage 1 (read-only) from here
 STAGE1_NAME = "01_vcf_discovery"           # the seed/depth-independent stage to reuse
-STAGE11_NAME = "11_pedigree_inference"     # completion marker = this stage's _done
+STAGE11_NAME = "11_pedigree_inference"
 SIM_PIPELINE_FILE = "pedigree_sim_pipeline.py"   # the self-contained stages-2-11 file
 
 CONTINUE_ON_FAILURE = True            # if one seed fails, still attempt the rest
@@ -113,11 +115,12 @@ def verify_prereqs():
             f"[BHD-SWEEP] cannot find {sim}. Keep pedigree_sim_pipeline.py next "
             f"to this driver.")
     s1 = source_stage1_dir()
-    if not os.path.isdir(s1) or not os.path.exists(os.path.join(s1, "_done")):
+    marker = os.path.join(s1, checkpoint_io.DONE_MARKER)
+    if not os.path.isdir(s1) or not os.path.exists(marker):
         raise SystemExit(
             f"[BHD-SWEEP] existing stage-1 checkpoint not found at {s1} "
-            f"(expected a '_done' file). Run the pipeline at least through "
-            f"stage 1 once, then re-run this sweep.")
+            f"(expected {checkpoint_io.DONE_MARKER!r}). Run the pipeline at "
+            f"least through stage 1 once, then re-run this sweep.")
     return sim
 
 
@@ -134,7 +137,9 @@ def link_stage1(combo_ckpt):
 
 
 def combo_is_complete(combo_ckpt):
-    return os.path.exists(os.path.join(combo_ckpt, STAGE11_NAME, "_done"))
+    return os.path.exists(
+        os.path.join(combo_ckpt, STAGE11_NAME, checkpoint_io.DONE_MARKER)
+    )
 
 
 def _dir_size_bytes(path):

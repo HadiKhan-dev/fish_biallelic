@@ -22,10 +22,10 @@ from thread_env import force_single_threaded_numeric_libraries
 # -----------------------------------------------------------------------------
 # USE_KNOWN_FOUNDERS controls whether the 4 G0 (parental) samples are fed into
 # the reconstruction pipeline:
-#   True  -> all 116 samples go through T01-T10 (easy mode: G0s are mostly
+#   True  -> all 116 samples go through T01-T11 (easy mode: G0s are mostly
 #            homozygous for distinct parental species and form clean founder
 #            clusters on their own during block discovery)
-#   False -> the 4 G0 sample rows are sliced out, so T01-T10 see only the 112
+#   False -> the 4 G0 sample rows are sliced out, so T01-T11 see only the 112
 #            admixed F1+F2 samples (hard mode: parental haplotypes must be
 #            reconstructed purely from offspring)
 # In BOTH modes the 4 G0 reads are ALSO loaded separately and stashed in the
@@ -44,15 +44,11 @@ output_dir = f"results_tropheops_{_run_label}"
 
 
 def _load_contig_for_phase_correction(r_name):
-    """Picklable wrapper around the standard checkpoint traversal."""
+    """Load the atomic final-panel painting bundle for phase correction."""
     return pipeline_runtime.load_phase_correction_inputs(
         CHECKPOINT_DIR,
         r_name,
-        tolerance_stage="T08_viterbi_painting",
-        founder_stage_keys=(
-            ("T07_assembly_L4", "super_blocks_L4"),
-            ("T06_assembly_L3", "super_blocks_L3"),
-        ),
+        tolerance_stage="T09_viterbi_painting",
         strip_founder_probs=True,
     )
 
@@ -120,6 +116,7 @@ if __name__ == '__main__':
     import pedigree_inference
     import phase_correction
     import analysis_utils
+    import terminal_cavity_refinement
 
     pd.set_option('display.max_columns', None)
     pd.set_option('display.max_rows', None)
@@ -191,17 +188,17 @@ if __name__ == '__main__':
     # =========================================================================
     # VALIDATION HELPERS (module-level, shared across stages)
     # =========================================================================
-    # Each pipeline stage that produces a block-shaped output (T01-T07) calls
+    # Each pipeline stage that produces a block-shaped output (T01-T08) calls
     # `run_stage_validation` at the end to compare those blocks with the four
     # observed G0 genotype references stashed in every T01 per-contig checkpoint
     # regardless of USE_KNOWN_FOUNDERS.  This is a non-independent post-hoc
     # consistency check when G0 rows participated in discovery, and a held-out
-    # reference comparison when they were excluded.  T09 calls
+    # reference comparison when they were excluded.  T10 calls
     # `run_pedigree_validation` on the inferred pedigree_df to cross-check
     # it against the metafile's biological generation column.
     #
-    # Semantics identical to the old monolithic T11 stage — just factored out
-    # and called at each stage boundary so the user sees quality progression
+    # Semantics identical to the old monolithic validation stage, just factored
+    # out and called at each stage boundary so the user sees quality progression
     # as the pipeline runs, not only at the very end.
 
     # Min argmax-prob to treat a G0 site as confidently homozygous.  Sites
@@ -535,15 +532,15 @@ if __name__ == '__main__':
         """Validate the inferred pedigree structure against the metafile.
 
         Writes:
-          - validation_T09_pedigree_confusion.csv (structural x biological crosstab)
-          - validation_T09_pedigree_per_sample.csv (per-sample audit with
+          - validation_T10_pedigree_confusion.csv (structural x biological crosstab)
+          - validation_T10_pedigree_per_sample.csv (per-sample audit with
             inferred Generation, Parent1, Parent2, and true_generation columns)
 
         Returns (n_correct, n_samples_audit, pedigree_accuracy, expected_mapping)
         for use in the final summary.
         """
         print(f"\n{'='*60}")
-        print(f"VALIDATION: T09 Pedigree Structure vs Metafile")
+        print(f"VALIDATION: T10 Pedigree Structure vs Metafile")
         print(f"{'='*60}")
 
         pedigree_augmented = pedigree_df.copy()
@@ -557,11 +554,11 @@ if __name__ == '__main__':
         print("\nInferred Generation × True Generation confusion matrix:")
         print(confusion)
 
-        confusion_csv = os.path.join(output_dir, "validation_T09_pedigree_confusion.csv")
+        confusion_csv = os.path.join(output_dir, "validation_T10_pedigree_confusion.csv")
         confusion.to_csv(confusion_csv)
         print(f"\nConfusion matrix saved to: {confusion_csv}")
 
-        audit_csv = os.path.join(output_dir, "validation_T09_pedigree_per_sample.csv")
+        audit_csv = os.path.join(output_dir, "validation_T10_pedigree_per_sample.csv")
         pedigree_augmented.to_csv(audit_csv, index=False)
         print(f"Per-sample pedigree audit saved to: {audit_csv}")
 
@@ -644,8 +641,8 @@ if __name__ == '__main__':
     #   active_vcf_indices  : positions of the samples the pipeline will see
     #                         (all 116 if USE_KNOWN_FOUNDERS, else 112 = no G0s)
     #   sample_names_active : VCF sample names the pipeline will see
-    #                         (what T08/T09/T10 receive as sample_ids)
-    #   g0_sample_names     : the 4 G0 primary_IDs (for T11 validation)
+    #                         (the ordered T01-T11 active sample axis)
+    #   g0_sample_names     : the 4 G0 primary_IDs (for post-hoc validation)
     print(f"\n{'='*60}")
     print("Sample Identification (VCF <-> metafile)")
     print(f"{'='*60}")
@@ -730,7 +727,7 @@ if __name__ == '__main__':
     # =========================================================================
     # Identical to pipeline_real.py STAGE R01, with ONE addition: we always
     # split out the G0 reads into a separate `g0_slice` that's stashed in the
-    # checkpoint so Stage T11 can use it for validation.  When
+    # checkpoint for the interleaved T01-T08 and final validations.  When
     # USE_KNOWN_FOUNDERS=False, the main global_probs/global_sites/block_results
     # are computed from the 112 non-G0 samples only (the reads array is sliced
     # along the sample axis before reads_to_probabilities / block discovery).
@@ -786,8 +783,8 @@ if __name__ == '__main__':
                     print(f"    WARNING: No data for {r_name}, skipping")
                     continue
 
-                # ALWAYS extract G0 reads separately for T11 validation.  This slice
-                # is independent of the USE_KNOWN_FOUNDERS flag — we want ground
+                # ALWAYS extract G0 reads separately for post-hoc validation.
+                # This slice is independent of the USE_KNOWN_FOUNDERS flag — we want ground
                 # truth available regardless of what the pipeline sees.
                 g0_reads = global_reads_full[g0_vcf_indices, :, :]
                 (_, g0_probs) = analysis_utils.reads_to_probabilities(
@@ -1187,6 +1184,7 @@ if __name__ == '__main__':
             print(f"    Output: {len(blocks_out)} blocks, "
                   f"avg haps: {np.mean([len(b.haplotypes) for b in blocks_out]):.1f}")
 
+            pipeline_runtime.strip_block_evidence(blocks_out)
             save_contig(STAGE_T3, r_name, {'block_results': blocks_out})
             del blocks, blocks_out, global_probs, global_sites
             gc.collect()
@@ -1251,6 +1249,7 @@ if __name__ == '__main__':
                   f"haps: min={min(hap_counts)}, max={max(hap_counts)}, "
                   f"mean={np.mean(hap_counts):.1f}")
 
+            pipeline_runtime.strip_block_evidence(super_blocks)
             save_contig(STAGE_T4, r_name, {'super_blocks_L1': super_blocks})
             del block_results, global_probs, super_blocks
             gc.collect()
@@ -1312,6 +1311,7 @@ if __name__ == '__main__':
             hap_counts = [len(b.haplotypes) for b in l2_blocks]
             print(f"    Output: {len(l2_blocks)} L2 super-blocks, haps: {hap_counts}")
 
+            pipeline_runtime.strip_block_evidence(l2_blocks)
             save_contig(STAGE_T5, r_name, {'super_blocks_L2': l2_blocks})
             del l1_blocks, global_probs, l2_blocks
             gc.collect()
@@ -1370,6 +1370,7 @@ if __name__ == '__main__':
             hap_counts = [len(b.haplotypes) for b in l3_blocks]
             print(f"    Output: {len(l3_blocks)} L3 super-blocks, haps: {hap_counts}")
 
+            pipeline_runtime.strip_block_evidence(l3_blocks)
             save_contig(STAGE_T6, r_name, {'super_blocks_L3': l3_blocks})
             del l2_blocks, global_probs, l3_blocks
             gc.collect()
@@ -1433,6 +1434,7 @@ if __name__ == '__main__':
             hap_counts = [len(b.haplotypes) for b in l4_blocks]
             print(f"    Output: {len(l4_blocks)} L4 super-blocks, haps: {hap_counts}")
 
+            pipeline_runtime.strip_block_evidence(l4_blocks)
             save_contig(STAGE_T7, r_name, {'super_blocks_L4': l4_blocks})
             del l3_blocks, l4_blocks
             gc.collect()
@@ -1443,45 +1445,147 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # VALIDATION: After T07 L4 Assembly (final founder-block validation)
+    # VALIDATION: After T07 raw L4 Assembly
     # =========================================================================
-    # L4 is the final assembly level.  Ideally one chromosome-scale super-block
-    # per contig whose haplotypes are consistent with all four observed G0
-    # genotype references at low error.
+    # T07 is the raw chromosome-scale input; retain it to measure T08's effect.
     run_stage_validation(
         stage_label="T07_L4_assembly",
         stage_key="T07_assembly_L4",
         blocks_loader_fn=lambda r: load_contig("T07_assembly_L4", r)['super_blocks_L4'],
         csv_filename="validation_T07_L4_assembly.csv"
     )
+#%%
+if __name__ == '__main__':
+    # =========================================================================
+    # STAGE T08: Terminal whole-bin cavity refinement (canonical final panel)
+    # =========================================================================
+    # T07 is the raw L4 intermediate; T08 publishes the only downstream panel.
+    STAGE_T8 = "T08_terminal_cavity"
+
+    missing_terminal = [r for r in region_keys if not contig_done(STAGE_T8, r)]
+    if stage_complete(STAGE_T8) and missing_terminal:
+        raise RuntimeError(
+            f"{STAGE_T8} is marked complete but lacks: {missing_terminal}"
+        )
+    if stage_complete(STAGE_T8):
+        print("\n[RESUME] Skipping terminal cavity refinement "
+              "(checkpoint found)")
+    else:
+        print(f"\n{'='*60}")
+        print("STAGE T08: Terminal Cavity Refinement (canonical final panel)")
+        print(f"{'='*60}")
+        start = time.time()
+        terminal_threads = min(
+            n_processes,
+            pipeline_runtime.available_cpu_count(),
+        )
+        print(f"  Sequential contigs; {terminal_threads} Numba threads/contig")
+
+        for r_name in region_keys:
+            if contig_done(STAGE_T8, r_name):
+                print(f"  [RESUME] {r_name} already done")
+                continue
+            print(f"\n  [Terminal] Processing {r_name}...")
+
+            t7 = load_contig(STAGE_T7, r_name)
+            l4_blocks = strip_block_probs(t7['super_blocks_L4'])
+            del t7
+            if len(l4_blocks) != 1:
+                raise RuntimeError(
+                    f"{r_name}: terminal refinement requires exactly one "
+                    f"chromosome-length L4 block; found {len(l4_blocks)}"
+                )
+            global_probs, global_sites = load_global_arrays(r_name)
+
+            final_blocks, diagnostics = (
+                terminal_cavity_refinement.refine_terminal_cavity_blocks(
+                    l4_blocks,
+                    global_sites,
+                    global_probs,
+                    return_diagnostics=True,
+                    num_threads=terminal_threads,
+                )
+            )
+            strip_block_probs(final_blocks)
+            summary = (
+                terminal_cavity_refinement.summarize_terminal_cavity_results(
+                    diagnostics
+                )
+            )
+            pipeline_runtime.strip_block_evidence(final_blocks)
+            save_contig(STAGE_T8, r_name, {
+                'super_blocks_L4': final_blocks,
+                'terminal_cavity_summary': summary,
+            })
+            if not contig_done(STAGE_T8, r_name):
+                raise OSError(f"Failed to checkpoint {STAGE_T8}/{r_name}")
+            print(
+                f"    Changed {summary['changed_founder_cells']} founder "
+                f"cells at {summary['changed_sites']} sites"
+            )
+            del l4_blocks, global_probs, global_sites, final_blocks, diagnostics
+            gc.collect()
+
+        mark_stage_complete(STAGE_T8)
+        print(f"Terminal refinement complete in {time.time()-start:.1f}s")
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE T08: Viterbi Painting
+    # VALIDATION: After T08 canonical terminal panel
     # =========================================================================
-    STAGE_T8 = "T08_viterbi_painting"
+    # This final panel feeds painting and every later stage.  The G0 comparison
+    # is non-independent when G0s participated in discovery and held-out only
+    # when USE_KNOWN_FOUNDERS is false.
+    run_stage_validation(
+        stage_label="T08_terminal_cavity",
+        stage_key="T08_terminal_cavity",
+        blocks_loader_fn=lambda r: load_contig(STAGE_T8, r)['super_blocks_L4'],
+        csv_filename="validation_T08_terminal_cavity.csv"
+    )
 
-    if stage_complete(STAGE_T8):
+
+#%%
+if __name__ == '__main__':
+    # =========================================================================
+    # STAGE T09: Viterbi Painting
+    # =========================================================================
+    STAGE_T9 = "T09_viterbi_painting"
+
+    missing_painting = [
+        r for r in region_keys if not contig_done(STAGE_T9, r)
+    ]
+    if stage_complete(STAGE_T9) and missing_painting:
+        raise RuntimeError(
+            f"{STAGE_T9} is marked complete but lacks: "
+            f"{missing_painting}"
+        )
+
+    if stage_complete(STAGE_T9):
         print(f"\n[RESUME] Skipping Viterbi painting (checkpoint found)")
     else:
         print(f"\n{'='*60}")
-        print("STAGE T08: Viterbi Painting (Tropheops)")
+        print("STAGE T09: Viterbi Painting (Tropheops)")
         print(f"{'='*60}")
         start = time.time()
 
         with paint_samples.PaintingPoolManager(num_processes=n_processes) as painter:
             for r_name in region_keys:
-                if contig_done(STAGE_T8, r_name):
+                if contig_done(STAGE_T9, r_name):
                     print(f"  [RESUME] {r_name} already done")
                     continue
 
                 print(f"\n  [Viterbi Painting] Processing Region: {r_name}")
 
-                t7 = load_contig(STAGE_T7, r_name)
-                discovered_block = t7['super_blocks_L4'][0]
-                discovered_block.probs_array = None  # reconstructible from global_probs
-                del t7
+                terminal_payload = load_contig(STAGE_T8, r_name)
+                final_blocks = terminal_payload['super_blocks_L4']
+                if len(final_blocks) != 1:
+                    raise RuntimeError(
+                        f"{r_name}: painting requires exactly one final L4 "
+                        f"block; found {len(final_blocks)}"
+                    )
+                discovered_block = final_blocks[0]
+                del terminal_payload, final_blocks
 
                 global_probs, global_sites = load_global_arrays(r_name)
 
@@ -1500,40 +1604,61 @@ if __name__ == '__main__':
                     sample_names=sample_names_active, figsize_width=20,
                     row_height_per_sample=0.25)
 
-                save_contig(STAGE_T8, r_name, {'tolerance_result': painting_result})
-                del discovered_block, global_probs, painting_result
+                founder_block = pipeline_runtime.compact_founder_block(
+                    discovered_block
+                )
+                save_contig(STAGE_T9, r_name, {
+                    'tolerance_result': painting_result,
+                    pipeline_runtime.FOUNDER_BLOCK_KEY: founder_block,
+                    pipeline_runtime.SAMPLE_IDS_KEY: tuple(
+                        str(value) for value in sample_names_active
+                    ),
+                })
+                del discovered_block, founder_block, global_probs, painting_result
                 gc.collect()
 
+        missing_painting = [
+            r for r in region_keys if not contig_done(STAGE_T9, r)
+        ]
+        if missing_painting:
+            raise OSError(f"Failed to checkpoint {STAGE_T9}: {missing_painting}")
         print(f"\nViterbi painting complete in {time.time()-start:.1f}s")
-        mark_stage_complete(STAGE_T8)
+        mark_stage_complete(STAGE_T9)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE T09: Pedigree Inference
+    # STAGE T10: Pedigree Inference
     # =========================================================================
-    STAGE_T9 = "T09_pedigree_inference"
+    STAGE_T10 = "T10_pedigree_inference"
 
-    if stage_complete(STAGE_T9):
+    if stage_complete(STAGE_T10) and not checkpoint_store.global_done(STAGE_T10):
+        raise RuntimeError(f"{STAGE_T10} is complete but lacks _global")
+    if stage_complete(STAGE_T10):
         print(f"\n[RESUME] Skipping pedigree inference (checkpoint found)")
-        pedigree_df = load_global(STAGE_T9)['pedigree_df']
+        pedigree_df = load_global(STAGE_T10)['pedigree_df']
     else:
         print(f"\n{'='*60}")
-        print("STAGE T09: Multi-Contig Pedigree Inference (Tropheops)")
+        print("STAGE T10: Multi-Contig Pedigree Inference (Tropheops)")
         print(f"{'='*60}")
 
         contig_inputs = []
         for r_name in region_keys:
-            t8 = load_contig(STAGE_T8, r_name)
-            t7 = load_contig(STAGE_T7, r_name)
-            founder_block = t7['super_blocks_L4'][0]
-            founder_block.probs_array = None  # not needed for pedigree inference
+            painting_payload = load_contig(STAGE_T9, r_name)
+            pipeline_runtime.validate_painting_bundle(
+                painting_payload,
+                expected_sample_ids=sample_names_active,
+                context=f"{STAGE_T9}/{r_name}",
+            )
+            founder_block = pipeline_runtime.compact_founder_block(
+                painting_payload[pipeline_runtime.FOUNDER_BLOCK_KEY]
+            )
             entry = {
-                'tolerance_painting': t8['tolerance_result'],
+                'tolerance_painting': painting_payload['tolerance_result'],
                 'founder_block': founder_block
             }
             contig_inputs.append(entry)
-            del t8, t7
+            del painting_payload
 
         start = time.time()
         pedigree_result = pedigree_inference.infer_pedigree_multi_contig_tolerance(
@@ -1556,42 +1681,53 @@ if __name__ == '__main__':
         output_tree = os.path.join(output_dir, "pedigree_tree_tropheops.png")
         pedigree_inference.draw_pedigree_tree(pedigree_df, output_file=output_tree)
 
-        save_global(STAGE_T9, {'pedigree_df': pedigree_df})
+        save_global(STAGE_T10, {'pedigree_df': pedigree_df})
+        if not checkpoint_store.global_done(STAGE_T10):
+            raise OSError(f"Failed to checkpoint {STAGE_T10}/_global")
         del contig_inputs
         gc.collect()
-        mark_stage_complete(STAGE_T9)
+        mark_stage_complete(STAGE_T10)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # VALIDATION: After T09 Pedigree Inference
+    # VALIDATION: After T10 Pedigree Inference
     # =========================================================================
     # Cross-checks the inferred pedigree_df against the metafile's biological
     # generation column.  Writes a confusion matrix and per-sample audit CSV,
     # and computes the structural->biological label translation accuracy.
     # Runs unconditionally at each invocation (cheap, no checkpointing).
     if 'pedigree_df' not in dir():
-        pedigree_df = load_global("T09_pedigree_inference")['pedigree_df']
-    _t9_val_result = run_pedigree_validation(pedigree_df)
+        pedigree_df = load_global("T10_pedigree_inference")['pedigree_df']
+    _t10_val_result = run_pedigree_validation(pedigree_df)
     # Keep the tuple for the final report: (n_correct, n_samples_audit,
     # pedigree_accuracy, expected_mapping)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE T10: Phase Correction + Greedy Refinement + F1 Recoloring + Propagation
+    # STAGE T11: Phase Correction + Greedy Refinement + F1 Recoloring + Propagation
     # =========================================================================
-    STAGE_T10 = "T10_phase_correction"
+    STAGE_T11 = "T11_phase_correction"
 
-    if stage_complete(STAGE_T10):
+    missing_phase = [
+        r for r in region_keys if not contig_done(STAGE_T11, r)
+    ]
+    if stage_complete(STAGE_T11) and missing_phase:
+        raise RuntimeError(
+            f"{STAGE_T11} is marked complete but lacks: "
+            f"{missing_phase}"
+        )
+
+    if stage_complete(STAGE_T11):
         print(f"\n[RESUME] Skipping phase correction (checkpoint found)")
     else:
         print("\n" + "="*60)
-        print("STAGE T10: Phase Correction (Tropheops)")
+        print("STAGE T11: Phase Correction (Tropheops)")
         print("="*60)
 
         if 'pedigree_df' not in dir():
-            pedigree_df = load_global(STAGE_T9)['pedigree_df']
+            pedigree_df = load_global(STAGE_T10)['pedigree_df']
 
         # _load_contig_for_phase_correction is defined at MODULE TOP LEVEL
         # (picklable for forkserver workers — a closure here could not be
@@ -1637,7 +1773,7 @@ if __name__ == '__main__':
         founder_blocks = pipeline_runtime.load_founder_blocks_parallel(
             checkpoint_store,
             region_keys,
-            ((STAGE_T7, 'super_blocks_L4'),),
+            ((STAGE_T9, pipeline_runtime.FOUNDER_BLOCK_KEY),),
             max_workers=n_processes,
             require_all=True,
         )
@@ -1690,11 +1826,17 @@ if __name__ == '__main__':
                      for k in ('corrected_painting', 'refined_painting',
                                'final_painting', 'founder_block')
                      if k in mcr[r_name]}
-                save_contig(STAGE_T10, r_name, d)
+                save_contig(STAGE_T11, r_name, d)
+
+        missing_phase = [
+            r for r in region_keys if not contig_done(STAGE_T11, r)
+        ]
+        if missing_phase:
+            raise OSError(f"Failed to checkpoint {STAGE_T11}: {missing_phase}")
 
         del mcr
         gc.collect()
-        mark_stage_complete(STAGE_T10)
+        mark_stage_complete(STAGE_T11)
 
 #%%
 if __name__ == '__main__':
@@ -1702,7 +1844,7 @@ if __name__ == '__main__':
     # FINAL REPORT: Aggregate all per-stage validation CSVs
     # =========================================================================
     # Each T01-T07 stage wrote its own per-block validation CSV as soon as it
-    # finished (see the VALIDATION cells interleaved between stages).  T09
+    # finished (see the VALIDATION cells interleaved between stages).  T10
     # wrote its pedigree confusion + per-sample audit CSVs.  This final cell
     # just aggregates those into a cross-stage summary so you can see
     # reconstruction quality progression end-to-end without digging through
@@ -1716,7 +1858,7 @@ if __name__ == '__main__':
     #     matching all four observed G0 genotype references, mean good/chimera
     #     haps)
     #   - validation_summary.txt               (human-readable overview
-    #     including the pedigree validation result from T09)
+    #     including the pedigree validation result from T10)
     # Runs unconditionally at each invocation — no checkpointing, cheap.
     print(f"\n{'='*60}")
     print("FINAL REPORT: Cross-stage validation summary")
@@ -1731,6 +1873,7 @@ if __name__ == '__main__':
         ('T05_L2_assembly',         'validation_T05_L2_assembly.csv'),
         ('T06_L3_assembly',         'validation_T06_L3_assembly.csv'),
         ('T07_L4_assembly',         'validation_T07_L4_assembly.csv'),
+        ('T08_terminal_cavity',     'validation_T08_terminal_cavity.csv'),
     ]
 
     ff_col = f'founders_found_under_{MATCH_THRESHOLD_PCT:.0f}pct'
@@ -1794,9 +1937,9 @@ if __name__ == '__main__':
         combined.to_csv(combined_csv_path, index=False)
         print(f"Combined per-block CSV saved to: {combined_csv_path}")
 
-    # Pull in the T09 pedigree validation result if it ran earlier this session
-    if '_t9_val_result' in dir():
-        n_correct, n_samples_audit, pedigree_accuracy, expected_mapping = _t9_val_result
+    # Pull in the T10 pedigree validation result if it ran earlier this session
+    if '_t10_val_result' in dir():
+        n_correct, n_samples_audit, pedigree_accuracy, expected_mapping = _t10_val_result
     else:
         n_correct, n_samples_audit, pedigree_accuracy, expected_mapping = (
             None, None, float('nan'), None
@@ -1828,7 +1971,7 @@ if __name__ == '__main__':
     else:
         summary_lines.append(f"  (no per-stage CSVs found)")
     summary_lines.append(f"")
-    summary_lines.append(f"Pedigree Structure (T09):")
+    summary_lines.append(f"Pedigree Structure (T10):")
     if n_samples_audit is not None:
         summary_lines.append(f"  Pipeline 'Generation' is a STRUCTURAL label")
         summary_lines.append(f"    ('F1' = graph root; not a biological generation)")
@@ -1836,7 +1979,7 @@ if __name__ == '__main__':
         summary_lines.append(f"  Samples matching translation: "
                              f"{n_correct}/{n_samples_audit} = {pedigree_accuracy:.1f}%")
     else:
-        summary_lines.append(f"  (T09 validation did not run — pedigree not available)")
+        summary_lines.append(f"  (T10 validation did not run — pedigree not available)")
     summary_lines.append(f"")
     summary_lines.append(f"Artefacts in {output_dir}/:")
     summary_lines.append(f"  validation_T01_block_discovery.csv")
@@ -1846,8 +1989,9 @@ if __name__ == '__main__':
     summary_lines.append(f"  validation_T05_L2_assembly.csv")
     summary_lines.append(f"  validation_T06_L3_assembly.csv")
     summary_lines.append(f"  validation_T07_L4_assembly.csv")
-    summary_lines.append(f"  validation_T09_pedigree_confusion.csv")
-    summary_lines.append(f"  validation_T09_pedigree_per_sample.csv")
+    summary_lines.append(f"  validation_T08_terminal_cavity.csv")
+    summary_lines.append(f"  validation_T10_pedigree_confusion.csv")
+    summary_lines.append(f"  validation_T10_pedigree_per_sample.csv")
     summary_lines.append(f"  validation_all_stages_summary.csv")
     summary_lines.append(f"  validation_all_stages_per_block.csv")
     summary_lines.append(f"  validation_summary.txt (this file)")

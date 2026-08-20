@@ -11,11 +11,14 @@ Run `python -m pedigree_v7 --help` for the complete command line interface.
 
 ## Scientific model
 
-The compatibility mode preserves the selected V7-margin implementation:
+The compatibility mode preserves the selected V7-margin scoring and
+aggregation logic while using the linear pipeline's final-panel inputs:
 
-1. Read the pre-pedigree T08 painting and the T10-carried founder block for
-   each of the 22 compatibility contigs. T10's corrected painting is not used,
-   avoiding feedback from the old inferred pedigree.
+1. Read one pre-pedigree `T09_viterbi_painting` checkpoint for each of the 22
+   compatibility contigs. Each checkpoint must atomically contain the final H1
+   founder block, its matched Z1 `tolerance_result` painting, and the painting's
+   ordered `sample_ids`. T08, T07, and H0 compatibility fallbacks are not
+   accepted.
 2. Use every retained founder-informative marker with a PL genotype likelihood
    in the BCF.
 3. Match locally IBS-equivalent reconstructed founder haplotypes before
@@ -41,19 +44,23 @@ The compatibility mode preserves the selected V7-margin implementation:
    agreement.
 
 The numerical transmission kernels were copied unchanged from the validated
-exploratory implementation. The package reorganises I/O and makes the design
-and seeds explicit; it does not change the likelihood, utility, bootstrap,
-leave-one-contig, or tier decision rules.
+exploratory implementation. The move from legacy H0/Z0 inputs to the final
+H1/Z1 bundle can change scores and inferred results, so it has a distinct
+scoring-model revision and cache provenance. It does not change the likelihood,
+utility, bootstrap, leave-one-contig, or tier decision rules.
 
 ## Required inputs
 
 - `--bcf`: the indexed multi-sample biallelic BCF/VCF containing `PL`.
 - `--metadata`: the Excel metafile, sheet `main_data`, with `primary_ID`,
   `alias_ID`, `santos_ID`, `generation`, and `sex` fields.
-- `--checkpoint-dir`: the pipeline checkpoint directory containing
-  `T08_viterbi_painting` and `T10_phase_correction` contig checkpoints. It is
-  required for both new scoring and external-cache reuse because all 44 source
-  checkpoint identities are validated before a cache is accepted.
+- `--checkpoint-dir`: the pipeline checkpoint directory containing one atomic
+  `T09_viterbi_painting` checkpoint per compatibility contig. Each must contain
+  `tolerance_result` (Z1), `founder_block` (H1), and ordered `sample_ids`.
+  The IDs must be unique, match the painting's sample count, and exactly equal
+  the full BCF sample order; subset or reordered paintings are rejected before
+  scoring. All 22 T09 checkpoint identities are validated before a cache is
+  accepted.
 - `--g0-seeds`: an explicitly named F1-to-G0 pair CSV. This is never inferred
   from an old output directory.
 - `--output-dir`: a new or resumable analysis directory.
@@ -116,8 +123,20 @@ are fixed inferred inputs, not independently confirmed parentage.
 ## Example
 
 ```bash
-python -m pedigree_v7 --bcf fish_vcf_restriped/AcTm.biallelic.bcf.gz --metadata fish_vcf_restriped/X_AcTm_metadata.xlsx --checkpoint-dir .pipeline_checkpoints_tropheops_withFounders --g0-seeds results_tropheops_withFounders/Tropheops_pedigree_handoff/F1_G0_seed_assignments.csv --output-dir results_tropheops_withFounders/v7_margin_reproducible --threads 112 --bcf-threads 4
+python -m pedigree_v7 \
+  --bcf fish_vcf_restriped/AcTm.biallelic.bcf.gz \
+  --metadata fish_vcf_restriped/X_AcTm_metadata.xlsx \
+  --checkpoint-dir /path/to/new_tropheops_linear_h1_z1_checkpoints \
+  --g0-seeds results_tropheops_withFounders/Tropheops_pedigree_handoff/F1_G0_seed_assignments.csv \
+  --output-dir results_tropheops_withFounders/v7_margin_reproducible \
+  --threads 112 --bcf-threads 4
 ```
+
+The checkpoint path is deliberately a placeholder: replace it with the root of
+a newly generated linear Tropheops pipeline run whose per-contig
+`T09_viterbi_painting` checkpoints use the H1/Z1 bundle described above.
+Legacy checkpoint trees with separate or H0/Z0 payloads do not satisfy this
+schema and must not be substituted merely because they already exist.
 
 The example's 112 Numba threads are appropriate only inside a verified
 112-CPU allocation. The default is one thread. The implementation uses one
@@ -125,7 +144,7 @@ process and a bounded Numba thread pool, so the process-by-thread product is
 the requested `--threads`; BLAS/OpenMP oversubscription remains capped by
 `thread_config`. BCF reading uses the independently bounded `--bcf-threads`.
 
-A complete real-data run reads the BCF and two checkpoints for each chromosome,
+A complete real-data run reads the BCF and one T09 checkpoint per chromosome,
 then performs CPU-bound Numba HMM scoring. It may take tens of minutes to hours
 and produces compressed per-contig caches. Use `--resume` after an interrupted
 run. `--contigs ... --diagnostics-only` is the smallest representative scoring
@@ -140,7 +159,7 @@ candidate arrays, selected local G0 pairs, and normalized seed content. The
 seed mapping and provenance are content-hashed, so changing a seed invalidates
 both cache reuse and output-directory resume.
 
-The BCF, any adjacent BCF/VCF index, metadata workbook, and all 44 checkpoint
+The BCF, any adjacent BCF/VCF index, metadata workbook, and all 22 T09 checkpoint
 files are identified by resolved path, byte size, and nanosecond modification
 time. This is a practical stale-cache guard, not a cryptographic content hash
 of those large source files. A byte-for-byte replacement preserving all three

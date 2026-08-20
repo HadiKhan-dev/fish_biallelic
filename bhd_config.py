@@ -17,6 +17,23 @@ DEFAULT_READ_ERROR_PROBABILITY = 0.02
 
 
 # ============================================================================
+# Terminal whole-bin cavity refinement
+# ============================================================================
+# Post-L4 allele refinement uses 100-site HMM bins and scores the strict 2*K+2
+# two-basin candidate family against an immutable structural ancestry track.
+# Rho is the per-alternative transition log penalty per bin; the total switch
+# probability therefore depends on K. The emission mixture and floor robustify
+# individual log-likelihood contributions. Chunk sizes affect only working-
+# memory use and scheduling, not the statistical model or result.
+TERMINAL_CAVITY_SNPS_PER_BIN = 100
+TERMINAL_CAVITY_RHO = 10.0
+TERMINAL_CAVITY_SAMPLE_CHUNK_SIZE = 128
+TERMINAL_CAVITY_SITE_CHUNK_SIZE = 1024
+TERMINAL_CAVITY_EMISSION_UNIFORM_MIX = 0.01
+TERMINAL_CAVITY_LOG_EMISSION_FLOOR = -2.0
+
+
+# ============================================================================
 # Viterbi scoring & similarity-band tuning  (sentinels MASK / LOG_EPS stay in bhd_kernels)
 # ============================================================================
 # Default wildcard penalty.  λ in log-likelihood units per (strand, site)

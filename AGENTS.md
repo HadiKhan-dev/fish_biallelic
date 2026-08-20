@@ -491,7 +491,7 @@ The data concerns cichlid fish rather than human participants, but datasets and 
 - Do not expose unnecessary genomic records, sample identifiers, logs, or large output to external model context.
 - Summarize large results locally.
 
-Common artifacts include `*.pkl.b2`, `.pipeline_checkpoints*`, `results_*`, `logs/`, VCF, BCF, BAM, CRAM, validation CSVs, and run summaries. Check `.gitignore` and `git status` before staging. Never delete checkpoint or result directories without explicit approval.
+Common artifacts include `*.pkl.b2`, `*.p5.b2`, `.pipeline_checkpoints*`, `results_*`, `logs/`, VCF, BCF, BAM, CRAM, validation CSVs, and run summaries. Check `.gitignore` and `git status` before staging. Never delete checkpoint or result directories without explicit approval.
 
 ## Temporary files and interrupted allocations
 

@@ -7,6 +7,7 @@ remain in their owning entry points.
 
 from __future__ import annotations
 
+import copy
 import gc
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,19 @@ from datetime import datetime
 
 import checkpoint_io
 from memory_utils import malloc_trim
+
+
+FOUNDER_BLOCK_KEY = "founder_block"
+SAMPLE_IDS_KEY = "sample_ids"
+
+
+def available_cpu_count():
+    """Return CPUs available to this process, respecting Slurm affinity."""
+    try:
+        count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        count = os.cpu_count() or 1
+    return max(1, int(count))
 
 
 class TeeOutput:
@@ -50,10 +64,8 @@ class TeeOutput:
 class CheckpointStore:
     """Facade for the standard, non-provenance-bound pipeline checkpoints.
 
-    Save failures retain the established standard-pipeline policy: filesystem
-    ``OSError`` exceptions are reported and the pipeline continues.  Pearly's
-    fatal, provenance-bound checkpoint policy deliberately does not use this
-    class.
+    Writes are atomic, and filesystem ``OSError`` exceptions are reported then
+    re-raised so a stage cannot be marked complete after losing a checkpoint.
     """
 
     def __init__(self, root, *, nthreads=1, global_log_indent="  "):
@@ -68,15 +80,21 @@ class CheckpointStore:
         return path
 
     def stage_complete(self, stage):
-        return os.path.exists(os.path.join(self.stage_dir(stage), "_done"))
+        return os.path.exists(
+            os.path.join(self.stage_dir(stage), checkpoint_io.DONE_MARKER)
+        )
 
     def mark_stage_complete(self, stage):
-        with open(os.path.join(self.stage_dir(stage), "_done"), "w") as handle:
+        marker = os.path.join(self.stage_dir(stage), checkpoint_io.DONE_MARKER)
+        with open(marker, "w") as handle:
             handle.write(datetime.now().isoformat())
         print(f"  [Checkpoint] Stage '{stage}' marked complete")
 
     def contig_done(self, stage, contig):
         return os.path.exists(checkpoint_io.contig_path(self.root, stage, contig))
+
+    def global_done(self, stage):
+        return os.path.exists(checkpoint_io.global_path(self.root, stage))
 
     def save_contig(self, stage, contig, payload):
         self.stage_dir(stage)
@@ -90,11 +108,15 @@ class CheckpointStore:
             print(f"    [Checkpoint] {stage}/{contig} ({size_mb:.1f} MB)")
         except OSError as error:
             print(f"    [Checkpoint] WARNING: {stage}/{contig}: {error}")
+            raise
 
-    def load_contig(self, stage, contig):
+    def load_contig(self, stage, contig, *, nthreads=None):
+        read_threads = (
+            self.nthreads if nthreads is None else max(1, int(nthreads))
+        )
         return checkpoint_io.read(
             checkpoint_io.contig_path(self.root, stage, contig),
-            nthreads=self.nthreads,
+            nthreads=read_threads,
         )
 
     def save_global(self, stage, payload):
@@ -115,6 +137,7 @@ class CheckpointStore:
                 f"{self.global_log_indent}[Checkpoint] WARNING: "
                 f"{stage}/_global: {error}"
             )
+            raise
 
     def load_global(self, stage):
         return checkpoint_io.read(
@@ -123,12 +146,45 @@ class CheckpointStore:
         )
 
 
+def require_contig_checkpoints(store, stage, contigs):
+    """Require every expected per-contig payload before marking a stage done."""
+    missing = [str(contig) for contig in contigs
+               if not store.contig_done(stage, contig)]
+    if missing:
+        raise OSError(
+            f"Failed to checkpoint {stage}: " + ", ".join(missing)
+        )
+
+
 def strip_block_probs(blocks):
-    """Drop reconstructible per-block probability arrays in place."""
+    """Drop probability arrays that supported stages reload globally."""
     for block in blocks:
         if hasattr(block, "probs_array") and block.probs_array is not None:
             block.probs_array = None
     return blocks
+
+
+def strip_block_evidence(blocks):
+    """Drop block-local evidence unused after supported checkpoint boundaries."""
+    for block in blocks:
+        if hasattr(block, "probs_array"):
+            block.probs_array = None
+        if hasattr(block, "reads_count_matrix"):
+            block.reads_count_matrix = None
+    return blocks
+
+
+def compact_founder_block(block):
+    """Return a shallow final-panel snapshot containing downstream inputs.
+
+    The block-local probability and read-count tensors are not consumed after painting.
+    The copied object retains positions, founder haplotypes and IDs, keep flags,
+    evidence-mode metadata, and any lightweight dynamic attributes needed by
+    pedigree or phase processing.
+    """
+    compact = copy.copy(block)
+    strip_block_evidence((compact,))
+    return compact
 
 
 def load_founder_blocks_parallel(
@@ -142,10 +198,11 @@ def load_founder_blocks_parallel(
 ):
     """Load the preferred available founder block for each contig.
 
-    ``stage_keys`` contains ordered ``(stage, list_key)`` pairs. Checkpoints
-    are considered in that order independently for each contig, falling back
-    when a checkpoint is absent or its block list is empty. The returned
-    mapping contains only contigs for which a non-empty block list was found.
+    ``stage_keys`` contains ordered ``(stage, payload_key)`` pairs. A payload
+    value may be a founder block directly or a non-empty block collection.
+    Checkpoints are considered in that order independently for each contig,
+    falling back when a checkpoint is absent or its value is empty. The
+    returned mapping contains only contigs for which a founder block was found.
     With ``require_all=True``, raise instead if any requested contig has no
     usable block; this preserves strict production stages that cannot skip one.
     """
@@ -157,18 +214,34 @@ def load_founder_blocks_parallel(
     requested_workers = int(max_workers)
     if requested_workers < 1:
         raise ValueError("max_workers must be greater than zero")
-    effective_workers = min(requested_workers, len(contigs))
+    store_threads = max(1, int(getattr(store, "nthreads", requested_workers)))
+    total_read_threads = min(requested_workers, store_threads)
+    effective_workers = min(total_read_threads, len(contigs))
+    threads_per_read = max(1, total_read_threads // effective_workers)
+    extra_thread_reads = total_read_threads % effective_workers
     missing = object()
 
-    def load_one(contig):
-        for stage, list_key in stage_keys:
+    def load_one(indexed_contig):
+        index, contig = indexed_contig
+        read_threads = threads_per_read + int(index < extra_thread_reads)
+        for stage, payload_key in stage_keys:
             if not store.contig_done(stage, contig):
                 continue
-            payload = store.load_contig(stage, contig)
+            payload = store.load_contig(
+                stage, contig, nthreads=read_threads
+            )
             try:
-                if list_key not in payload or not payload[list_key]:
+                if payload_key not in payload:
                     continue
-                founder_block = payload[list_key][0]
+                value = payload[payload_key]
+                if value is None:
+                    continue
+                if hasattr(value, "haplotypes"):
+                    founder_block = value
+                else:
+                    if not value:
+                        continue
+                    founder_block = value[0]
                 if strip_probs:
                     strip_block_probs((founder_block,))
                 return contig, founder_block
@@ -178,7 +251,7 @@ def load_founder_blocks_parallel(
 
     found = {}
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        for contig, founder_block in executor.map(load_one, contigs):
+        for contig, founder_block in executor.map(load_one, enumerate(contigs)):
             if founder_block is not missing:
                 found[contig] = founder_block
     if require_all and len(found) != len(contigs):
@@ -208,45 +281,86 @@ def load_global_arrays(store, discovery_stage, contig):
     return global_probs, global_sites
 
 
+def validate_painting_bundle(
+    payload, *, expected_sample_ids=None, context="painting checkpoint"
+):
+    """Validate the ordered sample identity of an atomic painting bundle."""
+    required = ("tolerance_result", FOUNDER_BLOCK_KEY, SAMPLE_IDS_KEY)
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise KeyError(
+            f"{context} lacks required keys: " + ", ".join(missing)
+        )
+
+    sample_ids = tuple(str(value) for value in payload[SAMPLE_IDS_KEY])
+    if len(sample_ids) != len(set(sample_ids)):
+        raise ValueError(f"{context} contains duplicate sample IDs")
+    painting = payload["tolerance_result"]
+    samples = (
+        painting
+        if isinstance(painting, (list, tuple))
+        else getattr(painting, "samples", None)
+    )
+    if samples is None:
+        raise TypeError(f"{context} has an unrecognized painting container")
+    if len(samples) != len(sample_ids):
+        raise ValueError(
+            f"{context} has {len(samples)} painted samples but "
+            f"{len(sample_ids)} sample IDs"
+        )
+
+    if expected_sample_ids is not None:
+        expected = tuple(str(value) for value in expected_sample_ids)
+        if sample_ids != expected:
+            mismatch = next(
+                (index for index, pair in enumerate(zip(sample_ids, expected))
+                 if pair[0] != pair[1]),
+                min(len(sample_ids), len(expected)),
+            )
+            raise ValueError(
+                f"{context} sample order does not match the expected order "
+                f"(observed={len(sample_ids)}, expected={len(expected)}, "
+                f"first_mismatch_index={mismatch})"
+            )
+    return sample_ids
+
+
 def load_phase_correction_inputs(
     checkpoint_dir,
     contig,
     *,
     tolerance_stage,
-    founder_stage_keys,
     checkpoint_available=os.path.exists,
     checkpoint_reader=checkpoint_io.read,
     strip_founder_probs=False,
 ):
-    """Traverse painting and assembly checkpoints for phase correction.
+    """Load an atomic final-panel painting bundle for phase correction.
 
-    ``founder_stage_keys`` is ordered from preferred to fallback checkpoint.
-    Callers retain module-level wrappers so callbacks remain importable and
-    picklable under the project's forkserver multiprocessing model.
+    Painting, founder block, and ordered sample IDs must come from the same
+    checkpoint payload; no assembly fallback is permitted. Callbacks remain
+    picklable under forkserver.
     """
-    data = {}
     tolerance_path = checkpoint_io.contig_path(
         checkpoint_dir, tolerance_stage, contig
     )
-    if checkpoint_available(tolerance_path):
-        payload = checkpoint_reader(tolerance_path)
-        if "tolerance_result" in payload:
-            data["tolerance_result"] = payload["tolerance_result"]
-        del payload
-
-    for stage, list_key in founder_stage_keys:
-        path = checkpoint_io.contig_path(checkpoint_dir, stage, contig)
-        if not checkpoint_available(path):
-            continue
-        payload = checkpoint_reader(path)
-        if list_key in payload and payload[list_key]:
-            founder_block = payload[list_key][0]
-            if strip_founder_probs:
-                founder_block.probs_array = None
-            data["founder_block"] = founder_block
-            del payload
-            break
-        del payload
+    if not checkpoint_available(tolerance_path):
+        raise FileNotFoundError(
+            f"Missing required painting checkpoint for {contig}: "
+            f"{tolerance_path}"
+        )
+    payload = checkpoint_reader(tolerance_path)
+    sample_ids = validate_painting_bundle(
+        payload, context=f"Painting checkpoint {tolerance_path}"
+    )
+    founder_block = payload[FOUNDER_BLOCK_KEY]
+    if strip_founder_probs:
+        strip_block_probs((founder_block,))
+    data = {
+        "tolerance_result": payload["tolerance_result"],
+        "founder_block": founder_block,
+        SAMPLE_IDS_KEY: sample_ids,
+    }
+    del payload
     return data
 
 

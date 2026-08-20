@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 import checkpoint_io
+import pipeline_runtime
 
 from . import linked
 from .design import CONTIGS
@@ -32,7 +33,9 @@ from .ranking import descending_rank_votes as _descending_rank_votes
 
 
 SCHEMA_VERSION = 7
-MODEL_REVISION = "phase_invariant_G0_to_F1_with_missing_parent_states"
+MODEL_REVISION = (
+    "phase_invariant_G0_to_F1_with_missing_parent_states__t09_h1_z1_atomic"
+)
 PRIMARY_VARIANT = 1
 PARENT_STATE_NAMES = (
     "zero_parent", "father_only", "mother_only", "two_parent"
@@ -70,6 +73,25 @@ def _variant_specifications():
     return values
 
 
+def _load_t09_scoring_inputs(
+    checkpoint_dir, contig, expected_sample_ids, *, nthreads=4
+):
+    """Load sample-bound final-panel H1/Z1 inputs required for V7 scoring."""
+    checkpoint_path = checkpoint_io.contig_path(
+        checkpoint_dir, "T09_viterbi_painting", contig
+    )
+    payload = checkpoint_io.read(checkpoint_path, nthreads=nthreads)
+    pipeline_runtime.validate_painting_bundle(
+        payload,
+        expected_sample_ids=expected_sample_ids,
+        context=f"T09 checkpoint {checkpoint_path}",
+    )
+    painting = payload["tolerance_result"]
+    founder_block = payload[pipeline_runtime.FOUNDER_BLOCK_KEY]
+    del payload
+    return painting, founder_block
+
+
 def _score_contig(
     contig,
     output_dir,
@@ -88,18 +110,11 @@ def _score_contig(
                 "seconds": 0.0,
             }
     started = time.monotonic()
-    painting = checkpoint_io.read(
-        checkpoint_io.contig_path(
-            settings["checkpoint_dir"], "T08_viterbi_painting", contig
-        ),
-        nthreads=4,
-    )["tolerance_result"]
-    founder_block = checkpoint_io.read(
-        checkpoint_io.contig_path(
-            settings["checkpoint_dir"], "T10_phase_correction", contig
-        ),
-        nthreads=4,
-    )["founder_block"]
+    painting, founder_block = _load_t09_scoring_inputs(
+        settings["checkpoint_dir"],
+        contig,
+        settings["ordered_bcf_sample_ids"],
+    )
     likelihoods, _, positions, block_indices, hard = (
         load_selected_likelihoods(
             settings["bcf"],

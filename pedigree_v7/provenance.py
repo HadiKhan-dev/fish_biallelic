@@ -122,13 +122,13 @@ def source_identities(bcf_path, metadata_path, checkpoint_dir, contigs):
     if not indices:
         raise FileNotFoundError(f"no BCF/VCF index beside {bcf}")
     checkpoints = []
-    for stage in ("T08_viterbi_painting", "T10_phase_correction"):
-        for contig in contigs:
-            path = checkpoint_io.contig_path(checkpoint_dir, stage, contig)
-            identity = file_identity(path)
-            identity["stage"] = stage
-            identity["contig"] = str(contig)
-            checkpoints.append(identity)
+    stage = "T09_viterbi_painting"
+    for contig in contigs:
+        path = checkpoint_io.contig_path(checkpoint_dir, stage, contig)
+        identity = file_identity(path)
+        identity["stage"] = stage
+        identity["contig"] = str(contig)
+        checkpoints.append(identity)
     return {
         "bcf": file_identity(bcf),
         "bcf_indices": [file_identity(path) for path in indices],

@@ -9,6 +9,7 @@ from pathlib import Path
 import numba
 import numpy as np
 import pandas as pd
+import pipeline_runtime
 
 from . import aggregation, model
 from .design import (
@@ -113,7 +114,10 @@ def _summary(args, result, pedigrees, cache_validation, elapsed):
     return {
         "schema_version": 7,
         "model_revision": aggregation.MODEL_REVISION,
+        "scoring_model_revision": model.MODEL_REVISION,
+        "aggregation_model_revision": aggregation.MODEL_REVISION,
         "compatibility_mode": "exact_selected_tropheops_v7_margin",
+        "compatibility_input_contract": "linear_t09_h1_z1_sample_bound_atomic",
         "children": int(len(assignments)),
         "candidate_pairs": int(len(result.candidate_evidence) / len(assignments)),
         "retained_informative_markers": int(np.sum(result.marker_counts)),
@@ -152,9 +156,13 @@ def _summary(args, result, pedigrees, cache_validation, elapsed):
 
 def _scientific_parameters(args):
     return {
-        "checkpoint_painting_stage": "T08_viterbi_painting",
-        "checkpoint_founder_stage": "T10_phase_correction",
-        "uses_T10_painting": False,
+        "checkpoint_painting_stage": "T09_viterbi_painting",
+        "checkpoint_painting_key": "tolerance_result",
+        "checkpoint_founder_stage": "T09_viterbi_painting",
+        "checkpoint_founder_key": pipeline_runtime.FOUNDER_BLOCK_KEY,
+        "checkpoint_bundle": "atomic_H1_Z1_with_ordered_sample_ids",
+        "checkpoint_sample_ids_key": pipeline_runtime.SAMPLE_IDS_KEY,
+        "uses_post_pedigree_inputs": False,
         "marker_selection": "all_retained_founder_informative_with_PL",
         "markers_per_contig": 0,
         "bcf_threads": int(args.bcf_threads),
@@ -207,7 +215,7 @@ def build_parser():
         required=True,
         help=(
             "pipeline checkpoint directory; also required with --cache-dir "
-            "to validate the 44 source checkpoint identities"
+            "to validate the 22 T09 source checkpoint identities"
         ),
     )
     parser.add_argument(
@@ -284,7 +292,7 @@ def run(args):
     for path in (bcf, metadata_path, checkpoint_dir, g0_seeds):
         if not path.exists():
             raise FileNotFoundError(path)
-    _, contig_lengths, metadata = load_metadata(bcf, metadata_path)
+    sample_ids, contig_lengths, metadata = load_metadata(bcf, metadata_path)
     missing_contigs = [contig for contig in CONTIGS if contig not in contig_lengths]
     if missing_contigs:
         raise RuntimeError(f"BCF is missing compatibility contigs: {missing_contigs}")
@@ -327,11 +335,15 @@ def run(args):
     settings = {
         "schema_version": 7,
         "model_revision": aggregation.MODEL_REVISION,
+        "scoring_model_revision": model.MODEL_REVISION,
+        "aggregation_model_revision": aggregation.MODEL_REVISION,
         "compatibility_mode": "exact_selected_tropheops_v7_margin",
+        "compatibility_input_contract": "linear_t09_h1_z1_sample_bound_atomic",
         "bcf": str(bcf),
         "metadata": str(metadata_path),
         "checkpoint_dir": str(checkpoint_dir),
         "g0_seeds": str(g0_seeds),
+        "ordered_bcf_sample_ids": list(sample_ids),
         "normalized_g0_seed_sha256": cache_manifest["g0_seed_sha256"],
         "cache_manifest_sha256": manifest_sha256(cache_manifest),
         "external_cache_dir": str(external_cache) if external_cache else None,
@@ -358,6 +370,7 @@ def run(args):
             args, cache_dir, scientific_parameters | {
                 "bcf": str(bcf),
                 "checkpoint_dir": str(checkpoint_dir),
+                "ordered_bcf_sample_ids": tuple(sample_ids),
             }, candidates, selected_g0_pairs
         )
     else:

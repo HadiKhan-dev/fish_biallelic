@@ -309,8 +309,8 @@ if __name__ == '__main__':
     # PER-CONTIG CHECKPOINTING
     # =============================================================================
     # Each stage gets a subdirectory.  Each contig gets its own checkpoint
-    # file (a blosc2-compressed pickle, suffix ".pkl.b2"; see checkpoint_io).
-    # A _done marker indicates the stage completed for ALL contigs.
+    # file (a protocol-5/Blosc frame, suffix ".p5.b2"; see checkpoint_io).
+    # The format-qualified done marker means all contigs completed.
     #
     # On resume, _ensure_key loads ONLY the keys a stage needs from checkpoints,
     # avoiding the monolithic pickle that caused OOM.
@@ -877,6 +877,7 @@ if __name__ == '__main__':
             )
 
             multi_contig_results[r_name]['simd_block_results'] = blocks_out
+            pipeline_runtime.strip_block_evidence(blocks_out)
             save_contig(STAGE_5, r_name, {'simd_block_results': blocks_out})
 
             print(f"    Output: {len(blocks_out)} blocks, "
@@ -935,6 +936,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L1'] = super_blocks
+            pipeline_runtime.strip_block_evidence(super_blocks)
             save_contig(STAGE_6, r_name, {'super_blocks_L1': super_blocks})
             
             hap_counts = [len(b.haplotypes) for b in super_blocks]
@@ -1000,6 +1002,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L2'] = super_blocks_L2
+            pipeline_runtime.strip_block_evidence(super_blocks_L2)
             save_contig(STAGE_7, r_name, {'super_blocks_L2': super_blocks_L2})
             
             haps_per_block = [len(b.haplotypes) for b in super_blocks_L2]
@@ -1065,6 +1068,7 @@ if __name__ == '__main__':
             )
             
             multi_contig_results[r_name]['super_blocks_L3'] = super_blocks_L3
+            pipeline_runtime.strip_block_evidence(super_blocks_L3)
             save_contig(STAGE_8, r_name, {'super_blocks_L3': super_blocks_L3})
             
             haps_per_block = [len(b.haplotypes) for b in super_blocks_L3]
@@ -1139,6 +1143,9 @@ if __name__ == '__main__':
                 print(f"    Sites per block: {[len(b.positions) for b in super_blocks_L4]}")
                 print(f"    Haps per super-block: {haps_per_block}")
 
+            pipeline_runtime.strip_block_evidence(
+                multi_contig_results[r_name]['super_blocks_L4']
+            )
             save_contig(STAGE_9, r_name, {
                 'super_blocks_L4': multi_contig_results[r_name]['super_blocks_L4']
             })

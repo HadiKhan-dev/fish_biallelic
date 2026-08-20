@@ -654,31 +654,24 @@ def _append_crossover_event_metadata(destination, contig_index,
 
 
 def _process_offspring_batch(args):
-    """
-    Worker function to process a BATCH of offspring for a single contig.
-    
-    Each batch gets its own RNG seed derived from the contig seed, so results
-    are deterministic regardless of how many inner workers are used.
-    """
-    (batch_indices, offspring_parent_indices_batch,
-     parents, ancestries, site_locs,
-     recomb_rate, mutate_rate, seed,
+    """Simulate one scheduled child batch using preassigned child seeds."""
+    (batch_indices, offspring_parent_indices_batch, child_seeds_batch,
+     parents, ancestries, site_locs, recomb_rate, mutate_rate,
      recombination_profile, return_crossover_events) = args
-
-    rng = np.random.default_rng(seed)
 
     batch_haps = []
     batch_ancs = []
     batch_events = []
 
-    for (p1_idx, p2_idx) in offspring_parent_indices_batch:
+    for (p1_idx, p2_idx), child_seed in zip(
+            offspring_parent_indices_batch, child_seeds_batch):
         child_result = create_offspring(
             parents[p1_idx], parents[p2_idx],
             ancestries[p1_idx], ancestries[p2_idx],
             site_locs,
             recomb_rate=recomb_rate,
             mutate_rate=mutate_rate,
-            rng=rng,
+            rng=np.random.default_rng(int(child_seed)),
             recombination_profile=recombination_profile,
             return_crossover_events=return_crossover_events,
         )
@@ -696,98 +689,58 @@ def _process_offspring_batch(args):
 
 
 def _process_contig_for_generation(args):
-    """
-    Worker function to process all offspring for a single contig within a generation.
-    
-    Two-level parallelism: this function is called as an outer worker (one per
-    contig), and internally parallelises across offspring batches using an inner
-    Pool.  The core budget is divided as num_processes // num_contigs per contig.
-    
-    When inner_workers <= 1 or the offspring count is small, falls back to
-    sequential processing to avoid Pool overhead.
-    """
-    contig_idx = args[0]
-    data = args[1]
-    
+    """Schedule one contig/generation without changing any child's RNG."""
+    contig_idx, data = args
     parents = data['parents']
     ancestries = data['ancestries']
     site_locs = data['site_locs']
     offspring_parent_indices = data['offspring_parent_indices']
+    child_seeds = data['child_seeds']
     recomb_rate = data['recomb_rate']
     mutate_rate = data['mutate_rate']
-    seed = data['seed']
     inner_workers = data.get('inner_workers', 1)
     recombination_profile = data.get('recombination_profile')
     return_crossover_events = data.get('return_crossover_events', False)
-    
+
     num_offspring = len(offspring_parent_indices)
-    
-    # --- Sequential path (small batch or single inner worker) ---
-    if inner_workers <= 1 or num_offspring <= inner_workers:
-        rng = np.random.default_rng(seed)
-        
-        offspring_haps = []
-        offspring_ancs = []
-        offspring_events = []
+    if len(child_seeds) != num_offspring:
+        raise ValueError("child seed count does not match offspring count")
+    if num_offspring == 0:
+        result = (contig_idx, [], [])
+        return result + ([],) if return_crossover_events else result
 
-        for (p1_idx, p2_idx) in offspring_parent_indices:
-            child_result = create_offspring(
-                parents[p1_idx], parents[p2_idx],
-                ancestries[p1_idx], ancestries[p2_idx],
-                site_locs,
-                recomb_rate=recomb_rate,
-                mutate_rate=mutate_rate,
-                rng=rng,
-                recombination_profile=recombination_profile,
-                return_crossover_events=return_crossover_events,
-            )
-            child_haps, child_paintings = child_result[:2]
-            offspring_haps.append(child_haps)
-            offspring_ancs.append(child_paintings)
-            if return_crossover_events:
-                offspring_events.append(child_result[2])
-
-        result = (contig_idx, offspring_haps, offspring_ancs)
-        if return_crossover_events:
-            return result + (offspring_events,)
-        return result
-    
-    # --- Parallel path: split offspring into batches for inner workers ---
-    # Derive per-batch seeds deterministically from the contig seed so that
-    # results are reproducible regardless of the number of inner workers.
-    batch_rng = np.random.default_rng(seed)
-    
-    # Divide offspring into roughly equal batches, one per inner worker
     batch_size = max(1, (num_offspring + inner_workers - 1) // inner_workers)
-    
     worker_args = []
-    for b_start in range(0, num_offspring, batch_size):
-        b_end = min(b_start + batch_size, num_offspring)
-        batch_seed = int(batch_rng.integers(0, 2**63))
+    for batch_start in range(0, num_offspring, batch_size):
+        batch_end = min(batch_start + batch_size, num_offspring)
         worker_args.append((
-            (b_start, b_end),
-            offspring_parent_indices[b_start:b_end],
-            parents, ancestries, site_locs,
-            recomb_rate, mutate_rate, batch_seed,
+            (batch_start, batch_end),
+            offspring_parent_indices[batch_start:batch_end],
+            child_seeds[batch_start:batch_end],
+            parents, ancestries, site_locs, recomb_rate, mutate_rate,
             recombination_profile, return_crossover_events,
         ))
-    
-    with Pool(processes=min(inner_workers, len(worker_args))) as inner_pool:
-        results = inner_pool.map(_process_offspring_batch, worker_args)
-    
-    # Reassemble in original order
+
+    if inner_workers <= 1 or len(worker_args) == 1:
+        results = [_process_offspring_batch(item) for item in worker_args]
+    else:
+        with Pool(processes=min(inner_workers, len(worker_args))) as inner_pool:
+            results = inner_pool.map(_process_offspring_batch, worker_args)
+
     offspring_haps = [None] * num_offspring
     offspring_ancs = [None] * num_offspring
-    offspring_events = [None] * num_offspring if return_crossover_events else None
-
+    offspring_events = (
+        [None] * num_offspring if return_crossover_events else None
+    )
     for batch_result in results:
-        (b_start, b_end), batch_haps, batch_ancs = batch_result[:3]
+        (batch_start, batch_end), batch_haps, batch_ancs = batch_result[:3]
         batch_events = batch_result[3] if return_crossover_events else None
-        for local_i, global_i in enumerate(range(b_start, b_end)):
-            offspring_haps[global_i] = batch_haps[local_i]
-            offspring_ancs[global_i] = batch_ancs[local_i]
+        for local_index, child_index in enumerate(
+                range(batch_start, batch_end)):
+            offspring_haps[child_index] = batch_haps[local_index]
+            offspring_ancs[child_index] = batch_ancs[local_index]
             if return_crossover_events:
-                offspring_events[global_i] = batch_events[local_i]
+                offspring_events[child_index] = batch_events[local_index]
 
     result = (contig_idx, offspring_haps, offspring_ancs)
     if return_crossover_events:
@@ -834,9 +787,9 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
         seed: Optional integer seed for full reproducibility. Seeds both the
               pedigree structure (parent selection) and the meiosis simulation
               (recombination + mutation). If None, uses system entropy (not
-              reproducible). Note: the parallel path uses deterministic
-              per-batch sub-seeds derived from this seed, so results are
-              reproducible regardless of the number of workers.
+              reproducible). One deterministic seed is assigned to every
+              contig/generation/child before batching, so worker counts and
+              batch boundaries only schedule already-defined simulations.
         recombination_profile: Optional contiguous relative-position segments
               ``(start_fraction, end_fraction, multiplier)``. Multipliers are
               normalised so ``recomb_rate`` stays the chromosome-average rate.
@@ -947,87 +900,52 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
                 'Parent2': parent2_id
             })
         
-        # B. Generate Genetics (Two-level parallel: contigs x offspring)
-        if use_parallel:
-            worker_args = []
-            for c in range(num_contigs):
-                contig_data = {
-                    'parents': current_parents_list[c],
-                    'ancestries': current_ancestries_list[c],
-                    'site_locs': site_locs_list[c],
-                    'offspring_parent_indices': offspring_parent_indices,
-                    'recomb_rate': recomb_rate,
-                    'mutate_rate': mutate_rate,
-                    'seed': master_rng.integers(0, 2**31),
-                    'inner_workers': inner_workers,
-                    'recombination_profile': recombination_profile,
-                    'return_crossover_events': return_crossover_events,
-                }
-                worker_args.append((c, contig_data))
-            
-            if outer_workers > 1:
-                with NoDaemonPool(processes=outer_workers) as pool:
-                    results = pool.map(_process_contig_for_generation, worker_args)
-            else:
-                # Single contig: run the worker directly (inner Pool handles parallelism)
-                results = [_process_contig_for_generation(wa) for wa in worker_args]
-            
-            next_gen_individuals_list = [None] * num_contigs
-            next_gen_ancestries_list = [None] * num_contigs
-            
-            for contig_result in results:
-                contig_idx, offspring_haps, offspring_ancs = contig_result[:3]
-                next_gen_individuals_list[contig_idx] = offspring_haps
-                next_gen_ancestries_list[contig_idx] = offspring_ancs
+        # B. Generate Genetics. Materialise one seed for every
+        # contig/generation/child before batching; resources only schedule work.
+        child_seeds_by_contig = master_rng.integers(
+            0, 2**63, size=(num_contigs, num_offspring), dtype=np.int64
+        )
+        scheduled_inner_workers = inner_workers if use_parallel else 1
+        worker_args = []
+        for c in range(num_contigs):
+            contig_data = {
+                'parents': current_parents_list[c],
+                'ancestries': current_ancestries_list[c],
+                'site_locs': site_locs_list[c],
+                'offspring_parent_indices': offspring_parent_indices,
+                'child_seeds': child_seeds_by_contig[c],
+                'recomb_rate': recomb_rate,
+                'mutate_rate': mutate_rate,
+                'inner_workers': scheduled_inner_workers,
+                'recombination_profile': recombination_profile,
+                'return_crossover_events': return_crossover_events,
+            }
+            worker_args.append((c, contig_data))
 
-                all_individuals_flat_by_contig[contig_idx].extend(offspring_haps)
-                all_paintings_flat_by_contig[contig_idx].extend(offspring_ancs)
-                if return_crossover_events:
-                    _append_crossover_event_metadata(
-                        all_crossover_events_by_contig[contig_idx], contig_idx,
-                        gen_idx, gen_name, next_gen_ids,
-                        range(len(next_gen_ids)), current_parent_ids,
-                        offspring_parent_indices, contig_result[3],
-                    )
-        
+        if use_parallel and outer_workers > 1:
+            with NoDaemonPool(processes=outer_workers) as pool:
+                results = pool.map(_process_contig_for_generation, worker_args)
         else:
-            next_gen_individuals_list = [[] for _ in range(num_contigs)]
-            next_gen_ancestries_list = [[] for _ in range(num_contigs)]
-            
-            for i, (p1_idx, p2_idx) in enumerate(offspring_parent_indices):
-                for c in range(num_contigs):
-                    p1_pair = current_parents_list[c][p1_idx]
-                    p2_pair = current_parents_list[c][p2_idx]
-                    
-                    p1_anc = current_ancestries_list[c][p1_idx]
-                    p2_anc = current_ancestries_list[c][p2_idx]
-                    
-                    c_sites = site_locs_list[c]
-                    
-                    child_result = create_offspring(
-                        p1_pair, p2_pair,
-                        p1_anc, p2_anc,
-                        c_sites,
-                        recomb_rate=recomb_rate,
-                        mutate_rate=mutate_rate,
-                        recombination_profile=recombination_profile,
-                        return_crossover_events=return_crossover_events,
-                    )
-                    child_haps, child_paintings = child_result[:2]
+            results = [
+                _process_contig_for_generation(item) for item in worker_args
+            ]
 
-                    next_gen_individuals_list[c].append(child_haps)
-                    next_gen_ancestries_list[c].append(child_paintings)
+        next_gen_individuals_list = [None] * num_contigs
+        next_gen_ancestries_list = [None] * num_contigs
+        for contig_result in results:
+            contig_idx, offspring_haps, offspring_ancs = contig_result[:3]
+            next_gen_individuals_list[contig_idx] = offspring_haps
+            next_gen_ancestries_list[contig_idx] = offspring_ancs
+            all_individuals_flat_by_contig[contig_idx].extend(offspring_haps)
+            all_paintings_flat_by_contig[contig_idx].extend(offspring_ancs)
+            if return_crossover_events:
+                _append_crossover_event_metadata(
+                    all_crossover_events_by_contig[contig_idx], contig_idx,
+                    gen_idx, gen_name, next_gen_ids,
+                    range(len(next_gen_ids)), current_parent_ids,
+                    offspring_parent_indices, contig_result[3],
+                )
 
-                    all_individuals_flat_by_contig[c].append(child_haps)
-                    all_paintings_flat_by_contig[c].append(child_paintings)
-                    if return_crossover_events:
-                        p_indices = offspring_parent_indices[i]
-                        _append_crossover_event_metadata(
-                            all_crossover_events_by_contig[c], c,
-                            gen_idx, gen_name, [next_gen_ids[i]], [i],
-                            current_parent_ids, [p_indices], [child_result[2]],
-                        )
-                
         # Move to next generation
         current_parents_list = next_gen_individuals_list
         current_ancestries_list = next_gen_ancestries_list
