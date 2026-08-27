@@ -16,6 +16,12 @@ repository evidence from theoretical possibilities in Python. When
 performance is in scope, identify the actual hot path or algorithmic cost
 rather than speculating from code shape alone.
 
+For verified CPU-bound investigation, use the complete verified Slurm CPU
+affinity without reserving dedicated CPUs for orchestration or the agent. Keep
+the aggregate process-count times threads-per-process within the allocation,
+and report any demonstrated task-count, memory, bandwidth, or I/O limit that
+prevents useful full-allocation scaling.
+
 Your final message must be a complete, self-contained handoff containing the
 path map, evidence, assumptions, uncertainty, performance implications when
 relevant, and implications for the coordinating agent.

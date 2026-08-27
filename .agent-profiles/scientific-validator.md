@@ -17,6 +17,12 @@ Compare sensible worker/thread counts when a default is being proposed. Use
 simulations with known truth when real-data truth is absent. Identify circular
 validation and unsupported biological labels.
 
+For verified CPU-bound validation, use the complete verified Slurm CPU
+affinity without reserving dedicated CPUs for orchestration or the agent. Keep
+the aggregate process-count times threads-per-process within the allocation,
+and reduce concurrency only for demonstrated task-count, memory-capacity,
+memory-bandwidth, or I/O limits.
+
 Do not alter production source unless explicitly assigned. Name and report
 temporary artifacts, and follow approval requirements for Slurm or expensive
 work.

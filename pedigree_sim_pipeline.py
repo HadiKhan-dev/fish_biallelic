@@ -122,57 +122,6 @@ if __name__ == "__main__":   # only the main process prints; workers re-import t
 CHECKPOINT_DIR = _BHD_CKPT_DIR
 
 import os
-import checkpoint_io
-
-
-def _load_contig_for_phase_correction(r_name):
-    """
-    Load tolerance_result and founder_block for one contig from
-    checkpoint files on disk.
-
-    Top-level (picklable) version used by forkserver workers in
-    phase_correction.  Reads checkpoints DIRECTLY rather than
-    going through main's `multi_contig_results` cache, because
-    forkserver workers do not inherit main's process state.
-
-    The stage->key mapping mirrors `_KEY_SOURCE` inside the
-    `__main__` block:
-        tolerance_result -> 10_viterbi_painting
-        super_blocks_L4  -> 09_assembly_L4    (preferred)
-        super_blocks_L3  -> 08_assembly_L3    (fallback)
-    If a checkpoint file is missing the corresponding data key is
-    simply omitted from the returned dict; the worker handles
-    missing keys by falling back to an identity equivalence matrix.
-    """
-    data = {}
-
-    # tolerance_result lives in stage 10 (Viterbi painting)
-    tol_path = checkpoint_io.contig_path(CHECKPOINT_DIR, "10_viterbi_painting", r_name)
-    if os.path.exists(tol_path):
-        ckpt = checkpoint_io.read(tol_path)
-        if 'tolerance_result' in ckpt:
-            data['tolerance_result'] = ckpt['tolerance_result']
-        del ckpt
-
-    # founder_block lives in stage 9 (L4 assembly), falling back to
-    # stage 8 (L3 assembly) when L4 is absent.  We take element [0]
-    # because super_blocks is a list of BlockResults; in the
-    # phase-correction flow there is exactly one block per contig
-    # (the whole-chromosome merged block).
-    for stage, list_key in [("09_assembly_L4", "super_blocks_L4"),
-                             ("08_assembly_L3", "super_blocks_L3")]:
-        if 'founder_block' in data:
-            break
-        path = checkpoint_io.contig_path(CHECKPOINT_DIR, stage, r_name)
-        if not os.path.exists(path):
-            continue
-        ckpt = checkpoint_io.read(path)
-        if list_key in ckpt and ckpt[list_key]:
-            data['founder_block'] = ckpt[list_key][0]
-        del ckpt
-
-    return data
-
 
 #%%
 if __name__ == '__main__':
@@ -257,7 +206,6 @@ if __name__ == '__main__':
     import block_linking
     import simulate_sequences
     import hmm_matching
-    import viterbi_likelihood_calculator
     import beam_search_core
     import chimera_resolution
     import hierarchical_assembly

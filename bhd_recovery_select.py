@@ -220,8 +220,8 @@ def _bic_prune(cache, selected_indices,
     enough weight to justify the +cc penalty for keeping it).
 
     Iterates: each drop may enable another (cascading prune of redundant
-    haps that propped each other up).  Matches the project's
-    refine_selection_by_pruning pattern in beam_search_core.
+    haps that propped each other up).  Each iteration evaluates every
+    leave-one-out candidate and accepts a drop only when it improves BIC.
 
     Uses PoolEmissionCache so each leave-one-out trial reuses the pool's
     precomputed emissions (no per-trial rebuild).  For a K-sized

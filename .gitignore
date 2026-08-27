@@ -34,6 +34,7 @@ pedigree_sweep_results/
 
 # Python
 __pycache__/
+/.pytest_cache/
 *.pyc
 *.pyo
 
@@ -44,12 +45,20 @@ model_logs/
 # Generated images
 *.png
 
+# Local conference-poster work (renderings and incomplete provenance bundle)
+/poster_assets/
+
 # Generated data/logs
 *.csv
 *.ped
 *.log
 *.stats
 *.relatedness
+
+# Profiling captures
+/blockhap.speedscope.json
+/blockhap_idle.json
+/blockhap_tail.json
 
 # Temp/lock files
 .~lock.*
@@ -58,6 +67,15 @@ model_logs/
 *.orig
 *.rej
 *.codex-patched*
+
+# Pearly validation adapters retained at source-hash-bound root paths.
+/f1_candidate_phase_production_adapter.py
+/f1_candidate_phase_validation.py
+/f1_fixed_parent_phase_production_adapter.py
+/f2_block_subtraction_production_adapter.py
+/f2_block_subtraction_validation.py
+/f2_tier1_production_adapter.py
+/f2_tier1_validation.py
 
 # Old/scratch
 old_files/

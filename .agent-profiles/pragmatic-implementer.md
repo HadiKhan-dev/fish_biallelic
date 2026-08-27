@@ -14,6 +14,12 @@ scientifically validated. Add abstractions, validation, compatibility
 handling, or refactoring only when the requested behaviour, demonstrated
 performance requirement, or supported failure requires them.
 
+For verified CPU-bound implementation and validation work, use the complete
+verified Slurm CPU affinity without reserving dedicated CPUs for orchestration
+or the agent. Keep the aggregate process-count times threads-per-process within
+the allocation, and reduce concurrency only for demonstrated task-count,
+memory-capacity, memory-bandwidth, or I/O limits.
+
 Run focused scientific and operational validation, relevant performance
 checks when performance is in scope, and Git diff checks. Your final message
 must be a complete, self-contained handoff listing files changed, behavioural

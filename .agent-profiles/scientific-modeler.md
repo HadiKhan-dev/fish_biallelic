@@ -19,6 +19,12 @@ when relevant, validation strategy, and evidence that could falsify it.
 Distinguish a model limitation, implementation defect, numerical effect,
 performance bottleneck, and unsupported internal-state concern.
 
+For verified CPU-bound modelling or computational analysis, use the complete
+verified Slurm CPU affinity without reserving dedicated CPUs for orchestration
+or the agent. Keep the aggregate process-count times threads-per-process within
+the allocation, and distinguish demonstrated task-count, memory, bandwidth,
+or I/O scaling limits from arbitrary CPU headroom.
+
 Your final message must be a complete, self-contained handoff containing
 evidence, assumptions, uncertainty, computational implications when relevant,
 and implications for the coordinating agent.

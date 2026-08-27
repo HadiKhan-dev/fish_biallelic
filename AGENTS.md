@@ -309,10 +309,9 @@ casually.
 - Preserve safeguards against BLAS, OpenMP, MKL, and Numba oversubscription.
 - In new entry points, inspect existing entry points to determine where
   `thread_config` must be imported relative to NumPy and Numba.
-- Do not increase process counts or thread counts merely because more CPUs
-  are allocated.
-- Do not assume that a 112-core allocation means every operation should use
-  112 cores.
+- For CPU-bound work that can safely parallelize, target the complete verified
+  Slurm CPU affinity. Increase process or thread counts when a larger
+  allocation provides useful parallel capacity.
 - Explain the process/thread model before changing parallel execution.
 - Avoid nested parallelism unless the total process-by-thread product is
   explicitly bounded.
@@ -354,6 +353,10 @@ python -c 'import os; print("sched_affinity_cpus=", len(os.sched_getaffinity(0))
 squeue -u "$USER"
 ```
 
+`nproc` may honor `OMP_NUM_THREADS` and therefore under-report the available
+cpuset. Prefer `os.sched_getaffinity(0)`, the Slurm job record, and the cgroup
+cpuset when determining the usable CPU allocation.
+
 Missing Slurm variables do not prove no allocation exists. If absent, inspect `squeue -u "$USER"`, match the hostname, ask when multiple jobs could match, and use `scontrol show job JOB_ID` for authoritative resources.
 
 Do not infer the allocation from physical node size, `/proc/cpuinfo`, or `nproc --all`.
@@ -362,9 +365,13 @@ Do not infer the allocation from physical node size, `/proc/cpuinfo`, or `nproc 
 
 - Never run substantial computation on a login node.
 - Lightweight inspection, syntax checks, and small unit-like tests are acceptable where permitted.
-- Begin with the smallest scientifically meaningful test.
+- Perform only the lightweight preflight needed to avoid immediate operational
+  failure. For authorized decomposable work, launch the canary and independent
+  provisional units concurrently rather than waiting for a serial test to
+  finish.
 - Estimate CPU, memory, I/O, and runtime before expensive execution.
-- Use only allocated resources and reserve capacity for the agent, OS, filesystem, and coordination.
+- Use only allocated resources. Do not reserve dedicated CPUs for the agent,
+  operating system, filesystem, or orchestration.
 - Use reviewed `srun` commands where required and reviewed `sbatch` scripts for long or production work.
 - Do not submit, cancel, reprioritize, or modify Slurm jobs without explicit approval.
 - Do not launch the full pipeline unless explicitly requested.
@@ -377,6 +384,91 @@ memory, I/O volume, or scaling determines whether the intended real-data
 workflow is usable. Optimize measured or analytically established bottlenecks,
 not hypothetical micro-costs, and validate that performance changes preserve
 scientific behaviour.
+
+### Speculative execution and in-run validation
+
+For explicitly authorized computation that decomposes into scientifically
+independent units, validation gates acceptance rather than execution.
+
+After a lightweight preflight, launch concurrently:
+
+- one or more representative canary units selected to expose shared failure
+  modes quickly; and
+- the remaining independent units as provisional work, sized to use the
+  complete verified CPU allocation.
+
+Give the canary enough resources and scheduling priority to finish quickly. Do
+not leave CPUs idle merely because its validation is still pending.
+
+Every speculative attempt must have an explicit code, configuration, input,
+seed, and checkpoint identity and an isolated output root. Provisional outputs
+must not publish global completion markers, overwrite accepted results, or be
+treated as accepted until the validation gate passes.
+
+If the canary fails:
+
+1. preserve the minimum logs and evidence needed to diagnose the failure;
+2. stop the attempt's remaining workers;
+3. invalidate the attempt's provisional outputs;
+4. make the required change; and
+5. restart under a new attempt identity.
+
+An explicit user request to run speculatively authorizes stopping that
+attempt's workers and deleting only outputs created under its validated,
+attempt-specific provisional output root. It never authorizes modifying or
+deleting pre-existing checkpoints, accepted results, or unrelated outputs.
+
+Speculation is permitted only where scientific and computational dependencies
+are already satisfied. Do not speculate across an unresolved global parameter,
+shared mutable state, cross-contig dependency, or stage whose inputs may change
+when the canary is evaluated.
+
+Performance measurements should normally be collected from the live
+speculative run. Do not insert a separate preliminary benchmark when the same
+evidence can be obtained from the authorized work.
+
+### Allocation-utilization reassessment
+
+During an authorized long-running computation, periodically reassess whether
+the complete verified CPU allocation is being used for useful work.
+
+Perform this reassessment:
+
+- immediately after launching the worker pool;
+- when the canary completes or fails;
+- at stage, phase, batch, chromosome, or other natural task boundaries;
+- when workers exit, the active task count falls, or a straggler tail begins;
+- whenever the agent regains control while waiting for a long-running command;
+  and
+- during a stage lasting more than several minutes when an existing monitoring
+  opportunity is available.
+
+Use the verified Slurm CPU affinity or cgroup cpuset as the allocation size; do
+not rely on `nproc` when numerical-library thread limits are set.
+
+Compare the allocation against active processes, threads per process, eligible
+queued work, and observed useful CPU activity. If a material portion of the
+allocation remains idle:
+
+1. determine whether independent eligible work is available;
+2. check whether dependencies, memory capacity, memory bandwidth, shared-
+   filesystem I/O, or an inherently serial section explains the idle CPUs;
+3. if the work is CPU-bound and safe to parallelize, immediately increase the
+   worker or thread count, expand remaining tasks into freed cores, or launch
+   additional isolated provisional units;
+4. keep the aggregate process-count times threads-per-process within the
+   verified allocation; and
+5. record the underutilization, its cause, and the action taken.
+
+Do not preserve an earlier conservative worker count merely because it was
+chosen at launch. Reallocate CPUs dynamically as task availability changes,
+especially during straggler tails.
+
+Do not create a separate tight polling loop solely for utilization checks.
+Reuse normal command output, worker-pool events, canary decisions, stage
+boundaries, and existing monitoring opportunities. If additional concurrency
+would not improve useful throughput, continue with the current allocation and
+state the concrete limiting factor.
 
 Before non-trivial computation, classify the likely bottleneck as one or more
 of:
@@ -394,10 +486,12 @@ Then apply these rules:
 - Keep lightweight repository inspection, syntax checks, small metadata reads,
   and short tests single-threaded when parallel startup would cost more than
   it saves.
-- For genuinely CPU-bound work, use bounded parallelism up to the verified
-  allocation, not automatically the entire node.
-- Start with a representative bounded benchmark and a conservative worker
-  count, then scale only when timing demonstrates useful speedup.
+- For verified CPU-bound work, default to using the complete Slurm CPU
+  affinity.
+- When scaling behaviour is unknown, measure it during the live speculative
+  attempt wherever outputs can be isolated safely. Use a separate preliminary
+  benchmark only when the user explicitly requests one or when a wrong resource
+  choice could make the real attempt unsafe rather than merely inefficient.
 - Prefer partitioning independent work by chromosome, contig, region, sample,
   block, replicate, or file when scientifically valid.
 - Do not parallelize in a way that changes statistical dependence,
@@ -415,9 +509,10 @@ Then apply these rules:
 - Do not launch several expensive analyses concurrently unless their combined
   CPU, memory, and I/O requirements have been estimated and fit safely within
   the allocation.
-- Reserve enough CPU and memory for the agent process, operating system,
-  filesystem activity, and worker coordination rather than saturating the
-  node merely because CPUs appear idle.
+- Keep the aggregate process-count times threads-per-process within the
+  verified allocation. Reduce concurrency below that allocation only when
+  task count, memory capacity, memory bandwidth, or measured I/O throughput
+  prevents useful CPU scaling, not to reserve CPUs for orchestration.
 
 ### Tool-specific performance guidance
 
@@ -450,33 +545,36 @@ Then apply these rules:
 
 For performance-sensitive work:
 
-- benchmark the smallest representative real-data subset that exercises the
-  relevant code path;
-- record the exact input subset, command, configuration, worker/thread count,
-  elapsed time, and exit status;
-- capture peak memory where practical, for example with `/usr/bin/time -v`;
-- distinguish wall-clock speedup from increased total CPU time, memory
-  consumption, or I/O load;
-- compare at least two sensible worker counts before recommending a default;
-- do not extrapolate full-pipeline runtime from an unrepresentative tiny case
-  without stating the limitation;
-- leave temporary benchmark outputs in an explicitly named safe location and
-  report them;
-- do not overwrite production results or checkpoints for benchmarking.
+- collect elapsed time, CPU use, peak memory, I/O behaviour, worker count, and
+  exit status from the authorized live attempt where practical;
+- at each natural utilization checkpoint, record allocated CPUs, active
+  workers, threads per worker, approximate useful CPU occupancy, idle capacity,
+  and any concurrency adjustment made;
+- use representative canary units for early validation while other independent
+  units run provisionally;
+- treat differences between chromosomes, contigs, samples, or regions as
+  workload differences rather than controlled worker-count comparisons;
+- compare multiple worker counts only when the user explicitly requests tuning
+  or when changing a shared default;
+- do not create separate benchmark outputs when the same measurements can be
+  collected from isolated provisional outputs;
+- do not overwrite accepted results or checkpoints;
+- report when I/O, memory bandwidth, memory capacity, dependency structure, or
+  insufficient task count prevents useful CPU saturation.
 
-Before proposing or running an expensive command, explain:
+Before launching an expensive command, state concisely:
 
-1. what it will execute;
-2. which inputs it will read;
-3. which outputs it will create or overwrite;
-4. whether it is expected to be CPU-bound, memory-bound, or I/O-bound;
-5. the verified allocated CPUs and memory;
-6. the proposed workers and threads per worker;
-7. expected memory per worker and total memory;
-8. expected runtime;
-9. whether it can resume safely;
-10. how it will be stopped or cleaned up if it fails;
-11. the smallest representative benchmark to run first.
+1. the inputs and isolated attempt output root;
+2. the verified allocation and aggregate process-by-thread budget;
+3. the canary and speculative work decomposition;
+4. the acceptance gate and which outputs remain provisional;
+5. how this attempt's workers and provisional outputs will be stopped or
+   invalidated if the gate fails; and
+6. expected runtime, memory, I/O behaviour, and resume semantics.
+
+Once the user has explicitly authorized that run or workflow, do not request
+the same approval again and do not interpose a separate benchmark unless a new
+material risk or scope change appears.
 
 ## Data and generated files
 
@@ -509,9 +607,14 @@ Allocations can end abruptly. Treat unfinished writes and node-local temporary f
 Verify the current entry point and configuration mechanism before changing or
 running it. Do not edit a production configuration merely to test.
 
-Prefer a small synthetic input, temporary configuration, dedicated test
-script, copied entry-point configuration, limited contig or stage, or existing
-self-test. Do not start a complete real-data run as exploration.
+Use a separate small synthetic or bounded test when the user requests one,
+when outputs cannot be isolated safely, or when a failure could corrupt
+accepted results. Otherwise, for an explicitly authorized decomposable run,
+launch a representative canary and independent provisional units concurrently
+under an attempt-specific output and checkpoint root.
+
+Do not publish global completion markers or promote provisional outputs until
+the applicable validation gate passes.
 
 Checkpointed execution may resume from earlier stages. Before running against
 existing checkpoints, confirm that the proposed code is compatible with their
@@ -519,7 +622,9 @@ schema, scientific semantics, configuration assumptions, and cached
 identities. Before recommending a fresh run, assess checkpoint compatibility
 and the cost of recomputation; do not recommend deleting or abandoning
 checkpoints merely because compatibility analysis is inconvenient. Never
-delete checkpoint or result directories without explicit approval.
+delete pre-existing or accepted checkpoint or result directories without
+explicit approval. Outputs created under an authorized, isolated speculative
+attempt may be invalidated or deleted as described above.
 
 ## Code style
 
@@ -559,10 +664,12 @@ Use focused execution paths, import or syntax checks, small fixtures, schema che
 
 ### Numerical or scientific changes
 
-Before running:
+Before accepting numerical or scientific outputs:
 
 1. Identify which results may change and why.
-2. Identify relevant metrics and establish a baseline where practical.
+2. Identify relevant metrics. Use an existing baseline or obtain one in
+   parallel when practical; do not delay an isolated speculative attempt solely
+   to generate a new baseline.
 3. Hold data, configuration, seeds, and resources constant.
 4. Compare primary and secondary metrics, failures, inferred haplotype counts, convergence, missingness, pedigree consistency, phase or switch behaviour, runtime, memory, warnings, and exceptions as relevant.
 
@@ -597,7 +704,18 @@ Show or summarize the relevant diff. Do not stage generated data, checkpoints, l
 
 ## Shell-command rules
 
-Explain non-trivial commands before running them. Require explicit approval before installing or upgrading software, deleting or moving files, overwriting results, modifying the Conda environment, changing Git history, submitting or cancelling jobs, running a full pipeline, launching a long or expensive test, or recursively scanning large directories.
+Explain non-trivial commands before running them. Require explicit approval
+before installing or upgrading software, changing Git history, overwriting
+accepted results, modifying the Conda environment, submitting or cancelling
+Slurm jobs, or launching a full pipeline when the current user request has not
+already authorized that action.
+
+The user's explicit request to launch a run counts as approval for that
+specified run. Do not ask for duplicate confirmation. Authorization for an
+isolated speculative attempt includes starting and stopping its workers and
+discarding only the provisional outputs created under that attempt's validated
+output root. Deleting or moving any other files, or recursively scanning large
+directories, still requires explicit approval.
 
 Avoid destructive commands such as `rm -rf`, `git clean`, `git reset --hard`, and broad wildcard deletion. Prefer bounded output such as:
 
@@ -621,7 +739,9 @@ At task end, report:
 6. resource-intensive validation still recommended;
 7. uncertainties and risks;
 8. generated files or jobs;
-9. workers, threads, CPUs, peak memory, and elapsed time for performance work;
+9. allocated CPUs, utilization checks, workers, threads, sustained idle
+   capacity, concurrency adjustments, peak memory, and elapsed time for
+   performance work;
 10. whether outputs or conclusions depend on unverified biological assumptions;
 11. any out-of-scope concern noted but deliberately not pursued.
 

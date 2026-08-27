@@ -225,7 +225,6 @@ if __name__ == '__main__':
     import block_linking
     import simulate_sequences
     import hmm_matching
-    import viterbi_likelihood_calculator
     import beam_search_core
     import chimera_resolution
     import hierarchical_assembly

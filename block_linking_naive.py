@@ -2,9 +2,7 @@ import thread_config
 
 import numpy as np
 import math
-import copy
 import warnings
-from functools import partial
 
 import analysis_utils
 import hap_statistics
@@ -35,7 +33,7 @@ np.seterr(divide='ignore',invalid="ignore")
 # O(num_workers × data_size) serialization cost that made the first
 # forkserver attempt 10x slower.
 #
-# For pool 6 (get_full_match_probs), large numpy arrays are placed in
+# Large numpy arrays used by Pool 4 are placed in
 # POSIX SharedMemory (/dev/shm) for zero-copy worker access.
 
 
@@ -73,7 +71,7 @@ def _strip_block_light(block):
     )
 
 
-# --- SHARED MEMORY MANAGEMENT (Pools 4 and 6 — large numpy arrays) ---
+# --- SHARED MEMORY MANAGEMENT (Pool 4 — large numpy arrays) ---
 
 _SHARED_DATA = {}
 _SHM_REFS = []
@@ -256,20 +254,6 @@ def _worker_get_similarities_direct(args):
     block_idx, block = args
     return hap_statistics.get_block_hap_similarities(block)
 
-
-def _worker_get_match_probabilities(sample_idx, recomb_rate, value_error_rate):
-    """
-    Pool 6 worker: match sample to haplotype combinations.
-    Accesses large arrays from POSIX SharedMemory (zero-copy).
-    """
-    return get_match_probabilities(
-        _SHARED_DATA['genotypes'],
-        _SHARED_DATA['sample_probs'][sample_idx],
-        _SHARED_DATA['locations'],
-        keep_flags=_SHARED_DATA.get('keep_flags'),
-        recomb_rate=recomb_rate,
-        value_error_rate=value_error_rate
-    )
 
 #%%
 
@@ -723,116 +707,6 @@ def combine_all_blocks_to_long_haps(all_haps,
     
     return [sites_loc,long_haps]
 
-def compute_likeliest_path(full_combined_genotypes,sample_probs,site_locations,
-                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):
-    """
-    Compute the likeliest path explaining the sample using a combination of
-    genotypes from full_combined_genotypes via the Viterbi algorithm.
-    """
-    
-    data_shape = full_combined_genotypes.shape
-    
-    if keep_flags is None:
-        keep_flags = np.array([1 for _ in range(data_shape[2])])
-    
-    if keep_flags.dtype != int:
-        keep_flags = np.array(keep_flags,dtype=int)
-        
-    eps = value_error_rate 
-    value_error_matrix = [[(1-eps)**2,2*eps*(1-eps),eps**2],
-                          [eps*(1-eps),eps**2+(1-eps)**2,eps*(1-eps)],
-                          [eps**2,2*eps*(1-eps),(1-eps)**2]]
-    
-    num_haps = data_shape[0]
-    num_rows = data_shape[0]
-    num_cols = data_shape[1]
-    num_geno = data_shape[0]*data_shape[1]
-    
-    num_sites = data_shape[2]
-    
-    starting_probabilities = analysis_utils.make_upper_triangular((1/num_geno)*np.ones((num_haps,num_haps)))
-    log_current_probabilities = np.log(starting_probabilities)
-    
-    prev_best = np.empty((data_shape[0],data_shape[1]),dtype=object)
-    prev_best[:] = [[(i,j) for j in range(data_shape[1])] for i in range(data_shape[0])]
-
-    log_probs_history = [copy.deepcopy(log_current_probabilities)]
-    prev_best_history = [copy.deepcopy(prev_best)]
-    
-    last_site_loc = None
-    
-    for loc in range(num_sites):
-        if keep_flags[loc] != 1:
-            log_probs_history.append(copy.deepcopy(log_current_probabilities))
-            prev_best_history.append(copy.deepcopy(prev_best))
-        else:
-            
-            if last_site_loc == None:
-                distance_since_last_site = 0
-            else:
-                distance_since_last_site = site_locations[loc]-last_site_loc
-            
-            last_site_loc = site_locations[loc]
-            
-            num_possible_switches = num_rows+num_cols-1
-            non_switch_prob = (1-recomb_rate)**distance_since_last_site
-            each_switch_prob= (1-non_switch_prob)/num_possible_switches
-            total_non_switch_prob = non_switch_prob+each_switch_prob
-            
-            transition_probs = np.zeros((num_rows,num_cols,num_rows,num_cols))
-            
-            for i in range(num_rows):
-                for j in range(i,num_cols):
-                    transition_probs[i,j,:,j] = each_switch_prob
-                    transition_probs[i,j,i,:] = each_switch_prob
-                    transition_probs[i,j,i,j] = total_non_switch_prob
-                    transition_probs[i,j,:,:] = analysis_utils.make_upper_triangular(transition_probs[i,j,:,:])
-                    
-            site_sample_val = sample_probs[loc]
-            genotype_vals = full_combined_genotypes[:,:,loc,:]
-
-            all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
-            prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
-            prob_switch_seen = np.einsum("ijkl,kl->ijkl",transition_probs,prob_data_given_comb)
-            
-            log_prob_switch_seen = math.log(prob_switch_seen)
-            
-            extended_log_cur_probs = copy.deepcopy(log_current_probabilities)
-            extended_log_cur_probs = np.expand_dims(extended_log_cur_probs,2)
-            extended_log_cur_probs = np.expand_dims(extended_log_cur_probs,3)
-            extended_log_cur_probs = np.repeat(extended_log_cur_probs,num_rows,axis=2)
-            extended_log_cur_probs = np.repeat(extended_log_cur_probs,num_cols,axis=3)
-            
-            log_total_combined_probability = extended_log_cur_probs+log_prob_switch_seen
-            
-            best_matches = np.empty((data_shape[0],data_shape[1]),dtype=object)
-            best_log_probs = np.empty((data_shape[0],data_shape[1]),dtype=float)
-            
-            for k in range(num_rows):
-                for l in range(num_cols):
-                    comb_data = log_total_combined_probability[:,:,k,l]
-                    max_combination = np.unravel_index(np.argmax(comb_data), comb_data.shape)
-                    max_val = comb_data[max_combination]
-                    
-                    best_matches[k,l] = max_combination
-                    best_log_probs[k,l] = max_val
-            
-            log_current_probabilities = best_log_probs
-            prev_best = best_matches
-            
-            log_probs_history.append(copy.deepcopy(log_current_probabilities))
-            prev_best_history.append(copy.deepcopy(prev_best))
-    
-    reversed_path = []
-    cur_place = np.unravel_index(np.argmax(log_probs_history[-1]), log_probs_history[-1].shape)
-    reversed_path.append(cur_place)
-    
-    for i in range(len(prev_best_history)-1,-1,-1):
-        cur_place = prev_best_history[i][cur_place[0],cur_place[1]]
-        reversed_path.append(cur_place)
-    
-    return (reversed_path,log_probs_history,prev_best_history)
-
 def generate_long_haplotypes_naive(block_results, num_long_haps,
                              node_usage_penalty=10, edge_usage_penalty=10, num_processes=16):
     """
@@ -889,115 +763,3 @@ def generate_long_haplotypes_naive(block_results, num_long_haps,
     final_long_haps = combine_all_blocks_to_long_haps(valid_blocks, chained_block_haps, num_processes=num_processes)
 
     return (valid_blocks, final_long_haps)   
-
-#%%
-def get_match_probabilities(full_combined_genotypes,sample_probs,site_locations,
-                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3):
-    """
-    HMM to match sample genotype to best combination of haplotypes.
-    """
-    
-    data_shape = full_combined_genotypes.shape
-    
-    if keep_flags is None:
-        keep_flags = np.array([1 for _ in range(data_shape[2])])
-    
-    if keep_flags.dtype != int:
-        keep_flags = np.array(keep_flags,dtype=int)
-        
-    eps = value_error_rate 
-    value_error_matrix = [[(1-eps)**2,2*eps*(1-eps),eps**2],
-                          [eps*(1-eps),eps**2+(1-eps)**2,eps*(1-eps)],
-                          [eps**2,2*eps*(1-eps),(1-eps)**2]]
-    
-    num_haps = data_shape[0]
-    num_geno = data_shape[0]*data_shape[1]
-    
-    num_sites = data_shape[2]
-    
-    current_probabilities = (1/num_geno)*np.ones((num_haps,num_haps))
-
-    posterior_probabilities = []
-    
-    last_site_loc = None
-    
-    #Iterate backwards
-    for loc in range(num_sites-1,-1,-1):
-        if keep_flags[loc] != 1:
-            posterior_probabilities.append(copy.deepcopy(current_probabilities))
-        else:
-            if last_site_loc == None:
-                distance_since_last_site = 0
-            else:
-                distance_since_last_site = last_site_loc-site_locations[loc]
-            last_site_loc = site_locations[loc]
-                
-            updated_prior = analysis_utils.recombination_fudge(current_probabilities,
-                                                distance_since_last_site,
-                                                recomb_rate=recomb_rate)
-            
-            site_sample_val = sample_probs[loc]
-            genotype_vals = full_combined_genotypes[:,:,loc,:]
-
-            all_combs = np.einsum("i,jkl->jkil",site_sample_val,genotype_vals)
-            prob_data_given_comb = np.einsum("ijkl,kl->ij",all_combs,value_error_matrix)
-            nonorm_prob_comb_given_data = np.einsum("ij,ij->ij",prob_data_given_comb,updated_prior)
-            prob_comb_given_data = nonorm_prob_comb_given_data/np.sum(nonorm_prob_comb_given_data)
-            
-            posterior_probabilities.append(copy.deepcopy(prob_comb_given_data))
-            current_probabilities = prob_comb_given_data
-            
-    upp_tri_post = []
-    for item in posterior_probabilities:
-        new = np.triu(item+np.transpose(item)-np.diag(np.diag(item)))
-        upp_tri_post.append(new)
-        
-    max_loc = []
-    for i in range(len(upp_tri_post)):
-        max_loc.append(np.unravel_index(upp_tri_post[i].argmax(), upp_tri_post[i].shape))
-    
-    return (max_loc,upp_tri_post)
-        
-def get_full_match_probs(full_combined_genotypes,all_sample_probs,site_locations,
-                            keep_flags=None,recomb_rate=10**-8,value_error_rate=10**-3, num_processes=16):         
-    """
-    Multithreaded version to match all samples to their haplotype combinations.
-    
-    Forkserver + POSIX SharedMemory: the genotypes tensor (~150 MB) and
-    sample_probs matrix (~1.3 GB) are placed in /dev/shm for zero-copy
-    access by workers.  Small arrays (locations, keep_flags) are passed
-    directly via the pool initializer.
-    """
-    
-    # Place large arrays in POSIX SharedMemory
-    shm_handles = []
-    try:
-        shm_geno, meta_geno = _create_shm_array(full_combined_genotypes, "genotypes")
-        shm_handles.append(shm_geno)
-        
-        shm_probs, meta_probs = _create_shm_array(all_sample_probs, "sample_probs")
-        shm_handles.append(shm_probs)
-        
-        # Build initializer dict — large arrays as shm metadata, small arrays directly
-        shared_context = {
-            'genotypes': meta_geno,
-            'sample_probs': meta_probs,
-            'locations': site_locations,           # small — pass directly
-        }
-        if keep_flags is not None:
-            shared_context['keep_flags'] = keep_flags  # small — pass directly
-        
-        worker = partial(_worker_get_match_probabilities, 
-                         recomb_rate=recomb_rate, 
-                         value_error_rate=value_error_rate)
-
-        with _safe_forkserver_pool(num_processes, initializer=_init_shared_data,
-                                   initargs=(shared_context,)) as pool:
-            num_samples = len(all_sample_probs)
-            results = pool.map(worker, range(num_samples))
-    
-    finally:
-        # Clean up SharedMemory segments
-        _close_shared_memory(shm_handles, unlink=True)
-    
-    return results
