@@ -20,11 +20,11 @@ from thread_env import force_single_threaded_numeric_libraries
 # -----------------------------------------------------------------------------
 # CONFIGURATION — EDIT THIS to switch between the two comparison runs.
 # -----------------------------------------------------------------------------
-# USE_KNOWN_FOUNDERS controls whether the 4 G0 (parental) samples are fed into
+# USE_KNOWN_FOUNDERS controls whether the 4 observed G0 reference samples enter
 # the reconstruction pipeline:
-#   True  -> all 116 samples go through T01-T11 (easy mode: G0s are mostly
-#            homozygous for distinct parental species and form clean founder
-#            clusters on their own during block discovery)
+#   True  -> all 116 samples go through T01-T11 (comparison mode: the observed
+#            G0 rows can form clean founder clusters during block discovery;
+#            this does not establish individual parentage)
 #   False -> the 4 G0 sample rows are sliced out, so T01-T11 see only the 112
 #            admixed F1+F2 samples (hard mode: parental haplotypes must be
 #            reconstructed purely from offspring)
@@ -33,6 +33,10 @@ from thread_env import force_single_threaded_numeric_libraries
 # only when those rows are excluded from reconstruction.
 USE_KNOWN_FOUNDERS = True
 
+# These strings are persisted compatibility identities, not runtime backend
+# selectors. Tropheops always uses the canonical parent-state engine.
+PEDIGREE_BACKEND = "smart_raw_gl_parent_state_v1"
+PEDIGREE_BASELINE = "hard_painted_b1_combined_v1_calibrated_v1"
 _mode_label = "withFounders" if USE_KNOWN_FOUNDERS else "withoutFounders"
 # This label is part of the checkpoint/output identity. Bump it whenever the
 # T01 scientific backend or its routine configuration changes, so a run cannot
@@ -40,7 +44,10 @@ _mode_label = "withFounders" if USE_KNOWN_FOUNDERS else "withoutFounders"
 BLOCK_DISCOVERY_BACKEND = "reversible_cavity_cap_free_v1"
 _run_label = f"{_mode_label}_{BLOCK_DISCOVERY_BACKEND}"
 CHECKPOINT_DIR = f".pipeline_checkpoints_tropheops_{_run_label}"
-output_dir = f"results_tropheops_{_run_label}"
+# Preserve the already-isolated parent-state result root for compatible resume.
+output_dir = (
+    f"results_tropheops_{_run_label}_{PEDIGREE_BACKEND}_{PEDIGREE_BASELINE}"
+)
 
 
 def _load_contig_for_phase_correction(r_name):
@@ -90,6 +97,8 @@ if __name__ == '__main__':
     print(f"Run started: {run_timestamp}")
     print(f"USE_KNOWN_FOUNDERS = {USE_KNOWN_FOUNDERS}  (mode: {_mode_label})")
     print(f"BLOCK_DISCOVERY_BACKEND = {BLOCK_DISCOVERY_BACKEND}")
+    print(f"PEDIGREE_ENGINE = {PEDIGREE_BACKEND}")
+    print(f"PEDIGREE_BASELINE = {PEDIGREE_BASELINE}")
 
     import numpy as np
     import pandas as pd
@@ -114,6 +123,13 @@ if __name__ == '__main__':
     from founder_alleles import hard_alleles
     import paint_samples
     import pedigree_inference
+    import pedigree_pipeline
+    if (
+        PEDIGREE_BACKEND != pedigree_pipeline.PEDIGREE_BACKEND
+        or PEDIGREE_BASELINE
+        != pedigree_pipeline.TROPHEOPS_PEDIGREE_BASELINE
+    ):
+        raise RuntimeError("pedigree checkpoint identity mismatch")
     import phase_correction
     import analysis_utils
     import terminal_cavity_refinement
@@ -124,7 +140,7 @@ if __name__ == '__main__':
     if platform.system() != "Windows":
         print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
-    n_processes = 112
+    n_processes = pipeline_runtime.available_cpu_count()
     # T01 uses the complete allocation: one block worker per Numba thread.
     # Dynamic reallocation gives the full budget to remaining stragglers.
     block_discovery_processes = n_processes
@@ -193,13 +209,9 @@ if __name__ == '__main__':
     # observed G0 genotype references stashed in every T01 per-contig checkpoint
     # regardless of USE_KNOWN_FOUNDERS.  This is a non-independent post-hoc
     # consistency check when G0 rows participated in discovery, and a held-out
-    # reference comparison when they were excluded.  T10 calls
-    # `run_pedigree_validation` on the inferred pedigree_df to cross-check
-    # it against the metafile's biological generation column.
-    #
-    # Semantics identical to the old monolithic validation stage, just factored
-    # out and called at each stage boundary so the user sees quality progression
-    # as the pipeline runs, not only at the very end.
+    # reference comparison when they were excluded. T10 instead reports a
+    # descriptive parent-state by metadata-generation table; generation labels
+    # constrain eligibility but do not provide individual-level trio truth.
 
     # Min argmax-prob to treat a G0 site as confidently homozygous.  Sites
     # below this confidence, or where the max state is heterozygous (state=1),
@@ -528,108 +540,6 @@ if __name__ == '__main__':
         else:
             print(f"  WARNING: no validation rows produced for {stage_label}")
 
-    def run_pedigree_validation(pedigree_df):
-        """Validate the inferred pedigree structure against the metafile.
-
-        Writes:
-          - validation_T10_pedigree_confusion.csv (structural x biological crosstab)
-          - validation_T10_pedigree_per_sample.csv (per-sample audit with
-            inferred Generation, Parent1, Parent2, and true_generation columns)
-
-        Returns (n_correct, n_samples_audit, pedigree_accuracy, expected_mapping)
-        for use in the final summary.
-        """
-        print(f"\n{'='*60}")
-        print(f"VALIDATION: T10 Pedigree Structure vs Metafile")
-        print(f"{'='*60}")
-
-        pedigree_augmented = pedigree_df.copy()
-        pedigree_augmented['true_generation'] = pedigree_augmented['Sample'].map(id_to_gen)
-
-        confusion = pd.crosstab(
-            pedigree_augmented['Generation'].fillna('(unassigned)'),
-            pedigree_augmented['true_generation'].fillna('(no metadata)'),
-            margins=True
-        )
-        print("\nInferred Generation × True Generation confusion matrix:")
-        print(confusion)
-
-        confusion_csv = os.path.join(output_dir, "validation_T10_pedigree_confusion.csv")
-        confusion.to_csv(confusion_csv)
-        print(f"\nConfusion matrix saved to: {confusion_csv}")
-
-        audit_csv = os.path.join(output_dir, "validation_T10_pedigree_per_sample.csv")
-        pedigree_augmented.to_csv(audit_csv, index=False)
-        print(f"Per-sample pedigree audit saved to: {audit_csv}")
-
-        # ---------------------------------------------------------------------
-        # Generation-label accuracy
-        # ---------------------------------------------------------------------
-        # IMPORTANT — the pipeline's `Generation` column is a STRUCTURAL label,
-        # not a biological one.  pedigree_inference assigns "F1" to any sample
-        # with no inferable parents (i.e. a root node in the inferred pedigree
-        # graph) and increments the label by one for each descendant
-        # generation.  So "F1" in pipeline output means "root of the graph",
-        # NOT "biologically an F1".  True biological generations come from the
-        # metafile's `generation` column (stored here as `true_generation`).
-        # G0 samples are NEVER relabeled as F1 biologically in either mode —
-        # in withFounders mode the pipeline's STRUCTURAL "F1" happens to be
-        # biologically G0 (because G0s are the roots the pipeline sees); in
-        # withoutFounders mode G0s are absent from the pipeline entirely.
-        #
-        # `expected_mapping` translates the pipeline's structural label into
-        # the biological label that sample should have, given what the
-        # pipeline saw as input:
-        #
-        #   withFounders (G0s fed in): G0s are the structural roots, so the
-        #     pipeline's "F1" should map to true G0; its "F2" to true F1; its
-        #     "F3" to true F2.  Labels are shifted by one vs biology because
-        #     the pipeline has no way to know its roots are biologically G0s.
-        #
-        #   withoutFounders (G0s excluded): biological F1s become the
-        #     structural roots (their G0 parents aren't in the data), so the
-        #     pipeline's "F1" maps to true F1 and its "F2" to true F2.
-        #     Labels coincide with biology by accident — the pipeline isn't
-        #     "recognising" F1 biology, its root-label convention just happens
-        #     to start at the same generation biology does in this mode.
-        if USE_KNOWN_FOUNDERS:
-            # Structural pipeline label -> expected biological truth label
-            expected_mapping = {'F1': 'G0', 'F2': 'F1', 'F3': 'F2'}
-        else:
-            # Structural pipeline label -> expected biological truth label
-            expected_mapping = {'F1': 'F1', 'F2': 'F2'}
-
-        n_samples_audit = len(pedigree_augmented)
-        n_correct = 0
-        for _, row in pedigree_augmented.iterrows():
-            inf = row['Generation']
-            tru = row['true_generation']
-            if expected_mapping.get(inf) == tru:
-                n_correct += 1
-        pedigree_accuracy = 100.0 * n_correct / max(1, n_samples_audit)
-        print(f"\nStructural->biological label translation: {expected_mapping}")
-        print(f"  (pipeline's 'Generation' is a graph-position label, not a")
-        print(f"   biological generation — 'F1' in this column means 'graph root')")
-        print(f"Samples whose structural label matches the expected biological truth: "
-              f"{n_correct}/{n_samples_audit} = {pedigree_accuracy:.1f}%")
-
-        # If USE_KNOWN_FOUNDERS: check that G0 samples are inferred as roots
-        if USE_KNOWN_FOUNDERS:
-            g0_rows = pedigree_augmented[pedigree_augmented['true_generation'] == 'G0']
-            g0_as_roots = int(g0_rows['Parent1'].isna().sum())
-            print(f"G0 samples correctly inferred as roots (Parent1 NaN): "
-                  f"{g0_as_roots}/{len(g0_rows)}")
-        else:
-            # In withoutFounders mode, G0s were not in the pipeline input, so
-            # they shouldn't appear in pedigree_df at all.  Sanity-check:
-            g0_in_pedigree = pedigree_augmented[pedigree_augmented['true_generation'] == 'G0']
-            if len(g0_in_pedigree) > 0:
-                print(f"WARNING: {len(g0_in_pedigree)} G0 samples in pedigree_df "
-                      f"despite USE_KNOWN_FOUNDERS=False (should be 0)")
-            else:
-                print("Confirmed: no G0 samples in pedigree (as expected for withoutFounders).")
-
-        return n_correct, n_samples_audit, pedigree_accuracy, expected_mapping
 
     region_keys = [r['contig'] for r in regions_config]
 
@@ -993,6 +903,8 @@ if __name__ == '__main__':
                 # non-independent when G0 rows entered reconstruction above.
                 save_contig(STAGE_T1, r_name, {
                     'global_probs': global_probs, 'global_sites': global_sites,
+                    'genotype_evidence_mode': (
+                        'normalized_raw_linear_likelihood_v1'),
                     'block_results': block_results, 'avg_depth': avg_depth,
                     'g0_probs': g0_probs, 'g0_sample_names': g0_sample_names,
                     'active_vcf_indices': active_vcf_indices,
@@ -1011,6 +923,7 @@ if __name__ == '__main__':
             'g0_sample_names': g0_sample_names,
             'active_vcf_indices': active_vcf_indices,
             'use_known_founders': USE_KNOWN_FOUNDERS,
+            'genotype_evidence_mode': 'normalized_raw_linear_likelihood_v1',
             'block_discovery_backend': BLOCK_DISCOVERY_BACKEND,
             'reversible_cavity_config': reversible_cavity_config_record,
         })
@@ -1628,18 +1541,130 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE T10: Pedigree Inference
+    # STAGE T10: Parent-state pedigree inference
     # =========================================================================
-    STAGE_T10 = "T10_pedigree_inference"
+    (
+        STAGE_T10_INPUT,
+        STAGE_T10,
+        STAGE_T11,
+    ) = pedigree_pipeline.pedigree_stage_names()
+    pedigree_config = pedigree_pipeline.build_current_pedigree_config()
+    parent_eligibility = pedigree_pipeline.build_tropheops_parent_eligibility(
+        meta_df,
+        sample_names_active,
+        require_opposite_sex_pair=True,
+    )
+    eligibility_summary = pedigree_pipeline.summarize_parent_eligibility(
+        parent_eligibility
+    )
+    parent_eligibility_identity = pedigree_pipeline.parent_eligibility_identity(
+        parent_eligibility
+    )
+    print(f"Parent eligibility: {eligibility_summary}")
+    print(
+        f"Pedigree baseline: {PEDIGREE_BASELINE} "
+        f"({pedigree_config.parent_state_algorithm_mode}, "
+        f"{pedigree_config.parent_state_candidate_source_mode}, "
+        "effective_markers="
+        f"{pedigree_config.parent_state_effective_markers_per_information_block:g})"
+    )
+
+    missing_raw_inputs = [
+        r_name for r_name in region_keys
+        if not contig_done(STAGE_T10_INPUT, r_name)
+    ]
+    if stage_complete(STAGE_T10_INPUT) and missing_raw_inputs:
+        raise RuntimeError(
+            f"{STAGE_T10_INPUT} is marked complete but lacks: "
+            f"{missing_raw_inputs}"
+        )
+    if not stage_complete(STAGE_T10_INPUT):
+        print(f"\n{'='*60}")
+        print("STAGE T10a: Compact raw-GL pedigree inputs")
+        print(f"{'='*60}")
+        for r_name in region_keys:
+            if contig_done(STAGE_T10_INPUT, r_name):
+                print(f"  [RESUME] {r_name} compact raw GL already done")
+                continue
+            painting_payload = load_contig(STAGE_T9, r_name)
+            pipeline_runtime.validate_painting_bundle(
+                painting_payload,
+                expected_sample_ids=sample_names_active,
+                context=f"{STAGE_T9}/{r_name}",
+            )
+            t1_payload = load_contig(STAGE_T1, r_name)
+            if t1_payload.get("genotype_evidence_mode") != (
+                "normalized_raw_linear_likelihood_v1"
+            ):
+                raise RuntimeError(
+                    f"{STAGE_T1}/{r_name} lacks explicit raw-likelihood "
+                    "provenance; refusing to reinterpret cached probabilities"
+                )
+            founder_block = pipeline_runtime.compact_founder_block(
+                painting_payload[pipeline_runtime.FOUNDER_BLOCK_KEY]
+            )
+            compact_raw_gl = pedigree_inference.prepare_standard_compact_raw_gl(
+                painting_payload["tolerance_result"],
+                founder_block,
+                sample_names_active,
+                t1_payload["global_probs"],
+                t1_payload["global_sites"],
+                snps_per_bin=100,
+                recombination_rate=5e-8,
+                max_snps_per_bin=10,
+                contig=r_name,
+            )
+            save_contig(STAGE_T10_INPUT, r_name, {
+                "schema_version": (
+                    pedigree_pipeline.PEDIGREE_RAW_GL_INPUT_SCHEMA_VERSION
+                ),
+                "backend": PEDIGREE_BACKEND,
+                "contig": r_name,
+                "ordered_sample_ids": tuple(sample_names_active),
+                "source_evidence_mode": (
+                    "normalized_raw_linear_likelihood_v1"
+                ),
+                "standard_compact_raw_gl": compact_raw_gl,
+            })
+            del t1_payload, painting_payload, founder_block, compact_raw_gl
+            gc.collect()
+        missing_raw_inputs = [
+            r_name for r_name in region_keys
+            if not contig_done(STAGE_T10_INPUT, r_name)
+        ]
+        if missing_raw_inputs:
+            raise OSError(
+                f"Failed to checkpoint {STAGE_T10_INPUT}: {missing_raw_inputs}"
+            )
+        mark_stage_complete(STAGE_T10_INPUT)
 
     if stage_complete(STAGE_T10) and not checkpoint_store.global_done(STAGE_T10):
         raise RuntimeError(f"{STAGE_T10} is complete but lacks _global")
     if stage_complete(STAGE_T10):
-        print(f"\n[RESUME] Skipping pedigree inference (checkpoint found)")
-        pedigree_df = load_global(STAGE_T10)['pedigree_df']
+        print("\n[RESUME] Skipping pedigree inference (checkpoint found)")
+        pedigree_payload = load_global(STAGE_T10)
+        if (
+            pedigree_payload.get("schema_version")
+            != pedigree_pipeline.PEDIGREE_T10_PAYLOAD_SCHEMA_VERSION
+            or pedigree_payload.get("backend") != PEDIGREE_BACKEND
+            or pedigree_payload.get("smart_parent_eligibility_identity")
+            != parent_eligibility_identity
+            or pedigree_payload.get("smart_config") != pedigree_config
+        ):
+            raise RuntimeError(
+                f"{STAGE_T10} checkpoint schema/backend/config mismatch"
+            )
+        pedigree_df = pedigree_payload["pipeline_control_relationships"]
+        scientific_pedigree_df = pedigree_payload["scientific_relationships"]
+        pedigree_diagnostics = pedigree_payload["smart_diagnostics"]
+        if scientific_pedigree_df["Sample"].tolist() != list(
+            sample_names_active
+        ):
+            raise RuntimeError(f"{STAGE_T10} checkpoint sample order mismatch")
+        del pedigree_payload
     else:
         print(f"\n{'='*60}")
-        print("STAGE T10: Multi-Contig Pedigree Inference (Tropheops)")
+        print("STAGE T10: Parent-state pedigree inference (Tropheops)")
         print(f"{'='*60}")
 
         contig_inputs = []
@@ -1653,62 +1678,142 @@ if __name__ == '__main__':
             founder_block = pipeline_runtime.compact_founder_block(
                 painting_payload[pipeline_runtime.FOUNDER_BLOCK_KEY]
             )
-            entry = {
-                'tolerance_painting': painting_payload['tolerance_result'],
-                'founder_block': founder_block
-            }
-            contig_inputs.append(entry)
-            del painting_payload
+            raw_payload = load_contig(STAGE_T10_INPUT, r_name)
+            if (
+                raw_payload.get("schema_version")
+                != pedigree_pipeline.PEDIGREE_RAW_GL_INPUT_SCHEMA_VERSION
+                or raw_payload.get("backend") != PEDIGREE_BACKEND
+                or tuple(raw_payload.get("ordered_sample_ids", ()))
+                != tuple(sample_names_active)
+            ):
+                raise RuntimeError(f"{STAGE_T10_INPUT}/{r_name} is incompatible")
+            contig_inputs.append({
+                "contig": r_name,
+                "tolerance_painting": painting_payload["tolerance_result"],
+                "founder_block": founder_block,
+                "standard_compact_raw_gl": raw_payload[
+                    "standard_compact_raw_gl"
+                ],
+            })
+            del painting_payload, raw_payload
 
         start = time.time()
-        pedigree_result = pedigree_inference.infer_pedigree_multi_contig_tolerance(
-            contig_inputs, sample_ids=sample_names_active, top_k=20,
-            n_workers=n_processes)
-        print(f"\nPedigree inference time: {time.time()-start:.1f}s")
+        pedigree_result = pedigree_inference.infer_pedigree_for_pipeline(
+            contig_inputs,
+            sample_ids=sample_names_active,
+            parent_eligibility=parent_eligibility,
+            config=pedigree_config,
+            top_k=20,
+            n_workers=n_processes,
+            anchor_k=5,
+            use_anchor_union=True,
+        )
+        pedigree_elapsed = time.time() - start
+        print(f"\nPedigree inference time: {pedigree_elapsed:.1f}s")
 
-        pedigree_df = pedigree_result.relationships
+        if pedigree_result.smart_config != pedigree_config:
+            raise RuntimeError("pedigree inference did not apply the requested config")
+        scientific_pedigree_df = pedigree_result.relationships
+        if pedigree_result.scientific_relationships is not scientific_pedigree_df:
+            if not pedigree_result.scientific_relationships.equals(
+                scientific_pedigree_df
+            ):
+                raise RuntimeError("scientific relationship aliases differ")
+        pedigree_df = pedigree_result.pipeline_control_relationships
+        pedigree_diagnostics = pedigree_result.smart_diagnostics
+        for label, frame in (
+            ("scientific", scientific_pedigree_df),
+            ("pipeline control", pedigree_df),
+        ):
+            if frame["Sample"].tolist() != list(sample_names_active):
+                raise RuntimeError(f"{label} pedigree sample order changed")
+        scientific_parent_values = pd.concat((
+            scientific_pedigree_df["Parent1"],
+            scientific_pedigree_df["Parent2"],
+        ), ignore_index=True).astype(object)
+        if scientific_parent_values.eq("0").any():
+            raise RuntimeError(
+                "pipeline-control sentinel leaked into scientific pedigree"
+            )
 
-        gen_counts = pedigree_df['Generation'].value_counts()
-        print(f"\n--- Pedigree Summary ---")
-        print(f"Generations: {gen_counts.to_dict()}")
-        n_with_parents = pedigree_df['Parent1'].notna().sum()
-        print(f"Individuals with parents: {n_with_parents}/{len(pedigree_df)}")
-
-        output_csv = os.path.join(output_dir, "pedigree_inference_tropheops.csv")
-        pedigree_df.to_csv(output_csv, index=False)
-        print(f"Pedigree saved to: {output_csv}")
-
-        output_tree = os.path.join(output_dir, "pedigree_tree_tropheops.png")
-        pedigree_inference.draw_pedigree_tree(pedigree_df, output_file=output_tree)
-
-        save_global(STAGE_T10, {'pedigree_df': pedigree_df})
+        scientific_pedigree_df.to_csv(os.path.join(
+            output_dir, "pedigree_inference_tropheops_scientific.csv"
+        ), index=False)
+        pedigree_df.to_csv(os.path.join(
+            output_dir, "pedigree_inference_tropheops_pipeline_control.csv"
+        ), index=False)
+        pedigree_diagnostics.to_csv(os.path.join(
+            output_dir, "pedigree_inference_tropheops_diagnostics.csv"
+        ), index=False)
+        pedigree_inference.draw_pedigree_tree(
+            scientific_pedigree_df,
+            output_file=os.path.join(output_dir, "pedigree_tree_tropheops.png"),
+        )
+        checkpoint_payload = {
+            "schema_version": (
+                pedigree_pipeline.PEDIGREE_T10_PAYLOAD_SCHEMA_VERSION
+            ),
+            "backend": PEDIGREE_BACKEND,
+            "pipeline_control_relationships": pedigree_df,
+            "scientific_relationships": scientific_pedigree_df,
+            "tier_a_relationships": pedigree_result.tier_a_relationships,
+            "tier_b_relationships": pedigree_result.tier_b_relationships,
+            "complete_relationships": pedigree_result.complete_relationships,
+            # Persist old keys/attributes for compatible checkpoint reads.
+            "smart_diagnostics": pedigree_diagnostics,
+            "smart_parent_state_calls": pedigree_result.smart_parent_state_calls,
+            "smart_evidence_summary": pedigree_result.smart_evidence_summary,
+            "smart_config": pedigree_result.smart_config,
+            "smart_parent_eligibility": parent_eligibility,
+            "smart_parent_eligibility_identity": parent_eligibility_identity,
+            "pedigree_elapsed_seconds": pedigree_elapsed,
+        }
+        save_global(STAGE_T10, checkpoint_payload)
         if not checkpoint_store.global_done(STAGE_T10):
             raise OSError(f"Failed to checkpoint {STAGE_T10}/_global")
-        del contig_inputs
+        del contig_inputs, checkpoint_payload
         gc.collect()
         mark_stage_complete(STAGE_T10)
+
+    gen_counts = scientific_pedigree_df["Generation"].value_counts()
+    print("\n--- Scientific Pedigree Summary ---")
+    print(f"Generations: {gen_counts.to_dict()}")
+    n_with_parents = scientific_pedigree_df["Parent1"].notna().sum()
+    print(
+        f"Individuals with scientific Parent1 calls: "
+        f"{n_with_parents}/{len(scientific_pedigree_df)}"
+    )
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # VALIDATION: After T10 Pedigree Inference
+    # Descriptive validation: there is no individual-level trio ground truth.
     # =========================================================================
-    # Cross-checks the inferred pedigree_df against the metafile's biological
-    # generation column.  Writes a confusion matrix and per-sample audit CSV,
-    # and computes the structural->biological label translation accuracy.
-    # Runs unconditionally at each invocation (cheap, no checkpointing).
-    if 'pedigree_df' not in dir():
-        pedigree_df = load_global("T10_pedigree_inference")['pedigree_df']
-    _t10_val_result = run_pedigree_validation(pedigree_df)
-    # Keep the tuple for the final report: (n_correct, n_samples_audit,
-    # pedigree_accuracy, expected_mapping)
+    pedigree_augmented = scientific_pedigree_df.copy()
+    pedigree_augmented["metadata_generation"] = (
+        pedigree_augmented["Sample"].map(id_to_gen)
+    )
+    state_by_generation = pd.crosstab(
+        pedigree_augmented["ParentState"].fillna("(unresolved)"),
+        pedigree_augmented["metadata_generation"].fillna("(no metadata)"),
+        margins=True,
+    )
+    state_by_generation.to_csv(os.path.join(
+        output_dir,
+        "validation_T10_parent_state_by_metadata_generation.csv",
+    ))
+    pedigree_augmented.to_csv(os.path.join(
+        output_dir,
+        "validation_T10_scientific_per_sample.csv",
+    ), index=False)
+    print("\nT10 descriptive validation (no individual-level trio truth):")
+    print(state_by_generation)
 
 #%%
 if __name__ == '__main__':
     # =========================================================================
     # STAGE T11: Phase Correction + Greedy Refinement + F1 Recoloring + Propagation
     # =========================================================================
-    STAGE_T11 = "T11_phase_correction"
 
     missing_phase = [
         r for r in region_keys if not contig_done(STAGE_T11, r)
@@ -1727,7 +1832,9 @@ if __name__ == '__main__':
         print("="*60)
 
         if 'pedigree_df' not in dir():
-            pedigree_df = load_global(STAGE_T10)['pedigree_df']
+            pedigree_df = load_global(STAGE_T10)[
+                "pipeline_control_relationships"
+            ]
 
         # _load_contig_for_phase_correction is defined at MODULE TOP LEVEL
         # (picklable for forkserver workers — a closure here could not be
@@ -1937,64 +2044,71 @@ if __name__ == '__main__':
         combined.to_csv(combined_csv_path, index=False)
         print(f"Combined per-block CSV saved to: {combined_csv_path}")
 
-    # Pull in the T10 pedigree validation result if it ran earlier this session
-    if '_t10_val_result' in dir():
-        n_correct, n_samples_audit, pedigree_accuracy, expected_mapping = _t10_val_result
-    else:
-        n_correct, n_samples_audit, pedigree_accuracy, expected_mapping = (
-            None, None, float('nan'), None
-        )
-
     # Human-readable summary.txt
     summary_lines = []
-    summary_lines.append(f"Tropheops Pipeline Validation Summary")
-    summary_lines.append(f"Mode: {_mode_label} (USE_KNOWN_FOUNDERS={USE_KNOWN_FOUNDERS})")
+    summary_lines.append("Tropheops Pipeline Validation Summary")
+    summary_lines.append(
+        f"Mode: {_mode_label} (USE_KNOWN_FOUNDERS={USE_KNOWN_FOUNDERS})"
+    )
     summary_lines.append(f"Block discovery: {BLOCK_DISCOVERY_BACKEND}")
+    summary_lines.append(
+        f"Pedigree engine: {PEDIGREE_BACKEND} ({PEDIGREE_BASELINE})"
+    )
+    summary_lines.append(
+        "Pedigree effective markers per information block: "
+        f"{pedigree_config.parent_state_effective_markers_per_information_block:g}"
+    )
     summary_lines.append(f"Timestamp: {datetime.now().isoformat()}")
-    summary_lines.append(f"")
-    summary_lines.append(f"Input:")
+    summary_lines.append("")
+    summary_lines.append("Input:")
     summary_lines.append(f"  VCF: {vcf_path}")
     summary_lines.append(f"  Metafile: {meta_path}")
     summary_lines.append(f"  Total VCF samples: {n_samples_total}")
     summary_lines.append(f"  Active (pipeline-visible) samples: {n_samples}")
-    summary_lines.append(f"  G0 genotype-reference samples: {len(g0_sample_names)}")
+    summary_lines.append(
+        f"  G0 genotype-reference samples: {len(g0_sample_names)}"
+    )
     for nm in g0_sample_names:
         summary_lines.append(f"    - {nm}")
     summary_lines.append(f"  Contigs processed: {len(region_keys)}")
-    summary_lines.append(f"")
-    summary_lines.append(f"Post-hoc G0 Consistency Progression")
+    summary_lines.append("")
+    summary_lines.append("Post-hoc G0 Consistency Progression")
     summary_lines.append(
-        "  (non-independent when USE_KNOWN_FOUNDERS=True; legacy "
-        f"match threshold: <{MATCH_THRESHOLD_PCT:.0f}% allele error)")
+        "  (non-independent when USE_KNOWN_FOUNDERS=True; "
+        f"match threshold: <{MATCH_THRESHOLD_PCT:.0f}% allele error)"
+    )
     if len(summary_df) > 0:
         summary_lines.append(summary_df.to_string(index=False))
     else:
-        summary_lines.append(f"  (no per-stage CSVs found)")
-    summary_lines.append(f"")
-    summary_lines.append(f"Pedigree Structure (T10):")
-    if n_samples_audit is not None:
-        summary_lines.append(f"  Pipeline 'Generation' is a STRUCTURAL label")
-        summary_lines.append(f"    ('F1' = graph root; not a biological generation)")
-        summary_lines.append(f"  Structural->biological translation: {expected_mapping}")
-        summary_lines.append(f"  Samples matching translation: "
-                             f"{n_correct}/{n_samples_audit} = {pedigree_accuracy:.1f}%")
-    else:
-        summary_lines.append(f"  (T10 validation did not run — pedigree not available)")
-    summary_lines.append(f"")
+        summary_lines.append("  (no per-stage CSVs found)")
+    summary_lines.append("")
+    summary_lines.append("Pedigree Structure (T10):")
+    state_counts = scientific_pedigree_df["ParentState"].fillna(
+        "(unresolved)"
+    ).value_counts().to_dict()
+    summary_lines.append(
+        "  Exploratory metadata-constrained parent-state analysis; no "
+        "individual-level trio ground truth."
+    )
+    summary_lines.append(f"  Scientific state counts: {state_counts}")
+    summary_lines.append(
+        f"  Eligibility policy: {eligibility_summary['policy_name']}"
+    )
+    summary_lines.append("")
     summary_lines.append(f"Artefacts in {output_dir}/:")
-    summary_lines.append(f"  validation_T01_block_discovery.csv")
-    summary_lines.append(f"  validation_T02_refinement.csv")
-    summary_lines.append(f"  validation_T03_residual_discovery.csv")
-    summary_lines.append(f"  validation_T04_L1_assembly.csv")
-    summary_lines.append(f"  validation_T05_L2_assembly.csv")
-    summary_lines.append(f"  validation_T06_L3_assembly.csv")
-    summary_lines.append(f"  validation_T07_L4_assembly.csv")
-    summary_lines.append(f"  validation_T08_terminal_cavity.csv")
-    summary_lines.append(f"  validation_T10_pedigree_confusion.csv")
-    summary_lines.append(f"  validation_T10_pedigree_per_sample.csv")
-    summary_lines.append(f"  validation_all_stages_summary.csv")
-    summary_lines.append(f"  validation_all_stages_per_block.csv")
-    summary_lines.append(f"  validation_summary.txt (this file)")
+    summary_lines.append("  validation_T01_block_discovery.csv")
+    summary_lines.append("  validation_T02_refinement.csv")
+    summary_lines.append("  validation_T03_residual_discovery.csv")
+    summary_lines.append("  validation_T04_L1_assembly.csv")
+    summary_lines.append("  validation_T05_L2_assembly.csv")
+    summary_lines.append("  validation_T06_L3_assembly.csv")
+    summary_lines.append("  validation_T07_L4_assembly.csv")
+    summary_lines.append("  validation_T08_terminal_cavity.csv")
+    summary_lines.append("  validation_T10_parent_state_by_metadata_generation.csv")
+    summary_lines.append("  validation_T10_scientific_per_sample.csv")
+    summary_lines.append("  validation_all_stages_summary.csv")
+    summary_lines.append("  validation_all_stages_per_block.csv")
+    summary_lines.append("  validation_summary.txt (this file)")
 
     summary_text = "\n".join(summary_lines)
     summary_txt_path = os.path.join(output_dir, "validation_summary.txt")
@@ -2018,6 +2132,7 @@ if __name__ == '__main__':
     print(f"{'='*60}")
     print(f"Mode: {_mode_label} (USE_KNOWN_FOUNDERS={USE_KNOWN_FOUNDERS})")
     print(f"Block discovery: {BLOCK_DISCOVERY_BACKEND}")
+    print(f"Pedigree engine: {PEDIGREE_BACKEND} ({PEDIGREE_BASELINE})")
     print(f"Total time: {hours}h {minutes}m ({elapsed:.0f}s)")
     print(f"Checkpoints: {CHECKPOINT_DIR}/")
     print(f"Results: {output_dir}/")

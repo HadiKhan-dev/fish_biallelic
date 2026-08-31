@@ -211,6 +211,45 @@ Before editing:
 
 Do not broaden the task beyond the user's request without explaining why and receiving approval when the expansion is material.
 
+## Pre-run implementation audit
+
+After implementing a change and before launching a long-running test, expensive
+computation, production process, or speculative fan-out, complete a focused
+implementation audit. This audit gates launch; deeper empirical validation
+gates acceptance.
+
+The pre-run audit must:
+
+1. inspect the final diff and every materially affected direct caller, data
+   producer, data consumer, checkpoint boundary, and configuration path;
+2. trace the supported execution path that the long run will exercise;
+3. check the implementation against its intended biological, statistical, and
+   mathematical meaning;
+4. examine boundary conditions, indexing and interval conventions, filtering
+   and eligibility masks, sample order, missing-data behaviour, output routing,
+   resume identities, and completion-marker semantics where relevant;
+5. check multiprocessing picklability, process-by-thread limits, shared state,
+   worker error propagation, and checkpoint isolation where relevant;
+6. run a syntax or import check plus the smallest focused reproducer, unit test,
+   or fixture that exercises the changed behaviour;
+7. inspect warnings, exceptions, and test output rather than relying only on the
+   exit code; and
+8. run `git diff --check` and confirm that unrelated working-tree changes were
+   not overwritten.
+
+Any known failure that can affect the intended execution path must be fixed
+before launch. Do not launch expensive speculative work merely to discover an
+implementation error that a focused code audit or short reproducer should have
+found.
+
+Keep this launch gate proportionate. It is not a requirement to run broad
+simulations, full scientific validation, scaling studies, or preliminary
+performance benchmarks. Those should run during the authorized speculative
+attempt when safe, and they gate acceptance rather than launch.
+
+Passing the pre-run audit means that no concrete launch-blocking defect was
+found; it does not prove that the implementation is bug-free.
+
 ## Repository structure
 
 Important entry points currently include:
@@ -365,10 +404,9 @@ Do not infer the allocation from physical node size, `/proc/cpuinfo`, or `nproc 
 
 - Never run substantial computation on a login node.
 - Lightweight inspection, syntax checks, and small unit-like tests are acceptable where permitted.
-- Perform only the lightweight preflight needed to avoid immediate operational
-  failure. For authorized decomposable work, launch the canary and independent
-  provisional units concurrently rather than waiting for a serial test to
-  finish.
+- Complete the mandatory pre-run implementation audit before expensive
+  execution. Once it passes, launch the canary and independent provisional
+  units concurrently rather than serializing deeper validation.
 - Estimate CPU, memory, I/O, and runtime before expensive execution.
 - Use only allocated resources. Do not reserve dedicated CPUs for the agent,
   operating system, filesystem, or orchestration.
@@ -388,7 +426,9 @@ scientific behaviour.
 ### Speculative execution and in-run validation
 
 For explicitly authorized computation that decomposes into scientifically
-independent units, validation gates acceptance rather than execution.
+independent units, the mandatory focused implementation audit gates launch,
+while deeper scientific, numerical, and performance validation gates
+acceptance rather than speculative execution.
 
 After a lightweight preflight, launch concurrently:
 

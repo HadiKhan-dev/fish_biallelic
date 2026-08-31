@@ -20,8 +20,9 @@
 #       between seeds),
 #     * skip a seed whose stage 11 is already complete; a half-finished seed
 #       resumes from its last completed stage (the pipeline's own checkpointing).
-#   Each run leaves ground_truth_pedigree.csv and pedigree_inference_discovered.csv
-#   in that combo's results/ -- all the figure script will need.
+#   Each run leaves ground_truth_pedigree.csv plus the current scientific,
+#   complete, Tier-B, and diagnostics CSVs in that combo's results/ -- all the
+#   figure script will need.
 #
 # ISOLATION / PARALLELISM
 #   Different depths (different nodes) write to different subtrees and never
@@ -54,7 +55,7 @@ SEEDS = [0, 1, 2, 3, 4]               # five replicate simulations per depth
 SWEEP_ROOT_NAME = "pedigree_depth_sweep"   # new top-level dir for ALL sweep data
 SOURCE_CHECKPOINTS = ".pipeline_checkpoints"   # reuse stage 1 (read-only) from here
 STAGE1_NAME = "01_vcf_discovery"           # the seed/depth-independent stage to reuse
-STAGE11_NAME = "11_pedigree_inference"
+STAGE11_NAME = "11_pedigree_inference_current_b1_combined_v1_calibrated_v1"
 SIM_PIPELINE_FILE = "pedigree_sim_pipeline.py"   # the self-contained stages-2-11 file
 
 CONTINUE_ON_FAILURE = True            # if one seed fails, still attempt the rest

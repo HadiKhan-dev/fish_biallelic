@@ -2,12 +2,11 @@
 # ============================================================================
 # pedigree_sim_pipeline.py
 # ----------------------------------------------------------------------------
-# SELF-CONTAINED snapshot of pipeline.py's setup + stages 2-11 (verbatim code
-# and comments), parameterized for the read-depth x seed sweep.  This file has
-# NO runtime dependency on pipeline.py -- you can delete pipeline.py and this
-# still runs.  It was produced by copying pipeline.py's setup + stages 1-11 unchanged
-# except that its experiment controls are sourced from environment variables
-# (with the defaults below), and the file stops after stage 11 (no phase correction).
+# SELF-CONTAINED snapshot of pipeline.py's setup + stages 2-11, parameterized
+# for the read-depth x seed sweep. This file has no runtime dependency on
+# pipeline.py. Its terminal pedigree stage uses the default current B1 engine
+# and exports scientific, complete, Tier-B, and diagnostic views separately;
+# no phase-correction stage follows it.
 #
 # It still imports the same project modules (block_haplotypes,
 # hierarchical_assembly, pedigree_inference, simulate_sequences, ...), so keep
@@ -212,7 +211,8 @@ if __name__ == '__main__':
     import small_block_refine
     import paint_samples
     import pedigree_inference
-    from pedigree_evaluation import parent_columns_match
+    import pedigree_pipeline
+    from pedigree_evaluation import compare_relationships_to_truth
     import phase_correction
     import residual_discovery
 
@@ -2018,90 +2018,146 @@ if __name__ == '__main__' and not SKIP_VALIDATIONS_PAINTING:
 #%%
 if __name__ == '__main__':
     # =============================================================================
-    # STAGE 11: MULTI-CONTIG PEDIGREE INFERENCE (using DISCOVERED haplotypes)
+    # STAGE 11: CALIBRATED COMBINED-V1 B1 PEDIGREE INFERENCE
     # =============================================================================
-    STAGE_11 = "11_pedigree_inference"
+    STAGE_11 = "11_pedigree_inference_current_b1_combined_v1_calibrated_v1"
+    pedigree_config = pedigree_pipeline.build_current_pedigree_config()
 
+    if stage_complete(STAGE_11) and not checkpoint_store.global_done(STAGE_11):
+        raise RuntimeError(f"{STAGE_11} is complete but lacks _global")
     if stage_complete(STAGE_11):
-        print(f"\n[RESUME] Skipping pedigree inference (checkpoint found)")
-        pedigree_df = load_global(STAGE_11)['pedigree_df']
+        print(f"\n[RESUME] Skipping current B1 pedigree inference (checkpoint found)")
+        pedigree_payload = load_global(STAGE_11)
+        pipeline_control_pedigree_df = pedigree_payload[
+            'pipeline_control_relationships'
+        ]
+        scientific_pedigree_df = pedigree_payload['scientific_relationships']
+        complete_pedigree_df = pedigree_payload['complete_relationships']
+        tier_b_pedigree_df = pedigree_payload['tier_b_relationships']
+        smart_diagnostics = pedigree_payload['smart_diagnostics']
+        if pedigree_payload['smart_config'] != pedigree_config:
+            raise RuntimeError("current B1 pedigree checkpoint config changed")
+        for label, frame in (
+            ('pipeline_control', pipeline_control_pedigree_df),
+            ('scientific', scientific_pedigree_df),
+            ('complete', complete_pedigree_df),
+            ('tier_b', tier_b_pedigree_df),
+        ):
+            if frame['Sample'].tolist() != list(sample_names):
+                raise RuntimeError(f"{label} checkpoint sample order changed")
+        del pedigree_payload
     else:
         print("\n" + "="*60)
-        print("RUNNING: Multi-Contig Pedigree Inference (Discovered Haplotypes)")
+        print("RUNNING: Current B1 Multi-Contig Pedigree Inference")
         print("="*60)
 
-        # 1. Gather Data from all regions
         contig_inputs = []
         for r_name in region_keys:
             _ensure_key(r_name, 'tolerance_result')
             _ensure_key(r_name, 'super_blocks_L4')
-            if 'tolerance_result' in multi_contig_results[r_name]:
-                # Use discovered L4 block instead of ground truth
-                if 'super_blocks_L4' in multi_contig_results[r_name]:
-                    discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
-                else:
-                    _ensure_key(r_name, 'super_blocks_L3')
-                    discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
-                
-                entry = {
-                    'tolerance_painting': multi_contig_results[r_name]['tolerance_result'],
-                    'founder_block': discovered_block
-                }
-                contig_inputs.append(entry)
-            else:
+            if 'tolerance_result' not in multi_contig_results[r_name]:
                 print(f"Warning: Tolerance painting missing for {r_name}")
+                continue
+            if 'super_blocks_L4' in multi_contig_results[r_name]:
+                discovered_block = multi_contig_results[r_name]['super_blocks_L4'][0]
+            else:
+                _ensure_key(r_name, 'super_blocks_L3')
+                discovered_block = multi_contig_results[r_name]['super_blocks_L3'][0]
+            contig_inputs.append({
+                'tolerance_painting': multi_contig_results[r_name]['tolerance_result'],
+                'founder_block': discovered_block,
+            })
 
-        # Founder-block eviction (pairs with the SharedMemory hand-off inside
-        # infer_pedigree_multi_contig_tolerance).  contig_inputs now holds the
-        # only reference to each founder block, so drop the checkpoint-backed
-        # super_blocks_L4 from multi_contig_results: pedigree inference copies
-        # each block into SharedMemory and releases its own reference once
-        # Phase 1 is dispatched, so the large founder set is freed for the
-        # duration of Phase 2/3 + the consistency cutoff instead of sitting
-        # idle in main.  super_blocks_L4 is re-loaded (via _ensure_key) further
-        # below for F1 recoloring / propagation.
+
+        # The current engine copies each bundled founder block into shared
+        # memory, so release checkpoint-backed duplicates before dispatch.
         for r_name in region_keys:
             multi_contig_results[r_name].pop('super_blocks_L4', None)
 
-        # 2. Run Inference (16-State HMM with tolerance-aware scoring)
-        #    n_workers uses all available cores
-        #    perform_consistency_cutoff + resolve_cycles called internally
-        pedigree_result = pedigree_inference.infer_pedigree_multi_contig_tolerance(
-            contig_inputs, 
+        pedigree_result = pedigree_inference.infer_pedigree_for_pipeline(
+            contig_inputs,
             sample_ids=sample_names,
+            config=pedigree_config,
             top_k=20,
-            n_workers=n_processes
+            n_workers=n_processes,
+        )
+        if pedigree_result.smart_config != pedigree_config:
+            raise RuntimeError("current pedigree engine changed the requested B1 config")
+
+        scientific_pedigree_df = pedigree_result.relationships
+        complete_pedigree_df = pedigree_result.complete_relationships
+        tier_b_pedigree_df = pedigree_result.tier_b_relationships
+        smart_diagnostics = pedigree_result.smart_diagnostics
+        pipeline_control_pedigree_df = pedigree_result.pipeline_control_relationships
+        for label, frame in (
+            ('scientific', scientific_pedigree_df),
+            ('complete', complete_pedigree_df),
+            ('tier_b', tier_b_pedigree_df),
+            ('pipeline_control', pipeline_control_pedigree_df),
+        ):
+            if frame['Sample'].tolist() != list(sample_names):
+                raise RuntimeError(f"{label} pedigree sample order changed")
+
+        exports = {
+            "pedigree_inference_current_scientific.csv": scientific_pedigree_df,
+            "pedigree_inference_current_complete.csv": complete_pedigree_df,
+            "pedigree_inference_current_tier_b.csv": tier_b_pedigree_df,
+            "pedigree_inference_current_diagnostics.csv": smart_diagnostics,
+        }
+        for filename, frame in exports.items():
+            output_csv = os.path.join(output_dir, filename)
+            frame.to_csv(output_csv, index=False)
+            print(f"Pedigree output saved to: {output_csv}")
+        pedigree_inference.draw_pedigree_tree(
+            scientific_pedigree_df,
+            output_file=os.path.join(
+                output_dir, "pedigree_tree_current_scientific.png"
+            ),
         )
 
-        # 3. Save & Visualize
-        pedigree_df = pedigree_result.relationships
-        output_csv = os.path.join(output_dir, "pedigree_inference_discovered.csv")
-        pedigree_df.to_csv(output_csv, index=False)
-        print(f"Pedigree saved to: {output_csv}")
-
-        output_tree = os.path.join(output_dir, "pedigree_tree_discovered.png")
-        pedigree_inference.draw_pedigree_tree(pedigree_df, output_file=output_tree)
-
-        # 4. Validate against Truth (if available)
         if 'truth_pedigree' in dir():
-            print("\n--- Pedigree Validation ---")
-            validation_df = pd.merge(
-                truth_pedigree[['Sample', 'Generation', 'Parent1', 'Parent2']],
-                pedigree_df[['Sample', 'Generation', 'Parent1', 'Parent2']],
-                on='Sample',
-                suffixes=('_True', '_Inf')
-            )
+            print("\n--- Current Pedigree Validation ---")
+            for view_name, inferred_frame in (
+                ('scientific', scientific_pedigree_df),
+                ('complete', complete_pedigree_df),
+                ('tier_b', tier_b_pedigree_df),
+            ):
+                validation_df = compare_relationships_to_truth(
+                    truth_pedigree, inferred_frame
+                )
+                descendant_mask = validation_df["TruthGeneration"].isin(
+                    ["F2", "F3"]
+                )
+                state_acc = (
+                    validation_df.loc[
+                        descendant_mask, "ParentState_Match"
+                    ].mean() * 100
+                )
+                parent_acc = (
+                    validation_df.loc[
+                        descendant_mask, "Parents_Match"
+                    ].mean() * 100
+                )
+                validation_path = os.path.join(
+                    output_dir, f"pedigree_validation_current_{view_name}.csv"
+                )
+                validation_df.to_csv(validation_path, index=False)
+                print(
+                    f"{view_name}: observed-parent-state accuracy "
+                    f"(F2+F3)={state_acc:.2f}%, parentage accuracy "
+                    f"(F2+F3)={parent_acc:.2f}%"
+                )
 
-
-            validation_df['Gen_Match'] = validation_df['Generation_True'] == validation_df['Generation_Inf']
-            validation_df['Parents_Match'] = validation_df.apply(parent_columns_match, axis=1)
-
-            gen_acc = validation_df['Gen_Match'].mean() * 100
-            descendant_mask = validation_df['Generation_True'].isin(['F2', 'F3'])
-            parent_acc = validation_df[descendant_mask]['Parents_Match'].mean() * 100
-
-            print(f"Generation Accuracy: {gen_acc:.2f}%")
-            print(f"Parentage Accuracy (F2+F3): {parent_acc:.2f}%")
-
-        save_global(STAGE_11, {'pedigree_df': pedigree_df})
+        save_global(STAGE_11, {
+            'pipeline_control_relationships': pipeline_control_pedigree_df,
+            'scientific_relationships': scientific_pedigree_df,
+            'complete_relationships': complete_pedigree_df,
+            'tier_b_relationships': tier_b_pedigree_df,
+            'smart_diagnostics': smart_diagnostics,
+            'smart_config': pedigree_config,
+        })
+        if not checkpoint_store.global_done(STAGE_11):
+            raise OSError(f"Failed to checkpoint {STAGE_11}/_global")
+        del contig_inputs
+        gc.collect()
         mark_stage_complete(STAGE_11)

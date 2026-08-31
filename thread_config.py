@@ -127,7 +127,8 @@ _project_source_root = os.path.dirname(os.path.realpath(__file__))
 # helpers do not necessarily have a source-file cache locator, so they must be
 # bound to Numba's unmodified decorator before the project-wide cache wrapper
 # below is installed.  Doing this once here replaces the two former per-module
-# warm-ups in pedigree_inference_smart and pedigree_v7 and ensures every import
+# warm-ups formerly duplicated in pedigree inference and pedigree_v7, and
+# ensures every import
 # order observes the same decorator policy.
 @_original_njit(cache=False)
 def _numba_registry_warmup(value):

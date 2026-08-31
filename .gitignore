@@ -6,6 +6,8 @@ fish_vcf_restriped/
 .pipeline_checkpoints/
 .pipeline_checkpoints_real/
 .pipeline_checkpoints_tropheops_withFounders
+# Any other attempt- or backend-qualified checkpoint root.
+/.pipeline_checkpoints_*/
 # Backend-qualified TroMau checkpoint directories.
 .pipeline_checkpoints_tropheops_*/
 

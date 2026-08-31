@@ -9,6 +9,8 @@
 # section small -- imports here run in every forkserver worker at startup.
 
 CHECKPOINT_DIR = ".pipeline_checkpoints_real"
+ASAC_METADATA_PATH = "./fish_vcf_restriped/X_AsAc_metafile.xlsx"
+ASAC_METADATA_SHEET = "main_data"
 
 import os
 import pipeline_runtime
@@ -64,6 +66,7 @@ if __name__ == '__main__':
     import hierarchical_assembly
     import paint_samples
     import pedigree_inference
+    import pedigree_pipeline
     import phase_correction
     import analysis_utils
     import terminal_cavity_refinement
@@ -74,7 +77,7 @@ if __name__ == '__main__':
     if platform.system() != "Windows":
         print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
-    n_processes = 112
+    n_processes = pipeline_runtime.available_cpu_count()
     # Recycle workers after each batch to prevent memory accumulation
     # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
     WORKER_MAXTASKS = 1
@@ -136,6 +139,24 @@ if __name__ == '__main__':
     n_samples = len(sample_names)
     print(f"VCF samples: {n_samples}")
     print(f"Regions: {len(region_keys)}")
+
+    # Explicit design eligibility: generation constrains candidate cohorts but
+    # does not establish any individual parentage.
+    asac_metadata = pd.read_excel(
+        ASAC_METADATA_PATH, sheet_name=ASAC_METADATA_SHEET
+    )
+    parent_eligibility = pedigree_pipeline.build_asac_parent_eligibility(
+        asac_metadata, sample_names, require_opposite_sex_pair=True
+    )
+    parent_eligibility_identity = (
+        pedigree_pipeline.parent_eligibility_identity(parent_eligibility)
+    )
+    parent_eligibility_summary = (
+        pedigree_pipeline.summarize_parent_eligibility(parent_eligibility)
+    )
+    print("Pedigree eligibility policy:")
+    print(parent_eligibility_summary)
+    del asac_metadata
 
     total_pipeline_start = time.time()
 
@@ -697,18 +718,47 @@ if __name__ == '__main__':
 #%%
 if __name__ == '__main__':
     # =========================================================================
-    # STAGE R10: Pedigree Inference
+    # STAGE R10: Calibrated combined-v1 B1 pedigree inference
     # =========================================================================
-    STAGE_R10 = "R10_pedigree_inference"
+    STAGE_R10 = "R10_pedigree_inference_current_b1_combined_v1_calibrated_asac_policy_v1"
+    pedigree_config = pedigree_pipeline.build_current_pedigree_config()
 
     if stage_complete(STAGE_R10) and not checkpoint_store.global_done(STAGE_R10):
         raise RuntimeError(f"{STAGE_R10} is complete but lacks _global")
     if stage_complete(STAGE_R10):
-        print(f"\n[RESUME] Skipping pedigree inference (checkpoint found)")
-        pedigree_df = load_global(STAGE_R10)['pedigree_df']
+        print(f"\n[RESUME] Skipping current B1 pedigree inference (checkpoint found)")
+        pedigree_payload = load_global(STAGE_R10)
+        if (
+            pedigree_payload.get("schema_version")
+            != pedigree_pipeline.PEDIGREE_REAL_PAYLOAD_SCHEMA_VERSION
+            or pedigree_payload.get("backend")
+            != pedigree_pipeline.ASAC_PEDIGREE_ENGINE_ID
+            or tuple(pedigree_payload.get("ordered_sample_ids", ()))
+            != tuple(sample_names)
+            or pedigree_payload.get("parent_eligibility_identity")
+            != parent_eligibility_identity
+            or pedigree_payload.get("smart_config") != pedigree_config
+        ):
+            raise RuntimeError(
+                "current AsAc pedigree checkpoint policy/config mismatch"
+            )
+        pedigree_df = pedigree_payload["pipeline_control_relationships"]
+        scientific_pedigree_df = pedigree_payload["scientific_relationships"]
+        complete_pedigree_df = pedigree_payload["complete_relationships"]
+        tier_b_pedigree_df = pedigree_payload["tier_b_relationships"]
+        smart_diagnostics = pedigree_payload["smart_diagnostics"]
+        for label, frame in (
+            ('pipeline_control', pedigree_df),
+            ('scientific', scientific_pedigree_df),
+            ('complete', complete_pedigree_df),
+            ('tier_b', tier_b_pedigree_df),
+        ):
+            if frame['Sample'].tolist() != list(sample_names):
+                raise RuntimeError(f"{label} checkpoint sample order changed")
+        del pedigree_payload
     else:
         print(f"\n{'='*60}")
-        print("STAGE R10: Multi-Contig Pedigree Inference (Real Data)")
+        print("STAGE R10: Current B1 Multi-Contig Pedigree Inference")
         print(f"{'='*60}")
 
         contig_inputs = []
@@ -722,34 +772,108 @@ if __name__ == '__main__':
             founder_block = pipeline_runtime.compact_founder_block(
                 painting_payload[pipeline_runtime.FOUNDER_BLOCK_KEY]
             )
-            entry = {
+            contig_inputs.append({
                 'tolerance_painting': painting_payload['tolerance_result'],
-                'founder_block': founder_block
-            }
-            contig_inputs.append(entry)
+                'founder_block': founder_block,
+            })
             del painting_payload
 
         start = time.time()
-        pedigree_result = pedigree_inference.infer_pedigree_multi_contig_tolerance(
-            contig_inputs, sample_ids=sample_names, top_k=20, n_workers=n_processes)
+        pedigree_result = pedigree_inference.infer_pedigree_for_pipeline(
+            contig_inputs,
+            sample_ids=sample_names,
+            parent_eligibility=parent_eligibility,
+            config=pedigree_config,
+            top_k=20,
+            n_workers=n_processes,
+        )
         print(f"\nPedigree inference time: {time.time()-start:.1f}s")
+        if pedigree_result.smart_config != pedigree_config:
+            raise RuntimeError(
+                "current pedigree engine changed the requested B1 config"
+            )
 
-        pedigree_df = pedigree_result.relationships
+        # The adapter is intentionally retained only for phase correction.
+        pedigree_df = pedigree_result.pipeline_control_relationships
+        scientific_pedigree_df = pedigree_result.relationships
+        complete_pedigree_df = pedigree_result.complete_relationships
+        tier_b_pedigree_df = pedigree_result.tier_b_relationships
+        smart_diagnostics = pedigree_result.smart_diagnostics
+        for label, frame in (
+            ('pipeline_control', pedigree_df),
+            ('scientific', scientific_pedigree_df),
+            ('complete', complete_pedigree_df),
+            ('tier_b', tier_b_pedigree_df),
+        ):
+            if frame['Sample'].tolist() != list(sample_names):
+                raise RuntimeError(f"{label} pedigree sample order changed")
 
-        gen_counts = pedigree_df['Generation'].value_counts()
-        print(f"\n--- Pedigree Summary ---")
-        print(f"Generations: {gen_counts.to_dict()}")
-        n_with_parents = pedigree_df['Parent1'].notna().sum()
-        print(f"Individuals with parents: {n_with_parents}/{len(pedigree_df)}")
+        state_counts = (
+            scientific_pedigree_df["ParentState"].fillna("unresolved")
+            .value_counts().to_dict()
+        )
+        n_with_parents = int(
+            scientific_pedigree_df[["Parent1", "Parent2"]]
+            .notna().any(axis=1).sum()
+        )
+        print("\n--- Current Pedigree Descriptive Summary ---")
+        print(f"Parent states: {state_counts}")
+        print(
+            f"Rows with at least one inferred observed parent: "
+            f"{n_with_parents}/{len(scientific_pedigree_df)}"
+        )
+        print(f"Eligibility policy: {parent_eligibility['policy_name']}")
+        print(
+            "These are model-based hypotheses and stability views; real-data "
+            "individual parentage truth is not available."
+        )
 
-        output_csv = os.path.join(output_dir, "pedigree_inference_real.csv")
-        pedigree_df.to_csv(output_csv, index=False)
-        print(f"Pedigree saved to: {output_csv}")
+        exports = {
+            (
+                "pedigree_inference_real_current_asac_policy_"
+                "scientific.csv"
+            ): scientific_pedigree_df,
+            (
+                "pedigree_inference_real_current_asac_policy_"
+                "complete.csv"
+            ): complete_pedigree_df,
+            (
+                "pedigree_inference_real_current_asac_policy_"
+                "tier_b.csv"
+            ): tier_b_pedigree_df,
+            (
+                "pedigree_inference_real_current_asac_policy_"
+                "diagnostics.csv"
+            ): smart_diagnostics,
+        }
+        for filename, frame in exports.items():
+            output_csv = os.path.join(output_dir, filename)
+            frame.to_csv(output_csv, index=False)
+            print(f"Pedigree output saved to: {output_csv}")
+        pedigree_inference.draw_pedigree_tree(
+            scientific_pedigree_df,
+            output_file=os.path.join(
+                output_dir,
+                "pedigree_tree_real_current_asac_policy_scientific.png"
+            ),
+        )
 
-        output_tree = os.path.join(output_dir, "pedigree_tree_real.png")
-        pedigree_inference.draw_pedigree_tree(pedigree_df, output_file=output_tree)
-
-        save_global(STAGE_R10, {'pedigree_df': pedigree_df})
+        save_global(STAGE_R10, {
+            "schema_version": (
+                pedigree_pipeline.PEDIGREE_REAL_PAYLOAD_SCHEMA_VERSION
+            ),
+            "backend": pedigree_pipeline.ASAC_PEDIGREE_ENGINE_ID,
+            "ordered_sample_ids": tuple(sample_names),
+            "parent_eligibility": parent_eligibility,
+            "parent_eligibility_identity": parent_eligibility_identity,
+            "parent_eligibility_summary": parent_eligibility_summary,
+            "pipeline_control_relationships": pedigree_df,
+            "scientific_relationships": scientific_pedigree_df,
+            "complete_relationships": complete_pedigree_df,
+            "tier_b_relationships": tier_b_pedigree_df,
+            "smart_diagnostics": smart_diagnostics,
+            "smart_config": pedigree_config,
+        })
         if not checkpoint_store.global_done(STAGE_R10):
             raise OSError(f"Failed to checkpoint {STAGE_R10}/_global")
         del contig_inputs
@@ -761,7 +885,7 @@ if __name__ == '__main__':
     # =========================================================================
     # STAGE R11: Phase Correction + Greedy Refinement + F1 Recoloring + Propagation
     # =========================================================================
-    STAGE_R11 = "R11_phase_correction"
+    STAGE_R11 = "R11_phase_correction_current_b1_combined_v1_calibrated_asac_policy_v1"
 
     missing_phase = [
         r for r in region_keys if not contig_done(STAGE_R11, r)
@@ -780,7 +904,7 @@ if __name__ == '__main__':
         print("="*60)
 
         if 'pedigree_df' not in dir():
-            pedigree_df = load_global(STAGE_R10)['pedigree_df']
+            pedigree_df = load_global(STAGE_R10)['pipeline_control_relationships']
 
         # _load_contig_for_phase_correction is defined at MODULE top level
         # (above `if __name__`) so forkserver workers can pickle a reference

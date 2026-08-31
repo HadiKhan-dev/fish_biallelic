@@ -60,6 +60,7 @@ RECOMB_RATE = 5e-8                 # per-bp recombination rate (matches the sim)
 ERROR_PENALTY = -math.log(1e-2)    # = 4.605170 ; pedigree_inference error_pen
 PHASE_PENALTY = 50.0               # pedigree_inference phase_pen
 MISMATCH_PENALTY = -4.605170       # = math.log(0.01) ; DEFAULT_MISMATCH_PENALTY
+CURRENT_PEDIGREE_FILENAME = "pedigree_inference_current_scientific.csv"
 
 
 # =============================================================================
@@ -175,7 +176,7 @@ def compute_hom_mask(child_dip_alleles):
 
 
 # =============================================================================
-# Trio HMM -- SCORER  (COPIED VERBATIM from pedigree_inference.run_trio_phase_aware_hmm)
+# Trio HMM -- SCORER  (COPIED VERBATIM from pedigree_hard_painting.run_trio_phase_aware_hmm)
 # Kept here unchanged so the backtracking variant below can be checked against it
 # (their best-path scores must agree).  16 states = 8 inheritance + 8 burst.
 # =============================================================================
@@ -699,22 +700,24 @@ def process_truth_cM(lo, hi, bin_bp, recomb_rate=RECOMB_RATE,
 # =============================================================================
 # Inferred pedigree (results CSV)
 # =============================================================================
-def read_inferred_pedigree(ckpt_dir, csv_path=None, results_dirname="results_simulation"):
+def read_inferred_pedigree(
+    ckpt_dir, csv_path=None, results_dirname="results_simulation"
+):
     """Load the pipeline's discovered pedigree (Sample, Parent1, Parent2).
 
-    Defaults to searching for `pedigree_inference_discovered.csv` near the
+    Defaults to searching for the current scientific pedigree CSV near the
     checkpoint tree; override with --inferred-pedigree-csv.
     """
     import pandas as pd
     if csv_path is not None:
         candidates = [csv_path]
     else:
-        base = os.path.dirname(os.path.abspath(ckpt_dir.rstrip("/"))) or "."
+        base = os.path.dirname(os.path.abspath(os.fspath(ckpt_dir).rstrip("/"))) or "."
         candidates = [
-            os.path.join(base, results_dirname, "pedigree_inference_discovered.csv"),
-            os.path.join(results_dirname, "pedigree_inference_discovered.csv"),
-            os.path.join(base, "pedigree_inference_discovered.csv"),
-            "pedigree_inference_discovered.csv",
+            os.path.join(base, results_dirname, CURRENT_PEDIGREE_FILENAME),
+            os.path.join(results_dirname, CURRENT_PEDIGREE_FILENAME),
+            os.path.join(base, CURRENT_PEDIGREE_FILENAME),
+            CURRENT_PEDIGREE_FILENAME,
         ]
     for p in candidates:
         if os.path.exists(p):
@@ -726,7 +729,7 @@ def read_inferred_pedigree(ckpt_dir, csv_path=None, results_dirname="results_sim
                     f"found {list(df.columns)}")
             return df
     raise FileNotFoundError(
-        "Could not find the inferred pedigree CSV (pedigree_inference_discovered.csv). "
+        f"Could not find the inferred pedigree CSV ({CURRENT_PEDIGREE_FILENAME}). "
         f"Looked in: {candidates}. Pass --inferred-pedigree-csv PATH.")
 
 
@@ -985,8 +988,9 @@ def build_maps(ckpt_dir, bin_bp, use_inferred_pedigree=True, inferred_csv=None,
     for contig in contigs:
         data = by_contig[contig]
         if use_inferred_pedigree:
-            data["pedigree_source"] = (inferred_csv or
-                                         "pedigree_inference_discovered.csv")
+            data["pedigree_source"] = (
+                inferred_csv or CURRENT_PEDIGREE_FILENAME
+            )
         else:
             data["pedigree_source"] = "true_pedigree_cli_ablation"
             data["track_labels"]["inferred"] = (
@@ -1698,7 +1702,7 @@ def main(argv=None):
     p.add_argument("--true-pedigree-for-inferred", action="store_true",
                    help="ablation: build the inferred map with the TRUE pedigree links")
     p.add_argument("--inferred-pedigree-csv", default=None,
-                   help="explicit path to pedigree_inference_discovered.csv")
+                   help=f"explicit path to {CURRENT_PEDIGREE_FILENAME}")
     p.add_argument("--workers", type=int, default=None,
                    help="parallel worker processes for the per-chromosome decode "
                         "(default: min(#contigs, CPU count); 1 = serial)")
