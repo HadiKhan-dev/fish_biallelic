@@ -32,7 +32,7 @@ map keys and CSV column names.
 
 Usage::
 
-    python recombination_map.py --ckpt-dir .pipeline_checkpoints --workers 22
+    python recombination_map.py --ckpt-dir .pipeline_checkpoints_reversible_cavity_depth_observation_v1 --workers 22
     python recombination_map.py --bin-mb 1.0 --out-dir recombination_map
     python recombination_map.py --true-pedigree-for-inferred
     python recombination_map.py --selftest
@@ -445,7 +445,7 @@ import multiprocessing as mp
 import checkpoint_io
 import pipeline_runtime
 
-STAGE_VCF = "01_vcf_discovery"       # naive_long_haps (true founders)
+STAGE_VCF = "01_founder_discovery"   # naive_long_haps (true founders)
 STAGE_SIM = "02_simulation"          # truth_painting + truth_pedigree
 STAGE_PAINT = "11_viterbi_painting"  # atomic H1 founder block + Z1 painting
 
@@ -1690,9 +1690,17 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         description="Build process, realized, truth-painting, reconstructed, and "
                     "end-to-end Marey maps from BHD simulation checkpoints.")
-    p.add_argument("--ckpt-dir", default=".pipeline_checkpoints",
-                   help="completed pipeline.py checkpoint tree with atomic Stage-11 "
-                        "H1/Z1 bundles (NOT a sweep combo)")
+    p.add_argument(
+        "--ckpt-dir",
+        default=(
+            ".pipeline_checkpoints_"
+            "reversible_cavity_depth_observation_v1"
+        ),
+        help=(
+            "completed pipeline.py checkpoint tree with atomic Stage-11 "
+            "H1/Z1 bundles (NOT a sweep combo)"
+        ),
+    )
     p.add_argument("--bin-mb", type=float, default=1.0, help="physical bin width (Mb)")
     p.add_argument("--out-dir", default="recombination_map",
                    help="output directory for chromosome maps, aggregate local-rate plot, "

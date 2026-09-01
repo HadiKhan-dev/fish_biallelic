@@ -15,7 +15,7 @@
 # STAGE 1 (founder discovery) is reused: if its checkpoint already exists in
 # the checkpoint dir it is skipped and loaded; if not, it is computed from the
 # VCF exactly as in pipeline.py.  The sweep driver (pedigree_depth_sweep.py)
-# symlinks the existing .pipeline_checkpoints/01_vcf_discovery in, so stage 1
+# symlinks the existing .pipeline_checkpoints_reversible_cavity_depth_observation_v1/01_founder_discovery in, so stage 1
 # is reused read-only and never recomputed.
 #
 # RUN STANDALONE (one combo): edit the defaults via env, e.g.
@@ -30,8 +30,10 @@
 import os as _bhd_os
 _BHD_SEED       = int(_bhd_os.environ.get("BHD_SWEEP_SEED", "0"))
 _BHD_DEPTH      = float(_bhd_os.environ.get("BHD_SWEEP_DEPTH", "5"))
-_BHD_CKPT_DIR   = _bhd_os.environ.get("BHD_SWEEP_CKPT_DIR", "pedigree_sweep_checkpoints")
-_BHD_OUTPUT_DIR = _bhd_os.environ.get("BHD_SWEEP_OUTPUT_DIR", "pedigree_sweep_results")
+_BHD_CKPT_DIR   = _bhd_os.environ.get("BHD_SWEEP_CKPT_DIR",
+    "pedigree_sweep_checkpoints_reversible_cavity_depth_observation_v1")
+_BHD_OUTPUT_DIR = _bhd_os.environ.get("BHD_SWEEP_OUTPUT_DIR",
+    "pedigree_sweep_results_reversible_cavity_depth_observation_v1")
 _BHD_NUM_PROCESSES = int(_bhd_os.environ.get("BHD_NUM_PROCESSES", "112"))
 _BHD_RECOMBINATION_PROFILE = _bhd_os.environ.get(
     "BHD_RECOMBINATION_PROFILE", "constant"
@@ -192,7 +194,7 @@ if __name__ == '__main__':
     import pickle
     import gc
     from tqdm import tqdm
-    from dataclasses import dataclass
+    from dataclasses import asdict, dataclass
     from typing import Dict
     from multiprocess import Pool
 
@@ -200,7 +202,14 @@ if __name__ == '__main__':
     import vcf_data_loader
     import analysis_utils
     import hap_statistics
-    import block_haplotypes  # Discrete coordinate descent w/ wildcard founder (drop-in for block_haplotypes)
+    import block_haplotypes
+    stage1_config = block_haplotypes.ReversibleCavitySearchConfig()
+    stage1_config_record = asdict(stage1_config)
+    stage1_identity_record = {
+        "backend": block_haplotypes.STAGE1_BACKEND,
+        "config": stage1_config_record,
+    }
+
     import block_linking_naive
     import block_linking
     import simulate_sequences
@@ -269,8 +278,7 @@ if __name__ == '__main__':
     #   After validations (before stage 9) -> drop simd_block_results, L1, L2, L3
     #   After stage 9 -> drop simd_probs, simd_priors
     #
-    # To force a full re-run:  rm -rf .pipeline_checkpoints/
-    # To re-run from stage N:  delete that stage's dir and all later ones.
+    # For a fresh run, configure a new exact checkpoint directory.
 
     CHECKPOINT_DIR = _BHD_CKPT_DIR
     checkpoint_store = pipeline_runtime.CheckpointStore(
@@ -289,13 +297,13 @@ if __name__ == '__main__':
     # simd_block_results lives in 03 before refinement, 04 after refinement,
     # and 04b after residual discovery.
     _KEY_SOURCE = {
-        'naive_long_haps':    '01_vcf_discovery',
+        'naive_long_haps':    '01_founder_discovery',
         'simulated_reads':    '02_simulation',
         'simd_genomic_data':  '02_simulation',
         'simd_probs':         '02_simulation',
         'simd_priors':        '02_simulation',
         'truth_painting':     '02_simulation',
-        'simd_block_results': ['05_residual_discovery', '04_refinement', '03_block_haplotypes'],
+        'simd_block_results': ['05_residual_discovery', '04_refinement', '03_founder_discovery'],
         'super_blocks_L1':    '06_assembly_L1',
         'super_blocks_L2':    '07_assembly_L2',
         'super_blocks_L3':    '08_assembly_L3',
@@ -371,7 +379,10 @@ if __name__ == '__main__':
     # =========================================================================
     # STAGE 1: VCF Loading + Haplotype Discovery + Naive Linking
     # =========================================================================
-    STAGE_1 = "01_vcf_discovery"
+    STAGE_1 = "01_founder_discovery"
+    checkpoint_store.bind_stage_identity(
+        STAGE_1, stage1_identity_record
+    )
 
     if stage_complete(STAGE_1):
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
@@ -402,8 +413,11 @@ if __name__ == '__main__':
 
             # 2. Run Haplotype Discovery
             start = time.time()
-            block_results = block_haplotypes.generate_all_block_haplotypes(genomic_data,
-                                                                           num_processes=n_processes)
+            block_results = block_haplotypes.generate_all_block_haplotypes(
+                genomic_data,
+                num_processes=n_processes,
+                discovery_config=stage1_config,
+            )
 
             valid_blocks = [b for b in block_results if len(b.positions) > 0]
             block_results = block_haplotypes.BlockResults(valid_blocks)
@@ -422,12 +436,22 @@ if __name__ == '__main__':
             multi_contig_results[region['contig']] = {
                 "naive_long_haps": naive_long_haps
             }
-            save_contig(STAGE_1, r_name, {'naive_long_haps': naive_long_haps})
+            save_contig(STAGE_1, r_name, {
+                'naive_long_haps': naive_long_haps,
+                'stage1_backend': block_haplotypes.STAGE1_BACKEND,
+                'stage1_config': stage1_config_record,
+            })
             del genomic_data, block_results, naive_blocks, naive_long_haps
             gc.collect()
 
         print(f"\nAll regions processed in {time.time() - total_start:.2f}s")
         mark_stage_complete(STAGE_1)
+
+    print(
+        "[STOP] Stage 1 is complete. Later stages are disabled until they "
+        "preserve unknown founder alleles."
+    )
+    raise SystemExit(0)
 
 #%%
 if __name__ == '__main__':
@@ -439,6 +463,14 @@ if __name__ == '__main__':
     if stage_complete(STAGE_2):
         print(f"\n[RESUME] Skipping simulation (checkpoint found)")
         g = load_global(STAGE_2)
+        if (
+            g.get('stage1_backend') != block_haplotypes.STAGE1_BACKEND
+            or g.get('stage1_config') != stage1_config_record
+        ):
+            raise RuntimeError(
+                "Stage-2 checkpoint was generated from an incompatible "
+                "founder-discovery model"
+            )
         truth_pedigree = g['truth_pedigree']
         sample_names = g['sample_names']
         region_keys = g['region_keys']
@@ -585,6 +617,8 @@ if __name__ == '__main__':
             'region_keys': region_keys,
             'recombination_model': recombination_model,
             'raw_recombination_events': raw_recombination_events,
+            'stage1_backend': block_haplotypes.STAGE1_BACKEND,
+            'stage1_config': stage1_config_record,
         })
         del all_offspring_lists, truth_paintings_lists, founders_list, sites_list
         gc.collect()
@@ -606,7 +640,10 @@ if __name__ == '__main__':
     # =========================================================================
     # STAGE 3: Discover Block Haplotypes from Simulated Reads
     # =========================================================================
-    STAGE_3 = "03_block_haplotypes"
+    STAGE_3 = "03_founder_discovery"
+    checkpoint_store.bind_stage_identity(
+        STAGE_3, stage1_identity_record
+    )
 
     if stage_complete(STAGE_3):
         print(f"\n[RESUME] Skipping block haplotype discovery (checkpoint found)")
@@ -629,10 +666,8 @@ if __name__ == '__main__':
             t_chr = time.time()
             simd_block_results = block_haplotypes.generate_all_block_haplotypes(
                 simd_genomic_data,
-                uniqueness_threshold_percent=1.0,
-                diff_threshold_percent=0.5,
-                wrongness_threshold=1.0,
-                num_processes=n_processes
+                num_processes=n_processes,
+                discovery_config=stage1_config,
             )
             disc_time = time.time() - t_chr
             
@@ -640,7 +675,11 @@ if __name__ == '__main__':
             simd_block_results = block_haplotypes.BlockResults(valid_blocks)
             
             multi_contig_results[r_name]['simd_block_results'] = simd_block_results
-            save_contig(STAGE_3, r_name, {'simd_block_results': simd_block_results})
+            save_contig(STAGE_3, r_name, {
+                'simd_block_results': simd_block_results,
+                'stage1_backend': block_haplotypes.STAGE1_BACKEND,
+                'stage1_config': stage1_config_record,
+            })
             
             hap_counts = [len(b.haplotypes) for b in valid_blocks]
             print(f"    {len(valid_blocks)} blocks, haps/block: "

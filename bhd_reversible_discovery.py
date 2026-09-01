@@ -1,11 +1,9 @@
 """Block-level adapter for cap-free reversible cavity discovery.
 
-This module deliberately keeps the reversible controller independent of the
-legacy robust-discovery and exhaustive fixed-K search paths.  It converts the
-kept allele depths to normalized raw genotype likelihoods, invokes one
-adaptive complete-panel search, and materializes the exact selected H/A state
-through the established cavity result contract.  It does not enumerate K,
-does not use metadata or truth, and does not inject a legacy-discovered panel.
+The adapter converts retained allele depths to normalized raw genotype
+likelihoods, invokes one adaptive complete-panel search, and materializes the
+exact selected H/A state while preserving unsupported founder alleles as
+unknown. It does not enumerate K and does not use metadata or biological truth.
 """
 
 from __future__ import annotations
@@ -22,8 +20,7 @@ from bhd_genotype_evidence import (
 )
 from bhd_results import (
     BlockResult,
-    _compute_per_site_confidence,
-    _discrete_haps_to_prob_arrays,
+    _materialize_founder_site_pseudo_evidence,
 )
 from bhd_factorization_modes import FactorizationMode
 from bhd_reversible_cavity import (
@@ -141,7 +138,6 @@ class CavityDiscoveryDiagnostics:
 
     status: str
     inference_kind: str
-    search_pass_count: int
     represented_k_values: tuple[int, ...]
     selected_k: int
     runner_up_k: int | None
@@ -149,10 +145,10 @@ class CavityDiscoveryDiagnostics:
     selection_method: str
     selection_config_type: str
     candidate_search: ReversibleCandidateSearchDiagnostic
-    terminalize_precleanup_seed_modes: bool
-    terminalize_proposal_seed_modes: bool
-    apply_terminal_merge_repairs: bool
-    min_supporters_for_confidence: int
+    observation_model: str
+    min_soft_unique_sample_support: int
+    min_directional_supporters: int
+    min_hard_call_pseudo_probability: float
     genotype_evidence_mode: str
     genotype_evidence_interpretation: str
     cavity_score_calibration: str
@@ -168,7 +164,7 @@ class CavityDiscoveryDiagnostics:
 
 @dataclass(frozen=True)
 class CavityMaterializedBlockData:
-    """Legacy-compatible arrays materialized from one exact selected mode."""
+    """Canonical public arrays materialized from one exact selected mode."""
 
     positions: np.ndarray
     haplotype_probability_arrays: tuple[np.ndarray, ...]
@@ -176,8 +172,11 @@ class CavityMaterializedBlockData:
     keep_flags: np.ndarray
     probs_array: np.ndarray
     discrete_haps: np.ndarray
-    per_site_confidence: np.ndarray
-    n_site_supporters: np.ndarray
+    founder_allele_pseudo_confidence: np.ndarray
+    n_directional_site_supporters: np.ndarray
+    founder_alt_pseudo_probability: np.ndarray
+    founder_log_pseudo_odds: np.ndarray
+    sample_has_observed_kept_depth: np.ndarray
     pair_assignments: np.ndarray
     wildcard_slots: np.ndarray
     wildcard_mass: float
@@ -208,13 +207,28 @@ class CavityMaterializedBlockData:
         )
         object.__setattr__(
             self,
-            "per_site_confidence",
-            _readonly(self.per_site_confidence, np.float64),
+            "founder_allele_pseudo_confidence",
+            _readonly(self.founder_allele_pseudo_confidence, np.float64),
         )
         object.__setattr__(
             self,
-            "n_site_supporters",
-            _readonly(self.n_site_supporters, np.int64),
+            "n_directional_site_supporters",
+            _readonly(self.n_directional_site_supporters, np.int64),
+        )
+        object.__setattr__(
+            self,
+            "founder_alt_pseudo_probability",
+            _readonly(self.founder_alt_pseudo_probability, np.float64),
+        )
+        object.__setattr__(
+            self,
+            "founder_log_pseudo_odds",
+            _readonly(self.founder_log_pseudo_odds, np.float64),
+        )
+        object.__setattr__(
+            self,
+            "sample_has_observed_kept_depth",
+            _readonly(self.sample_has_observed_kept_depth, np.bool_),
         )
         object.__setattr__(
             self,
@@ -262,8 +276,10 @@ class CavityMaterializedBlockData:
         expected_k_site = (k, n_sites)
         for name in (
             "discrete_haps",
-            "per_site_confidence",
-            "n_site_supporters",
+            "founder_allele_pseudo_confidence",
+            "n_directional_site_supporters",
+            "founder_alt_pseudo_probability",
+            "founder_log_pseudo_odds",
         ):
             if np.asarray(getattr(self, name)).shape != expected_k_site:
                 raise AssertionError(f"{name} and K_final disagree")
@@ -286,9 +302,19 @@ class CavityMaterializedBlockData:
             self.wildcard_slots, self.selected_mode.wildcard_slots
         ):
             raise AssertionError("materialization changed wildcard slots")
+        if (
+            np.asarray(self.sample_has_observed_kept_depth).shape
+            != (n_samples,)
+        ):
+            raise AssertionError(
+                "sample_has_observed_kept_depth has the wrong shape"
+            )
+        resolved = np.asarray(
+            self.sample_has_observed_kept_depth, dtype=np.bool_
+        )
         expected_mass = float(
-            np.sum(self.wildcard_slots, dtype=np.float64)
-            / max(2 * n_samples, 1)
+            np.sum(self.wildcard_slots[resolved], dtype=np.float64)
+            / max(2 * int(np.sum(resolved)), 1)
         )
         if not math.isclose(
             float(self.wildcard_mass),
@@ -303,18 +329,34 @@ class CavityMaterializedBlockData:
             raise AssertionError("selected-mode iteration provenance disagrees")
         if self.selected_mode_nll != self.selected_mode.total_nll:
             raise AssertionError("selected-mode NLL provenance disagrees")
-        threshold = self.diagnostics.min_supporters_for_confidence
-        low_support = self.n_site_supporters < threshold
-        if np.any(self.discrete_haps[low_support] != -1):
-            raise AssertionError("low-support discrete cells must be masked")
+        minimum_support = self.diagnostics.min_directional_supporters
+        minimum_probability = (
+            self.diagnostics.min_hard_call_pseudo_probability
+        )
+        pseudo_probability = self.founder_alt_pseudo_probability
+        expected_called = (
+            (self.n_directional_site_supporters >= minimum_support)
+            & (
+                np.maximum(pseudo_probability, 1.0 - pseudo_probability)
+                >= minimum_probability
+            )
+        )
+        called = self.discrete_haps >= 0
+        if not np.array_equal(called, expected_called):
+            raise AssertionError(
+                "founder hard calls disagree with the release rule"
+            )
+        expected_allele = (pseudo_probability >= 0.5).astype(np.int64)
+        if np.any(self.discrete_haps[called] != expected_allele[called]):
+            raise AssertionError("called alleles oppose their pseudo-evidence")
         for index, value in enumerate(self.haplotype_probability_arrays):
-            if np.any(value[low_support[index]] != 0.5):
+            if np.any(value[~called[index]] != 0.5):
                 raise AssertionError(
-                    "low-support public cells must be (0.5, 0.5)"
+                    "unknown public cells must be (0.5, 0.5)"
                 )
 
     def to_block_result(self, block_result_class: type | None = None) -> Any:
-        """Construct the historical result type without changing H or A."""
+        """Construct the public block result without changing H or A."""
 
         self.validate()
         if block_result_class is None:
@@ -341,9 +383,20 @@ class CavityMaterializedBlockData:
         if not accepts_mode:
             result.genotype_evidence_mode = RAW_EVIDENCE_MODE
         result.discrete_haps = self.discrete_haps
-        result.per_site_confidence = self.per_site_confidence
-        result.n_site_supporters = self.n_site_supporters
+        result.founder_allele_pseudo_confidence = (
+            self.founder_allele_pseudo_confidence
+        )
+        result.n_directional_site_supporters = (
+            self.n_directional_site_supporters
+        )
         result.pair_assignments = self.pair_assignments
+        result.founder_alt_pseudo_probability = (
+            self.founder_alt_pseudo_probability
+        )
+        result.founder_log_pseudo_odds = self.founder_log_pseudo_odds
+        result.sample_has_observed_kept_depth = (
+            self.sample_has_observed_kept_depth
+        )
         result.wildcard_slots = self.wildcard_slots
         result.wildcard_mass = self.wildcard_mass
         result.uncertainty_flag = self.uncertainty_flag
@@ -351,7 +404,7 @@ class CavityMaterializedBlockData:
         result.growth_history = []
         keep_mask = self.keep_flags > 0
         precleanup = np.full_like(self.discrete_haps, -1)
-        precleanup[:, keep_mask] = self.selected_mode.haplotypes
+        precleanup[:, keep_mask] = self.discrete_haps[:, keep_mask]
         result.precleanup_candidate_discrete_haps = precleanup
         result.precleanup_candidate_k = self.K_final
         result.cavity_discovery_diagnostics = asdict(self.diagnostics)
@@ -431,44 +484,69 @@ class CavityBlockDiscoveryResult:
         return dict(self.selection.probability_by_k)
 
     def materialize(self) -> CavityMaterializedBlockData:
-        """Expand the exact selected mode without any fitted-state update."""
+        """Expand the exact selected mode without refitting H or A."""
 
         mode = self.selected_mode
         keep_mask = self.keep_flags > 0
-        confidence_kept, supporters_kept = _compute_per_site_confidence(
+        n_sites = len(self.positions)
+        observed_kept = np.ascontiguousarray(
+            np.sum(self.reads_count_matrix[:, keep_mask, :], axis=2) > 0
+        )
+        (
+            q_kept,
+            supporters_kept,
+            log_pseudo_odds_kept,
+            _hard_mask_kept,
+            hard_values_kept,
+        ) = _materialize_founder_site_pseudo_evidence(
             self.raw_genotype_likelihoods_kept,
             mode.haplotypes,
             mode.assignments,
+            observed_kept,
             self.config.lambda_wildcard_penalty,
-            min_supporters=self.config.min_supporters_for_confidence,
+            self.config.min_directional_supporters,
+            self.config.min_hard_call_pseudo_probability,
         )
-        n_sites = len(self.positions)
-        h_full = np.zeros((mode.k, n_sites), dtype=np.int64)
-        confidence_full = np.zeros((mode.k, n_sites), dtype=np.float64)
+        q_full = np.full((mode.k, n_sites), 0.5, dtype=np.float64)
+        log_pseudo_odds_full = np.zeros(
+            (mode.k, n_sites), dtype=np.float64
+        )
         supporters_full = np.zeros((mode.k, n_sites), dtype=np.int64)
-        h_full[:, keep_mask] = mode.haplotypes
-        confidence_full[:, keep_mask] = confidence_kept
+        h_masked = np.full((mode.k, n_sites), -1, dtype=np.int64)
+        q_full[:, keep_mask] = q_kept
+        log_pseudo_odds_full[:, keep_mask] = log_pseudo_odds_kept
         supporters_full[:, keep_mask] = supporters_kept
-        public = _discrete_haps_to_prob_arrays(
-            h_full,
-            n_sites,
-            keep_mask,
-            confidence_full,
-            supporters_full,
-            self.config.min_supporters_for_confidence,
+        h_masked[:, keep_mask] = hard_values_kept
+        confidence_full = np.maximum(q_full, 1.0 - q_full)
+        public = {}
+        for founder in range(mode.k):
+            values = np.full((n_sites, 2), 0.5, dtype=np.float64)
+            called = h_masked[founder] >= 0
+            values[called, 0] = 1.0 - q_full[founder, called]
+            values[called, 1] = q_full[founder, called]
+            public[founder] = values
+        sample_has_observed_kept_depth = np.ascontiguousarray(
+            np.any(observed_kept, axis=1)
         )
-        h_masked = h_full.copy()
-        h_masked[
-            supporters_full < self.config.min_supporters_for_confidence
-        ] = -1
+
         full_probabilities = _raw_genotype_likelihoods(
             self.reads_count_matrix, self.config.read_error_probability
         )
         wildcard_mass = float(
-            np.sum(mode.wildcard_slots, dtype=np.float64)
-            / max(2 * len(self.reads_count_matrix), 1)
+            np.sum(
+                mode.wildcard_slots[sample_has_observed_kept_depth],
+                dtype=np.float64,
+            )
+            / max(2 * int(np.sum(sample_has_observed_kept_depth)), 1)
         )
         reasons = list(self.diagnostics.uncertainty_reasons)
+        reasons.append(
+            "founder_allele_confidence_is_fixed_assignment_capped_"
+            "pseudo_probability"
+        )
+        unresolved_count = int(np.sum(~sample_has_observed_kept_depth))
+        if unresolved_count:
+            reasons.append("samples_without_kept_site_depth_are_unresolved")
         if wildcard_mass > 0.0:
             reasons.append("selected_mode_uses_wildcard_copies")
         return CavityMaterializedBlockData(
@@ -480,8 +558,11 @@ class CavityBlockDiscoveryResult:
             keep_flags=self.keep_flags,
             probs_array=full_probabilities,
             discrete_haps=h_masked,
-            per_site_confidence=confidence_full,
-            n_site_supporters=supporters_full,
+            founder_allele_pseudo_confidence=confidence_full,
+            n_directional_site_supporters=supporters_full,
+            founder_alt_pseudo_probability=q_full,
+            founder_log_pseudo_odds=log_pseudo_odds_full,
+            sample_has_observed_kept_depth=sample_has_observed_kept_depth,
             pair_assignments=mode.assignments,
             wildcard_slots=mode.wildcard_slots,
             wildcard_mass=wildcard_mass,
@@ -496,11 +577,6 @@ class CavityBlockDiscoveryResult:
             diagnostics=self.diagnostics,
             selection=self.selection,
         )
-
-    def materialize_state(self) -> CavityMaterializedBlockData:
-        """Compatibility spelling for exact selected-mode materialization."""
-
-        return self.materialize()
 
     def to_block_result(
         self,
@@ -625,7 +701,6 @@ def discover_block_reversible_cavity(
     diagnostics = CavityDiscoveryDiagnostics(
         status="selected_with_uncalibrated_reversible_cavity_pseudo_weights",
         inference_kind="full_data_adaptive_reversible_cavity",
-        search_pass_count=1,
         represented_k_values=tuple(sorted(scored_modes)),
         selected_k=int(selection.map_k),
         runner_up_k=(
@@ -637,15 +712,19 @@ def discover_block_reversible_cavity(
         selection_method=str(selection.method),
         selection_config_type=type(settings.cavity).__name__,
         candidate_search=candidate_diagnostic,
-        terminalize_precleanup_seed_modes=False,
-        terminalize_proposal_seed_modes=False,
-        apply_terminal_merge_repairs=False,
-        min_supporters_for_confidence=(
-            settings.min_supporters_for_confidence
+        observation_model="positive_allele_depth_is_observed",
+        min_soft_unique_sample_support=(
+            settings.min_soft_unique_sample_support
+        ),
+        min_directional_supporters=settings.min_directional_supporters,
+        min_hard_call_pseudo_probability=(
+            settings.min_hard_call_pseudo_probability
         ),
         genotype_evidence_mode=RAW_EVIDENCE_MODE,
         genotype_evidence_interpretation=(
-            "normalized_raw_read_genotype_likelihoods_at_kept_sites"
+            "normalized_raw_read_genotype_likelihoods_at_kept_sites; "
+            "founder hard-call confidence is an uncalibrated capped "
+            "fixed-assignment pseudo-probability"
         ),
         cavity_score_calibration=CAVITY_SCORE_CALIBRATION,
         cavity_weight_calibration=CAVITY_WEIGHT_CALIBRATION,

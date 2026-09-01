@@ -57,14 +57,13 @@ from bhd_mode_canonicalization import exact_unique_binary_rows
 
 _SCORE_TOLERANCE = 1e-9
 _SUPPORTED_MOVE_OFFSETS = (-1, 0, 1, 2)
-
-
 @dataclass(frozen=True)
 class _GrowthInputs:
     oracle_nll: np.ndarray
     decisiveness: np.ndarray
     dosage_by_sample: np.ndarray
     seed_haplotypes_by_sample: np.ndarray
+    active_sample_mask: np.ndarray
 
 
 
@@ -88,7 +87,9 @@ class ReversibleCavitySearchConfig:
     max_replacement_children_per_mode: int = 24
     lambda_wildcard_penalty: float = 0.5
     read_error_probability: float = DEFAULT_READ_ERROR_PROBABILITY
-    min_supporters_for_confidence: int = 2
+    min_soft_unique_sample_support: int = 2
+    min_directional_supporters: int = 2
+    min_hard_call_pseudo_probability: float = 0.85
     coordinate_descent_max_iter: int = 50
     soft_seed_min_cluster_size: int = 2
     apply_gauge_rewire: bool = True
@@ -107,7 +108,8 @@ class ReversibleCavitySearchConfig:
             "n_data_seed_modes",
             "max_candidate_start_rows",
             "max_replacement_children_per_mode",
-            "min_supporters_for_confidence",
+            "min_soft_unique_sample_support",
+            "min_directional_supporters",
             "coordinate_descent_max_iter",
             "soft_seed_min_cluster_size",
             "exact_cut_max_k",
@@ -126,6 +128,11 @@ class ReversibleCavitySearchConfig:
         if not 0.0 < self.read_error_probability < 0.5:
             raise ValueError(
                 "read_error_probability must lie strictly in (0, 0.5)"
+            )
+        if not 0.5 < self.min_hard_call_pseudo_probability < 1.0:
+            raise ValueError(
+                "min_hard_call_pseudo_probability must lie strictly in "
+                "(0.5, 1)"
             )
         if not math.isfinite(self.score_tolerance) or self.score_tolerance < 0:
             raise ValueError("score_tolerance must be finite and non-negative")
@@ -238,6 +245,8 @@ class ReversibleCavitySearchResult:
     search_steps: tuple[SearchStepDiagnostic, ...]
     local_certificate: LocalSearchCertificate
     natural_k_ceiling: int
+    n_input_samples: int
+    n_scored_samples: int
     search_limited: bool
     search_limit_reasons: tuple[str, ...]
     boundary_limited: bool
@@ -334,6 +343,7 @@ def _score_stage(
     modes: Sequence[FactorizationMode],
     config: CavitySelectionConfig,
     cavity_workspace: Any | None = None,
+    active_sample_mask: np.ndarray | None = None,
 ) -> tuple[_StageModeScore, ...]:
     # Refresh the shared block-pool allocation immediately before the
     # parallel held-out cavity kernel, so late stragglers can claim cores
@@ -342,11 +352,37 @@ def _score_stage(
     dynamic_threads.apply_dynamic_threads()
     if not modes:
         return ()
+
+    score_evidence = evidence
+    score_modes: Sequence[FactorizationMode] = modes
+    if active_sample_mask is not None:
+        active = np.asarray(active_sample_mask, dtype=np.bool_)
+        if active.shape != (len(evidence),) or not np.any(active):
+            raise ValueError("active_sample_mask must retain an evidence sample")
+        if not np.all(active):
+            score_evidence = (
+                cavity_workspace.evidence_reference
+                if cavity_workspace is not None
+                else np.ascontiguousarray(evidence[active])
+            )
+            score_modes = tuple(
+                FactorizationMode(
+                    mode.haplotypes,
+                    mode.assignments[active],
+                    mode.per_sample_cost[active],
+                    mode.wildcard_slots[active],
+                    mode.n_iter,
+                    float(np.sum(mode.per_sample_cost[active])),
+                    mode.fixed_point_certified,
+                )
+                for mode in modes
+            )
+
     grouped: dict[int, list[FactorizationMode]] = {}
-    for mode in modes:
+    for mode in score_modes:
         grouped.setdefault(mode.k, []).append(mode)
     selection = select_cavity_predictive_k(
-        evidence, grouped, config=config, _workspace=cavity_workspace
+        score_evidence, grouped, config=config, _workspace=cavity_workspace
     )
     diagnostics = {
         (item.k, item.mode_digest): item
@@ -396,28 +432,70 @@ def _internal_move_config(
     )
 
 
-def _prepare_growth_inputs(evidence: np.ndarray) -> _GrowthInputs:
-    """Prepare the evidence-only K-growth quantities once per search."""
+def _prepare_growth_inputs(
+        evidence: np.ndarray,
+        observed_mask: np.ndarray | None = None,
+) -> _GrowthInputs:
+    """Prepare evidence-only K-growth quantities once per search."""
 
     max_genotype_probability = np.max(evidence, axis=2)
-    oracle_nll = -np.sum(
-        np.log(np.maximum(max_genotype_probability, np.finfo(np.float64).tiny)),
-        axis=1,
-    )
-    decisiveness = np.sum(max_genotype_probability, axis=1)
     dosage_by_sample = np.argmax(evidence, axis=2)
-    population_alt_frequency = (
-        evidence[..., 1].mean(axis=0) * 0.5
-        + evidence[..., 2].mean(axis=0)
-    )
-    seed_haplotypes_by_sample = np.zeros_like(dosage_by_sample)
-    seed_haplotypes_by_sample[dosage_by_sample == 2] = 1
-    heterozygous = dosage_by_sample == 1
-    seed_haplotypes_by_sample[
-        heterozygous & (population_alt_frequency[None, :] > 0.5)
-    ] = 1
+    if observed_mask is None:
+        oracle_nll = -np.sum(
+            np.log(np.maximum(
+                max_genotype_probability, np.finfo(np.float64).tiny
+            )),
+            axis=1,
+        )
+        decisiveness = np.sum(max_genotype_probability, axis=1)
+        active_sample_mask = np.ones(len(evidence), dtype=np.bool_)
+        population_alt_frequency = (
+            evidence[..., 1].mean(axis=0) * 0.5
+            + evidence[..., 2].mean(axis=0)
+        )
+        seed_haplotypes_by_sample = np.zeros_like(dosage_by_sample)
+        seed_haplotypes_by_sample[dosage_by_sample == 2] = 1
+        heterozygous = dosage_by_sample == 1
+        seed_haplotypes_by_sample[
+            heterozygous & (population_alt_frequency[None, :] > 0.5)
+        ] = 1
+    else:
+        observed = np.asarray(observed_mask, dtype=np.bool_)
+        if observed.shape != evidence.shape[:2]:
+            raise ValueError("observed_mask must match growth evidence")
+        active_sample_mask = np.any(observed, axis=1)
+        if not np.any(active_sample_mask):
+            raise ValueError("observed_mask must retain an evidence sample")
+        oracle_nll = -np.sum(
+            np.where(
+                observed,
+                np.log(np.maximum(
+                    max_genotype_probability, np.finfo(np.float64).tiny
+                )),
+                0.0,
+            ),
+            axis=1,
+        )
+        decisiveness = np.sum(
+            np.where(observed, max_genotype_probability, 0.0), axis=1
+        )
+        alt_fraction = 0.5 * evidence[..., 1] + evidence[..., 2]
+        observed_count = np.sum(observed, axis=0)
+        population_alt_frequency = np.divide(
+            np.sum(np.where(observed, alt_fraction, 0.0), axis=0),
+            observed_count,
+            out=np.full(evidence.shape[1], 0.5, dtype=np.float64),
+            where=observed_count > 0,
+        )
+        seed_haplotypes_by_sample = np.zeros_like(dosage_by_sample)
+        seed_haplotypes_by_sample[observed & (dosage_by_sample == 2)] = 1
+        ambiguous = (~observed) | (dosage_by_sample == 1)
+        seed_haplotypes_by_sample[
+            ambiguous & (population_alt_frequency[None, :] > 0.5)
+        ] = 1
     for value in (
-        oracle_nll, decisiveness, dosage_by_sample, seed_haplotypes_by_sample
+        oracle_nll, decisiveness, dosage_by_sample, seed_haplotypes_by_sample,
+        active_sample_mask,
     ):
         value.setflags(write=False)
     return _GrowthInputs(
@@ -425,6 +503,7 @@ def _prepare_growth_inputs(evidence: np.ndarray) -> _GrowthInputs:
         decisiveness=decisiveness,
         dosage_by_sample=dosage_by_sample,
         seed_haplotypes_by_sample=seed_haplotypes_by_sample,
+        active_sample_mask=active_sample_mask,
     )
 
 
@@ -535,7 +614,7 @@ def _v2_soft_births(
         return value
 
     from types import SimpleNamespace
-    from bhd_candidate_pool import augment_assigned_residual_candidates
+    from bhd_candidate_pool import augment_combined_soft_candidates
 
     adapter = SimpleNamespace(
         discrete_haps=mode.haplotypes,
@@ -546,16 +625,13 @@ def _v2_soft_births(
         precleanup_candidate_k=mode.k,
         haplotypes={},
     )
-    augmented = augment_assigned_residual_candidates(
+    augmented = augment_combined_soft_candidates(
         adapter,
         reads,
         base_candidates=mode.haplotypes.astype(float),
         read_error_probability=settings.read_error_probability,
-        proposal_mode="D",
-        include_assigned_hard_candidates=False,
-        compute_excluded_assigned_hard_diagnostics=False,
         minimum_soft_unique_sample_support=(
-            settings.min_supporters_for_confidence
+            settings.min_soft_unique_sample_support
         ),
         residual_input_workspace=residual_input_workspace,
         binary_panel_fast_path=True,
@@ -565,15 +641,6 @@ def _v2_soft_births(
     )
     if len(soft) == 0:
         return finish(((), 0, 0, ()))
-    for index in range(augmented.n_base_candidates, len(augmented.candidates)):
-        provenance = augmented.candidate_provenance[index]
-        diagnostic_index = provenance.proposal_diagnostic_index
-        if diagnostic_index is None:
-            raise AssertionError("residual proposal lacks diagnostic provenance")
-        diagnostic = augmented.proposal_diagnostics[diagnostic_index]
-        if diagnostic.proposal_mode == "assigned_hard":
-            raise AssertionError("base_plus_soft retained a hard proposal")
-
     rows = _ordered_binary_candidate_rows(soft, evidence)
     existing = {
         np.asarray(row, dtype=np.int8).tobytes() for row in mode.haplotypes
@@ -696,6 +763,7 @@ def _v2_ordinary_moves(
             decisiveness=growth_inputs.decisiveness,
             dosage_by_sample=growth_inputs.dosage_by_sample,
             seed_haplotypes_by_sample=growth_inputs.seed_haplotypes_by_sample,
+            active_sample_mask=growth_inputs.active_sample_mask,
         )
         modes.extend(child for child in data_births if child.k == mode.k + 1)
     modes = list(_deduplicate(modes))
@@ -755,14 +823,27 @@ def search_reversible_cavity(
         raise ValueError("allele_depths must match evidence samples/sites")
     if np.any(~np.isfinite(reads)) or np.any(reads < 0):
         raise ValueError("allele_depths must be finite and non-negative")
-
-    ceiling = _natural_k_ceiling(n_samples, n_sites)
+    observed_mask = np.ascontiguousarray(np.sum(reads, axis=2) > 0)
+    # The allele-depth mask is authoritative. Normalize every missing cell to
+    # neutral evidence before any seed, proposal, fit, or cavity calculation.
+    likelihood = np.array(likelihood, dtype=np.float64, order="C", copy=True)
+    likelihood[~observed_mask] = 1.0 / 3.0
+    active_sample_mask = np.ascontiguousarray(
+        np.any(observed_mask, axis=1)
+    )
+    active_sample_count = int(np.sum(active_sample_mask))
+    if active_sample_count < 1:
+        raise ValueError("discovery requires at least one informative sample")
+    ceiling = _natural_k_ceiling(active_sample_count, n_sites)
     candidate_rows = _canonical_candidate_rows(candidate_haplotypes, n_sites)
+
     move_config = _internal_move_config(settings)
     workspace = _prepare_fixed_k_fit_workspace(
-        likelihood, settings.lambda_wildcard_penalty
+        likelihood,
+        settings.lambda_wildcard_penalty,
+        observed_mask=observed_mask,
     )
-    growth_inputs = _prepare_growth_inputs(likelihood)
+    growth_inputs = _prepare_growth_inputs(likelihood, observed_mask)
     residual_input_workspace = prepare_residual_inputs(
         reads, settings.read_error_probability,
         likelihood=likelihood,
@@ -775,6 +856,7 @@ def search_reversible_cavity(
         settings.lambda_wildcard_penalty,
         settings.coordinate_descent_max_iter,
         fit_workspace=workspace,
+        seed_sample_mask=active_sample_mask,
     )
     if any(mode.k != 1 for mode in data_modes):
         raise AssertionError("data-derived starts must remain independent K=1 fits")
@@ -825,9 +907,15 @@ def search_reversible_cavity(
     if not archive:
         raise RuntimeError("reversible search produced no initial complete mode")
     exact_config = _stage_config(settings.cavity, "mean_field")
-    cavity_workspace = _prepare_cavity_scoring_workspace(
-        likelihood, exact_config
+    cavity_evidence = (
+        np.ascontiguousarray(likelihood[active_sample_mask])
+        if not np.all(active_sample_mask)
+        else likelihood
     )
+    cavity_workspace = _prepare_cavity_scoring_workspace(
+        cavity_evidence, exact_config
+    )
+
 
     def refresh(preferred_k: int) -> bool:
         """Score changed minimum-NLL representatives within the exact budget."""
@@ -863,7 +951,8 @@ def search_reversible_cavity(
         retained = novel[:room]
         omitted = novel[room:]
         for stage in _score_stage(
-            likelihood, retained, exact_config, cavity_workspace
+            likelihood, retained, exact_config, cavity_workspace,
+            active_sample_mask=active_sample_mask,
         ):
             score = ReversibleModeScore(
                 mode=stage.mode,
@@ -1048,6 +1137,7 @@ def search_reversible_cavity(
                     decisiveness=growth_inputs.decisiveness,
                     dosage_by_sample=growth_inputs.dosage_by_sample,
                     seed_haplotypes_by_sample=growth_inputs.seed_haplotypes_by_sample,
+                    active_sample_mask=growth_inputs.active_sample_mask,
                 )
                 paired = [
                     mode for mode in bridge_children
@@ -1156,6 +1246,13 @@ def search_reversible_cavity(
     for mode in archive.values():
         grouped.setdefault(mode.k, []).append(mode)
 
+    search_interpretation = (
+        "Cap-free-in-K adaptive reversible search with lazy basin, "
+        "replacement, proposal-D residual and paired-bridge expansion "
+        f"({residual_calls} residual calls, {residual_candidates} emitted "
+        "novel rows). Finite work budgets are operational limitations; "
+        "the natural identifiable ceiling alone sets boundary_limited."
+    )
     selected_key = selected.mode.canonical_key
     selected_offsets = tuple(sorted(generated_offsets.get(selected_key, set())))
     exact_offsets = tuple(
@@ -1226,6 +1323,8 @@ def search_reversible_cavity(
         search_steps=tuple(search_steps),
         local_certificate=certificate,
         natural_k_ceiling=ceiling,
+        n_input_samples=n_samples,
+        n_scored_samples=active_sample_count,
         search_limited=bool(unique_limits),
         search_limit_reasons=unique_limits,
         boundary_limited=at_ceiling,
@@ -1249,13 +1348,7 @@ def search_reversible_cavity(
             "full-data selection leakage and normalized values are "
             "uncalibrated pseudo-weights."
         ),
-        search_interpretation=(
-            "Cap-free-in-K adaptive reversible search with lazy basin, "
-            "replacement, proposal-D residual and paired-bridge expansion "
-            f"({residual_calls} residual calls, {residual_candidates} emitted "
-            "novel rows). Finite work budgets are operational limitations; "
-            "the natural identifiable ceiling alone sets boundary_limited."
-        ),
+        search_interpretation=search_interpretation,
     )
 
 
@@ -1292,7 +1385,12 @@ def as_cavity_selection(
     )
     k_diagnostics: list[CavityKDiagnostic] = []
     mode_diagnostics: list[CavityModeDiagnostic] = []
-    n_samples = len(result.selected.mode.assignments)
+    full_n_samples = len(result.selected.mode.assignments)
+    if result.n_input_samples != full_n_samples:
+        raise AssertionError("search sample count and assignments disagree")
+    n_samples = int(result.n_scored_samples)
+    if n_samples < 1 or n_samples > full_n_samples:
+        raise AssertionError("invalid scored-sample count on search result")
     for k in sorted(scores_by_k):
         scores = scores_by_k[k]
         best = best_by_k[k]
@@ -1374,8 +1472,8 @@ def as_cavity_selection(
             "are uncalibrated selection-leakage-affected pseudo-weights. "
             "The deterministic minimum-full-data-NLL representative is the "
             "single scored mode at each represented K; archived alternatives "
-            "are reported as per-K cap omissions by this compatibility "
-            "schema. Operational search limits are recorded on the source "
+            "are reported as per-K cap omissions in the selection record. "
+            "Operational search limits are recorded on the source "
             "result and are not represented as a K boundary."
         ),
         n_samples=n_samples,

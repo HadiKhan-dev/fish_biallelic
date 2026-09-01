@@ -565,6 +565,59 @@ def _update_A_blas_lp_precompute(log_probs, lam, snps_per_bin, n_bins):
     return _update_A_blas_lp_precompute_kernel(
         lp_c, float(lam), int(snps_per_bin), int(n_bins), int(L))
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _update_A_blas_lp_precompute_depth_mask_kernel(
+        log_probs, observed_mask, lam, snps_per_bin, n_bins, L):
+    """Depth-mask counterpart of the established assignment precompute.
+
+    Missing sample/site cells have all three log emissions fixed to zero by
+    the caller.  This kernel additionally charges the real-wildcard penalty
+    only at observed cells.  Real-real contractions are otherwise identical
+    to the established implementation, so the existing BLAS/pattern kernels
+    remain valid.
+    """
+    N = log_probs.shape[0]
+    C0b = np.zeros((N, n_bins), dtype=np.float64)
+    kW_Cb = np.zeros((N, n_bins), dtype=np.float64)
+    diff1_bt = np.zeros((n_bins, snps_per_bin, N), dtype=np.float64)
+    w_bt = np.zeros((n_bins, snps_per_bin, N), dtype=np.float64)
+    kWdiff_bt = np.zeros((n_bins, snps_per_bin, N), dtype=np.float64)
+    for b in prange(n_bins):
+        for s in range(N):
+            c0 = 0.0
+            cm01 = 0.0
+            observed_count = 0
+            for t in range(snps_per_bin):
+                l = b * snps_per_bin + t
+                if l < L:
+                    a0 = log_probs[s, l, 0]
+                    a1 = log_probs[s, l, 1]
+                    a2 = log_probs[s, l, 2]
+                    m01 = a0 if a0 > a1 else a1
+                    m12 = a1 if a1 > a2 else a2
+                    diff1_bt[b, t, s] = a1 - a0
+                    w_bt[b, t, s] = a0 - 2.0 * a1 + a2
+                    kWdiff_bt[b, t, s] = m12 - m01
+                    c0 += a0
+                    cm01 += m01
+                    if observed_mask[s, l]:
+                        observed_count += 1
+            C0b[s, b] = c0
+            kW_Cb[s, b] = cm01 - observed_count * lam
+    return C0b, diff1_bt, w_bt, kW_Cb, kWdiff_bt
+
+
+def _update_A_blas_lp_precompute_depth_mask(
+        log_probs, observed_mask, lam, snps_per_bin, n_bins):
+    """Prepare assignment contractions with lambda charged only when observed."""
+    lp_c = _maybe_c_contig(log_probs, np.float64)
+    mask_c = _maybe_c_contig(observed_mask, np.bool_)
+    if mask_c.shape != lp_c.shape[:2]:
+        raise ValueError("observed_mask must match evidence samples and sites")
+    return _update_A_blas_lp_precompute_depth_mask_kernel(
+        lp_c, mask_c, float(lam), int(snps_per_bin), int(n_bins),
+        int(lp_c.shape[1]),
+    )
 
 _BINARY_PATTERN_MAX_SNPS_PER_BIN = 10
 
@@ -1882,6 +1935,70 @@ def _prepare_fit_cost_tables(cost_WW, log_probs, lam):
 
 
 @njit(cache=True, parallel=True, fastmath=False, nogil=True)
+def _prepare_depth_mask_fit_evidence(probs_k, observed_mask, lam):
+    """Return zero-contribution missing emissions and depth-aware WW costs."""
+    N, L, _ = probs_k.shape
+    log_probs = np.empty((N, L, 3), dtype=np.float64)
+    cost_WW = np.empty((N, L), dtype=np.float64)
+    eps = 1e-12
+    for s in prange(N):
+        for l in range(L):
+            if not observed_mask[s, l]:
+                log_probs[s, l, 0] = 0.0
+                log_probs[s, l, 1] = 0.0
+                log_probs[s, l, 2] = 0.0
+                cost_WW[s, l] = 0.0
+                continue
+            maximum = -math.inf
+            for genotype in range(3):
+                value = probs_k[s, l, genotype]
+                if value < eps:
+                    value = eps
+                log_value = math.log(value)
+                log_probs[s, l, genotype] = log_value
+                if log_value > maximum:
+                    maximum = log_value
+            cost_WW[s, l] = -maximum + 2.0 * lam
+    return log_probs, cost_WW
+
+
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
+def _prepare_fit_cost_tables_depth_mask(
+        cost_WW, log_probs, observed_mask, lam):
+    """Prepare H-update costs with wildcard charges only at observed cells."""
+    N, L = cost_WW.shape
+    ww_total_cost = np.empty(N, dtype=np.float64)
+    genotype_cost = np.empty((N, L, 3), dtype=np.float64)
+    real_wildcard_cost = np.empty((N, L, 2), dtype=np.float64)
+    for s in prange(N):
+        total = 0.0
+        for l in range(L):
+            cap = cost_WW[s, l]
+            total += cap
+            lp0 = log_probs[s, l, 0]
+            lp1 = log_probs[s, l, 1]
+            lp2 = log_probs[s, l, 2]
+            for genotype in range(3):
+                value = -log_probs[s, l, genotype]
+                if value > cap:
+                    value = cap
+                genotype_cost[s, l, genotype] = value
+            best_lp0 = lp0 if lp0 > lp1 else lp1
+            best_lp1 = lp1 if lp1 > lp2 else lp2
+            penalty = lam if observed_mask[s, l] else 0.0
+            value0 = -best_lp0 + penalty
+            value1 = -best_lp1 + penalty
+            if value0 > cap:
+                value0 = cap
+            if value1 > cap:
+                value1 = cap
+            real_wildcard_cost[s, l, 0] = value0
+            real_wildcard_cost[s, l, 1] = value1
+        ww_total_cost[s] = total
+    return ww_total_cost, genotype_cost, real_wildcard_cost
+
+
+@njit(cache=True, parallel=True, fastmath=False, nogil=True)
 def _ww_total_cost_kernel(cost_WW):
     """Exact left-to-right WW row sums for standalone assignment updates."""
     N, L = cost_WW.shape
@@ -1919,6 +2036,8 @@ class _FixedKFitWorkspace:
         "h_wildcard_cost",
         "blas_lp_cache",
         "binary_pattern_cache",
+        "observed_mask",
+        "uninformative_samples",
         "fit_result_cache",
         "fixed_point_keys",
         "assignment_cache",
@@ -1938,13 +2057,21 @@ class _FixedKFitWorkspace:
         h_wildcard_cost,
         blas_lp_cache,
         binary_pattern_cache,
+        observed_mask,
+        uninformative_samples,
     ):
         self.probs_reference = probs_reference
         self.lam = float(lam)
+        self.observed_mask = observed_mask
+        self.uninformative_samples = uninformative_samples
+        if self.observed_mask is not None:
+            self.observed_mask.setflags(write=False)
+            self.uninformative_samples.setflags(write=False)
         self.fit_config_key = (
             bool(_VITERBI_BIC_ENABLED),
             int(VITERBI_SNPS_PER_BIN),
             float(VITERBI_SWITCH_PENALTY),
+            self.observed_mask is not None,
         )
         self.cost_WW = cost_WW
         self.log_probs = log_probs
@@ -2031,6 +2158,16 @@ class _FixedKFitWorkspace:
             float(stored_uncapped.sum()),
         )
 
+    def apply_missing_assignment_policy(
+            self, assignments, wildcard_slots, wildcard_index):
+        """Force wholly uninformative samples to the unresolved WW state."""
+        if self.observed_mask is None:
+            return
+        unresolved = self.uninformative_samples
+        assignments[unresolved, 0] = int(wildcard_index)
+        assignments[unresolved, 1] = int(wildcard_index)
+        wildcard_slots[unresolved] = 2
+
     def cached_assignment(self, state_key):
         with self.cache_lock:
             record = self.assignment_cache.get(state_key)
@@ -2071,6 +2208,7 @@ class _FixedKFitWorkspace:
         matrix = np.asarray(haplotypes)
         return (
             matrix.ndim == 2
+            and self.observed_mask is None
             and matrix.dtype == np.dtype(np.int64)
             and matrix.shape[0] >= 1
             and self.binary_pattern_cache is not None
@@ -2149,6 +2287,7 @@ class _FixedKFitWorkspace:
             binary_pattern_cache=self.binary_pattern_cache,
             WW_total_cost=self.WW_total_cost,
         )
+        self.apply_missing_assignment_policy(A, wildcard, matrix.shape[0])
         assignment = self._store_assignment_record(
             A, cost, uncapped_cost, wildcard
         )
@@ -2175,6 +2314,7 @@ class _FixedKFitWorkspace:
             binary_pattern_cache=self.binary_pattern_cache,
             WW_total_cost=self.WW_total_cost,
         )
+        self.apply_missing_assignment_policy(A, wildcard, matrix.shape[0])
         H_next = matrix.copy()
         h_changes = _update_H(
             self.probs_reference, H_next, A, self.lam,
@@ -2261,28 +2401,57 @@ class _FixedKFitWorkspace:
             return key in self.fixed_point_keys
 
 
-def _prepare_fixed_k_fit_workspace(probs_k, lam, *, binary_patterns=True):
+def _prepare_fixed_k_fit_workspace(
+        probs_k, lam, *, binary_patterns=True, observed_mask=None):
     """Prepare quantities invariant across fixed-K initializations.
 
-    ``binary_patterns`` is reserved for an explicitly shared evidence
-    workspace.  One-off fits set it false so they do not pay the bounded table
-    construction cost for a table that cannot be amortised.
+    When an observed mask is supplied, missing cells contribute zero
+    emission/cost and wildcard penalties are charged only where a sample has
+    allele-depth evidence. An absent mask remains useful as a numerical
+    reference for fully observed inputs.
     """
 
     probs_reference = probs_k
     L = probs_k.shape[1]
-    cost_WW = _per_site_cost_W_W(probs_k, lam)
     probs_c = _maybe_c_contig(probs_k, np.float64)
-    log_probs = _log_probs_kernel(probs_c)
-    (
-        WW_total_cost,
-        h_genotype_cost,
-        h_wildcard_cost,
-    ) = _prepare_fit_cost_tables(
-        _maybe_c_contig(cost_WW, np.float64),
-        _maybe_c_contig(log_probs, np.float64),
-        float(lam),
-    )
+    if observed_mask is None:
+        mask_value = None
+        uninformative_samples = None
+        cost_WW = _per_site_cost_W_W(probs_k, lam)
+        log_probs = _log_probs_kernel(probs_c)
+        (
+            WW_total_cost,
+            h_genotype_cost,
+            h_wildcard_cost,
+        ) = _prepare_fit_cost_tables(
+            _maybe_c_contig(cost_WW, np.float64),
+            _maybe_c_contig(log_probs, np.float64),
+            float(lam),
+        )
+    else:
+        mask_value = np.array(
+            observed_mask, dtype=np.bool_, order="C", copy=True
+        )
+        if mask_value.shape != probs_c.shape[:2]:
+            raise ValueError(
+                "observed_mask must match evidence samples and sites"
+            )
+        uninformative_samples = np.ascontiguousarray(
+            ~np.any(mask_value, axis=1)
+        )
+        log_probs, cost_WW = _prepare_depth_mask_fit_evidence(
+            probs_c, mask_value, float(lam)
+        )
+        (
+            WW_total_cost,
+            h_genotype_cost,
+            h_wildcard_cost,
+        ) = _prepare_fit_cost_tables_depth_mask(
+            _maybe_c_contig(cost_WW, np.float64),
+            _maybe_c_contig(log_probs, np.float64),
+            mask_value,
+            float(lam),
+        )
     h_genotype_cost = np.ascontiguousarray(
         h_genotype_cost.transpose(1, 0, 2)
     )
@@ -2300,12 +2469,21 @@ def _prepare_fixed_k_fit_workspace(probs_k, lam, *, binary_patterns=True):
         WW_bin_emis = _ww_bin_emis_from_cost_ww(
             cost_WW_c, int(snps_per_bin), int(n_bins)
         )
-        blas_lp_cache = _update_A_blas_lp_precompute(
-            _maybe_c_contig(log_probs, np.float64),
-            float(lam),
-            int(snps_per_bin),
-            int(n_bins),
-        )
+        if mask_value is None:
+            blas_lp_cache = _update_A_blas_lp_precompute(
+                _maybe_c_contig(log_probs, np.float64),
+                float(lam),
+                int(snps_per_bin),
+                int(n_bins),
+            )
+        else:
+            blas_lp_cache = _update_A_blas_lp_precompute_depth_mask(
+                _maybe_c_contig(log_probs, np.float64),
+                mask_value,
+                float(lam),
+                int(snps_per_bin),
+                int(n_bins),
+            )
         binary_pattern_cache = (
             _prepare_binary_pattern_contractions(
                 blas_lp_cache, int(snps_per_bin), int(n_bins)
@@ -2328,6 +2506,8 @@ def _prepare_fixed_k_fit_workspace(probs_k, lam, *, binary_patterns=True):
         h_wildcard_cost,
         blas_lp_cache,
         binary_pattern_cache,
+        mask_value,
+        uninformative_samples,
     )
 
 
@@ -2613,6 +2793,8 @@ def _fit_at_fixed_K(
                 log_probs=log_probs, blas_lp_cache=_blas_lp_cache,
                 binary_pattern_cache=_binary_pattern_cache,
                 WW_total_cost=WW_total_cost)
+            workspace.apply_missing_assignment_policy(
+                A, wildcard_slots, H.shape[0])
 
         if _return_initial and captured_initial is None:
             captured_initial = (
@@ -2673,6 +2855,8 @@ def _fit_at_fixed_K(
             log_probs=log_probs, blas_lp_cache=_blas_lp_cache,
             binary_pattern_cache=_binary_pattern_cache,
             WW_total_cost=WW_total_cost)
+        workspace.apply_missing_assignment_policy(
+            A, wildcard_slots, H.shape[0])
     # Use UNCAPPED NLL as the K-growth signal (see docstring).  When the
     # synchronized endpoint came from the workspace and H did not change,
     # that cached endpoint already holds the same uncapped total.

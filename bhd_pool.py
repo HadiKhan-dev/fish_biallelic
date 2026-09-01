@@ -1,7 +1,9 @@
-"""Pool emission cache and subset-scoring kernels (precomputed-tensor path plus the
-fused log-free fallback), split out of bhd_kernels.  Imports primitives from the
-bhd_kernels foundation and _compute_nll_for_subset from bhd_fit (single-subset
-fallback / equivalence reference)."""
+"""Cached Viterbi emissions for repeated fixed-panel subset scoring.
+
+The cache is independent of founder proposal and discovery. It evaluates many
+subsets of one fixed binary haplotype pool without rebuilding identical
+sample-by-state emission tensors for every subset.
+"""
 
 import numpy as np
 import math
@@ -22,48 +24,6 @@ from bhd_config import (
     VITERBI_SWITCH_PENALTY,
 )
 
-
-# =============================================================================
-# POOL EMISSION CACHE — precompute Viterbi emissions once per BIC-search
-# =============================================================================
-#
-# The recovery loop (_subtraction_recovery_round_loop, _late_low_carrier_-
-# rescue) and the trio/pairwise seed-trim (in block_haplotypes.py's
-# _grow_K_with_recovery) each do hundreds-to-thousands of `_compute_nll_-
-# for_subset` calls over subsets drawn from a FIXED candidate pool.  Each
-# call independently rebuilds the (N, K_states, n_bins) binned-emission
-# tensor via _viterbi_binned_emissions_kernel.  Since the emission for
-# state (i, j) depends ONLY on the haps H[i], H[j] and the data probs_k
-# — NOT on what other states are in the subset — the rebuild is mostly
-# redundant work.
-#
-# PoolEmissionCache precomputes the full pool emission tensor ONCE per
-# search session.  Each `nll_for_subset` call then:
-#   1. Maps the subset's state slots back to the pool's state slots via
-#      a tiny index map (njit kernel).
-#   2. Fancy-indexes the pool tensor along the state axis to assemble
-#      the subset's (N, K_sub_states, n_bins) tensor.
-#   3. Runs viterbi_score_selection on the assembled subset tensor.
-#
-# Memory: O(N * n_states_pool * n_bins).  For pool size K_pool=25, N=320,
-# n_bins=20: n_states_pool = K_pool*(K_pool+1)/2 + K_pool + 1 = 351
-# states; tensor size 320*351*20*8 = ~18 MB.  Bounded by typical pool
-# sizes (≤ 30) so cache stays under 30 MB.
-#
-# Lifetime: one BIC-search session (one recovery round, one late-rescue
-# invocation, or one seed-trim).  Built, queried thousands of times,
-# discarded.
-#
-# Bit-exact equivalence: the cache uses the same _viterbi_binned_-
-# emissions_kernel as the fresh build, so the pool emission tensor is
-# bit-identical to what fresh-build-on-subset would produce at the same
-# slot positions (modulo permutation, since the subset's state layout
-# is a re-ordering of the corresponding pool slots).  viterbi_score_-
-# selection's output is invariant under state-slot permutation (the
-# best-path NLL doesn't depend on which integer label the states carry),
-# so cache.nll_for_subset(indices) == _compute_nll_for_subset(
-# [pool[i] for i in indices], ...) bit-identically.  Verified at machine
-# precision against the legacy path.
 
 @njit(cache=True)
 def _build_pool_state_index_map_kernel(subset_indices, K_pool):
@@ -169,7 +129,7 @@ def _viterbi_partial_binned_emissions_kernel(
     max(log_probs[..., d0..d1]) = log(max(probs[..., d0..d1], EPS))
     after the LOG_EPS clamp baked into log_probs.  Same scalars in
     the same accumulation order yield bit-identical output to the
-    legacy full-build kernel.
+    reference full-build kernel.
 
     Arguments:
         H_pool:             (K_pool_new, L) int64 — current pool's
@@ -276,7 +236,7 @@ def _viterbi_subset_from_pool_kernel(pool_tensor, pool_state_indices, penalty):
     subset of states named by `pool_state_indices`, read in place from
     the full pool emission tensor.
 
-    Bit-identical to (and a drop-in for) the legacy query path::
+    Bit-identical to (and a drop-in for) the reference query path::
 
         sub_tensor = np.ascontiguousarray(
             pool_tensor[:, pool_state_indices, :])
@@ -290,7 +250,7 @@ def _viterbi_subset_from_pool_kernel(pool_tensor, pool_state_indices, penalty):
     ll_tensor[s, k, i], this reads pool_tensor[s, pool_state_indices[k], i]
     — the SAME scalar by construction of the gather — and runs the
     identical recurrence in the identical left-to-right order, so the
-    returned best-path scores match the legacy path to the last bit.
+    returned best-path scores match the reference path to the last bit.
 
     Arguments:
         pool_tensor:        (N, K_pool_states, n_bins) float64 — the
@@ -635,7 +595,7 @@ def _fused_subset_scores_kernel(pool_haps, log_probs, subsets,
 class PoolEmissionCache:
     """Precomputed Viterbi-emission tensor for a fixed hap pool.
 
-    Lets the recovery loop and seed-trim evaluate per-subset Viterbi
+    Lets fixed-panel model selection evaluate per-subset Viterbi
     NLL without rebuilding the (N, K_states, n_bins) emission tensor
     on each call.  See module-header comment block (POOL EMISSION
     CACHE) for design rationale and bit-exact equivalence argument.
@@ -705,13 +665,13 @@ class PoolEmissionCache:
         # Store reference to probs_k for the incremental-build path's
         # compatibility check.  We use object identity (`is`) below to
         # decide if a `prev_cache` argument is compatible — this is
-        # cheap and unambiguous when the recovery loop is invoking the
+        # cheap and unambiguous when the subset search invokes the
         # same probs_k object across rounds (the typical pattern).
         self._probs_k_ref = probs_k
 
         # K=0 NLL is independent of pool — it's just the (W, W)-only
         # path's NLL on probs_k.  Compute via _per_site_cost_W_W to
-        # match the legacy _compute_nll_for_subset([], ...) value
+        # match the reference _compute_nll_for_subset([], ...) value
         # exactly bit-for-bit (the alternative — summing the cache's
         # WW slot over bins — would sum the same scalars in a slightly
         # different order, risking tiny float differences).
@@ -737,8 +697,8 @@ class PoolEmissionCache:
         # The full-pool emission tensor built below is O(K_pool^2) in its
         # state axis (K_states = n_rr_pool + K_pool + 1).  At normal read
         # depth the candidate pool is small (<= ~30) and this tensor is a
-        # ~30 MB speed win, but at low read depth the trio/pairwise pool can
-        # balloon to thousands and the tensor then runs to hundreds of GiB
+        # ~30 MB speed win. A large fixed candidate pool can instead grow to
+        # thousands of rows, making the tensor hundreds of GiB
         # (e.g. K_pool=3398, N=320, n_bins=20 -> 276 GiB), OOM-killing the
         # worker.  When the tensor would exceed POOL_EMISSION_CACHE_MAX_BYTES
         # we skip building it and set self._fallback; nll_for_subset then
@@ -803,9 +763,9 @@ class PoolEmissionCache:
         #       compute only the truly missing rows via the partial
         #       kernel.
         #
-        # Bit-equivalence with the legacy full-build path:
+        # Bit-equivalence with the reference full-build path:
         #   - The partial kernel's per-slot accumulator is identical
-        #     to the legacy _viterbi_binned_emissions_kernel's (same
+        #     to the reference _viterbi_binned_emissions_kernel's (same
         #     scalars from log_probs[s, l, d], same accumulation
         #     order within each bin).  See the partial kernel's
         #     docstring for the monotonicity-of-log argument used to
@@ -943,7 +903,7 @@ class PoolEmissionCache:
         K_sub = len(subset_indices)
         if K_sub == 0:
             # K=0 path: only state is (W, W); return precomputed value
-            # for bit-identity with legacy _compute_nll_for_subset([], ...).
+            # for bit-identity with reference _compute_nll_for_subset([], ...).
             return self._nll_K0
 
         if self._fallback:
@@ -970,7 +930,7 @@ class PoolEmissionCache:
 
         # Score the subset's states directly from the pool tensor via the
         # state-index map, with NO intermediate (N, K_sub_states, n_bins)
-        # tensor.  The legacy path fancy-indexed
+        # tensor.  The reference path fancy-indexed
         # self._pool_tensor[:, pool_state_indices, :] and copied it to a
         # contiguous sub_tensor for viterbi_score_selection; that gather +
         # ascontiguousarray copy was the dominant per-query cost (the

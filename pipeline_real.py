@@ -8,7 +8,10 @@
 # crosses the worker boundary MUST live at module top level here.  Keep this
 # section small -- imports here run in every forkserver worker at startup.
 
-CHECKPOINT_DIR = ".pipeline_checkpoints_real"
+CHECKPOINT_DIR = (
+    ".pipeline_checkpoints_real_"
+    "reversible_cavity_depth_observation_v1"
+)
 ASAC_METADATA_PATH = "./fish_vcf_restriped/X_AsAc_metafile.xlsx"
 ASAC_METADATA_SHEET = "main_data"
 
@@ -53,6 +56,7 @@ if __name__ == '__main__':
     import warnings
     import platform
     import gc
+    from dataclasses import asdict
     from cyvcf2 import VCF
 
     warnings.filterwarnings("ignore")
@@ -61,6 +65,13 @@ if __name__ == '__main__':
     import thread_config
     import vcf_data_loader
     import block_haplotypes
+    stage1_config = block_haplotypes.ReversibleCavitySearchConfig()
+    stage1_config_record = asdict(stage1_config)
+    stage1_identity_record = {
+        "backend": block_haplotypes.STAGE1_BACKEND,
+        "config": stage1_config_record,
+    }
+
     import small_block_refine
     import residual_discovery
     import hierarchical_assembly
@@ -106,7 +117,9 @@ if __name__ == '__main__':
         {"contig": "chr23"},
     ]
 
-    output_dir = "results_real"
+    output_dir = (
+        "results_real_reversible_cavity_depth_observation_v1"
+    )
 
     # =========================================================================
     # Checkpoint Infrastructure
@@ -165,7 +178,10 @@ if __name__ == '__main__':
     # =========================================================================
     # STAGE R01: VCF Loading + Block Discovery + Global Probabilities
     # =========================================================================
-    STAGE_R1 = "R01_vcf_discovery"
+    STAGE_R1 = "R01_founder_discovery"
+    checkpoint_store.bind_stage_identity(
+        STAGE_R1, stage1_identity_record
+    )
 
     if stage_complete(STAGE_R1):
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
@@ -210,10 +226,8 @@ if __name__ == '__main__':
             t0 = time.time()
             block_results = block_haplotypes.generate_all_block_haplotypes(
                 genomic_data,
-                uniqueness_threshold_percent=1.0,
-                diff_threshold_percent=0.5,
-                wrongness_threshold=1.0,
-                num_processes=n_processes
+                num_processes=n_processes,
+                discovery_config=stage1_config,
             )
             valid_blocks = [b for b in block_results if len(b.positions) > 0]
             block_results = block_haplotypes.BlockResults(valid_blocks)
@@ -226,13 +240,26 @@ if __name__ == '__main__':
             save_contig(STAGE_R1, r_name, {
                 'global_probs': global_probs, 'global_sites': global_sites,
                 'block_results': block_results, 'avg_depth': avg_depth,
+                'stage1_backend': block_haplotypes.STAGE1_BACKEND,
+                'stage1_config': stage1_config_record,
             })
             del genomic_data, block_results, global_probs, global_sites
             gc.collect()
 
-        save_global(STAGE_R1, {'sample_names': sample_names, 'region_keys': region_keys})
+        save_global(STAGE_R1, {
+            'sample_names': sample_names,
+            'region_keys': region_keys,
+            'stage1_backend': block_haplotypes.STAGE1_BACKEND,
+            'stage1_config': stage1_config_record,
+        })
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
         mark_stage_complete(STAGE_R1)
+
+    print(
+        "[STOP] Stage 1 is complete. Later stages are disabled until they "
+        "preserve unknown founder alleles."
+    )
+    raise SystemExit(0)
 
 #%%
 if __name__ == '__main__':

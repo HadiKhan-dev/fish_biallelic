@@ -32,19 +32,21 @@ from thread_env import force_single_threaded_numeric_libraries
 # T01 checkpoint as genotype-reference rows. Their comparison is independent
 # only when those rows are excluded from reconstruction.
 USE_KNOWN_FOUNDERS = True
+# Stage 1 always uses the calibrated reversible-cavity observation model.
+# Downstream stages remain disabled until they preserve unknown founder alleles.
+STAGE1_BACKEND = "reversible_cavity_depth_observation_v1"
+
 
 # These strings are persisted compatibility identities, not runtime backend
 # selectors. Tropheops always uses the canonical parent-state engine.
 PEDIGREE_BACKEND = "smart_raw_gl_parent_state_v1"
 PEDIGREE_BASELINE = "hard_painted_b1_combined_v1_calibrated_v1"
 _mode_label = "withFounders" if USE_KNOWN_FOUNDERS else "withoutFounders"
-# This label is part of the checkpoint/output identity. Bump it whenever the
-# T01 scientific backend or its routine configuration changes, so a run cannot
-# silently resume legacy or otherwise incompatible T01 contigs.
-BLOCK_DISCOVERY_BACKEND = "reversible_cavity_cap_free_v1"
-_run_label = f"{_mode_label}_{BLOCK_DISCOVERY_BACKEND}"
+# The fixed backend label is part of the checkpoint/output identity, keeping
+# these checkpoints isolated from every earlier Stage-1 model.
+_run_label = f"{_mode_label}_{STAGE1_BACKEND}"
 CHECKPOINT_DIR = f".pipeline_checkpoints_tropheops_{_run_label}"
-# Preserve the already-isolated parent-state result root for compatible resume.
+# Results share the same fixed Stage-1 identity as the checkpoint root.
 output_dir = (
     f"results_tropheops_{_run_label}_{PEDIGREE_BACKEND}_{PEDIGREE_BASELINE}"
 )
@@ -96,7 +98,7 @@ if __name__ == '__main__':
     print(f"Logging to: {log_path}")
     print(f"Run started: {run_timestamp}")
     print(f"USE_KNOWN_FOUNDERS = {USE_KNOWN_FOUNDERS}  (mode: {_mode_label})")
-    print(f"BLOCK_DISCOVERY_BACKEND = {BLOCK_DISCOVERY_BACKEND}")
+    print(f"STAGE1_BACKEND = {STAGE1_BACKEND}")
     print(f"PEDIGREE_ENGINE = {PEDIGREE_BACKEND}")
     print(f"PEDIGREE_BASELINE = {PEDIGREE_BASELINE}")
 
@@ -117,10 +119,11 @@ if __name__ == '__main__':
     import vcf_data_loader
     import block_haplotypes
     from bhd_reversible_cavity import ReversibleCavitySearchConfig
+    if STAGE1_BACKEND != block_haplotypes.STAGE1_BACKEND:
+        raise RuntimeError("Stage-1 checkpoint identity mismatch")
     import small_block_refine
     import residual_discovery
     import hierarchical_assembly
-    from founder_alleles import hard_alleles
     import paint_samples
     import pedigree_inference
     import pedigree_pipeline
@@ -266,7 +269,7 @@ if __name__ == '__main__':
 
         Two recall metrics are reported per block, side by side:
 
-          * hom-only single-haplotype (legacy, A/B reference): each founder's
+          * hom-only single-haplotype (A/B reference): each founder's
             confident HOMOZYGOUS consensus is matched to the single best
             discovered haplotype.  Columns: founders_found_under_<X>pct and the
             per-G0 *_err_pct / *_valid_sites.  A founder with < MIN_CONF_SITES
@@ -278,7 +281,7 @@ if __name__ == '__main__':
             best PAIR of discovered haplotypes (i <= j) by summed dosage
             d_i + d_j.  A heterozygous founder is "found" only when BOTH of its
             haplotypes are present in the discovered set; a homozygous founder
-            reduces to the legacy check (best pair is one hap used twice).
+            reduces to the hom-only case (best pair is one hap used twice).
             Columns: founders_found_pair, n_scorable, per-G0 *_pair /
             *_pair_err_pct / *_conf_sites.
 
@@ -303,10 +306,15 @@ if __name__ == '__main__':
             g0_hom = np.where(g0_geno == 0, 0,
                               np.where(g0_geno == 2, 1, -1)).astype(np.int8)
 
-            # Discovered haplotypes -> concrete {0,1}
-            discovered = []
-            for hid, h_arr in block.haplotypes.items():
-                discovered.append((hid, hard_alleles(h_arr)))
+            # Score only explicit Stage-1 calls; unknown founder alleles are
+            # excluded rather than hardened to the reference allele.
+            discovered = [
+                (
+                    hid,
+                    np.asarray(block.discrete_haps[hid], dtype=np.int8),
+                )
+                for hid in block.haplotypes
+            ]
             n_disc = len(discovered)
             disc_ids = [hid for hid, _ in discovered]
             if n_disc > 0:
@@ -314,7 +322,7 @@ if __name__ == '__main__':
             else:
                 D = np.zeros((0, len(positions)), dtype=np.int16)
 
-            # ---- legacy hom-only single-haplotype recall ----
+            # ---- hom-only single-haplotype recall ----
             g0_best_matches = []  # (g, best_disc_id, err_pct, n_valid_sites)
             for g in range(n_g0):
                 g_valid = (g0_hom[g] != -1)
@@ -366,16 +374,36 @@ if __name__ == '__main__':
                 if n_disc == 0:
                     g0_pair_matches.append((g, '', float('inf'), n_conf))
                     continue
-                geno_m = g0_geno[g, conf].astype(np.int16)            # (n_conf,)
-                Dm = D[:, conf]                                       # (n_disc, n_conf)
-                S = Dm[:, None, :] + Dm[None, :, :]                   # (n_disc, n_disc, n_conf)
-                mm = (S != geno_m[None, None, :]).mean(axis=2) * 100.0  # (n_disc, n_disc)
-                iu = np.triu_indices(n_disc)                         # i <= j
-                flat = mm[iu]
-                k = int(np.argmin(flat))
-                best_err = float(flat[k])
-                bi, bj = int(iu[0][k]), int(iu[1][k])
-                g0_pair_matches.append((g, f"{disc_ids[bi]}+{disc_ids[bj]}", best_err, n_conf))
+                geno_m = g0_geno[g, conf].astype(np.int16)
+                Dm = D[:, conf]
+                valid = (
+                    (Dm[:, None, :] >= 0)
+                    & (Dm[None, :, :] >= 0)
+                )
+                dosage = Dm[:, None, :] + Dm[None, :, :]
+                n_valid = np.sum(valid, axis=2)
+                mismatch = np.sum(
+                    (dosage != geno_m[None, None, :]) & valid,
+                    axis=2,
+                )
+                error = np.divide(
+                    mismatch * 100.0,
+                    n_valid,
+                    out=np.full(n_valid.shape, np.inf, dtype=np.float64),
+                    where=n_valid >= MIN_CONF_SITES,
+                )
+                iu = np.triu_indices(n_disc)
+                flat = error[iu]
+                best = int(np.argmin(flat))
+                best_err = float(flat[best])
+                bi, bj = int(iu[0][best]), int(iu[1][best])
+                evaluated = int(n_valid[bi, bj])
+                g0_pair_matches.append((
+                    g,
+                    f"{disc_ids[bi]}+{disc_ids[bj]}",
+                    best_err,
+                    evaluated,
+                ))
 
             # ---- block-level metrics ----
             founders_found = sum(
@@ -434,7 +462,7 @@ if __name__ == '__main__':
         global_probs / block_results / site priors). Used by every post-stage
         validation pass so we don't reload the full T01 pickle just to get
         g0_probs."""
-        t1 = load_contig("T01_vcf_discovery", r_name)
+        t1 = load_contig("T01_founder_discovery", r_name)
         g0_probs = t1['g0_probs']
         g0_sites = t1['global_sites']
         g0_names = t1['g0_sample_names']
@@ -452,7 +480,7 @@ if __name__ == '__main__':
             stage_label: human-readable tag that goes into the CSV 'stage' column
                          (e.g. "T01_block_discovery", "T04_L1_assembly").
             stage_key: checkpoint dir name, used to check contig_done
-                       (e.g. "T01_vcf_discovery", "T04_assembly_L1").
+                       (e.g. "T01_founder_discovery", "T04_assembly_L1").
             blocks_loader_fn: callable(r_name) -> list of blocks for that contig.
                               Knows how to extract the right block list from
                               this stage's checkpoint (block_results vs
@@ -481,7 +509,7 @@ if __name__ == '__main__':
             if not contig_done(stage_key, r_name):
                 print(f"  [skip] {r_name}: no checkpoint in {stage_key}")
                 continue
-            if not contig_done("T01_vcf_discovery", r_name):
+            if not contig_done("T01_founder_discovery", r_name):
                 print(f"  [skip] {r_name}: no T01 checkpoint (needed for G0 reference)")
                 continue
 
@@ -641,7 +669,16 @@ if __name__ == '__main__':
     # USE_KNOWN_FOUNDERS=False, the main global_probs/global_sites/block_results
     # are computed from the 112 non-G0 samples only (the reads array is sliced
     # along the sample axis before reads_to_probabilities / block discovery).
-    STAGE_T1 = "T01_vcf_discovery"
+    STAGE_T1 = "T01_founder_discovery"
+    discovery_config = ReversibleCavitySearchConfig()
+    discovery_config_record = asdict(discovery_config)
+    stage1_identity_record = {
+        "backend": STAGE1_BACKEND,
+        "config": discovery_config_record,
+    }
+    checkpoint_store.bind_stage_identity(
+        STAGE_T1, stage1_identity_record
+    )
 
     if stage_complete(STAGE_T1):
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
@@ -650,16 +687,14 @@ if __name__ == '__main__':
         print("STAGE T01: VCF Loading + Block Haplotype Discovery")
         print(f"{'='*60}")
         start = time.time()
-        reversible_cavity_config = ReversibleCavitySearchConfig()
-        reversible_cavity_config_record = asdict(reversible_cavity_config)
         print(
             "  Cap-free reversible cavity discovery: no explicit K grid or "
             "scientific K cap; "
-            f"beam_width={reversible_cavity_config.beam_width}, "
-            f"max_expansions={reversible_cavity_config.max_expansions}, "
-            f"max_exact_scores={reversible_cavity_config.max_exact_scores}, "
+            f"beam_width={discovery_config.beam_width}, "
+            f"max_expansions={discovery_config.max_expansions}, "
+            f"max_exact_scores={discovery_config.max_exact_scores}, "
             "max_proposals_per_expansion="
-            f"{reversible_cavity_config.max_proposals_per_expansion}"
+            f"{discovery_config.max_proposals_per_expansion}"
         )
         print(
             "  Block discovery parallelism: "
@@ -735,11 +770,8 @@ if __name__ == '__main__':
                 t0 = time.time()
                 block_results = block_haplotypes.generate_all_block_haplotypes(
                     genomic_data,
-                    uniqueness_threshold_percent=1.0,
-                    diff_threshold_percent=0.5,
-                    wrongness_threshold=1.0,
                     num_processes=block_discovery_processes,
-                    reversible_cavity_config=reversible_cavity_config,
+                    discovery_config=discovery_config,
                     total_numba_threads=block_discovery_numba_threads,
                     block_pool=block_pool,
                 )
@@ -795,9 +827,11 @@ if __name__ == '__main__':
                         search_limit_reason_counts[reason] = (
                             search_limit_reason_counts.get(reason, 0) + 1
                         )
-                legacy_fallback_count = (
-                    len(valid_blocks) - len(cavity_blocks)
-                )
+                if len(cavity_blocks) != len(valid_blocks):
+                    raise AssertionError(
+                        "every informative Stage-1 block must use the "
+                        "canonical cavity model"
+                    )
                 score_margins = np.asarray([
                     float(selection.log_score_by_k[selection.map_k])
                     - float(selection.log_score_by_k[selection.runner_up_k])
@@ -864,9 +898,7 @@ if __name__ == '__main__':
                     "    [Cavity audit] search-boundary blocks="
                     f"{boundary_count}/{len(cavity_diagnostics)}; "
                     "operationally search-limited blocks="
-                    f"{search_limited_count}/{len(candidate_searches)}; "
-                    "legacy empty/no-kept fallbacks="
-                    f"{legacy_fallback_count}"
+                    f"{search_limited_count}/{len(candidate_searches)}"
                 )
                 print(
                     "    [Cavity audit] search-limit reasons="
@@ -908,9 +940,8 @@ if __name__ == '__main__':
                     'block_results': block_results, 'avg_depth': avg_depth,
                     'g0_probs': g0_probs, 'g0_sample_names': g0_sample_names,
                     'active_vcf_indices': active_vcf_indices,
-                    'block_discovery_backend': BLOCK_DISCOVERY_BACKEND,
-                    'reversible_cavity_config': (
-                        reversible_cavity_config_record),
+                    'stage1_backend': STAGE1_BACKEND,
+                    'stage1_config': discovery_config_record,
                 })
                 del genomic_data, block_results, global_probs, global_sites, g0_probs
                 gc.collect()
@@ -924,8 +955,8 @@ if __name__ == '__main__':
             'active_vcf_indices': active_vcf_indices,
             'use_known_founders': USE_KNOWN_FOUNDERS,
             'genotype_evidence_mode': 'normalized_raw_linear_likelihood_v1',
-            'block_discovery_backend': BLOCK_DISCOVERY_BACKEND,
-            'reversible_cavity_config': reversible_cavity_config_record,
+            'stage1_backend': STAGE1_BACKEND,
+            'stage1_config': discovery_config_record,
         })
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
         mark_stage_complete(STAGE_T1)
@@ -939,10 +970,17 @@ if __name__ == '__main__':
     # In withFounders mode this is explicitly post-hoc and non-independent.
     run_stage_validation(
         stage_label="T01_block_discovery",
-        stage_key="T01_vcf_discovery",
-        blocks_loader_fn=lambda r: load_contig("T01_vcf_discovery", r)['block_results'],
+        stage_key="T01_founder_discovery",
+        blocks_loader_fn=lambda r: load_contig("T01_founder_discovery", r)['block_results'],
         csv_filename="validation_T01_block_discovery.csv"
     )
+
+    print(
+        "[STOP] Stage 1 is complete and validated. T02 and later stages are "
+        "disabled until they preserve unknown founder alleles instead of "
+        "converting (0.5, 0.5) abstentions to allele 0."
+    )
+    raise SystemExit(0)
 
 #%%
 if __name__ == '__main__':
@@ -2050,7 +2088,7 @@ if __name__ == '__main__':
     summary_lines.append(
         f"Mode: {_mode_label} (USE_KNOWN_FOUNDERS={USE_KNOWN_FOUNDERS})"
     )
-    summary_lines.append(f"Block discovery: {BLOCK_DISCOVERY_BACKEND}")
+    summary_lines.append(f"Block discovery: {STAGE1_BACKEND}")
     summary_lines.append(
         f"Pedigree engine: {PEDIGREE_BACKEND} ({PEDIGREE_BASELINE})"
     )
@@ -2131,7 +2169,7 @@ if __name__ == '__main__':
     print("TROPHEOPS PIPELINE COMPLETE")
     print(f"{'='*60}")
     print(f"Mode: {_mode_label} (USE_KNOWN_FOUNDERS={USE_KNOWN_FOUNDERS})")
-    print(f"Block discovery: {BLOCK_DISCOVERY_BACKEND}")
+    print(f"Block discovery: {STAGE1_BACKEND}")
     print(f"Pedigree engine: {PEDIGREE_BACKEND} ({PEDIGREE_BASELINE})")
     print(f"Total time: {hours}h {minutes}m ({elapsed:.0f}s)")
     print(f"Checkpoints: {CHECKPOINT_DIR}/")

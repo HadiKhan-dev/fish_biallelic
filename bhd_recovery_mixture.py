@@ -7,9 +7,8 @@
 # {0,1} consensus thetas become candidate founder haps for the outer BIC subset-
 # selection on actual sample data.
 #
-# Leaf module of the bhd_recovery 4-file split: imports only numpy,
-# dynamic_threads, and mixture tuning constants from bhd_config.  See
-# bhd_recovery.py for subsystem context and the numba-optimisation history.
+# This numerical leaf is used by the F2 block-subtraction recovery adapter
+# and imports only NumPy, dynamic thread controls, and mixture settings.
 
 from collections import OrderedDict
 import numpy as np

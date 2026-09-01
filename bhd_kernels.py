@@ -23,8 +23,7 @@
 #   - The unified BIC scorer (_compute_nll_for_subset) — dispatches on
 #     _VITERBI_BIC_ENABLED to either Viterbi or best-pair NLL.
 #
-# Dependencies: only numpy + math + block_haplotypes.viterbi_score_-
-# selection.  No cycles with bhd_recovery, bhd_trio, or bhd_pairwise.
+# Dependencies are limited to NumPy, math, Numba, and shared constants.
 # =======================================================================
 
 import math
@@ -33,11 +32,7 @@ import warnings
 import numpy as np
 from numba import njit, prange
 from bhd_config import (
-    CLUSTER_HOM_BAND_HI,
-    CLUSTER_HOM_BAND_LO,
     DEFAULT_LAMBDA,
-    POOLED_ALT_HI,
-    POOLED_ALT_LO,
     VITERBI_SNPS_PER_BIN,
     VITERBI_SWITCH_PENALTY,
 )
@@ -609,69 +604,11 @@ def _viterbi_nll(haps_list, probs_k,
 
 
 # =============================================================================
-# SHARED LOW-READ-DEPTH CANDIDATE-GENERATION PRIMITIVES
+# Soft-cluster seed primitives
 # =============================================================================
-#
-# The candidate generators that feed stage-3 founder discovery — trio
-# recovery and homozygous-sample recovery (bhd_trio), the k-medoids
-# multistart seeding (block_haplotypes), the Bernoulli-mixture /
-# kmeans++ subtraction recovery (bhd_recovery), and pairwise common-hap
-# recovery (bhd_pairwise) — have historically reduced each sample's
-# posteriors to a hard argmax dosage (and, in trio, an XOR/parity form)
-# before clustering or comparing samples.  Hard calls are fine at the read
-# depths those paths were validated on (>= ~10x), but they discard exactly
-# the information that survives at low read depth:
-#
-#   - A zero-coverage site has a ~uniform posterior; argmax calls it dosage
-#     0, which is indistinguishable from a true hom-ref call and injects
-#     spurious agreement into every sample-sample comparison.
-#   - A heterozygous site at low depth (one read) is read as a RANDOM
-#     homozygote, so two true-het samples look like a hard 0-vs-2
-#     disagreement even though their posteriors still place real mass on
-#     the het genotype.
-#
-# These primitives operate on the full posteriors instead of hard calls, so
-# the low-depth signal is retained.  They are SHARED so that every generator
-# uses one validated implementation:
-#
-#   - soft_agreement_similarity(probs_k):
-#       (N, N) expected per-site genotype-agreement matrix under the
-#       posteriors.  Replaces "argmax then pairwise Hamming" as the
-#       sample-sample similarity used for clustering.  It is homoscedastic
-#       by construction — every pair is averaged over all L sites, so unlike
-#       a masked-Hamming distance (whose denominator is the variable count
-#       of jointly-informative sites) it does not assign systematically
-#       noisier distances to low-overlap pairs; a uniform (zero-coverage)
-#       site contributes the same constant 1/3 agreement term to every pair
-#       and so needs no masking.
-#   - alt_fractions(probs_k):
-#       (N, L) per-(sample, site) expected alt-allele fraction E[dosage]/2.
-#       Pooling this across a cluster's members (alt[members].mean(axis=0))
-#       gives a signal-boosted per-site estimate that reveals het sites a
-#       per-sample mode/argmax consensus would collapse: a het site of the
-#       cluster's pair-type pools to ~0.5 (both alleles seen across the
-#       shallow members), a hom site to ~0 or ~1.
-#   - pooled_alt_to_dosage / cluster_homozygosity_score / pooled_alt_to_hap:
-#       small deterministic readers of a pooled-alt vector — call the
-#       dosage {0, 1, 2}, score how homozygous a cluster looks (fraction of
-#       sites NOT sitting in the het band), and read a binary founder hap
-#       off a (presumed homozygous) cluster.
-#
-# IMPORTANT: nothing in the existing code path calls these.  They are
-# dormant additions; each consumer opts in behind its own switch (e.g.
-# bhd_trio's TRIO_CLUSTER).  With those switches off, behaviour is
-# bit-identical to before, because these functions are simply never
-# invoked.  This keeps the additions safe to land ahead of the consumers.
-#
-# Dependency note: these use only numpy (the soft-agreement matrix is built
-# with BLAS matmul; the remaining primitives are elementwise / reduction
-# numpy), consistent with this module's "numpy + math +
-# block_haplotypes.viterbi_score_selection only" contract.  The actual
-# clustering call (HDBSCAN etc.) lives in the consumer modules, not here, so
-# this module pulls in no new dependency.
-#
-# Thresholds are module constants (documented below) so every consumer
-# applies identical cut-points; tune here to retune all consumers at once.
+# Reversible discovery clusters samples using expected genotype agreement and
+# emits pooled-alt consensus seeds. Uniform zero-depth likelihoods contribute
+# the same constant to every pair and therefore cannot create reference bias.
 
 
 def soft_agreement_similarity(probs_k):
@@ -749,62 +686,13 @@ def alt_fractions(probs_k):
     return 0.5 * probs_k[:, :, 1] + probs_k[:, :, 2]
 
 
-def pooled_alt_to_dosage(pooled_alt, lo=POOLED_ALT_LO, hi=POOLED_ALT_HI):
-    """Call a per-site consensus dosage in {0, 1, 2} from a pooled-alt vector.
-
-        pooled_alt[l] < lo  -> 0 (hom-ref)
-        pooled_alt[l] > hi  -> 2 (hom-alt)
-        otherwise           -> 1 (het)
-
-    Defaults lo = POOLED_ALT_LO (0.25), hi = POOLED_ALT_HI (0.75).  Values
-    landing exactly on lo or hi fall through to the het call (1); this is a
-    negligible measure-zero edge for continuous pooled fractions.
-
-    Arguments:
-        pooled_alt: (L,) float64 — a cluster's per-site pooled alt fraction
-                    (e.g. alt_fractions(probs_k)[members].mean(axis=0)).
-
-    Returns:
-        (L,) int64 dosage in {0, 1, 2}.
-    """
-    d = np.ones(pooled_alt.shape[0], dtype=np.int64)
-    d[pooled_alt < lo] = 0
-    d[pooled_alt > hi] = 2
-    return d
-
-
-def cluster_homozygosity_score(pooled_alt, band_lo=CLUSTER_HOM_BAND_LO,
-                               band_hi=CLUSTER_HOM_BAND_HI):
-    """Fraction of a cluster's sites that are NOT in the het band.
-
-        score = 1 - mean_l[ band_lo < pooled_alt[l] < band_hi ]
-
-    A genuinely homozygous cluster (pair-type (A, A), so no site is truly
-    het) has almost no sites near 0.5 and scores ~1; a heterozygous pair-
-    type (A, B) has about half its sites near 0.5 and scores ~0.5.  Range
-    [0, 1].  Defaults band (band_lo, band_hi) = (CLUSTER_HOM_BAND_LO,
-    CLUSTER_HOM_BAND_HI) = (0.35, 0.65).
-
-    Arguments:
-        pooled_alt: (L,) float64 — a cluster's per-site pooled alt fraction.
-
-    Returns:
-        float in [0, 1] — higher means the cluster looks more homozygous.
-    """
-    in_band = (pooled_alt > band_lo) & (pooled_alt < band_hi)
-    return 1.0 - float(in_band.mean())
-
-
 def pooled_alt_to_hap(pooled_alt):
     """Read a binary founder hap off a (presumed homozygous) cluster.
 
         bit[l] = 1 if pooled_alt[l] > 0.5 else 0
 
-    Intended for clusters that `cluster_homozygosity_score` has flagged as
-    homozygous, where pooled_alt sits cleanly near 0 or 1 so the 0.5 cut is
-    unambiguous; the recovered hap is the single haplotype that both strands
-    of those homozygous samples carry.  (A value of exactly 0.5 maps to 0; a
-    negligible measure-zero edge for continuous pooled fractions.)
+    Pooled values above 0.5 map to allele 1; all others map to allele 0.
+    Cluster pooling denoises shallow per-sample observations before this call.
 
     Arguments:
         pooled_alt: (L,) float64 — the cluster's per-site pooled alt fraction.
@@ -816,11 +704,7 @@ def pooled_alt_to_hap(pooled_alt):
 
 
 # =============================================================================
-# MIGRATED FROM block_haplotypes.py (legacy block-hap discovery, retired).
-# Viterbi/chimera scoring kernels + prune_chimeras now live here so the
-# active ecosystem (beam_search_core, chimera_resolution/scoring,
-# residual_discovery, block_haplotypes) imports them from the bhd_* leaf
-# instead of from the legacy module.
+# Viterbi and chimera-scoring kernels
 # =============================================================================
 
 @njit(parallel=True, fastmath=True)

@@ -46,8 +46,8 @@ from bhd_mode_canonicalization import (
 from bhd_config import (
     DEFAULT_LAMBDA,
     FIXED_K_FIT_MAX_THREADS,
-    K_MEDOID_STARTS_DEFAULT,
-    SEED_SOFT_MIN_CLUSTER_SIZE,
+    DEFAULT_DATA_SEED_MODES,
+    DEFAULT_SOFT_SEED_MIN_CLUSTER_SIZE,
 )
 
 
@@ -1399,22 +1399,32 @@ def _initial_complete_modes(
     max_iter_per_k: int,
     *,
     fit_workspace: Any | None = None,
+    seed_sample_mask: np.ndarray | None = None,
 ) -> tuple[FactorizationMode, ...]:
     from bhd_fit import _fit_at_fixed_K_many
     from bhd_kernels import _init_hap_from_sample_dosage, _select_initial_seed
-    from bhd_kgrowth import _soft_cluster_seed_haps
+    from bhd_soft_seeding import soft_cluster_seed_haplotypes
 
-    seeds = _soft_cluster_seed_haps(
-        evidence,
+    seed_evidence = evidence
+    if seed_sample_mask is not None:
+        mask = np.asarray(seed_sample_mask, dtype=np.bool_)
+        if mask.shape != (len(evidence),) or not np.any(mask):
+            raise ValueError(
+                "seed_sample_mask must retain an evidence sample"
+            )
+        if not np.all(mask):
+            seed_evidence = np.ascontiguousarray(evidence[mask])
+
+    seeds = soft_cluster_seed_haplotypes(
+        seed_evidence,
         n_seed_modes,
         min_cluster_size=soft_seed_min_cluster_size,
-        verbose=False,
     )
     if not seeds:
-        sample = _select_initial_seed(evidence, kept_mask=None)
+        sample = _select_initial_seed(seed_evidence, kept_mask=None)
         seeds = [
             _init_hap_from_sample_dosage(
-                evidence, sample, kept_mask=None
+                seed_evidence, sample, kept_mask=None
             )
         ]
     starts = [
@@ -1446,6 +1456,7 @@ def _expand_one_complete_mode(
     decisiveness: np.ndarray | None = None,
     dosage_by_sample: np.ndarray | None = None,
     seed_haplotypes_by_sample: np.ndarray | None = None,
+    active_sample_mask: np.ndarray | None = None,
 ) -> tuple[tuple[FactorizationMode, ...], int, int]:
     """Generate data-derived K+1 children without rewarding diffuse reads.
 
@@ -1514,8 +1525,19 @@ def _expand_one_complete_mode(
             )
             for sample in range(len(evidence))
         ])
+    if active_sample_mask is None:
+        proposal_samples = np.arange(len(evidence), dtype=np.int64)
+    else:
+        active = np.asarray(active_sample_mask, dtype=np.bool_)
+        if active.shape != (len(evidence),):
+            raise ValueError(
+                "active_sample_mask must match the evidence sample axis"
+            )
+        proposal_samples = np.flatnonzero(active)
+        if len(proposal_samples) == 0:
+            raise ValueError("active_sample_mask must retain an evidence sample")
     sample_order = sorted(
-        range(len(evidence)),
+        proposal_samples.tolist(),
         key=lambda sample: (
             -float(excess_nll[sample]),
             -float(decisiveness[sample]),
@@ -1630,8 +1652,8 @@ def enumerate_complete_modes(
     max_k: int,
     beam_width: int,
     lambda_wildcard_penalty: float = DEFAULT_LAMBDA,
-    n_seed_modes: int = K_MEDOID_STARTS_DEFAULT,
-    soft_seed_min_cluster_size: int = SEED_SOFT_MIN_CLUSTER_SIZE,
+    n_seed_modes: int = DEFAULT_DATA_SEED_MODES,
+    soft_seed_min_cluster_size: int = DEFAULT_SOFT_SEED_MIN_CLUSTER_SIZE,
     max_iter_per_k: int = 50,
     apply_gauge_rewire: bool = True,
     exact_cut_max_k: int = DEFAULT_EXACT_CUT_MAX_K,

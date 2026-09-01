@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import copy
 import gc
+import json
 import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -62,7 +64,7 @@ class TeeOutput:
 
 
 class CheckpointStore:
-    """Facade for the standard, non-provenance-bound pipeline checkpoints.
+    """Facade for atomic pipeline checkpoints with optional stage binding.
 
     Writes are atomic, and filesystem ``OSError`` exceptions are reported then
     re-raised so a stage cannot be marked complete after losing a checkpoint.
@@ -78,6 +80,85 @@ class CheckpointStore:
         path = os.path.join(self.root, stage)
         os.makedirs(path, exist_ok=True)
         return path
+
+    def bind_stage_identity(self, stage, identity):
+        """Bind a stage directory to one exact model/configuration record.
+
+        Existing outputs without an identity are rejected rather than being
+        retroactively treated as current. Concurrent first binders publish a
+        fully written sidecar with an atomic hard-link claim.
+        """
+
+        stage_path = os.path.join(self.root, stage)
+        identity_path = os.path.join(stage_path, "_identity.json")
+        expected_text = json.dumps(
+            copy.deepcopy(identity),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+        def verify_existing():
+            try:
+                with open(identity_path, "r", encoding="utf-8") as handle:
+                    observed = json.load(handle)
+            except (OSError, ValueError) as error:
+                raise RuntimeError(
+                    f"{stage}: checkpoint identity is unreadable"
+                ) from error
+            observed_text = json.dumps(
+                observed,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            if observed_text != expected_text:
+                raise RuntimeError(
+                    f"{stage}: checkpoint identity does not match the "
+                    "current model/configuration"
+                )
+
+        if os.path.exists(identity_path):
+            verify_existing()
+            return
+
+        os.makedirs(stage_path, exist_ok=True)
+        existing = [
+            name for name in os.listdir(stage_path)
+            if name != "_identity.json"
+            and not (
+                name.startswith("_identity.")
+                and name.endswith(".tmp")
+            )
+        ]
+        if existing:
+            if os.path.exists(identity_path):
+                verify_existing()
+                return
+            raise RuntimeError(
+                f"{stage}: existing checkpoints lack the required "
+                "model/configuration identity"
+            )
+
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix="_identity.", suffix=".tmp", dir=stage_path
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(expected_text)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary_path, identity_path)
+            except FileExistsError:
+                pass
+        finally:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+        verify_existing()
 
     def stage_complete(self, stage):
         return os.path.exists(

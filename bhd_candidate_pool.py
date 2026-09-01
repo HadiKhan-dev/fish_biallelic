@@ -1,23 +1,16 @@
-"""Blind candidate-pool augmentation from assigned unexplained strands.
+"""Blind combined-soft candidate augmentation from unexplained strands.
 
-This module is deliberately separate from final model selection.  It proposes
-additional block haplotypes only from training allele depths and the discrete
-fit's own assignments.  It never receives cohort labels, founder identities,
-a requested K, or biological truth.  A held-out selector must decide whether
-any proposal belongs in the final model.
+This module proposes additional block haplotypes from allele depths and the
+current fit's assignments. It never receives cohort labels, founder identities,
+a requested K, or biological truth, and it never decides whether a proposal
+belongs in the final model.
 
-The key case is a sample assigned to exactly one well-resolved discrete
-haplotype and one wildcard or mostly-masked row.  Conditioning the raw
-three-genotype likelihood on the resolved allele yields a likelihood for the
-other strand.  Residuals are clustered with missing-aware Hamming distance;
-cluster consensus combines each biological sample once in log-odds space.
-
-That historical path remains the default.  Explicit experimental modes can
-also score every unordered diplotype under a neutral uniform state prior,
-derive posterior expected-copy responsibilities for every usable subtractor,
-and cluster either globally or within subtractor/partner routes.  These soft
-proposals retain allele probabilities and cap every biological sample at one
-effective contribution.  They still require independent held-out selection.
+Every unordered diplotype is scored under a neutral state prior. Posterior
+expected-copy responsibilities condition each usable subtractor to infer the
+other strand. Missing-aware residuals are clustered both globally and within
+subtractor/partner routes; each biological sample contributes at most once to
+a soft consensus. Final inclusion remains the responsibility of the separate
+cavity model selector.
 """
 
 from __future__ import annotations
@@ -33,7 +26,7 @@ from numba import njit
 
 from bhd_config import (
     DEFAULT_READ_ERROR_PROBABILITY,
-    RECOVERY_HAPS_EQUAL_EPS_PCT,
+    CANDIDATE_DEDUP_HAMMING_PERCENT,
 )
 from bhd_kernels import MASK
 from bhd_genotype_evidence import (
@@ -41,23 +34,8 @@ from bhd_genotype_evidence import (
     validate_normalized_genotype_evidence,
 )
 
-PROPOSAL_MODE_ASSIGNED_HARD = "assigned_hard"
 PROPOSAL_MODE_SOFT_RESIDUAL = "soft_residual"
 PROPOSAL_MODE_SOFT_SPLIT = "soft_split"
-PROPOSAL_MODE_SOFT_COMBINED = "soft_combined"
-PROPOSAL_MODES = (
-    PROPOSAL_MODE_ASSIGNED_HARD,
-    PROPOSAL_MODE_SOFT_RESIDUAL,
-    PROPOSAL_MODE_SOFT_SPLIT,
-    PROPOSAL_MODE_SOFT_COMBINED,
-)
-_PROPOSAL_MODE_ALIASES = {
-    "a": PROPOSAL_MODE_ASSIGNED_HARD,
-    "b": PROPOSAL_MODE_SOFT_RESIDUAL,
-    "c": PROPOSAL_MODE_SOFT_SPLIT,
-    "d": PROPOSAL_MODE_SOFT_COMBINED,
-    **{mode: mode for mode in PROPOSAL_MODES},
-}
 
 
 def allele_depths_to_likelihoods(
@@ -145,7 +123,7 @@ class ResidualRecord:
     hard_calls: np.ndarray
     compatible_mask: np.ndarray
     hard_known_fraction: float
-    record_kind: str = PROPOSAL_MODE_ASSIGNED_HARD
+    record_kind: str = PROPOSAL_MODE_SOFT_RESIDUAL
     responsibility_weight: float = 1.0
     dominant_partner_index: int | None = None
     dominant_partner_probability: float | None = None
@@ -167,7 +145,7 @@ class ProposalDiagnostic:
     closest_existing_other_coverage: float | None
     emitted: bool
     reason: str
-    proposal_mode: str = PROPOSAL_MODE_ASSIGNED_HARD
+    proposal_mode: str = PROPOSAL_MODE_SOFT_RESIDUAL
     subtractor_indices: tuple[int, ...] = ()
     dominant_partner_indices: tuple[int, ...] = ()
     dominant_partner_probabilities: tuple[float, ...] = ()
@@ -188,7 +166,7 @@ class CandidateProvenance:
 
 @dataclass(frozen=True)
 class CandidatePoolAugmentation:
-    """Base candidates plus blind assigned-residual proposals."""
+    """Base candidates plus combined soft-residual proposals."""
 
     candidates: np.ndarray
     n_input_base_candidates: int
@@ -203,13 +181,9 @@ class CandidatePoolAugmentation:
     n_emitted_candidates: int
     residual_records: tuple[ResidualRecord, ...]
     proposal_diagnostics: tuple[ProposalDiagnostic, ...]
-    proposal_mode: str = PROPOSAL_MODE_ASSIGNED_HARD
-    n_assigned_hard_records: int = 0
     n_soft_records: int = 0
     n_soft_residual_clusters: int = 0
     n_soft_split_clusters: int = 0
-    include_assigned_hard_candidates: bool = True
-    n_assigned_hard_candidates_emitted: int = 0
     n_soft_candidates_emitted: int = 0
     candidate_provenance: tuple[CandidateProvenance, ...] = ()
 
@@ -333,68 +307,6 @@ def _validate_base_candidates(
     if np.any((candidates < 0.0) | (candidates > 1.0)):
         raise ValueError("base_candidates must lie in [0, 1]")
     return np.ascontiguousarray(candidates)
-
-
-def _conditional_residual(
-    genotype_likelihood: np.ndarray,
-    read_depth: np.ndarray,
-    subtractor: np.ndarray,
-    keep_mask: np.ndarray,
-    hard_probability: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Condition genotype likelihood on one allele without clipping conflicts.
-
-    A site is admissible only if the global maximum-likelihood genotype is
-    compatible with the subtractor allele.  This prevents a tiny conditional
-    mass from becoming a falsely decisive residual call.
-    """
-
-    likelihood = np.asarray(genotype_likelihood, dtype=np.float64)
-    depth = np.asarray(read_depth)
-    subtractor = np.asarray(subtractor)
-    if likelihood.ndim != 2 or likelihood.shape[1] != 3:
-        raise ValueError("genotype_likelihood must have shape (sites, 3)")
-    n_sites = likelihood.shape[0]
-    if depth.shape != (n_sites,) or subtractor.shape != (n_sites,):
-        raise ValueError("depth and subtractor must match the site dimension")
-    if keep_mask.shape != (n_sites,):
-        raise ValueError("keep_mask must match the site dimension")
-
-    known_subtractor = (subtractor == 0) | (subtractor == 1)
-    map_genotype = np.argmax(likelihood, axis=1)
-    compatible = (
-        keep_mask
-        & known_subtractor
-        & (depth > 0)
-        & ((map_genotype == subtractor) | (map_genotype == subtractor + 1))
-    )
-
-    soft_alt = np.full(n_sites, 0.5, dtype=np.float64)
-    for allele in (0, 1):
-        sites = compatible & (subtractor == allele)
-        if not np.any(sites):
-            continue
-        allowed = likelihood[sites, allele : allele + 2]
-        denominator = np.sum(allowed, axis=1)
-        valid = denominator > 0.0
-        values = np.full(len(allowed), 0.5, dtype=np.float64)
-        values[valid] = allowed[valid, 1] / denominator[valid]
-        soft_alt[sites] = values
-
-    hard = np.full(n_sites, MASK, dtype=np.int8)
-    hard[compatible & (soft_alt >= hard_probability)] = 1
-    hard[compatible & (soft_alt <= 1.0 - hard_probability)] = 0
-    return soft_alt, hard, compatible
-
-def _resolve_proposal_mode(proposal_mode: str) -> str:
-    key = str(proposal_mode).strip().lower()
-    try:
-        return _PROPOSAL_MODE_ALIASES[key]
-    except KeyError as error:
-        choices = ", ".join(PROPOSAL_MODES)
-        raise ValueError(
-            f"proposal_mode must be A/B/C/D or one of: {choices}"
-        ) from error
 
 
 def _soft_conditional_residual(
@@ -868,95 +780,6 @@ def _candidate_digest(candidate: np.ndarray) -> str:
     return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
 
 
-def _extract_residual_records(
-    block_result: Any,
-    reads_array: np.ndarray,
-    keep_mask: np.ndarray,
-    read_error_probability: float,
-    usable_founder_known_fraction: float,
-    hard_probability: float,
-    *,
-    residual_input_workspace: ResidualInputWorkspace | None = None,
-) -> tuple[ResidualRecord, ...]:
-    discrete = np.asarray(getattr(block_result, "discrete_haps", None))
-    assignments = np.asarray(getattr(block_result, "pair_assignments", None))
-    reads = np.asarray(reads_array)
-    if discrete.ndim != 2:
-        raise ValueError("block_result.discrete_haps must have shape (K, sites)")
-    if assignments.ndim != 2 or assignments.shape[1] != 2:
-        raise ValueError("block_result.pair_assignments must have shape (samples, 2)")
-    if reads.ndim != 3 or reads.shape[2] != 2:
-        raise ValueError("reads_array must have shape (samples, sites, 2)")
-    if reads.shape[:2] != (assignments.shape[0], discrete.shape[1]):
-        raise ValueError("reads, assignments, and discrete haplotypes disagree")
-    if np.any(reads < 0):
-        raise ValueError("allele depths must be non-negative")
-
-    n_haplotypes, n_sites = discrete.shape
-    k_final = getattr(block_result, "K_final", n_haplotypes)
-    if int(k_final) != n_haplotypes:
-        raise ValueError("K_final and discrete_haps use inconsistent coordinates")
-    if np.any((assignments < 0) | (assignments > n_haplotypes)):
-        raise ValueError("pair_assignments contain an invalid non-wildcard index")
-
-    n_kept = int(np.sum(keep_mask))
-    minimum_known = int(math.ceil(usable_founder_known_fraction * n_kept))
-    founder_known = ((discrete == 0) | (discrete == 1)) & keep_mask[None, :]
-    usable = np.sum(founder_known, axis=1) >= minimum_known
-    workspace = (
-        prepare_residual_inputs(reads, read_error_probability)
-        if residual_input_workspace is None
-        else _validate_residual_input_workspace(
-            residual_input_workspace, reads.shape, read_error_probability
-        )
-    )
-    likelihood = np.asarray(workspace.likelihood)
-    depth = np.asarray(workspace.depth)
-
-    records: list[ResidualRecord] = []
-    for sample_index, pair_array in enumerate(assignments):
-        pair = (int(pair_array[0]), int(pair_array[1]))
-        usable_slots = [
-            slot
-            for slot, value in enumerate(pair)
-            if value < n_haplotypes and usable[value]
-        ]
-        if len(usable_slots) != 1:
-            continue
-        subtractor_slot = usable_slots[0]
-        other_slot = 1 - subtractor_slot
-        subtractor_index = pair[subtractor_slot]
-        unexplained_assignment = pair[other_slot]
-        # The other assignment must genuinely be wildcard or an unusable real
-        # row.  A second usable row means the sample has no unexplained strand.
-        if (
-            unexplained_assignment < n_haplotypes
-            and usable[unexplained_assignment]
-        ):
-            continue
-        soft_alt, hard, compatible = _conditional_residual(
-            likelihood[sample_index],
-            depth[sample_index],
-            discrete[subtractor_index],
-            keep_mask,
-            hard_probability,
-        )
-        known_fraction = float(np.mean(hard[keep_mask] != MASK))
-        records.append(
-            ResidualRecord(
-                sample_index=sample_index,
-                assignments=pair,
-                subtractor_index=subtractor_index,
-                unexplained_assignment=unexplained_assignment,
-                soft_alt_probability=soft_alt,
-                hard_calls=hard,
-                compatible_mask=compatible,
-                hard_known_fraction=known_fraction,
-            )
-        )
-    return tuple(records)
-
-
 @njit(cache=True, fastmath=False)
 def _missing_aware_hamming_reference_kernel(
     hard_calls: np.ndarray,
@@ -1020,63 +843,6 @@ def _popcount_uint64(value: np.uint64) -> int:
     return int(
         (value * np.uint64(0x0101010101010101)) >> np.uint64(56)
     )
-
-
-@njit(cache=True, fastmath=False)
-def _missing_aware_hamming_kernel(
-    hard_calls: np.ndarray,
-    keep_mask: np.ndarray,
-    minimum_joint: int,
-    n_kept: int,
-    mask_value: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Exact bit-packed missing-aware Hamming matrix.
-
-    Each row is represented by a known-site bitset and an allele-one bitset.
-    Pairwise joint-known and mismatch counts then require only a few bitwise
-    operations and two population counts per 64 sites.  The counts, threshold
-    comparison, divisions, matrix symmetry, and diagonal values are identical
-    to :func:`_missing_aware_hamming_reference_kernel`.
-    """
-
-    n_records, n_sites = hard_calls.shape
-    n_words = (n_sites + 63) // 64
-    known_bits = np.zeros((n_records, n_words), dtype=np.uint64)
-    allele_bits = np.zeros((n_records, n_words), dtype=np.uint64)
-    for record in range(n_records):
-        for site in range(n_sites):
-            value = hard_calls[record, site]
-            if keep_mask[site] and value != mask_value:
-                word = site >> 6
-                bit = np.uint64(1) << np.uint64(site & 63)
-                known_bits[record, word] |= bit
-                if value == 1:
-                    allele_bits[record, word] |= bit
-
-    distance = np.zeros((n_records, n_records), dtype=np.float64)
-    joint_fraction = np.ones((n_records, n_records), dtype=np.float64)
-    for first in range(n_records - 1):
-        for second in range(first + 1, n_records):
-            n_joint = 0
-            n_mismatch = 0
-            for word in range(n_words):
-                joint = known_bits[first, word] & known_bits[second, word]
-                mismatch = (
-                    allele_bits[first, word] ^ allele_bits[second, word]
-                ) & joint
-                n_joint += _popcount_uint64(joint)
-                n_mismatch += _popcount_uint64(mismatch)
-            joint_value = n_joint / n_kept
-            joint_fraction[first, second] = joint_value
-            joint_fraction[second, first] = joint_value
-            if n_joint < minimum_joint:
-                value = 1.0
-            else:
-                value = n_mismatch / n_joint
-            distance[first, second] = value
-            distance[second, first] = value
-    return distance, joint_fraction
-
 
 
 @njit(cache=True, fastmath=False)
@@ -1144,33 +910,6 @@ def _missing_aware_hamming_distance_matrix(
         hard_calls,
         np.ascontiguousarray(keep_mask),
         minimum_joint,
-        int(MASK),
-    )
-
-
-def _missing_aware_hamming_matrix(
-    records: Sequence[ResidualRecord],
-    keep_mask: np.ndarray,
-    minimum_joint_known_fraction: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    n_records = len(records)
-    if n_records == 0:
-        return (
-            np.zeros((n_records, n_records), dtype=np.float64),
-            np.ones((n_records, n_records), dtype=np.float64),
-        )
-    n_kept = int(np.sum(keep_mask))
-    minimum_joint = max(
-        1, int(math.ceil(minimum_joint_known_fraction * n_kept))
-    )
-    hard_calls = np.ascontiguousarray(
-        np.stack([record.hard_calls for record in records])
-    )
-    return _missing_aware_hamming_kernel(
-        hard_calls,
-        np.ascontiguousarray(keep_mask),
-        minimum_joint,
-        n_kept,
         int(MASK),
     )
 
@@ -1254,7 +993,8 @@ def _cluster_residuals(
 
     # Rescue cohesive small groups that HDBSCAN labelled as noise.  This does
     # not set K: it partitions only residual proposals at an absolute sequence
-    # disagreement bound, and held-out likelihood still decides inclusion.
+    # disagreement bound; downstream cavity scoring still decides final
+    # panel inclusion.
     remaining = tuple(sorted(noise))
     complete_link_members: set[int] = set()
     if len(remaining) >= 2:
@@ -1317,50 +1057,6 @@ def _cluster_residuals_cached(
         cached = _cluster_residuals(distance, maximum_cluster_hamming)
         cache[key] = cached
     return cached
-
-
-def _consensus_candidate(
-    records: Sequence[ResidualRecord],
-    member_indices: Sequence[int],
-    keep_mask: np.ndarray,
-    candidate_call_probability: float,
-) -> tuple[np.ndarray, float]:
-    # One contribution per biological sample, even if a caller accidentally
-    # supplies a duplicated residual record.
-    unique_indices: list[int] = []
-    seen_samples: set[int] = set()
-    for index in member_indices:
-        sample = records[int(index)].sample_index
-        if sample not in seen_samples:
-            seen_samples.add(sample)
-            unique_indices.append(int(index))
-
-    n_sites = len(keep_mask)
-    log_odds = np.zeros(n_sites, dtype=np.float64)
-    n_informative = np.zeros(n_sites, dtype=np.int32)
-    tiny = np.finfo(np.float64).tiny
-    for index in unique_indices:
-        record = records[index]
-        q1 = np.clip(record.soft_alt_probability, tiny, 1.0 - np.finfo(float).eps)
-        informative = keep_mask & record.compatible_mask
-        log_odds[informative] += (
-            np.log(q1[informative]) - np.log1p(-q1[informative])
-        )
-        n_informative[informative] += 1
-
-    posterior = np.full(n_sites, 0.5, dtype=np.float64)
-    observed = n_informative > 0
-    positive = observed & (log_odds >= 0.0)
-    negative = observed & ~positive
-    posterior[positive] = 1.0 / (1.0 + np.exp(-log_odds[positive]))
-    exponential = np.exp(log_odds[negative])
-    posterior[negative] = exponential / (1.0 + exponential)
-
-    candidate = np.full(n_sites, 0.5, dtype=np.float64)
-    candidate[observed & (posterior >= candidate_call_probability)] = 1.0
-    candidate[observed & (posterior <= 1.0 - candidate_call_probability)] = 0.0
-    known_fraction = float(np.mean(candidate[keep_mask] != 0.5))
-    return candidate, known_fraction
 
 
 def _soft_record_log_odds(records: Sequence[ResidualRecord]) -> np.ndarray:
@@ -1457,7 +1153,7 @@ def _soft_consensus_candidate(
     Multiple assignment routes from one biological sample are averaged in
     responsibility-weighted log-odds space.  Their total weight is capped at
     one independently at every site, so duplicate routes cannot manufacture
-    replication.  Unlike the legacy consensus, the returned candidate keeps
+    replication.  The returned candidate keeps
     the posterior allele probabilities rather than replacing them by 0/0.5/1.
     """
 
@@ -1748,51 +1444,50 @@ def _is_confirmed_duplicate(
 
 
 def _candidate_discrete_rows(block_result: Any, n_sites: int) -> np.ndarray:
-    """Return validated candidate-only rows, preferring explicit provenance.
+    """Return the canonical candidate-only rows with explicit provenance.
 
-    Final ``discrete_haps`` rows share coordinates with final assignments and
-    can therefore differ from the permissive rows that existed before model
-    cleanup.  New results preserve those earlier rows explicitly.  Legacy
-    results do not, so only the complete absence (or explicit ``None``) of
-    that provenance field permits a fallback to ``discrete_haps``.
+    Final discrete_haps rows share coordinates with final assignments and can
+    therefore differ from the permissive proposal rows. Canonical results
+    preserve those proposal rows explicitly; a result without that provenance
+    is not a supported Stage-1 input.
     """
 
     precleanup = getattr(
         block_result, "precleanup_candidate_discrete_haps", None
     )
-    if precleanup is not None:
-        source_name = "precleanup_candidate_discrete_haps"
-        rows = np.asarray(precleanup)
-        candidate_k = getattr(block_result, "precleanup_candidate_k", None)
-        if candidate_k is None or isinstance(candidate_k, (bool, np.bool_)):
-            raise ValueError(
-                "present pre-cleanup candidate provenance requires an "
-                "integer precleanup_candidate_k"
-            )
-        try:
-            candidate_k = int(np.asarray(candidate_k).item())
-        except (TypeError, ValueError) as error:
-            raise ValueError(
-                "precleanup_candidate_k must be a scalar integer"
-            ) from error
-        raw_candidate_k = np.asarray(
-            getattr(block_result, "precleanup_candidate_k")
+    if precleanup is None:
+        raise ValueError(
+            "canonical Stage-1 results require "
+            "precleanup_candidate_discrete_haps"
         )
-        if (
-            raw_candidate_k.ndim != 0
-            or not np.issubdtype(raw_candidate_k.dtype, np.integer)
-        ):
-            raise ValueError("precleanup_candidate_k must be a scalar integer")
-    else:
-        source_name = "discrete_haps"
-        rows = np.asarray(getattr(block_result, "discrete_haps", None))
-        candidate_k = None
+    source_name = "precleanup_candidate_discrete_haps"
+    rows = np.asarray(precleanup)
+    candidate_k = getattr(block_result, "precleanup_candidate_k", None)
+    if candidate_k is None or isinstance(candidate_k, (bool, np.bool_)):
+        raise ValueError(
+            "pre-cleanup candidate provenance requires an integer "
+            "precleanup_candidate_k"
+        )
+    try:
+        candidate_k = int(np.asarray(candidate_k).item())
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "precleanup_candidate_k must be a scalar integer"
+        ) from error
+    raw_candidate_k = np.asarray(
+        getattr(block_result, "precleanup_candidate_k")
+    )
+    if (
+        raw_candidate_k.ndim != 0
+        or not np.issubdtype(raw_candidate_k.dtype, np.integer)
+    ):
+        raise ValueError("precleanup_candidate_k must be a scalar integer")
 
     if rows.ndim != 2 or rows.shape[1] != n_sites:
         raise ValueError(
             f"block_result.{source_name} must have shape (K, sites)"
         )
-    if candidate_k is not None and candidate_k != rows.shape[0]:
+    if candidate_k != rows.shape[0]:
         raise ValueError(
             "precleanup_candidate_k and "
             "precleanup_candidate_discrete_haps disagree"
@@ -1802,7 +1497,6 @@ def _candidate_discrete_rows(block_result: Any, n_sites: int) -> np.ndarray:
             f"block_result.{source_name} must contain only 0, 1, or MASK"
         )
     return np.ascontiguousarray(rows)
-
 
 def _add_usable_discrete_candidates(
     base: np.ndarray,
@@ -1851,7 +1545,6 @@ def _soft_cluster_sources(
     keep_mask: np.ndarray,
     minimum_joint_known_fraction: float,
     maximum_cluster_hamming: float,
-    proposal_mode: str,
     cluster_cache: dict[tuple[Any, ...], Any] | None = None,
 ) -> tuple[
     tuple[tuple[str, str, int | None, tuple[int, ...], float], ...],
@@ -1863,19 +1556,11 @@ def _soft_cluster_sources(
 ]:
     """Build global and/or assignment-route soft clusters.
 
-    Soft modes deliberately expose cluster consensuses only.  Member-level
-    singleton candidates remain a legacy-arm behaviour; they are not emitted
-    merely because all-assignment enumeration created a record.
+    Soft modes deliberately expose cluster consensuses only. Member-level
+    singleton candidates are not emitted merely because all-assignment
+    enumeration created a record.
     """
 
-    include_residual = proposal_mode in {
-        PROPOSAL_MODE_SOFT_RESIDUAL,
-        PROPOSAL_MODE_SOFT_COMBINED,
-    }
-    include_split = proposal_mode in {
-        PROPOSAL_MODE_SOFT_SPLIT,
-        PROPOSAL_MODE_SOFT_COMBINED,
-    }
     sources: list[tuple[str, str, int | None, tuple[int, ...], float]] = []
     n_residual_clusters = 0
     n_split_clusters = 0
@@ -1883,7 +1568,7 @@ def _soft_cluster_sources(
     n_complete_link = 0
     initial_noise = 0
     global_distance: np.ndarray | None = None
-    if include_residual and len(records) >= 2:
+    if len(records) >= 2:
         global_distance = _missing_aware_hamming_distance_matrix(
             records, keep_mask, minimum_joint_known_fraction
         )
@@ -1907,49 +1592,47 @@ def _soft_cluster_sources(
                 source_kind == "complete_link_noise_cluster"
             )
 
-    if include_split:
-        by_route: dict[tuple[int, int], list[int]] = {}
-        for index, record in enumerate(records):
-            partner = record.dominant_partner_index
-            if partner is None:
-                continue
-            by_route.setdefault(
-                (record.subtractor_index, int(partner)), []
-            ).append(index)
-        for route in sorted(by_route):
-            member_pool = tuple(sorted(by_route[route]))
-            if len(member_pool) < 2:
-                continue
-            if global_distance is None:
-                # Split-only mode need not pay for distances between unrelated
-                # routes.  Combined mode already owns the complete matrix, so
-                # slice it rather than repacking and recounting every route.
-                route_records = tuple(records[index] for index in member_pool)
-                distance = _missing_aware_hamming_distance_matrix(
-                    route_records, keep_mask, minimum_joint_known_fraction
-                )
-            else:
-                distance = global_distance[np.ix_(member_pool, member_pool)]
-            clusters, _noise, n_initial_noise = _cluster_residuals_cached(
-                distance, maximum_cluster_hamming, cluster_cache
+    by_route: dict[tuple[int, int], list[int]] = {}
+    for index, record in enumerate(records):
+        partner = record.dominant_partner_index
+        if partner is None:
+            continue
+        by_route.setdefault(
+            (record.subtractor_index, int(partner)), []
+        ).append(index)
+    for route in sorted(by_route):
+        member_pool = tuple(sorted(by_route[route]))
+        if len(member_pool) < 2:
+            continue
+        if global_distance is None:
+            # With fewer than two records the route cannot cluster; otherwise
+            # combined construction already owns the global distance matrix.
+            route_records = tuple(records[index] for index in member_pool)
+            distance = _missing_aware_hamming_distance_matrix(
+                route_records, keep_mask, minimum_joint_known_fraction
             )
-            initial_noise += n_initial_noise
-            for source_kind, label, local_members, max_distance in clusters:
-                members = tuple(member_pool[index] for index in local_members)
-                sources.append(
-                    (
-                        f"soft_split_{source_kind}",
-                        PROPOSAL_MODE_SOFT_SPLIT,
-                        label,
-                        members,
-                        max_distance,
-                    )
+        else:
+            distance = global_distance[np.ix_(member_pool, member_pool)]
+        clusters, _noise, n_initial_noise = _cluster_residuals_cached(
+            distance, maximum_cluster_hamming, cluster_cache
+        )
+        initial_noise += n_initial_noise
+        for source_kind, label, local_members, max_distance in clusters:
+            members = tuple(member_pool[index] for index in local_members)
+            sources.append(
+                (
+                    f"soft_split_{source_kind}",
+                    PROPOSAL_MODE_SOFT_SPLIT,
+                    label,
+                    members,
+                    max_distance,
                 )
-                n_split_clusters += 1
-                n_hdbscan += int(source_kind == "hdbscan_cluster")
-                n_complete_link += int(
-                    source_kind == "complete_link_noise_cluster"
-                )
+            )
+            n_split_clusters += 1
+            n_hdbscan += int(source_kind == "hdbscan_cluster")
+            n_complete_link += int(
+                source_kind == "complete_link_noise_cluster"
+            )
     return (
         tuple(sources),
         n_residual_clusters,
@@ -1960,7 +1643,7 @@ def _soft_cluster_sources(
     )
 
 
-def augment_assigned_residual_candidates(
+def augment_combined_soft_candidates(
     block_result: Any,
     reads_array: np.ndarray,
     *,
@@ -1975,39 +1658,22 @@ def augment_assigned_residual_candidates(
     minimum_candidate_known_fraction: float = 0.80,
     minimum_dedup_joint_known_fraction: float = 0.60,
     minimum_dedup_bidirectional_coverage: float = 0.95,
-    dedup_hamming_fraction: float = RECOVERY_HAPS_EQUAL_EPS_PCT / 100.0,
-    proposal_mode: str = PROPOSAL_MODE_ASSIGNED_HARD,
-    include_assigned_hard_candidates: bool = True,
-    compute_excluded_assigned_hard_diagnostics: bool = True,
+    dedup_hamming_fraction: float = CANDIDATE_DEDUP_HAMMING_PERCENT / 100.0,
     minimum_soft_responsibility: float = 0.25,
     minimum_soft_unique_sample_support: int = 2,
     minimum_soft_effective_sample_support: float = 1.50,
     residual_input_workspace: ResidualInputWorkspace | None = None,
     binary_panel_fast_path: bool = False,
 ) -> CandidatePoolAugmentation:
-    """Add blind, permissive assigned-residual proposals to a candidate pool.
+    """Add combined posterior-residual proposals to a candidate pool.
 
-    The returned pool is intentionally permissive.  This function does not
-    decide K and does not accept a candidate as a founder.  Final inclusion is
-    delegated to an independently held-out probabilistic selector.
-
-    ``proposal_mode`` supplies four explicit validation arms.  ``A`` (the
-    default, ``assigned_hard``) is the historical hard-assignment path.  ``B``
-    adds global all-assignment posterior residual clusters, ``C`` adds
-    route-specific posterior split clusters, and ``D`` adds both.  Every soft
-    path uses only ``reads_array``; in cross-validation that argument must be
-    the training read partition.  Soft modes require multi-sample support by
-    default and preserve consensus allele probabilities for held-out model
-    selection.
-    ``include_assigned_hard_candidates=False`` keeps the historical residual
-    diagnostics for audit but excludes those proposals before soft candidate
-    deduplication, yielding a base-plus-soft-only pool.
-
-    Internal search callers that consume only soft proposals may also set
-    ``compute_excluded_assigned_hard_diagnostics=False``.  That skips the
-    otherwise unused hard-residual extraction, clustering, consensus, and
-    deduplication work.  It cannot be combined with inclusion of hard
-    candidates and does not alter the soft proposal path or its ordering.
+    Global and route-specific soft residual clusters are both evaluated. The
+    returned pool is intentionally permissive: this function does not decide K
+    or accept a candidate as a founder. Final inclusion is delegated to the
+    downstream cavity selector. Every proposal uses only
+    ``reads_array``; in cross-validation that must be the training partition.
+    Multi-sample support is required by default and consensus allele
+    probabilities remain soft for downstream model selection.
 
     Repeated internal calls for fitted panels from the same block can pass a
     :class:`ResidualInputWorkspace` made by :func:`prepare_residual_inputs`.
@@ -2017,38 +1683,13 @@ def augment_assigned_residual_candidates(
 
     ``binary_panel_fast_path=True`` gathers the exact likelihood term selected
     by each hard pair/site dosage when every usable panel allele is known and
-    binary.  It preserves the generic F-order site reduction, full-panel
-    normalization, and proposal ordering, falling back automatically for
-    incomplete or uncertain panels.
-
+    binary. It preserves generic reduction and proposal ordering, falling back
+    automatically for incomplete or uncertain panels.
     """
 
-    resolved_proposal_mode = _resolve_proposal_mode(proposal_mode)
     if not isinstance(binary_panel_fast_path, (bool, np.bool_)):
         raise TypeError("binary_panel_fast_path must be boolean")
     binary_panel_fast_path = bool(binary_panel_fast_path)
-    if not isinstance(include_assigned_hard_candidates, (bool, np.bool_)):
-        raise TypeError("include_assigned_hard_candidates must be boolean")
-    include_assigned_hard_candidates = bool(
-        include_assigned_hard_candidates
-    )
-    if not isinstance(
-        compute_excluded_assigned_hard_diagnostics, (bool, np.bool_)
-    ):
-        raise TypeError(
-            "compute_excluded_assigned_hard_diagnostics must be boolean"
-        )
-    compute_excluded_assigned_hard_diagnostics = bool(
-        compute_excluded_assigned_hard_diagnostics
-    )
-    if (
-        include_assigned_hard_candidates
-        and not compute_excluded_assigned_hard_diagnostics
-    ):
-        raise ValueError(
-            "hard-candidate diagnostics are required when hard candidates "
-            "are included"
-        )
 
     reads = np.asarray(reads_array)
     if reads.ndim != 3 or reads.shape[2] != 2:
@@ -2118,82 +1759,23 @@ def augment_assigned_residual_candidates(
         dedup_hamming_fraction,
         minimum_dedup_bidirectional_coverage,
     )
-    if compute_excluded_assigned_hard_diagnostics:
-        records = _extract_residual_records(
-            block_result,
-            reads,
-            keep_mask,
-            read_error_probability,
-            usable_founder_known_fraction,
-            residual_hard_probability,
-            residual_input_workspace=workspace,
-        )
-        distance, _joint_fraction = _missing_aware_hamming_matrix(
-            records, keep_mask, minimum_residual_joint_known_fraction
-        )
-        clusters, noise, hdbscan_initial_noise = _cluster_residuals_cached(
-            distance, maximum_cluster_hamming, workspace.cluster_cache
-        )
-    else:
-        records = ()
-        clusters = ()
-        noise = ()
-        hdbscan_initial_noise = 0
-    soft_records: tuple[ResidualRecord, ...] = ()
-    soft_sources: tuple[
-        tuple[str, str, int | None, tuple[int, ...], float], ...
-    ] = ()
-    n_soft_residual_clusters = 0
-    n_soft_split_clusters = 0
-    n_soft_hdbscan_clusters = 0
-    n_soft_complete_link_clusters = 0
-    soft_hdbscan_initial_noise = 0
-    if resolved_proposal_mode != PROPOSAL_MODE_ASSIGNED_HARD:
-        soft_records = _extract_soft_residual_records(
-            block_result,
-            reads,
-            keep_mask,
-            read_error_probability,
-            usable_founder_known_fraction,
-            residual_hard_probability,
-            minimum_soft_responsibility,
-            residual_input_workspace=workspace,
-            binary_panel_fast_path=binary_panel_fast_path,
-        )
-        (
-            soft_sources,
-            n_soft_residual_clusters,
-            n_soft_split_clusters,
-            n_soft_hdbscan_clusters,
-            n_soft_complete_link_clusters,
-            soft_hdbscan_initial_noise,
-        ) = _soft_cluster_sources(
-            soft_records,
-            keep_mask,
-            minimum_residual_joint_known_fraction,
-            maximum_cluster_hamming,
-            resolved_proposal_mode,
-            workspace.cluster_cache,
-        )
+    soft_records = _extract_soft_residual_records(
+        block_result, reads, keep_mask, read_error_probability,
+        usable_founder_known_fraction, residual_hard_probability,
+        minimum_soft_responsibility, residual_input_workspace=workspace,
+        binary_panel_fast_path=binary_panel_fast_path,
+    )
+    (
+        soft_sources, n_soft_residual_clusters, n_soft_split_clusters,
+        n_soft_hdbscan_clusters, n_soft_complete_link_clusters,
+        soft_hdbscan_initial_noise,
+    ) = _soft_cluster_sources(
+        soft_records, keep_mask, minimum_residual_joint_known_fraction,
+        maximum_cluster_hamming, workspace.cluster_cache,
+    )
 
 
-    sources: list[tuple[str, int | None, tuple[int, ...], float | None]] = []
-    for source_kind, label, members, max_distance in clusters:
-        sources.append((source_kind, label, members, max_distance))
-    clustered_members = {
-        member for _, _, members, _ in clusters for member in members
-    }
-    # Retain informative member-level candidates as well as consensuses,
-    # so clustering cannot irreversibly merge two close true haplotypes.
-    for member in range(len(records)):
-        source_kind = (
-            "informative_cluster_member"
-            if member in clustered_members
-            else "informative_unclustered_singleton"
-        )
-        sources.append((source_kind, None, (member,), None))
-
-    existing_capacity = len(base) + len(sources) + len(soft_sources)
+    existing_capacity = len(base) + len(soft_sources)
     existing = np.empty((existing_capacity, len(keep_mask)), dtype=np.float64)
     existing_count = len(base)
     existing[:existing_count] = base
@@ -2201,80 +1783,8 @@ def augment_assigned_residual_candidates(
     emitted_candidate_digests: list[str] = []
     emitted_source_classes: list[str] = []
     emitted_diagnostic_indices: list[int] = []
-    n_assigned_hard_emitted = 0
     n_soft_emitted = 0
     diagnostics: list[ProposalDiagnostic] = []
-    for source_kind, label, members, max_distance in sources:
-        unique_samples = tuple(
-            dict.fromkeys(records[index].sample_index for index in members)
-        )
-        candidate, known_fraction = _consensus_candidate(
-            records, members, keep_mask, candidate_call_probability
-        )
-        candidate_digest = _candidate_digest(candidate)
-        closest = _closest_existing(
-            candidate,
-            existing[:existing_count],
-            keep_mask,
-            minimum_dedup_joint_known_fraction,
-        )
-        (
-            closest_distance,
-            closest_joint,
-            closest_candidate_coverage,
-            closest_other_coverage,
-        ) = closest
-        if not include_assigned_hard_candidates:
-            emitted_flag = False
-            reason = "excluded_assigned_hard_candidate_by_configuration"
-        elif known_fraction < minimum_candidate_known_fraction:
-            emitted_flag = False
-            reason = "insufficient_candidate_known_fraction"
-        elif _is_confirmed_duplicate(
-            closest,
-            dedup_hamming_fraction,
-            minimum_dedup_bidirectional_coverage,
-        ):
-            emitted_flag = False
-            reason = "duplicate_existing_candidate"
-        else:
-            emitted_flag = True
-            reason = "emitted_for_heldout_selection"
-            emitted.append(candidate)
-            emitted_candidate_digests.append(candidate_digest)
-            existing[existing_count] = candidate
-            existing_count += 1
-            emitted_source_classes.append(PROPOSAL_MODE_ASSIGNED_HARD)
-            emitted_diagnostic_indices.append(len(diagnostics))
-            n_assigned_hard_emitted += 1
-        diagnostics.append(
-            ProposalDiagnostic(
-                source_kind=source_kind,
-                sample_indices=unique_samples,
-                cluster_label=label,
-                unique_sample_support=len(unique_samples),
-                max_pairwise_hamming=max_distance,
-                known_fraction=known_fraction,
-                closest_existing_hamming=closest_distance,
-                closest_existing_joint_known_fraction=closest_joint,
-                closest_existing_candidate_coverage=closest_candidate_coverage,
-                closest_existing_other_coverage=closest_other_coverage,
-                emitted=emitted_flag,
-                reason=reason,
-                proposal_mode=PROPOSAL_MODE_ASSIGNED_HARD,
-                subtractor_indices=tuple(
-                    records[index].subtractor_index for index in members
-                ),
-                dominant_partner_indices=tuple(
-                    records[index].unexplained_assignment for index in members
-                ),
-                responsibility_weights=tuple(
-                    records[index].responsibility_weight for index in members
-                ),
-                effective_sample_support=float(len(unique_samples)),
-                canonical_candidate_digest=candidate_digest,
-            )
-        )
     prepared_soft: list[tuple[Any, ...]] = []
     soft_log_odds = _soft_record_log_odds(soft_records)
     soft_sample_indices = np.fromiter(
@@ -2408,7 +1918,7 @@ def augment_assigned_residual_candidates(
             reason = "duplicate_existing_candidate"
         else:
             emitted_flag = True
-            reason = "emitted_for_heldout_selection"
+            reason = "emitted_for_cavity_selection"
             emitted.append(candidate)
             emitted_candidate_digests.append(candidate_digest)
             existing[existing_count] = candidate
@@ -2504,591 +2014,127 @@ def augment_assigned_residual_candidates(
         n_input_base_candidates=len(input_base),
         n_discrete_candidates_added=n_discrete_added,
         n_base_candidates=len(base),
-        n_residual_records=len(records) + len(soft_records),
-        n_residual_clusters=(
-            len(clusters) + n_soft_residual_clusters + n_soft_split_clusters
-        ),
-        n_hdbscan_clusters=sum(
-            source_kind == "hdbscan_cluster"
-            for source_kind, _, _, _ in clusters
-        ) + n_soft_hdbscan_clusters,
-        n_complete_link_clusters=sum(
-            source_kind == "complete_link_noise_cluster"
-            for source_kind, _, _, _ in clusters
-        ) + n_soft_complete_link_clusters,
-        n_hdbscan_initial_noise=(
-            hdbscan_initial_noise + soft_hdbscan_initial_noise
-        ),
+        n_residual_records=len(soft_records),
+        n_residual_clusters=n_soft_residual_clusters + n_soft_split_clusters,
+        n_hdbscan_clusters=n_soft_hdbscan_clusters,
+        n_complete_link_clusters=n_soft_complete_link_clusters,
+        n_hdbscan_initial_noise=soft_hdbscan_initial_noise,
         n_unclustered_singletons=(
-            len(noise) + len(soft_records) - len(soft_clustered_members)
+            len(soft_records) - len(soft_clustered_members)
         ),
         n_emitted_candidates=len(emitted),
-        residual_records=records + soft_records,
+        residual_records=soft_records,
         proposal_diagnostics=tuple(diagnostics),
-        proposal_mode=resolved_proposal_mode,
-        n_assigned_hard_records=len(records),
         n_soft_records=len(soft_records),
         n_soft_residual_clusters=n_soft_residual_clusters,
         n_soft_split_clusters=n_soft_split_clusters,
-        include_assigned_hard_candidates=include_assigned_hard_candidates,
-        n_assigned_hard_candidates_emitted=n_assigned_hard_emitted,
         n_soft_candidates_emitted=n_soft_emitted,
         candidate_provenance=candidate_provenance,
     )
 
 
 def _selftest() -> None:
-    # Conditional truth table plus the incompatible-subtractor guard.
     reads = np.asarray([[[20, 0]], [[10, 10]], [[0, 20]], [[0, 0]]])
-    likelihood = allele_depths_to_likelihoods(reads, 0.02)[:, 0, :]
-    depth = np.sum(reads[:, 0, :], axis=1)
+    likelihood = allele_depths_to_likelihoods(reads)
+    assert np.allclose(likelihood[3, 0], 1.0 / 3.0)
     keep = np.ones(1, dtype=bool)
-    _, hard0, compatible0 = _conditional_residual(
-        likelihood, depth, np.zeros(4, dtype=np.int8), np.ones(4, dtype=bool), 0.8
-    )
-    _, hard1, compatible1 = _conditional_residual(
-        likelihood, depth, np.ones(4, dtype=np.int8), np.ones(4, dtype=bool), 0.8
-    )
-    assert hard0.tolist() == [0, 1, MASK, MASK]
-    assert hard1.tolist() == [MASK, 0, 1, MASK]
-    assert compatible0.tolist() == [True, True, False, False]
-    assert compatible1.tolist() == [False, True, True, False]
+    for subtractor, expected in ((0.0, (0, 1, 1, MASK)), (1.0, (0, 0, 1, MASK))):
+        _, hard, compatible = _soft_conditional_residual(
+            likelihood[:, 0], np.sum(reads[:, 0], axis=1),
+            np.full(4, subtractor), np.ones(4, dtype=bool), 0.8,
+        )
+        assert tuple(hard) == expected
+        assert tuple(compatible) == (True, True, True, False)
 
-    # Missing sites do not enter the Hamming denominator.
-    def record(sample: int, hard: Sequence[int], q1: float = 0.8) -> ResidualRecord:
-        hard_array = np.asarray(hard, dtype=np.int8)
+    rng = np.random.default_rng(20260809)
+    hard_calls = rng.integers(0, 2, (17, 131), dtype=np.int8)
+    hard_calls[rng.random(hard_calls.shape) < 0.23] = MASK
+    kept = rng.random(131) > 0.17
+    minimum_joint = max(1, int(math.ceil(0.1 * np.sum(kept))))
+    reference, _ = _missing_aware_hamming_reference_kernel(
+        hard_calls, kept, minimum_joint, int(np.sum(kept)), int(MASK)
+    )
+    packed = _missing_aware_hamming_distance_kernel(
+        hard_calls, kept, minimum_joint, int(MASK)
+    )
+    assert np.array_equal(packed, reference)
+
+    def record(sample_index: int, q: float) -> ResidualRecord:
         return ResidualRecord(
-            sample, (0, 1), 0, 1,
-            np.full(len(hard_array), q1),
-            hard_array,
-            hard_array != MASK,
-            float(np.mean(hard_array != MASK)),
+            sample_index=sample_index, assignments=(0, 1), subtractor_index=0,
+            unexplained_assignment=1, soft_alt_probability=np.asarray([q]),
+            hard_calls=np.asarray([int(q >= 0.5)], np.int8),
+            compatible_mask=np.ones(1, bool), hard_known_fraction=1.0,
+            responsibility_weight=1.0, dominant_partner_index=1,
+            dominant_partner_probability=1.0,
         )
+    duplicate = (record(0, 0.8), record(0, 0.8))
+    independent = (record(0, 0.8), record(1, 0.8))
+    duplicate_q, duplicate_known = _soft_consensus_candidate(duplicate, (0, 1), keep, 0.9)
+    independent_q, independent_known = _soft_consensus_candidate(independent, (0, 1), keep, 0.9)
+    assert np.isclose(duplicate_q[0], 0.8) and duplicate_known == 0.0
+    assert independent_q[0] > 0.9 and independent_known == 1.0
+    assert _effective_unique_sample_support(duplicate, (0, 1)) == 1.0
+    assert _effective_unique_sample_support(independent, (0, 1)) == 2.0
 
-    distance, joint = _missing_aware_hamming_matrix(
-        (record(0, [0, MASK, 1]), record(1, [0, 0, MASK])),
-        np.ones(3, dtype=bool),
-        0.3,
-    )
-    assert distance[0, 1] == 0.0 and joint[0, 1] == 1.0 / 3.0
-    distance_only = _missing_aware_hamming_distance_matrix(
-        (record(0, [0, MASK, 1]), record(1, [0, 0, MASK])),
-        np.ones(3, dtype=bool),
-        0.3,
-    )
-    assert np.array_equal(distance_only, distance)
-
-    # The bit-packed production kernel must remain exactly equal to the scalar
-    # reference across word boundaries, missing calls, filtered sites, and
-    # alternative joint-known thresholds.
-    rng = np.random.default_rng(90417)
-    random_hard = rng.choice(
-        np.asarray([0, 1, MASK], dtype=np.int8),
-        size=(19, 129),
-        p=(0.35, 0.35, 0.30),
-    )
-    random_keep = np.ascontiguousarray(rng.random(129) > 0.2)
-    n_random_kept = int(np.sum(random_keep))
-    for minimum_fraction in (0.01, 0.35, 0.95):
-        minimum_joint = max(
-            1, int(math.ceil(minimum_fraction * n_random_kept))
-        )
-        arguments = (
-            np.ascontiguousarray(random_hard),
-            random_keep,
-            minimum_joint,
-            n_random_kept,
-            int(MASK),
-        )
-        packed = _missing_aware_hamming_kernel(*arguments)
-        reference = _missing_aware_hamming_reference_kernel(*arguments)
-        assert np.array_equal(packed[0], reference[0])
-        assert np.array_equal(packed[1], reference[1])
-        distance_only = _missing_aware_hamming_distance_kernel(
-            arguments[0], arguments[1], arguments[2], arguments[4]
-        )
-        assert np.array_equal(distance_only, reference[0])
-
-    # Counting the same sample twice cannot manufacture 0.9 consensus.
-    one = record(0, [1], 0.8)
-    duplicate = record(0, [1], 0.8)
-    independent = record(1, [1], 0.8)
-    candidate_duplicate, _ = _consensus_candidate(
-        (one, duplicate), (0, 1), keep, 0.9
-    )
-    candidate_independent, _ = _consensus_candidate(
-        (one, independent), (0, 1), keep, 0.9
-    )
-    assert candidate_duplicate[0] == 0.5
-    assert candidate_independent[0] == 1.0
-
-    # HDBSCAN must not turn two maximally distant residuals into a cluster.
-    clusters, noise, initial_noise = _cluster_residuals(
-        np.asarray([[0.0, 1.0], [1.0, 0.0]]), 0.1
-    )
-    assert clusters == () and noise == (0, 1) and initial_noise in (0, 2)
-    clusters, noise, initial_noise = _cluster_residuals(
-        np.asarray([[0.0, 0.05], [0.05, 0.0]]), 0.1
-    )
-    assert clusters == (("hdbscan_cluster", 0, (0, 1), 0.05),)
-    assert noise == () and initial_noise == 0
-
-    # End-to-end slot-order invariant rescue of a rare alternating haplotype.
-    n_sites = 20
+    n_sites = 80
     common = np.zeros(n_sites, dtype=np.int8)
-    rare = np.arange(n_sites, dtype=np.int8) % 2
-    discrete = np.vstack([common, np.full(n_sites, MASK, dtype=np.int8)])
-    assignments = np.asarray([[0, 1], [1, 0], [0, 0], [2, 2]], dtype=np.int64)
-    block_reads = np.zeros((4, n_sites, 2), dtype=np.int64)
-    genotype = common + rare
-    block_reads[0, :, 0] = np.where(genotype == 0, 20, 10)
-    block_reads[0, :, 1] = np.where(genotype == 0, 0, 10)
-    block_reads[1] = block_reads[0]
-    block_reads[2, :, 0] = 20
-    fake = SimpleNamespace(
-        discrete_haps=discrete,
-        pair_assignments=assignments,
-        K_final=2,
-        keep_flags=np.ones(n_sites, dtype=np.int8),
-        haplotypes={0: np.column_stack([1.0 - common, common])},
-    )
-    augmented = augment_assigned_residual_candidates(fake, block_reads)
-    assert augmented.n_residual_records == 2
-    assert augmented.n_residual_clusters == 1
-    assert augmented.n_emitted_candidates == 1
-    assert augmented.candidates.shape == (2, n_sites)
-    assert np.array_equal(augmented.candidates[-1], rare.astype(float))
-
-    # A masked one-dimensional input remains unknown, never allele zero.
-    masked_fake = SimpleNamespace(
-        haplotypes={0: np.asarray([0, MASK, 1], dtype=float)}
-    )
-    masked_base = _base_candidate_matrix(masked_fake, 3)
-    assert masked_base.tolist() == [[0.0, 0.5, 1.0]]
-
-    # Agreement on only 60% of the more complete proposal is not enough to
-    # discard it as a duplicate of a partial existing candidate.
-    complete = np.zeros(200, dtype=float)
-    partial = np.full(200, 0.5, dtype=float)
-    partial[:120] = 0.0
-    closest = _closest_existing(
-        complete, (partial,), np.ones(200, dtype=bool), 0.60
-    )
-    assert closest[:2] == (0.0, 0.6)
-    assert not _is_confirmed_duplicate(closest, 0.005, 0.95)
-
-    # Candidate-only provenance, rather than cleaned assignment coordinates,
-    # contributes permissive extras.  Repeated provenance rows are suppressed.
-    precleanup_rows = np.vstack([common, rare, rare])
-    cleaned_result = SimpleNamespace(
-        discrete_haps=common[None, :],
-        precleanup_candidate_discrete_haps=precleanup_rows,
-        precleanup_candidate_k=3,
-        pair_assignments=np.asarray([[0, 0]], dtype=np.int64),
-        K_final=1,
-        keep_flags=np.ones(n_sites, dtype=np.int8),
-        haplotypes={0: np.column_stack([1.0 - common, common])},
-    )
-    genotype_reads = np.zeros((1, n_sites, 2), dtype=np.int64)
-    genotype_reads[0, :, 0] = np.where(rare == 0, 20, 10)
-    genotype_reads[0, :, 1] = np.where(rare == 0, 0, 10)
-    discrete_augmented = augment_assigned_residual_candidates(
-        cleaned_result, genotype_reads
-    )
-    assert discrete_augmented.n_discrete_candidates_added == 1
-    assert discrete_augmented.n_residual_records == 0
-    assert discrete_augmented.candidates.shape == (2, n_sites)
-    assert np.array_equal(discrete_augmented.candidates[-1], rare)
-    assert tuple(
-        provenance.source_class
-        for provenance in discrete_augmented.candidate_provenance
-    ) == ("input_base_candidate", "usable_discrete_candidate")
-
-    # Old checkpoints without candidate-only provenance continue to use their
-    # synchronized discrete rows.  Explicit None has the same legacy meaning.
-    legacy_result = SimpleNamespace(
-        discrete_haps=np.vstack([common, rare]),
-        precleanup_candidate_discrete_haps=None,
-        pair_assignments=np.asarray([[0, 1]], dtype=np.int64),
-        K_final=2,
-        keep_flags=np.ones(n_sites, dtype=np.int8),
-        haplotypes={0: np.column_stack([1.0 - common, common])},
-    )
-    legacy_augmented = augment_assigned_residual_candidates(
-        legacy_result, genotype_reads
-    )
-    assert legacy_augmented.n_discrete_candidates_added == 1
-    assert np.array_equal(legacy_augmented.candidates[-1], rare)
-
-    # Present provenance is authoritative and therefore fails closed rather
-    # than silently falling back when its shape, K, or allele alphabet is bad.
-    malformed_rows = precleanup_rows.copy().astype(np.float64)
-    malformed_rows[0, 0] = 0.5
-    malformed_cases = (
-        SimpleNamespace(
-            discrete_haps=common[None, :],
-            precleanup_candidate_discrete_haps=precleanup_rows,
-        ),
-        SimpleNamespace(
-            discrete_haps=common[None, :],
-            precleanup_candidate_discrete_haps=precleanup_rows,
-            precleanup_candidate_k=2,
-        ),
-        SimpleNamespace(
-            discrete_haps=common[None, :],
-            precleanup_candidate_discrete_haps=common,
-            precleanup_candidate_k=1,
-        ),
-        SimpleNamespace(
-            discrete_haps=common[None, :],
-            precleanup_candidate_discrete_haps=malformed_rows,
-            precleanup_candidate_k=3,
-        ),
-    )
-    for malformed in malformed_cases:
-        try:
-            _candidate_discrete_rows(malformed, n_sites)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("malformed candidate provenance was accepted")
-
-    # Soft consensus also caps duplicate assignment routes from one sample.
-    soft_duplicate_candidate, duplicate_known = _soft_consensus_candidate(
-        (one, duplicate), (0, 1), keep, 0.9
-    )
-    soft_independent_candidate, independent_known = _soft_consensus_candidate(
-        (one, independent), (0, 1), keep, 0.9
-    )
-    assert np.isclose(soft_duplicate_candidate[0], 0.8)
-    assert duplicate_known == 0.0
-    assert soft_independent_candidate[0] > 0.9
-    assert independent_known == 1.0
-    assert _effective_unique_sample_support((one, duplicate), (0, 1)) == 1.0
-    assert _effective_unique_sample_support((one, independent), (0, 1)) == 2.0
-
-    # The explicit A alias is exactly the default historical path.
-    arm_a = augment_assigned_residual_candidates(fake, block_reads, proposal_mode="A")
-    assert np.array_equal(arm_a.candidates, augmented.candidates)
-    assert arm_a.proposal_diagnostics == augmented.proposal_diagnostics
-    explicit_true = augment_assigned_residual_candidates(
-        fake,
-        block_reads,
-        proposal_mode="A",
-        include_assigned_hard_candidates=True,
-    )
-    assert np.array_equal(explicit_true.candidates, augmented.candidates)
-    assert explicit_true.proposal_diagnostics == augmented.proposal_diagnostics
-    assert explicit_true.candidate_provenance == augmented.candidate_provenance
-
-    hard_excluded = augment_assigned_residual_candidates(
-        fake,
-        block_reads,
-        proposal_mode="A",
-        include_assigned_hard_candidates=False,
-    )
-    assert hard_excluded.n_assigned_hard_records == 2
-    assert hard_excluded.n_assigned_hard_candidates_emitted == 0
-    assert hard_excluded.n_soft_candidates_emitted == 0
-    assert hard_excluded.candidates.shape == (1, n_sites)
-    assert all(
-        diagnostic.reason
-        == "excluded_assigned_hard_candidate_by_configuration"
-        for diagnostic in hard_excluded.proposal_diagnostics
-        if diagnostic.proposal_mode == PROPOSAL_MODE_ASSIGNED_HARD
-    )
-    assert len(hard_excluded.candidate_provenance) == 1
-    assert hard_excluded.candidate_provenance[0].source_class == "input_base_candidate"
-    soft_only = augment_assigned_residual_candidates(
-        fake,
-        block_reads,
-        proposal_mode="D",
-        include_assigned_hard_candidates=False,
-    )
-    assert soft_only.n_assigned_hard_candidates_emitted == 0
-    assert soft_only.n_soft_candidates_emitted == 1
-    assert soft_only.candidates.shape == (2, n_sites)
-    assert np.array_equal(soft_only.candidates[-1] >= 0.5, rare.astype(bool))
-    assert soft_only.candidate_provenance[-1].source_class in {
-        PROPOSAL_MODE_SOFT_RESIDUAL,
-        PROPOSAL_MODE_SOFT_SPLIT,
-    }
-    soft_diagnostic_index = soft_only.candidate_provenance[-1].proposal_diagnostic_index
-    assert soft_diagnostic_index is not None
-    assert soft_only.proposal_diagnostics[soft_diagnostic_index].emitted
-
-    prepared_workspace = prepare_residual_inputs(block_reads)
-    soft_prepared = augment_assigned_residual_candidates(
-        fake,
-        block_reads,
-        proposal_mode="D",
-        include_assigned_hard_candidates=False,
-        residual_input_workspace=prepared_workspace,
-    )
-    assert np.array_equal(soft_prepared.candidates, soft_only.candidates)
-    assert soft_prepared.proposal_diagnostics == soft_only.proposal_diagnostics
-    assert soft_prepared.candidate_provenance == soft_only.candidate_provenance
-
-    soft_binary = augment_assigned_residual_candidates(
-        fake,
-        block_reads,
-        proposal_mode="D",
-        include_assigned_hard_candidates=False,
-        residual_input_workspace=prepared_workspace,
-        binary_panel_fast_path=True,
-    )
-    assert np.array_equal(soft_binary.candidates, soft_only.candidates)
-    assert np.array_equal(
-        soft_binary.candidates >= 0.5, soft_only.candidates >= 0.5
-    )
-    assert soft_binary.candidate_provenance == soft_only.candidate_provenance
-    assert soft_binary.proposal_diagnostics == soft_only.proposal_diagnostics
-    assert tuple(item.reason for item in soft_binary.proposal_diagnostics) == tuple(
-        item.reason for item in soft_only.proposal_diagnostics
-    )
-
-    # Preserve generic ordering for an observed near-tie where a flattened
-    # matrix product selected a different dominant partner (~2e-14 apart).
-    tie_rng = np.random.default_rng(20260809)
-    for tie_k in range(1, 7):
-        for tie_rep in range(20):
-            tie_n = int(tie_rng.integers(2, 25))
-            tie_l = int(tie_rng.integers(1, 220))
-            tie_haplotypes = tie_rng.integers(
-                0, 2, (tie_k, tie_l), dtype=np.int64
-            )
-            tie_reads = tie_rng.poisson(3, (tie_n, tie_l, 2))
-            if tie_k == 6 and tie_rep == 7:
-                break
-    tie_likelihood = allele_depths_to_likelihoods(tie_reads, 0.02)
-    tie_pair_i, tie_pair_j, tie_genotype = diplotype_genotype_probabilities(
-        tie_haplotypes.astype(np.float64)
-    )
-    tie_predictive = np.einsum(
-        "nlg,plg->npl", tie_likelihood, tie_genotype, optimize=True
-    )
-    tie_log_emission = np.sum(
-        np.log(np.maximum(tie_predictive, np.finfo(np.float64).tiny)), axis=2
-    )
-    tie_maximum = np.max(tie_log_emission, axis=1, keepdims=True)
-    tie_generic = np.exp(tie_log_emission - tie_maximum)
-    tie_generic /= np.sum(tie_generic, axis=1, keepdims=True)
-    tie_bounded = _binary_panel_responsibility(
-        tie_likelihood,
-        tie_haplotypes,
-        np.ones(tie_l, dtype=bool),
-        tie_pair_i,
-        tie_pair_j,
-    )
-    assert np.array_equal(tie_bounded, tie_generic)
-    assert int(np.argmax(tie_bounded[14])) == 7
-    assert (int(tie_pair_i[7]), int(tie_pair_j[7])) == (1, 2)
-    tie_kernel_arguments = (
-        tie_pair_i,
-        tie_pair_j,
-        tie_k,
-        np.arange(tie_k, dtype=np.int64),
-        tie_haplotypes.astype(np.float64),
-        tie_likelihood,
-        np.sum(tie_reads, axis=2),
-        np.ones(tie_l, dtype=bool),
-        0.8,
-        0.25,
-        int(MASK),
-    )
-    tie_generic_fields = _soft_residual_numeric_kernel(
-        np.ascontiguousarray(tie_generic), *tie_kernel_arguments
-    )
-    tie_bounded_fields = _soft_residual_numeric_kernel(
-        np.ascontiguousarray(tie_bounded), *tie_kernel_arguments
-    )
-    assert all(
-        np.array_equal(generic_field, bounded_field)
-        for generic_field, bounded_field in zip(
-            tie_generic_fields, tie_bounded_fields
-        )
-    )
-
-    # A near-clone can be hidden behind a hard assignment to two usable rows.
-    absorbed_sites = 80
-    first_haplotype = np.zeros(absorbed_sites, dtype=np.int8)
-    second_haplotype = (np.arange(absorbed_sites) % 2).astype(np.int8)
-    near_clone = second_haplotype.copy()
-    flipped_sites = np.arange(0, absorbed_sites, 10)
-    near_clone[flipped_sites] = 1 - near_clone[flipped_sites]
-    absorbed_discrete = np.vstack([first_haplotype, second_haplotype])
-    absorbed_assignments = np.asarray(
-        [[0, 1], [0, 1], [0, 0], [1, 1]], dtype=np.int64
-    )
-    absorbed_reads = np.zeros((4, absorbed_sites, 2), dtype=np.int64)
-    absorbed_diplotypes = (
-        (first_haplotype, near_clone),
-        (first_haplotype, near_clone),
-        (first_haplotype, first_haplotype),
-        (second_haplotype, second_haplotype),
-    )
-    for sample_index, (first, second) in enumerate(absorbed_diplotypes):
+    alternate = (np.arange(n_sites) % 2).astype(np.int8)
+    near_clone = alternate.copy()
+    near_clone[np.arange(0, n_sites, 10)] ^= 1
+    discrete = np.vstack([common, alternate])
+    assignments = np.asarray([[0, 1], [0, 1], [0, 0], [1, 1]], np.int64)
+    block_reads = np.zeros((4, n_sites, 2), np.int64)
+    diplotypes = ((common, near_clone), (common, near_clone), (common, common), (alternate, alternate))
+    for sample_index, (first, second) in enumerate(diplotypes):
         genotype = first + second
-        absorbed_reads[sample_index, :, 0] = np.where(
-            genotype == 0, 30, np.where(genotype == 1, 15, 0)
-        )
-        absorbed_reads[sample_index, :, 1] = np.where(
-            genotype == 0, 0, np.where(genotype == 1, 15, 30)
-        )
-    absorbed_fake = SimpleNamespace(
-        discrete_haps=absorbed_discrete,
-        pair_assignments=absorbed_assignments,
-        K_final=2,
-        keep_flags=np.ones(absorbed_sites, dtype=np.int8),
+        block_reads[sample_index, :, 0] = np.where(genotype == 0, 30, np.where(genotype == 1, 15, 0))
+        block_reads[sample_index, :, 1] = np.where(genotype == 0, 0, np.where(genotype == 1, 15, 30))
+    block = SimpleNamespace(
+        discrete_haps=discrete, precleanup_candidate_discrete_haps=discrete,
+        precleanup_candidate_k=2, pair_assignments=assignments, K_final=2,
+        keep_flags=np.ones(n_sites, np.int8),
         haplotypes={
-            0: np.column_stack([1.0 - first_haplotype, first_haplotype]),
-            1: np.column_stack([1.0 - second_haplotype, second_haplotype]),
+            0: np.column_stack([1.0 - common, common]),
+            1: np.column_stack([1.0 - alternate, alternate]),
         },
     )
-
-    absorbed_a = augment_assigned_residual_candidates(
-        absorbed_fake, absorbed_reads, proposal_mode="A"
+    generic = augment_combined_soft_candidates(block, block_reads)
+    repeated = augment_combined_soft_candidates(block, block_reads)
+    prepared = augment_combined_soft_candidates(
+        block, block_reads, residual_input_workspace=prepare_residual_inputs(block_reads)
     )
-    absorbed_c = augment_assigned_residual_candidates(
-        absorbed_fake,
-        absorbed_reads,
-        proposal_mode="C",
-        include_assigned_hard_candidates=False,
+    binary = augment_combined_soft_candidates(
+        block, block_reads, residual_input_workspace=prepare_residual_inputs(block_reads),
+        binary_panel_fast_path=True,
     )
-    assert absorbed_a.n_assigned_hard_records == 0
-    assert absorbed_a.n_emitted_candidates == 0
-    near_candidates = [
-        row
-        for row in absorbed_c.candidates[absorbed_c.n_base_candidates :]
-        if np.array_equal(
-            (row >= 0.5).astype(np.int8),
-            near_clone,
-        )
-    ]
-    assert near_candidates
-    assert not absorbed_c.include_assigned_hard_candidates
-    assert absorbed_c.n_assigned_hard_candidates_emitted == 0
-    assert absorbed_c.n_soft_candidates_emitted == absorbed_c.n_emitted_candidates
-    assert len(absorbed_c.candidate_provenance) == len(absorbed_c.candidates)
-    for index, (provenance, candidate) in enumerate(
-        zip(absorbed_c.candidate_provenance, absorbed_c.candidates)
-    ):
+    for other in (repeated, prepared, binary):
+        assert np.array_equal(other.candidates, generic.candidates)
+        assert other.proposal_diagnostics == generic.proposal_diagnostics
+        assert other.candidate_provenance == generic.candidate_provenance
+    emitted = generic.candidates[generic.n_base_candidates:]
+    assert any(np.array_equal((row >= 0.5).astype(np.int8), near_clone) for row in emitted)
+    assert generic.n_soft_records == generic.n_residual_records
+    assert generic.n_soft_candidates_emitted == generic.n_emitted_candidates
+    assert generic.n_soft_residual_clusters > 0 and generic.n_soft_split_clusters > 0
+    assert len(generic.candidate_provenance) == len(generic.candidates)
+    for index, (provenance, candidate) in enumerate(zip(generic.candidate_provenance, generic.candidates)):
         assert provenance.candidate_index == index
         assert provenance.canonical_candidate_digest == _candidate_digest(candidate)
-    for provenance in absorbed_c.candidate_provenance[
-        absorbed_c.n_base_candidates :
-    ]:
-        assert provenance.source_class == PROPOSAL_MODE_SOFT_SPLIT
-        assert provenance.proposal_diagnostic_index is not None
-        source_diagnostic = absorbed_c.proposal_diagnostics[
-            provenance.proposal_diagnostic_index
-        ]
-        assert source_diagnostic.emitted
-    assert any(
-        np.any(
-            (row > 0.0)
-            & (row < 1.0)
-            & (~np.isclose(row, 0.5, rtol=0.0, atol=1e-12))
-        )
-        for row in near_candidates
-    )
-    soft_diagnostics = [
-        diagnostic
-        for diagnostic in absorbed_c.proposal_diagnostics
-        if diagnostic.proposal_mode == PROPOSAL_MODE_SOFT_SPLIT
-    ]
-    assert soft_diagnostics
-    assert all(
-        diagnostic.sample_indices
-        == tuple(sorted(set(diagnostic.sample_indices)))
-        for diagnostic in soft_diagnostics
-    )
-    assert all(
-        diagnostic.effective_sample_support
-        <= diagnostic.unique_sample_support + 1e-12
-        for diagnostic in soft_diagnostics
-    )
 
-    # One absorbed sample is not promoted merely because it is a singleton.
-    singleton_fake = SimpleNamespace(
-        discrete_haps=absorbed_discrete,
-        pair_assignments=absorbed_assignments[[0, 2, 3]],
-        K_final=2,
-        keep_flags=np.ones(absorbed_sites, dtype=np.int8),
-        haplotypes=absorbed_fake.haplotypes,
+    singleton = SimpleNamespace(
+        discrete_haps=discrete, precleanup_candidate_discrete_haps=discrete,
+        precleanup_candidate_k=2, pair_assignments=assignments[[0, 2, 3]],
+        K_final=2, keep_flags=np.ones(n_sites, np.int8), haplotypes=block.haplotypes,
     )
-    singleton = augment_assigned_residual_candidates(
-        singleton_fake,
-        absorbed_reads[[0, 2, 3]],
-        proposal_mode="C",
+    singleton_result = augment_combined_soft_candidates(
+        singleton, block_reads[[0, 2, 3]]
     )
-    assert singleton.n_assigned_hard_records == 0
-    assert singleton.n_soft_split_clusters == 0
-    assert singleton.n_emitted_candidates == 0
+    assert singleton_result.n_soft_split_clusters == 0
 
-    combined = augment_assigned_residual_candidates(
-        absorbed_fake, absorbed_reads, proposal_mode="D"
-    )
-    combined_repeat = augment_assigned_residual_candidates(
-        absorbed_fake, absorbed_reads, proposal_mode="D"
-    )
-    assert np.array_equal(combined.candidates, combined_repeat.candidates)
-    emitted_digests = tuple(
-        diagnostic.canonical_candidate_digest
-        for diagnostic in combined.proposal_diagnostics
-        if diagnostic.emitted
-    )
-    assert len(emitted_digests) == len(set(emitted_digests))
-    assert any(
-        diagnostic.reason == "duplicate_existing_candidate"
-        for diagnostic in combined.proposal_diagnostics
-    )
-
-    # Fully explained diplotypes create only deduplicated soft proposals.
-    explained_reads = np.zeros((4, absorbed_sites, 2), dtype=np.int64)
-    explained_genotype = first_haplotype + second_haplotype
-    explained_reads[:, :, 0] = np.where(
-        explained_genotype == 0, 30, np.where(explained_genotype == 1, 15, 0)
-    )
-    explained_reads[:, :, 1] = np.where(
-        explained_genotype == 0, 0, np.where(explained_genotype == 1, 15, 30)
-    )
-    explained_fake = SimpleNamespace(
-        discrete_haps=absorbed_discrete,
-        pair_assignments=np.tile(np.asarray([[0, 1]], dtype=np.int64), (4, 1)),
-        K_final=2,
-        keep_flags=np.ones(absorbed_sites, dtype=np.int8),
-        haplotypes=absorbed_fake.haplotypes,
-    )
-    dross_control = augment_assigned_residual_candidates(
-        explained_fake,
-        explained_reads,
-        proposal_mode="D",
-        include_assigned_hard_candidates=False,
-    )
-    assert dross_control.n_assigned_hard_records == 0
-    assert dross_control.n_emitted_candidates == 0
-    assert dross_control.proposal_diagnostics
-    assert all(
-        diagnostic.reason == "duplicate_existing_candidate"
-        for diagnostic in dross_control.proposal_diagnostics
-    )
-
-    low_depth_control = augment_assigned_residual_candidates(
-        fake,
-        np.zeros_like(block_reads),
-        proposal_mode="D",
-        include_assigned_hard_candidates=False,
-    )
-    assert low_depth_control.n_assigned_hard_records == 2
-    assert low_depth_control.n_assigned_hard_candidates_emitted == 0
-    assert low_depth_control.n_soft_candidates_emitted == 0
-    assert low_depth_control.n_emitted_candidates == 0
-    assert low_depth_control.candidates.shape == (1, n_sites)
-    assert all(
-        provenance.source_class == "input_base_candidate"
-        for provenance in low_depth_control.candidate_provenance
-    )
+    zero_depth = augment_combined_soft_candidates(block, np.zeros_like(block_reads))
+    assert zero_depth.n_emitted_candidates == 0
+    assert zero_depth.candidates.shape == (2, n_sites)
     print("bhd_candidate_pool selftest: PASS")
 
 

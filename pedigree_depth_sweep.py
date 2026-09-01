@@ -3,7 +3,15 @@
 # pedigree_depth_sweep.py
 # =============================================================================
 # Driver for the read-depth x seed sweep used to make the pedigree-inference
-# accuracy figure.  Runs the SELF-CONTAINED pipeline snapshot
+# accuracy figure.
+#
+# CURRENT RELEASE STATUS: unavailable while the canonical Stage-1 founder
+# calls can contain unknown alleles. The invoked simulation pipeline stops
+# after Stage 1 until every downstream consumer preserves those abstentions.
+# This driver exits before creating run directories instead of reporting a
+# misleading Stage-11 failure.
+#
+# The retained implementation runs the SELF-CONTAINED pipeline snapshot
 # `pedigree_sim_pipeline.py` (stages 2-11) once per seed, in isolated
 # per-(depth, seed) directories.  Neither this file nor the snapshot has any
 # runtime dependency on pipeline.py -- you can delete pipeline.py and both
@@ -13,7 +21,7 @@
 #   For the depth set below, for each seed in SEEDS:
 #     * make isolated checkpoint + results dirs under
 #       SWEEP_ROOT/depth<D>/seed<S>/,
-#     * symlink the existing .pipeline_checkpoints/01_vcf_discovery in
+#     * symlink the existing .pipeline_checkpoints_reversible_cavity_depth_observation_v1/01_founder_discovery in
 #       read-only so stage 1 (founders) is reused, never recomputed,
 #     * run pedigree_sim_pipeline.py with that combo's seed/depth/dirs via
 #       environment variables, as a fresh subprocess (so memory is released
@@ -26,7 +34,7 @@
 #
 # ISOLATION / PARALLELISM
 #   Different depths (different nodes) write to different subtrees and never
-#   collide.  The only shared path is .pipeline_checkpoints/01_vcf_discovery,
+#   collide.  The only shared path is .pipeline_checkpoints_reversible_cavity_depth_observation_v1/01_founder_discovery,
 #   which is read-only here, so concurrent nodes are safe.
 #
 # USAGE (next to pedigree_sim_pipeline.py and the project modules):
@@ -52,9 +60,13 @@ import checkpoint_io
 READ_DEPTH = 5.0                      # <-- CHANGE PER NODE: 5, 3, 2, 1, 0.5, 0.2
 SEEDS = [0, 1, 2, 3, 4]               # five replicate simulations per depth
 
-SWEEP_ROOT_NAME = "pedigree_depth_sweep"   # new top-level dir for ALL sweep data
-SOURCE_CHECKPOINTS = ".pipeline_checkpoints"   # reuse stage 1 (read-only) from here
-STAGE1_NAME = "01_vcf_discovery"           # the seed/depth-independent stage to reuse
+SWEEP_ROOT_NAME = (
+    "pedigree_depth_sweep_reversible_cavity_depth_observation_v1"
+)
+SOURCE_CHECKPOINTS = (
+    ".pipeline_checkpoints_reversible_cavity_depth_observation_v1"
+)
+STAGE1_NAME = "01_founder_discovery"           # the seed/depth-independent stage to reuse
 STAGE11_NAME = "11_pedigree_inference_current_b1_combined_v1_calibrated_v1"
 SIM_PIPELINE_FILE = "pedigree_sim_pipeline.py"   # the self-contained stages-2-11 file
 
@@ -71,7 +83,7 @@ CONTINUE_ON_FAILURE = True            # if one seed fails, still attempt the res
 # 09 (L4), plus 11 (tiny; carries the completion marker) and the results/ CSVs.
 PRUNE_INTERMEDIATES = True             # set False to keep every stage
 PRUNE_STAGES = (
-    "03_block_haplotypes",
+    "03_founder_discovery",
     "04_refinement",
     "06_assembly_L1",
     "07_assembly_L2",
@@ -249,15 +261,23 @@ def run_one_combo(depth, seed, sim_pipeline, dry_run=False):
 # =============================================================================
 def main():
     ap = argparse.ArgumentParser(
-        description="Run the pedigree-inference depth sweep for ONE depth "
-                    "across seeds 0-4 (stages 2-11 only).")
+        description=(
+            "Unavailable in the current Stage-1-only release because "
+            "downstream stages do not preserve unknown founder alleles."
+        ),
+    )
     ap.add_argument("--depth", type=float, default=None,
-                    help=f"read depth for this node (default {READ_DEPTH})")
+                    help=f"reserved depth setting (default {READ_DEPTH})")
     ap.add_argument("--seeds", type=int, nargs="+", default=None,
-                    help=f"seeds to run (default {SEEDS})")
+                    help=f"reserved seed settings (default {SEEDS})")
     ap.add_argument("--dry-run", action="store_true",
-                    help="set up dirs + stage-1 symlinks, but launch nothing")
+                    help="reserved; no directories are created in this release")
     args = ap.parse_args()
+
+    raise SystemExit(
+        "[BHD-SWEEP] unavailable in the current Stage-1-only release: "
+        "downstream stages do not yet preserve unknown founder alleles"
+    )
 
     depth = args.depth if args.depth is not None else READ_DEPTH
     seeds = args.seeds if args.seeds is not None else SEEDS
