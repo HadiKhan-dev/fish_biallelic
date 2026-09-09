@@ -1,0 +1,1108 @@
+"""simulation / pedigree for the canonical reconstruction pipeline."""
+from __future__ import annotations
+
+
+import random
+import numpy as np
+import pickle
+import pandas as pd
+
+import os
+from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor
+
+
+try:
+    import networkx as nx
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    HAS_VIS = True
+except ImportError:
+    HAS_VIS = False
+
+
+def materialize_simulation_haplotypes(haps_list, rng):
+    """Create complete binary simulation truth without reference-biased ties.
+
+    Confident probabilistic calls retain their maximum-probability allele.
+    Exact probability ties, including explicit unknown (0.5, 0.5) cells, are
+    resolved by the supplied random generator. The caller must persist the
+    generator seed as part of the simulation identity.
+    """
+
+    if not isinstance(rng, np.random.Generator):
+        raise TypeError("rng must be a numpy.random.Generator")
+    result = []
+    for haplotype in haps_list:
+        values = np.asarray(haplotype)
+        if values.ndim == 1:
+            if np.any((values != 0) & (values != 1)):
+                raise ValueError(
+                    "one-dimensional simulation haplotypes must contain 0/1"
+                )
+            result.append(np.asarray(values, dtype=np.int8).copy())
+            continue
+        if values.ndim != 2 or values.shape[1] != 2:
+            raise ValueError(
+                "probabilistic simulation haplotypes must have shape (sites, 2)"
+            )
+        if np.any(~np.isfinite(values)) or np.any(values < 0.0):
+            raise ValueError(
+                "simulation haplotype probabilities must be finite and nonnegative"
+            )
+        totals = np.sum(values, axis=1)
+        if np.any(totals <= 0.0):
+            raise ValueError(
+                "simulation haplotype probability rows must have positive mass"
+            )
+        alleles = np.argmax(values, axis=1).astype(np.int8)
+        tied = values[:, 0] == values[:, 1]
+        if np.any(tied):
+            alleles[tied] = rng.integers(
+                0, 2, size=int(np.sum(tied)), dtype=np.int8
+            )
+        result.append(alleles)
+    return result
+
+
+def pairup_haps(haps_list, shuffle=False):
+    """
+    Pair up a list of concrete haps (made up of 0s and 1s)
+    """
+    haps_copy = pickle.loads(pickle.dumps(haps_list))
+
+    if shuffle:
+        random.shuffle(haps_copy)
+
+    num_pairs = len(haps_list) // 2
+    haps_paired = []
+
+    for i in range(num_pairs):
+        first = haps_copy[2 * i]
+        second = haps_copy[2 * i + 1]
+        haps_paired.append([first, second])
+
+    return haps_paired
+
+
+def get_segments_in_range(source_painting, range_start, range_end):
+    """
+    Helper to extract and clip ancestry segments that fall within a specific window.
+    source_painting: List of (start, end, founder_id)
+    """
+    result = []
+    for (seg_start, seg_end, fid) in source_painting:
+        overlap_start = max(seg_start, range_start)
+        overlap_end = min(seg_end, range_end)
+        if overlap_start < overlap_end:
+            result.append((overlap_start, overlap_end, fid))
+    return result
+
+
+def validate_recombination_profile(recombination_profile):
+    """Validate and canonicalise a relative-position recombination profile.
+
+    A profile contains ``(start_fraction, end_fraction, multiplier)`` triples.
+    Segments must be contiguous, cover ``[0, 1]``, and use finite
+    non-negative multipliers. Multipliers are normalised by their
+    length-weighted mean, so
+    the scalar ``recomb_rate`` remains the chromosome-average per-base rate.
+
+    ``None`` selects the historical homogeneous simulator and is returned
+    unchanged so that its API and random-number stream remain exactly intact.
+    """
+    if recombination_profile is None:
+        return None
+
+    try:
+        profile = tuple(
+            (float(start), float(end), float(multiplier))
+            for start, end, multiplier in recombination_profile
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "recombination_profile must contain "
+            "(start_fraction, end_fraction, multiplier) triples"
+        ) from exc
+
+    if not profile:
+        raise ValueError("recombination_profile must contain at least one segment")
+
+    tolerance = 1e-12
+    previous_end = 0.0
+    weighted_multiplier = 0.0
+    for segment_index, (start, end, multiplier) in enumerate(profile):
+        if not np.isfinite(start) or not np.isfinite(end):
+            raise ValueError("recombination-profile boundaries must be finite")
+        if not np.isfinite(multiplier) or multiplier < 0.0:
+            raise ValueError(
+                "recombination-profile multipliers must be finite and non-negative"
+            )
+        if end <= start:
+            raise ValueError(
+                f"recombination-profile segment {segment_index} has end <= start"
+            )
+        if abs(start - previous_end) > tolerance:
+            raise ValueError(
+                "recombination-profile segments must be ordered, contiguous, "
+                "and begin at 0"
+            )
+        weighted_multiplier += (end - start) * multiplier
+        previous_end = end
+
+    if abs(profile[0][0]) > tolerance or abs(previous_end - 1.0) > tolerance:
+        raise ValueError("recombination_profile must cover the full interval [0, 1]")
+    if weighted_multiplier <= 0.0 or not np.isfinite(weighted_multiplier):
+        raise ValueError("recombination_profile has an invalid weighted mean")
+
+    # Remove harmless boundary round-off so downstream metadata is canonical.
+    canonical = list(profile)
+    canonical[0] = (0.0, canonical[0][1], canonical[0][2])
+    canonical[-1] = (canonical[-1][0], 1.0, canonical[-1][2])
+    return tuple(canonical)
+
+
+def resolve_recombination_profile(recombination_profile, recomb_rate):
+    """Return ``(start_fraction, end_fraction, rate_per_bp)`` segments."""
+    profile = validate_recombination_profile(recombination_profile)
+    if profile is None:
+        return ((0.0, 1.0, float(recomb_rate)),)
+    if not np.isfinite(recomb_rate) or recomb_rate < 0.0:
+        raise ValueError("recomb_rate must be finite and non-negative")
+
+    weighted_multiplier = sum(
+        (end - start) * multiplier
+        for start, end, multiplier in profile
+    )
+    return tuple(
+        (start, end, float(recomb_rate) * multiplier / weighted_multiplier)
+        for start, end, multiplier in profile
+    )
+
+
+def _sample_profile_crossovers(site_locs, recomb_rate,
+                               recombination_profile, rng):
+    """Sample an exact piecewise-constant non-homogeneous Poisson process."""
+    start_phys = float(site_locs[0])
+    end_phys = float(site_locs[-1])
+    chromosome_span = end_phys - start_phys
+    if chromosome_span <= 0.0 or recomb_rate == 0.0:
+        return np.empty(0, dtype=np.float64)
+
+    events = []
+    for start_fraction, end_fraction, segment_rate in resolve_recombination_profile(
+            recombination_profile, recomb_rate):
+        segment_start = start_phys + chromosome_span * start_fraction
+        segment_end = start_phys + chromosome_span * end_fraction
+        event_count = int(rng.poisson(segment_rate * (segment_end - segment_start)))
+        if event_count:
+            events.append(rng.uniform(segment_start, segment_end, size=event_count))
+
+    if not events:
+        return np.empty(0, dtype=np.float64)
+    return np.sort(np.concatenate(events).astype(np.float64, copy=False))
+
+
+def _sample_map_crossovers(site_locs, chromosome_map, rng):
+    """Sample a Poisson process uniform in integrated genetic coordinates."""
+    start,end = float(site_locs[0]),float(site_locs[-1])
+    distance = float(chromosome_map.interval_morgans(start,end))
+    if distance == 0:
+        return np.empty(0,dtype=np.float64)
+    count = int(rng.poisson(distance))
+    genetic_start = float(chromosome_map.cumulative_morgans(start))
+    coordinates = genetic_start + rng.uniform(0.,distance,size=count)
+    return np.sort(chromosome_map.inverse_morgans(coordinates))
+
+
+def recombine_haps(hap_pair, ancestry_pair, site_locs,
+                   recomb_rate=10**-8, mutate_rate=10**-8, rng=None,
+                   recombination_profile=None,
+                   return_crossover_events=False, chromosome_map=None):
+    """Simulate one gamete, tracking alleles and founder ancestry.
+
+    ``recombination_profile`` optionally supplies relative-position rate
+    multipliers; see :func:`validate_recombination_profile`. An absolute
+    ``chromosome_map`` instead supplies integrated genetic distance and cannot
+    be combined with that relative profile. Without either, the historical
+    positive-rate homogeneous branch executes without changing its random
+    draws. If ``return_crossover_events`` is true, a third return value holds
+    the raw physical crossover locations used to construct this gamete.
+    """
+    if chromosome_map is not None:
+        if chromosome_map.has_map and recombination_profile is not None:
+            raise ValueError("absolute chromosome map and relative recombination profile cannot be combined")
+        recomb_rate = chromosome_map.fallback_rate_per_bp
+    if not np.isfinite(recomb_rate) or recomb_rate < 0:
+        raise ValueError("recomb_rate must be finite and nonnegative")
+    using_absolute_map = chromosome_map is not None and chromosome_map.has_map
+    if rng is None:
+        rng = np.random.default_rng()
+
+    mutate_scale = 1.0 / mutate_rate
+
+    assert len(hap_pair[0]) == len(hap_pair[1]), "Length of two haplotypes is different"
+    assert len(hap_pair[0]) == len(site_locs), "Different length of hap and of list of site locations"
+
+    start_phys = site_locs[0]
+    end_phys = site_locs[-1]
+
+    cur_loc = start_phys
+    cur_loc_index = 0
+
+    using_hap = rng.choice([0, 1])
+
+    final_hap_alleles = []
+    final_hap_ancestry = []
+    crossover_events = []
+
+    if recombination_profile is None and not using_absolute_map and recomb_rate>0:
+        # Keep this historical path structurally unchanged. Recording events
+        # performs no additional random draws.
+        recomb_scale = 1.0 / recomb_rate
+        while cur_loc <= end_phys:
+            next_break_distance = rng.exponential(recomb_scale)
+            new_loc = cur_loc + np.ceil(next_break_distance)
+            new_loc_index = np.searchsorted(site_locs, new_loc)
+
+            adding = hap_pair[using_hap][cur_loc_index:new_loc_index]
+            final_hap_alleles.append(adding)
+
+            segment_phys_end = min(new_loc, end_phys)
+            parent_segments = get_segments_in_range(
+                ancestry_pair[using_hap], cur_loc, segment_phys_end
+            )
+            final_hap_ancestry.extend(parent_segments)
+
+            if return_crossover_events and new_loc <= end_phys:
+                crossover_events.append(float(new_loc))
+
+            using_hap = 1 - using_hap
+            cur_loc = new_loc
+            cur_loc_index = new_loc_index
+
+            if cur_loc_index >= len(site_locs):
+                break
+    else:
+        if using_absolute_map:
+            sampled_events = _sample_map_crossovers(site_locs,chromosome_map,rng)
+        elif recomb_rate == 0:
+            sampled_events = np.empty(0,dtype=np.float64)
+        else:
+            sampled_events = _sample_profile_crossovers(
+                site_locs, recomb_rate, recombination_profile, rng
+            )
+        # A terminal boundary beyond the last marker includes the final allele
+        # while retaining the historical [start, end) ancestry convention.
+        terminal_loc = np.nextafter(float(end_phys), np.inf)
+        for event_index in range(len(sampled_events) + 1):
+            is_crossover = event_index < len(sampled_events)
+            new_loc = (sampled_events[event_index]
+                       if is_crossover else terminal_loc)
+            new_loc_index = np.searchsorted(site_locs, new_loc)
+            final_hap_alleles.append(
+                hap_pair[using_hap][cur_loc_index:new_loc_index]
+            )
+            final_hap_ancestry.extend(get_segments_in_range(
+                ancestry_pair[using_hap], cur_loc, min(new_loc, end_phys)
+            ))
+            if is_crossover:
+                crossover_events.append(float(new_loc))
+                using_hap = 1 - using_hap
+                cur_loc = new_loc
+                cur_loc_index = new_loc_index
+
+    return_alleles = np.concatenate(final_hap_alleles)
+
+    if len(return_alleles) > len(site_locs):
+        return_alleles = return_alleles[:len(site_locs)]
+
+    # Apply Mutations (only affects alleles, not ancestry)
+    mutation_points = []
+    cur_loc = start_phys
+
+    while cur_loc <= end_phys:
+        next_mutation_distance = rng.exponential(mutate_scale)
+        new_loc = cur_loc + np.floor(next_mutation_distance)
+        new_loc_index = np.searchsorted(site_locs, new_loc)
+
+        if new_loc_index < len(site_locs):
+            mutation_points.append(new_loc_index)
+
+        cur_loc = new_loc
+
+    if len(mutation_points) > 0:
+        base_vals = return_alleles[mutation_points]
+        mutated_vals = 1 - base_vals
+        return_alleles[mutation_points] = mutated_vals
+
+    if return_crossover_events:
+        return (return_alleles, final_hap_ancestry,
+                np.asarray(crossover_events, dtype=np.float64))
+    return return_alleles, final_hap_ancestry
+
+
+def create_offspring(first_pair, second_pair,
+                     first_ancestry, second_ancestry,
+                     site_locs, recomb_rate=10**-8,
+                     mutate_rate=10**-8, rng=None,
+                     recombination_profile=None,
+                     return_crossover_events=False, chromosome_map=None):
+    """Create one diploid offspring from two parents."""
+    if rng is None:
+        rng = np.random.default_rng()
+
+    first_result = recombine_haps(
+        first_pair, first_ancestry, site_locs,
+        recomb_rate=recomb_rate, mutate_rate=mutate_rate, rng=rng,
+        recombination_profile=recombination_profile,
+        return_crossover_events=return_crossover_events, chromosome_map=chromosome_map,
+    )
+
+    second_result = recombine_haps(
+        second_pair, second_ancestry, site_locs,
+        recomb_rate=recomb_rate, mutate_rate=mutate_rate, rng=rng,
+        recombination_profile=recombination_profile,
+        return_crossover_events=return_crossover_events, chromosome_map=chromosome_map,
+    )
+
+    h1_alleles, h1_ancestry = first_result[:2]
+    h2_alleles, h2_ancestry = second_result[:2]
+    offspring = ([h1_alleles, h2_alleles], [h1_ancestry, h2_ancestry])
+    if return_crossover_events:
+        return offspring + ([first_result[2], second_result[2]],)
+    return offspring
+
+
+def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rng=None):
+    """
+    Vectorized read sampling across ALL individuals at once.
+
+    Instead of looping over 320 individuals each doing separate
+    np.random calls, performs single bulk poisson + masked binomial
+    calls over the full (N_individuals, N_sites) array.
+
+    Args:
+        individual_list: List of (hap0, hap1) pairs.
+        read_depth: Average sequencing depth.
+        error_rate: Per-base sequencing error rate.
+        rng: Optional numpy Generator for reproducibility. If None, uses
+             np.random (legacy global state, not reproducible).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    num_individuals = len(individual_list)
+    num_sites = len(individual_list[0][0])
+
+    hap0 = np.array([ind[0] for ind in individual_list])  # (N, S)
+    hap1 = np.array([ind[1] for ind in individual_list])  # (N, S)
+    site_sum = hap0 + hap1  # (N, S) — genotype: 0, 1, or 2
+
+    # Sample read depths for all individuals x sites at once
+    num_reads = rng.poisson(lam=read_depth, size=(num_individuals, num_sites))
+
+    # Alt read count depends on genotype
+    alt_reads = np.zeros_like(num_reads)
+
+    mask0 = (site_sum == 0)
+    mask1 = (site_sum == 1)
+    mask2 = (site_sum == 2)
+
+    if np.any(mask0):
+        alt_reads[mask0] = rng.binomial(num_reads[mask0], error_rate)
+    if np.any(mask1):
+        alt_reads[mask1] = rng.binomial(num_reads[mask1], 0.5)
+    if np.any(mask2):
+        alt_reads[mask2] = rng.binomial(num_reads[mask2], 1 - error_rate)
+
+    ref_reads = num_reads - alt_reads
+
+    return np.stack([ref_reads, alt_reads], axis=-1).astype(int)
+
+
+def chunk_up_data(positions_list, reads_array,
+                  starting_pos, ending_pos,
+                  block_size, shift_size,
+                  use_snp_count=False, snps_per_block=200, snp_shift=100,
+                  error_rate=0.02,
+                  min_total_reads=5):
+    """
+    Breaks up the positions_list and reads_array into blocks.
+    """
+    chunked_positions = []
+    chunked_reads = []
+    chunked_keep_flags = []
+
+    num_samples = reads_array.shape[0]
+    total_sites = len(positions_list)
+
+    range_start_idx = np.searchsorted(positions_list, starting_pos)
+    range_end_idx = np.searchsorted(positions_list, ending_pos)
+
+    positions_slice = positions_list[range_start_idx:range_end_idx]
+    reads_slice = reads_array[:, range_start_idx:range_end_idx, :]
+
+    slice_len = len(positions_slice)
+
+    if slice_len == 0:
+        return core_variants.GenomicData([], [], [])
+
+    if use_snp_count:
+        curr_idx = 0
+        while curr_idx < slice_len:
+            end_idx = min(curr_idx + snps_per_block, slice_len)
+            if end_idx == curr_idx:
+                break
+
+            block_positions = positions_slice[curr_idx:end_idx]
+            block_reads_array = reads_slice[:, curr_idx:end_idx, :]
+
+            total_read_pos = np.sum(block_reads_array, axis=(0, 2))
+            block_keep_flags = (total_read_pos >= max(min_total_reads, error_rate * num_samples)).astype(int)
+
+            chunked_positions.append(np.array(block_positions))
+            chunked_reads.append(block_reads_array)
+            chunked_keep_flags.append(block_keep_flags)
+
+            curr_idx += snp_shift
+
+    else:
+        cur_pos = positions_slice[0]
+        cur_idx_in_slice = 0
+        max_phys_pos = positions_slice[-1]
+
+        while cur_pos < max_phys_pos:
+            block_end_pos = cur_pos + block_size
+            end_idx_in_slice = cur_idx_in_slice
+            while end_idx_in_slice < slice_len and positions_slice[end_idx_in_slice] < block_end_pos:
+                end_idx_in_slice += 1
+
+            block_positions = positions_slice[cur_idx_in_slice:end_idx_in_slice]
+
+            if len(block_positions) > 0:
+                block_reads_array = reads_slice[:, cur_idx_in_slice:end_idx_in_slice, :]
+                total_read_pos = np.sum(block_reads_array, axis=(0, 2))
+                block_keep_flags = (total_read_pos >= max(min_total_reads, error_rate * num_samples)).astype(int)
+
+                chunked_positions.append(np.array(block_positions))
+                chunked_reads.append(block_reads_array)
+                chunked_keep_flags.append(block_keep_flags)
+
+            cur_pos = cur_pos + shift_size
+            while cur_idx_in_slice < slice_len and positions_slice[cur_idx_in_slice] < cur_pos:
+                cur_idx_in_slice += 1
+
+    return core_variants.GenomicData(chunked_positions, chunked_keep_flags, chunked_reads)
+
+
+def plot_ground_truth_pedigree(relationships_df, output_file="ground_truth_pedigree.png"):
+    """
+    Plots the Ground Truth Pedigree structure.
+    Gracefully handles disk quota / IO errors.
+    """
+    if not HAS_VIS:
+        print("Visualization libraries not found.")
+        return
+    if output_file is None:
+        return
+
+    try:
+        folder = os.path.dirname(output_file)
+        if folder and not os.path.exists(folder):
+            os.makedirs(folder, exist_ok=True)
+
+        G = nx.DiGraph()
+        unique_gens = sorted(relationships_df['Generation'].unique())
+
+        all_samples = set(relationships_df['Sample'])
+        all_parents = set(relationships_df['Parent1'].dropna()) | set(relationships_df['Parent2'].dropna())
+        founders = list(all_parents - all_samples)
+
+        if founders:
+            unique_gens.insert(0, "Founder")
+
+        cmap = plt.get_cmap("tab10")
+        gen_colors = {gen: cmap(i) for i, gen in enumerate(unique_gens)}
+
+        generations_nodes = {gen: [] for gen in unique_gens}
+        parents_of = {}
+
+        for f in founders:
+            G.add_node(f, color=gen_colors["Founder"], gen="Founder")
+            generations_nodes["Founder"].append(f)
+
+        for _, row in relationships_df.iterrows():
+            sample = row['Sample']
+            gen = row['Generation']
+            generations_nodes[gen].append(sample)
+            G.add_node(sample, color=gen_colors[gen], gen=gen)
+
+            if pd.notna(row['Parent1']):
+                G.add_edge(row['Parent1'], sample)
+                parents_of.setdefault(sample, []).append(row['Parent1'])
+            if pd.notna(row['Parent2']):
+                G.add_edge(row['Parent2'], sample)
+                parents_of.setdefault(sample, []).append(row['Parent2'])
+
+        pos = {}
+        node_y_map = {}
+
+        def gen_sort_key(g):
+            if g == "Founder":
+                return -1
+            if g.startswith("F") and g[1:].isdigit():
+                return int(g[1:])
+            return 999
+
+        sorted_gens = sorted(unique_gens, key=gen_sort_key)
+
+        for x_idx, gen in enumerate(sorted_gens):
+            nodes = generations_nodes[gen]
+            if not nodes:
+                continue
+
+            if x_idx == 0:
+                nodes.sort()
+            else:
+                def get_parent_avg_y(node):
+                    parents = parents_of.get(node, [])
+                    if not parents:
+                        return 0.5
+                    ys = [node_y_map.get(p, 0.5) for p in parents]
+                    return sum(ys) / len(ys)
+                nodes.sort(key=get_parent_avg_y, reverse=True)
+
+            for i, node in enumerate(nodes):
+                y = 1.0 - (i + 0.5) / len(nodes)
+                pos[node] = (x_idx, y)
+                node_y_map[node] = y
+
+        max_nodes = max([len(n) for n in generations_nodes.values()])
+        fig_height = max(10, max_nodes * 0.25)
+
+        plt.figure(figsize=(20, fig_height))
+        node_colors = [G.nodes[n]['color'] for n in G.nodes()]
+
+        nx.draw_networkx_nodes(G, pos, node_size=120, node_color=node_colors, edgecolors='black', linewidths=0.5)
+        nx.draw_networkx_edges(G, pos, edge_color='gray', alpha=0.3, width=0.5, arrows=False)
+
+        first_gen = sorted_gens[0]
+        labels_first = {n: n for n in generations_nodes[first_gen]}
+        pos_first = {n: (x - 0.03, y) for n, (x, y) in pos.items() if n in labels_first}
+        nx.draw_networkx_labels(G, pos_first, labels=labels_first, font_size=10, horizontalalignment='right')
+
+        labels_others = {}
+        for gen in sorted_gens[1:]:
+            for n in generations_nodes[gen]:
+                labels_others[n] = n
+        pos_others = {n: (x + 0.03, y) for n, (x, y) in pos.items() if n in labels_others}
+        nx.draw_networkx_labels(G, pos_others, labels=labels_others, font_size=8, horizontalalignment='left')
+
+        patches = [mpatches.Patch(color=gen_colors[g], label=g) for g in sorted_gens]
+        plt.legend(handles=patches, loc='upper right')
+
+        plt.title("Ground Truth Pedigree")
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=150)
+        plt.close()
+    except OSError as e:
+        print(f"WARNING: Could not save pedigree plot to {output_file}: {e}")
+        plt.close('all')
+
+
+def _append_crossover_event_metadata(destination, contig_index,
+                                     generation_index, generation,
+                                     child_ids, child_indices, parent_ids,
+                                     offspring_parent_indices,
+                                     child_event_pairs):
+    """Append one compact, fully identified record per simulated gamete."""
+    for child, child_index, parent_indices, event_pair in zip(
+            child_ids, child_indices, offspring_parent_indices,
+            child_event_pairs):
+        for parent_slot in (0, 1):
+            destination.append({
+                'contig_index': int(contig_index),
+                'generation': generation,
+                'generation_index': int(generation_index),
+                'child': child,
+                'child_index': int(child_index),
+                'parent_slot': int(parent_slot),
+                'parent': parent_ids[parent_indices[parent_slot]],
+                'crossover_positions_bp': np.asarray(
+                    event_pair[parent_slot], dtype=np.float64
+                ),
+            })
+
+
+def _process_offspring_batch(args):
+    """Simulate one scheduled child batch using preassigned child seeds."""
+    (batch_indices, offspring_parent_indices_batch, child_seeds_batch,
+     parents, ancestries, site_locs, recomb_rate, mutate_rate,
+     recombination_profile, return_crossover_events, *map_args) = args
+    chromosome_map = map_args[0] if map_args else None
+
+    batch_haps = []
+    batch_ancs = []
+    batch_events = []
+
+    for (p1_idx, p2_idx), child_seed in zip(
+            offspring_parent_indices_batch, child_seeds_batch):
+        child_result = create_offspring(
+            parents[p1_idx], parents[p2_idx],
+            ancestries[p1_idx], ancestries[p2_idx],
+            site_locs,
+            recomb_rate=recomb_rate,
+            mutate_rate=mutate_rate,
+            rng=np.random.default_rng(int(child_seed)),
+            recombination_profile=recombination_profile,
+            return_crossover_events=return_crossover_events,
+            chromosome_map=chromosome_map,
+        )
+        child_haps, child_paintings = child_result[:2]
+
+        batch_haps.append(child_haps)
+        batch_ancs.append(child_paintings)
+        if return_crossover_events:
+            batch_events.append(child_result[2])
+
+    result = (batch_indices, batch_haps, batch_ancs)
+    if return_crossover_events:
+        return result + (batch_events,)
+    return result
+
+
+def _process_contig_for_generation(args):
+    """Schedule one contig/generation without changing any child's RNG."""
+    contig_idx, data = args
+    parents = data['parents']
+    ancestries = data['ancestries']
+    site_locs = data['site_locs']
+    offspring_parent_indices = data['offspring_parent_indices']
+    child_seeds = data['child_seeds']
+    recomb_rate = data['recomb_rate']
+    mutate_rate = data['mutate_rate']
+    inner_workers = data.get('inner_workers', 1)
+    recombination_profile = data.get('recombination_profile')
+    return_crossover_events = data.get('return_crossover_events', False)
+    chromosome_map = data.get('chromosome_map')
+
+    num_offspring = len(offspring_parent_indices)
+    if len(child_seeds) != num_offspring:
+        raise ValueError("child seed count does not match offspring count")
+    if num_offspring == 0:
+        result = (contig_idx, [], [])
+        return result + ([],) if return_crossover_events else result
+
+    batch_size = max(1, (num_offspring + inner_workers - 1) // inner_workers)
+    worker_args = []
+    for batch_start in range(0, num_offspring, batch_size):
+        batch_end = min(batch_start + batch_size, num_offspring)
+        worker_args.append((
+            (batch_start, batch_end),
+            offspring_parent_indices[batch_start:batch_end],
+            child_seeds[batch_start:batch_end],
+            parents, ancestries, site_locs, recomb_rate, mutate_rate,
+            recombination_profile, return_crossover_events, chromosome_map,
+        ))
+
+    if inner_workers <= 1 or len(worker_args) == 1:
+        results = [_process_offspring_batch(item) for item in worker_args]
+    else:
+        with Pool(processes=min(inner_workers, len(worker_args))) as inner_pool:
+            results = inner_pool.map(_process_offspring_batch, worker_args)
+
+    offspring_haps = [None] * num_offspring
+    offspring_ancs = [None] * num_offspring
+    offspring_events = (
+        [None] * num_offspring if return_crossover_events else None
+    )
+    for batch_result in results:
+        (batch_start, batch_end), batch_haps, batch_ancs = batch_result[:3]
+        batch_events = batch_result[3] if return_crossover_events else None
+        for local_index, child_index in enumerate(
+                range(batch_start, batch_end)):
+            offspring_haps[child_index] = batch_haps[local_index]
+            offspring_ancs[child_index] = batch_ancs[local_index]
+            if return_crossover_events:
+                offspring_events[child_index] = batch_events[local_index]
+
+    result = (contig_idx, offspring_haps, offspring_ancs)
+    if return_crossover_events:
+        return result + (offspring_events,)
+    return result
+
+
+def simulate_pedigree(founders, site_locs, generation_sizes,
+                      recomb_rate=1e-8, mutate_rate=1e-10,
+                      output_plot="ground_truth_pedigree.png",
+                      max_workers=None, parallel=True,
+                      num_processes=None, seed=None,
+                      recombination_profile=None,
+                      return_crossover_events=False,
+                      genetic_maps=None, contig_names=None):
+    """
+    Simulates a multi-generation pedigree while tracking ANCESTRY.
+
+    TWO-LEVEL PARALLELISM (mirrors hierarchical_assembly pattern):
+      outer_workers = min(num_contigs, num_processes)
+      inner_workers = max(1, num_processes // outer_workers)
+
+    This saturates all available cores even with few contigs.  For example,
+    5 contigs with num_processes=110 gives 5 outer × 22 inner = 110 cores.
+    Single-contig mode also benefits: 1 outer × N inner parallelises across
+    offspring batches within the single contig.
+
+    SUPPORTS MULTI-CONTIG INPUT:
+    - If `founders` is a single list of individuals (pairs), runs single simulation.
+    - If `founders` is a list of lists of individuals (contigs), runs multi-contig simulation
+      where the pedigree structure (parent-child links) is consistent across all contigs.
+
+    Args:
+        founders: Founder haplotype pairs (single contig) or list-of-lists (multi-contig).
+        site_locs: Site positions array (single) or list of arrays (multi-contig).
+        generation_sizes: List of offspring counts per generation, e.g. [20, 100, 200].
+        recomb_rate: Per-bp recombination rate.
+        mutate_rate: Per-bp mutation rate.
+        output_plot: Path to save pedigree plot, or None to skip.
+        max_workers: Deprecated — use num_processes instead. If set and num_processes
+                     is None, used as outer worker count (backward-compatible).
+        parallel: Whether to use parallel processing at all.
+        num_processes: Total core budget.  Divided between outer (contig) and inner
+                       (offspring) workers.  Defaults to num_contigs if None.
+        seed: Optional integer seed for full reproducibility. Seeds both the
+              pedigree structure (parent selection) and the meiosis simulation
+              (recombination + mutation). If None, uses system entropy (not
+              reproducible). One deterministic seed is assigned to every
+              contig/generation/child before batching, so worker counts and
+              batch boundaries only schedule already-defined simulations.
+        recombination_profile: Optional contiguous relative-position segments
+              ``(start_fraction, end_fraction, multiplier)``. Multipliers are
+              normalised so ``recomb_rate`` stays the chromosome-average rate.
+        return_crossover_events: If true, append raw crossover metadata as a
+              fourth return value. Each contig contains one record per gamete,
+              including gametes with no crossovers.
+        genetic_maps: Optional absolute GeneticMapSet, independent of any map
+              used for inference. Missing contigs use its scalar fallback.
+        contig_names: Exact chromosome names aligned with input contig order;
+              required whenever genetic_maps contains supplied maps.
+    """
+    recombination_profile = validate_recombination_profile(recombination_profile)
+    # 1. Detect Input Mode (Single vs Multi Contig)
+    is_multi_mode = False
+
+    if len(founders) > 0 and isinstance(founders[0], list):
+        if len(founders[0]) > 0 and isinstance(founders[0][0], list):
+            is_multi_mode = True
+
+    if is_multi_mode:
+        founders_list = founders
+        site_locs_list = site_locs
+        num_contigs = len(founders_list)
+        print(f"Detected Multi-Contig Simulation ({num_contigs} contigs).")
+    else:
+        founders_list = [founders]
+        site_locs_list = [site_locs]
+        num_contigs = 1
+
+    if genetic_maps is not None and genetic_maps.maps and contig_names is None:
+        raise ValueError("contig_names are required for an absolute simulation map")
+    if contig_names is not None:
+        contig_names = tuple(map(str,contig_names))
+        if len(contig_names)!=num_contigs or len(set(contig_names))!=num_contigs:
+            raise ValueError("contig_names must uniquely match the simulation contig axis")
+    resolved_maps = [None]*num_contigs
+    if genetic_maps is not None:
+        resolved_maps = [genetic_maps.for_contig(contig_names[c] if contig_names is not None else str(c))
+                         for c in range(num_contigs)]
+        if recombination_profile is not None and any(model.has_map for model in resolved_maps):
+            raise ValueError("absolute chromosome map and relative recombination profile cannot be combined")
+
+    # Resolve core budget
+    # num_processes is the total budget; max_workers is the legacy parameter.
+    if num_processes is None:
+        if max_workers is not None:
+            num_processes = max_workers
+        else:
+            num_processes = num_contigs
+
+    # Two-level split (same pattern as hierarchical_assembly)
+    outer_workers = min(num_contigs, num_processes)
+    inner_workers = max(1, num_processes // outer_workers)
+
+    use_parallel = parallel and num_processes > 1
+
+    if use_parallel:
+        print(f"Parallelism: {outer_workers} outer (contigs) x {inner_workers} inner (offspring) "
+              f"= {outer_workers * inner_workers} total")
+
+    # 2. Initialize Ancestries for Founders (Per Contig)
+    current_parents_list = founders_list
+    current_ancestries_list = []
+
+    for c in range(num_contigs):
+        c_sites = site_locs_list[c]
+        start_pos, end_pos = c_sites[0], c_sites[-1]
+
+        c_ancestries = []
+        c_founders = founders_list[c]
+
+        hap_id_counter = 0
+        for _ in c_founders:
+            ancestry_pair = []
+            for _ in range(2):
+                ancestry_pair.append([(start_pos, end_pos, hap_id_counter)])
+                hap_id_counter += 1
+            c_ancestries.append(ancestry_pair)
+        current_ancestries_list.append(c_ancestries)
+
+    # 3. Storage for results
+    all_individuals_flat_by_contig = [[] for _ in range(num_contigs)]
+    all_paintings_flat_by_contig = [[] for _ in range(num_contigs)]
+    all_crossover_events_by_contig = ([[] for _ in range(num_contigs)]
+                                      if return_crossover_events else None)
+
+    relationships = []
+
+    num_initial_founders = len(founders_list[0])
+    current_parent_ids = [f"Founder_{i}" for i in range(num_initial_founders)]
+
+    master_rng = np.random.default_rng(seed)
+
+    # Seed stdlib random for pedigree structure (parent selection).
+    # Derive a sub-seed from master_rng so a single seed controls everything.
+    if seed is not None:
+        pedigree_seed = int(master_rng.integers(0, 2**31))
+        random.seed(pedigree_seed)
+        print(f"Seeded simulation: master={seed}, pedigree_structure={pedigree_seed}")
+
+    # 4. Simulation Loop
+    for gen_idx, num_offspring in enumerate(generation_sizes):
+
+        gen_name = f"F{gen_idx + 1}"
+        print(f"Simulating {gen_name}: {num_offspring} individuals...")
+
+        # A. Determine Pedigree Structure (Shared across contigs)
+        offspring_parent_indices = []
+        next_gen_ids = []
+
+        for i in range(num_offspring):
+            p1_idx, p2_idx = random.sample(range(len(current_parent_ids)), 2)
+
+            parent1_id = current_parent_ids[p1_idx]
+            parent2_id = current_parent_ids[p2_idx]
+            child_id = f"{gen_name}_{i}"
+
+            next_gen_ids.append(child_id)
+            offspring_parent_indices.append((p1_idx, p2_idx))
+
+            relationships.append({
+                'Sample': child_id,
+                'Generation': gen_name,
+                'Parent1': parent1_id,
+                'Parent2': parent2_id
+            })
+
+        # B. Generate Genetics. Materialise one seed for every
+        # contig/generation/child before batching; resources only schedule work.
+        child_seeds_by_contig = master_rng.integers(
+            0, 2**63, size=(num_contigs, num_offspring), dtype=np.int64
+        )
+        scheduled_inner_workers = inner_workers if use_parallel else 1
+        worker_args = []
+        for c in range(num_contigs):
+            contig_data = {
+                'parents': current_parents_list[c],
+                'ancestries': current_ancestries_list[c],
+                'site_locs': site_locs_list[c],
+                'offspring_parent_indices': offspring_parent_indices,
+                'child_seeds': child_seeds_by_contig[c],
+                'recomb_rate': recomb_rate,
+                'mutate_rate': mutate_rate,
+                'inner_workers': scheduled_inner_workers,
+                'recombination_profile': recombination_profile,
+                'return_crossover_events': return_crossover_events,
+            }
+            contig_data['chromosome_map'] = resolved_maps[c]
+            worker_args.append((c, contig_data))
+
+        if use_parallel and outer_workers > 1:
+            with core_parallel.NonDaemonicForkserverPool(processes=outer_workers) as pool:
+                results = pool.map(_process_contig_for_generation, worker_args)
+        else:
+            results = [
+                _process_contig_for_generation(item) for item in worker_args
+            ]
+
+        next_gen_individuals_list = [None] * num_contigs
+        next_gen_ancestries_list = [None] * num_contigs
+        for contig_result in results:
+            contig_idx, offspring_haps, offspring_ancs = contig_result[:3]
+            next_gen_individuals_list[contig_idx] = offspring_haps
+            next_gen_ancestries_list[contig_idx] = offspring_ancs
+            all_individuals_flat_by_contig[contig_idx].extend(offspring_haps)
+            all_paintings_flat_by_contig[contig_idx].extend(offspring_ancs)
+            if return_crossover_events:
+                _append_crossover_event_metadata(
+                    all_crossover_events_by_contig[contig_idx], contig_idx,
+                    gen_idx, gen_name, next_gen_ids,
+                    range(len(next_gen_ids)), current_parent_ids,
+                    offspring_parent_indices, contig_result[3],
+                )
+
+        # Move to next generation
+        current_parents_list = next_gen_individuals_list
+        current_ancestries_list = next_gen_ancestries_list
+        current_parent_ids = next_gen_ids
+
+    # 5. Wrap up
+    df = pd.DataFrame(relationships)
+    if genetic_maps is not None:
+        df.attrs['generating_recombination_maps'] = [model.record() for model in resolved_maps]
+    if output_plot is not None:
+        plot_ground_truth_pedigree(df, output_file=output_plot)
+
+    if is_multi_mode:
+        result = (all_individuals_flat_by_contig, df,
+                  all_paintings_flat_by_contig)
+        if return_crossover_events:
+            return result + (all_crossover_events_by_contig,)
+        return result
+
+    result = (all_individuals_flat_by_contig[0], df,
+              all_paintings_flat_by_contig[0])
+    if return_crossover_events:
+        return result + (all_crossover_events_by_contig[0],)
+    return result
+
+
+def convert_truth_to_painting_objects(all_paintings_flat, num_workers=8):
+    """
+    Converts the raw simulation output (lists of tuples) into
+    SamplePainting/PaintedChunk objects compatible with paint_samples.py.
+
+    Uses ThreadPoolExecutor + binary search for segment lookup.
+    """
+    def _process_one_sample(args):
+        i, p1, p2 = args
+
+        breaks = set()
+        for s, e, _ in p1:
+            breaks.add(s); breaks.add(e)
+        for s, e, _ in p2:
+            breaks.add(s); breaks.add(e)
+
+        sorted_breaks = sorted(breaks)
+        chunks = []
+
+        # Build arrays for binary search (faster than linear scan)
+        p1_starts = np.array([s for s, e, _ in p1])
+        p1_ends = np.array([e for s, e, _ in p1])
+        p1_ids = [fid for _, _, fid in p1]
+
+        p2_starts = np.array([s for s, e, _ in p2])
+        p2_ends = np.array([e for s, e, _ in p2])
+        p2_ids = [fid for _, _, fid in p2]
+
+        for k in range(len(sorted_breaks) - 1):
+            start, end = sorted_breaks[k], sorted_breaks[k + 1]
+            if start == end:
+                continue
+
+            mid = (start + end) / 2
+
+            # Find owner in p1 via binary search
+            h1_id = -1
+            idx = np.searchsorted(p1_starts, mid, side='right') - 1
+            if 0 <= idx < len(p1_starts) and p1_starts[idx] <= start and p1_ends[idx] >= end:
+                h1_id = p1_ids[idx]
+
+            # Find owner in p2 via binary search
+            h2_id = -1
+            idx = np.searchsorted(p2_starts, mid, side='right') - 1
+            if 0 <= idx < len(p2_starts) and p2_starts[idx] <= start and p2_ends[idx] >= end:
+                h2_id = p2_ids[idx]
+
+            chunks.append(painting_components.PaintedChunk(
+                start=int(start),
+                end=int(end),
+                hap1=h1_id,
+                hap2=h2_id
+            ))
+
+        return painting_components.SamplePainting(i, chunks)
+
+    args_list = [(i, p1, p2) for i, (p1, p2) in enumerate(all_paintings_flat)]
+
+    if num_workers <= 1 or len(args_list) <= 1:
+        block_samples = [_process_one_sample(a) for a in args_list]
+    else:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            block_samples = list(executor.map(_process_one_sample, args_list))
+
+    if not block_samples:
+        return None
+
+    g_min = block_samples[0].chunks[0].start
+    g_max = block_samples[0].chunks[-1].end
+
+    return painting_components.BlockPainting((g_min, g_max), block_samples)
+
+
+def _process_single_contig_postprocessing(args):
+    """
+    Worker: process one contig's post-simulation steps (read sampling,
+    chunking, probability conversion, truth painting conversion).
+
+    All operations are numpy/scipy — they release the GIL, so
+    ThreadPoolExecutor gives true parallelism here.
+    """
+
+
+    (r_name, offspring_haps, paintings_raw, sites, read_depth,
+     error_rate, snps_per_block, snp_shift, seed) = args
+
+    # 1. Convert truth paintings to SamplePainting objects
+    true_biological_painting = convert_truth_to_painting_objects(paintings_raw)
+
+    # 2. Simulate sequencing reads (vectorized across all individuals)
+    reads_rng = np.random.default_rng(seed)
+    new_reads_array = read_sample_all_individuals(
+        offspring_haps, read_depth, error_rate=error_rate, rng=reads_rng
+    )
+
+    # 3. Chunk into blocks
+    min_pos = sites[0]
+    max_pos = sites[-1] + 1
+    simd_genomic_data = chunk_up_data(
+        sites, new_reads_array,
+        min_pos, max_pos, 0, 0,
+        use_snp_count=True,
+        snps_per_block=snps_per_block,
+        snp_shift=snp_shift,
+        error_rate=error_rate,
+    )
+
+    # 4. Convert reads to raw genotype likelihoods.  Population-frequency
+    # priors are useful during local haplotype discovery, but reusing them as
+    # sample evidence in linkage HMMs counts the cohort information again.
+    (simd_site_priors, simd_probabalistic_genotypes) = core_numerics.reads_to_probabilities(
+        new_reads_array,
+        read_error_prob=error_rate,
+        use_hwe_prior=False,
+    )
+
+    return {
+        'r_name': r_name,
+        'simulated_reads': new_reads_array,
+        'simd_genomic_data': simd_genomic_data,
+        'simd_probs': simd_probabalistic_genotypes,
+        'simd_priors': simd_site_priors,
+        'truth_painting': true_biological_painting,
+    }
+
+import haplotype_reconstruction.core.numerics as core_numerics
+import haplotype_reconstruction.core.parallel as core_parallel
+import haplotype_reconstruction.core.variants as core_variants
+import haplotype_reconstruction.painting.components as painting_components

@@ -1,0 +1,16 @@
+[run]
+cores = "auto"
+output = "work/runs/tropheops"
+
+[inputs]
+vcf = "work/data/fish_vcf_restriped/AcTm.biallelic.bcf.gz"
+metadata = "work/data/fish_vcf_restriped/X_AcTm_metadata.xlsx"
+metadata_sheet = "main_data"
+
+[recombination]
+rate_cm_per_mb = 5.0
+shared_family_evidence = true
+# recombination_map = "work/data/cross.map"
+
+[refinement]
+impute_missing = false

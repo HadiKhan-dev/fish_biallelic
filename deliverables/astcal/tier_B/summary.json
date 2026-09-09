@@ -1,0 +1,28 @@
+{
+  "F1_individuals": 9,
+  "F2_both_parents": 82,
+  "F2_edges": 195,
+  "F2_fathers": 98,
+  "F2_individuals": 129,
+  "F2_mothers": 97,
+  "F2_no_parent": 16,
+  "F2_one_parent": 31,
+  "F3_fathers": 67,
+  "F3_individuals": 150,
+  "F3_parent_groups": 14,
+  "F3_unresolved": 83,
+  "Tier_A_exact_pairs": 14,
+  "Tier_B_exact_pairs": 76,
+  "all_edges": 280,
+  "edge_evidence_classes": {
+    "Reported_cross_design_topology": 18,
+    "Tier_A_strict_identity": 59,
+    "Tier_B_additional_identity": 203
+  },
+  "forced_completion_edges": 0,
+  "graph_caption": "F2: 82 both, 31 one, 16 unresolved; F3 observed fathers: 67/150. Grey=reported abstract topology; green=A; blue=B; orange dashed=C; red dotted=forced complete-only.",
+  "label": "Tier B \u2014 recommended supported identities",
+  "pedigree_rows": 293,
+  "topology_edges": 18,
+  "view": "tier_B"
+}

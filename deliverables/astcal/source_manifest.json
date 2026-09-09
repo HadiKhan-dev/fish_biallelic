@@ -1,0 +1,312 @@
+{
+  "preserved_without_model_rerun": true,
+  "source_bundle": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff",
+  "files": [
+    {
+      "file": "summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/summary.json",
+      "sha256": "a47a0b1138a781d2076dff6e207bd97b3ec87a42bb194b63e41e79997e400cb1",
+      "bytes": 6974
+    },
+    {
+      "file": "individual_id_crosswalk.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/individual_id_crosswalk.csv",
+      "sha256": "c75885338d164128f569d8893235e028316507f00d5f880414966b00b67564b2",
+      "bytes": 23371
+    },
+    {
+      "file": "tier_comparison_summary.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_comparison_summary.svg",
+      "sha256": "03511166d7780aafe06f9874649451386fa6fa5f07c6878d2e2bbc8323de77f5",
+      "bytes": 62378
+    },
+    {
+      "file": "tier_A/summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/summary.json",
+      "sha256": "c3c2ccfb1dc92634c8703a24e8ef13e5f0295b9714507a573d0196cc26e8d25f",
+      "bytes": 796
+    },
+    {
+      "file": "tier_A/family_matrix.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/family_matrix.svg",
+      "sha256": "a79f5f09bd800826cd0cdf05932e8eda4cd38d76b4b7a479f3b47129b2965eed",
+      "bytes": 62487
+    },
+    {
+      "file": "tier_A/F3_father_group_counts.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/F3_father_group_counts.csv",
+      "sha256": "44c438ef7e8cc87dabe62fd2082472a9be5b6fa0e05905637cd2e9c54a82eefe",
+      "bytes": 54
+    },
+    {
+      "file": "tier_A/F3_father_counts.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/F3_father_counts.svg",
+      "sha256": "1a4cdfbcb7c5d059dc89916d3a4056ed5c7deae60d0cb19e20281537b91dfd56",
+      "bytes": 33241
+    },
+    {
+      "file": "tier_A/F3_parent_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/F3_parent_assignments.csv",
+      "sha256": "0886d2ff19d74944b071735ac2e46bb4e639568e46292347c49a59c0d40cc4ed",
+      "bytes": 42423
+    },
+    {
+      "file": "tier_A/pedigree_annotated.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/pedigree_annotated.csv",
+      "sha256": "d026ef9fdfc17a0501d574ce1c80b18db0ad29735576efc6f179afb7f568584e",
+      "bytes": 240901
+    },
+    {
+      "file": "tier_A/pedigree_standard.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/pedigree_standard.csv",
+      "sha256": "d9a6838943727af90b63f60f29a312248c15cfb443a554cc239de889af314457",
+      "bytes": 10753
+    },
+    {
+      "file": "tier_A/pedigree.fam",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/pedigree.fam",
+      "sha256": "4606a595889cd25534b72a405e9c9c1422e349cab29daa66be84323cb12c7bef",
+      "bytes": 10723
+    },
+    {
+      "file": "tier_A/F2_family_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/F2_family_assignments.csv",
+      "sha256": "9d546ab6a26134b358798b9f7829dbb6b0b5f71ca489086779d4a31aa8193b31",
+      "bytes": 33923
+    },
+    {
+      "file": "tier_A/F2_family_count_matrix.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/F2_family_count_matrix.csv",
+      "sha256": "8276d4a4b3c28d582315142ea154f40ededfbbc7b8c55f8ee3415360b6fe505c",
+      "bytes": 204
+    },
+    {
+      "file": "tier_A/pedigree_graph.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/pedigree_graph.svg",
+      "sha256": "359ac39a2119c8ef394b97bb98206fc30fa71cf4d70c3f6787a176eeca304fd2",
+      "bytes": 136774
+    },
+    {
+      "file": "tier_A/pedigree_edges_with_evidence.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_A/pedigree_edges_with_evidence.csv",
+      "sha256": "00d63a33659f1ee311a3d41d927c645cf65b84ffae7f00f85bb88967b6d22b56",
+      "bytes": 31538
+    },
+    {
+      "file": "tier_B/summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/summary.json",
+      "sha256": "086b16737963c3dffbc3e7a0d78dce68fcaca4d45824f10794c2ecff6c970d50",
+      "bytes": 846
+    },
+    {
+      "file": "tier_B/family_matrix.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/family_matrix.svg",
+      "sha256": "d40919ac12367fd41fcd7da4972fbc155be0319405adce24d0823f5cd51585f1",
+      "bytes": 61726
+    },
+    {
+      "file": "tier_B/F3_father_group_counts.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/F3_father_group_counts.csv",
+      "sha256": "77182d17c63f1c37658bb529819305a967e66ceed2d8dfe9ceea7cee7205ce5f",
+      "bytes": 217
+    },
+    {
+      "file": "tier_B/F3_father_counts.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/F3_father_counts.svg",
+      "sha256": "effdf470c6f104f9e2d9ac69000cd0c4522887cf1c2a67b9f83d1d9a4aaac2e8",
+      "bytes": 54287
+    },
+    {
+      "file": "tier_B/F3_parent_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/F3_parent_assignments.csv",
+      "sha256": "1ea2c7139c828ac831e674244a00987d9a03797aef8cc81cbcebcbed239a7fcd",
+      "bytes": 43855
+    },
+    {
+      "file": "tier_B/pedigree_annotated.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/pedigree_annotated.csv",
+      "sha256": "2d4e9fe6e82d8860da8b9399303d405a11958a520fa3b077653d8851b1931c67",
+      "bytes": 249365
+    },
+    {
+      "file": "tier_B/pedigree_standard.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/pedigree_standard.csv",
+      "sha256": "d8d088a34862ae05290ca834c0013891e253b1b2717fc2267365507e8dc12479",
+      "bytes": 12540
+    },
+    {
+      "file": "tier_B/pedigree.fam",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/pedigree.fam",
+      "sha256": "424cb1dd84866f411157b4ce52a0d45e5f67560ed6149df905084da310178fcb",
+      "bytes": 12510
+    },
+    {
+      "file": "tier_B/F2_family_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/F2_family_assignments.csv",
+      "sha256": "f43c887778c99ce003b88c5815637771adc397406df9057b6389e5e6b0412798",
+      "bytes": 38624
+    },
+    {
+      "file": "tier_B/F2_family_count_matrix.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/F2_family_count_matrix.csv",
+      "sha256": "ac6a41b05cd791928cbb3063fc6dfa48b160f88d9660ea97d27eec6c9435457f",
+      "bytes": 209
+    },
+    {
+      "file": "tier_B/pedigree_graph.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/pedigree_graph.svg",
+      "sha256": "bebd5f22c6a449658e15f7bed85b2acac9a91f0a4cb5015fe132c3504b8a8573",
+      "bytes": 232697
+    },
+    {
+      "file": "tier_B/pedigree_edges_with_evidence.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_B/pedigree_edges_with_evidence.csv",
+      "sha256": "27e111d8a40cebb6206d9c6d06e6a580918cea1f3711f2a95cf512664e90630c",
+      "bytes": 125623
+    },
+    {
+      "file": "tier_C/summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/summary.json",
+      "sha256": "bd79ed2934ee6a7c8c52133f05a2cceb2a0eebb4f8e302fc169499a7451c98a4",
+      "bytes": 963
+    },
+    {
+      "file": "tier_C/family_matrix.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/family_matrix.svg",
+      "sha256": "69de4389af1763afce605c6d665a2e2056c99dde9d9fc5fc66150295f258a329",
+      "bytes": 62808
+    },
+    {
+      "file": "tier_C/F3_father_group_counts.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/F3_father_group_counts.csv",
+      "sha256": "d2b85031c4dba0019a279db5a828f80dfa9e535bff058ccf3248e9a6fa8395f9",
+      "bytes": 543
+    },
+    {
+      "file": "tier_C/F3_father_counts.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/F3_father_counts.svg",
+      "sha256": "4e6de57166bbe5b729640c535cafc21d42fb059721090ba60f40d45b42c757aa",
+      "bytes": 90010
+    },
+    {
+      "file": "tier_C/F3_parent_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/F3_parent_assignments.csv",
+      "sha256": "91791b187fe24e8e1863af571a8168317ae7ee6818900cbcf9fc29b4a926b154",
+      "bytes": 46744
+    },
+    {
+      "file": "tier_C/pedigree_annotated.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/pedigree_annotated.csv",
+      "sha256": "c22644410dfb554d80a07241cd4ab55f74eb401a1f65e946f4067ce3d61f45b7",
+      "bytes": 261798
+    },
+    {
+      "file": "tier_C/pedigree_standard.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/pedigree_standard.csv",
+      "sha256": "f33a3e27c868b880f0440c6198f93af6069f6d86219dd9dcc5db49159f8db331",
+      "bytes": 13782
+    },
+    {
+      "file": "tier_C/pedigree.fam",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/pedigree.fam",
+      "sha256": "dbb249a960ac1466363947d4d5967dc3362c8d80b810776e68396a9ab54affca",
+      "bytes": 13752
+    },
+    {
+      "file": "tier_C/F2_family_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/F2_family_assignments.csv",
+      "sha256": "781b1af056dff7742e30fb99a610a0322a8984ec6c21ab29d96bdc22909d03aa",
+      "bytes": 41922
+    },
+    {
+      "file": "tier_C/F2_family_count_matrix.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/F2_family_count_matrix.csv",
+      "sha256": "5336d5d33995f18b046db04068f429e5dbefc82a8ee0aca37e2d2bcda6866d3d",
+      "bytes": 208
+    },
+    {
+      "file": "tier_C/pedigree_graph.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/pedigree_graph.svg",
+      "sha256": "7f2f2053884cca4e2d43a80150e4c7c94406e77c33b68a7204959a619629ee02",
+      "bytes": 305133
+    },
+    {
+      "file": "tier_C/pedigree_edges_with_evidence.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/tier_C/pedigree_edges_with_evidence.csv",
+      "sha256": "c5eae5009f08376868ff4bded1f2102e4e70c640b6681e90042b4e355bf89e0f",
+      "bytes": 209354
+    },
+    {
+      "file": "complete/summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/summary.json",
+      "sha256": "54ba4d99b4e42297d4dd3a5b6720c77515cd4047be4c6522c943e1235027711a",
+      "bytes": 1001
+    },
+    {
+      "file": "complete/family_matrix.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/family_matrix.svg",
+      "sha256": "7e906ef089e8fb0d5f3419a47ac55002ede804a25e78fe748236c5bb1277db9b",
+      "bytes": 62218
+    },
+    {
+      "file": "complete/F3_father_group_counts.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/F3_father_group_counts.csv",
+      "sha256": "214c5aaec8a8fd042c74f8b7a80aa9281bf1c848028db699ee40b0eeaeccae87",
+      "bytes": 542
+    },
+    {
+      "file": "complete/F3_father_counts.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/F3_father_counts.svg",
+      "sha256": "e87573d53f64ec238e8ec7ddf49da4b6b63f697a651a2f26c782530a4066a436",
+      "bytes": 89598
+    },
+    {
+      "file": "complete/F3_parent_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/F3_parent_assignments.csv",
+      "sha256": "88292761d15389e1d8cf9fa9a2168c5294235c45939d10c600a4bb24791cdf5a",
+      "bytes": 46759
+    },
+    {
+      "file": "complete/pedigree_annotated.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/pedigree_annotated.csv",
+      "sha256": "abe0d58344c6fa1fc5e4b2285dcb0cf64cfcf6cc3c79e96087e72b4e1f84f491",
+      "bytes": 260043
+    },
+    {
+      "file": "complete/pedigree_standard.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/pedigree_standard.csv",
+      "sha256": "5928f5b9048b243310cc364afacfb5765b16694bf33d144acbc85b63340d58c8",
+      "bytes": 13790
+    },
+    {
+      "file": "complete/pedigree.fam",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/pedigree.fam",
+      "sha256": "453c1a906d41ef9695b27ca103d58207adfbdd329a6524dd8f0c36e1d2e6954c",
+      "bytes": 13760
+    },
+    {
+      "file": "complete/F2_family_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/F2_family_assignments.csv",
+      "sha256": "781b1af056dff7742e30fb99a610a0322a8984ec6c21ab29d96bdc22909d03aa",
+      "bytes": 41922
+    },
+    {
+      "file": "complete/F2_family_count_matrix.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/F2_family_count_matrix.csv",
+      "sha256": "5336d5d33995f18b046db04068f429e5dbefc82a8ee0aca37e2d2bcda6866d3d",
+      "bytes": 208
+    },
+    {
+      "file": "complete/pedigree_graph.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/pedigree_graph.svg",
+      "sha256": "83080e6b4d794bdbca16b70d67fb11eec7d042aaeae41b0931145e9c17fc3ae8",
+      "bytes": 305436
+    },
+    {
+      "file": "complete/pedigree_edges_with_evidence.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_real/AstCal_AulStu_pedigree_handoff/complete/pedigree_edges_with_evidence.csv",
+      "sha256": "1a77fb8c34c6a8e47f092ea02402905b08a7b663edd305e4e0b2d2b04cf0e732",
+      "bytes": 209932
+    }
+  ]
+}

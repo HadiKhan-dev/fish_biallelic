@@ -1,1 +1,0 @@
-../../.agent-profiles/scientific-modeler.md

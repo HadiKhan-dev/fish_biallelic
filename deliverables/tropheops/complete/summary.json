@@ -1,0 +1,26 @@
+{
+  "F1_individuals": 16,
+  "F2_any_parent": 96,
+  "F2_both_parents": 96,
+  "F2_edges": 192,
+  "F2_fathers": 96,
+  "F2_individuals": 96,
+  "F2_mothers": 96,
+  "F2_no_parent": 0,
+  "F2_one_parent": 0,
+  "G0_individuals": 4,
+  "G0_to_F1_edges": 32,
+  "Tier_A_exact_pairs": 37,
+  "Tier_B_exact_pairs": 47,
+  "all_edges": 224,
+  "edge_evidence_classes": {
+    "Forced_completion_uncertain": 3,
+    "G0_to_F1_inferred_seed": 32,
+    "Leading_hypothesis_below_Tier_B": 56,
+    "Tier_A_strict_identity": 106,
+    "Tier_B_additional_identity": 27
+  },
+  "forced_completion_edges": 3,
+  "name": "complete",
+  "pedigree_rows": 116
+}

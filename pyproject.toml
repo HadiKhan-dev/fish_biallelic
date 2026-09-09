@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "haplotype-reconstruction"
+version = "1.0.0"
+description = "Missing-aware founder-haplotype reconstruction for experimental crosses"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2.0",
+  "numba>=0.61",
+  "scipy>=1.13",
+  "pandas>=2.2",
+  "hdbscan>=0.8.40",
+  "cyvcf2>=0.31",
+  "blosc2>=4.0",
+  "matplotlib>=3.9",
+  "networkx>=3.3",
+  "seaborn>=0.13",
+  "tqdm>=4.66",
+  "openpyxl>=3.1",
+  "tbb>=2021.13",
+]
+
+[project.scripts]
+haplotypes = "haplotype_reconstruction.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["haplotype_reconstruction*"]
+namespaces = false
+
+[tool.setuptools]
+include-package-data = false

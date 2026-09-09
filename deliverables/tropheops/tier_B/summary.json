@@ -1,0 +1,24 @@
+{
+  "F1_individuals": 16,
+  "F2_any_parent": 82,
+  "F2_both_parents": 51,
+  "F2_edges": 133,
+  "F2_fathers": 65,
+  "F2_individuals": 96,
+  "F2_mothers": 68,
+  "F2_no_parent": 14,
+  "F2_one_parent": 31,
+  "G0_individuals": 4,
+  "G0_to_F1_edges": 32,
+  "Tier_A_exact_pairs": 37,
+  "Tier_B_exact_pairs": 47,
+  "all_edges": 165,
+  "edge_evidence_classes": {
+    "G0_to_F1_inferred_seed": 32,
+    "Tier_A_strict_identity": 106,
+    "Tier_B_additional_identity": 27
+  },
+  "forced_completion_edges": 0,
+  "name": "tier_B",
+  "pedigree_rows": 116
+}

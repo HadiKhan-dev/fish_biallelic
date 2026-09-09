@@ -1,97 +1,46 @@
-# Data
-fish_vcf/
-fish_vcf_restriped/
+# Local data, experiments, checkpoints and recoverable maintenance archives.
+/work/
+/.work/
 
-# Pipeline checkpoints (large pickle files, regenerated on re-run)
-.pipeline_checkpoints/
-.pipeline_checkpoints_real/
-.pipeline_checkpoints_tropheops_withFounders
-# Any other attempt- or backend-qualified checkpoint root.
-/.pipeline_checkpoints_*/
-# Backend-qualified TroMau checkpoint directories.
-.pipeline_checkpoints_tropheops_*/
+# Python/build caches.
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+*.egg-info/
+/build/
+/dist/
+/.venv/
+/.pytest_cache/
 
-# Pickled checkpoints anywhere (the multi-GB stage pickles) — global safety net
+# Large data/checkpoints and transient outputs do not belong in source control.
 *.pkl
+*.pickle
 *.pkl.b2
 *.p5.b2
-*.p5.b2.tmp
-*.pickle
-
-# Outputs
-results_simulation/
-results_real/
-results_tropheops_withFounders/
-# Model/backend-qualified result directories.
-results_simulation_*/
-results_real_*/
-results_tropheops_*/
-path_plots/
-debug_hierarchical/
-recombination_map/
-
-# Pedigree depth-sweep (per-(depth,seed) checkpoints are many GB; CSVs are reproducible)
-pedigree_depth_sweep/
-pedigree_depth_sweep_*/
-# Default and model-qualified standalone pedigree-simulation roots.
-pedigree_sweep_checkpoints/
-pedigree_sweep_checkpoints_*/
-pedigree_sweep_results/
-pedigree_sweep_results_*/
-
-# Python
-__pycache__/
-/.pytest_cache/
-*.pyc
-*.pyo
-
-# Logs
-logs/
-model_logs/
-
-# Generated images
+*.vcf
+*.vcf.gz
+*.bcf
+*.bcf.gz
+*.bam
+*.cram
+*.fastq.gz
+*.log
 *.png
-
-# Local conference-poster work (renderings and incomplete provenance bundle)
-/poster_assets/
-
-# Generated data/logs
 *.csv
 *.ped
-*.log
-*.stats
-*.relatedness
 
-# Profiling captures
-/blockhap.speedscope.json
-/blockhap_idle.json
-/blockhap_tail.json
+# Explicitly curated readable real-data handoffs.
+!deliverables/**/*.csv
+!deliverables/**/*.ped
 
-# Temp/lock files
-.~lock.*
-*.swp
-*~
+# Editor/patch leftovers and personal coding-tool configuration.
+/.agents/
+/.codex/
+/.claude/
+/.vscode/
 *.orig
 *.rej
-*.codex-patched*
-
-# Pearly validation adapters retained at source-hash-bound root paths.
-/f1_candidate_phase_production_adapter.py
-/f1_candidate_phase_validation.py
-/f1_fixed_parent_phase_production_adapter.py
-/f2_block_subtraction_production_adapter.py
-/f2_block_subtraction_validation.py
-/f2_tier1_production_adapter.py
-/f2_tier1_validation.py
-
-# Old/scratch
-old_files/
-prev_versions/
-
-# Isolated, disposable chromosome-1 reversible-cavity comparisons.
-results_chr1_reversible_comparison_*/
-.pipeline_checkpoints_chr1_reversible_comparison_*/
-untitled*.py
-
-# Jupyter
-.ipynb_checkpoints/
+*.swp
+*~
+.DS_Store

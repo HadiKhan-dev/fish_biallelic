@@ -1,0 +1,180 @@
+{
+  "preserved_without_model_rerun": true,
+  "source_bundle": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff",
+  "files": [
+    {
+      "file": "summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/summary.json",
+      "sha256": "f3ef16c988336afc10f6d19d36104d225ff55edf3a7268548b2790f04debca52",
+      "bytes": 3474
+    },
+    {
+      "file": "individual_id_crosswalk.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/individual_id_crosswalk.csv",
+      "sha256": "07c77d282626cb42a5ecde5bd2b995d97dc91cb13d6160a06862442c9d54a45d",
+      "bytes": 9552
+    },
+    {
+      "file": "tier_comparison_summary.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_comparison_summary.svg",
+      "sha256": "31be342772a02c9d269db5be6959cf2c5a800e4b35abd814406614eef1e8f88c",
+      "bytes": 58334
+    },
+    {
+      "file": "tier_A/summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_A/summary.json",
+      "sha256": "1c7ef3674ea1fb651ea584d58b1ff65717b162c3726c732fab6e24e59027af4e",
+      "bytes": 504
+    },
+    {
+      "file": "tier_A/family_matrix.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_A/family_matrix.svg",
+      "sha256": "7c688e243323d22656b8e719bb553f6ae2ae8ea0a60b1b31daf2072500c9d6ab",
+      "bytes": 124185
+    },
+    {
+      "file": "tier_A/pedigree_annotated.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_A/pedigree_annotated.csv",
+      "sha256": "6e015eaee2c08dd351658087a7e4a91f79265d586f1a37da82f86e21d8489f3b",
+      "bytes": 119920
+    },
+    {
+      "file": "tier_A/pedigree_standard.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_A/pedigree_standard.csv",
+      "sha256": "66f50637ab9bffc6a94ad2bcfa2bd7e309ba2c0237130129cae8878db690be6e",
+      "bytes": 5065
+    },
+    {
+      "file": "tier_A/pedigree.fam",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_A/pedigree.fam",
+      "sha256": "97fae1ac2629d1238f8a5b63b8076aadb22613f96d13f670d848480356c2ecf5",
+      "bytes": 5035
+    },
+    {
+      "file": "tier_A/F2_family_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_A/F2_family_assignments.csv",
+      "sha256": "137b2532ec20615545ff709531dcec00364610f35ab4d1afe05071e47b0f1426",
+      "bytes": 16678
+    },
+    {
+      "file": "tier_A/pedigree_graph.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_A/pedigree_graph.svg",
+      "sha256": "d19b6c4372b229957099c5f682bc3be6467f71192ba5ea66f60725cf114da8d0",
+      "bytes": 106215
+    },
+    {
+      "file": "tier_A/pedigree_edges_with_evidence.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_A/pedigree_edges_with_evidence.csv",
+      "sha256": "dab83820073361fa13cd32896f23446469254ce973a667e202675088f2faed08",
+      "bytes": 72198
+    },
+    {
+      "file": "tier_B/summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_B/summary.json",
+      "sha256": "edbfd97f90a7d3ce5059ffed7f130783355521e81c06340edd7c27a9d971b065",
+      "bytes": 542
+    },
+    {
+      "file": "tier_B/family_matrix.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_B/family_matrix.svg",
+      "sha256": "4884e768df579442872b0c509e9c8cc263cf5c72bf706a836bab5e20bf251d7d",
+      "bytes": 123363
+    },
+    {
+      "file": "tier_B/pedigree_annotated.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_B/pedigree_annotated.csv",
+      "sha256": "1c92fbfabcc736cbfafecba8a90170009c533fab729299612f302655ca2986ac",
+      "bytes": 122862
+    },
+    {
+      "file": "tier_B/pedigree_standard.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_B/pedigree_standard.csv",
+      "sha256": "275247245733012f7570182a79d10ac7aa2c438346d2388a11c6969c1605e195",
+      "bytes": 5281
+    },
+    {
+      "file": "tier_B/pedigree.fam",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_B/pedigree.fam",
+      "sha256": "c119cfe1197b036276afa656d32ea2e62414ed04e9b4511eaa63a0f07c46fb80",
+      "bytes": 5251
+    },
+    {
+      "file": "tier_B/F2_family_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_B/F2_family_assignments.csv",
+      "sha256": "8d0174ff633511b41e5bbea65328d4bc877d160af5c772320778b64f96ac1a27",
+      "bytes": 17863
+    },
+    {
+      "file": "tier_B/pedigree_graph.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_B/pedigree_graph.svg",
+      "sha256": "403687d6e04b0b4543fa0773f668437392922aa21e078a7dfb982f33aec0e8e7",
+      "bytes": 117106
+    },
+    {
+      "file": "tier_B/pedigree_edges_with_evidence.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/tier_B/pedigree_edges_with_evidence.csv",
+      "sha256": "96e4a251a87c7b230449d053cf852b266ca37f156b34af3c5c68d75ec8bd3510",
+      "bytes": 87261
+    },
+    {
+      "file": "complete/summary.json",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/summary.json",
+      "sha256": "5ca3f33cc6bfdf3c87b292a3d2ddde7b536b9b25d22c8d8e9511e37c657a3a0e",
+      "bytes": 623
+    },
+    {
+      "file": "complete/family_matrix.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/family_matrix.svg",
+      "sha256": "e1b5bc099ff397462d5356408bdfbc69d751df99c773a674ca5a409e5aca0a59",
+      "bytes": 130659
+    },
+    {
+      "file": "complete/forced_father_selected_completions.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/forced_father_selected_completions.csv",
+      "sha256": "ce843c9e4da8cbf0baf82f78773f7d3e7640c34c90bcf8c4033f0a52182fc837",
+      "bytes": 1731
+    },
+    {
+      "file": "complete/pedigree_annotated.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/pedigree_annotated.csv",
+      "sha256": "91d99dd19d56f6ef7900d4783fc45781417a3cd4ed5317b885eab5349b2c2c37",
+      "bytes": 148706
+    },
+    {
+      "file": "complete/pedigree_standard.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/pedigree_standard.csv",
+      "sha256": "6b412229a0ff5203dc8c645a6961335d1fc70f6ede3f8977cb989260ac168a9b",
+      "bytes": 5753
+    },
+    {
+      "file": "complete/pedigree.fam",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/pedigree.fam",
+      "sha256": "16984a95706a0d58577d18ea746ff317760ad7b56b84cd353ddb6e0b3e4bf515",
+      "bytes": 5723
+    },
+    {
+      "file": "complete/F2_family_assignments.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/F2_family_assignments.csv",
+      "sha256": "296e7c050f1baad6c94e552f2b312654c922c41bc778b7dd12fd698e0cdcd287",
+      "bytes": 22135
+    },
+    {
+      "file": "complete/forced_father_candidate_evidence.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/forced_father_candidate_evidence.csv",
+      "sha256": "95a3162ed9054547388524ac06f518d7b45c8dfb5f0d9f7e5becd68a641854bf",
+      "bytes": 7262
+    },
+    {
+      "file": "complete/pedigree_graph.svg",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/pedigree_graph.svg",
+      "sha256": "185ecf5a7c185c82b8cbee0defcf62ded6a59b184bbf32a2cdfc1d2ac3370abf",
+      "bytes": 140194
+    },
+    {
+      "file": "complete/pedigree_edges_with_evidence.csv",
+      "source": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/Tropheops_pedigree_handoff/complete/pedigree_edges_with_evidence.csv",
+      "sha256": "7a3b58778f2e34962c24166d34e3387a41da7002b9824c2cc13da64070f94a0c",
+      "bytes": 119305
+    }
+  ]
+}

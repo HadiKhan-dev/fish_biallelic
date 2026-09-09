@@ -1,1 +1,0 @@
-../../.agent-profiles/code-path-explorer.md

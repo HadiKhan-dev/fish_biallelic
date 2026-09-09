@@ -62,9 +62,9 @@ This repository implements a scientific bioinformatics pipeline for founder-hapl
 
 Given a multi-sample VCF or BCF, the pipeline discovers founder haplotypes within marker blocks, assembles them across chromosomes, paints offspring as diploid mosaics of founder haplotypes, infers pedigree relationships, corrects phase, and derives recombination maps.
 
-The codebase includes the `bhd_*` block-haplotype-discovery modules and several pipeline entry points. Statistical and biological correctness remain paramount, while material runtime, memory, I/O, and scaling constraints are first-class requirements for the real workflow and may justify localized, validated complexity.
+The codebase includes the `haplotype_reconstruction/discovery/` modules and several pipeline entry points. Statistical and biological correctness remain paramount, while material runtime, memory, I/O, and scaling constraints are first-class requirements for the real workflow and may justify localized, validated complexity.
 
-The current primary real-data workflow is associated with the cichlid pipeline in `pipeline_tropheops.py`. Verify this against the current repository before assuming it remains the primary entry point.
+The current primary real-data workflow is associated with the cichlid pipeline in `haplotype_reconstruction/workflows/tropheops.py`. Verify this against the current repository before assuming it remains the primary entry point.
 
 ## Task contract and scope control
 
@@ -254,35 +254,43 @@ found; it does not prove that the implementation is bug-free.
 
 Important entry points currently include:
 
-- `pipeline_tropheops.py` — primary real cichlid-cross workflow.
-- `pipeline_real.py` — another real-cross workflow.
-- `pipeline.py` — broader or simulation-oriented pipeline driver.
-- `pedigree_sim_pipeline.py` — simulated end-to-end validation against known truth.
-- `simulate_sequences.py` — sequence or read simulation.
-- `recombination_map.py` — downstream recombination-map generation and CLI.
+- `haplotype_reconstruction/workflows/tropheops.py` — primary real cichlid-cross workflow.
+- `haplotype_reconstruction/workflows/astcal.py` — another real-cross workflow.
+- `haplotype_reconstruction/workflows/simulation.py` — broader or simulation-oriented pipeline driver.
+- `run.py simulate` — simulated end-to-end validation against known truth.
+- `haplotype_reconstruction/simulation/pedigree.py` — sequence or read simulation.
+- `haplotype_reconstruction/recombination/pipeline.py` — downstream recombination-map generation and CLI.
 
 Important infrastructure currently includes:
 
-- `bhd_config.py` — shared model and algorithm configuration.
-- `thread_config.py` — numerical-library thread configuration.
-- `dynamic_threads.py` — dynamic Numba thread allocation.
-- `checkpoint_io.py` — compressed checkpoint I/O.
-- `vcf_data_loader.py` — VCF/BCF loading and genotype-likelihood preparation.
+- `haplotype_reconstruction/core/config.py` — shared model and algorithm configuration.
+- `haplotype_reconstruction/core/parallel.py` — process pools, numerical-library limits and dynamic Numba allocation.
+- `haplotype_reconstruction/core/checkpoints.py` — compressed checkpoint I/O.
+- `haplotype_reconstruction/core/variants.py` — VCF/BCF loading and genotype-likelihood preparation.
 
-Major stages include block-haplotype discovery, chimera resolution, refinement and residual discovery, hierarchical assembly, sample painting, pedigree inference, phase correction, and recombination-map generation.
+The current supported route performs missing-aware block-haplotype discovery,
+joint founder completion, component-preserving L1-L4 hierarchical assembly, and
+component-local sample painting through typed T09 checkpoints. Stage 10 consumes
+those paintings plus raw genotype likelihoods with ragged quadratic scoring,
+strict direction gating, a fixed top-20 pair panel, and Tier B as primary output.
+Stage 11 performs pedigree-conditioned refinement and genotype-preserving final
+phase polishing. Stage 12 consumes final phase for missing-aware, conditional
+recombination maps, with separate posterior-mean rates, called crossover
+intervals, and observable meiosis exposure. Neither stage feeds back upstream.
+The direction assumption has known limitations for same-depth/missing-parent crosses.
 
 This is a guide, not an authoritative inventory. Inspect the current repository before relying on filenames, stage numbers, or relationships.
 
 ## Configuration
 
-Shared tunable model thresholds and feature flags generally belong in `bhd_config.py`.
+Shared tunable model thresholds and feature flags generally belong in `haplotype_reconstruction/core/config.py`.
 
 Before adding a constant:
 
 1. Search for an existing equivalent.
 2. Check how related parameters are organised.
 3. Confirm it is shared rather than entry-point-specific.
-4. Preserve `bhd_config.py` as logic-free if that remains the convention.
+4. Preserve `haplotype_reconstruction/core/config.py` as logic-free if that remains the convention.
 
 Dataset paths, output paths, and experiment-specific selections should remain in the appropriate entry-point configuration unless the existing architecture indicates otherwise.
 
@@ -347,7 +355,7 @@ casually.
   function unless the current execution model explicitly supports it.
 - Preserve safeguards against BLAS, OpenMP, MKL, and Numba oversubscription.
 - In new entry points, inspect existing entry points to determine where
-  `thread_config` must be imported relative to NumPy and Numba.
+  `core.environment` and `core.parallel` must be imported relative to NumPy and Numba.
 - For CPU-bound work that can safely parallelize, target the complete verified
   Slurm CPU affinity. Increase process or thread counts when a larger
   allocation provides useful parallel capacity.
@@ -694,7 +702,12 @@ Match surrounding code.
 
 ## Validation
 
-Search for existing tests before concluding none exist. Possible mechanisms include module self-tests, `recombination_map.py --selftest`, simulated crosses, pipeline validation, held-out founder comparisons, pair-reconstruction recall, and validation CSVs or summaries.
+The supported simulation CLI provides cached known-truth validation through
+`python run.py simulate` and `python run.py evaluate`. Historical focused tests
+and development fixtures are archived locally, not part of the public package.
+Other validation mechanisms include bounded synthetic inputs, held-out founder
+comparisons, pair-reconstruction recall, phase/genotype error counts, and
+validation CSVs or summaries.
 
 Choose validation according to the change.
 

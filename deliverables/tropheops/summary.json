@@ -1,0 +1,111 @@
+{
+  "created_utc": "2026-07-24T22:30:34.959936+00:00",
+  "generation": {
+    "elapsed_seconds_internal": 14.766284020995954,
+    "graph_renderer": "dot - graphviz version 2.40.1 (0)",
+    "model_rerun": false,
+    "workers": 1
+  },
+  "git_commit": "c6522d3",
+  "schema_version": 1,
+  "scientific_caveat": "No individual-level breeding-record trio truth is available. Tier labels measure internal stability, and complete calls include leading and forced hypotheses.",
+  "source_files": {
+    "complete": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/handoff_pedigree_linked_v9_forced_complete_hypothesis/pedigree_v9_forced_complete_working_hypothesis.csv",
+    "tier_A": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/handoff_pedigree_linked_v9_final/pedigree_v9_final_tier_A.csv",
+    "tier_B": "/rds/project/rds-8b3VcZwY7rY/projects/haplotype_reconstruction/results_tropheops_withFounders/handoff_pedigree_linked_v9_final/pedigree_v9_final_tier_B.csv"
+  },
+  "standard_exchange_format": {
+    "IID": "project Alias; see individual_id_crosswalk.csv",
+    "columns": [
+      "FID",
+      "IID",
+      "PAT",
+      "MAT",
+      "SEX",
+      "PHENOTYPE"
+    ],
+    "missing_parent": "0",
+    "missing_phenotype": -9,
+    "sex_codes": {
+      "female": 2,
+      "male": 1,
+      "unknown": 0
+    },
+    "type": "PLINK FAM six-column sample/pedigree information"
+  },
+  "tiers": {
+    "complete": {
+      "F1_individuals": 16,
+      "F2_any_parent": 96,
+      "F2_both_parents": 96,
+      "F2_edges": 192,
+      "F2_fathers": 96,
+      "F2_individuals": 96,
+      "F2_mothers": 96,
+      "F2_no_parent": 0,
+      "F2_one_parent": 0,
+      "G0_individuals": 4,
+      "G0_to_F1_edges": 32,
+      "Tier_A_exact_pairs": 37,
+      "Tier_B_exact_pairs": 47,
+      "all_edges": 224,
+      "edge_evidence_classes": {
+        "Forced_completion_uncertain": 3,
+        "G0_to_F1_inferred_seed": 32,
+        "Leading_hypothesis_below_Tier_B": 56,
+        "Tier_A_strict_identity": 106,
+        "Tier_B_additional_identity": 27
+      },
+      "forced_completion_edges": 3,
+      "name": "complete",
+      "pedigree_rows": 116
+    },
+    "tier_A": {
+      "F1_individuals": 16,
+      "F2_any_parent": 68,
+      "F2_both_parents": 38,
+      "F2_edges": 106,
+      "F2_fathers": 50,
+      "F2_individuals": 96,
+      "F2_mothers": 56,
+      "F2_no_parent": 28,
+      "F2_one_parent": 30,
+      "G0_individuals": 4,
+      "G0_to_F1_edges": 32,
+      "Tier_A_exact_pairs": 37,
+      "Tier_B_exact_pairs": 47,
+      "all_edges": 138,
+      "edge_evidence_classes": {
+        "G0_to_F1_inferred_seed": 32,
+        "Tier_A_strict_identity": 106
+      },
+      "forced_completion_edges": 0,
+      "name": "tier_A",
+      "pedigree_rows": 116
+    },
+    "tier_B": {
+      "F1_individuals": 16,
+      "F2_any_parent": 82,
+      "F2_both_parents": 51,
+      "F2_edges": 133,
+      "F2_fathers": 65,
+      "F2_individuals": 96,
+      "F2_mothers": 68,
+      "F2_no_parent": 14,
+      "F2_one_parent": 31,
+      "G0_individuals": 4,
+      "G0_to_F1_edges": 32,
+      "Tier_A_exact_pairs": 37,
+      "Tier_B_exact_pairs": 47,
+      "all_edges": 165,
+      "edge_evidence_classes": {
+        "G0_to_F1_inferred_seed": 32,
+        "Tier_A_strict_identity": 106,
+        "Tier_B_additional_identity": 27
+      },
+      "forced_completion_edges": 0,
+      "name": "tier_B",
+      "pedigree_rows": 116
+    }
+  }
+}

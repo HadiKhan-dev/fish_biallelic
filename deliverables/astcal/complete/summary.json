@@ -1,0 +1,31 @@
+{
+  "F1_individuals": 9,
+  "F2_both_parents": 129,
+  "F2_edges": 258,
+  "F2_fathers": 129,
+  "F2_individuals": 129,
+  "F2_mothers": 129,
+  "F2_no_parent": 0,
+  "F2_one_parent": 0,
+  "F3_fathers": 150,
+  "F3_individuals": 150,
+  "F3_parent_groups": 42,
+  "F3_unresolved": 0,
+  "Tier_A_exact_pairs": 14,
+  "Tier_B_exact_pairs": 76,
+  "all_edges": 426,
+  "edge_evidence_classes": {
+    "Forced_completion_uncertain": 1,
+    "Reported_cross_design_topology": 18,
+    "Tier_A_strict_identity": 59,
+    "Tier_B_additional_identity": 203,
+    "Tier_C_design_conditioned_leading_identity": 63,
+    "Tier_C_state_supported_leading_identity": 82
+  },
+  "forced_completion_edges": 1,
+  "graph_caption": "F2: 129 both, 0 one, 0 unresolved; F3 observed fathers: 150/150. Grey=reported abstract topology; green=A; blue=B; orange dashed=C; red dotted=forced complete-only.",
+  "label": "Complete \u2014 includes one forced uncertain F3 father",
+  "pedigree_rows": 293,
+  "topology_edges": 18,
+  "view": "complete"
+}
