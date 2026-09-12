@@ -1,261 +1,275 @@
-"""refinement / pipeline for the canonical reconstruction pipeline."""
+"""Checkpointed family inference and stable, genotype-preserving final phase.
+
+T11 publishes one conditional phase product. Phase stability is not a claim of
+marginal-posterior convergence; full family probability tensors are not built.
+"""
 from __future__ import annotations
-from haplotype_reconstruction import PACKAGE_ROOT
 
 from dataclasses import asdict, replace
-import hashlib
-from pathlib import Path
-from types import SimpleNamespace
-import numpy as np
 import gc
-import haplotype_reconstruction.refinement.polish as refinement_polish
+from pathlib import Path
+import time
+import numpy as np
 
-CANONICAL_PHASE_CONFIG=refinement_polish.PhasePolishConfig(copy_error=.01,adaptive_window_sites=100,minimum_biological_gain=0.)
+from haplotype_reconstruction.core import checkpoints, parallel, runtime
+from haplotype_reconstruction.pedigree import components as pedigree_components
+from haplotype_reconstruction.pedigree import pipeline as pedigree_pipeline
+from haplotype_reconstruction.painting import checkpoints as painting_checkpoints
+from haplotype_reconstruction.workflows.reconstruction import PAINTING_STAGE
+from . import conditioning, model, polish
 
 
 FINAL_PHASE_STAGE = "11_phase_correction"
+CANONICAL_PHASE_CONFIG = polish.PhasePolishConfig(
+    copy_error=.01, adaptive_window_sites=100, minimum_biological_gain=0.)
 
 
-def finalize_stage11_product(product, t09, *, checkpoint_path=None, checkpoint_threads=1,
-                             genotype_likelihoods=None, relationships=None, messages=None,
-                             phase_config=None, chromosome_map=None):
-    """Return coherent allele/painting views; never attach stale confidence.
+def _fit_phase(gl, observed, scaffold, positions, relationships, names, *,
+               config, phase_config, identity, work_path=None, checkpoint_threads=1,
+               checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None):
+    """Resume family messages and the actual consecutive called-phase checks.
 
-For a converged source, the typed Stage11 and T09 products suffice. An
-unconverged source additionally needs its saved messages, original GLs and
-fixed pedigree for consecutive phase-stability assessment. It does not release
-unconverged posterior probabilities or recombination estimates.
+The prepared workspace survives one-iteration continuations but is rebuilt on
+restart. Each polisher starts independently from the current family context;
+the preceding polished path is only a comparison, never a warm start.
 """
-    if tuple(product.sample_ids)!=tuple(t09.sample_ids):
-        raise ValueError('Stage11 and painting sample axes differ')
-    if phase_config is None:
-        phase_config = replace(CANONICAL_PHASE_CONFIG,
-            recombination_rate=product.identity['config']['recombination_rate'])
+    if config.max_iterations < config.minimum_iterations:
+        raise ValueError("maximum family iterations must cover the initial phase window")
+    if config.required_unchanged < 2:
+        raise ValueError("phase release needs at least two consecutive unchanged checks")
+    if not np.isfinite(checkpoint_min_seconds) or checkpoint_min_seconds < 0:
+        raise ValueError("checkpoint_min_seconds must be finite and nonnegative")
+    work = None if work_path is None else Path(work_path)
+    state = point = None
+    unchanged = 0
+    checks = []
+    if work is not None and work.is_file():
+        saved = checkpoints.read(str(work), nthreads=checkpoint_threads)
+        if saved["identity"] != identity:
+            raise ValueError("Stage11 iteration checkpoint inputs/configuration differ")
+        state, point, unchanged = saved["messages"], saved["phase"], saved["unchanged"]
+        checks = list(saved["checks"])
+        del saved
+    converged = bool(state is not None and state.deltas and state.deltas[-1] < config.tolerance)
+    last_saved = -np.inf
+
+    def save(messages, phase, stable_count, *, force=False):
+        nonlocal last_saved
+        if work is not None and (force or time.perf_counter()-last_saved >= checkpoint_min_seconds):
+            checkpoints.write(str(work), {
+                "identity": identity, "messages": messages, "phase": phase,
+                "unchanged": stable_count, "checks": tuple(checks),
+            }, nthreads=checkpoint_threads)
+            last_saved = time.perf_counter()
+
+    def save_initial(messages):
+        # Before the first phase assessment there is no preceding phase whose
+        # iteration could become inconsistent with these checkpointed messages.
+        save(messages, None, 0)
+
+    workspace = None
+    # Only the immediately preceding independent solve is reusable. Fixed
+    # chromosome axes, pedigree, map and configuration belong to this call;
+    # restarting from messages intentionally starts with an empty cache.
+    polish_context = polish_initial = None
+    while point is None or (not converged and unchanged < config.required_unchanged):
+        iteration = 0 if state is None else state.iteration
+        if point is not None and iteration >= config.max_iterations:
+            save(state, point, unchanged, force=True)
+            raise RuntimeError("final called phase did not stabilize; iteration checkpoint retained, no final product released")
+        stop = (max(config.minimum_iterations, iteration) if point is None else iteration+1)
+        if workspace is None:
+            workspace = model.prepare_family_workspace(
+                gl, observed, scaffold.reference_alleles, positions, scaffold.phase_bins,
+                scaffold.component_ids, relationships, names, config=config,
+                chromosome_map=chromosome_map)
+        family = model.refine_family(
+            gl, observed, scaffold.reference_alleles, positions, scaffold.phase_bins,
+            scaffold.component_ids, relationships, names,
+            config=replace(config, max_iterations=stop), resume=state,
+            checkpoint_callback=save_initial if point is None else None,
+            workspace=workspace, chromosome_map=chromosome_map)
+        state = family.messages
+        try:
+            same_inputs = (polish_context is not None
+                and np.array_equal(polish_context, family.phase_context)
+                and np.array_equal(polish_initial, family.inferred_phase_map))
+            following = polish.finish_family_phase(
+                scaffold.reference_alleles, family, positions, scaffold.phase_bins,
+                scaffold.component_ids, workspace.parents, workspace.children, workspace.slots,
+                config=phase_config, chromosome_map=chromosome_map,
+                conditional_result=point.conditional_result if same_inputs else None)
+            if not same_inputs:
+                polish_context = family.phase_context.copy()
+                polish_initial = family.inferred_phase_map.copy()
+        except Exception:
+            # These messages have advanced; do not pair them with an older
+            # phase check. Retry this exact iteration after an interruption.
+            save(state, None, 0, force=True)
+            raise
+        changed = None if point is None else int(np.count_nonzero(point.allele_calls != following.allele_calls))
+        unchanged = unchanged+1 if changed == 0 else 0
+        point, converged = following, bool(family.converged)
+        item = {"iteration": state.iteration, "latent_delta": state.deltas[-1],
+                "latent_converged": converged, "changed_called_alleles": changed,
+                "consecutive_unchanged": unchanged}
+        checks.append(item)
+        stable = converged or unchanged >= config.required_unchanged
+        save(state, point, unchanged, force=stable or state.iteration >= config.max_iterations)
+        print(f"  [T11] iteration={state.iteration} delta={state.deltas[-1]:.6g} "
+              f"changed_alleles={changed} unchanged_checks={unchanged}", flush=True)
+        if progress_callback is not None:
+            progress_callback(item)
+        del family, following
+    return point, tuple(checks), converged
+
+
+def refine_chromosome(t09, gl, positions, observed, relationships, sample_ids, *,
+                      contig, config=model.FamilyRefinementConfig(), phase_config=None,
+                      identity=None, work_path=None, checkpoint_threads=1,
+                      checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None):
+    """Produce one independently resumable T11 chromosome from frozen T09/T10."""
+    names = tuple(map(str, sample_ids))
+    t09 = painting_checkpoints.validate_t09_component_checkpoint(t09, expected_sample_ids=names)
+    pedigree_components._validate_release_array_identity(
+        t09, np.asarray(gl), np.asarray(positions), np.asarray(observed))
     if chromosome_map is not None:
-        phase_config = replace(phase_config, recombination_rate=chromosome_map.fallback_rate_per_bp)
-    source_map = product.identity.get('recombination_map')
-    supplied_map = None if chromosome_map is None else chromosome_map.identity()
-    if source_map != supplied_map:
-        raise ValueError('final phase requires the same chromosome recombination map as its source family fit')
-    if chromosome_map is not None and chromosome_map.contig != str(product.contig):
-        raise ValueError('final phase chromosome map name differs from input contig')
-    if (product.identity['t09_release']!=t09.release_identity.record() or
-            product.identity['t09_painting']!=t09.painting_product_identity.record()):
-        raise ValueError('family fit belongs to another painting')
-    files=('refinement/pipeline.py', 'refinement/polish.py', 'refinement/conditioning.py', 'core/genetic_map.py')
-    identity={'schema':'stage11-final-phase-only-v1','family':product.identity,
-              'phase_config':asdict(phase_config),
-              'code':{f:hashlib.sha256((PACKAGE_ROOT / f).read_bytes()).hexdigest() for f in files}}
-    path=Path(checkpoint_path) if checkpoint_path is not None else None
-    if path is not None and path.exists():
-        cached=core_checkpoints.read(str(path),nthreads=checkpoint_threads)
-        if cached['identity']!=identity:raise ValueError('final phase checkpoint inputs/configuration differ')
-        return cached
-    scaffold=refinement_conditioning.prepare_phase_scaffold(t09,product.positions)
-    if not np.array_equal(scaffold.reference_alleles,product.reference_alleles):
-        raise ValueError('source family and frozen painting alleles differ')
-    checks=();latent_converged=bool(product.summary['converged'])
-    if latent_converged:
-        phase=refinement_polish.finish_family_phase(product.reference_alleles,product,product.positions,scaffold.phase_bins,
-            product.component_ids,product.edge_parent,product.edge_child,product.edge_child_slot,config=phase_config,
-            chromosome_map=chromosome_map)
-    else:
-        if genotype_likelihoods is None or relationships is None or messages is None:
-            raise ValueError('phase-only assessment requires the unconverged fit messages and original evidence')
-        family=SimpleNamespace(converged=False,messages=messages,
-            ordered_genotype_probability=product.ordered_genotype_probability,
-            phase_map=product.phase_map,inferred_phase_map=product.inferred_phase_map,phase_flip=product.phase_flip)
-        assessed=refinement_polish.assess_phase_release(genotype_likelihoods,product.raw_observed_mask,product.reference_alleles,
-            product.positions,scaffold.phase_bins,product.component_ids,relationships,product.sample_ids,
-            product.edge_parent,product.edge_child,product.edge_child_slot,family,
-            phase_config=phase_config,family_config=refinement_model.FamilyRefinementConfig(**product.identity['config']),
-            chromosome_map=chromosome_map)
-        if not assessed.phase_stable:raise RuntimeError('final called phase did not stabilize; source checkpoints are unchanged')
-        phase,checks,latent_converged=assessed.phase,assessed.checks,assessed.latent_converged
-    paintings=refinement_conditioning.paint_final_phase(t09,product.positions,phase.phase_map)
-    result={'identity':identity,'contig':product.contig,'sample_ids':product.sample_ids,
-            'positions':product.positions,'component_ids':product.component_ids,
-            'phase':phase,'corrected_component_paintings':paintings,'phase_stable':True,
-            'source_posterior_converged':bool(product.summary['converged']),
-            'continuation_posterior_converged':latent_converged,'phase_stability_checks':checks,
-            'confidence_policy':'conditional phase point path; source family posterior is separate and is not transferred to this path',
-            'posterior_and_recombination_products_included':False}
-    if path is not None:core_checkpoints.write(str(path),result,nthreads=checkpoint_threads)
-    return result
-
-
-def _finalizer_code_identity():
-    files = ('refinement/pipeline.py', 'refinement/polish.py', 'refinement/conditioning.py', 'core/genetic_map.py')
-    return {name: hashlib.sha256((PACKAGE_ROOT / name).read_bytes()).hexdigest()
-            for name in files}
-
-
-def _source_path(store, stage, contig, converged):
-    if converged:
-        return Path(core_checkpoints.contig_path(store.root, stage, contig))
-    # Existing family-stage readers interpret a contig checkpoint as a
-    # converged fit. Keep unconverged diagnostics out of that namespace.
-    return Path(store.stage_dir(stage)) / f"{contig}.nonconverged.p5.b2"
-
-
-def _summary(result, store, source_stage):
-    phase = result["phase"].summary
-    contig = result["contig"]
+        if chromosome_map.contig != str(contig):
+            raise ValueError("Stage11 chromosome map name differs from input contig")
+        config = replace(config, recombination_rate=chromosome_map.fallback_rate_per_bp)
+    config = config.validated()
+    phase_config = replace(phase_config or CANONICAL_PHASE_CONFIG,
+                           recombination_rate=config.recombination_rate)
+    family_identity = {
+        "model": model.MODEL_VERSION, "config": asdict(config), "sample_ids": names,
+        "contig": str(contig), "t09_release": t09.release_identity.record(),
+        "t09_painting": t09.painting_product_identity.record(),
+        "pedigree_sha256": conditioning.relationship_identity(relationships),
+        "recombination_map": None if chromosome_map is None else chromosome_map.identity(),
+        "external": identity,
+    }
+    product_identity = {"schema": conditioning.SCHEMA, "family": family_identity,
+                        "phase_config": asdict(phase_config),
+                        "code": conditioning.refinement_code_identity()}
+    scaffold = conditioning.prepare_phase_scaffold(t09, positions)
+    phase, checks, converged = _fit_phase(
+        gl, observed, scaffold, positions, relationships, names, config=config,
+        phase_config=phase_config, identity=product_identity, work_path=work_path,
+        checkpoint_threads=checkpoint_threads, checkpoint_min_seconds=checkpoint_min_seconds,
+        progress_callback=progress_callback, chromosome_map=chromosome_map)
     return {
-        "contig": contig, "samples": len(result["sample_ids"]),
+        "identity": product_identity, "contig": str(contig), "sample_ids": names,
+        "positions": np.asarray(positions), "component_ids": scaffold.component_ids,
+        "phase": phase,
+        "corrected_component_paintings": conditioning.paint_final_phase(t09, positions, phase.phase_map),
+        "phase_stable": True, "phase_stability_checks": checks,
+        "source_posterior_converged": converged,
+        "posterior_and_recombination_products_included": False,
+        "confidence_policy": "conditional phase point path; no marginal posterior probabilities are published or transferred",
+    }
+
+
+def _summary(result, store, elapsed):
+    phase = result["phase"].summary
+    checks = result["phase_stability_checks"]
+    return {
+        "contig": result["contig"], "samples": len(result["sample_ids"]),
         "sites": len(result["positions"]), "phase_stable": result["phase_stable"],
         "source_posterior_converged": result["source_posterior_converged"],
-        "continuation_posterior_converged": result["continuation_posterior_converged"],
-        "phase_stability_checks": len(result["phase_stability_checks"]),
+        "iterations": checks[-1]["iteration"], "phase_stability_checks": len(checks),
+        "consecutive_unchanged": checks[-1]["consecutive_unchanged"],
         "called_alleles": phase["called_alleles"],
         "changed_observable_phase_sites": phase["changed_observable_phase_sites"],
         "known_genotypes_changed": phase["known_genotypes_changed"],
-        "imputation_enabled": phase["imputation_enabled"],
-        "posterior_and_recombination_products_included": False,
-        "confidence_policy": result["confidence_policy"],
-        "final_checkpoint": str(Path(core_checkpoints.contig_path(
-            store.root, FINAL_PHASE_STAGE, contig)).resolve()),
-        "source_family_checkpoint": str(_source_path(
-            store, source_stage, contig, result["source_posterior_converged"]).resolve()),
+        "imputation_enabled": False, "posterior_and_recombination_products_included": False,
+        "confidence_policy": result["confidence_policy"], "elapsed_seconds": elapsed,
+        "final_checkpoint": str(Path(checkpoints.contig_path(
+            store.root, FINAL_PHASE_STAGE, result["contig"])).resolve()),
     }
 
 
 def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
-                        output_dir, raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
-                        n_workers=None, config=None, genetic_maps=None):
-    """Publish the validated phase-only product, reusing completed family fits.
+                   output_dir, raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
+                   n_workers=None, config=None, genetic_maps=None):
+    """Run canonical T11 sequentially by chromosome with the full CPU budget.
 
-Chromosomes run sequentially with the full supplied Numba budget. Existing
-family iteration/output checkpoints are preserved; final chromosomes are
-atomic and a compact final summary permits a no-array-load completed resume.
-Optional family imputation remains in the separate source family product.
+Only final phase is a release product. Work-in-progress messages and consecutive
+phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
 """
     if pedigree_payload is None:
         print("[T11] Waiting for the complete genome-wide T10 pedigree; no shard inference.")
         return None
-    config = (config or refinement_conditioning.config_from_environment()).validated()
+    config = (config or model.FamilyRefinementConfig()).validated()
     if genetic_maps is not None:
         config = replace(config, recombination_rate=genetic_maps.default_rate_cm_per_mb / 1e8).validated()
-    workers = core_runtime.available_cpu_count() if n_workers is None else int(n_workers)
-    if not 1 <= workers <= core_runtime.available_cpu_count():
+    workers = runtime.available_cpu_count() if n_workers is None else int(n_workers)
+    if not 1 <= workers <= runtime.available_cpu_count():
         raise ValueError("Stage11 CPU budget exceeds allocation")
     names = tuple(map(str, sample_ids)); contigs = tuple(map(str, contigs))
     if (tuple(map(str, pedigree_payload["ordered_sample_ids"])) != names or
             tuple(map(str, pedigree_payload["ordered_contigs"])) != contigs):
         raise ValueError("Stage11 axes differ from the complete T10 pedigree")
     relationships = pedigree_payload["tier_b_relationships"]
-    source_stage = "11_family_imputation" if config.impute_missing else "11_family_refinement"
     source_files = []
-    for source in dict.fromkeys((workflows_reconstruction.PAINTING_STAGE, raw_gl_stage, raw_sites_stage)):
-        core_runtime.require_contig_checkpoints(checkpoint_store, source, contigs)
+    for source in dict.fromkeys((PAINTING_STAGE, raw_gl_stage, raw_sites_stage)):
+        runtime.require_contig_checkpoints(checkpoint_store, source, contigs)
         for contig in contigs:
-            path = Path(core_checkpoints.contig_path(checkpoint_store.root, source, contig)).resolve()
+            path = Path(checkpoints.contig_path(checkpoint_store.root, source, contig)).resolve()
             stat = path.stat()
             source_files.append({"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
-    # Exactly the existing family-stage identity: finalizer changes must not
-    # cause an expensive family refit or discard upstream assembly checkpoints.
-    source_identity = {"schema": refinement_conditioning.SCHEMA, "config": asdict(config),
-        "sample_ids": names, "contigs": contigs,
-        "pedigree_sha256": refinement_conditioning.relationship_identity(relationships),
-        "code": refinement_conditioning.refinement_code_identity(), "source_files": source_files}
-    if genetic_maps is not None:
-        source_identity['recombination_maps'] = {name: genetic_maps.identity(name) for name in contigs}
-    checkpoint_store.bind_stage_identity(source_stage, source_identity)
-    if checkpoint_store.stage_complete(source_stage):
-        core_runtime.require_contig_checkpoints(checkpoint_store, source_stage, contigs)
-    phase_code = _finalizer_code_identity()
-    phase_settings = replace(CANONICAL_PHASE_CONFIG, recombination_rate=config.recombination_rate)
-    phase_config = asdict(phase_settings)
-    identity = {"schema": "stage11-canonical-final-phase-v1", "family": source_identity,
-        "phase_config": phase_config, "finalizer_code": phase_code,
-        "driver_code": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    identity = {
+        "schema": conditioning.SCHEMA, "config": asdict(config),
+        "phase_config": asdict(replace(CANONICAL_PHASE_CONFIG, recombination_rate=config.recombination_rate)),
+        "sample_ids": names, "contigs": contigs, "source_files": source_files,
+        "pedigree_sha256": conditioning.relationship_identity(relationships),
+        "code": conditioning.refinement_code_identity(),
+        "raw_gl_key": raw_gl_key,
+        "recombination_maps": None if genetic_maps is None else {c: genetic_maps.identity(c) for c in contigs},
+    }
     checkpoint_store.bind_stage_identity(FINAL_PHASE_STAGE, identity)
     output = Path(output_dir) / "phase_correction"
     output.mkdir(parents=True, exist_ok=True)
     if checkpoint_store.stage_complete(FINAL_PHASE_STAGE) and checkpoint_store.global_done(FINAL_PHASE_STAGE):
-        core_runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
+        runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
         saved = checkpoint_store.load_global(FINAL_PHASE_STAGE)
         if saved["identity"] != identity:
             raise ValueError("Stage11 final summary identity differs")
-        refinement_conditioning._write_summary_table(output, FINAL_PHASE_STAGE, saved["summaries"])
+        conditioning._write_summary_table(output, FINAL_PHASE_STAGE, saved["summaries"])
         print("[T11] Resumed complete final phase output from its compact summary.")
         return saved["summaries"]
     summaries = []
-    with core_parallel.numba_thread_scope(workers):
+    evidence_store = runtime.CheckpointStore(checkpoint_store.root, nthreads=workers)
+    print(f"[T11] Stable final phase; one chromosome, {workers} Numba threads.", flush=True)
+    with parallel.numba_thread_scope(workers):
         for contig in contigs:
-            chromosome_map = None if genetic_maps is None else genetic_maps.for_contig(contig)
-            contig_phase_settings = phase_settings if chromosome_map is None else replace(
-                phase_settings, recombination_rate=chromosome_map.fallback_rate_per_bp)
-            contig_phase_config = asdict(contig_phase_settings)
+            started = time.perf_counter()
             if checkpoint_store.contig_done(FINAL_PHASE_STAGE, contig):
                 result = checkpoint_store.load_contig(FINAL_PHASE_STAGE, contig, nthreads=workers)
-                saved = result["identity"]
-                if (saved["family"]["external"] != source_identity or
-                        saved["phase_config"] != contig_phase_config or saved["code"] != phase_code):
+                if result["identity"]["family"]["external"] != identity:
                     raise ValueError("Stage11 final chromosome identity differs")
             else:
-                t09 = checkpoint_store.load_contig(workflows_reconstruction.PAINTING_STAGE, contig, nthreads=workers)
-                work = Path(checkpoint_store.stage_dir(source_stage)) / f"{contig}.iterations.p5.b2"
-                gl = pos = observed = gl_payload = sites_payload = messages = None
-                diagnostic = output / f"{contig}.nonconverged.p5.b2"
-                unconverged = _source_path(checkpoint_store, source_stage, contig, False)
-                if checkpoint_store.contig_done(source_stage, contig):
-                    product = checkpoint_store.load_contig(source_stage, contig, nthreads=workers)
-                elif unconverged.is_file():
-                    product = core_checkpoints.read(str(unconverged), nthreads=workers)
-                elif diagnostic.is_file():
-                    # The earlier runner saved unconverged fits here before
-                    # stopping. Reuse that fit without overwriting its record.
-                    product = core_checkpoints.read(str(diagnostic), nthreads=workers)
-                else:
-                    gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
-                        checkpoint_store, contig, raw_gl_stage=raw_gl_stage,
-                        raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key,
-                        raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
-                    product = refinement_conditioning.refine_t09_chromosome(t09, gl, pos, observed, relationships,
-                        names, contig=contig, config=config, work_path=work,
-                        identity=source_identity, checkpoint_threads=None,
-                        chromosome_map=chromosome_map)
-                if product.identity["external"] != source_identity:
-                    raise ValueError("Stage11 source family identity differs")
-                source_path = _source_path(checkpoint_store, source_stage, contig,
-                                           product.summary["converged"])
-                if not source_path.is_file():
-                    core_checkpoints.write(str(source_path), product, nthreads=workers)
-                if not product.summary["converged"]:
-                    if gl is None:
-                        gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
-                            checkpoint_store, contig, raw_gl_stage=raw_gl_stage,
-                            raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key,
-                            raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
-                    saved = core_checkpoints.read(str(work), nthreads=workers)
-                    if saved["identity"] != product.identity:
-                        raise ValueError("Stage11 phase assessment messages belong to another family fit")
-                    messages = saved["messages"]
-                    del saved
-                result = finalize_stage11_product(product, t09,
-                    checkpoint_path=core_checkpoints.contig_path(checkpoint_store.root, FINAL_PHASE_STAGE, contig),
-                    checkpoint_threads=workers, genotype_likelihoods=gl,
-                    relationships=relationships, messages=messages,
-                    phase_config=contig_phase_settings, chromosome_map=chromosome_map)
-                del t09, product, gl, pos, observed, gl_payload, sites_payload, messages
-            summaries.append(_summary(result, checkpoint_store, source_stage))
-            print(f"[T11 {contig}] Final phase released; source posterior converged="
-                  f"{result['source_posterior_converged']}; phase stable={result['phase_stable']}", flush=True)
+                t09 = checkpoint_store.load_contig(PAINTING_STAGE, contig, nthreads=workers)
+                gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
+                    evidence_store, contig, raw_gl_stage=raw_gl_stage,
+                    raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key,
+                    raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
+                del gl_payload, sites_payload
+                chromosome_map = None if genetic_maps is None else genetic_maps.for_contig(contig)
+                result = refine_chromosome(
+                    t09, gl, pos, observed, relationships, names, contig=contig, config=config,
+                    work_path=Path(checkpoint_store.stage_dir(FINAL_PHASE_STAGE)) / f"{contig}.iterations.p5.b2",
+                    identity=identity, checkpoint_threads=workers, chromosome_map=chromosome_map)
+                checkpoints.write(checkpoints.contig_path(checkpoint_store.root, FINAL_PHASE_STAGE, contig),
+                                  result, nthreads=workers)
+                del t09, gl, pos, observed
+            summaries.append(_summary(result, checkpoint_store, time.perf_counter()-started))
+            print(f"[T11 {contig}] Stable final phase released; latent converged="
+                  f"{result['source_posterior_converged']}", flush=True)
             del result
-            gc.collect()
-    core_runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
+            gc.collect(); parallel.malloc_trim()
+    runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
     checkpoint_store.save_global(FINAL_PHASE_STAGE, {"identity": identity, "summaries": summaries})
-    refinement_conditioning._write_summary_table(output, FINAL_PHASE_STAGE, summaries)
+    conditioning._write_summary_table(output, FINAL_PHASE_STAGE, summaries)
     checkpoint_store.mark_stage_complete(FINAL_PHASE_STAGE)
-    print(f"[COMPLETE] Final phase ready for recombination-map estimation: "
-          f"{output / (FINAL_PHASE_STAGE + '.csv')}")
+    print(f"[COMPLETE] Final phase ready for recombination maps: {output / (FINAL_PHASE_STAGE + '.csv')}")
     return summaries
-
-import haplotype_reconstruction.core.checkpoints as core_checkpoints
-import haplotype_reconstruction.core.parallel as core_parallel
-import haplotype_reconstruction.core.runtime as core_runtime
-import haplotype_reconstruction.pedigree.pipeline as pedigree_pipeline
-import haplotype_reconstruction.refinement.conditioning as refinement_conditioning
-import haplotype_reconstruction.refinement.model as refinement_model
-import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction

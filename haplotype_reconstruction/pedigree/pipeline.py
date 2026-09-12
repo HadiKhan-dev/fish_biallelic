@@ -35,7 +35,7 @@ EVIDENCE_STAGE, PEDIGREE_STAGE = (
 )
 
 
-T10_INFERENCE_CODE_FILES = ('pedigree/pipeline.py', 'pedigree/components.py', 'pedigree/likelihoods.py', 'pedigree/bootstrap.py', 'pedigree/candidates.py', 'pedigree/config.py', 'pedigree/direction.py', 'pedigree/eligibility.py', 'pedigree/evidence.py', 'pedigree/graph.py', 'pedigree/inference.py', 'pedigree/models.py', 'pedigree/states.py', 'pedigree/sources.py', 'pedigree/transmission.py', 'painting/model.py', 'core/genetic_map.py', 'pedigree/results.py')
+T10_INFERENCE_CODE_FILES = ('pedigree/pipeline.py', 'pedigree/components.py', 'pedigree/likelihoods.py', 'pedigree/bootstrap.py', 'pedigree/candidates.py', 'pedigree/config.py', 'pedigree/direction.py', 'pedigree/eligibility.py', 'pedigree/evidence.py', 'pedigree/graph.py', 'pedigree/inference.py', 'pedigree/models.py', 'pedigree/states.py', 'pedigree/sources.py', 'pedigree/transmission.py', 'painting/model.py', 'painting/evidence.py', 'core/genetic_map.py', 'core/raw_evidence.py', 'pedigree/results.py')
 
 
 @dataclass(frozen=True)
@@ -284,6 +284,14 @@ def _load_raw_evidence(
         raw_sites_key,
         raw_observed_mask_key,
 ):
+    cached = raw_evidence.load(
+        checkpoint_store, contig, raw_gl_stage=raw_gl_stage,
+        raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key,
+        raw_sites_key=raw_sites_key, raw_observed_mask_key=raw_observed_mask_key)
+    if cached is not None:
+        _validate_source_modes(cached, raw_evidence.STAGE, contig)
+        return (cached["global_probs"], cached["global_sites"],
+                cached["global_observed_mask"], cached, cached)
     sites_payload = checkpoint_store.load_contig(raw_sites_stage, contig)
     gl_payload = None
     try:
@@ -1225,3 +1233,5 @@ import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.pedigree.config as module_pedigree_config
 import haplotype_reconstruction.pedigree.likelihoods as pedigree_likelihoods
 import haplotype_reconstruction.pedigree.sources as pedigree_sources
+
+from haplotype_reconstruction.core import raw_evidence

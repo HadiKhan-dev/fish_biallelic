@@ -551,7 +551,7 @@ def _process_single_batch(args):
      max_sites_for_linking, n_generations, recomb_tolerance,
      top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
      cc_scale, inner_num_processes, verbose,
-     chromosome_map, precomputed_informative_sample_mask) = args
+     chromosome_map, structured_transition_config, panel_search_config, precomputed_informative_sample_mask) = args
 
     # Attach to shared memory (zero-copy).
     shm_probs, global_probs = _attach_shared_array(_SHARED_META['probs'])
@@ -672,6 +672,7 @@ def _process_single_batch(args):
             dynamic_cores_fn=core_parallel.get_dynamic_threads,
             chromosome_map=chromosome_map,
             max_gap=beam_max_gap,
+            structured_config=structured_transition_config,
         )
         if _prof: _acc('mesh_transition', _t)
         del viterbi_emissions
@@ -684,7 +685,8 @@ def _process_single_batch(args):
         _t = time.perf_counter()
         beam_results = assembly_paths.run_full_mesh_beam_search(
             portion_proxy, mesh, beam_width=beam_width,
-            max_gap=beam_max_gap, verbose=verbose
+            max_gap=beam_max_gap, verbose=verbose,
+            endpoint_quota=None if panel_search_config is None else panel_search_config.paths_per_endpoint,
         )
         if _prof: _acc('beam_search', _t)
 
@@ -706,20 +708,30 @@ def _process_single_batch(args):
         # =================================================================
         core_parallel.apply_dynamic_threads()
         _t = time.perf_counter()
-        resolved_beam = assembly_chimera_resolution.select_and_resolve(
-            beam_results=beam_results,
-            fast_mesh=fast_mesh,
-            batch_blocks=list(original_portion),
-            global_probs=inference_batch_probs,
-            global_sites=batch_sites,
-            max_founders=max_founders,
-            top_n_swap=top_n_swap,
-            max_cr_iterations=max_cr_iterations,
-            paint_penalty=paint_penalty,
-            min_hotspot_samples=min_hotspot_samples,
-            cc_scale=cc_scale,
-            num_threads=core_parallel.get_dynamic_threads,
-        )
+        search_diagnostics = []
+        if panel_search_config is not None:
+            from .panel_search import select_and_resolve
+            resolved_beam = select_and_resolve(
+                beam_results, fast_mesh, list(original_portion),
+                inference_batch_probs, batch_sites, config=panel_search_config,
+                cc_scale=cc_scale, num_threads=core_parallel.get_dynamic_threads,
+                diagnostics=search_diagnostics,
+            )
+        else:
+            resolved_beam = assembly_chimera_resolution.select_and_resolve(
+                beam_results=beam_results,
+                fast_mesh=fast_mesh,
+                batch_blocks=list(original_portion),
+                global_probs=inference_batch_probs,
+                global_sites=batch_sites,
+                max_founders=max_founders,
+                top_n_swap=top_n_swap,
+                max_cr_iterations=max_cr_iterations,
+                paint_penalty=paint_penalty,
+                min_hotspot_samples=min_hotspot_samples,
+                cc_scale=cc_scale,
+                num_threads=core_parallel.get_dynamic_threads,
+            )
         if _prof: _acc('select_and_resolve(CR)', _t)
 
         del beam_results
@@ -748,6 +760,8 @@ def _process_single_batch(args):
                 informative_sample_count
             )
             super_block.hierarchy_total_sample_count = total_sample_count
+            if search_diagnostics:
+                super_block.panel_search_diagnostics = search_diagnostics
             super_block.hierarchy_informative_sample_rule = (
                 'intersection_across_linking_proxy_batch_v2'
             )
@@ -845,7 +859,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           # Output control
                           verbose=False,
                           min_boundary_informative_samples=1,
-                          chromosome_map=None):
+                          chromosome_map=None, structured_transition_config=None,
+                          panel_search_config=None):
     """Performs one level of Hierarchical Assembly.
 
     Memory strategy:
@@ -1039,7 +1054,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             max_sites_for_linking, n_generations, recomb_tolerance,
             top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
             cc_scale, inner_num_processes, verbose,
-            chromosome_map, batch_informative_sample_mask
+            chromosome_map, structured_transition_config, panel_search_config, batch_informative_sample_mask
         ))
 
     informative_counts = [int(np.sum(args[-1])) for args in worker_args]

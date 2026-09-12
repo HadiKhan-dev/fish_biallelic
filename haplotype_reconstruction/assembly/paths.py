@@ -224,7 +224,8 @@ def _recompute_affected_steps(path, step_scores, changed_block, fast_mesh, eff_m
 
 
 def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
-                                  max_gap=None, mmr_lambda=0.7, verbose=True):
+                                  max_gap=None, mmr_lambda=0.7, verbose=True,
+                                  endpoint_quota=None):
     """
     Bidirectional Beam Search with scaffold-based backward refinement.
 
@@ -314,7 +315,11 @@ def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
                 new_score = path_score + mean_transition[h]
                 candidates.append((new_path, new_score, h))
 
-        forward_beam = _select_beam_mmr_forward(candidates, beam_width, mmr_lambda)
+        if endpoint_quota is None:
+            forward_beam = _select_beam_mmr_forward(candidates, beam_width, mmr_lambda)
+        else:
+            from .panel_search import endpoint_select
+            forward_beam = endpoint_select(candidates, curr_block, endpoint_quota)
 
     if verbose:
         print(f"  Forward beam has {len(forward_beam)} full paths")
@@ -339,6 +344,9 @@ def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
             scaffold_cache[path_tuple] = (list(path), np.sum(step_scores), step_scores)
 
     current_scaffolds = list(scaffold_cache.values())
+    # Preserve full paths representing interior states, not only the final
+    # first-block quota. At most B * quota * max(K_b) paths survive.
+    archive = dict(scaffold_cache) if endpoint_quota is not None else None
 
     for refine_block in range(num_blocks - 1, -1, -1):
         n_choices = fast_mesh.get_num_haps(refine_block)
@@ -370,17 +378,24 @@ def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
 
         # Select top beam_width using MMR
         cand_list = list(candidates.values())  # [(path, total, steps), ...]
-        current_scaffolds = _select_beam_mmr_backward(cand_list, beam_width, mmr_lambda)
+        if endpoint_quota is None:
+            current_scaffolds = _select_beam_mmr_backward(cand_list, beam_width, mmr_lambda)
+        else:
+            current_scaffolds = endpoint_select(cand_list, refine_block, endpoint_quota)
+            for candidate in current_scaffolds:
+                archive[tuple(candidate[0])] = candidate
 
     if verbose:
         print(f"  Backward refinement complete. {len(current_scaffolds)} paths.")
 
     # ========== FINAL OUTPUT ==========
     # Convert to (path, score) format and sort by score descending
+    if archive is not None:
+        current_scaffolds = list(archive.values())
     final_results = [(path, total) for path, total, _ in current_scaffolds]
     final_results.sort(key=lambda x: x[1], reverse=True)
 
-    return final_results[:beam_width]
+    return final_results[:beam_width] if endpoint_quota is None else final_results
 
 
 def _select_beam_mmr(candidates, beam_width, mmr_lambda=0.7):
@@ -438,7 +453,8 @@ def _select_beam_mmr_backward(candidates, beam_width, mmr_lambda=0.7):
 
 
 def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100,
-                              max_gap=None, mmr_lambda=0.7, weight_decay_func=None, verbose=True):
+                              max_gap=None, mmr_lambda=0.7, weight_decay_func=None, verbose=True,
+                              endpoint_quota=None):
     """
     Main Driver for Bidirectional Beam Search.
 
@@ -455,7 +471,8 @@ def run_full_mesh_beam_search(haps_data, transition_mesh, beam_width=100,
         List of (path_indices, score) sorted by score.
     """
     return run_bidirectional_beam_search(haps_data, transition_mesh, beam_width,
-                                         max_gap=max_gap, mmr_lambda=mmr_lambda, verbose=verbose)
+                                         max_gap=max_gap, mmr_lambda=mmr_lambda, verbose=verbose,
+                                         endpoint_quota=endpoint_quota)
 
 
 _ATOMIC_SOURCE_PROVENANCE_ATTRIBUTES = (
@@ -638,5 +655,3 @@ def reconstruct_haplotypes_from_beam(beam_results, fast_mesh, haps_data):
         reconstructed.append(result)
 
     return reconstructed
-
-

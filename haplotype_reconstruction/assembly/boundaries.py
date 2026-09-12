@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 from scipy.special import logsumexp
+from numba import njit
+from .allele_polynomials import shared_sample_likelihoods
 import haplotype_reconstruction.assembly.observations as assembly_observations
 
 @dataclass(frozen=True)
@@ -138,6 +140,24 @@ def _unordered_pairs(k: int) -> np.ndarray:
     )
 
 
+@njit(cache=True)
+def _carrier_probabilities(pairs, weights, n_founders):
+    """Sum pair masses at their one or two endpoints in O(N*K**2).
+
+    A homozygous pair contributes once to carrier probability, not twice.
+    This avoids the dense (K**2, K) incidence matrix and cubic product.
+    """
+    result = np.zeros((len(weights), n_founders), dtype=np.float64)
+    for sample in range(len(weights)):
+        for state in range(len(pairs)):
+            first, second = pairs[state]
+            mass = weights[sample, state]
+            result[sample, first] += mass
+            if first != second:
+                result[sample, second] += mass
+    return result
+
+
 def exact_shared_latent_site_posterior(
     panel: assembly_observations.FounderPanel,
     site: int,
@@ -205,26 +225,10 @@ def exact_shared_latent_site_posterior(
         (assignment_codes[:, None] >> bit_positions[None, :]) & 1
     ).astype(np.int8)
 
-    allele_assignments = np.broadcast_to(
-        (panel.q[:, site] > 0.5).astype(np.int8),
-        (assignment_codes.size, n_founders),
-    ).copy()
-    if n_unresolved:
-        allele_assignments[:, unresolved] = assignments
-    dosage = (
-        allele_assignments[:, pairs[:, 0]]
-        + allele_assignments[:, pairs[:, 1]]
-    )
-
     robust_evidence = (1.0 - uniform_mix) * evidence + uniform_mix / 3.0
-    sample_likelihood = np.empty(
-        (assignment_codes.size, evidence.shape[0]), dtype=np.float64
-    )
-    for assignment_index in range(assignment_codes.size):
-        state_likelihood = robust_evidence[:, dosage[assignment_index]]
-        sample_likelihood[assignment_index] = np.sum(
-            weights * state_likelihood, axis=1
-        )
+    sample_likelihood = shared_sample_likelihoods(
+        robust_evidence, weights, pairs,
+        (panel.q[:, site] > 0.5).astype(np.int8), unresolved)
     with np.errstate(divide="ignore"):
         log_sample_likelihood = np.log(sample_likelihood)
     log_likelihood = np.sum(
@@ -256,12 +260,7 @@ def exact_shared_latent_site_posterior(
     posterior_alt = panel.q[:, site].copy()
     log_odds = np.full(n_founders, np.nan, dtype=np.float64)
     effective_support = np.zeros(n_founders, dtype=np.float64)
-    carrier_state = (
-        (pairs[:, :, None] == np.arange(n_founders)[None, None, :])
-        .any(axis=1)
-        .astype(np.float64)
-    )
-    carrier_probability = weights @ carrier_state
+    carrier_probability = _carrier_probabilities(pairs, weights, n_founders)
     with np.errstate(divide="ignore", invalid="ignore"):
         log_sample = np.log(sample_likelihood)
 
@@ -305,50 +304,50 @@ def exact_shared_latent_site_posterior(
     )
 
 
-def _posterior_with_site_mask(
-    panel: assembly_observations.FounderPanel,
-    genotype_likelihoods: np.ndarray,
-    observed: np.ndarray,
-    included_sites: np.ndarray,
-    *,
-    uniform_mix: float,
-    uniform_tolerance: float,
-) -> UnorderedDiplotypePosterior:
-    evidence, informative = _informative_cells(
-        genotype_likelihoods, observed, uniform_tolerance
-    )
-    included = np.asarray(included_sites, dtype=np.bool_)
-    if included.shape != (panel.q.shape[1],):
-        raise ValueError("included_sites must match the panel site dimension")
-    # A site may enter factorized per-sample state inference only when every
-    # founder allele is authoritative.  Otherwise its shared latent allele
-    # belongs in the joint focal-site model below, never in independent sample
-    # emissions.
-    inference_sites = included & np.all(panel.called, axis=0)
-    informative &= inference_sites[None, :]
-
-    distributions = assembly_observations.diploid_genotype_distributions(panel)
-    site_scores = assembly_observations.site_log_emissions(
-        evidence, distributions, uniform_mix=uniform_mix
-    )
-    site_scores *= informative[:, None, None, :]
-    pairs = _unordered_pairs(panel.q.shape[0])
-    log_likelihood = np.empty((evidence.shape[0], pairs.shape[0]), np.float64)
-    for state, (first, second) in enumerate(pairs):
-        log_likelihood[:, state] = np.sum(
-            site_scores[:, first, second, :], axis=1
-        )
-
-    # A uniform prior over unordered states avoids giving heterozygous states
-    # twice the prior mass merely because they have two ordered representations.
-    maximum = np.max(log_likelihood, axis=1, keepdims=True)
-    probability = np.exp(log_likelihood - maximum)
-    probability /= np.sum(probability, axis=1, keepdims=True)
-    return UnorderedDiplotypePosterior(
-        pairs=pairs,
-        probabilities=probability,
-        informative_site_count=np.sum(informative, axis=1, dtype=np.int64),
-    )
+def _whole_bin_statistics(panel, evidence, observed, rule, uniform_tolerance,
+                          informative_focal):
+    """Compute each site's contribution once, retaining immutable holdouts."""
+    evidence, informative = _informative_cells(evidence, observed, uniform_tolerance)
+    informative &= np.all(panel.called, axis=0)[None, :]
+    samples, sites = informative.shape
+    k = len(panel.keys)
+    bins = (sites + rule.snps_per_bin - 1) // rule.snps_per_bin
+    pairs = _unordered_pairs(k)
+    scores = np.zeros((bins, samples, len(pairs)))
+    counts = np.zeros((bins, samples), dtype=np.int64)
+    separations = np.zeros((bins, k, k), dtype=np.int64)
+    for block in range(bins):
+        start = block * rule.snps_per_bin
+        stop = min(sites, start + rule.snps_per_bin)
+        subpanel = assembly_observations.FounderPanel(
+            panel.positions[start:stop], panel.keys, panel.q[:, start:stop],
+            panel.called[:, start:stop])
+        distribution = assembly_observations.diploid_genotype_distributions(subpanel)
+        emissions = assembly_observations.site_log_emissions(
+            evidence[:, start:stop], distribution, uniform_mix=rule.uniform_mix)
+        mask = informative[:, start:stop]
+        emissions *= mask[:, None, None, :]
+        counts[block] = np.sum(mask, axis=1)
+        for state, (first, second) in enumerate(pairs):
+            scores[block, :, state] = np.sum(emissions[:, first, second, :], axis=1)
+        observable = (np.all(subpanel.called, axis=0)
+                      & np.any(informative_focal[:, start:stop], axis=0))
+        for first in range(k):
+            for second in range(first + 1, k):
+                count = np.count_nonzero(observable & (
+                    np.abs(subpanel.q[first] - subpanel.q[second])
+                    > rule.founder_identifiability_tolerance))
+                separations[block, first, second] = count
+                separations[block, second, first] = count
+    # Positive/negative bin totals are combined without subtracting a large
+    # held-out contribution from a nearly equal whole-block score.
+    prefix = np.zeros_like(scores)
+    suffix = np.zeros_like(scores)
+    for block in range(1, bins):
+        prefix[block] = prefix[block - 1] + scores[block - 1]
+    for block in range(bins - 2, -1, -1):
+        suffix[block] = scores[block + 1] + suffix[block + 1]
+    return pairs, prefix + suffix, counts, separations
 
 
 def cavity_fill_unknown_alleles(
@@ -368,9 +367,12 @@ def cavity_fill_unknown_alleles(
     likelihoods are multiplied.  Independent Bernoulli priors from ``panel.q``
     are included for all unresolved alleles, including the target.
 
-    Exact enumeration costs ``O(2**U * N * K**2)`` time and
-    ``O(2**U * (N + K**2))`` working memory at a site with ``U`` unresolved
-    founders.  Sites over the configured cap conservatively remain unresolved.
+    Quadratic dosage coefficients reduce the likelihood table to
+    ``O(N*K**2 + N*2**U)``; exact carrier-sensitivity diagnostics retain
+    ``O(U*N*2**U)`` worst-case work. Near-zero polynomial values use the
+    direct positive mixture to avoid cancellation. Working memory is
+    ``O(N*K**2 + (N+U)*2**U)``. Sites over the unchanged enumeration cap
+    conservatively remain unresolved.
     Effective carrier support is the sum of leave-bin-out probabilities of
     carrying the target over focal-informative samples whose likelihood is
     sensitive to that target allele; it gates release but never scales an LLR.
@@ -400,29 +402,17 @@ def cavity_fill_unknown_alleles(
     minimum_observable_separation = np.full(q.shape, -1, dtype=np.int64)
 
     n_bins = (n_sites + rule.snps_per_bin - 1) // rule.snps_per_bin
+    pairs, outside_scores, bin_counts, bin_separations = _whole_bin_statistics(
+        panel, evidence, observed, rule, uniform_tolerance, informative_focal)
+    all_counts = np.sum(bin_counts, axis=0)
+    all_separations = np.sum(bin_separations, axis=0)
     for bin_index in range(n_bins):
         start = bin_index * rule.snps_per_bin
         stop = min(start + rule.snps_per_bin, n_sites)
-        outside = np.ones(n_sites, dtype=np.bool_)
-        outside[start:stop] = False
-        inference_outside = outside & np.all(panel.called, axis=0)
-        observable_outside = inference_outside & np.any(
-            informative_focal, axis=0
-        )
         exchangeable_founder = np.zeros(k, dtype=np.bool_)
         minimum_separation = np.full(k, -1, dtype=np.int64)
         if k > 1:
-            separation = np.zeros((k, k), dtype=np.int64)
-            for first in range(k):
-                for second in range(first + 1, k):
-                    count = int(np.sum(
-                        np.abs(
-                            panel.q[first, observable_outside]
-                            - panel.q[second, observable_outside]
-                        ) > rule.founder_identifiability_tolerance
-                    ))
-                    separation[first, second] = count
-                    separation[second, first] = count
+            separation = all_separations - bin_separations[bin_index]
             for founder in range(k):
                 other = np.arange(k) != founder
                 minimum_separation[founder] = int(
@@ -433,14 +423,13 @@ def cavity_fill_unknown_alleles(
                 )
         minimum_observable_separation[:, start:stop] = minimum_separation[:, None]
 
-        cavity = _posterior_with_site_mask(
-            panel,
-            evidence,
-            observed,
-            outside,
-            uniform_mix=rule.uniform_mix,
-            uniform_tolerance=uniform_tolerance,
-        )
+        log_likelihood = outside_scores[bin_index]
+        maximum = np.max(log_likelihood, axis=1, keepdims=True)
+        probability = np.exp(log_likelihood - maximum)
+        probability /= np.sum(probability, axis=1, keepdims=True)
+        cavity = UnorderedDiplotypePosterior(
+            pairs=pairs, probabilities=probability,
+            informative_site_count=all_counts - bin_counts[bin_index])
 
         for site in range(start, stop):
             unresolved = np.flatnonzero(~panel.called[:, site])
@@ -522,5 +511,3 @@ def cavity_fill_unknown_alleles(
         ),
         n_enumeration_limit_skipped=int(np.sum(enumeration_limit_skipped)),
     )
-
-

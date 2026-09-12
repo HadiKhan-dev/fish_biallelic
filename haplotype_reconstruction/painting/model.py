@@ -10,6 +10,10 @@ from typing import Any
 import numpy as np
 import numba
 from numba import njit, prange
+from . import evidence as painting_evidence
+
+
+T09_EMISSION_CACHE_MAX_BYTES = 1024 ** 3  # Bounded reusable T10 evidence, per chromosome.
 
 
 RAGGED_MIN_WORKING_MEMORY_BYTES = 512 * 1024 * 1024
@@ -179,9 +183,15 @@ class RaggedBinning:
 def normalise_genotype_likelihoods(genotype_likelihoods: np.ndarray) -> np.ndarray:
     """Normalize raw non-negative GL rows; zero-mass rows become uniform."""
 
-    evidence = np.asarray(genotype_likelihoods, dtype=np.float64)
-    if evidence.ndim != 3 or evidence.shape[2] != 3:
+    raw = np.asarray(genotype_likelihoods)
+    if raw.ndim != 3 or raw.shape[2] != 3:
         raise ValueError("genotype likelihoods must have shape (samples, sites, 3)")
+    if raw.dtype in (np.dtype("float32"), np.dtype("float64")) and raw.size >= 196608:
+        result, invalid = painting_evidence.normalize_rows(raw)
+        if invalid:
+            raise ValueError("genotype likelihoods must be finite and non-negative")
+        return result
+    evidence = np.asarray(raw, dtype=np.float64)
     if np.any(~np.isfinite(evidence)) or np.any(evidence < 0.0):
         raise ValueError("genotype likelihoods must be finite and non-negative")
     totals = np.sum(evidence, axis=2, keepdims=True)
@@ -280,11 +290,12 @@ def build_ragged_bins(
         return RaggedBinning((), np.array([]), np.array([], dtype=np.int64),
                              np.array([], dtype=np.int64))
 
-    boundaries = [0]
-    for site in range(1, len(positions)):
-        if not np.array_equal(active[:, site], active[:, site - 1]):
-            boundaries.append(site)
-    boundaries.append(len(positions))
+    # Accumulate site boundaries in native vector operations, using O(L)
+    # temporary memory rather than a K-by-L difference grid.
+    changed = np.zeros(len(positions) - 1, dtype=np.bool_)
+    for trajectory in active:
+        changed |= trajectory[1:] != trajectory[:-1]
+    boundaries = np.r_[0, np.flatnonzero(changed) + 1, len(positions)]
 
     bins: list[np.ndarray] = []
     for start, stop in zip(boundaries[:-1], boundaries[1:]):
@@ -851,6 +862,9 @@ class RaggedPaintingDiagnostics:
     hmm_working_memory_budget_bytes: int
     hmm_estimated_bytes_per_sample: int
     minimum_viterbi_public_class_posterior: float
+    # Upper triangle, including the diagonal: samples x S*(S+1)/2 x bins.
+    # Diploid emissions are exactly symmetric; transitions remain ordered.
+    source_log_emission_upper: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -904,36 +918,45 @@ def release_ragged_states(
     ] + [-1], dtype=np.int32)
     class_grid = internal_grid.astype(np.int32, copy=True)
     label_grid = class_output_labels[internal_grid]
-    status_grid = np.full(
-        internal_grid.shape,
-        int(PaintingTrackStatus.INELIGIBLE_NO_EVIDENCE),
+    status_by_class = np.full(
+        state_space.background_index + 1, int(PaintingTrackStatus.BACKGROUND),
         dtype=np.uint8,
     )
-    for sample_index in range(internal_grid.shape[0]):
-        if not eligible[sample_index]:
-            class_grid[sample_index] = -1
-            label_grid[sample_index] = -1
-            continue
-        for bin_index in range(internal_grid.shape[2]):
-            if qv[sample_index, bin_index] < threshold:
-                class_grid[sample_index, :, bin_index] = -1
-                label_grid[sample_index, :, bin_index] = -1
-                status_grid[sample_index, :, bin_index] = int(
-                    PaintingTrackStatus.LOW_POSTERIOR_ABSTENTION
-                )
-                continue
-            for track in range(2):
-                class_index = int(internal_grid[sample_index, track, bin_index])
-                if class_index == state_space.background_index:
-                    status = PaintingTrackStatus.BACKGROUND
-                elif not class_is_anchored[class_index]:
-                    status = PaintingTrackStatus.UNANCHORED_TRAJECTORY
-                elif len(state_space.equivalence_classes[class_index]) > 1:
-                    status = PaintingTrackStatus.POOLED_EQUIVALENCE
-                else:
-                    status = PaintingTrackStatus.SINGLETON_NAMED
-                status_grid[sample_index, track, bin_index] = int(status)
+    for class_index, members in enumerate(state_space.equivalence_classes):
+        if not class_is_anchored[class_index]:
+            status_by_class[class_index] = int(PaintingTrackStatus.UNANCHORED_TRAJECTORY)
+        elif len(members) > 1:
+            status_by_class[class_index] = int(PaintingTrackStatus.POOLED_EQUIVALENCE)
+        else:
+            status_by_class[class_index] = int(PaintingTrackStatus.SINGLETON_NAMED)
+    status_grid = status_by_class[internal_grid]
+    low = np.broadcast_to((qv < threshold)[:, None, :], internal_grid.shape)
+    class_grid[low] = -1
+    label_grid[low] = -1
+    status_grid[low] = int(PaintingTrackStatus.LOW_POSTERIOR_ABSTENTION)
+    class_grid[~eligible] = -1
+    label_grid[~eligible] = -1
+    status_grid[~eligible] = int(PaintingTrackStatus.INELIGIBLE_NO_EVIDENCE)
     return label_grid, class_grid, status_grid
+
+
+def _released_chunks(labels, classes, statuses, edges):
+    """Coalesce unordered release keys, keeping each run's first ordered pair."""
+    bins = labels.shape[1]
+    if not bins:
+        return []
+    changed = np.zeros(bins, dtype=np.bool_)
+    changed[0] = True
+    for grid in (labels, classes, statuses):
+        first = np.minimum(grid[0], grid[1])
+        second = np.maximum(grid[0], grid[1])
+        changed[1:] |= (first[1:] != first[:-1]) | (second[1:] != second[:-1])
+    starts = np.flatnonzero(changed)
+    stops = np.r_[starts[1:], bins]
+    return [painting_components.PaintedChunk(
+        int(edges[start]), int(edges[stop]),
+        int(labels[0, start]), int(labels[1, start]))
+        for start, stop in zip(starts, stops)]
 
 
 def paint_ragged_component(
@@ -952,6 +975,7 @@ def paint_ragged_component(
         working_memory_bytes: int | None = None,
         minimum_viterbi_public_class_posterior: float = 0.90,
         chromosome_map=None,
+        source_emission_cache_bytes: int = T09_EMISSION_CACHE_MAX_BYTES,
 ) -> RaggedPainting:
     """Paint one component in bounded sample batches with exact recurrences.
 
@@ -985,8 +1009,9 @@ def paint_ragged_component(
         raise ValueError("observed mask must match component evidence")
     if full_evidence.shape[1] != len(panel.positions):
         raise ValueError("component evidence must align with the full founder panel")
-    evidence = full_evidence[:, state_space.site_indices, :]
-    observed = full_observed[:, state_space.site_indices]
+    evidence, observed = painting_evidence.select_site_evidence(
+        full_evidence, full_observed, state_space.site_indices
+    )
     binning = build_ragged_bins(
         state_space.positions, state_space.active, snps_per_bin
     )
@@ -1009,7 +1034,9 @@ def paint_ragged_component(
     # With D=S², B bins, and L selected sites, 20*D*B bounds the
     # concurrent emission/HMM arrays per sample and 24*L covers normalized GLs.
     # The direct emission kernel has no S²-by-site founder temporary.
-    fixed_working_bytes = 0
+    n_symmetric = n_states * (n_states + 1) // 2
+    cache_bytes = 8 * evidence.shape[0] * n_symmetric * n_bins
+    fixed_working_bytes = cache_bytes if cache_bytes <= source_emission_cache_bytes else 0
     estimated_bytes_per_sample = max(
         1, 20 * n_diplotypes * n_bins + 24 * len(state_space.positions)
     )
@@ -1018,6 +1045,12 @@ def paint_ragged_component(
         fixed_working_bytes,
         thread_count,
         requested_bytes=working_memory_bytes,
+    )
+    if fixed_working_bytes + estimated_bytes_per_sample > working_memory_budget:
+        fixed_working_bytes = 0
+    source_log_emission_upper = (
+        np.empty((evidence.shape[0],n_symmetric,n_bins),dtype=np.float64)
+        if fixed_working_bytes else None
     )
     effective_batch_size = choose_ragged_batch_size(
         evidence.shape[0], batch_size, thread_count,
@@ -1047,6 +1080,9 @@ def paint_ragged_component(
             binning,
             robustness_epsilon=robustness_epsilon,
         )
+        if source_log_emission_upper is not None:
+            painting_evidence.store_symmetric_emissions(
+                emissions, source_log_emission_upper, batch_start, n_states)
         viterbi_grid = viterbi_label_grid(
             emissions, binning.centers, n_states, recomb_rate,
             switch_penalty_per_snp, snps_per_bin, double_recomb_factor, genetic_distances,
@@ -1088,32 +1124,9 @@ def paint_ragged_component(
         if not eligible[sample_index]:
             samples.append(painting_components.SamplePainting(sample_index, []))
             continue
-        chunks = []
-        previous_release_key = None
-        for bin_index in range(len(binning.indices)):
-            first = int(map_grid[sample_index, 0, bin_index])
-            second = int(map_grid[sample_index, 1, bin_index])
-            status_pair = tuple(sorted((
-                int(status_grid[sample_index, 0, bin_index]),
-                int(status_grid[sample_index, 1, bin_index]),
-            )))
-            class_pair = tuple(sorted((
-                int(class_grid[sample_index, 0, bin_index]),
-                int(class_grid[sample_index, 1, bin_index]),
-            )))
-            release_key = (status_pair, class_pair, tuple(sorted((first, second))))
-            if chunks and previous_release_key == release_key:
-                previous = chunks[-1]
-                chunks[-1] = painting_components.PaintedChunk(
-                    previous.start, int(binning.edges[bin_index + 1]),
-                    previous.hap1, previous.hap2,
-                )
-            else:
-                chunks.append(painting_components.PaintedChunk(
-                    int(binning.edges[bin_index]),
-                    int(binning.edges[bin_index + 1]), first, second,
-                ))
-            previous_release_key = release_key
+        chunks = _released_chunks(
+            map_grid[sample_index], class_grid[sample_index],
+            status_grid[sample_index], binning.edges)
         samples.append(painting_components.SamplePainting(sample_index, chunks))
     painting = painting_components.BlockPainting(
         (int(state_space.positions[0]), int(state_space.positions[-1])), samples
@@ -1123,26 +1136,20 @@ def paint_ragged_component(
     posterior_background[~eligible] = np.nan
     posterior_public_unknown[~eligible] = np.nan
     posterior_viterbi_public[~eligible] = np.nan
-    totals = np.sum(evidence, axis=2)
-    spread = np.max(evidence, axis=2) - np.min(evidence, axis=2)
-    nonuniform = (
-        (totals > 0.0)
-        & (spread > 16.0 * np.finfo(np.float64).eps * totals)
-    )
-    direct = np.zeros(map_grid.shape, dtype=np.bool_)
-    for sample_index in range(evidence.shape[0]):
-        for track in range(2):
-            for bin_index, site_indices in enumerate(binning.indices):
-                internal_label = internal_grid[sample_index, track, bin_index]
-                if class_grid[sample_index, track, bin_index] < 0:
-                    continue
-                if internal_label == state_space.background_index:
-                    continue
-                direct[sample_index, track, bin_index] = np.any(
-                    state_space.called[internal_label, site_indices]
-                    & observed[sample_index, site_indices]
-                    & nonuniform[sample_index, site_indices]
-                )
+    if evidence.dtype in (np.dtype("float32"), np.dtype("float64")):
+        # NumPy's raw-array arithmetic uses this dtype (unlike the float64
+        # normalized eligibility calculation); retain that threshold rounding.
+        epsilon = np.asarray(16.0 * np.finfo(np.float64).eps, dtype=evidence.dtype)[()]
+        nonuniform = painting_evidence.raw_nonuniform(evidence, epsilon)
+    else:
+        totals = np.sum(evidence, axis=2)
+        spread = np.max(evidence, axis=2) - np.min(evidence, axis=2)
+        nonuniform = (totals > 0.0) & (spread > 16.0 * np.finfo(np.float64).eps * totals)
+    starts = np.asarray([indices[0] for indices in binning.indices], dtype=np.int64)
+    stops = np.asarray([indices[-1] + 1 for indices in binning.indices], dtype=np.int64)
+    direct = painting_evidence.direct_callability(
+        internal_grid, class_grid, state_space.called, observed, nonuniform,
+        starts, stops, state_space.background_index)
     biological = minimum_unordered_switch_counts(internal_grid)
     biological[~eligible] = 0
     named_alleles = np.full(state_space.called.shape, -1, dtype=np.int8)
@@ -1171,6 +1178,7 @@ def paint_ragged_component(
         hmm_working_memory_budget_bytes=working_memory_budget,
         hmm_estimated_bytes_per_sample=estimated_bytes_per_sample,
         minimum_viterbi_public_class_posterior=minimum_viterbi_public_class_posterior,
+        source_log_emission_upper=source_log_emission_upper,
     )
     return RaggedPainting(painting, state_space, binning, eligible, diagnostics)
 
@@ -1181,6 +1189,14 @@ def samples_with_ragged_evidence(
 ) -> np.ndarray:
     """Return samples having at least one observed non-uniform GL row."""
 
+    raw = np.asarray(genotype_likelihoods)
+    if (raw.ndim == 3 and raw.shape[2] == 3 and raw.size >= 196608
+            and raw.dtype in (np.dtype("float32"), np.dtype("float64"))):
+        mask = np.broadcast_to(np.asarray(observed, dtype=np.bool_), raw.shape[:2])
+        eligible, invalid = painting_evidence.eligible_samples(raw, mask)
+        if invalid:
+            raise ValueError("genotype likelihoods must be finite and non-negative")
+        return eligible
     evidence = normalise_genotype_likelihoods(genotype_likelihoods)
     observed = np.asarray(observed, dtype=np.bool_)
     spread = np.max(evidence, axis=2) - np.min(evidence, axis=2)

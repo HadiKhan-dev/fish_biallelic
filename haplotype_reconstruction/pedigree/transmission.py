@@ -17,6 +17,9 @@ njit = core_parallel.original_njit
 
 APPROXIMATION_NAME = "transmitted-marginal-persistence-maxent-quadratic"
 
+# Temporary per-call cache, tiled over children; not a scientific setting.
+_COMMON_EMISSION_CACHE_BYTES = 256 << 20
+
 
 @dataclass(frozen=True)
 class ProjectedRaggedQuadraticModel:
@@ -169,6 +172,10 @@ def _project_transmitted_alt(
         candidate = quotient // sites
         block = site_to_bin[site]
         q_first = state_alt[first, site]
+        # Deterministic transmitted alleles cannot change upon conditioning.
+        if q_first == 0.0 or q_first == 1.0:
+            result[candidate, site, first] = q_first
+            continue
         if candidate_observed[candidate, site]:
             w0 = (1.0 - epsilon) * candidate_gl[candidate, site, 0] + epsilon / 3.0
             w1 = (1.0 - epsilon) * candidate_gl[candidate, site, 1] + epsilon / 3.0
@@ -996,6 +1003,55 @@ def _site_likelihood(gl, coefficient, first_alt, second_alt, mismatch):
     return 3.0 * (gl[0] * p0 + gl[1] * p1 + gl[2] * p2)
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _common_emission_products(
+    state_alt, child_gl, coefficient, observed_site, observed_start,
+    observed_stop, mismatch, child_start, child_stop,
+):
+    """Share exact called-founder products; NaN requests the general path.
+
+    A called named allele projects to the same 0/1 value in every candidate.
+    Missing named alleles and BACKGROUND retain candidate-specific emissions.
+    The original site order, likelihood calculation and underflow fallback
+    remain authoritative. This cache never removes an HMM state.
+    """
+    bins = observed_start.shape[1]
+    states = state_alt.shape[0]
+    children = child_stop - child_start
+    result = np.full((children, bins, states, states), np.nan)
+    for task in prange(children * bins):
+        local_child, block = task // bins, task % bins
+        child = child_start + local_child
+        for first in range(states - 1):
+            for second in range(states - 1):
+                product = 1.0
+                valid = True
+                for slot in range(
+                    observed_start[child, block], observed_stop[child, block]
+                ):
+                    site = observed_site[slot]
+                    a, b = state_alt[first, site], state_alt[second, site]
+                    if not ((a == 0.0 or a == 1.0)
+                            and (b == 0.0 or b == 1.0)):
+                        valid = False
+                        break
+                    value = _site_likelihood(
+                        child_gl[child, site], coefficient[child, site],
+                        a, b, mismatch,
+                    )
+                    if value <= 0.0:
+                        valid = False
+                        break
+                    product *= value
+                    if (not np.isfinite(product)
+                            or product < 2.2250738585072014e-308):
+                        valid = False
+                        break
+                if valid:
+                    result[local_child, block, first, second] = product
+    return result
+
+
 @njit(cache=True, fastmath=False)
 def _normalise_forward(values):
     total = np.sum(values)
@@ -1046,14 +1102,58 @@ def _apply_log_emission(current, log_emission):
 
 
 @njit(cache=True, fastmath=False)
+def _apply_star_bridge_axis(current, output, stay, alpha, row_arm, pivot, axis):
+    """Apply exact Hall-star support without general leave-one-out arrays.
+
+    Only the pivot has a nonzero beta. Its two sums retain the general
+    operator's ascending prefix and descending suffix order. All other
+    destinations receive their diagonal and the pivot's outgoing row arm.
+    """
+    states = current.shape[0]
+    if axis == 0:
+        for second in range(states):
+            left = 0.0
+            for source in range(pivot):
+                left += current[source, second] * alpha[source]
+            right = 0.0
+            for source in range(states - 1, pivot, -1):
+                right += current[source, second] * alpha[source]
+            pivot_value = current[pivot, second]
+            for destination in range(states):
+                value = stay[destination] * current[destination, second]
+                if destination == pivot:
+                    value += left + right
+                value += pivot_value * row_arm[destination]
+                output[destination, second] = value
+    else:
+        for first in range(states):
+            left = 0.0
+            for source in range(pivot):
+                left += current[first, source] * alpha[source]
+            right = 0.0
+            for source in range(states - 1, pivot, -1):
+                right += current[first, source] * alpha[source]
+            pivot_value = current[first, pivot]
+            for destination in range(states):
+                value = stay[destination] * current[first, destination]
+                if destination == pivot:
+                    value += left + right
+                value += pivot_value * row_arm[destination]
+                output[first, destination] = value
+
+
+@njit(cache=True, fastmath=False)
 def _apply_bridge_axis(
-    current, output, stay, alpha, beta, row_arm, column_arm, large, axis
+    current, output, stay, alpha, beta, row_arm, column_arm, large, axis,
+    prefix, suffix, branch=-1,
 ):
     """Apply one compressed bridge with cancellation-free leave-one-out sums."""
 
+    if branch == 3:
+        _apply_star_bridge_axis(current, output, stay, alpha, row_arm, large, axis)
+        return
+
     states = current.shape[0]
-    prefix = np.empty(states + 1, dtype=np.float64)
-    suffix = np.empty(states + 1, dtype=np.float64)
     if axis == 0:
         for second in range(states):
             prefix[0] = 0.0
@@ -1165,11 +1265,16 @@ def _score_path(
     null_diagonal,
     null_off,
     mismatch,
+    common_products=None,
+    first_cached_child=0,
+    bridge_branch=None,
 ):
     states = state_alt.shape[0]
     bins = exponent.shape[1]
     current = np.empty((states, states), dtype=np.float64)
     work = np.empty_like(current)
+    prefix = np.empty(states + 1, dtype=np.float64)
+    suffix = np.empty(states + 1, dtype=np.float64)
     for first in range(states):
         for second in range(states):
             if mode == 0:
@@ -1194,7 +1299,8 @@ def _score_path(
                     bridge_row_arm[first_parent, boundary],
                     bridge_column_arm[first_parent, boundary],
                     bridge_large_index[first_parent, boundary],
-                    0,
+                    0, prefix, suffix,
+                    -1 if bridge_branch is None else bridge_branch[first_parent, boundary],
                 )
             else:
                 _apply_null_axis(
@@ -1215,7 +1321,8 @@ def _score_path(
                     bridge_row_arm[second_parent, boundary],
                     bridge_column_arm[second_parent, boundary],
                     bridge_large_index[second_parent, boundary],
-                    1,
+                    1, prefix, suffix,
+                    -1 if bridge_branch is None else bridge_branch[second_parent, boundary],
                 )
             else:
                 _apply_null_axis(
@@ -1234,6 +1341,13 @@ def _score_path(
         else:
             for first in range(states):
                 for second in range(states):
+                    if common_products is not None:
+                        saved = common_products[
+                            child - first_cached_child, block, first, second
+                        ]
+                        if np.isfinite(saved):
+                            work[first, second] = saved
+                            continue
                     product = 1.0
                     for slot in range(
                         observed_start[child, block], observed_stop[child, block]
@@ -1336,25 +1450,27 @@ def _score_m1_kernel(
     bridge_row_arm, bridge_column_arm, bridge_large_index,
     available, state_alt, child_gl, child_coefficient, observed_site,
     observed_start, observed_stop, exponent, null_diagonal, null_off, mismatch,
-    eligible_edge, m0,
+    eligible_edge, m0, common_products, child_start, child_stop, bridge_branch=None,
 ):
-    children = child_gl.shape[0]
+    children = child_stop - child_start
     candidates = pi.shape[0]
     output = np.empty((children, candidates), dtype=np.float64)
     for task in prange(children * candidates):
-        child = task // candidates
+        local_child = task // candidates
+        child = child_start + local_child
         parent = task % candidates
         if not eligible_edge[child, parent]:
-            output[child, parent] = -np.inf
+            output[local_child, parent] = -np.inf
         elif not available[parent]:
-            output[child, parent] = m0[child]
+            output[local_child, parent] = m0[child]
         else:
-            output[child, parent] = _score_path(
+            output[local_child, parent] = _score_path(
                 child, parent, 0, 1, pi, candidate_alt, bridge_left,
                 bridge_right, bridge_diagonal, bridge_off, bridge_row_arm,
                 bridge_column_arm, bridge_large_index, state_alt, child_gl,
                 child_coefficient, observed_site, observed_start, observed_stop,
                 exponent, null_diagonal, null_off, mismatch,
+                common_products, child_start, bridge_branch,
             )
     return output
 
@@ -1365,6 +1481,7 @@ def _score_m2_kernel(
     bridge_off, bridge_row_arm, bridge_column_arm, bridge_large_index,
     state_alt, child_gl, child_coefficient, observed_site,
     observed_start, observed_stop, exponent, null_diagonal, null_off, mismatch,
+    common_products, first_cached_child, bridge_branch=None,
 ):
     output = np.empty(len(trios), dtype=np.float64)
     for row in prange(len(trios)):
@@ -1377,6 +1494,7 @@ def _score_m2_kernel(
             bridge_column_arm, bridge_large_index, state_alt, child_gl,
             child_coefficient, observed_site, observed_start, observed_stop,
             exponent, null_diagonal, null_off, mismatch,
+            common_products, first_cached_child, bridge_branch,
         )
     return output
 
@@ -1526,6 +1644,17 @@ def score_projected_ragged_quadratic(
         child_seen, projected.bin_start, projected.bin_stop
     )
 
+    # Keep temporary emission storage bounded even for large founder panels.
+    # If a single child's cache cannot fit, use the same quadratic scorer
+    # without caching, rather than exceeding the workspace allowance.
+    per_child_bytes = projected.n_bins * projected.n_states**2 * 8
+    cache_children = _COMMON_EMISSION_CACHE_BYTES // max(1, per_child_bytes)
+    child_batch_size = min(children, cache_children) if cache_children else children
+    common_args = (
+        projected.state_alt_probability, children_gl, coefficient,
+        observed_site, observed_start, observed_stop, float(mismatch_probability),
+    )
+
     args = (
         projected.transmitted_state_probability,
         projected.transmitted_alt_probability,
@@ -1555,22 +1684,31 @@ def score_projected_ragged_quadratic(
         )
         m0_seconds = time.perf_counter() - m0_started
         m1_started = time.perf_counter()
-        one = _score_m1_kernel(
-            *args,
-            projected.available,
-            projected.state_alt_probability,
-            children_gl,
-            coefficient,
-            observed_site,
-            observed_start,
-            observed_stop,
-            exponent,
-            null_diagonal,
-            null_off,
-            float(mismatch_probability),
-            eligible_edge,
-            zero,
-        )
+        one = np.empty((children, projected.n_candidates), dtype=np.float64)
+        for child_start in range(0, children, child_batch_size):
+            child_stop = min(children, child_start + child_batch_size)
+            common_products = (
+                _common_emission_products(*common_args, child_start, child_stop)
+                if cache_children else None
+            )
+            one[child_start:child_stop] = _score_m1_kernel(
+                *args,
+                projected.available,
+                projected.state_alt_probability,
+                children_gl,
+                coefficient,
+                observed_site,
+                observed_start,
+                observed_stop,
+                exponent,
+                null_diagonal,
+                null_off,
+                float(mismatch_probability),
+                eligible_edge,
+                zero, common_products, child_start, child_stop,
+                projected.bridge_branch,
+            )
+            del common_products
         m1_seconds = time.perf_counter() - m1_started
     else:
         zero = np.asarray(reuse_scores.zero_observed, dtype=np.float64)
@@ -1623,20 +1761,35 @@ def score_projected_ragged_quadratic(
             two[row] = zero[child]
     active_rows = np.flatnonzero(active)
     if len(active_rows):
-        two[active_rows] = _score_m2_kernel(
-            np.ascontiguousarray(trio_array[active_rows]),
-            *args,
-            projected.state_alt_probability,
-            children_gl,
-            coefficient,
-            observed_site,
-            observed_start,
-            observed_stop,
-            exponent,
-            null_diagonal,
-            null_off,
-            float(mismatch_probability),
-        )
+        active_children = trio_array[active_rows, 0]
+        for child_start in range(0, children, child_batch_size):
+            child_stop = min(children, child_start + child_batch_size)
+            batch_rows = active_rows[
+                (active_children >= child_start) & (active_children < child_stop)
+            ]
+            if not len(batch_rows):
+                continue
+            common_products = (
+                _common_emission_products(*common_args, child_start, child_stop)
+                if cache_children else None
+            )
+            two[batch_rows] = _score_m2_kernel(
+                np.ascontiguousarray(trio_array[batch_rows]),
+                *args,
+                projected.state_alt_probability,
+                children_gl,
+                coefficient,
+                observed_site,
+                observed_start,
+                observed_stop,
+                exponent,
+                null_diagonal,
+                null_off,
+                float(mismatch_probability),
+                common_products, child_start, projected.bridge_branch,
+            )
+
+            del common_products
 
     m2_seconds = time.perf_counter() - m2_started
     informative = child_seen & (

@@ -69,7 +69,14 @@ Pseudocounts, the probability floor, uniform robustness and forward parameter
 damping regularize the fitted transitions. Reverse summaries for mesh/path
 selection are column-normalizations of the same regularized edge evidence, not
 likelihood operators or unconditional time-reversed chain transitions. This is
-the sole linker at every hierarchy level; no fitting-mode selector is required.
+the default dense linker at every hierarchy level. Both assembly modes use
+bounded candidate-panel search, with full Viterbi/BIC scoring before accepting
+a proposal. The optional [structured model](founder_scaling.md) restricts the
+macro transition to sparse specific edges plus a positive shared background.
+It does not change discovery or the within-block emission model. Dense
+propagation is cubic in founder count; structured propagation is near quadratic
+for fixed fitting/search budgets. Numerically guarded matrix multiplication
+accelerates larger dense contractions without restricting their parameters.
 
 Coherence here refers to each independently fitted gap/residue chain. Combining
 overlapping mesh edges in the beam remains a separate heuristic, and final
@@ -110,11 +117,36 @@ receive the generating pedigree or generation labels.
 ## Family refinement and recombination
 
 Family refinement conditions on the accepted Tier-B pedigree. Joint meiosis
-messages and phase polishing reconcile relatives while the canonical final
-phase product preserves called genotypes. Optional imputation is a separate
-view; conditional scaffold support is not independent measurement confidence.
-Unconverged family posteriors are not relabeled as converged confidence simply
-because a phase point estimate stabilizes.
+messages and conditional phase polishing reconcile relatives while preserving
+called genotypes and missingness. T11 has one phase-focused release policy:
+start phase assessment after 20 family iterations, then require five consecutive
+identical called-phase arrays, or actual family convergence. Each assessment
+restarts the polisher from the current family context, not the preceding polished
+path. If phase remains unstable at 520 iterations, retain work and refuse release.
+
+This is a phase point estimate, not a calibrated marginal posterior. Full family
+probability tensors and a separate imputed source product are not produced.
+Family-supported gap fills at the existing 0.98 context threshold can inform
+the polisher internally, but do not become new published allele calls. Root
+gauges and component-local labels retain their existing interpretation. T11
+does not modify T10 or feed evidence upstream.
+
+The numerical implementation retains the likelihoods, priors, error rates,
+damping, root-gauge moves and coupled-branch model. Incoming messages into
+hard-homozygous point masses are unnecessary; wholly fixed factors have constant
+selector likelihoods initialized once. Partial, missing and soft genotype
+supports retain their general calculation. Sparse copy updates preserve the
+original per-marker family update order.
+
+Ordinary selector chains integrate out neutral intervals using composed
+transitions. Cached forward/backward calculations recompute changed regions
+until boundary messages are exactly unchanged, without tolerance truncation.
+Zero-transition phase bins are contracted exactly, preserving positive
+transitions and component resets. The ordinary and branch workspaces are bounded
+at approximately 24 GiB and 4 GiB respectively and never checkpointed. Gauge and
+cluster changes invalidate them. These implementation reductions preserve the
+model; the earlier phase-focused stopping policy is a separate scientific
+trade-off validated against truth and downstream outputs.
 
 Recombination estimation distinguishes biological switches from correlated
 orientation-error tracts. Shared-family evidence can favor one parental phase

@@ -13,6 +13,7 @@ from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
 import haplotype_reconstruction.painting.components as painting_components
+from haplotype_reconstruction.core import raw_evidence
 
 STAGE2_PRODUCTION_SCHEMA = "stage2-production-v3"
 
@@ -25,7 +26,7 @@ STAGE2_PRODUCTION_BACKEND = (
 PAINTING_STAGE = "09_painting"
 
 
-STAGE2_PAINTING_CODE_FILES = ('core/numerics.py', 'core/genetic_map.py', 'painting/components.py', 'assembly/observations.py', 'painting/model.py')
+STAGE2_PAINTING_CODE_FILES = ('core/numerics.py', 'core/genetic_map.py', 'painting/components.py', 'assembly/observations.py', 'painting/model.py', 'painting/evidence.py')
 
 
 EXACT_OBSERVED_MASK_MODE = "positive_read_depth_v1"
@@ -37,6 +38,7 @@ SUPPORTED_GENOTYPE_EVIDENCE_MODE = "normalized_raw_linear_likelihood_v1"
 STAGE2_PRODUCTION_CODE_FILES = (
     'painting/components.py',
     'core/runtime.py',
+    'core/raw_evidence.py',
     'painting/checkpoints.py',
     'workflows/reconstruction.py',
     'painting/model.py',
@@ -495,6 +497,11 @@ def _run_or_resume_one_contig(
             target_stage=target_stage,
             painter_factory=painter_factory,
             chromosome_map=chromosome_map,
+            raw_evidence_source=dict(
+                raw_gl_stage=probabilities_stage or source_stage,
+                raw_sites_stage=source_stage,
+                raw_gl_key=probabilities_key if probabilities_stage else "global_probs",
+            ),
         )
     finally:
         del source, probabilities_payload
@@ -513,6 +520,7 @@ def _run_or_resume_loaded_contig(
     target_stage,
     painter_factory,
     chromosome_map=None,
+    raw_evidence_source=None,
 ):
     blocks, probabilities, sites, observed, mask_mode = (
         stage2_inputs_from_stage1(
@@ -521,6 +529,9 @@ def _run_or_resume_loaded_contig(
             expected_sample_ids=ordered_ids,
         )
     )
+    if raw_evidence_source is not None:
+        raw_evidence.save(checkpoint_store, contig, probabilities, sites, observed,
+                          source, **raw_evidence_source)
     release_stage1_identity = _canonical_mapping(
         stage1_identity, "stage1_identity"
     )

@@ -418,7 +418,7 @@ def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rn
 
     ref_reads = num_reads - alt_reads
 
-    return np.stack([ref_reads, alt_reads], axis=-1).astype(int)
+    return np.stack([ref_reads, alt_reads], axis=-1).astype(int, copy=False)
 
 
 def chunk_up_data(positions_list, reads_array,

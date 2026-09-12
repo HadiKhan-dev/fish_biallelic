@@ -12,6 +12,8 @@ import time
 from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.assembly.completion as assembly_completion
+from .structured_transitions import StructuredTransitionConfig, configured_transition
+from .panel_search import PanelSearchConfig
 
 STAGE2_RELEASE_SCHEMA = "stage2-release-v1"
 
@@ -29,6 +31,11 @@ STAGE2_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
 )))
 
 
+STAGE2_RELEASE_CODE_IDENTITY_FILES += (
+    'assembly/structured_transitions.py', 'assembly/panel_search.py',
+    'assembly/panel_scoring.py', 'assembly/panel_candidates.py',
+)
+
 _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
     "num_processes",
     "maxtasksperchild",
@@ -40,7 +47,7 @@ _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
 
 @dataclass(frozen=True)
 class AssemblyConfig:
-    """Scientific settings and one non-overlapping phase core ceiling."""
+    """Dense transitions and bounded panel search by default; one core ceiling."""
 
     preprocess_config: assembly_completion.CompletionConfig = field(
         default_factory=assembly_completion.CompletionConfig
@@ -65,8 +72,15 @@ class AssemblyConfig:
     min_gb_per_worker: float = 4.0
     preprocess_diagnostics_mode: str = "compact"
     verbose: bool = False
+    structured_transition_config: StructuredTransitionConfig | None = field(default_factory=configured_transition)
+    panel_search_config: PanelSearchConfig | None = field(default_factory=PanelSearchConfig)
 
     def __post_init__(self) -> None:
+        if self.panel_search_config is not None and not isinstance(self.panel_search_config, PanelSearchConfig):
+            raise TypeError("panel_search_config must be PanelSearchConfig or None")
+        if (self.structured_transition_config is not None
+                and not isinstance(self.structured_transition_config, StructuredTransitionConfig)):
+            raise TypeError("structured_transition_config must be StructuredTransitionConfig or None")
         if not isinstance(self.preprocess_config, assembly_completion.CompletionConfig):
             raise TypeError("preprocess_config must be a Stage2PreprocessConfig")
         for name in (
@@ -811,6 +825,8 @@ def assemble_chromosome(
                 min_boundary_informative_samples=(
                     config.min_boundary_informative_samples
                 ),
+                structured_transition_config=config.structured_transition_config,
+                panel_search_config=config.panel_search_config,
             )
             elapsed_seconds = time.perf_counter() - started
             stored_diagnostic = None

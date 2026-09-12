@@ -30,7 +30,7 @@ import haplotype_reconstruction.pedigree.pipeline as pedigree_pipeline
 import haplotype_reconstruction.recombination.model as module_recombination_model
 import haplotype_reconstruction.recombination.pipeline as recombination_pipeline
 import haplotype_reconstruction.refinement.pipeline as refinement_pipeline
-import haplotype_reconstruction.refinement.conditioning as refinement_conditioning
+import haplotype_reconstruction.refinement.model as refinement_model
 import haplotype_reconstruction.workflows.design as workflows_design
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
 
@@ -999,8 +999,7 @@ def run():
         raw_gl_stage=STAGE_T1, raw_sites_stage=STAGE_T1,
         n_workers=n_processes,
         genetic_maps=inference_genetic_maps,
-        config=replace(refinement_conditioning.config_from_environment(),
-                       recombination_rate=inference_recombination_rate),
+        config=refinement_model.FamilyRefinementConfig(recombination_rate=inference_recombination_rate),
     )
     recombination_pipeline.run_recombination(
         checkpoint_store, region_keys, sample_names_active,

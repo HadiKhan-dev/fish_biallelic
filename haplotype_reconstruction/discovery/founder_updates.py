@@ -280,7 +280,7 @@ def _stable_descending_usage_order(usage):
 def _fixed_k_transition_batch_pattern_kernel(
         C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
         WW_bin_emis, WW_total_cost, rr_i, rr_j, penalty, snps_per_bin, n_bins,
-        h_genotype_cost, h_wildcard_cost, H_batch):
+        h_genotype_cost, h_wildcard_cost, uninformative_samples, H_batch):
     """Evaluate independent ordered-H coordinate transitions in parallel."""
     B = H_batch.shape[0]
     K = H_batch.shape[1]
@@ -303,6 +303,15 @@ def _fixed_k_transition_batch_pattern_kernel(
             h_patterns, pair_patterns, WW_bin_emis, WW_total_cost,
             rr_i, rr_j, penalty, K, n_bins,
         )
+        # Missing cells have zero weight in the cost tables. Wholly unobserved
+        # samples must also be WW before counting founder usage: arbitrary
+        # zero-cost RR ties would otherwise change the H sweep order.
+        if uninformative_samples is not None:
+            for sample in range(N):
+                if uninformative_samples[sample]:
+                    A[sample, 0] = K
+                    A[sample, 1] = K
+                    wildcard[sample] = 2
         A_batch[start] = A
         cost_batch[start] = cost
         wildcard_batch[start] = wildcard

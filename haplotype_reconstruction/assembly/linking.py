@@ -689,7 +689,8 @@ def generate_transition_probability_mesh(
         full_samples_data, sample_sites, haps_data,
         max_num_iterations=MAX_LINKING_ITERATIONS, recomb_rate=5e-7,
         precalculated_viterbi_emissions=None,
-        num_processes=1, dynamic_cores_fn=None, chromosome_map=None, max_gap=None):
+        num_processes=1, dynamic_cores_fn=None, chromosome_map=None, max_gap=None,
+        structured_config=None):
     """Fit consumed gaps, reusing fixed emissions/zero-prior scans within this mesh.
 
     Gaps retain independent EM fits and the original convergence settings.
@@ -709,12 +710,19 @@ def generate_transition_probability_mesh(
     for gap in range(1, last_gap + 1):
         if dynamic_cores_fn is not None:
             numba.set_num_threads(dynamic_cores_fn())
-        results[gap] = calculate_hap_transition_probabilities(
-            None, None, haps_data, max_num_iterations=max_num_iterations,
-            space_gap=gap, recomb_rate=recomb_rate,
-            precalculated_viterbi_emissions=precalculated_viterbi_emissions,
-            dynamic_cores_fn=dynamic_cores_fn, chromosome_map=chromosome_map,
-            prepared_scans=prepared)
+        if structured_config is None:
+            results[gap] = calculate_hap_transition_probabilities(
+                None, None, haps_data, max_num_iterations=max_num_iterations,
+                space_gap=gap, recomb_rate=recomb_rate,
+                precalculated_viterbi_emissions=precalculated_viterbi_emissions,
+                dynamic_cores_fn=dynamic_cores_fn, chromosome_map=chromosome_map,
+                prepared_scans=prepared)
+        else:
+            from .structured_transitions import fit_gap
+            results[gap] = fit_gap(precalculated_viterbi_emissions, prepared,
+                [sorted(block.haplotypes) for block in haps_data], gap,
+                max_iterations=max_num_iterations, config=structured_config,
+                dynamic_cores_fn=dynamic_cores_fn)
         core_parallel.malloc_trim()
     mesh = TransitionMesh(results)
     mesh.scan_diagnostics = {

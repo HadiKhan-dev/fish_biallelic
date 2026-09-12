@@ -394,7 +394,7 @@ def _canonicalize_fit(
         canonical_key = np.ascontiguousarray(byte_rows[order]).tobytes()
     fixed_point_certified = bool(
         fit_workspace is not None
-        and fit_workspace.certifies_fixed_point(canonical_haplotypes.copy())
+        and fit_workspace.certifies_fixed_point(canonical_haplotypes)
     )
     return FactorizationMode._from_owned_arrays(
         canonical_haplotypes,
@@ -648,6 +648,80 @@ def _exact_cut_score_table(
 
 
 @njit(cache=True, nogil=True)
+def _component_exact_cuts(weights, max_ties):
+    """Factor independent graph components; solve bipartite pieces by coloring.
+
+    Integer codes use vertex order as most-to-least significant bits, so
+    retaining the smallest codes preserves the public byte-lexicographic tie
+    rule. Non-bipartite components retain exhaustive weighted maximum cuts.
+    """
+    k=len(weights)
+    component=np.full(k,-1,dtype=np.int64)
+    color=np.zeros(k,dtype=np.bool_)
+    vertices=np.empty((k,k),dtype=np.int64)
+    sizes=np.zeros(k,dtype=np.int64)
+    bipartite=np.ones(k,dtype=np.bool_)
+    count=0
+    for root in range(k):
+        if component[root]>=0:continue
+        component[root]=count
+        vertices[count,0]=root;sizes[count]=1
+        head=0
+        while head<sizes[count]:
+            vertex=vertices[count,head];head+=1
+            for other in range(k):
+                if weights[vertex,other]==0:continue
+                if component[other]<0:
+                    component[other]=count;color[other]=not color[vertex]
+                    vertices[count,sizes[count]]=other;sizes[count]+=1
+                elif color[other]==color[vertex]:
+                    bipartite[count]=False
+        count+=1
+    # One extra permits omission of the all-False empty cut at the end.
+    limit=max_ties+1
+    combined=np.zeros(1,dtype=np.int64)
+    for c in range(count):
+        members=np.sort(vertices[c,:sizes[c]])
+        mask=np.int64(0)
+        for vertex in members:mask|=np.int64(1)<<(k-1-vertex)
+        if bipartite[c]:
+            code=np.int64(0)
+            for vertex in members:
+                if color[vertex]:code|=np.int64(1)<<(k-1-vertex)
+            choices=np.empty(1 if c==0 else 2,dtype=np.int64)
+            choices[0]=code
+            if c>0:choices[1]=code^mask
+        else:
+            m=len(members)
+            local=np.empty((m,m),dtype=np.int64)
+            for i in range(m):
+                for j in range(m):local[i,j]=weights[members[i],members[j]]
+            cross,_=_exact_cut_score_table(local)
+            best=np.max(cross)
+            winners=np.flatnonzero(cross==best)
+            choices=np.empty(len(winners)*(1 if c==0 else 2),dtype=np.int64)
+            cursor=0
+            for index in winners:
+                bits=index+1;code=np.int64(0)
+                for j in range(1,m):
+                    if bits & (1<<(j-1)):code|=np.int64(1)<<(k-1-members[j])
+                choices[cursor]=code;cursor+=1
+                if c>0:choices[cursor]=code^mask;cursor+=1
+        choices=np.sort(choices)[:limit]
+        joined=np.empty(len(combined)*len(choices),dtype=np.int64)
+        cursor=0
+        for previous in combined:
+            for choice in choices:joined[cursor]=previous|choice;cursor+=1
+        combined=np.sort(joined)[:limit]
+    combined=combined[combined!=0][:max_ties]
+    result=np.zeros((len(combined),k),dtype=np.bool_)
+    for row in range(len(combined)):
+        for vertex in range(k):
+            result[row,vertex]=bool(combined[row] & (np.int64(1)<<(k-1-vertex)))
+    return result
+
+
+@njit(cache=True, nogil=True)
 def _cut_score_kernel(
     weights: np.ndarray,
     side: np.ndarray,
@@ -745,7 +819,8 @@ def maximum_cut_partitions(
     """Return deterministic maximum-weight bipartitions.
 
     Complement-equivalent cuts are represented once by fixing vertex zero on
-    side ``False``.  Exact enumeration is used through ``exact_max_k``.
+    side ``False``.  Exact component-wise inference is used through ``exact_max_k``;
+    bipartite components need no enumeration.
     Larger graphs use deterministic degree-ordered local searches from
     singleton and alternating starts.  At most ``max_ties`` equal optima are
     returned, in lexicographic bit order.
@@ -774,24 +849,7 @@ def maximum_cut_partitions(
     candidates: list[np.ndarray] = []
     k = len(matrix)
     if k <= exact_max_k:
-        cross_scores, within_scores = _exact_cut_score_table(matrix)
-        best_cross = int(np.max(cross_scores))
-        best_within = int(np.min(
-            within_scores[cross_scores == best_cross]
-        ))
-        winner_indices = np.flatnonzero(
-            (cross_scores == best_cross)
-            & (within_scores == best_within)
-        )
-        winners = []
-        for candidate_index in winner_indices:
-            bits = int(candidate_index) + 1
-            side = np.zeros(k, dtype=bool)
-            for index in range(1, k):
-                side[index] = bool(bits & (1 << (index - 1)))
-            winners.append(side)
-        winners.sort(key=lambda side: side.tobytes())
-        result = tuple(side.copy() for side in winners[:max_ties])
+        result = tuple(side.copy() for side in _component_exact_cuts(matrix, max_ties))
         _maximum_cut_cache_put(cache_key, result)
         return result
 

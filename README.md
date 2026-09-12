@@ -54,15 +54,20 @@ units and interpretation.
 | L1–L4 assembly | `assembly/` | Supported, component-preserving chromosome haplotypes |
 | Sample painting (T09) | `painting/` | Ragged diploid paths with an explicit unknown state |
 | Pedigree inference (T10) | `pedigree/` | Genome-wide M0/M1/M2 calls, parent identities and ambiguity |
-| Family refinement and phase correction (T11) | `refinement/` | Genotype-preserving final phase; optional imputed view |
+| Family refinement and phase correction (T11) | `refinement/` | Stable, genotype-preserving final phase |
 | Recombination estimation (T12) | `recombination/` | Posterior rates, crossover intervals and observable exposure |
 
-There is one canonical inference route. T11 does not feed back into painting or
-pedigree inference, and the estimated T12 map is not automatically fed upstream.
+Assembly defaults to dense learned transitions plus bounded panel search.
+Use `--assembly-model structured` for the
+[near-quadratic alternative](docs/founder_scaling.md); this restricts the
+transition model and does not change discovery. T11 does not feed back into
+painting or pedigree inference, and the estimated T12 map is not automatically
+fed upstream.
 Shared-family orientation-error evidence is enabled for T12 by default;
-`--no-shared-family-evidence` disables it. Family allele imputation is optional
-(`--impute-missing`); it does not redefine the genotype-preserving final-phase
-product.
+`--no-shared-family-evidence` disables it. T11 releases final phase after five
+consecutive unchanged phase checks (starting after 20 family iterations), or
+actual family convergence. It preserves called genotypes and missingness; it
+does not publish full marginal-posterior tensors.
 
 Pedigree Tier B is the primary supported output. M0 means **zero observed
 parents**, not necessarily a biological founder. Support tiers and bootstrap
@@ -73,6 +78,8 @@ interpreting parentage or recombination rates.
 
 The [validation notes](docs/validation.md) distinguish exact implementation
 regressions, short wiring checks and fresh full-genome simulation evaluation.
+[Performance notes](docs/performance.md) separate numerical speedups from
+scientific trade-offs.
 
 ## Repository layout
 

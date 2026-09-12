@@ -77,6 +77,40 @@ and surrounding whitespace. Invalid values are rejected rather than enabling
 the feature accidentally. Use `--no-shared-family-evidence` to explicitly
 disable it even when the selected TOML example sets it to true.
 
+## Assembly transition models
+
+The default, `--assembly-model dense`, retains arbitrary dense learned
+transitions and uses bounded candidate-panel search at every assembly level.
+Its dominant founder-count dependence is cubic. For larger founder panels,
+`--assembly-model structured` selects sparse-specific plus positive-background
+transitions, giving near-quadratic scaling for fixed fitting/search budgets.
+Both modes use the same bounded search (16 full scores per proposal category)
+and the 20-iteration linker limit.
+
+```bash
+python run.py simulate --config configs/simulation.toml --seed 400 \
+  --assembly-model structured --output work/runs/structured_seed_400
+```
+
+The same option is available for `astcal` and `tropheops`. Set
+`[run].assembly_model = "dense"` or `"structured"` in TOML, or use
+`HAPLOTYPES_ASSEMBLY_MODEL`. Precedence is CLI > TOML > environment > dense.
+There is no automatic founder-count cutoff: the user chooses the model.
+Structured transitions are a restricted statistical model, not an exact
+acceleration of arbitrary dense transitions. Read the
+[scaling and accuracy trade-offs](founder_scaling.md).
+
+Assembly selection does **not** change Stage 1. Its established search remains
+the default. The separate `--discovery-search batched` option is experimental;
+its TOML/environment settings are `[run].discovery_search` and
+`HAPLOTYPES_DISCOVERY_SEARCH`, with `standard` as the default. An earlier
+combined discovery/assembly experiment had substantial accuracy regressions;
+do not enable batched discovery merely to obtain structured assembly.
+
+Use a separate output directory when changing scientific settings. Existing
+checkpoint identities include the actual assembly configuration and reject
+incompatible reuse; no manual cache relabeling is needed.
+
 ## Checkpoints and outputs
 
 By default, a simulation writes `work/runs/seed_<seed>/`. Real-data defaults are
@@ -89,13 +123,12 @@ Do not share a checkpoint directory between different seeds or configurations.
 | `00_founder_templates/` | Frozen simulation sequence inputs |
 | `00_simulated_reads/` | Simulated observations, true pedigree, alleles and raw crossover events |
 | `01_blocks/` | Discovered 200-SNP block haplotypes, raw likelihoods/observation masks as applicable |
+| `00_genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
 | `09_painting_release_work/` | Per-chromosome preprocessing and completed L1–L4 assembly phases |
 | `09_painting/` | Typed component-local painting products |
 | `10_pedigree_evidence/` | Prepared/scored chromosome evidence |
 | `10_pedigree/` | Genome-wide inferred pedigree and support tables |
-| `11_family_refinement/` | Family-conditioned phase messages/results |
-| `11_family_imputation/` | Alternative source view when imputation is enabled |
-| `11_phase_correction/` | Final genotype-preserving phase products |
+| `11_phase_correction/` | Final phase products, `CONTIG.iterations.p5.b2` work checkpoints, and compact completion summary |
 | `12_recombination/` | Conditional map products and completion summary |
 
 Atomic protocol-5/Blosc checkpoints use `.p5.b2`; completion markers are written
@@ -104,6 +137,25 @@ source identities are checked at stage boundaries. Interrupted work resumes
 from durable chromosome, assembly-phase or family-iteration checkpoints. Source
 changes may invalidate affected stages; do not bypass a mismatch by relabeling
 an old checkpoint as current.
+
+Reconstruction writes compact genotype evidence after validating its inputs.
+T10 and T11 use this derived cache when it matches the source checkpoint files;
+older runs without it continue to read their original raw/block checkpoints.
+The cache does not replace the rich simulation truth or discovery products:
+keep those source files, including linked targets, for validation and resume.
+It uses the same likelihood precision and missing-observation mask, trading an
+additional write and disk space for smaller repeated reads and lower memory.
+
+T11 uses one phase-focused path, with no separate full-posterior or imputed
+source stage. Iteration checkpoints retain family messages, the preceding
+polished phase and the consecutive-stability count; large numerical caches are
+rebuilt on restart. A 520-iteration safety limit refuses release if phase has
+not stabilized. Stable phase does not assert marginal-posterior convergence.
+
+The phase-focused schema changes T11 and downstream cache identities. Existing
+T09/T10/raw checkpoints remain reusable; preserve older results and use a new
+output/checkpoint root for the changed downstream stages. Do not overwrite or
+relabel old T11/T12 checkpoints.
 
 When an attempt reuses validated inputs, its checkpoint directories may be
 symbolic links to an earlier attempt. `attempt.json` records that source.

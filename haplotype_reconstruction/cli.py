@@ -49,9 +49,11 @@ def main(argv=None):
         command.add_argument('--rate-cm-per-mb',type=float,help='Fallback rate, default5.0 cM/Mb.')
         command.add_argument('--shared-family-evidence',action=argparse.BooleanOptionalAction,default=None,
                              help='Use shared-family phase-error evidence in map generation; default on.')
-        command.add_argument('--impute-missing',action=argparse.BooleanOptionalAction,default=None,
-                             help='Also produce family-imputed alleles; phase-only output remains genotype preserving.')
         if name!='recombination':
+            command.add_argument('--assembly-model',choices=('dense','structured'),
+                                 help='Dense cubic transitions (default) or near-quadratic structured transitions; both use bounded panel search.')
+            command.add_argument('--discovery-search',choices=('standard','batched'),
+                                 help='Stage 1 search, independent of assembly; default standard. Batched is experimental.')
             command.add_argument('--contigs',nargs='+',help='Physical contigs to analyze, in input order.')
             command.add_argument('--vcf',help='Input VCF/BCF; optional when simulation templates are supplied.')
         if name=='simulate':
@@ -105,6 +107,17 @@ def main(argv=None):
         stop_after_stage=_setting(args,config,'run','stop_after_stage',os.environ.get('BHD_SIM_STOP_AFTER_STAGE'))
         if stop_after_stage is not None and stop_after_stage not in ('01_blocks','09_painting'):
             parser.error('stop_after_stage must be 01_blocks or 09_painting')
+    if args.command!='recombination':
+        if 'founder_scaling' in config.get('run',{}):
+            parser.error('founder_scaling was replaced by independent assembly_model and discovery_search settings')
+        assembly_model=_setting(args,config,'run','assembly_model',os.environ.get('HAPLOTYPES_ASSEMBLY_MODEL','dense'))
+        if assembly_model not in ('dense','structured'):
+            parser.error('assembly_model must be dense or structured')
+        discovery_search=_setting(args,config,'run','discovery_search',os.environ.get('HAPLOTYPES_DISCOVERY_SEARCH','standard'))
+        if discovery_search not in ('standard','batched'):
+            parser.error('discovery_search must be standard or batched')
+        os.environ['HAPLOTYPES_ASSEMBLY_MODEL']=assembly_model
+        os.environ['HAPLOTYPES_DISCOVERY_SEARCH']=discovery_search
     seed=_setting(args,config,'simulation','seed',400)
     default_output=f'work/runs/seed_{seed}' if args.command=='simulate' else f'work/runs/{args.command}'
     output=Path(_setting(args,config,'run','output',default_output)).expanduser().resolve()
@@ -115,11 +128,10 @@ def main(argv=None):
         os.environ.pop(name,None)
     checkpoints=Path(_setting(args,config,'run','checkpoints',output/'checkpoints')).expanduser().resolve()
     rate=float(_setting(args,config,'recombination','rate_cm_per_mb',5.0))
-    impute=bool(_setting(args,config,'refinement','impute_missing',False))
     mapping=_path(_setting(args,config,'recombination','recombination_map'))
     os.environ.update(BHD_NUM_PROCESSES=str(cores),NUMBA_NUM_THREADS=str(cores),
         BHD_RECOMBINATION_RATE_CM_PER_MB=str(rate),BHD_RECOMBINATION_SHARED_FAMILY='1' if shared else '0',
-        BHD_FAMILY_IMPUTATION='1' if impute else '0',HAPLOTYPES_OUTPUT_DIR=str(output),
+        HAPLOTYPES_OUTPUT_DIR=str(output),
         HAPLOTYPES_CHECKPOINT_DIR=str(checkpoints),HAPLOTYPES_LOG_DIR=str(output/'logs'))
     if mapping:os.environ['BHD_RECOMBINATION_MAP']=mapping
     else:os.environ.pop('BHD_RECOMBINATION_MAP',None)

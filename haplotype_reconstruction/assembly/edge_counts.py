@@ -62,20 +62,26 @@ def _probability_sample_counts(a, b, log_t):
     t = np.exp(log_t - top_t)
     aa = np.exp(a - np.max(a))
     bb = np.exp(b - np.max(b))
-    at = np.zeros((left, right))
-    att = np.zeros((left, right))
-    for i in range(left):
-        for k in range(left):
+    if max(left, right) >= 32:
+        at = aa @ t
+        att = aa.T @ t
+        w1 = at @ bb.T
+        w2 = att @ bb
+    else:
+        at = np.zeros((left, right))
+        att = np.zeros((left, right))
+        for i in range(left):
+            for k in range(left):
+                for j in range(right):
+                    at[i, j] += aa[i, k] * t[k, j]
+                    att[i, j] += aa[k, i] * t[k, j]
+        w1 = np.zeros((left, right))
+        w2 = np.zeros((left, right))
+        for i in range(left):
             for j in range(right):
-                at[i, j] += aa[i, k] * t[k, j]
-                att[i, j] += aa[k, i] * t[k, j]
-    w1 = np.zeros((left, right))
-    w2 = np.zeros((left, right))
-    for i in range(left):
-        for j in range(right):
-            for k in range(right):
-                w1[i, j] += at[i, k] * bb[j, k]
-                w2[i, j] += att[i, k] * bb[k, j]
+                for k in range(right):
+                    w1[i, j] += at[i, k] * bb[j, k]
+                    w2[i, j] += att[i, k] * bb[k, j]
     z = 0.0
     for i in range(left):
         for j in range(right):

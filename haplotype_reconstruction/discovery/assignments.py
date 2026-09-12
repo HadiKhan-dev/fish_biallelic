@@ -673,27 +673,35 @@ def _canonical_binary_pattern_contractions(
     )
     w_table = np.empty_like(diff1_table)
     kWdiff_table = np.empty_like(diff1_table)
-    for flat_index in prange(n_bins * n_samples):
-        b = flat_index // n_samples
-        s = flat_index - b * n_samples
-        diff1_table[b, 0, s] = 0.0
-        w_table[b, 0, s] = 0.0
-        kWdiff_table[b, 0, s] = 0.0
+    # Traverse contiguous sample tiles instead of striding over the full
+    # pattern table for each sample. Every output retains its exact ascending
+    # set-bit recurrence; tiles are independent and cache-line aligned.
+    tile_width = 16
+    n_tiles = (n_samples + tile_width - 1) // tile_width
+    for flat_index in prange(n_bins * n_tiles):
+        b = flat_index // n_tiles
+        first = (flat_index - b * n_tiles) * tile_width
+        last = min(first + tile_width, n_samples)
+        for s in range(first, last):
+            diff1_table[b, 0, s] = 0.0
+            w_table[b, 0, s] = 0.0
+            kWdiff_table[b, 0, s] = 0.0
         for pattern in range(1, n_patterns):
             highest_bit = added_bit[pattern]
             previous = previous_pattern[pattern]
-            diff1_table[b, pattern, s] = (
-                diff1_table[b, previous, s]
-                + diff1_bt[b, highest_bit, s]
-            )
-            w_table[b, pattern, s] = (
-                w_table[b, previous, s]
-                + w_bt[b, highest_bit, s]
-            )
-            kWdiff_table[b, pattern, s] = (
-                kWdiff_table[b, previous, s]
-                + kWdiff_bt[b, highest_bit, s]
-            )
+            for s in range(first, last):
+                diff1_table[b, pattern, s] = (
+                    diff1_table[b, previous, s]
+                    + diff1_bt[b, highest_bit, s]
+                )
+                w_table[b, pattern, s] = (
+                    w_table[b, previous, s]
+                    + w_bt[b, highest_bit, s]
+                )
+                kWdiff_table[b, pattern, s] = (
+                    kWdiff_table[b, previous, s]
+                    + kWdiff_bt[b, highest_bit, s]
+                )
     return diff1_table, w_table, kWdiff_table
 
 

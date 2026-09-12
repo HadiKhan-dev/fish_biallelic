@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import math
-from typing import Sequence
 import numpy as np
+
+from . import joint_statistics
 
 
 @dataclass(frozen=True)
@@ -297,117 +298,84 @@ def _complete_site_state_scores(
     return scores, np.sum(usable, axis=1, dtype=np.int64)
 
 
-def _update_site_probability(
-    configurations: np.ndarray,
-    log_prior: np.ndarray,
-    state_probability: np.ndarray,
-    log_emission_site: np.ndarray,
-    observed_site: np.ndarray,
-    pairs: np.ndarray,
-) -> np.ndarray:
-    if not np.any(observed_site):
-        return _softmax(log_prior)
-    dosage = _configuration_dosages(configurations, pairs)
-    # log_evidence[n, c, s], gathered at the dosage implied by one global
-    # founder configuration c and unordered state s.
-    log_evidence = log_emission_site[:, dosage]
-    log_evidence[~observed_site] = 0.0
-    expected = np.einsum("ns,ncs->c", state_probability, log_evidence, optimize=True)
-    return _softmax(log_prior + expected)
-
-
-def _expected_state_scores(
-    site_configurations: Sequence[np.ndarray | None],
-    site_probabilities: Sequence[np.ndarray | None],
-    log_emission: np.ndarray,
-    observed: np.ndarray,
-    pairs: np.ndarray,
-) -> np.ndarray:
-    scores = np.zeros((log_emission.shape[0], pairs.shape[0]), dtype=np.float64)
-    for site, (configurations, probability) in enumerate(
-        zip(site_configurations, site_probabilities)
-    ):
-        if configurations is None or probability is None or not np.any(observed[:, site]):
-            continue
-        dosage = _configuration_dosages(configurations, pairs)
-        gathered = log_emission[:, site, :][:, dosage]
-        gathered[~observed[:, site]] = 0.0
-        scores += np.einsum("c,ncs->ns", probability, gathered, optimize=True)
-    return scores
-
-
-def _elbo(
-    site_configurations: Sequence[np.ndarray | None],
-    site_log_priors: Sequence[np.ndarray | None],
-    site_probabilities: Sequence[np.ndarray | None],
-    state_probability: np.ndarray,
-    log_emission: np.ndarray,
-    observed: np.ndarray,
-    pairs: np.ndarray,
-) -> float:
-    expected_scores = _expected_state_scores(
-        site_configurations, site_probabilities, log_emission, observed, pairs
+def _site_probabilities(probabilities, offsets):
+    return tuple(
+        probabilities[start:stop] if stop > start else None
+        for start, stop in zip(offsets[:-1], offsets[1:])
     )
+
+
+def _elbo(expected_scores, log_priors, site_probabilities, state_probability):
+    # Reuse the same expected scores that updated z; q has not changed.
     value = float(np.sum(state_probability * expected_scores))
-    value += _entropy_term(state_probability, -math.log(pairs.shape[0]))
-    for log_prior, probability in zip(site_log_priors, site_probabilities):
-        if log_prior is not None and probability is not None:
+    value += _entropy_term(state_probability, -math.log(state_probability.shape[1]))
+    for log_prior, probability in zip(log_priors, site_probabilities):
+        # A fully known site has q=[1] and log_prior=[0], hence zero entropy.
+        if probability is not None and len(probability) > 1:
             value += _entropy_term(probability, log_prior)
     return value
 
 
 def _fit_one_start(
     panel: HardFounderPanel,
-    log_emission: np.ndarray,
-    observed: np.ndarray,
     pairs: np.ndarray,
     configurations: tuple[np.ndarray | None, ...],
     log_priors: tuple[np.ndarray | None, ...],
     unknown_by_site: tuple[np.ndarray, ...],
     config: JointBlockConfig,
     start: int,
+    statistics_workspace,
+    complete_scores: np.ndarray,
+    shared_result=None,
 ) -> tuple[np.ndarray, tuple[np.ndarray | None, ...], StartDiagnostics]:
-    complete_scores, _ = _complete_site_state_scores(panel, log_emission, observed, pairs)
+    evidence, alleles, offsets, packed_prior = statistics_workspace
     state_probability = _softmax(complete_scores - math.log(pairs.shape[0]), axis=1)
-    site_probability: list[np.ndarray | None] = []
-    for site, site_configurations in enumerate(configurations):
-        if site_configurations is None:
-            site_probability.append(None)
-        else:
-            site_probability.append(
-                _site_initial_probability(
-                    panel, site, site_configurations, unknown_by_site[site], config, start
-                )
-            )
-    elbo_history = [
-        _elbo(
-            configurations, log_priors, site_probability, state_probability,
-            log_emission, observed, pairs,
-        )
+    initial = [
+        _site_initial_probability(
+            panel, site, values, unknown_by_site[site], config, start)
+        for site, values in enumerate(configurations) if values is not None
     ]
+    probability = np.concatenate(initial) if initial else np.empty(0)
+    state_scores = evidence @ joint_statistics.dosage_marginals(
+        alleles, pairs, offsets, probability)
+    site_probability = _site_probabilities(probability, offsets)
+    elbo_history = [_elbo(state_scores, log_priors, site_probability, state_probability)]
+    if shared_result is not None:
+        # All starts initialize the same z and update q before z. From the
+        # first update onward their trajectories are therefore identical.
+        # With minimum_iterations >= 2 only the initial ELBO/check is unique;
+        # minimum-one starts retain the independent path below because their
+        # first increment can make them stop at different iterations.
+        state_probability, site_probability, shared_diagnostics = shared_result
+        increment = shared_diagnostics.elbo_history[1] - elbo_history[0]
+        if increment < -config.monotonic_tolerance:
+            raise RuntimeError(
+                f"ELBO decreased by {increment:.6g} at start {start}, iteration 1"
+            )
+        history = np.r_[elbo_history, shared_diagnostics.elbo_history[1:]]
+        diagnostics = StartDiagnostics(
+            label=f"paired_jitter_{(start + 1) // 2}_{'plus' if start % 2 else 'minus'}",
+            converged=shared_diagnostics.converged,
+            iterations=shared_diagnostics.iterations,
+            elbo_history=history,
+            minimum_elbo_increment=float(np.min(np.diff(history))),
+        )
+        return state_probability, site_probability, diagnostics
     converged = False
     for iteration in range(1, config.max_iterations + 1):
-        for site, site_configurations in enumerate(configurations):
-            if site_configurations is None:
-                continue
-            site_probability[site] = _update_site_probability(
-                site_configurations,
-                log_priors[site],
-                state_probability,
-                log_emission[:, site, :],
-                observed[:, site],
-                pairs,
-            )
-        state_scores = _expected_state_scores(
-            configurations, site_probability, log_emission, observed, pairs
-        )
+        # All site-q updates condition on the same z. Their three-dosage
+        # statistics can therefore be contracted together without changing
+        # the coordinate-update schedule. BLAS remains worker-local/one thread.
+        statistics = state_probability.T @ evidence
+        probability = joint_statistics.configuration_probabilities(
+            statistics, alleles, pairs, offsets, packed_prior)
+        state_scores = evidence @ joint_statistics.dosage_marginals(
+            alleles, pairs, offsets, probability)
         state_probability = _softmax(
             state_scores - math.log(pairs.shape[0]), axis=1
         )
-        value = _elbo(
-            configurations, log_priors, site_probability, state_probability,
-            log_emission, observed, pairs,
-        )
+        site_probability = _site_probabilities(probability, offsets)
+        value = _elbo(state_scores, log_priors, site_probability, state_probability)
         increment = value - elbo_history[-1]
         if increment < -config.monotonic_tolerance:
             raise RuntimeError(
@@ -430,7 +398,7 @@ def _fit_one_start(
             float(np.min(np.diff(history))) if history.size > 1 else math.inf
         ),
     )
-    return state_probability, tuple(site_probability), diagnostics
+    return state_probability, site_probability, diagnostics
 
 
 def fit_joint_block(
@@ -461,17 +429,24 @@ def fit_joint_block(
     log_prior_tuple = tuple(log_priors)
     unknown_tuple = tuple(unknown_by_site)
 
+    statistics_workspace = joint_statistics.prepare(
+        configuration_tuple, log_prior_tuple, log_emission, panel.n_founders)
+    complete_scores, _ = _complete_site_state_scores(panel, log_emission, observed_mask, pairs)
     state_results: list[np.ndarray] = []
     site_results: list[tuple[np.ndarray | None, ...]] = []
     diagnostics: list[StartDiagnostics] = []
+    shared_result = None
     for start in range(config.num_starts):
         state, site, start_diagnostics = _fit_one_start(
-            panel, log_emission, observed_mask, pairs, configuration_tuple,
-            log_prior_tuple, unknown_tuple, config, start,
+            panel, pairs, configuration_tuple, log_prior_tuple, unknown_tuple,
+            config, start, statistics_workspace, complete_scores,
+            shared_result=shared_result,
         )
         state_results.append(state)
         site_results.append(site)
         diagnostics.append(start_diagnostics)
+        if start == 0 and config.minimum_iterations >= 2:
+            shared_result = state, site, start_diagnostics
     final_elbos = np.asarray([value.elbo_history[-1] for value in diagnostics])
     best = int(np.argmax(final_elbos))
     best_state = state_results[best]
@@ -670,5 +645,3 @@ def crossfit_block(
         ),
         tuple(results),
     )
-
-

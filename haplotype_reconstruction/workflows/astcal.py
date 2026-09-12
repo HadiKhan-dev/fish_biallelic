@@ -30,7 +30,7 @@ import haplotype_reconstruction.pedigree.pipeline as pedigree_pipeline
 import haplotype_reconstruction.recombination.model as module_recombination_model
 import haplotype_reconstruction.recombination.pipeline as recombination_pipeline
 import haplotype_reconstruction.refinement.pipeline as refinement_pipeline
-import haplotype_reconstruction.refinement.conditioning as refinement_conditioning
+import haplotype_reconstruction.refinement.model as refinement_model
 import haplotype_reconstruction.workflows.design as workflows_design
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
 
@@ -173,77 +173,79 @@ def run():
         print(f"{'='*60}")
         start = time.time()
 
-        for r_name in region_keys:
-            if contig_done(STAGE_R1, r_name):
-                print(f"  [RESUME] {r_name} already done")
-                continue
-            print(f"\n  Processing {r_name}...")
+        with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
+            for r_name in region_keys:
+                if contig_done(STAGE_R1, r_name):
+                    print(f"  [RESUME] {r_name} already done")
+                    continue
+                print(f"\n  Processing {r_name}...")
 
-            t0 = time.time()
-            genomic_data = core_variants.cleanup_block_reads_list(
-                vcf_path, r_name,
-                use_snp_count=True, snps_per_block=200, snp_shift=200,
-                num_processes=n_processes
-            )
-            print(f"    [Loader] {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
-
-            global_sites, global_reads = (
-                core_variants.concatenate_unique_block_reads(genomic_data)
-            )
-            if global_sites is None:
-                print(f"    WARNING: No data for {r_name}, skipping")
-                continue
-
-            # Preserve the observation event before releasing read counts.
-            global_observed_mask = (
-                workflows_reconstruction.observed_call_mask_from_read_counts(
-                    global_reads
+                t0 = time.time()
+                genomic_data = core_variants.cleanup_block_reads_list(
+                    vcf_path, r_name,
+                    use_snp_count=True, snps_per_block=200, snp_shift=200,
+                    num_processes=n_processes
                 )
-            )
+                print(f"    [Loader] {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
 
-            # Keep cohort-frequency regularization inside block discovery;
-            # linkage and assembly consume the raw genotype likelihoods.
-            (site_priors, global_probs) = core_numerics.reads_to_probabilities(
-                global_reads,
-                use_hwe_prior=False,
-            )
-            avg_depth = np.mean(np.sum(global_reads, axis=-1))
-            print(f"    Sites: {len(global_sites)}, Samples: {global_probs.shape[0]}, "
-                  f"Depth: {avg_depth:.1f}x")
-            del global_reads, site_priors
+                global_sites, global_reads = (
+                    core_variants.concatenate_unique_block_reads(genomic_data)
+                )
+                if global_sites is None:
+                    print(f"    WARNING: No data for {r_name}, skipping")
+                    continue
 
-            t0 = time.time()
-            block_results = discovery_blocks.generate_all_block_haplotypes(
-                genomic_data,
-                num_processes=n_processes,
-                discovery_config=stage1_config,
-            )
-            valid_blocks = [b for b in block_results if len(b.positions) > 0]
-            block_results = core_haplotypes.BlockResults(valid_blocks)
+                # Preserve the observation event before releasing read counts.
+                global_observed_mask = (
+                    workflows_reconstruction.observed_call_mask_from_read_counts(
+                        global_reads
+                    )
+                )
 
-            hap_counts = [len(b.haplotypes) for b in valid_blocks]
-            print(f"    [Discovery] {len(valid_blocks)} blocks, haps/block: "
-                  f"min={min(hap_counts)}, max={max(hap_counts)}, "
-                  f"mean={np.mean(hap_counts):.1f} in {time.time()-t0:.1f}s")
+                # Keep cohort-frequency regularization inside block discovery;
+                # linkage and assembly consume the raw genotype likelihoods.
+                (site_priors, global_probs) = core_numerics.reads_to_probabilities(
+                    global_reads,
+                    use_hwe_prior=False,
+                )
+                avg_depth = np.mean(np.sum(global_reads, axis=-1))
+                print(f"    Sites: {len(global_sites)}, Samples: {global_probs.shape[0]}, "
+                      f"Depth: {avg_depth:.1f}x")
+                del global_reads, site_priors
 
-            save_contig(STAGE_R1, r_name, {
-                'global_probs': global_probs,
-                'global_sites': global_sites,
-                'global_observed_mask': global_observed_mask,
-                'observed_call_mask_mode': (
-                    workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-                ),
-                'genotype_evidence_mode': (
-                    workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
-                ),
-                'block_results': block_results,
-                'avg_depth': avg_depth,
-                'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-                'stage1_config': stage1_config_record,
-            })
-            del genomic_data, block_results, global_probs, global_sites
-            del global_observed_mask
-            gc.collect()
+                t0 = time.time()
+                block_results = discovery_blocks.generate_all_block_haplotypes(
+                    genomic_data,
+                    num_processes=n_processes,
+                    block_pool=block_pool,
+                    discovery_config=stage1_config,
+                )
+                valid_blocks = [b for b in block_results if len(b.positions) > 0]
+                block_results = core_haplotypes.BlockResults(valid_blocks)
+
+                hap_counts = [len(b.haplotypes) for b in valid_blocks]
+                print(f"    [Discovery] {len(valid_blocks)} blocks, haps/block: "
+                      f"min={min(hap_counts)}, max={max(hap_counts)}, "
+                      f"mean={np.mean(hap_counts):.1f} in {time.time()-t0:.1f}s")
+
+                save_contig(STAGE_R1, r_name, {
+                    'global_probs': global_probs,
+                    'global_sites': global_sites,
+                    'global_observed_mask': global_observed_mask,
+                    'observed_call_mask_mode': (
+                        workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
+                    ),
+                    'genotype_evidence_mode': (
+                        workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
+                    ),
+                    'block_results': block_results,
+                    'avg_depth': avg_depth,
+                    'stage1_backend': discovery_blocks.STAGE1_BACKEND,
+                    'stage1_config': stage1_config_record,
+                })
+                del genomic_data, block_results, global_probs, global_sites
+                del global_observed_mask
+                gc.collect()
 
         save_global(STAGE_R1, {
             'sample_ids': sample_names,
@@ -320,8 +322,7 @@ def run():
         raw_gl_stage=STAGE_R1, raw_sites_stage=STAGE_R1,
         n_workers=n_processes,
         genetic_maps=inference_genetic_maps,
-        config=replace(refinement_conditioning.config_from_environment(),
-                       recombination_rate=inference_recombination_rate),
+        config=refinement_model.FamilyRefinementConfig(recombination_rate=inference_recombination_rate),
     )
     recombination_pipeline.run_recombination(
         checkpoint_store, region_keys, sample_names,

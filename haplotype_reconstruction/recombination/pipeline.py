@@ -120,7 +120,9 @@ def run_recombination(checkpoint_store,contigs,sample_ids,*,pedigree_payload,out
         "shared_orientation_config":asdict(shared_config) if shared_family_evidence else None,
         "sample_ids":names,"contigs":contigs,"pedigree_sha256":pedigree_hash,"final_phase_files":files,
         "code":{name:hashlib.sha256((PACKAGE_ROOT / name).read_bytes()).hexdigest()
-                for name in ('recombination/pipeline.py','recombination/model.py','refinement/model.py')}}
+                for name in ('recombination/pipeline.py','recombination/model.py',
+                             'recombination/intervals.py','recombination/orientation_prior.py',
+                             'refinement/model.py')}}
     if shared_family_evidence:
         identity["code"]['recombination/model.py']=hashlib.sha256(
             (PACKAGE_ROOT / 'recombination/model.py').read_bytes()).hexdigest()

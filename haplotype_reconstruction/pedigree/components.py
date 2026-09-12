@@ -10,6 +10,7 @@ import math
 import time
 from typing import Any, Mapping, Sequence
 import numpy as np
+from numba import njit, prange
 import haplotype_reconstruction.pedigree.candidates as pedigree_candidates
 import haplotype_reconstruction.pedigree.models as pedigree_models
 import haplotype_reconstruction.pedigree.sources as pedigree_sources
@@ -734,6 +735,37 @@ def _validate_release_array_identity(
             )
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _normalize_raw_evidence(raw_gl, observed):
+    """Fuse strict raw-row validation, float64 normalization and missingness."""
+    samples, sites, _ = raw_gl.shape
+    normalized = np.empty((samples, sites, 3), dtype=np.float64)
+    invalid = 0
+    for row in prange(samples * sites):
+        sample, site = row // sites, row % sites
+        a = np.float64(raw_gl[sample, site, 0])
+        b = np.float64(raw_gl[sample, site, 1])
+        c = np.float64(raw_gl[sample, site, 2])
+        # Match the float64 three-genotype NumPy sum without reassociation.
+        total = (a + b) + c
+        valid = (
+            np.isfinite(a) and np.isfinite(b) and np.isfinite(c)
+            and a >= 0.0 and b >= 0.0 and c >= 0.0
+            and np.isfinite(total) and total > 0.0
+        )
+        invalid += int(not valid)
+        # Unobserved rows still have to satisfy the raw evidence contract.
+        if valid and observed[sample, site]:
+            normalized[sample, site, 0] = a / total
+            normalized[sample, site, 1] = b / total
+            normalized[sample, site, 2] = c / total
+        else:
+            normalized[sample, site, 0] = 1.0 / 3.0
+            normalized[sample, site, 1] = 1.0 / 3.0
+            normalized[sample, site, 2] = 1.0 / 3.0
+    return normalized, invalid
+
+
 def _validated_raw_evidence(
         checkpoint,
         raw_genotype_likelihoods: Any,
@@ -779,27 +811,25 @@ def _validated_raw_evidence(
             "(T09 samples, raw positions, 3)"
         )
     try:
-        gl = np.asarray(raw_gl, dtype=np.float64)
+        # Native float32/64 inputs can be cast row-wise inside the fused pass.
+        # Keep NumPy's established conversion for other supported input dtypes.
+        gl = (
+            raw_gl if raw_gl.dtype in (np.dtype(np.float32), np.dtype(np.float64))
+            else np.asarray(raw_gl, dtype=np.float64)
+        )
     except (TypeError, ValueError, OverflowError) as exc:
         raise pedigree_models.PedigreeEvidenceError(
             "raw genotype likelihoods must be finite non-negative values"
         ) from exc
-    totals = np.sum(gl, axis=2)
-    if (
-        np.any(~np.isfinite(gl))
-        or np.any(gl < 0.0)
-        or np.any(~np.isfinite(totals))
-        or np.any(totals <= 0.0)
-    ):
-        raise pedigree_models.PedigreeEvidenceError(
-            "every raw genotype-likelihood row must have positive finite mass"
-        )
-    normalized = np.ascontiguousarray(gl / totals[:, :, None])
-
     observed = np.asarray(raw_observed_mask)
     if observed.dtype != np.dtype(np.bool_) or observed.shape != expected_shape[:2]:
         raise pedigree_models.PedigreeEvidenceError(
             "raw_observed_mask must be an exact boolean T09-sample-by-site mask"
+        )
+    normalized, invalid = _normalize_raw_evidence(gl, observed)
+    if invalid:
+        raise pedigree_models.PedigreeEvidenceError(
+            "every raw genotype-likelihood row must have positive finite mass"
         )
     _validate_release_array_identity(
         checkpoint,
@@ -808,8 +838,6 @@ def _validated_raw_evidence(
         observed,
     )
     observed = np.ascontiguousarray(observed, dtype=np.bool_)
-    # ``gl / totals`` above already owns a writable contiguous result.
-    normalized[~observed] = 1.0 / 3.0
     return normalized, positions, observed
 
 
@@ -1122,18 +1150,24 @@ def _prepare_component(
     all_raw_indices = _raw_indices_for_positions(
         raw_positions, diagnostic_positions, component_index
     )
-    source_gl = np.ascontiguousarray(raw_gl[:, all_raw_indices, :])
-    source_observed = np.ascontiguousarray(
-        raw_observed[:, all_raw_indices]
-    )
-    source_emissions, _ = module_painting_model.calculate_ragged_binned_emissions(
-        source_gl,
-        source_observed,
-        state,
-        binning,
-        robustness_epsilon=painting_config["robustness_epsilon"],
-        log_floor=_T09_LOG_FLOOR,
-    )
+    # Raw evidence identity/sample order and T09 config were checked by the
+    # chromosome entry point. Reuse the exact frozen emission axis when kept
+    # by the painter; high-K/memory-limited products compute it here as usual.
+    source_emissions = getattr(diagnostic, "source_log_emission_upper", None)
+    if source_emissions is None:
+        source_gl, source_observed, informative_counts = painting_evidence.gather_component_evidence(
+            raw_gl, raw_observed, all_raw_indices, raw_gl.dtype.type(1e-12))
+        source_emissions, _ = module_painting_model.calculate_ragged_binned_emissions(
+            source_gl, source_observed, state, binning,
+            robustness_epsilon=painting_config["robustness_epsilon"], log_floor=_T09_LOG_FLOOR)
+        del source_gl, source_observed
+    else:
+        states = state.background_index + 1
+        if source_emissions.shape != (raw_gl.shape[0], states*(states+1)//2, len(centers)):
+            raise pedigree_models.PedigreeEvidenceError("cached T09 emissions have incompatible axes")
+        source_emissions = painting_evidence.expand_symmetric_emissions(source_emissions, states)
+        informative_counts = painting_evidence.count_component_information(
+            raw_gl, raw_observed, all_raw_indices, raw_gl.dtype.type(1e-12))
     transition = pedigree_sources.build_t09_hamming_transition(
         centers,
         state.background_index + 1,
@@ -1143,14 +1177,13 @@ def _prepare_component(
         double_recomb_factor=painting_config["double_recomb_factor"],
         chromosome_map=painting_config.get("chromosome_map"),
     )
-    informative = source_observed & (np.ptp(source_gl, axis=2) > 1e-12)
     ragged_factors = pedigree_sources.infer_candidate_source_factors_batch(
         source_emissions,
         transition,
-        np.sum(informative, axis=1, dtype=np.int64),
+        informative_counts,
         robustness_epsilon=painting_config["robustness_epsilon"],
     )
-    del source_gl, source_observed, source_emissions
+    del source_emissions
 
     selected, marker_counts = _selected_marker_grid(
         diagnostic_positions, edges, max_snps_per_bin
@@ -1395,4 +1428,5 @@ import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints
 import haplotype_reconstruction.painting.components as painting_components
 import haplotype_reconstruction.painting.model as module_painting_model
+import haplotype_reconstruction.painting.evidence as painting_evidence
 import haplotype_reconstruction.pedigree.config as module_pedigree_config

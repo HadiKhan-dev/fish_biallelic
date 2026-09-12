@@ -29,6 +29,8 @@ STAGE2_PREPROCESS_SCIENTIFIC_DEPENDENCIES = tuple(sorted((
     'core/haplotypes.py',
     'assembly/components.py',
     'assembly/joint_completion.py',
+    'assembly/joint_statistics.py',
+    'assembly/allele_polynomials.py',
     'assembly/boundaries.py',
     'assembly/observations.py',
     'assembly/partial_links.py',

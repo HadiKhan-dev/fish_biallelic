@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 import math
 from typing import Any, Sequence
 import numpy as np
 import haplotype_reconstruction.core.config as core_config
 import haplotype_reconstruction.discovery.cavity as discovery_cavity
 import haplotype_reconstruction.discovery.modes as discovery_modes
+from .batched_search import BatchedSearchConfig, configured_search
 
 _SCORE_TOLERANCE = 1e-9
 
@@ -35,6 +36,7 @@ class ReversibleCavitySearchConfig:
     minimum-NLL representative's ordinary route stalls.
     """
 
+    batched_search_config: BatchedSearchConfig | None = field(default_factory=configured_search)
     beam_width: int = 3
     max_expansions: int = 32
     max_exact_scores: int = 96
@@ -57,6 +59,8 @@ class ReversibleCavitySearchConfig:
     cavity: discovery_cavity.HybridCavitySelectionConfig = discovery_cavity.HybridCavitySelectionConfig()
 
     def __post_init__(self) -> None:
+        if self.batched_search_config is not None and not isinstance(self.batched_search_config, BatchedSearchConfig):
+            raise TypeError('batched_search_config must be BatchedSearchConfig or None')
         for name in (
             "beam_width",
             "max_expansions",
@@ -792,6 +796,10 @@ def search_reversible_cavity(
         reads, settings.read_error_probability,
         likelihood=likelihood,
     )
+    if settings.batched_search_config is not None:
+        from .batched_search import run
+        return run(likelihood, reads, seed_haplotypes, candidate_rows, settings,
+                   workspace, growth_inputs, residual_input_workspace)
     data_modes = discovery_modes._initial_complete_modes(
         likelihood,
         settings.data_start_beam_width,

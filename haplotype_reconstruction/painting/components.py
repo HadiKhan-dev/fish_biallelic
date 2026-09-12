@@ -10,6 +10,7 @@ from typing import Any, List, Tuple, NamedTuple
 
 
 import haplotype_reconstruction.painting.model as module_painting_model
+from . import evidence as painting_evidence
 
 PAINTING_MODEL_RAGGED = "unified-open-set-public-unknown-v3"
 
@@ -184,23 +185,10 @@ def _component_break_reason(block, side):
 
 
 class ComponentPainter:
-    """
-    Persistent pool manager for painting multiple chromosomes efficiently.
+    """Paint independent components with the caller's bounded Numba threads.
 
-    Creates the multiprocessing Pool ONCE and reuses it across chromosomes.
-    SharedMemory is created per chromosome; workers lazy-initialize when they
-    detect a new chromosome ID.
-
-    Usage:
-        with paint_samples.PaintingPoolManager(num_processes=112) as painter:
-            result = painter.paint_components(
-                components,
-                sample_probs_matrix,
-                sample_sites,
-                sample_observed_mask=observed,
-            )
-
-    Saves ~10s per chromosome by avoiding repeated Pool creation/teardown.
+    The object is reusable across chromosomes. Components reset their HMMs;
+    the optional emission cache has one aggregate chromosome memory budget.
     """
 
     def __init__(self, num_processes=16):
@@ -227,6 +215,12 @@ class ComponentPainter:
         )
         num_samples = sample_probs.shape[0]
         component_results = []
+        # Bound optional evidence reuse over the entire chromosome bundle,
+        # including highly fragmented inputs with many small components.
+        emission_cache_remaining = module_painting_model.T09_EMISSION_CACHE_MAX_BYTES
+        if painting_kwargs.get("working_memory_bytes") is not None:
+            emission_cache_remaining = min(
+                emission_cache_remaining, int(painting_kwargs["working_memory_bytes"]))
 
         ragged_keys = {
             "recomb_rate", "switch_penalty_per_snp", "robustness_epsilon",
@@ -275,20 +269,18 @@ class ComponentPainter:
                 else np.asarray(block.keep_flags) > 0
             )
             component_site_indices = np.searchsorted(sites, positions)
-            component_evidence = np.ascontiguousarray(
-                sample_probs[:, component_site_indices, :]
-            )
-            component_observed = (
-                np.ones(component_evidence.shape[:2], dtype=np.bool_)
-                if observed is None
-                else np.ascontiguousarray(observed[:, component_site_indices])
-            )
             break_reason_before = _component_break_reason(block, "before")
             break_reason_after = _component_break_reason(block, "after")
 
             with core_parallel.numba_thread_scope(getattr(self, "num_processes", 1)):
+                component_evidence, component_observed = (
+                    painting_evidence.select_site_evidence(
+                        sample_probs, observed, component_site_indices
+                    )
+                )
                 ragged = module_painting_model.paint_ragged_component(
                     panel, component_evidence, component_observed, kept,
+                    source_emission_cache_bytes=emission_cache_remaining,
                     **ragged_kwargs,
                 )
             informative_site_count = len(ragged.state_space.positions)
@@ -307,6 +299,8 @@ class ComponentPainter:
             )
             painting_model = PAINTING_MODEL_RAGGED
             ragged_diagnostics = ragged.diagnostics
+            if ragged_diagnostics is not None and ragged_diagnostics.source_log_emission_upper is not None:
+                emission_cache_remaining -= ragged_diagnostics.source_log_emission_upper.nbytes
 
             resolved = np.asarray(resolved, dtype=np.bool_)
             resolved.flags.writeable = False

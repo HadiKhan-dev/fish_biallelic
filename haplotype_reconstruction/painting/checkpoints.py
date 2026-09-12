@@ -336,38 +336,30 @@ def _validate_ragged_diagnostics(
         raise ValueError("ragged Viterbi public posterior exceeds public maximum")
     if np.any(background_mass[eligible] > unknown_mass[eligible] + tolerance):
         raise ValueError("ragged BACKGROUND mass exceeds public UNKNOWN mass")
-
-    expected_status = np.full(
-        expected_grid, int(module_painting_model.PaintingTrackStatus.INELIGIBLE_NO_EVIDENCE),
-        dtype=np.uint8,
-    )
+    status_type = module_painting_model.PaintingTrackStatus
+    class_status = np.full(len(classes) + 1, int(status_type.BACKGROUND),
+                           dtype=np.uint8)
+    class_labels = np.full(len(classes) + 1, -1, dtype=np.int64)
+    for class_index, members in enumerate(classes):
+        if not class_is_anchored[class_index]:
+            class_status[class_index] = int(status_type.UNANCHORED_TRAJECTORY)
+        elif len(members) > 1:
+            class_status[class_index] = int(status_type.POOLED_EQUIVALENCE)
+        else:
+            class_status[class_index] = int(status_type.SINGLETON_NAMED)
+            class_labels[class_index] = members[0]
+    # The grids have already been checked to contain integer-valued classes.
+    state_indices = viterbi_grid.astype(np.intp, copy=False)
+    expected_status = class_status[state_indices]
+    expected_labels = class_labels[state_indices]
     expected_classes = viterbi_grid.copy()
+    low = np.broadcast_to((qv < threshold)[:, None, :], expected_grid)
+    expected_status[low] = int(status_type.LOW_POSTERIOR_ABSTENTION)
+    expected_labels[low] = -1
+    expected_classes[low] = -1
+    expected_status[~eligible] = int(status_type.INELIGIBLE_NO_EVIDENCE)
+    expected_labels[~eligible] = -1
     expected_classes[~eligible] = -1
-    expected_labels = np.full(expected_grid, -1, dtype=np.int64)
-    for sample_index in range(sample_count):
-        if not eligible[sample_index]:
-            continue
-        for bin_index in range(len(centers)):
-            if qv[sample_index, bin_index] < threshold:
-                expected_status[sample_index, :, bin_index] = int(
-                    module_painting_model.PaintingTrackStatus.LOW_POSTERIOR_ABSTENTION
-                )
-                expected_classes[sample_index, :, bin_index] = -1
-                continue
-            for track in range(2):
-                class_index = int(viterbi_grid[sample_index, track, bin_index])
-                if class_index == background_index:
-                    status = module_painting_model.PaintingTrackStatus.BACKGROUND
-                elif not class_is_anchored[class_index]:
-                    status = module_painting_model.PaintingTrackStatus.UNANCHORED_TRAJECTORY
-                elif len(classes[class_index]) > 1:
-                    status = module_painting_model.PaintingTrackStatus.POOLED_EQUIVALENCE
-                else:
-                    status = module_painting_model.PaintingTrackStatus.SINGLETON_NAMED
-                    expected_labels[sample_index, track, bin_index] = (
-                        classes[class_index][0]
-                    )
-                expected_status[sample_index, track, bin_index] = int(status)
     if not np.array_equal(statuses, expected_status):
         raise ValueError("ragged track status disagrees with qV/public state")
     if not np.array_equal(class_grid, expected_classes):
@@ -394,6 +386,39 @@ def _validate_ragged_diagnostics(
             raise ValueError(f"ragged {name} is invalid")
     if diagnostics.hmm_batch_size > sample_count:
         raise ValueError("ragged HMM batch exceeds the sample count")
+
+
+def _chunks_match_label_bins(chunks, centers, labels):
+    """Check half-open chunk coverage in O(C log M + M), without a C-by-M scan.
+
+    Difference arrays count covering intervals and sum their one-based IDs.
+    Exactly one covering interval makes that sum its unique owner. This also
+    preserves overlap/gap detection and does not require chunks to be sorted.
+    """
+    if not len(centers):
+        return True
+    starts = np.asarray([chunk.start for chunk in chunks])
+    ends = np.asarray([chunk.end for chunk in chunks])
+    if np.any(starts >= ends):
+        return False
+    left = np.searchsorted(centers, starts, side="left")
+    right = np.searchsorted(centers, ends, side="left")
+    coverage = np.zeros(len(centers) + 1, dtype=np.int64)
+    owner = np.zeros_like(coverage)
+    ids = np.arange(1, len(chunks) + 1, dtype=np.int64)
+    np.add.at(coverage, left, 1)
+    np.add.at(coverage, right, -1)
+    if np.any(np.cumsum(coverage[:-1]) != 1):
+        return False
+    np.add.at(owner, left, ids)
+    np.add.at(owner, right, -ids)
+    selected = np.cumsum(owner[:-1]) - 1
+    hap1 = np.asarray([chunk.hap1 for chunk in chunks])[selected]
+    hap2 = np.asarray([chunk.hap2 for chunk in chunks])[selected]
+    return bool(np.all(
+        ((hap1 == labels[0]) & (hap2 == labels[1]))
+        | ((hap1 == labels[1]) & (hap2 == labels[0]))
+    ))
 
 
 def validate_t09_component_checkpoint(
@@ -542,19 +567,12 @@ def validate_t09_component_checkpoint(
                 else:
                     centers = np.asarray(diagnostics.bin_centers)
                     expected_grid = np.asarray(diagnostics.map_label_grid)
-                    for bin_index, center in enumerate(centers):
-                        matches = [
-                            chunk for chunk in chunks
-                            if chunk.start <= center < chunk.end
-                        ]
-                        if (len(matches) != 1
-                                or set((matches[0].hap1, matches[0].hap2)) != set(
-                                    expected_grid[sample_index, :, bin_index]
-                                )):
-                            raise ValueError(
-                                f"painting component {component_id} chunks disagree "
-                                "with released label bins"
-                            )
+                    if not _chunks_match_label_bins(
+                            chunks, centers, expected_grid[sample_index]):
+                        raise ValueError(
+                            f"painting component {component_id} chunks disagree "
+                            "with released label bins"
+                        )
             for chunk in chunks:
                 if chunk.start >= chunk.end:
                     raise ValueError(

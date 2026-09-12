@@ -32,7 +32,7 @@ import haplotype_reconstruction.pedigree.pipeline as pedigree_pipeline
 import haplotype_reconstruction.recombination.model as module_recombination_model
 import haplotype_reconstruction.recombination.pipeline as recombination_pipeline
 import haplotype_reconstruction.refinement.pipeline as refinement_pipeline
-import haplotype_reconstruction.refinement.conditioning as refinement_conditioning
+import haplotype_reconstruction.refinement.model as refinement_model
 import haplotype_reconstruction.simulation.pedigree as simulation_pedigree
 import haplotype_reconstruction.simulation.templates as simulation_templates
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
@@ -435,61 +435,63 @@ def run():
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
         # naive_long_haps loaded on-demand via _ensure_key
     else:
-        for region in regions_config:
-            r_name = region['contig']
-            if contig_done(STAGE_1, r_name):
-                print(f"  [RESUME] {r_name} already done")
-                continue
+        with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
+            for region in regions_config:
+                r_name = region['contig']
+                if contig_done(STAGE_1, r_name):
+                    print(f"  [RESUME] {r_name} already done")
+                    continue
 
-            print(f"\n" + "="*60)
-            print(f"PROCESSING REGION: ({region['contig']} blocks {region['start']}-{region['end']})")
-            print("="*60)
+                print(f"\n" + "="*60)
+                print(f"PROCESSING REGION: ({region['contig']} blocks {region['start']}-{region['end']})")
+                print("="*60)
 
-            # 1. Load Data
-            start = time.time()
-            genomic_data = core_variants.cleanup_block_reads_list(
-                vcf_path,
-                region['contig'],
-                start_block_idx=region['start'],
-                end_block_idx=region['end'],
-                block_size=block_size,
-                shift_size=shift_size,
-                num_processes=n_processes
-            )
-            print(f"  [Loader] Loaded {len(genomic_data)} blocks in {time.time() - start:.2f}s")
+                # 1. Load Data
+                start = time.time()
+                genomic_data = core_variants.cleanup_block_reads_list(
+                    vcf_path,
+                    region['contig'],
+                    start_block_idx=region['start'],
+                    end_block_idx=region['end'],
+                    block_size=block_size,
+                    shift_size=shift_size,
+                    num_processes=n_processes
+                )
+                print(f"  [Loader] Loaded {len(genomic_data)} blocks in {time.time() - start:.2f}s")
 
-            # 2. Run Haplotype Discovery
-            start = time.time()
-            block_results = discovery_blocks.generate_all_block_haplotypes(
-                genomic_data,
-                num_processes=n_processes,
-                discovery_config=stage1_config,
-            )
+                # 2. Run Haplotype Discovery
+                start = time.time()
+                block_results = discovery_blocks.generate_all_block_haplotypes(
+                    genomic_data,
+                    num_processes=n_processes,
+                    block_pool=block_pool,
+                    discovery_config=stage1_config,
+                )
 
-            valid_blocks = [b for b in block_results if len(b.positions) > 0]
-            block_results = core_haplotypes.BlockResults(valid_blocks)
+                valid_blocks = [b for b in block_results if len(b.positions) > 0]
+                block_results = core_haplotypes.BlockResults(valid_blocks)
 
-            print(f"  [Discovery] Haplotypes generated in {time.time() - start:.2f}s")
+                print(f"  [Discovery] Haplotypes generated in {time.time() - start:.2f}s")
 
-            # 3. Run Naive Linker (to get long templates for simulation)
-            start = time.time()
-            (naive_blocks, naive_long_haps) = simulation_templates.build_founder_templates(
-                block_results,
-                num_long_haps=6
-            )
-            print(f"  [Naive Linker] Chained {len(naive_long_haps[1])} haps in {time.time() - start:.2f}s")
+                # 3. Run Naive Linker (to get long templates for simulation)
+                start = time.time()
+                (naive_blocks, naive_long_haps) = simulation_templates.build_founder_templates(
+                    block_results,
+                    num_long_haps=6
+                )
+                print(f"  [Naive Linker] Chained {len(naive_long_haps[1])} haps in {time.time() - start:.2f}s")
 
-            # Store only naive_long_haps (genomic_data + block_results are huge, never needed again)
-            multi_contig_results[region['contig']] = {
-                "naive_long_haps": naive_long_haps
-            }
-            save_contig(STAGE_1, r_name, {
-                'naive_long_haps': naive_long_haps,
-                'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-                'stage1_config': stage1_config_record,
-            })
-            del genomic_data, block_results, naive_blocks, naive_long_haps
-            gc.collect()
+                # Store only naive_long_haps (genomic_data + block_results are huge, never needed again)
+                multi_contig_results[region['contig']] = {
+                    "naive_long_haps": naive_long_haps
+                }
+                save_contig(STAGE_1, r_name, {
+                    'naive_long_haps': naive_long_haps,
+                    'stage1_backend': discovery_blocks.STAGE1_BACKEND,
+                    'stage1_config': stage1_config_record,
+                })
+                del genomic_data, block_results, naive_blocks, naive_long_haps
+                gc.collect()
 
         print(f"\nAll regions processed in {time.time() - total_start:.2f}s")
         core_runtime.require_contig_checkpoints(
@@ -931,61 +933,63 @@ def run():
 
         start = time.time()
 
-        for r_name in region_keys:
-            if contig_done(STAGE_3, r_name):
-                print(f"  [RESUME] {r_name} already done")
-                continue
-            print(f"\n  Processing {r_name}...")
+        with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
+            for r_name in region_keys:
+                if contig_done(STAGE_3, r_name):
+                    print(f"  [RESUME] {r_name} already done")
+                    continue
+                print(f"\n  Processing {r_name}...")
 
-            _ensure_key(r_name, 'simd_genomic_data')
-            _ensure_key(r_name, 'simulated_reads')
-            _ensure_key(r_name, 'naive_long_haps')
-            simd_genomic_data = multi_contig_results[r_name]['simd_genomic_data']
-            simulated_reads = multi_contig_results[r_name]['simulated_reads']
-            global_sites = np.asarray(
-                multi_contig_results[r_name]['naive_long_haps'][0]
-            )
-
-            t_chr = time.time()
-            simd_block_results = discovery_blocks.generate_all_block_haplotypes(
-                simd_genomic_data,
-                num_processes=n_processes,
-                discovery_config=stage1_config,
-            )
-            disc_time = time.time() - t_chr
-
-            valid_blocks = [b for b in simd_block_results if len(b.positions) > 0]
-            simd_block_results = core_haplotypes.BlockResults(valid_blocks)
-
-            global_observed_mask = (
-                workflows_reconstruction.observed_call_mask_from_read_counts(
-                    simulated_reads
+                _ensure_key(r_name, 'simd_genomic_data')
+                _ensure_key(r_name, 'simulated_reads')
+                _ensure_key(r_name, 'naive_long_haps')
+                simd_genomic_data = multi_contig_results[r_name]['simd_genomic_data']
+                simulated_reads = multi_contig_results[r_name]['simulated_reads']
+                global_sites = np.asarray(
+                    multi_contig_results[r_name]['naive_long_haps'][0]
                 )
-            )
-            save_contig(STAGE_3, r_name, {
-                'block_results': simd_block_results,
-                'global_sites': global_sites,
-                'global_observed_mask': global_observed_mask,
-                'observed_call_mask_mode': (
-                    workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-                ),
-                'genotype_evidence_mode': (
-                    workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
-                ),
-                'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-                'stage1_config': stage1_config_record,
-            })
 
-            hap_counts = [len(b.haplotypes) for b in valid_blocks]
-            print(f"    {len(valid_blocks)} blocks, haps/block: "
-                  f"min={min(hap_counts)}, max={max(hap_counts)}, mean={np.mean(hap_counts):.1f} "
-                  f"[discovery: {disc_time:.1f}s]")
+                t_chr = time.time()
+                simd_block_results = discovery_blocks.generate_all_block_haplotypes(
+                    simd_genomic_data,
+                    num_processes=n_processes,
+                    block_pool=block_pool,
+                    discovery_config=stage1_config,
+                )
+                disc_time = time.time() - t_chr
 
-            # Free this contig's data immediately (don't accumulate across contigs)
-            for _k in (
-                    'simd_genomic_data', 'simulated_reads', 'naive_long_haps',
-            ):
-                multi_contig_results[r_name].pop(_k, None)
+                valid_blocks = [b for b in simd_block_results if len(b.positions) > 0]
+                simd_block_results = core_haplotypes.BlockResults(valid_blocks)
+
+                global_observed_mask = (
+                    workflows_reconstruction.observed_call_mask_from_read_counts(
+                        simulated_reads
+                    )
+                )
+                save_contig(STAGE_3, r_name, {
+                    'block_results': simd_block_results,
+                    'global_sites': global_sites,
+                    'global_observed_mask': global_observed_mask,
+                    'observed_call_mask_mode': (
+                        workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
+                    ),
+                    'genotype_evidence_mode': (
+                        workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
+                    ),
+                    'stage1_backend': discovery_blocks.STAGE1_BACKEND,
+                    'stage1_config': stage1_config_record,
+                })
+
+                hap_counts = [len(b.haplotypes) for b in valid_blocks]
+                print(f"    {len(valid_blocks)} blocks, haps/block: "
+                      f"min={min(hap_counts)}, max={max(hap_counts)}, mean={np.mean(hap_counts):.1f} "
+                      f"[discovery: {disc_time:.1f}s]")
+
+                # Free this contig's data immediately (don't accumulate across contigs)
+                for _k in (
+                        'simd_genomic_data', 'simulated_reads', 'naive_long_haps',
+                ):
+                    multi_contig_results[r_name].pop(_k, None)
 
         print(f"\nBlock haplotype discovery complete in {time.time()-start:.1f}s")
         _prune_key('simd_genomic_data')
@@ -1056,8 +1060,7 @@ def run():
         raw_gl_stage=STAGE_2, raw_sites_stage=STAGE_3,
         raw_gl_key='simd_probs', n_workers=n_processes,
         genetic_maps=inference_genetic_maps,
-        config=replace(refinement_conditioning.config_from_environment(),
-                       recombination_rate=inference_recombination_rate),
+        config=refinement_model.FamilyRefinementConfig(recombination_rate=inference_recombination_rate),
     )
     recombination_pipeline.run_recombination(
         checkpoint_store, all_region_keys, sample_names,

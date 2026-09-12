@@ -319,14 +319,13 @@ class _FixedKFitWorkspace:
         matrix = np.asarray(haplotypes)
         return (
             matrix.ndim == 2
-            and self.observed_mask is None
             and matrix.dtype == np.dtype(np.int64)
             and matrix.shape[0] >= 1
             and self.binary_pattern_cache is not None
             and self._binary_state_key(matrix) is not None
         )
 
-    def compute_transition_batch(self, haplotypes):
+    def compute_transition_batch(self, haplotypes, *, state_keys=None):
         """Compute and cache exact transitions for int64 binary starts."""
         matrices = tuple(haplotypes)
         if not matrices:
@@ -345,7 +344,7 @@ class _FixedKFitWorkspace:
             numba.set_num_threads(batch_threads)
         try:
             (H_next, A_batch, cost_batch, wildcard_batch,
-             h_changes) = discovery_founder_updates._fixed_k_transition_batch_pattern_kernel(
+             h_changes) = discovery_frontier_emissions.transition_batch(
                 C0b,
                 cache.diff1_table, cache.w_table,
                 kW_Cb, cache.kWdiff_table,
@@ -354,7 +353,7 @@ class _FixedKFitWorkspace:
                 float(core_config.VITERBI_SWITCH_PENALTY),
                 int(cache.snps_per_bin), int(cache.n_bins),
                 self.h_genotype_cost, self.h_wildcard_cost,
-                H_batch,
+                self.uninformative_samples, H_batch,
             )
         finally:
             if batch_threads != active_threads:
@@ -363,7 +362,10 @@ class _FixedKFitWorkspace:
         for index in range(H_batch.shape[0]):
             if int(h_changes[index]) < 0:
                 raise ValueError("batch transition received a nonbinary start")
-            state_key = self._binary_state_key(H_batch[index])
+            state_key = (
+                self._binary_state_key(H_batch[index])
+                if state_keys is None else state_keys[index]
+            )
             # The fused binary Viterbi path has no capped/uncapped split.
             # Reuse the one immutable stored array instead of copying an
             # identical second B x N slab for every frontier transition.
@@ -1076,17 +1078,20 @@ def _fit_at_fixed_K_many_binary_frontier(
                 workspace._binary_state_from_key(key) for key in missing
             ]
             if assignment_only:
-                for matrix in matrices:
-                    workspace.compute_assignment_scalar(matrix)
+                for key, matrix in zip(missing, matrices):
+                    workspace.compute_assignment_scalar(
+                        matrix, state_key=key, known_missing=True)
             else:
-                # At one thread the scalar kernels avoid the batch slab's
-                # packing/scattering overhead. A singleton frontier likewise
-                # needs sample/site parallelism rather than an outer B=1 team.
-                if numba.get_num_threads() == 1 or len(matrices) == 1:
-                    for matrix in matrices:
-                        workspace.compute_transition_scalar(matrix)
+                # Fuse multi-state frontiers even on one-core workers. A
+                # singleton retains internal sample/site parallelism instead
+                # of the fused kernel's outer B=1 parallel dimension.
+                if len(matrices) == 1:
+                    for key, matrix in zip(missing, matrices):
+                        workspace.compute_transition_scalar(
+                            matrix, state_key=key, known_missing=True)
                 else:
-                    workspace.compute_transition_batch(matrices)
+                    workspace.compute_transition_batch(
+                        matrices, state_keys=tuple(missing))
 
         next_active = []
         for index in active:
@@ -1312,3 +1317,4 @@ import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.discovery.assignments as discovery_assignments
 import haplotype_reconstruction.discovery.founder_updates as discovery_founder_updates
 import haplotype_reconstruction.discovery.objectives as discovery_objectives
+import haplotype_reconstruction.discovery.frontier_emissions as discovery_frontier_emissions

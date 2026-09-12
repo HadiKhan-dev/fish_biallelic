@@ -1,5 +1,7 @@
 [run]
 cores = "auto"
+assembly_model = "dense" # "structured" gives near-quadratic assembly.
+discovery_search = "standard" # Independent; "batched" remains experimental.
 output = "work/runs/tropheops"
 
 [inputs]
@@ -11,6 +13,3 @@ metadata_sheet = "main_data"
 rate_cm_per_mb = 5.0
 shared_family_evidence = true
 # recombination_map = "work/data/cross.map"
-
-[refinement]
-impute_missing = false

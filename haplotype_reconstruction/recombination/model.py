@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, replace
 import math
 import time
 import numpy as np
-from numba import njit, prange
+from numba import njit, prange, get_num_threads
 
 from types import SimpleNamespace
 
@@ -348,7 +348,7 @@ def _one_meiosis(calls, displayed_phase, internal_phase, positions, components,
 
 @njit(cache=True)
 def edge_observations(calls, orientation, positions, runs, parent, child, slot,
-                      maximum_gap):
+                      maximum_gap, flip_sample=-1, flip_left=0, flip_right=0):
     indices = np.empty(len(positions), dtype=np.int64)
     obs = np.empty(len(positions), dtype=np.int8)
     resets = np.empty(len(positions), dtype=np.bool_)
@@ -356,9 +356,14 @@ def edge_observations(calls, orientation, positions, runs, parent, child, slot,
     for j in range(len(positions)):
         if runs[parent,j] < 0 or runs[child,j] < 0:
             continue
-        p0 = calls[parent,j,orientation[parent,j]]
-        p1 = calls[parent,j,1 ^ orientation[parent,j]]
-        c = calls[child,j,slot ^ orientation[child,j]]
+        p_phase = orientation[parent,j]
+        c_phase = orientation[child,j]
+        if flip_left <= j < flip_right:
+            if parent == flip_sample:p_phase ^= 1
+            if child == flip_sample:c_phase ^= 1
+        p0 = calls[parent,j,p_phase]
+        p1 = calls[parent,j,1 ^ p_phase]
+        c = calls[child,j,slot ^ c_phase]
         if p0 < 0 or p1 < 0 or p0 == p1 or c < 0:
             continue
         reset = count == 0
@@ -395,8 +400,13 @@ def _decode_meioses(calls, displayed_phase, internal_phase, positions, component
 
 
 @njit(cache=True)
-def orientation_log_prior(path, positions, runs, entry_rate, mean_bp):
-    """One CTMC prior per individual's path, resetting at its actual breaks."""
+def orientation_log_prior(path, positions, runs, entry_rate, mean_bp,
+                          flip_left=0, flip_right=0):
+    """Ordered full CTMC scan, optionally flipping a half-open trial tract.
+
+    Virtual trials retain every original scalar operation and accumulation
+    order. The asymmetric prior changes inside a tract, not only at its ends.
+    """
     stationary = entry_rate / (entry_rate + 1/mean_bp)
     value = 0.
     previous = -1
@@ -404,13 +414,15 @@ def orientation_log_prior(path, positions, runs, entry_rate, mean_bp):
         if runs[j] < 0:
             previous = -1
             continue
+        current_phase = path[j] ^ (flip_left <= j < flip_right)
         if previous < 0 or runs[j] != runs[previous]:
-            probability = stationary if path[j] else 1-stationary
+            probability = stationary if current_phase else 1-stationary
         else:
+            previous_phase = path[previous] ^ (flip_left <= previous < flip_right)
             changed = -math.expm1(-(entry_rate+1/mean_bp)*(positions[j]-positions[previous]))
             enter, leave = stationary*changed, (1-stationary)*changed
-            probability = ((leave if not path[j] else 1-leave) if path[previous]
-                           else (enter if path[j] else 1-enter))
+            probability = ((leave if not current_phase else 1-leave) if previous_phase
+                           else (enter if current_phase else 1-enter))
         value += math.log(probability)
         previous = j
     return value
@@ -584,27 +596,44 @@ def posterior_intervals(positions, components, resets, switch, bins, rate,
     return counts,exposure,array
 
 
+@njit(cache=True)
 def _return_tracts(indices, posterior, resets, threshold):
-    """Screen supported return-to-original patterns, without choosing a cause."""
+    """Same supported alternating-run proposals, retaining only the last run."""
     output = []
-    runs = []
-    for i,probability in enumerate(posterior):
+    previous_state = -1
+    previous_start = 0
+    run_count = 0
+    for i, probability in enumerate(posterior):
         if resets[i]:
-            runs = []
-        if max(probability,1-probability) < threshold:
+            run_count = 0
+            previous_state = -1
+        if max(probability, 1 - probability) < threshold:
             continue
         state = int(probability < .5)
-        if runs and runs[-1][0] == state:
-            runs[-1][2] = i
-        else:
-            runs.append([state,i,i])
-            if len(runs) >= 3:
-                # Candidate includes the middle supported run. Its two
-                # boundaries remain marker-bracketed, not known event bases.
-                left = int(indices[runs[-2][1]])
-                right = int(indices[runs[-1][1]])
-                output.append((left,right))
+        if state != previous_state:
+            if run_count >= 2:
+                output.append((int(indices[previous_start]), int(indices[i])))
+            previous_state = state
+            previous_start = i
+            run_count += 1
     return output
+
+@njit(cache=True, parallel=True)
+def _screen_edge_tracts(calls, orientation, positions, runs, parents, children, slots,
+                genetic, maximum_gap, error, support):
+    """Screen independent meioses in parallel; no redundant artifact-HMM score."""
+    results = [np.empty((0, 2), dtype=np.int64) for _ in range(len(parents))]
+    for edge in prange(len(parents)):
+        indices, obs, resets = edge_observations(
+            calls, orientation, positions, runs, parents[edge], children[edge],
+            slots[edge], maximum_gap)
+        posterior = origin_posterior(obs, genetic[indices], resets, 1., error)
+        tracts = _return_tracts(indices, posterior, resets, support)
+        result = np.empty((len(tracts), 2), dtype=np.int64)
+        for i in range(len(tracts)):
+            result[i, 0], result[i, 1] = tracts[i]
+        results[edge] = result
+    return results
 
 
 def map_bins(positions,components,bin_bp):
@@ -621,13 +650,15 @@ def screen_candidates(data, orientation, config, shared_config):
     for edge,(parent,child) in enumerate(zip(parents,children)):
         adjacent[parent].append(edge)
         adjacent[child].append(edge)
+    # The two-state screening posterior uses the input map in Morgans.
+    # Full artifact-HMM evidence is evaluated later by the unchanged objective.
+    proposals = _screen_edge_tracts(
+        calls, orientation, positions, runs, parents, children, slots, genetic,
+        config.maximum_gap_bp, config.copy_error, shared_config.candidate_support)
     candidates = set()
-    for edge in range(len(parents)):
-        _,(indices,obs,resets) = _edge_fit(data,orientation,edge,config)
-        # Use the local input map for proposal screening as well as fitting.
-        # origin_posterior takes rate*distance, so Morgans with rate=1 is exact.
-        posterior = origin_posterior(obs,genetic[indices],resets,1.,config.copy_error)
-        for left,right in _return_tracts(indices,posterior,resets,shared_config.candidate_support):
+    for edge, tracts in enumerate(proposals):
+        for left, right in tracts:
+            left, right = int(left), int(right)
             if positions[right]-positions[left] > shared_config.maximum_candidate_bp:
                 continue
             for sample in (parents[edge],children[edge]):
@@ -687,6 +718,107 @@ an assembly break. Uncovered bins have NaN rates, not zero recombination.
         "cumulative_observed_cM": np.r_[0.,np.cumsum(np.nan_to_num(distance,nan=0.))]}
 
 
+@njit(cache=True, parallel=True)
+def _score_candidate_edges(calls, orientation, positions, runs, parents, children,
+                           slots, genetic, trials, edges, maximum_gap, error,
+                           artifact_rate, artifact_mean):
+    """Read-only trial flips: each job evaluates one candidate/incident edge."""
+    scores = np.empty(len(edges))
+    for i in prange(len(edges)):
+        edge = edges[i]
+        sample, left, right = trials[i]
+        indices, obs, resets = edge_observations(
+            calls, orientation, positions, runs, parents[edge], children[edge],
+            slots[edge], maximum_gap, sample, left, right)
+        scores[i] = edge_log_evidence(
+            obs, positions[indices], resets, genetic[indices],
+            error, artifact_rate, artifact_mean)
+    return scores
+
+
+@njit(cache=True, parallel=True)
+def _orientation_priors(orientation, positions, runs, entry_rate, mean_bp):
+    priors = np.empty(len(orientation))
+    for sample in prange(len(orientation)):
+        priors[sample] = orientation_log_prior(
+            orientation[sample], positions, runs[sample], entry_rate, mean_bp)
+    return priors
+
+
+@njit(cache=True, parallel=True)
+def _candidate_orientation_priors(orientation, positions, runs, trials,
+                                  entry_rate, mean_bp):
+    priors = np.empty(len(trials))
+    for i in prange(len(trials)):
+        sample, left, right = trials[i]
+        priors[i] = orientation_log_prior(
+            orientation[sample], positions, runs[sample], entry_rate, mean_bp,
+            left, right)
+    return priors
+
+
+def _candidate_scores(data, orientation, candidates, adjacent, config, epochs,
+                      orientation_epochs, shared_config, edge_products=None, prior_sums=None):
+    """Batch independent trial work; consume it in the original greedy order.
+
+    An accepted flip invalidates its incident-edge scores and its individual's
+    prior, with separate epochs because neighbouring flips do not change that
+    prior. Recompute stale work immediately before the original greedy decision.
+    """
+    offset = 0
+    width = get_num_threads()
+    while offset < len(candidates):
+        stop = offset
+        jobs, edges, cuts = [], [], [0]
+        while stop < len(candidates) and (len(edges) < width or stop == offset):
+            trial = candidates[stop]
+            incident = adjacent[trial[0]]
+            jobs.extend([trial] * len(incident))
+            edges.extend(incident)
+            cuts.append(len(edges))
+            stop += 1
+        edge_array = np.asarray(edges, dtype=np.int64)
+        trial_array = np.asarray(jobs, dtype=np.int64).reshape((-1, 3))
+        candidate_array = np.asarray(candidates[offset:stop], dtype=np.int64).reshape((-1, 3))
+        versions = epochs[edge_array].copy()
+        prior_versions = orientation_epochs[candidate_array[:, 0]].copy()
+        if edge_products is None:
+            values = _score_candidate_edges(
+                data[0], orientation, *data[1:], trial_array, edge_array, config.maximum_gap_bp,
+                config.copy_error, config.phase_artifact_rate, config.phase_artifact_mean_bp)
+            priors = _candidate_orientation_priors(
+                orientation, data[1], data[2], candidate_array,
+                shared_config.phase_error_rate, shared_config.phase_error_mean_bp)
+        else:
+            indexed_jobs = np.concatenate([
+                edge_products.jobs(*trial, adjacent[trial[0]]) for trial in candidate_array])
+            prior_jobs = prior_sums.jobs(candidate_array)
+            values = edge_products.score(indexed_jobs)
+            priors = prior_sums.score(prior_jobs)
+        for i in range(offset, stop):
+            lo, hi = cuts[i-offset:i-offset+2]
+            incident = edge_array[lo:hi]
+            result = values[lo:hi]
+            if np.any(epochs[incident] != versions[lo:hi]):
+                if edge_products is None:
+                    result = _score_candidate_edges(
+                        data[0], orientation, *data[1:], trial_array[lo:hi], incident, config.maximum_gap_bp,
+                        config.copy_error, config.phase_artifact_rate, config.phase_artifact_mean_bp)
+                else:
+                    result = edge_products.score(indexed_jobs[lo:hi])
+            sample, left, right = candidates[i]
+            prior = priors[i-offset]
+            if orientation_epochs[sample] != prior_versions[i-offset]:
+                if prior_sums is None:
+                    prior = orientation_log_prior(
+                        orientation[sample], data[1], data[2][sample],
+                        shared_config.phase_error_rate, shared_config.phase_error_mean_bp, left, right)
+                else:
+                    prior = prior_sums.score(prior_jobs[i-offset:i-offset+1])[0]
+            yield (sample, left, right, incident, result, prior)
+        offset = stop
+
+
 def fit_shared_orientations(product, relationships, *, config=RecombinationMapConfig(),
                             shared_config=SharedOrientationConfig(),
                             genetic_positions_morgans=None, chromosome_map=None,
@@ -704,9 +836,26 @@ def fit_shared_orientations(product, relationships, *, config=RecombinationMapCo
     orientation = np.zeros(calls.shape[:2],dtype=np.int8)
     screened,adjacent = screen_candidates(data,orientation,config,shared_config)
     candidates = screened if candidates is None else list(candidates)
-    scores = _scores(data,orientation,np.arange(len(parents)),config)
-    prior = np.array([orientation_log_prior(orientation[s],positions,runs[s],
-        shared_config.phase_error_rate,shared_config.phase_error_mean_bp) for s in range(len(calls))])
+    edge_products = prior_sums = None
+    # Nonmixing products can lose initial-state mass: either the artifact
+    # process is disabled or a supplied map has flat stretches. Keep the
+    # scaled streaming recurrence on these supported numerical boundaries.
+    mixing = config.phase_artifact_rate > 0 and np.all(np.diff(genetic) > 0)
+    if candidates and mixing:
+        from .intervals import EdgeIntervalProducts
+        from .orientation_prior import OrientationPriorSums
+        edge_products = EdgeIntervalProducts(data,candidates,adjacent,config)
+        prior_sums = OrientationPriorSums(positions,runs,candidates,shared_config)
+        scores = np.empty(len(parents))
+        scores[edge_products.edges] = edge_products.current_scores()
+        remaining = np.setdiff1d(np.arange(len(parents)),edge_products.edges)
+        scores[remaining] = _scores(data,orientation,remaining,config)
+    else:
+        scores = _scores(data,orientation,np.arange(len(parents)),config)
+    prior = _orientation_priors(orientation,positions,runs,
+        shared_config.phase_error_rate,shared_config.phase_error_mean_bp)
+    if prior_sums is not None:
+        prior[prior_sums.samples] = prior_sums.current_scores()
     initial_objective = float(scores.sum()+prior.sum())
     accepted = []
     tested = 0
@@ -714,20 +863,30 @@ def fit_shared_orientations(product, relationships, *, config=RecombinationMapCo
     # Deterministic descending degree order allows well-supported shared
     # parents to resolve before the more ambiguous degree-two child cases.
     candidates.sort(key=lambda c:(-len(adjacent[c[0]]),c[0],c[1],c[2]))
+    epochs = np.zeros(len(parents), dtype=np.int64)
+    orientation_epochs = np.zeros(len(calls), dtype=np.int64)
     for sweep in range(shared_config.maximum_sweeps):
         changes = 0
-        for sample,left,right in candidates:
-            orientation[sample,left:right] ^= 1
-            new_prior = orientation_log_prior(orientation[sample],positions,runs[sample],
-                shared_config.phase_error_rate,shared_config.phase_error_mean_bp)
-            incident = adjacent[sample]
-            new_scores = _scores(data,orientation,incident,config)
+        for sample,left,right,incident,new_scores,new_prior in _candidate_scores(
+                data,orientation,candidates,adjacent,config,epochs,orientation_epochs,
+                shared_config,edge_products,prior_sums):
             per_edge = new_scores-scores[incident]
             prior_change = float(new_prior-prior[sample])
             gain = float(per_edge.sum()+prior_change)
             tested += 1
             if gain > shared_config.minimum_objective_gain:
+                if edge_products is None:
+                    orientation[sample,left:right] ^= 1
+                else:
+                    # Difference encoding makes accepted range flips O(1).
+                    # Trees own the current paths until final materialization.
+                    orientation[sample,left] ^= 1
+                    if right < len(positions):orientation[sample,right] ^= 1
+                    edge_products.accept(edge_products.jobs(sample,left,right,incident))
+                    prior_sums.accept(prior_sums.jobs([(sample,left,right)])[0])
                 scores[incident] = new_scores
+                epochs[incident] += 1
+                orientation_epochs[sample] += 1
                 prior[sample] = new_prior
                 accepted.append({"sample_index":sample,"start_index":left,"stop_index":right,
                     "start_bp":int(positions[left]),"stop_bp":int(positions[right]),
@@ -736,11 +895,11 @@ def fit_shared_orientations(product, relationships, *, config=RecombinationMapCo
                     "log_prior_change":prior_change,"incident_edges":list(map(int,incident)),
                     "per_edge_log_likelihood_gain":list(map(float,per_edge))})
                 changes += 1
-            else:
-                orientation[sample,left:right] ^= 1
         if not changes:
             converged = True
             break
+    if edge_products is not None:
+        np.bitwise_xor.accumulate(orientation,axis=1,out=orientation)
     corrected = np.take_along_axis(calls,
         np.stack((orientation,1^orientation),axis=-1),axis=-1)
     zero = np.zeros(calls.shape[:2],dtype=np.int8)

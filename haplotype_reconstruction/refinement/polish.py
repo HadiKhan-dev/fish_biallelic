@@ -9,8 +9,7 @@ import math
 import time
 from numba import njit, prange
 
-from dataclasses import replace
-import haplotype_reconstruction.refinement.model as refinement_model
+from haplotype_reconstruction.refinement import evidence as refinement_evidence
 
 @dataclass(frozen=True)
 class FinishedFamilyPhase:
@@ -39,37 +38,6 @@ class PhasePolishConfig:
 @njit(cache=True, inline='always')
 def _copy(a, b, match, mismatch):
     return 0. if a < 0 or b < 0 else (match if a == b else mismatch)
-
-
-@dataclass(frozen=True)
-class PhaseReleaseAssessment:
-    phase: FinishedFamilyPhase
-    family: object
-    phase_stable: bool
-    latent_converged: bool
-    checks: tuple
-
-
-def family_phase_context(reference, family):
-    """Complete an internal scaffold from the existing fit, without new data.
-
-Four-genotype uncertainty is retained in the source family product. Only its
->=.98 supported gap fills are used as this conditional model's context; they
-do not become published allele calls unless imputation is explicitly enabled.
-No called allele is overwritten, and posterior states are moved to the emitted
-frame before completion then back to the original reference frame.
-"""
-    initial = family.phase_map
-    posterior = family.ordered_genotype_probability.copy()
-    reverse = family.inferred_phase_map != initial
-    posterior[:,:,1] = np.where(reverse,family.ordered_genotype_probability[:,:,2],family.ordered_genotype_probability[:,:,1])
-    posterior[:,:,2] = np.where(reverse,family.ordered_genotype_probability[:,:,1],family.ordered_genotype_probability[:,:,2])
-    corrected = np.where(initial[:,:,None],reference[:,:,::-1],reference)
-    filled,_ = refinement_model.complete_scaffold(corrected,family.phase_flip,posterior,.98)
-    context = np.where(initial[:,:,None],filled[:,:,::-1],filled)
-    if not np.array_equal(context[reference>=0],reference[reference>=0]):
-        raise RuntimeError('internal family context changed a called allele')
-    return context
 
 
 @dataclass
@@ -126,70 +94,41 @@ def interval_gain(i, a, b, path, reference, flips, selectors, incoming, offsets,
     return biological, regularisation
 
 
-def assess_phase_release(gl, observed, reference, positions, phase_bins, component_ids,
-                         relationships, sample_ids, parents, children, slots, family, *,
-                         phase_config, family_config=refinement_model.FamilyRefinementConfig(),
-                         required_unchanged=5, maximum_checks=20, callback=None, chromosome_map=None):
-    if required_unchanged < 2 or maximum_checks < required_unchanged:
-        raise ValueError('invalid consecutive phase-stability window')
-    phase=finish_family_phase(reference,family,positions,phase_bins,component_ids,
-                             parents,children,slots,config=phase_config,impute_missing=False,
-                             chromosome_map=chromosome_map)
-    if family.converged:
-        return PhaseReleaseAssessment(phase,family,True,True,())
-    checks=[];unchanged=0
-    for check in range(maximum_checks):
-        # Resume preserves iteration scheduling, existing clusters and message
-        # state. It does not reinitialize a fit or change its biological model.
-        config=replace(family_config,max_iterations=family.messages.iteration+1)
-        following=refinement_model.refine_family(gl,observed,reference,positions,phase_bins,component_ids,
-            relationships,sample_ids,config=config,resume=family.messages,chromosome_map=chromosome_map)
-        proposed=finish_family_phase(reference,following,positions,phase_bins,component_ids,
-                                    parents,children,slots,config=phase_config,impute_missing=False,
-                                    chromosome_map=chromosome_map)
-        changed=int(np.count_nonzero(np.any(proposed.allele_calls!=phase.allele_calls,axis=2)))
-        unchanged=unchanged+1 if changed==0 else 0
-        item={'check':check+1,'family_iteration':following.messages.iteration,
-              'changed_called_phase_sites':changed,'consecutive_unchanged':unchanged,
-              'latent_delta':following.messages.deltas[-1],
-              'latent_converged':bool(following.converged)}
-        checks.append(item);family,phase=following,proposed
-        if callback is not None:callback(family,phase,item)
-        if family.converged or unchanged>=required_unchanged:
-            break
-    stable=bool(family.converged or unchanged>=required_unchanged)
-    return PhaseReleaseAssessment(phase,family,stable,bool(family.converged),tuple(checks))
-
-
 def finish_family_phase(reference, family, positions, phase_bins, component_ids,
-                        parents, children, slots, *, config, impute_missing=False,
-                        callback=None, resume=None, chromosome_map=None):
-    context = family_phase_context(reference,family)
-    result = polish_phase(context,family.inferred_phase_map,positions,phase_bins,
-        component_ids,parents,children,slots,config=config,callback=callback,resume=resume,
-        chromosome_map=chromosome_map)
+                        parents, children, slots, *, config,
+                        callback=None, resume=None, chromosome_map=None,
+                        conditional_result=None):
+    """Render the current family frame, optionally reusing an identical solve.
+
+    The chromosome driver alone supplies ``conditional_result`` after exact
+    comparison of both changing inputs in its fixed-input invocation. Displayed
+    phase is deliberately not cached: incomplete-parent tracks and observable
+    changes must always be derived from the current family state.
+    """
+    context = family.phase_context
+    result = conditional_result
+    if result is None:
+        result = polish_phase(context,family.inferred_phase_map,positions,phase_bins,
+            component_ids,parents,children,slots,config=config,callback=callback,resume=resume,
+            chromosome_map=chromosome_map)
     if not result.converged:
         raise RuntimeError('conditional phase finalization has not converged; retain its iteration checkpoint')
     emitted = result.phase_map.copy()
     incomplete = np.bincount(children,minlength=len(reference)) < 2
     if not config.correct_incomplete_parent_phase:
         emitted[incomplete] = family.phase_map[incomplete]
-    source = context if impute_missing else reference
-    calls = np.where(emitted[:,:,None],source[:,:,::-1],source)
-    original = np.where(emitted[:,:,None],reference[:,:,::-1],reference)
-    provenance = (calls >= 0).astype(np.uint8)
-    provenance[(calls>=0)&(original<0)] = 2
-    if not impute_missing and not np.array_equal(np.sort(calls,axis=2),np.sort(reference,axis=2)):
+    calls,provenance,changed,counts,invalid=refinement_evidence.phase_views(
+        reference,emitted,family.phase_map)
+    if np.any(invalid):
         raise RuntimeError('phase-only finalization changed genotype or missingness')
-    observable = reference[:,:,0] != reference[:,:,1]
-    changed = (emitted != family.phase_map) & observable
-    summary = {'schema':'finished-family-phase-view-v1','called_alleles':int(np.sum(calls>=0)),
-        'original_called_alleles':int(np.sum(reference>=0)),
-        'filled_alleles':int(np.sum(provenance==2)),
+    called,original_called,filled=np.sum(counts,axis=0)
+    summary = {'schema':'finished-family-phase-view-v1','called_alleles':int(called),
+        'original_called_alleles':int(original_called),
+        'filled_alleles':int(filled),
         'changed_observable_phase_sites':int(changed.sum()),
-        'known_genotypes_changed':0,'imputation_enabled':bool(impute_missing),
+        'known_genotypes_changed':0,'imputation_enabled':False,
         'phase_estimate':'conditional point path, not an independently calibrated posterior',
-        'phase_probability_policy':'source-family probabilities remain in the source product; none are transferred to this changed path',
+        'phase_probability_policy':'conditional phase point path; no source posterior probabilities are published or transferred',
         'selector_frame':'conditional_result.phase_map internal family frame; M0/M1 emitted tracks can differ',
         'pedigree_updated':False,'founder_namespaces_merged':False,
         'conditional_score_gain':result.final_score-result.initial_score,
@@ -486,7 +425,7 @@ def polish_phase(reference, initial_phase, positions, bins, component_ids, paren
         raise ValueError("marker axes differ")
     if len(positions) == 0 or np.any(np.diff(positions) <= 0):
         raise ValueError("positions must be nonempty and increasing")
-    if np.any(~np.isin(reference, (-1,0,1))) or np.any(~np.isin(flips, (0,1))):
+    if not refinement_evidence.valid_phase_arrays(reference,flips):
         raise ValueError("invalid allele or phase values")
     if not (0 < config.copy_error < .5 and 0 < config.phase_switch_probability < .5
             and np.isfinite(config.recombination_rate) and config.recombination_rate >= 0):
@@ -562,5 +501,3 @@ def polish_phase(reference, initial_phase, positions, bins, component_ids, paren
         model_config['recombination_map'] = chromosome_map.identity()
     return PhasePolishResult(flips, selectors, phase_theta, trace, initial, final,
                              converged, time.monotonic()-started, model_config)
-
-
