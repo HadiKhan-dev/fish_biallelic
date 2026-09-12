@@ -13,7 +13,7 @@ from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.assembly.completion as assembly_completion
 from .structured_transitions import StructuredTransitionConfig, configured_transition
-from .panel_search import PanelSearchConfig
+from .panel_search import PanelSearchConfig, configured_panel_search
 
 STAGE2_RELEASE_SCHEMA = "stage2-release-v1"
 
@@ -73,7 +73,7 @@ class AssemblyConfig:
     preprocess_diagnostics_mode: str = "compact"
     verbose: bool = False
     structured_transition_config: StructuredTransitionConfig | None = field(default_factory=configured_transition)
-    panel_search_config: PanelSearchConfig | None = field(default_factory=PanelSearchConfig)
+    panel_search_config: PanelSearchConfig | None = field(default_factory=configured_panel_search)
 
     def __post_init__(self) -> None:
         if self.panel_search_config is not None and not isinstance(self.panel_search_config, PanelSearchConfig):

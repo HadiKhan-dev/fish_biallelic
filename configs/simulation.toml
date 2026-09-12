@@ -1,7 +1,9 @@
 [run]
 cores = "auto"
-assembly_model = "dense" # "structured" gives near-quadratic assembly.
+assembly_model = "dense" # "structured" is near quadratic with bounded search.
+assembly_search = "bounded" # "broad" retains the optimized broader full-refit search.
 discovery_search = "standard" # Independent; "batched" remains experimental.
+feedback_selection = "balanced" # "strict" protects clean feedback calls; less variation rescue.
 # Output defaults to work/runs/seed_<seed>; each seed has isolated checkpoints.
 # Optional execution controls; shards require globally completed simulation inputs.
 # process_contigs = ["chr1", "chr2"]

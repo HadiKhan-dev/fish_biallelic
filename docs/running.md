@@ -40,7 +40,8 @@ The generating map and inference map are separate settings.
 ## Simulation stage boundaries and chromosome shards
 
 `simulate --stop-after-stage 01_blocks` stops after block discovery;
-`--stop-after-stage 09_painting` stops after L1–L4 assembly and painting.
+`--stop-after-stage 09_painting` stops after local feedback selection, final
+L1–L4 assembly and painting.
 Both retain completed checkpoints. Omit the option on a later invocation to
 resume downstream work.
 
@@ -77,15 +78,82 @@ and surrounding whitespace. Invalid values are rejected rather than enabling
 the feature accidentally. Use `--no-shared-family-evidence` to explicitly
 disable it even when the selected TOML example sets it to true.
 
-## Assembly transition models
+## Local feedback selection
+
+All three reconstruction commands use this sequence by default:
+
+1. Keep the original missing-aware 200-SNP discovery results.
+2. Assemble them through L1 and refit/project that context back to local blocks.
+3. Select from original and L1-feedback candidates using the original raw
+   likelihoods and observation masks.
+4. Assemble those **selected** panels through L1+L2 and refit back to blocks.
+5. Select again, using original, selected-L1 and fresh L2-feedback candidates.
+6. Run final L1–L4 and the unchanged downstream algorithms on the selected blocks.
+
+Selection always runs after each round; there is no end-only ordering option.
+
+The intermediate passes are proposals, not additional observations. Their
+carrier model excludes the current block's emission before refitting its
+alleles. Neither truth nor downstream assembly/painting metrics select panels.
+The configured assembly model/search applies to the context passes as well as
+final assembly. Supplied recombination maps also determine context transitions;
+unmapped chromosomes use the fallback rate, scaled by assembly generations.
+
+`--feedback-selection balanced` is the default. It starts from the
+cavity-selected feedback-only refit, filters candidates explainable by a single
+join between current backbone haplotypes, requires a positive local BIC gain
+for additions, then performs same-K cavity-selected allele/confidence refinement.
+The final refinement can change or withdraw earlier calls.
+
+`--feedback-selection strict` instead permits only private-allele rescue,
+requires the same positive BIC gain, rechecks support for added rows, and
+protects the original clean feedback calls. It recovers less missing variation.
+That protection applies to the refitted backbone within each round's rescue,
+not to freezing all first-round calls during the next context/refit.
+
+```bash
+python run.py simulate --config configs/simulation.toml --seed 400 \
+  --feedback-selection strict --output work/runs/strict_seed_400
+```
+
+The flag works for `astcal` and `tropheops` too. TOML uses
+`[run].feedback_selection = "balanced"` or `"strict"`; the environment variable
+is `HAPLOTYPES_FEEDBACK_SELECTION`. Precedence is CLI > TOML > environment >
+balanced. This is local block feedback, **not** a T11 → T10 feedback loop.
+
+Both modes retain unknown calls. Exact context-site inference is bounded to
+at most ten distinct context haplotypes; larger contexts or contexts that do
+not cover whole original blocks retain their input local proposals, with a
+recorded skip reason. This cap bounds computation, not the biological founder
+count. Local selection itself does not impose that ten-founder cap.
+
+In the 9,287-block ordering comparison (six seed/chromosome cases), balanced
+selection after each round gave 135 called-allele errors and 566 truth-to-panel
+errors/missing, versus 183 and 652 when selecting only at the end. The 135
+errors span 10,265,983 called founder alleles: **13.15 errors per million
+called SNP alleles (0.001315%)**, excluding unknown calls. These are
+local panel metrics, **not** final chromosome or sample phase errors. The
+balanced result is a measured precision/variation trade-off, not a uniform
+accuracy improvement or a guarantee against per-block regression.
+
+This ordering changes feedback, T09 and downstream cache identities, including
+products from the earlier end-only feedback workflow.
+Preserve old runs and use a separate output/checkpoint root; compatible original
+input/discovery stages can still be linked into that root. Do not relabel old
+T09 products. Both feedback rounds and their selection batches are checkpointed.
+Balanced and strict can share the initial raw L1 context/proposals, but have
+separate first-round selections and second-round contexts/proposals/selections.
+Switching modes does not overwrite raw discovery results.
+
+## Assembly transition models and search breadth
 
 The default, `--assembly-model dense`, retains arbitrary dense learned
-transitions and uses bounded candidate-panel search at every assembly level.
-Its dominant founder-count dependence is cubic. For larger founder panels,
+transitions and defaults to bounded candidate-panel search at every assembly
+level. With bounded search, its dominant founder-count dependence is cubic. For larger founder panels,
 `--assembly-model structured` selects sparse-specific plus positive-background
 transitions, giving near-quadratic scaling for fixed fitting/search budgets.
-Both modes use the same bounded search (16 full scores per proposal category)
-and the 20-iteration linker limit.
+Both modes default to bounded search (16 full scores per proposal category)
+and retain the 20-iteration linker limit.
 
 ```bash
 python run.py simulate --config configs/simulation.toml --seed 400 \
@@ -96,6 +164,28 @@ The same option is available for `astcal` and `tropheops`. Set
 `[run].assembly_model = "dense"` or `"structured"` in TOML, or use
 `HAPLOTYPES_ASSEMBLY_MODEL`. Precedence is CLI > TOML > environment > dense.
 There is no automatic founder-count cutoff: the user chooses the model.
+
+Search breadth is a separate choice: `--assembly-search bounded` (default) or
+`--assembly-search broad`. The broader mode retains the optimized diversity
+beam and broader full-refit panel/chimera search, including Numba scoring,
+cached proposal tensors and dynamic CPU allocation. To select the earlier
+broad-search/dense-transition combination explicitly:
+
+```bash
+python run.py simulate --config configs/simulation.toml --seed 400 \
+  --assembly-model dense --assembly-search broad \
+  --output work/runs/broad_seed_400
+```
+
+This works for `astcal` and `tropheops` too. TOML uses
+`[run].assembly_search = "bounded"` or `"broad"`; the environment variable is
+`HAPLOTYPES_ASSEMBLY_SEARCH`. Precedence is CLI > TOML > environment > bounded.
+The two search modes are heuristics with the same full Viterbi/BIC acceptance
+objective; broader search can be slower and is not uniformly more accurate.
+Combining `structured` transitions with `broad` search is allowed, but no longer
+gives the near-quadratic whole-assembly bound. Search breadth changes L1–L4,
+not Stage 1 or downstream models.
+
 Structured transitions are a restricted statistical model, not an exact
 acceleration of arbitrary dense transitions. Read the
 [scaling and accuracy trade-offs](founder_scaling.md).
@@ -123,6 +213,10 @@ Do not share a checkpoint directory between different seeds or configurations.
 | `00_founder_templates/` | Frozen simulation sequence inputs |
 | `00_simulated_reads/` | Simulated observations, true pedigree, alleles and raw crossover events |
 | `01_blocks/` | Discovered 200-SNP block haplotypes, raw likelihoods/observation masks as applicable |
+| `02_feedback_l1_assembly/`, `02_feedback_l1/` | Initial context-assembly levels and raw local proposals, shared between modes |
+| `02_feedback_<mode>_l1/` | First-round 128-block selection batches and selected panels |
+| `02_feedback_<mode>_l2_assembly/` | Context assembly through L1+L2 from that mode's selected first-round panels |
+| `02_feedback_<mode>_l2/` | Second-round raw proposals, 128-block selection batches and final selected panels; `<mode>` is `balanced` or `strict` |
 | `00_genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
 | `09_painting_release_work/` | Per-chromosome preprocessing and completed L1–L4 assembly phases |
 | `09_painting/` | Typed component-local painting products |
@@ -152,10 +246,10 @@ polished phase and the consecutive-stability count; large numerical caches are
 rebuilt on restart. A 520-iteration safety limit refuses release if phase has
 not stabilized. Stable phase does not assert marginal-posterior convergence.
 
-The phase-focused schema changes T11 and downstream cache identities. Existing
-T09/T10/raw checkpoints remain reusable; preserve older results and use a new
-output/checkpoint root for the changed downstream stages. Do not overwrite or
-relabel old T11/T12 checkpoints.
+Changes confined to T11 can reuse compatible T09/T10/raw checkpoints in a new
+downstream output root. The local-feedback change described above also changes
+T09 inputs: reuse only compatible original input/discovery stages for that
+upgrade. Do not overwrite or relabel old scientific products.
 
 When an attempt reuses validated inputs, its checkpoint directories may be
 symbolic links to an earlier attempt. `attempt.json` records that source.

@@ -15,6 +15,7 @@ choosing the T11 stopping rule, not from all project development.
 | Portion | Completed evidence |
 | --- | --- |
 | Stage1 discovery | All 1,647 seed400 chr1 blocks; repeated batches and 76 approximately 2× seed401 missing-data controls |
+| Per-round balanced feedback | 9,287 local blocks in six seed/chromosome cases; full chr12 production parity plus bounded L1–L4/painting and resume checks |
 | Pre-L1 founder completion | 5,484 chr16 blocks across seeds400–402; independent 2×/3×/5× crossfits |
 | Dense q16 assembly and painting | All 22 seed402 chromosomes plus six controls; Stage1 and painter held fixed |
 | Painting numerical implementation | All 22 seed402 q16 chromosomes, 148 components and 8,956,852 sites, plus seed400/401 chr16 controls |
@@ -25,8 +26,9 @@ choosing the T11 stopping rule, not from all project development.
 | Latest T12 indexed trials | All 22 seed401 final-phase maps; variable/zero maps, missingness, overlapping flips and reset controls |
 
 There has not been a fresh, start-to-end run of every latest component together.
-In particular, the full q16 assembly-to-T11/T12 combination remains to be
-evaluated. Fixed-input tests deliberately reuse checkpoints instead of
+In particular, a full-genome run combining the new per-round local feedback
+with final q16 assembly and T11/T12 remains to be evaluated.
+Fixed-input tests deliberately reuse checkpoints instead of
 repeating hours of assembly. They must not be relabeled as fresh reconstructions.
 
 ## Founder reconstruction and assembly search
@@ -75,6 +77,37 @@ evidence that every floating difference is harmless.
 The exact unresolved-founder cap remains six. Polynomial likelihood evaluation
 and marginal folding do not remove the exponential output size of explicitly
 enumerated configurations or approximate posterior mass.
+
+## Local feedback selection
+
+The accepted default selects after **each** context round. The comparison held
+the original discovery inputs and local scoring rules fixed, with truth used
+only for evaluation. It covered seed402 chr10/12/16/19 and seed401 chr10/13:
+9,287 blocks in total.
+
+| Local 200-SNP metric | Selection only at the end | Selection after each round |
+| --- | ---: | ---: |
+| Incorrect called founder alleles | 183 | 135 |
+| Called founder alleles compared | 10,266,082 | 10,265,983 |
+| Errors per million called SNP alleles | 17.83 | 13.15 |
+| Truth-to-panel errors or missing alleles | 652 | 566 |
+| Exactly represented distinct true local haplotypes | 51,275 / 51,503 | 51,291 / 51,503 |
+
+Called-allele errors compare each output row to its closest true local haplotype
+over called sites, without a one-to-one row constraint. Unknown cells are not
+counted as called errors. The reverse metric compares each true row to its
+closest output row and penalizes both wrong and unknown alleles; its denominator
+is 11,140,146 true founder allele cells. Neither metric assesses cross-block
+phase, final L4 chromosome accuracy or sample painting switches. The aggregate
+improvement is not uniform: small local regressions and occasional extra rows
+remain. These are development simulations, not a real-data accuracy estimate.
+
+The full seed402 chr12 production feedback route reproduced all 1,794 selected
+panels exactly in each round: 17 called-allele errors over 1,998,544 calls and
+zero reverse errors/missing. A 36-block integration exercised both selections,
+final L1–L4 and painting, mode separation, completed/batch/interrupted resumes,
+and preservation of original discovery inputs. Missing-read, noncontiguous
+marker-mask and genetic-map wiring checks accompany those comparisons.
 
 ## Painting and pedigree inference
 

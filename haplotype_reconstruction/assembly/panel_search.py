@@ -1,8 +1,8 @@
 """Bounded-refit assembly search using exact fixed-painting edit statistics.
 
 Conditional gains generate proposals, not reoptimized likelihoods. Every
-accepted panel is checked by the existing full Viterbi/BIC objective. Unlike
-the previous broader search, this heuristic can miss beneficial repainting moves.
+accepted panel is checked by the existing full Viterbi/BIC objective. Compared
+with the optional broader search, this heuristic can miss beneficial repainting moves.
 With an O(K) input candidate pool and fixed batch width, each sweep has
 O(N*m*K**2 + K**2*B*log(K)) work and a bounded number of full scores.
 """
@@ -37,6 +37,12 @@ class PanelSearchConfig:
         for value in (self.paths_per_endpoint,self.max_sweeps,self.full_scores_per_kind,self.max_bins,self.tensor_budget_mb):
             if isinstance(value,bool) or int(value)!=value or value<1:
                 raise ValueError("panel search budgets must be positive integers")
+
+
+def configured_panel_search():
+    """None selects the optimized broader search in the shared hierarchy."""
+    from ..core.environment import assembly_panel_search
+    return PanelSearchConfig() if assembly_panel_search() == "bounded" else None
 
 
 def endpoint_select(candidates, block, quota):

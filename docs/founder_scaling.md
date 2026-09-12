@@ -1,7 +1,8 @@
 # Founder scaling and assembly models
 
 The default is **dense transitions plus bounded panel search**. The optional
-structured transition model gives near-quadratic founder-count scaling. These
+structured transition model with bounded search gives near-quadratic
+founder-count scaling. An optimized broader search is also available. These
 choices affect L1–L4 assembly, independently of Stage 1.
 
 The default uses **16 full proposal scores per category**, after the initial
@@ -26,15 +27,33 @@ python run.py simulate --config configs/simulation.toml --seed 400 \
 The same flag works for `astcal` and `tropheops`. TOML uses
 `[run].assembly_model = "dense"` or `"structured"`; the environment variable is
 `HAPLOTYPES_ASSEMBLY_MODEL`. Precedence is CLI > TOML > environment > dense.
-There is no automatic K cutoff. Both choices use `PanelSearchConfig`, and
-both retain the same full Viterbi/BIC acceptance objective and fitting limits.
+There is no automatic K cutoff. Both transition models default to
+`--assembly-search bounded` and retain the same full Viterbi/BIC acceptance
+objective and linker fitting limits.
+
+Use `--assembly-search broad` for the optimized broader diversity-beam and
+full-refit panel/chimera search. For the earlier dense/broad combination:
+
+```bash
+python run.py simulate --config configs/simulation.toml --seed 400 \
+  --assembly-model dense --assembly-search broad \
+  --output work/runs/broad_seed_400
+```
+
+Search precedence is CLI > `[run].assembly_search` >
+`HAPLOTYPES_ASSEMBLY_SEARCH` > `bounded`. Broad search retains Numba kernels,
+cached swap templates, chunked scoring and dynamic thread allocation; it
+does not reinstate unoptimized historical code. It retains the diversity beam
+(width 200), founder cap 12, top-20 swap candidates and at most 10 chimera
+resolution iterations. It is broader, not exhaustive or guaranteed to improve
+allele accuracy.
 
 Python callers can pass `AssemblyConfig(structured_transition_config=None)`
 for dense transitions or an explicit `StructuredTransitionConfig()` for the
-structured model. The panel-search configuration defaults to
-`PanelSearchConfig()` in either case. Explicit `panel_search_config=None`
-remains an internal old-search reference for controlled comparisons; it is not
-a third CLI mode. Actual configurations are recorded in checkpoint identities.
+structured model. The panel-search default follows the search environment
+setting; explicit `panel_search_config=PanelSearchConfig()` selects bounded
+search and `panel_search_config=None` selects broad search regardless of that
+setting. Actual configurations are recorded in checkpoint identities.
 
 Stage 1 remains on its established missing-aware reversible-cavity search.
 Its independent experimental option is `--discovery-search batched`
@@ -62,9 +81,14 @@ not claims that sample count, chromosome length, iterations, or I/O are free.
 | Optional batched discovery | Batch births/pruning, residual replacements, fixed-start gauge moves; same fixed-K fitter and mean-field cavity score | O(R I N L K²), plus candidate generation/clustering costs |
 | Default dense macro inference | Arbitrary dense learned transitions; full diploid posterior | O(I N K³) per boundary |
 | Optional structured macro inference | Sparse specific edges plus a shared positive background; full diploid posterior | O(I N K² log K) per boundary |
-| Candidate paths | Fixed endpoint quota; archive interior-state paths; no MMR all-selected comparisons | O(K² log K) for fixed B/quota |
-| Panel selection | Conditional, no-switch and candidate/mate-HMM proposal scores; bounded full Viterbi/BIC refits | O(R (N m K² + B K² log K)) for an O(K) candidate pool |
+| Bounded-search candidate paths | Fixed endpoint quota; archive interior-state paths; no MMR all-selected comparisons | O(K² log K) for fixed B/quota |
+| Bounded panel selection | Conditional, no-switch and candidate/mate-HMM proposal scores; bounded full Viterbi/BIC refits | O(R (N m K² + B K² log K)) for an O(K) candidate pool |
 | Cavity carrier probabilities | Sum each pair-state mass at its one/two founder endpoints | O(N K²), replacing an O(N K³) dense incidence product |
+
+The near-quadratic/cubic whole-assembly comparisons assume bounded search.
+Broad search restores additional full rescoring and coordinated suffix
+proposals, including the historical quartic-style search costs. Selecting
+structured transitions alone does not bound that broader search quadratically.
 
 The carrier-probability change is mathematically equivalent and also applies
 to the standard profile. Homozygotes contribute once to carrier probability.
@@ -100,9 +124,9 @@ is fixed within a fit; a genuinely complex boundary may not be represented as
 well. Backward mesh summaries are reverse conditionals derived from the
 regularized joint mass, not the adjoint likelihood operator.
 
-### Search changes are approximations
+### Bounded-search changes are approximations
 
-The path pool retains up to 16 paths per endpoint and archives intermediate
+The bounded-search path pool retains up to 16 paths per endpoint and archives intermediate
 backward refinements. Its size grows linearly with K for fixed batch width,
 rather than applying a fixed total founder/path cap.
 

@@ -1,7 +1,9 @@
 [run]
 cores = "auto"
-assembly_model = "dense" # "structured" gives near-quadratic assembly.
+assembly_model = "dense" # "structured" is near quadratic with bounded search.
+assembly_search = "bounded" # "broad" retains the optimized broader full-refit search.
 discovery_search = "standard" # Independent; "batched" remains experimental.
+feedback_selection = "balanced" # "strict" protects clean feedback calls; less variation rescue.
 output = "work/runs/astcal"
 
 [inputs]

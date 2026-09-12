@@ -15,6 +15,24 @@ state. A sole discovered haplotype does not force every sample to be homozygous
 for it. Phase is local to supported components, and H1/H2 names are arbitrary
 orientation labels, not paternal/maternal identities for pedigree roots.
 
+## Local feedback and candidate selection
+
+Before final chromosome assembly, L1 context is projected/refitted back to the
+original 200-SNP blocks and selected locally; the selected panels then supply
+the L1+L2 context for a second refit/selection round. Original candidates remain
+available in both rounds. Context excludes the target block's emission when
+estimating carrier weights. Candidate panels are starts, not extra read evidence.
+
+The default balanced selector combines a cavity-ranked feedback backbone with
+BIC-supported candidate additions not explainable by one donor join, followed
+by same-K cavity-ranked refinement. The strict option limits rescue to private
+alleles and protects each round's backbone during that rescue. Both use the
+original likelihoods and observation masks, and release unsupported alleles as
+unknown. These selection scores are not calibrated correctness probabilities;
+novelty filtering is a heuristic, not proof of a distinct biological founder.
+See [configuration and checkpointing](running.md#local-feedback-selection) and
+[local validation](validation.md#local-feedback-selection).
+
 ## Hierarchical linking
 
 All four assembly levels use the same distance-aware normal/error-tract linker
@@ -69,13 +87,15 @@ Pseudocounts, the probability floor, uniform robustness and forward parameter
 damping regularize the fitted transitions. Reverse summaries for mesh/path
 selection are column-normalizations of the same regularized edge evidence, not
 likelihood operators or unconditional time-reversed chain transitions. This is
-the default dense linker at every hierarchy level. Both assembly modes use
-bounded candidate-panel search, with full Viterbi/BIC scoring before accepting
-a proposal. The optional [structured model](founder_scaling.md) restricts the
+the default dense linker at every hierarchy level. Both assembly modes default
+to bounded candidate-panel search, with full Viterbi/BIC scoring before accepting
+a proposal; `--assembly-search broad` retains the optimized broader search.
+The optional [structured model](founder_scaling.md) restricts the
 macro transition to sparse specific edges plus a positive shared background.
 It does not change discovery or the within-block emission model. Dense
 propagation is cubic in founder count; structured propagation is near quadratic
-for fixed fitting/search budgets. Numerically guarded matrix multiplication
+with bounded search and fixed fitting budgets. Broad search adds further
+rescoring costs. Numerically guarded matrix multiplication
 accelerates larger dense contractions without restricting their parameters.
 
 Coherence here refers to each independently fitted gap/residue chain. Combining

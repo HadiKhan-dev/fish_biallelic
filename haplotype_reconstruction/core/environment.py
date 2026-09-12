@@ -22,6 +22,22 @@ def assembly_transition_model():
     return value
 
 
+def assembly_panel_search():
+    """Panel-search breadth is independent of the assembly transition model."""
+    value = os.environ.get("HAPLOTYPES_ASSEMBLY_SEARCH", "bounded")
+    if value not in ("bounded", "broad"):
+        raise ValueError("HAPLOTYPES_ASSEMBLY_SEARCH must be bounded or broad")
+    return value
+
+
+def block_feedback_selection():
+    """Balanced local feedback rescue is the default; strict protects calls."""
+    value = os.environ.get("HAPLOTYPES_FEEDBACK_SELECTION", "balanced")
+    if value not in ("balanced", "strict"):
+        raise ValueError("HAPLOTYPES_FEEDBACK_SELECTION must be balanced or strict")
+    return value
+
+
 def batched_discovery_enabled():
     """The experimental discovery search requires its own explicit choice."""
     value = os.environ.get("HAPLOTYPES_DISCOVERY_SEARCH", "standard")

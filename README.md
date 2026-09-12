@@ -51,6 +51,7 @@ units and interpretation.
 | Step | Implementation | Product |
 | --- | --- | --- |
 | Block discovery | `discovery/` | Missing-aware reversible-cavity 200-SNP haplotypes |
+| Local feedback selection | `workflows/block_feedback.py`, `discovery/` | Read-supported selection after each L1/L2 feedback round; balanced rescue by default |
 | L1–L4 assembly | `assembly/` | Supported, component-preserving chromosome haplotypes |
 | Sample painting (T09) | `painting/` | Ragged diploid paths with an explicit unknown state |
 | Pedigree inference (T10) | `pedigree/` | Genome-wide M0/M1/M2 calls, parent identities and ambiguity |
@@ -58,9 +59,18 @@ units and interpretation.
 | Recombination estimation (T12) | `recombination/` | Posterior rates, crossover intervals and observable exposure |
 
 Assembly defaults to dense learned transitions plus bounded panel search.
+Before final assembly, two checkpointed feedback rounds refine local panels:
+L1 → blocks → selection, then L1+L2 → blocks → selection. The first selected
+panels feed the second context; original candidates remain available throughout.
+Use `--feedback-selection strict` to protect each round's clean feedback calls
+and rescue only private alleles instead of the default balanced trade-off.
+See [local feedback selection](docs/running.md#local-feedback-selection).
 Use `--assembly-model structured` for the
 [near-quadratic alternative](docs/founder_scaling.md); this restricts the
-transition model and does not change discovery. T11 does not feed back into
+transition model and does not change discovery. Use `--assembly-search broad`
+to retain the optimized broader path/panel search instead of the default
+`bounded` search; this costs more full refits and is not guaranteed to improve
+accuracy. T11 does not feed back into
 painting or pedigree inference, and the estimated T12 map is not automatically
 fed upstream.
 Shared-family orientation-error evidence is enabled for T12 by default;

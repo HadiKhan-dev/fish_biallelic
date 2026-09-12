@@ -51,9 +51,13 @@ def main(argv=None):
                              help='Use shared-family phase-error evidence in map generation; default on.')
         if name!='recombination':
             command.add_argument('--assembly-model',choices=('dense','structured'),
-                                 help='Dense cubic transitions (default) or near-quadratic structured transitions; both use bounded panel search.')
+                                 help='Dense cubic transitions (default) or near-quadratic structured transitions; independent of --assembly-search.')
+            command.add_argument('--assembly-search',choices=('bounded','broad'),
+                                 help='Bounded panel search (default, 16 full scores per category) or the optimized broader search with more full refits.')
             command.add_argument('--discovery-search',choices=('standard','batched'),
                                  help='Stage 1 search, independent of assembly; default standard. Batched is experimental.')
+            command.add_argument('--feedback-selection',choices=('balanced','strict'),
+                                 help='Selection after each L1/L2 feedback round: balanced (default) or protected-backbone strict rescue.')
             command.add_argument('--contigs',nargs='+',help='Physical contigs to analyze, in input order.')
             command.add_argument('--vcf',help='Input VCF/BCF; optional when simulation templates are supplied.')
         if name=='simulate':
@@ -113,11 +117,19 @@ def main(argv=None):
         assembly_model=_setting(args,config,'run','assembly_model',os.environ.get('HAPLOTYPES_ASSEMBLY_MODEL','dense'))
         if assembly_model not in ('dense','structured'):
             parser.error('assembly_model must be dense or structured')
+        assembly_search=_setting(args,config,'run','assembly_search',os.environ.get('HAPLOTYPES_ASSEMBLY_SEARCH','bounded'))
+        if assembly_search not in ('bounded','broad'):
+            parser.error('assembly_search must be bounded or broad')
         discovery_search=_setting(args,config,'run','discovery_search',os.environ.get('HAPLOTYPES_DISCOVERY_SEARCH','standard'))
         if discovery_search not in ('standard','batched'):
             parser.error('discovery_search must be standard or batched')
+        feedback_selection=_setting(args,config,'run','feedback_selection',os.environ.get('HAPLOTYPES_FEEDBACK_SELECTION','balanced'))
+        if feedback_selection not in ('balanced','strict'):
+            parser.error('feedback_selection must be balanced or strict')
         os.environ['HAPLOTYPES_ASSEMBLY_MODEL']=assembly_model
+        os.environ['HAPLOTYPES_ASSEMBLY_SEARCH']=assembly_search
         os.environ['HAPLOTYPES_DISCOVERY_SEARCH']=discovery_search
+        os.environ['HAPLOTYPES_FEEDBACK_SELECTION']=feedback_selection
     seed=_setting(args,config,'simulation','seed',400)
     default_output=f'work/runs/seed_{seed}' if args.command=='simulate' else f'work/runs/{args.command}'
     output=Path(_setting(args,config,'run','output',default_output)).expanduser().resolve()

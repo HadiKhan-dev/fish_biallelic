@@ -14,12 +14,13 @@ import numpy as np
 import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
 import haplotype_reconstruction.painting.components as painting_components
 from haplotype_reconstruction.core import raw_evidence
+from haplotype_reconstruction.workflows import block_feedback
 
-STAGE2_PRODUCTION_SCHEMA = "stage2-production-v3"
+STAGE2_PRODUCTION_SCHEMA = "stage2-production-v4"
 
 
 STAGE2_PRODUCTION_BACKEND = (
-    "raw-stage1-preprocess-hierarchy-unified-open-set-painting-t09-v3"
+    "feedback-selected-stage1-preprocess-hierarchy-unified-open-set-painting-t09-v4"
 )
 
 
@@ -56,6 +57,8 @@ class ReconstructionConfig:
     release_config: assembly_pipeline.AssemblyConfig = field(
         default_factory=_default_release_config
     )
+    feedback_config: block_feedback.BlockFeedbackConfig = field(
+        default_factory=block_feedback.BlockFeedbackConfig)
     paint_recombination_rate: float = 5e-8
     paint_switch_penalty_per_snp: float = 1.0
     paint_robustness_epsilon: float = 1e-2
@@ -399,6 +402,7 @@ def stage2_production_stage_identity(
         "probabilities_key": str(probabilities_key),
         "target_stage": str(target_stage),
         "config": {
+            "block_feedback": block_feedback.scientific_identity(config.feedback_config),
             "release_scientific": (
                 assembly_pipeline._release_scientific_config(
                     config.release_config
@@ -532,10 +536,15 @@ def _run_or_resume_loaded_contig(
     if raw_evidence_source is not None:
         raw_evidence.save(checkpoint_store, contig, probabilities, sites, observed,
                           source, **raw_evidence_source)
+    blocks, feedback_identity = block_feedback.run_block_feedback(
+        checkpoint_store, contig, blocks, probabilities, sites, observed, ordered_ids,
+        stage1_identity=stage1_identity, assembly_config=config.release_config,
+        config=config.feedback_config, chromosome_map=chromosome_map)
     release_stage1_identity = _canonical_mapping(
         stage1_identity, "stage1_identity"
     )
     release_stage1_identity["observed_call_mask_mode"] = mask_mode
+    release_stage1_identity["block_feedback"] = feedback_identity
     expected_release_identity = (
         assembly_pipeline.stage2_release_identity_record(
             config.release_config,

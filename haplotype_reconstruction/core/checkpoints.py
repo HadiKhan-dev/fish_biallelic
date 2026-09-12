@@ -77,10 +77,16 @@ def _aligned_buffer(nbytes):
 
 
 def _compress(raw, nthreads):
+    # A packed group may end with int8 calls and have an odd byte length.
+    # Blosc2 4.5.1 emits unreadable all-zero special chunks when that length
+    # is not divisible by its default eight-byte element size. Keep the
+    # established shuffle for aligned chunks; otherwise compress as bytes.
+    typesize = 8 if memoryview(raw).nbytes % 8 == 0 else 1
     return blosc2.compress2(
         raw,
         cparams=blosc2.CParams(
-            nthreads=max(1, int(nthreads)), clevel=CLEVEL, codec=CODEC
+            nthreads=max(1, int(nthreads)), clevel=CLEVEL, codec=CODEC,
+            typesize=typesize,
         ),
     )
 
@@ -458,5 +464,4 @@ def read(path, nthreads=1):
                 return pickle.Unpickler(metadata, buffers=buffers).load()
             except (EOFError, pickle.UnpicklingError) as error:
                 raise ValueError("corrupt checkpoint: invalid pickle metadata") from error
-
 

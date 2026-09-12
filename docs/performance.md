@@ -1,6 +1,7 @@
 # Performance and resource use
 
-The supported pipeline uses missing-aware block discovery, dense L1–L4 assembly
+The supported pipeline uses missing-aware block discovery, local selection
+after each L1/L2 feedback round, dense final L1–L4 assembly
 with bounded panel search, ragged painting and pedigree inference, phase-focused
 family refinement, and conditional recombination maps. The structured assembly
 option changes the transition model; numerical reuse does not.
@@ -11,6 +12,17 @@ recorded workflow durations. They use different inputs, CPU counts and cache
 states: do not multiply their speedups or add them into a fresh end-to-end
 runtime. First-use compilation, shared-filesystem I/O and chromosome complexity
 matter. All simulations cited here are development data, not real-data truth.
+Older full-run timings below predate the default local-feedback passes and do
+not include their extra context assembly/refitting. Feedback checkpoints avoid
+repeating completed passes. Local BIC selection reuses cavity-scored source
+endpoints rather than running a second full search for the feedback backbone.
+First-round selected panels seed the second context; there are two local
+selection passes. Balanced and strict share only the initial raw L1 context,
+not the mode-dependent second context. In a six-chromosome development test
+on 112 cores, the second round took 624 seconds total, starting from already
+selected L1 panels: 405 seconds context assembly/preprocessing, 41 feedback,
+99 selection, plus loading/checkpointing/evaluation. This excludes the initial
+L1 round, final L1–L4 and all downstream stages.
 
 ## CPU allocation and checkpoint reuse
 
@@ -118,9 +130,12 @@ were unchanged. This is documented numerical variation, not bitwise identity.
 
 ## L1–L4 assembly
 
-Both assembly models use the same linker, at most 20 fitting iterations, and
-16 full proposal scores per category. Dense learned transitions are cubic in K;
-the optional sparse-plus-background model is near quadratic. Search quality
+Both assembly models use the same linker and at most 20 fitting iterations.
+The default bounded search uses 16 full proposal scores per category. With
+that search, dense learned transitions are cubic in K; the optional
+sparse-plus-background model is near quadratic. `--assembly-search broad`
+retains the optimized broader full-refit search, at additional cost; the
+near-quadratic whole-assembly bound does not apply to it. Search quality
 and model restrictions are described in [founder scaling](founder_scaling.md).
 
 Model-preserving optimizations include range-guarded dense BLAS contractions,
