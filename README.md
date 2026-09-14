@@ -13,9 +13,18 @@ frame.
 
 ## Running
 
-Python 3.11 or newer is required. Package dependencies are declared in
-`pyproject.toml`; run directly from this checkout in your existing environment.
-On CSD3, the project environment is:
+Python 3.11 or newer is required. From this checkout, install the package into
+your chosen environment to obtain its dependencies and the `haplotypes` command:
+
+```bash
+python -m pip install .
+haplotypes --help
+```
+
+Alternatively, use `python run.py` directly when the dependencies declared in
+`pyproject.toml` are already installed. Input data and simulation founder
+templates are not bundled; see [input requirements](docs/running.md#inputs).
+On CSD3, the existing project environment is:
 
 ```bash
 conda activate /rds/user/ahk39/hpc-work/conda_envs/bio-env
@@ -70,9 +79,14 @@ Use `--assembly-model structured` for the
 transition model and does not change discovery. Use `--assembly-search broad`
 to retain the optimized broader path/panel search instead of the default
 `bounded` search; this costs more full refits and is not guaranteed to improve
-accuracy. T11 does not feed back into
-painting or pedigree inference, and the estimated T12 map is not automatically
-fed upstream.
+accuracy. Final assembly also reopens the original local row choices in a
+fixed-count, chromosome-wide founder refinement; this runs after the hierarchy,
+not within the two local feedback rounds. If local search stalls, it can reopen
+larger L1 pieces, with a genotype-fit guard against penalty-only improvements.
+Use `--founder-refinement off` for a controlled comparison.
+See [the model and its limits](docs/methods.md#final-founder-path-refinement).
+T11 does not feed back into painting or pedigree inference, and the estimated
+T12 map is not automatically fed upstream.
 Shared-family orientation-error evidence is enabled for T12 by default;
 `--no-shared-family-evidence` disables it. T11 releases final phase after five
 consecutive unchanged phase checks (starting after 20 family iterations), or

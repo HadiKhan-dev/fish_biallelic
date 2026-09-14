@@ -239,9 +239,9 @@ def run():
             f"received {n_processes}"
         )
     print(f"CPU budget: {n_processes} of {available_cpus} available CPUs")
-    # Recycle workers after each batch to prevent memory accumulation
-    # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
-    WORKER_MAXTASKS = 1
+    # Reuse native code across four batches; trim between batches and retain
+    # periodic process recycling to bound long-lived allocator fragmentation.
+    WORKER_MAXTASKS = 4
 
     # -------------------------------------------------------------------------
     # REPRODUCIBILITY: Set BHD_SIMULATION_SEED for the simulation.
@@ -332,24 +332,18 @@ def run():
         'truth_painting': '00_simulated_reads',
     }
 
-    def _ensure_key(r_name, key):
-        """Load a key from its checkpoint into multi_contig_results if not present."""
+    def _ensure_key(r_name, key, *additional_keys):
+        """Load requested fields together, reading each source checkpoint once."""
         mcr = multi_contig_results.setdefault(r_name, {})
-        if key not in mcr:
-            sources = _KEY_SOURCE[key]
-            if isinstance(sources, str):
-                sources = [sources]
-            for src in sources:
-                if contig_done(src, r_name):
-                    ckpt = load_contig(src, r_name)
-                    if key in ckpt:
-                        mcr[key] = ckpt[key]
-                        del ckpt
-                        return
-                    del ckpt
-            raise FileNotFoundError(
-                f"Cannot find '{key}' for {r_name} in any of {sources}"
-            )
+        missing = [name for name in (key, *additional_keys) if name not in mcr]
+        for src in dict.fromkeys(_KEY_SOURCE[name] for name in missing):
+            if not contig_done(src, r_name):
+                raise FileNotFoundError(f"Cannot find {src} for {r_name}")
+            ckpt = load_contig(src, r_name)
+            for name in missing:
+                if _KEY_SOURCE[name] == src:
+                    mcr[name] = ckpt[name]
+            del ckpt
 
     def _prune_key(key):
         """Remove a key from all contigs to free RAM."""
@@ -940,8 +934,7 @@ def run():
                     continue
                 print(f"\n  Processing {r_name}...")
 
-                _ensure_key(r_name, 'simd_genomic_data')
-                _ensure_key(r_name, 'simulated_reads')
+                _ensure_key(r_name, 'simd_genomic_data', 'simulated_reads')
                 _ensure_key(r_name, 'naive_long_haps')
                 simd_genomic_data = multi_contig_results[r_name]['simd_genomic_data']
                 simulated_reads = multi_contig_results[r_name]['simulated_reads']

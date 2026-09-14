@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 import numpy as np
+from numba import njit, types, prange
+from numba.typed import List
 import haplotype_reconstruction.assembly.joint_completion as assembly_joint_completion
 
 @dataclass(frozen=True)
@@ -99,6 +101,33 @@ def _normalised_evidence(genotype_likelihoods: np.ndarray) -> np.ndarray:
     return result
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _focal_mask_rows(evidence, observed, output, offsets, tolerance):
+    """Independent sample rows; divide before subtracting as in NumPy."""
+    valid = np.ones(offsets[-1], np.bool_)
+    for task in prange(offsets[-1]):
+        block = np.searchsorted(offsets, task, side="right") - 1
+        sample = task - offsets[block]
+        values = evidence[block]
+        mask = observed[block]
+        result = output[block]
+        for site in range(values.shape[1]):
+            a, b, c = values[sample, site]
+            if (not np.isfinite(a) or not np.isfinite(b) or not np.isfinite(c)
+                    or a < 0.0 or b < 0.0 or c < 0.0):
+                valid[task] = False
+                result[sample, site] = False
+                continue
+            total = (a + b) + c
+            if total > 0.0:
+                a, b, c = a / total, b / total, c / total
+                result[sample, site] = (
+                    mask[sample, site] and max(a, b, c) - min(a, b, c) > tolerance)
+            else:
+                result[sample, site] = False
+    return valid
+
+
 def focal_informative_masks(
     genotype_likelihoods: Sequence[np.ndarray],
     observed: Sequence[np.ndarray],
@@ -113,18 +142,34 @@ def focal_informative_masks(
     observed_masks = tuple(observed)
     if not likelihoods or len(likelihoods) != len(observed_masks):
         raise ValueError("genotype likelihoods and observed masks must align")
-    output = []
+    # Keep one representation for writable/read-only and contiguous/strided
+    # callers. The temporary views do not change the caller's write flags.
+    values = List.empty_list(types.Array(types.float64, 3, "A", readonly=True))
+    masks = List.empty_list(types.Array(types.boolean, 2, "A", readonly=True))
+    output = List.empty_list(types.Array(types.boolean, 2, "C"))
+    offsets = [0]
     for evidence, observed_mask in zip(likelihoods, observed_masks):
-        normalized = _normalised_evidence(evidence)
+        evidence = np.asarray(evidence, dtype=np.float64)
         observed_mask = np.asarray(observed_mask, dtype=np.bool_)
-        if observed_mask.shape != normalized.shape[:2]:
+        if evidence.ndim != 3 or evidence.shape[2] != 3:
+            raise ValueError("genotype_likelihoods must have shape (samples, sites, 3)")
+        if observed_mask.shape != evidence.shape[:2]:
             raise ValueError("observed masks must have shape (samples, sites)")
-        informative = np.ascontiguousarray(
-            observed_mask & (np.ptp(normalized, axis=2) > uniform_tolerance)
-        )
-        informative.setflags(write=False)
-        output.append(informative)
-    return tuple(output)
+        frozen_evidence, frozen_mask = evidence.view(), observed_mask.view()
+        frozen_evidence.setflags(write=False)
+        frozen_mask.setflags(write=False)
+        values.append(frozen_evidence)
+        masks.append(frozen_mask)
+        output.append(np.empty(evidence.shape[:2], dtype=np.bool_))
+        offsets.append(offsets[-1] + evidence.shape[0])
+    valid = _focal_mask_rows(values, masks, output,
+                             np.asarray(offsets, dtype=np.int64), uniform_tolerance)
+    if not np.all(valid):
+        raise ValueError("genotype_likelihoods must be finite and non-negative")
+    result = tuple(output)
+    for value in result:
+        value.setflags(write=False)
+    return result
 
 
 def _freeze_profile(profile: assembly_joint_completion.CarrierProfiles, block: int) -> assembly_joint_completion.CarrierProfiles:

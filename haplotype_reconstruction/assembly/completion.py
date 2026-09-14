@@ -10,6 +10,8 @@ import json
 
 from typing import Any, Callable, Mapping, Sequence
 import numpy as np
+from numba import njit, prange, types
+from numba.typed import List
 import haplotype_reconstruction.assembly.boundaries as assembly_boundaries
 import haplotype_reconstruction.assembly.joint_completion as assembly_joint_completion
 import haplotype_reconstruction.assembly.observations as assembly_observations
@@ -64,7 +66,7 @@ def _whole_bin_cavity_rule() -> assembly_boundaries.CavityFillRule:
 
 @dataclass(frozen=True)
 class CompletionConfig:
-    """Frozen scientific settings for the initial Stage-2 replacement."""
+    """Scientific settings for missing-aware founder completion before assembly."""
 
     joint_block_config: assembly_joint_completion.JointBlockConfig = field(
         default_factory=_joint_block_release_config
@@ -129,7 +131,7 @@ def stage2_preprocess_identity(
     n_samples: int | None = None,
 ) -> FrozenPreprocessIdentity:
     if not isinstance(config, CompletionConfig):
-        raise TypeError("config must be a Stage2PreprocessConfig")
+        raise TypeError("config must be a CompletionConfig")
     if fold_assignments is None:
         if n_samples is not None and (
                 isinstance(n_samples, bool)
@@ -272,9 +274,7 @@ class Stage2PreprocessResult:
 
 
 def _readonly(array, dtype=None):
-    value = np.ascontiguousarray(
-        np.asarray(array) if dtype is None else np.asarray(array, dtype=dtype)
-    ).copy()
+    value = np.array(array, dtype=dtype, order="C", copy=True)
     value.setflags(write=False)
     return value
 
@@ -320,10 +320,28 @@ def _hard_panel(panel: assembly_observations.FounderPanel) -> assembly_joint_com
     return result
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _copy_validated_evidence(source, destination):
+    """Own the input snapshot and check finite/nonnegative GLs in one scan."""
+    samples = source[0].shape[0]
+    valid = np.ones(len(source) * samples, np.bool_)
+    for task in prange(len(source) * samples):
+        block, sample = task // samples, task % samples
+        values, copied = source[block], destination[block]
+        for site in range(values.shape[1]):
+            for genotype in range(3):
+                value = values[sample, site, genotype]
+                copied[sample, site, genotype] = value
+                if not np.isfinite(value) or value < 0.0:
+                    valid[task] = False
+    return valid
+
+
 def _validate_and_clone_inputs(
     raw_blocks: core_haplotypes.BlockResults,
     genotype_evidence: Sequence[np.ndarray],
     observed_masks: Sequence[np.ndarray],
+    num_threads=1,
 ):
     if not isinstance(raw_blocks, core_haplotypes.BlockResults):
         raise TypeError("raw_blocks must be a BlockResults")
@@ -342,6 +360,7 @@ def _validate_and_clone_inputs(
     cloned = copy.deepcopy(raw_blocks)
     blocks = tuple(cloned)
     evidence = []
+    source_evidence = List.empty_list(types.Array(types.float64, 3, "A", readonly=True))
     observed = []
     n_samples = None
     previous_end = None
@@ -375,7 +394,10 @@ def _validate_and_clone_inputs(
                 f"block {index} keep_flags must match positions"
             )
 
-        values = np.asarray(block_evidence, dtype=np.float64)
+        source_values = np.asarray(block_evidence)
+        owns_conversion = source_values.dtype != np.float64
+        values = (np.asarray(source_values, dtype=np.float64, order="C")
+                  if owns_conversion else source_values)
         mask = np.asarray(block_observed, dtype=np.bool_).copy()
         if values.ndim != 3 or values.shape[1:] != (len(positions), 3):
             raise ValueError(
@@ -386,8 +408,6 @@ def _validate_and_clone_inputs(
                 f"block {index} observed mask must have shape (samples, sites)"
             )
         mask &= kept_sites[None, :]
-        if np.any(~np.isfinite(values)) or np.any(values < 0.0):
-            raise ValueError("genotype evidence must be finite and non-negative")
         if n_samples is None:
             n_samples = values.shape[0]
         elif values.shape[0] != n_samples:
@@ -398,11 +418,24 @@ def _validate_and_clone_inputs(
         snapshot = _readonly(inference_discrete, np.int8)
         block.discrete_haps = np.ascontiguousarray(discrete, dtype=np.int8).copy()
         block.missing_aware_inference_discrete_haps = snapshot
-        evidence.append(_readonly(values, np.float64))
-        observed.append(_readonly(mask, np.bool_))
+        frozen_values = values.view()
+        frozen_values.setflags(write=False)
+        source_evidence.append(frozen_values)
+        # A dtype conversion already owns its snapshot. Do not retain a
+        # second chromosome-sized float64 copy for float32 callers.
+        evidence.append(values if owns_conversion
+                        else np.empty(values.shape, dtype=np.float64))
+        mask.setflags(write=False)
+        observed.append(mask)
         previous_end = positions[-1]
 
     assert n_samples is not None
+    with core_parallel.numba_thread_scope(num_threads):
+        valid = _copy_validated_evidence(source_evidence, List(evidence))
+    if not np.all(valid):
+        raise ValueError("genotype evidence must be finite and non-negative")
+    for value in evidence:
+        value.setflags(write=False)
     return cloned, tuple(evidence), tuple(observed), int(n_samples)
 
 
@@ -774,6 +807,14 @@ def _preprocess_cavity_worker(task):
     return block_index, value
 
 
+def _preprocess_partial_link_worker(task):
+    """Independent adjacent boundaries share the already-running block pool."""
+    index, left_panel, right_panel, left, right, config = task
+    return index, assembly_partial_links.link_partial_profiles(
+        left_panel, right_panel, left, right,
+        fold_assignments=_PREPROCESS_WORKER_FOLDS, config=config)
+
+
 def _ordered_worker_results(records, count, value_name):
     output = [None] * count
     for index, value in records:
@@ -856,6 +897,21 @@ def _run_sequential_block_science(
     return crossfit_blocks, links, cavity_fills
 
 
+@njit(cache=True, parallel=True)
+def _pack_preprocess_arrays(evidence, observed, offsets):
+    """Copy independent block/sample slabs into the worker transport layout."""
+    samples = evidence[0].shape[0]
+    blocks = len(evidence)
+    values = np.empty((samples, offsets[-1], 3), np.float64)
+    masks = np.empty((samples, offsets[-1]), np.bool_)
+    for task in prange(samples * blocks):
+        sample, block = task // blocks, task % blocks
+        start, stop = offsets[block], offsets[block + 1]
+        values[sample, start:stop] = evidence[block][sample]
+        masks[sample, start:stop] = observed[block][sample]
+    return values, masks
+
+
 def _run_parallel_block_science(
     raw_panels,
     hard_panels,
@@ -871,23 +927,20 @@ def _run_parallel_block_science(
     offsets[1:] = np.cumsum(
         [value.shape[1] for value in evidence], dtype=np.int64
     )
-    combined_evidence = np.ascontiguousarray(
-        np.concatenate(evidence, axis=1)
-    )
-    combined_observed = np.ascontiguousarray(
-        np.concatenate(observed, axis=1)
-    )
+    with core_parallel.numba_thread_scope(worker_count):
+        combined_evidence, combined_observed = _pack_preprocess_arrays(
+            List(evidence), List(observed), offsets)
     shared_input_bytes = (
         int(combined_evidence.nbytes) + int(combined_observed.nbytes)
     )
     handles = []
     try:
         evidence_handle, evidence_metadata = core_parallel.create_shared_array(
-            combined_evidence
+            combined_evidence, copy_threads=worker_count
         )
         handles.append(evidence_handle)
         observed_handle, observed_metadata = core_parallel.create_shared_array(
-            combined_observed
+            combined_observed, copy_threads=worker_count
         )
         handles.append(observed_handle)
         del combined_evidence, combined_observed
@@ -914,13 +967,20 @@ def _run_parallel_block_science(
                 len(hard_panels),
                 "crossfit",
             )
-            links = _infer_partial_links(
-                hard_panels,
-                crossfit_blocks,
-                folds,
-                config,
-                partial_link_fn,
-            )
+            if partial_link_fn is assembly_partial_links.link_partial_profiles:
+                # Boundaries depend only on the adjacent completed crossfits,
+                # never on another boundary's decision. Preserve result order.
+                links = _ordered_worker_results(pool.imap_unordered(
+                    _preprocess_partial_link_worker,
+                    ((index, hard_panels[index], hard_panels[index + 1],
+                      crossfit_blocks[index].profiles,
+                      crossfit_blocks[index + 1].profiles,
+                      config.partial_link_config)
+                     for index in range(len(hard_panels) - 1)),
+                    chunksize=4), len(hard_panels) - 1, "partial links")
+            else:
+                links = _infer_partial_links(
+                    hard_panels, crossfit_blocks, folds, config, partial_link_fn)
             cavity_fills = _ordered_worker_results(
                 pool.imap_unordered(
                     _preprocess_cavity_worker,
@@ -1092,9 +1152,9 @@ def run_stage2_preprocess(
     """
 
     if not isinstance(config, CompletionConfig):
-        raise TypeError("config must be a Stage2PreprocessConfig")
+        raise TypeError("config must be a CompletionConfig")
     prepared, evidence, observed, n_samples = _validate_and_clone_inputs(
-        raw_blocks, genotype_evidence, observed_masks
+        raw_blocks, genotype_evidence, observed_masks, num_threads=num_processes
     )
     blocks = tuple(prepared)
     block_underfit_flags, wildcard_diagnostics = _stage1_underfit_flags(
@@ -1174,7 +1234,8 @@ def run_stage2_preprocess(
             zip(cavity_fills, raw_panels, blocks)):
         _validate_cavity_fill(fill, panel, block, index)
 
-    focal_masks = assembly_occupancy.focal_informative_masks(evidence, observed)
+    with core_parallel.numba_thread_scope(requested_workers):
+        focal_masks = assembly_occupancy.focal_informative_masks(evidence, observed)
     occupancy_gate = assembly_occupancy.apply_variable_k_occupancy_gate(
         tuple(np.asarray(value.filled, dtype=np.bool_) for value in cavity_fills),
         tuple(value.profiles for value in crossfit_blocks),

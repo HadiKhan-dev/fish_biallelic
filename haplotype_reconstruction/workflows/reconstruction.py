@@ -72,7 +72,7 @@ class ReconstructionConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.release_config, assembly_pipeline.AssemblyConfig):
-            raise TypeError("release_config must be a Stage2ReleaseConfig")
+            raise TypeError("release_config must be an AssemblyConfig")
         for name in ("paint_snps_per_bin", "paint_batch_size", "paint_cores"):
             value = getattr(self, name)
             if isinstance(value, bool) or int(value) != value or value < 1:
@@ -292,7 +292,7 @@ def stage2_painting_product_identity(
     """Return the scientific painting identity, excluding scheduling knobs."""
 
     if not isinstance(config, ReconstructionConfig):
-        raise TypeError("config must be a Stage2ProductionConfig")
+        raise TypeError("config must be a ReconstructionConfig")
     return painting_checkpoints.component_painting_product_identity(
         {
             "recombination_rate": (
@@ -388,7 +388,7 @@ def stage2_production_stage_identity(
     """Return the shared multi-contig production-stage resume identity."""
 
     if not isinstance(config, ReconstructionConfig):
-        raise TypeError("config must be a Stage2ProductionConfig")
+        raise TypeError("config must be a ReconstructionConfig")
     return _canonical_mapping({
         "schema": STAGE2_PRODUCTION_SCHEMA,
         "backend": STAGE2_PRODUCTION_BACKEND,
@@ -536,10 +536,14 @@ def _run_or_resume_loaded_contig(
     if raw_evidence_source is not None:
         raw_evidence.save(checkpoint_store, contig, probabilities, sites, observed,
                           source, **raw_evidence_source)
+    with core_parallel.numba_thread_scope(config.release_config.num_processes):
+        chromosome_evidence = assembly_pipeline.prepare_chromosome_evidence(
+            blocks, probabilities, sites, observed)
     blocks, feedback_identity = block_feedback.run_block_feedback(
         checkpoint_store, contig, blocks, probabilities, sites, observed, ordered_ids,
         stage1_identity=stage1_identity, assembly_config=config.release_config,
-        config=config.feedback_config, chromosome_map=chromosome_map)
+        config=config.feedback_config, chromosome_map=chromosome_map,
+        chromosome_evidence=chromosome_evidence)
     release_stage1_identity = _canonical_mapping(
         stage1_identity, "stage1_identity"
     )
@@ -555,6 +559,7 @@ def _run_or_resume_loaded_contig(
             global_sites=sites,
             global_observed_mask=observed,
             chromosome_map=chromosome_map,
+            chromosome_evidence=chromosome_evidence,
         )
     )
     expected_painting_identity = stage2_painting_product_identity(
@@ -590,6 +595,7 @@ def _run_or_resume_loaded_contig(
             config=config.release_config,
             release_checkpoints=release_checkpoints,
             chromosome_map=chromosome_map,
+            chromosome_evidence=chromosome_evidence,
         )
     if release.get("identity") != expected_release_identity:
         raise RuntimeError(
@@ -656,7 +662,7 @@ def run_reconstruction(
     """Run the canonical Stage-2 route and atomically checkpoint every contig."""
 
     if not isinstance(config, ReconstructionConfig):
-        raise TypeError("config must be a Stage2ProductionConfig")
+        raise TypeError("config must be a ReconstructionConfig")
     if probabilities_stage is not None:
         probabilities_stage = str(probabilities_stage)
         if not probabilities_stage:

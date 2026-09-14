@@ -1,10 +1,10 @@
 # Performance and resource use
 
 The supported pipeline uses missing-aware block discovery, local selection
-after each L1/L2 feedback round, dense final L1–L4 assembly
-with bounded panel search, ragged painting and pedigree inference, phase-focused
-family refinement, and conditional recombination maps. The structured assembly
-option changes the transition model; numerical reuse does not.
+after each L1/L2 feedback round, dense final L1–L4 assembly with bounded panel
+search, final founder-path refinement, ragged painting and pedigree inference,
+phase-focused family refinement, and conditional recombination maps. The
+structured assembly option changes the transition model; numerical reuse does not.
 See [assembly choices](founder_scaling.md) and [scientific validation](validation.md).
 
 Timings below are controlled component comparisons or explicitly labeled
@@ -23,6 +23,19 @@ on 112 cores, the second round took 624 seconds total, starting from already
 selected L1 panels: 405 seconds context assembly/preprocessing, 41 feedback,
 99 selection, plus loading/checkpointing/evaluation. This excludes the initial
 L1 round, final L1–L4 and all downstream stages.
+
+## Latest complete workflow measurement
+
+On a 76-core Ice Lake node, the seed403 optimization comparison took 204.03
+minutes starting from cached Stage 1. Adding the unchanged input/discovery
+durations gives a 252.53-minute fresh-run estimate, not a measured fresh run
+or a 112-core measurement. The [stage-by-stage comparison](validation.md#seed403-end-to-end-performance-comparison)
+reports both timings and matched scientific outputs.
+
+The later guarded multiscale founder refiner has not had a complete fresh-seed
+timing. On chr4, final assembly plus refinement took 343.3 seconds, including
+229.1 seconds in refinement (about 92 seconds more than its stored predecessor).
+These component measurements must not be presented as a full-genome timing.
 
 ## CPU allocation and checkpoint reuse
 

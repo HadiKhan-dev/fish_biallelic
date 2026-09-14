@@ -78,14 +78,25 @@ class ForkserverPool(_mp_pool.Pool):
         super().__init__(*args, **kwargs)
 
 
-def create_shared_array(array, *, name_key="shm_name", dtype_as_string=True):
+@numba.njit(cache=True, parallel=True)
+def _copy_shared_bytes(source, destination):
+    chunk = 1 << 20
+    for part in numba.prange((source.size + chunk - 1) // chunk):
+        start = part * chunk
+        stop = min(source.size, start + chunk)
+        destination[start:stop] = source[start:stop]
+
+
+def create_shared_array(array, *, name_key="shm_name", dtype_as_string=True,
+                        copy_threads=1):
     """Copy an array into a new segment and return ``(handle, metadata)``.
 
     Non-contiguous inputs are copied to C-contiguous storage.  POSIX shared
     memory does not allow zero-byte segments, so empty arrays receive a
     one-byte backing segment while retaining their original shape and dtype.
     If setup or copying fails after allocation, the new segment is immediately
-    closed and unlinked.
+    closed and unlinked. ``copy_threads`` is an upper bound; parallel first-touch
+    copying is capped at 16 threads where measured memory bandwidth saturates.
     """
     if name_key not in ("shm_name", "name"):
         raise ValueError("name_key must be 'shm_name' or 'name'")
@@ -98,7 +109,17 @@ def create_shared_array(array, *, name_key="shm_name", dtype_as_string=True):
         shared_view = np.ndarray(
             contiguous.shape, dtype=contiguous.dtype, buffer=handle.buf
         )
-        np.copyto(shared_view, contiguous)
+        if copy_threads > 1 and contiguous.nbytes >= 4 << 20:
+            # Explicit controller-side budget: never start a second pool
+            # implicitly inside an already-parallel numerical worker.
+            # 512 MiB first-touch test: 16 threads beat 76 (0.058s vs 0.087s).
+            with numba_thread_scope(min(copy_threads, 16)):
+                _copy_shared_bytes(
+                    np.frombuffer(memoryview(contiguous), dtype=np.uint8),
+                    np.frombuffer(handle.buf, dtype=np.uint8,
+                                  count=contiguous.nbytes))
+        else:
+            np.copyto(shared_view, contiguous)
         metadata = {
             name_key: handle.name,
             "shape": tuple(contiguous.shape),

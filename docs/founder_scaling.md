@@ -211,9 +211,12 @@ but a whole-genome q32 pedigree has not been tested. The default remains the bro
 evaluated 16. Python experiments can use
 `PanelSearchConfig(full_scores_per_kind=32)` in `AssemblyConfig`.
 
-Full q16 T11/T12 validation has not been run. Completed full-genome final-phase
-comparisons use earlier q4 inputs, not q16; see [validation](validation.md).
-Stage1, per-level assembly, painting and pedigree checkpoints remain separate.
+The later seed403 end-to-end run exercised dense q16 assembly through T11/T12
+with balanced feedback and final founder refinement. The subsequent multiscale
+refinement update changes chr4's founders and has been checked through T09,
+but not yet rerun through T10–T12. The earlier q4 comparisons below remain
+historical controls; see [current validation coverage](validation.md).
+Stage 1, per-level assembly, painting and pedigree checkpoints remain separate.
 
 ## Interpreting the structured alternative
 

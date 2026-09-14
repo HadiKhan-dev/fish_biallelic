@@ -7,6 +7,21 @@ repository root. No environment installation is needed when the project
 dependencies are already available. An installed package exposes the same CLI
 as `haplotypes`.
 
+## CPU execution
+
+`--cores` sets the total process-by-thread budget within the allocation.
+Discovery and hierarchy workers share that budget dynamically at numerical
+phase boundaries; freed cores cannot join an already-running kernel. Evidence
+validation/snapshotting, worker-array packing, occupancy masks and hierarchy
+eligibility also use the explicit budget, before or after the worker pool.
+Large shared-memory initialization uses at most 16 copying threads because
+additional threads slowed the measured memory-bandwidth-bound operation.
+Other numerical work retains the requested budget.
+
+Checkpoint I/O, process startup, ordered panel/beam updates and inter-stage
+dependencies can still leave cores idle. This is not a claim of sustained
+full-node utilization or independent chromosome sharding within one run.
+
 ## Inputs
 
 Real workflows accept indexed VCF/BCF files and the corresponding cross-design
@@ -88,7 +103,8 @@ All three reconstruction commands use this sequence by default:
    likelihoods and observation masks.
 4. Assemble those **selected** panels through L1+L2 and refit back to blocks.
 5. Select again, using original, selected-L1 and fresh L2-feedback candidates.
-6. Run final L1–L4 and the unchanged downstream algorithms on the selected blocks.
+6. Run final L1–L4, refine its founder paths against the prepared local panels,
+   and pass the result to the unchanged downstream algorithms.
 
 Selection always runs after each round; there is no end-only ordering option.
 
@@ -144,6 +160,33 @@ T09 products. Both feedback rounds and their selection batches are checkpointed.
 Balanced and strict can share the initial raw L1 context/proposals, but have
 separate first-round selections and second-round contexts/proposals/selections.
 Switching modes does not overwrite raw discovery results.
+
+## Final founder refinement
+
+`--founder-refinement on` is the default for all three reconstruction commands.
+After final L1–L4 assembly, it reopens original prepared local-row choices while
+keeping component boundaries and founder counts fixed. The two L1/L2 context
+passes and balanced local selection are unchanged. Use `--founder-refinement off`
+for a controlled comparison without this final pass.
+Toggling this final-only option reuses the same local feedback checkpoints;
+only final assembly/painting and downstream products change identity.
+
+TOML uses `[run].founder_refinement = "on"` or `"off"`; the environment variable
+is `HAPLOTYPES_FOUNDER_REFINEMENT`. Precedence is CLI > TOML > environment > on.
+The API exposes `AssemblyConfig.founder_refinement_config`. Its default beam
+budget grows from 64 to at most1024 only when the data-based search-gain rule
+warrants it; it is not a confidence cutoff. When this local search stalls, final
+L1 pieces supply larger proposals at the initial beam width. These must improve
+the total score without worsening genotype fit. This multiscale fallback is
+part of the default refiner; no extra flag is needed. See
+[methods](methods.md#final-founder-path-refinement).
+
+The final pass saves completed beams, iterations, components and its aggregate
+result under `09_painting_release_work/`. It uses the existing phase core ceiling
+and does not overlap with the painting pool. Changed code/configuration is part
+of assembly and downstream cache identities; retain older accepted outputs and
+use a separate run root. Raw reads and original Stage1 discovery need not be
+regenerated. These are assembly checkpoints, not new globally complete stages.
 
 ## Assembly transition models and search breadth
 
@@ -218,7 +261,7 @@ Do not share a checkpoint directory between different seeds or configurations.
 | `02_feedback_<mode>_l2_assembly/` | Context assembly through L1+L2 from that mode's selected first-round panels |
 | `02_feedback_<mode>_l2/` | Second-round raw proposals, 128-block selection batches and final selected panels; `<mode>` is `balanced` or `strict` |
 | `00_genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
-| `09_painting_release_work/` | Per-chromosome preprocessing and completed L1–L4 assembly phases |
+| `09_painting_release_work/` | Preprocessing, L1–L4 levels, final founder-refinement beams/iterations/components and aggregate result |
 | `09_painting/` | Typed component-local painting products |
 | `10_pedigree_evidence/` | Prepared/scored chromosome evidence |
 | `10_pedigree/` | Genome-wide inferred pedigree and support tables |
@@ -283,3 +326,27 @@ Cold Numba compilation and pool startup can dominate tiny fixtures. Full runs
 use a chromosome-at-a-time data path to bound memory; numerical and process
 phases do not each receive an independent full-node budget. Concurrent seeds
 belong on separate allocated nodes with separate output roots.
+
+## Recording a publication run
+
+Retain the exact source commit, the command and selected TOML configuration,
+the input sequences/variant files and their sample order, the generating seed
+and map (for simulations), and the inference settings. Archive the environment
+versions and readable evaluation tables alongside the run's checkpoints.
+A seed alone is not sufficient to reproduce a run with different founder
+templates, source code or model settings. Published data access and citation
+details must identify the actual inputs; the local example paths are not
+public download locations.
+
+The checkout checks on 14 September 2026 used Python 3.12.0 on Linux with the
+following installed versions. This is a tested environment snapshot, not an
+exhaustive dependency lock or validation of every version permitted by
+`pyproject.toml`.
+
+| Dependencies | Tested versions |
+| --- | --- |
+| NumPy / Numba / SciPy | 2.4.0 / 0.64.0 / 1.16.3 |
+| pandas / hdbscan / cyvcf2 | 2.3.3 / 0.8.41 / 0.32.1 |
+| Blosc2 / TBB | 4.5.1 / 2022.3.1 |
+| Matplotlib / NetworkX / seaborn | 3.10.8 / 3.6.1 / 0.13.2 |
+| tqdm / openpyxl / setuptools | 4.67.1 / 3.1.5 / 80.9.0 |

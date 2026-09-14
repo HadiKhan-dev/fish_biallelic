@@ -1052,6 +1052,25 @@ def _common_emission_products(
     return result
 
 
+@njit(cache=True, parallel=True, fastmath=False)
+def _power_common_products(products, exponent, child_start):
+    """Reuse called-founder emission powers across the candidate panel."""
+    powered = np.full(products.shape, np.nan)
+    children, bins, states, _ = products.shape
+    for task in prange(children * bins):
+        child, block = task // bins, task % bins
+        eta = exponent[child_start + child, block]
+        if 0.0 < eta < 1.0:
+            for first in range(states):
+                for second in range(states):
+                    value = products[child, block, first, second]
+                    if np.isfinite(value) and value > 0.0:
+                        result = math.pow(value, eta)
+                        if np.isfinite(result) and result > 0.0:
+                            powered[child, block, first, second] = result
+    return powered
+
+
 @njit(cache=True, fastmath=False)
 def _normalise_forward(values):
     total = np.sum(values)
@@ -1062,12 +1081,16 @@ def _normalise_forward(values):
 
 
 @njit(cache=True, fastmath=False)
-def _apply_probability_emission(current, emission, exponent):
+def _apply_probability_emission(current, emission, exponent, powered=None):
     maximum = np.max(emission)
     if maximum <= 0.0 or not np.isfinite(maximum):
         return -np.inf
     inverse = 1.0 / maximum
     states = current.shape[0]
+    log_maximum = math.log(maximum)
+    common_scale = 0.0
+    if powered is not None and abs(exponent * log_maximum) < 300.0:
+        common_scale = math.pow(maximum, exponent)
     if exponent == 1.0:
         for first in range(states):
             for second in range(states):
@@ -1075,12 +1098,19 @@ def _apply_probability_emission(current, emission, exponent):
     else:
         for first in range(states):
             for second in range(states):
-                current[first, second] *= math.pow(
-                    emission[first, second] * inverse, exponent
-                )
+                base = emission[first, second] * inverse
+                saved = np.nan if powered is None else powered[first, second]
+                # Preserve the original underflow path and arbitrary-exponent
+                # fallback. Ordinary fractional powers share their numerator.
+                if (common_scale > 0.0 and np.isfinite(saved)
+                        and base >= 2.2250738585072014e-308):
+                    value = saved / common_scale
+                else:
+                    value = math.pow(base, exponent)
+                current[first, second] *= value
     increment = _normalise_forward(current)
     return (
-        increment + exponent * math.log(maximum)
+        increment + exponent * log_maximum
         if np.isfinite(increment)
         else -np.inf
     )
@@ -1268,6 +1298,7 @@ def _score_path(
     common_products=None,
     first_cached_child=0,
     bridge_branch=None,
+    common_powered=None,
 ):
     states = state_alt.shape[0]
     bins = exponent.shape[1]
@@ -1383,7 +1414,9 @@ def _score_path(
                 if not stable_product:
                     break
         if stable_product:
-            increment = _apply_probability_emission(current, work, eta)
+            powered = (None if common_powered is None else
+                       common_powered[child - first_cached_child, block])
+            increment = _apply_probability_emission(current, work, eta, powered)
         else:
             for first in range(states):
                 for second in range(states):
@@ -1451,6 +1484,7 @@ def _score_m1_kernel(
     available, state_alt, child_gl, child_coefficient, observed_site,
     observed_start, observed_stop, exponent, null_diagonal, null_off, mismatch,
     eligible_edge, m0, common_products, child_start, child_stop, bridge_branch=None,
+    common_powered=None,
 ):
     children = child_stop - child_start
     candidates = pi.shape[0]
@@ -1470,7 +1504,7 @@ def _score_m1_kernel(
                 bridge_column_arm, bridge_large_index, state_alt, child_gl,
                 child_coefficient, observed_site, observed_start, observed_stop,
                 exponent, null_diagonal, null_off, mismatch,
-                common_products, child_start, bridge_branch,
+                common_products, child_start, bridge_branch, common_powered,
             )
     return output
 
@@ -1481,7 +1515,7 @@ def _score_m2_kernel(
     bridge_off, bridge_row_arm, bridge_column_arm, bridge_large_index,
     state_alt, child_gl, child_coefficient, observed_site,
     observed_start, observed_stop, exponent, null_diagonal, null_off, mismatch,
-    common_products, first_cached_child, bridge_branch=None,
+    common_products, first_cached_child, bridge_branch=None, common_powered=None,
 ):
     output = np.empty(len(trios), dtype=np.float64)
     for row in prange(len(trios)):
@@ -1494,7 +1528,7 @@ def _score_m2_kernel(
             bridge_column_arm, bridge_large_index, state_alt, child_gl,
             child_coefficient, observed_site, observed_start, observed_stop,
             exponent, null_diagonal, null_off, mismatch,
-            common_products, first_cached_child, bridge_branch,
+            common_products, first_cached_child, bridge_branch, common_powered,
         )
     return output
 
@@ -1647,7 +1681,7 @@ def score_projected_ragged_quadratic(
     # Keep temporary emission storage bounded even for large founder panels.
     # If a single child's cache cannot fit, use the same quadratic scorer
     # without caching, rather than exceeding the workspace allowance.
-    per_child_bytes = projected.n_bins * projected.n_states**2 * 8
+    per_child_bytes = projected.n_bins * projected.n_states**2 * 16
     cache_children = _COMMON_EMISSION_CACHE_BYTES // max(1, per_child_bytes)
     child_batch_size = min(children, cache_children) if cache_children else children
     common_args = (
@@ -1691,6 +1725,8 @@ def score_projected_ragged_quadratic(
                 _common_emission_products(*common_args, child_start, child_stop)
                 if cache_children else None
             )
+            common_powered = (_power_common_products(common_products, exponent, child_start)
+                              if common_products is not None else None)
             one[child_start:child_stop] = _score_m1_kernel(
                 *args,
                 projected.available,
@@ -1706,9 +1742,9 @@ def score_projected_ragged_quadratic(
                 float(mismatch_probability),
                 eligible_edge,
                 zero, common_products, child_start, child_stop,
-                projected.bridge_branch,
+                projected.bridge_branch, common_powered,
             )
-            del common_products
+            del common_products, common_powered
         m1_seconds = time.perf_counter() - m1_started
     else:
         zero = np.asarray(reuse_scores.zero_observed, dtype=np.float64)
@@ -1773,6 +1809,8 @@ def score_projected_ragged_quadratic(
                 _common_emission_products(*common_args, child_start, child_stop)
                 if cache_children else None
             )
+            common_powered = (_power_common_products(common_products, exponent, child_start)
+                              if common_products is not None else None)
             two[batch_rows] = _score_m2_kernel(
                 np.ascontiguousarray(trio_array[batch_rows]),
                 *args,
@@ -1786,10 +1824,10 @@ def score_projected_ragged_quadratic(
                 null_diagonal,
                 null_off,
                 float(mismatch_probability),
-                common_products, child_start, projected.bridge_branch,
+                common_products, child_start, projected.bridge_branch, common_powered,
             )
 
-            del common_products
+            del common_products, common_powered
 
     m2_seconds = time.perf_counter() - m2_started
     informative = child_seen & (

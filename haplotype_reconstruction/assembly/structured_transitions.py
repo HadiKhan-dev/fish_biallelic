@@ -1,4 +1,4 @@
-"""Sparse-plus-background homologue transitions for the scaling prototype.
+"""Sparse-plus-background homologue transitions for structured assembly.
 
 T[i,j] = S[i,j] + u[i] q[j], with nonnegative sparse S, q.sum()=1,
 and S.sum(axis=1)+u=1. The diploid distribution is NOT factorized.

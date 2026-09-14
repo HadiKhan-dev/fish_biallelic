@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import numba
+from numba.typed import List
 import math
 import gc
 import time
@@ -64,7 +65,7 @@ def _init_worker_meta(meta_dict, total_cores, active_counter, extra_counter,
         **({} if startup_counters is None else startup_counters))
 
 
-def _create_shared_array(array, label):
+def _create_shared_array(array, label, copy_threads=1):
     """
     Copy a numpy array into a POSIX shared memory segment.
 
@@ -72,7 +73,7 @@ def _create_shared_array(array, label):
         (SharedMemory handle, metadata_dict)
     """
     return core_parallel.create_shared_array(
-        array, name_key='name', dtype_as_string=False
+        array, name_key='name', dtype_as_string=False, copy_threads=copy_threads
     )
 
 
@@ -97,10 +98,8 @@ def _missing_aware_informative_sample_mask(batch_probs):
     return np.any(positive_mass & nonuniform, axis=1)
 
 
-def _missing_aware_block_informative_sample_mask(
-        block, global_probs, global_sites, max_sites=None):
-    """Samples informative on sites complete in the frozen inference panel."""
-
+def _missing_aware_block_indices(block, global_sites, max_sites=None):
+    """Marker indices used by the unchanged frozen-panel eligibility rule."""
 
     panel = assembly_observations.founder_inference_panel_from_block_result(block)
     keep_flags = getattr(block, 'keep_flags', None)
@@ -117,13 +116,35 @@ def _missing_aware_block_informative_sample_mask(
         proxy_mask[sampled] = True
         globally_complete &= proxy_mask
     if not np.any(globally_complete):
-        return np.zeros(global_probs.shape[0], dtype=np.bool_)
+        return np.empty(0, dtype=np.int64)
     indices = np.searchsorted(global_sites, block.positions)
     if (np.any(indices >= len(global_sites))
             or not np.array_equal(global_sites[indices], block.positions)):
         raise ValueError("block positions are absent from global sites")
-    complete_probs = np.asarray(global_probs)[:, indices[globally_complete], :]
-    return _missing_aware_informative_sample_mask(complete_probs)
+    return np.ascontiguousarray(indices[globally_complete], dtype=np.int64)
+
+
+@numba.njit(cache=True, parallel=True, fastmath=False)
+def _informative_samples_at_indices(probabilities, index_sets):
+    """Scan independent block/sample rows without gathering a GL tensor."""
+    samples = probabilities.shape[0]
+    result = np.zeros((len(index_sets), samples), np.bool_)
+    for task in numba.prange(len(index_sets) * samples):
+        block, sample = task // samples, task % samples
+        indices = index_sets[block]
+        for site in indices:
+            a, b, c = probabilities[sample, site]
+            if (a + b) + c > 0.0 and (a != b or b != c):
+                result[block, sample] = True
+                break
+    return result
+
+
+def _missing_aware_block_informative_sample_mask(
+        block, global_probs, global_sites, max_sites=None):
+    indices = List.empty_list(numba.types.int64[::1])
+    indices.append(_missing_aware_block_indices(block, global_sites, max_sites))
+    return _informative_samples_at_indices(np.asarray(global_probs), indices)[0]
 
 
 def _missing_aware_batch_ranges(
@@ -140,12 +161,12 @@ def _missing_aware_batch_ranges(
             "min_boundary_informative_samples must be a positive integer"
         )
     blocks = list(input_blocks)
-    masks = [
-        _missing_aware_block_informative_sample_mask(
-            block, global_probs, global_sites, max_sites=max_sites
-        )
-        for block in blocks
-    ]
+    index_sets = List.empty_list(numba.types.int64[::1])
+    for block in blocks:
+        index_sets.append(_missing_aware_block_indices(
+            block, global_sites, max_sites=max_sites))
+    masks = list(_informative_samples_at_indices(
+        np.asarray(global_probs), index_sets))
     boundary_joint_counts = []
     for boundary in range(max(0, len(blocks) - 1)):
         left = blocks[boundary]
@@ -553,6 +574,10 @@ def _process_single_batch(args):
      cc_scale, inner_num_processes, verbose,
      chromosome_map, structured_transition_config, panel_search_config, precomputed_informative_sample_mask) = args
 
+    # A reused worker has finished serializing its previous result. Release
+    # that batch's dead Python cycles and allocator arenas before attaching.
+    gc.collect()
+    core_parallel.malloc_trim()
     # Attach to shared memory (zero-copy).
     shm_probs, global_probs = _attach_shared_array(_SHARED_META['probs'])
     shm_sites, global_sites = _attach_shared_array(_SHARED_META['sites'])
@@ -860,7 +885,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           verbose=False,
                           min_boundary_informative_samples=1,
                           chromosome_map=None, structured_transition_config=None,
-                          panel_search_config=None):
+                          panel_search_config=None, scoring_probs=None):
     """Performs one level of Hierarchical Assembly.
 
     Memory strategy:
@@ -903,16 +928,17 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     forkserver workers will re-execute it.
     """
     total_blocks = len(input_blocks)
-    batch_ranges, block_informative_masks, boundary_joint_counts = (
-        _missing_aware_batch_ranges(
-            input_blocks,
-            global_probs,
-            global_sites,
-            batch_size,
-            min_boundary_informative_samples,
-            max_sites=max_sites_for_linking,
+    with core_parallel.numba_thread_scope(num_processes):
+        batch_ranges, block_informative_masks, boundary_joint_counts = (
+            _missing_aware_batch_ranges(
+                input_blocks,
+                global_probs,
+                global_sites,
+                batch_size,
+                min_boundary_informative_samples,
+                max_sites=max_sites_for_linking,
+            )
         )
-    )
     num_batches = len(batch_ranges)
 
     # num_processes is the user's ceiling — never exceed it for either
@@ -961,7 +987,13 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     # where float32 precision is sufficient.  Halves shared memory,
     # per-worker batch_probs slices, and all downstream emission/
     # chimera tensors (they inherit dtype).
-    if global_probs.dtype == np.float64:
+    if scoring_probs is not None:
+        # Eligibility above deliberately uses the original precision; only
+        # numerical assembly scoring has always used the float32 tensor.
+        if scoring_probs.shape != global_probs.shape or scoring_probs.dtype != np.float32:
+            raise ValueError("shared hierarchy scoring evidence must be aligned float32")
+        global_probs = scoring_probs
+    elif global_probs.dtype == np.float64:
         global_probs = global_probs.astype(np.float32)
         print(f"  Downcast global_probs to float32 ({global_probs.nbytes / (1024**3):.1f} GB)")
 
@@ -973,8 +1005,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
 
     # Create POSIX shared memory for the global arrays.
     t0 = time.time()
-    shm_probs, probs_meta = _create_shared_array(global_probs, 'global_probs')
-    shm_sites, sites_meta = _create_shared_array(global_sites, 'global_sites')
+    shm_probs, probs_meta = _create_shared_array(global_probs, 'global_probs', total_cores)
+    shm_sites, sites_meta = _create_shared_array(global_sites, 'global_sites', total_cores)
 
     shared_meta = {
         'probs': probs_meta,

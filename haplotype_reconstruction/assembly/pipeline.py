@@ -14,12 +14,13 @@ import numpy as np
 import haplotype_reconstruction.assembly.completion as assembly_completion
 from .structured_transitions import StructuredTransitionConfig, configured_transition
 from .panel_search import PanelSearchConfig, configured_panel_search
+from . import founder_refinement, evidence as assembly_evidence
 
 STAGE2_RELEASE_SCHEMA = "stage2-release-v1"
 
 
 STAGE2_RELEASE_BACKEND = (
-    "preprocess-original-layout-coherent-unfloored-hmm-hierarchy-l1-l4-v6"
+    "preprocess-original-layout-coherent-hierarchy-local-path-refinement-v7"
 )
 
 
@@ -34,6 +35,8 @@ STAGE2_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
 STAGE2_RELEASE_CODE_IDENTITY_FILES += (
     'assembly/structured_transitions.py', 'assembly/panel_search.py',
     'assembly/panel_scoring.py', 'assembly/panel_candidates.py',
+    'assembly/founder_refinement.py', 'assembly/founder_path_search.py',
+    'assembly/founder_scoring.py', 'assembly/evidence.py',
 )
 
 _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
@@ -43,6 +46,12 @@ _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
     "preprocess_diagnostics_mode",
     "verbose",
 ))
+
+
+def _configured_founder_refinement():
+    from ..core.environment import assembly_founder_refinement
+    return founder_refinement.FounderRefinementConfig(
+        enabled=assembly_founder_refinement())
 
 
 @dataclass(frozen=True)
@@ -74,15 +83,19 @@ class AssemblyConfig:
     verbose: bool = False
     structured_transition_config: StructuredTransitionConfig | None = field(default_factory=configured_transition)
     panel_search_config: PanelSearchConfig | None = field(default_factory=configured_panel_search)
+    founder_refinement_config: founder_refinement.FounderRefinementConfig = field(
+        default_factory=_configured_founder_refinement)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.founder_refinement_config, founder_refinement.FounderRefinementConfig):
+            raise TypeError("founder_refinement_config must be FounderRefinementConfig")
         if self.panel_search_config is not None and not isinstance(self.panel_search_config, PanelSearchConfig):
             raise TypeError("panel_search_config must be PanelSearchConfig or None")
         if (self.structured_transition_config is not None
                 and not isinstance(self.structured_transition_config, StructuredTransitionConfig)):
             raise TypeError("structured_transition_config must be StructuredTransitionConfig or None")
         if not isinstance(self.preprocess_config, assembly_completion.CompletionConfig):
-            raise TypeError("preprocess_config must be a Stage2PreprocessConfig")
+            raise TypeError("preprocess_config must be a CompletionConfig")
         for name in (
             "max_level", "l1_batch_size", "higher_level_batch_size",
             "min_boundary_informative_samples", "beam_width", "max_founders",
@@ -277,7 +290,8 @@ def stage2_release_code_identity(digest_overrides=None) -> dict[str, str]:
 
 
 def _validate_global_inputs(
-    input_blocks, global_probs, global_sites, global_observed_mask
+    input_blocks, global_probs, global_sites, global_observed_mask,
+    chromosome_evidence=None,
 ):
     if not isinstance(input_blocks, core_haplotypes.BlockResults) or not input_blocks:
         raise TypeError("input_blocks must be a nonempty BlockResults")
@@ -292,7 +306,9 @@ def _validate_global_inputs(
         raise ValueError("global_observed_mask must have shape (samples, sites)")
     if sites.size > 1 and np.any(sites[1:] <= sites[:-1]):
         raise ValueError("global_sites must be strictly increasing")
-    if np.any(~np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+    if chromosome_evidence is not None:
+        chromosome_evidence.check_arrays(probabilities, sites, observed)
+    elif not assembly_evidence.finite_nonnegative(probabilities):
         raise ValueError("global_probs must be finite and non-negative")
     previous = None
     for block in input_blocks:
@@ -310,31 +326,27 @@ def _validate_global_inputs(
     return probabilities, sites, observed
 
 
-def _preprocess_inputs(input_blocks, probabilities, sites, observed):
-    effective_observed = observed.copy()
-    observed_by_block = []
-    indices_by_block = []
-    for block in input_blocks:
-        indices = np.searchsorted(sites, block.positions)
-        indices_by_block.append(indices)
-        flags = getattr(block, "keep_flags", None)
-        kept = (
-            np.ones(len(indices), dtype=np.bool_)
-            if flags is None else np.asarray(flags) > 0
-        )
-        if kept.shape != (len(indices),):
-            raise ValueError("keep_flags must match block positions")
-        block_observed = np.ascontiguousarray(observed[:, indices]).copy()
-        block_observed[:, ~kept] = False
-        effective_observed[:, indices] = block_observed
-        observed_by_block.append(block_observed)
-    neutral = np.ascontiguousarray(probabilities, dtype=np.float64).copy()
-    neutral[~effective_observed] = 1.0 / 3.0
-    evidence_by_block = tuple(
-        np.ascontiguousarray(neutral[:, indices, :])
-        for indices in indices_by_block
-    )
-    return neutral, evidence_by_block, tuple(observed_by_block)
+def prepare_chromosome_evidence(input_blocks, probabilities, sites, observed):
+    """Validate/hash raw evidence once during one read-only chromosome run."""
+    probabilities, sites, observed = _validate_global_inputs(
+        input_blocks, probabilities, sites, observed)
+    return assembly_evidence.ChromosomeEvidence(
+        probabilities, sites, observed, {
+            "global_probs": _array_digest(probabilities),
+            "global_sites": _array_digest(sites),
+            "global_observed_mask": _array_digest(observed),
+        })
+
+
+def _preprocess_inputs(input_blocks, probabilities, sites, observed,
+                       chromosome_evidence=None):
+    if chromosome_evidence is not None:
+        chromosome_evidence.check_arrays(probabilities, sites, observed)
+        return chromosome_evidence.prepare(input_blocks)
+    indices, kept = assembly_evidence.block_indices_and_keep(input_blocks, sites)
+    neutral, effective_observed = assembly_evidence.neutral_evidence(
+        probabilities, observed, kept)
+    return assembly_evidence.block_views(neutral, effective_observed, indices)
 
 
 def stage2_release_identity_record(
@@ -350,13 +362,15 @@ def stage2_release_identity_record(
     preprocess_identity=None,
     code_digest_overrides=None,
     chromosome_map=None,
+    chromosome_evidence=None,
 ) -> dict[str, Any]:
     """Return the exact stable scientific and input identity for one release."""
 
     if not isinstance(config, AssemblyConfig):
-        raise TypeError("config must be a Stage2ReleaseConfig")
+        raise TypeError("config must be an AssemblyConfig")
     probabilities, sites, observed = _validate_global_inputs(
-        input_blocks, global_probs, global_sites, global_observed_mask
+        input_blocks, global_probs, global_sites, global_observed_mask,
+        chromosome_evidence,
     )
     ordered_ids = _canonical_sample_ids(sample_ids, probabilities.shape[0])
     if preprocess_identity is None:
@@ -381,11 +395,12 @@ def stage2_release_identity_record(
             "scientific_hierarchy": _release_scientific_config(config),
         },
         "input_block_sha256": _input_block_digest(input_blocks),
-        "input_array_sha256": {
-            "global_probs": _array_digest(probabilities),
-            "global_sites": _array_digest(sites),
-            "global_observed_mask": _array_digest(observed),
-        },
+        "input_array_sha256": (
+            chromosome_evidence.digests if chromosome_evidence is not None else {
+                "global_probs": _array_digest(probabilities),
+                "global_sites": _array_digest(sites),
+                "global_observed_mask": _array_digest(observed),
+            }),
         "code_identity_sha256": stage2_release_code_identity(
             code_digest_overrides
         ),
@@ -398,6 +413,7 @@ def stage2_release_identity_record(
             "genotype_emission": "uniform_mixture_without_extra_log_floor",
             "max_linking_iterations": assembly_linking.MAX_LINKING_ITERATIONS,
             "observed_false_genotype_evidence": "uniform_state_neutral",
+            "final_founder_refinement": "fixed_count_full_site_potts_original_local_rows",
         },
     }
     if chromosome_map is not None:
@@ -667,13 +683,15 @@ def assemble_chromosome(
     code_digest_overrides=None,
     release_checkpoints: assembly_checkpoints.AssemblyCheckpointIO | None = None,
     chromosome_map=None,
+    chromosome_evidence=None,
 ) -> dict[str, Any]:
-    """Run preprocessing then rectangular-K hierarchy on prepared blocks."""
+    """Preprocess, assemble the hierarchy, then refine final local row choices."""
 
     if not isinstance(config, AssemblyConfig):
-        raise TypeError("config must be a Stage2ReleaseConfig")
+        raise TypeError("config must be an AssemblyConfig")
     probabilities, sites, observed = _validate_global_inputs(
-        input_blocks, global_probs, global_sites, global_observed_mask
+        input_blocks, global_probs, global_sites, global_observed_mask,
+        chromosome_evidence,
     )
     ordered_ids = _canonical_sample_ids(sample_ids, probabilities.shape[0])
     source_layout = _layout(input_blocks)
@@ -685,7 +703,7 @@ def assemble_chromosome(
     ])
     persistent_breaks = _persistent_breaks(input_blocks)
     neutral_probs, evidence_by_block, observed_by_block = _preprocess_inputs(
-        input_blocks, probabilities, sites, observed
+        input_blocks, probabilities, sites, observed, chromosome_evidence
     )
     expected_preprocess_identity = (
         assembly_completion.stage2_preprocess_identity(
@@ -706,6 +724,7 @@ def assemble_chromosome(
         preprocess_identity=expected_preprocess_identity,
         code_digest_overrides=code_digest_overrides,
         chromosome_map=chromosome_map,
+        chromosome_evidence=chromosome_evidence,
     )
     resumed_phases = []
     preprocess_checkpoint_upgraded = False
@@ -773,6 +792,7 @@ def assemble_chromosome(
             preprocess_identity=observed_preprocess_identity,
             code_digest_overrides=code_digest_overrides,
             chromosome_map=chromosome_map,
+            chromosome_evidence=chromosome_evidence,
         )
     working = _validate_preprocess_result(input_blocks, preprocess_result)
     core_runtime.strip_block_evidence(working)
@@ -785,6 +805,10 @@ def assemble_chromosome(
     del evidence_by_block, observed_by_block
     _canonicalize_persistent_breaks(working, persistent_breaks)
 
+    # The hierarchy has always consumed float32 evidence. Cast once for all
+    # levels instead of repeating a chromosome-sized cast at each level.
+    hierarchy_probs = None
+    refinement_context = None
     level_diagnostics = []
     stop_reason = "maximum_level_reached"
     for level in range(1, config.max_level + 1):
@@ -801,10 +825,13 @@ def assemble_chromosome(
         selected_path_input = _selected_path_snapshot(working)
         if checkpoint_payload is None:
             started = time.perf_counter()
+            if hierarchy_probs is None:
+                hierarchy_probs = assembly_evidence.float32_evidence(neutral_probs)
             output = assembly_hierarchy.run_hierarchical_step(
                 working,
                 neutral_probs,
                 sites,
+                scoring_probs=hierarchy_probs,
                 batch_size=batch_size,
                 recomb_rate=config.recombination_rate,
                 chromosome_map=chromosome_map,
@@ -897,10 +924,40 @@ def assemble_chromosome(
                     "diagnostic": diagnostic,
                 })
         working = next_blocks
+        if level == 1 and config.max_level == 4:
+            refinement_context = next_blocks
         level_diagnostics.append(diagnostic)
         if stopped is not None:
             stop_reason = stopped
             break
+
+    refinement_diagnostics = {"enabled": False, "components": []}
+    # L1/L2 context passes must not feed chromosome-wide refinement back into
+    # local discovery. Only a final release (including early-irreducible ones)
+    # reopens the prepared local rows discarded by the hierarchy.
+    if config.max_level == 4 and config.founder_refinement_config.enabled:
+        phase = "founder_refinement"
+        refined = (None if release_checkpoints is None
+                   else release_checkpoints.load(phase))
+        if refined is None:
+            output, refinement_diagnostics = founder_refinement.refine_components(
+                preprocess_result.prepared_blocks, working, neutral_probs, sites,
+                config=config.founder_refinement_config,
+                num_threads=config.num_processes, checkpoints=release_checkpoints,
+                l1_blocks=refinement_context)
+        else:
+            output, refinement_diagnostics = refined["blocks"], refined["diagnostics"]
+            resumed_phases.append(phase)
+        _assert_position_coverage(output, expected_positions)
+        _validate_persistent_breaks(output, persistent_breaks)
+        _validate_hierarchy_selected_paths(
+            _selected_path_snapshot(preprocess_result.prepared_blocks), output)
+        _freeze_inference_snapshots(output)
+        core_runtime.strip_block_evidence(output)
+        working = output
+        if refined is None and release_checkpoints is not None:
+            release_checkpoints.save(phase, {
+                "blocks": working, "diagnostics": refinement_diagnostics})
 
     for component_id, block in enumerate(working):
         block.missing_aware_phase_component_id = component_id
@@ -920,6 +977,7 @@ def assemble_chromosome(
         "components": working,
         "component_manifest": component_manifest,
         "level_diagnostics": tuple(level_diagnostics),
+        "founder_refinement_diagnostics": refinement_diagnostics,
         "stop_reason": stop_reason,
         "release_metadata": {
                 "hierarchy_input": "preprocess_result.prepared_blocks",

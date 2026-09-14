@@ -98,9 +98,9 @@ def run():
         print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
     n_processes = int(os.environ.get("BHD_NUM_PROCESSES", str(core_runtime.available_cpu_count())))
-    # Recycle workers after each batch to prevent memory accumulation
-    # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
-    WORKER_MAXTASKS = 1
+    # Reuse native code across four batches; trim between batches and retain
+    # periodic process recycling to bound long-lived allocator fragmentation.
+    WORKER_MAXTASKS = 4
 
     # Start forkserver before data loading
     _warmup_pool = core_parallel.NonDaemonicForkserverPool(1)

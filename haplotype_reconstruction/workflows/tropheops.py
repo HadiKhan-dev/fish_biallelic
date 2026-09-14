@@ -122,9 +122,9 @@ def run():
     # Dynamic reallocation gives the full budget to remaining stragglers.
     block_discovery_processes = n_processes
     block_discovery_numba_threads = n_processes
-    # Recycle workers after each batch to prevent memory accumulation
-    # from glibc malloc fragmentation (Python doesn't return freed pages to OS).
-    WORKER_MAXTASKS = 1
+    # Reuse native code across four batches; trim between batches and retain
+    # periodic process recycling to bound long-lived allocator fragmentation.
+    WORKER_MAXTASKS = 4
 
     # Start forkserver before data loading
     _warmup_pool = core_parallel.NonDaemonicForkserverPool(1)

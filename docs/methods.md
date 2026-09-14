@@ -64,7 +64,8 @@ Genotype emissions use a 1% uniform mixture:
 clipping. The mixture itself bounds contradictory evidence at approximately
 -5.70 for normalized likelihoods. The quality/error-tract process remains
 enabled; removing the extra floor does not remove robustness to correlated
-errors. This is the sole emission model for all four assembly levels.
+errors. This is the sole **linker** emission model for all four assembly levels;
+panel selection and the final founder refiner have their separate objective below.
 
 The error emission averages the three robust genotype likelihood weights,
 independently of founder identity. Flat/missing observations therefore remain
@@ -110,6 +111,76 @@ Assembly checkpoint identities record the coherent expected-count linker,
 unclipped mixture emissions and iteration cap. Incompatible assemblies are not
 silently reused; changing the linker requires new assembly/downstream identities,
 not regeneration of the underlying simulated reads or discovered blocks.
+
+## Final founder-path refinement
+
+The hierarchy chooses component boundaries and founder counts. Its final pass
+then reopens row choices from the original **prepared local panels** within each
+component. A locally supported founder can otherwise be pruned at L2 and remain
+unrecoverable to L3/L4, even when a better chromosome path exists in those local
+panels. Refinement changes whole local-row selections, not their allele values,
+support metadata, or pre-fill inference snapshots. It neither crosses component
+breaks nor adds founders, and runs only for final assembly (`max_level=4`), not
+the L1/L2 feedback contexts.
+
+This pass uses the full cohort's genotype likelihoods, without truth, pedigree
+or generation labels. It retains the panel scorer's normalized likelihoods,
+1% uniform mixture, -2 log-likelihood floor, and length-scaled uniform penalty
+for a change of sample diplotype. Unlike the binned panel scorer, acceptance
+permits sample state changes at every SNP. This is a finer-discretization model
+change, not merely a faster evaluation of the binned model. It is an internal
+assembly fitting HMM, not the homologue-specific T09 painter, a posterior phase
+confidence, or a recombination-map estimator.
+
+Fixed-painting row edits provide cheap proposals. Conditional beams vary one
+founder while retaining every sample's diploid state against the other founders;
+an incumbent suffix supplies complete-path ranking in both scan directions.
+The first beam sees the original assembly and competes with warm proposals,
+rather than inheriting a potentially worse warm-start search basin. Every
+accepted proposal improves the same full-site, fixed-count objective.
+
+If fine-scale proposals stall, paths from the **final hierarchy's L1 level**
+supply larger competing moves alongside the incumbent path pieces. These are
+not a replacement of the local panels or another feedback round. Exact duplicate
+row sequences are removed; a bounded beam joins these pieces, then decodes the
+proposal back to original prepared rows. All original emission bins, sample
+state transitions and evidence masks remain unchanged. Accepted larger moves
+are followed by the ordinary fine-scale refinement.
+
+Larger moves have an additional genotype-fit guard. Write the optimized sample
+score as `Q = E - penalty * S`, where E is the cohort's centered genotype-emission
+score and S counts internal sample diplotype changes. A macro move must improve
+Q and must not lower E beyond numerical tolerance. This prevents accepting a
+long founder rewrite solely because it saves switch penalties while fitting
+the genotypes worse. It is a search-policy restriction, not a confidence
+threshold or proof of biological correctness; a true move that sacrifices
+some genotype fit can be withheld. Existing fine-scale proposals are unchanged.
+
+The default starts with width64, widens fourfold up to 1024 when the best beam
+improves on the cheaper proposal by more than one switch penalty, and retains
+that budget for subsequent sweeps. This is a computational heuristic, not a
+confidence threshold. There are at most20 sweeps, one focal path per sweep and
+16 candidate local rows per beam expansion. Unknown observations are neutral;
+the evidence mask is fixed across all original local candidate rows, so changing
+a path cannot improve its score by hiding difficult sites. Original missing
+calls can still move with the selected row.
+
+Symmetric emissions and the uniform change penalty permit exact unordered
+diploid states for this model alone. Full-site scoring costs `O(N L K²)`;
+conditional beam work costs `O(N M W C K²)` per sweep, where M is the total
+proposal-bin count, W the bounded beam width and C the bounded local branch
+count. Traceback bookkeeping is linear in original block count. This does not
+introduce cubic or quartic founder-state transitions into structured assembly.
+Macro emission packing adds `O(N M (K+R)²)` work/storage, with R the number of
+L1 context paths per piece. The additional genotype-fit check uses the same
+quadratic-state traceback only for score-improving macro proposals. There is no
+new cubic or quartic transition, and the original search budgets are retained.
+
+The method remains a bounded, non-convex search. Higher read likelihood does
+not guarantee fewer true founder errors; an absent local allele or incorrect
+final founder count cannot be repaired by this fixed-count pass. Conservative
+complete-site evidence can exclude useful partially observed markers. Those
+limitations require scientific validation, not claims of a global optimum.
 
 ## Pedigree
 

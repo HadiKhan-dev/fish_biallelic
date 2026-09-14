@@ -66,7 +66,7 @@ class ScientificIdentity:
     canonical_json: str
 
     @classmethod
-    def from_record(cls, record: Mapping[str, Any]) -> "FrozenStage2Identity":
+    def from_record(cls, record: Mapping[str, Any]) -> "ScientificIdentity":
         _validate_identity_record(record)
         canonical = json.dumps(
             copy.deepcopy(dict(record)),
@@ -93,7 +93,7 @@ class RuntimeProvenance:
 
     @classmethod
     def from_record(
-            cls, record: Mapping[str, Any]) -> "FrozenRuntimeProvenance":
+            cls, record: Mapping[str, Any]) -> "RuntimeProvenance":
         if not isinstance(record, Mapping) or not record:
             raise ValueError("runtime provenance must be a nonempty mapping")
         canonical = json.dumps(

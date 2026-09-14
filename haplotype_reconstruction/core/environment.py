@@ -30,6 +30,14 @@ def assembly_panel_search():
     return value
 
 
+def assembly_founder_refinement():
+    """Reopen original local row choices after the final hierarchy by default."""
+    value = os.environ.get("HAPLOTYPES_FOUNDER_REFINEMENT", "on")
+    if value not in ("on", "off"):
+        raise ValueError("HAPLOTYPES_FOUNDER_REFINEMENT must be on or off")
+    return value == "on"
+
+
 def block_feedback_selection():
     """Balanced local feedback rescue is the default; strict protects calls."""
     value = os.environ.get("HAPLOTYPES_FEEDBACK_SELECTION", "balanced")

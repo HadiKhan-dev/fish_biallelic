@@ -765,19 +765,19 @@ def _prepare_one_contig(
                 preparation_identity
             ),
         )
+        _validate_prepared_checkpoint(
+            checkpoint, expected_contig=contig, expected_sample_ids=sample_ids,
+            expected_preparation_identity=preparation_identity, expected_t09=t09)
+        # Atomic checkpoint I/O already propagates write failures. Validate
+        # this exact object before writing; global inference validates the
+        # persisted copy on load, without an immediate duplicate disk read.
         checkpoint_store.save_contig(target_stage, contig, checkpoint)
     finally:
         del raw_gl, raw_sites, raw_observed, gl_payload, sites_payload, t09
         gc.collect()
         core_parallel.malloc_trim()
 
-    persisted = _validate_prepared_checkpoint(
-        checkpoint_store.load_contig(target_stage, contig),
-        expected_contig=contig,
-        expected_sample_ids=sample_ids,
-        expected_preparation_identity=preparation_identity,
-    )
-    prepared = persisted.prepared_chromosome
+    prepared = checkpoint.prepared_chromosome
     return Stage10ContigSummary(
         contig, False, prepared.component_count, len(prepared.components),
         prepared.omitted_reason,

@@ -12,6 +12,7 @@ import hashlib
 from haplotype_reconstruction import PACKAGE_ROOT
 from haplotype_reconstruction.assembly import pipeline as assembly
 from haplotype_reconstruction.assembly.checkpoints import AssemblyCheckpointStore
+from haplotype_reconstruction.assembly.founder_refinement import FounderRefinementConfig
 from haplotype_reconstruction.core import environment, parallel, runtime
 from haplotype_reconstruction.discovery import feedback, search, cavity
 from haplotype_reconstruction.discovery.candidate_selection import CandidateSelectionConfig
@@ -57,7 +58,8 @@ def _discovery_config(record):
 
 
 def run_block_feedback(store, contig, originals, gl, sites, observed, sample_ids,
-                       *, stage1_identity, assembly_config, config, chromosome_map=None):
+                       *, stage1_identity, assembly_config, config, chromosome_map=None,
+                       chromosome_evidence=None):
     """Return selected local blocks and their mode-specific scientific identity.
 
 Raw Stage-1 files are never replaced. The initial L1 context and raw proposals
@@ -66,12 +68,16 @@ raw proposals, are mode-specific because selected L1 panels feed that context.
 Only the outer reconstruction runner publishes genome-wide completion.
 """
     cpus = min(assembly_config.num_processes, runtime.available_cpu_count())
+    # This option affects only final chromosomes. Do not invalidate or refit
+    # identical local contexts merely because final refinement was toggled.
+    assembly_config = replace(assembly_config,
+        founder_refinement_config=FounderRefinementConfig(enabled=False))
     identity = scientific_identity(config)
     mode = identity["config"].pop("selection")
     original_identity = assembly.stage2_release_identity_record(assembly_config,
         stage1_identity=stage1_identity, sample_ids=sample_ids, input_blocks=originals,
         global_probs=gl, global_sites=sites, global_observed_mask=observed,
-        chromosome_map=chromosome_map)
+        chromosome_map=chromosome_map, chromosome_evidence=chromosome_evidence)
     latent = hashlib.sha256()
     for block in originals:
         fitted = getattr(block, "cavity_selected_mode", None)
@@ -123,7 +129,8 @@ Only the outer reconstruction runner publishes genome-wide completion.
                 context = assembly.assemble_chromosome(current, gl, sites, observed, sample_ids,
                     stage1_identity=dict(stage1_identity, feedback_pass=pass_identity),
                     config=replace(assembly_config, max_level=level),
-                    release_checkpoints=assembly_io, chromosome_map=chromosome_map)
+                    release_checkpoints=assembly_io, chromosome_map=chromosome_map,
+                    chromosome_evidence=chromosome_evidence)
                 proposed, diagnostic = feedback.refine(current, context["components"],
                     gl, sites, observed, cpus, options, chromosome_map=chromosome_map,
                     n_generations=assembly_config.n_generations)

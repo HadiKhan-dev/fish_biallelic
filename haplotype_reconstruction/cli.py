@@ -46,7 +46,7 @@ def main(argv=None):
         command.add_argument('--checkpoints',help='Checkpoint directory; default OUTPUT/checkpoints.')
         command.add_argument('--cores',type=int,help='Total process/thread ceiling; default current CPU affinity.')
         command.add_argument('--recombination-map',help='PLINK/Beagle cumulative-cM input map.')
-        command.add_argument('--rate-cm-per-mb',type=float,help='Fallback rate, default5.0 cM/Mb.')
+        command.add_argument('--rate-cm-per-mb',type=float,help='Fallback rate, default 5.0 cM/Mb.')
         command.add_argument('--shared-family-evidence',action=argparse.BooleanOptionalAction,default=None,
                              help='Use shared-family phase-error evidence in map generation; default on.')
         if name!='recombination':
@@ -54,6 +54,8 @@ def main(argv=None):
                                  help='Dense cubic transitions (default) or near-quadratic structured transitions; independent of --assembly-search.')
             command.add_argument('--assembly-search',choices=('bounded','broad'),
                                  help='Bounded panel search (default, 16 full scores per category) or the optimized broader search with more full refits.')
+            command.add_argument('--founder-refinement',choices=('on','off'),
+                                 help='Refine final chromosome paths using original local panels; default on. Does not alter the L1/L2 feedback passes.')
             command.add_argument('--discovery-search',choices=('standard','batched'),
                                  help='Stage 1 search, independent of assembly; default standard. Batched is experimental.')
             command.add_argument('--feedback-selection',choices=('balanced','strict'),
@@ -120,6 +122,9 @@ def main(argv=None):
         assembly_search=_setting(args,config,'run','assembly_search',os.environ.get('HAPLOTYPES_ASSEMBLY_SEARCH','bounded'))
         if assembly_search not in ('bounded','broad'):
             parser.error('assembly_search must be bounded or broad')
+        founder_refinement=_setting(args,config,'run','founder_refinement',os.environ.get('HAPLOTYPES_FOUNDER_REFINEMENT','on'))
+        if founder_refinement not in ('on','off'):
+            parser.error('founder_refinement must be on or off')
         discovery_search=_setting(args,config,'run','discovery_search',os.environ.get('HAPLOTYPES_DISCOVERY_SEARCH','standard'))
         if discovery_search not in ('standard','batched'):
             parser.error('discovery_search must be standard or batched')
@@ -128,6 +133,7 @@ def main(argv=None):
             parser.error('feedback_selection must be balanced or strict')
         os.environ['HAPLOTYPES_ASSEMBLY_MODEL']=assembly_model
         os.environ['HAPLOTYPES_ASSEMBLY_SEARCH']=assembly_search
+        os.environ['HAPLOTYPES_FOUNDER_REFINEMENT']=founder_refinement
         os.environ['HAPLOTYPES_DISCOVERY_SEARCH']=discovery_search
         os.environ['HAPLOTYPES_FEEDBACK_SELECTION']=feedback_selection
     seed=_setting(args,config,'simulation','seed',400)
