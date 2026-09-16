@@ -290,7 +290,7 @@ def refine(raw_blocks,super_blocks,gl,sites,observed,cpus,options,chromosome_map
 def select_worker(task):
     """One local selection, using the same shared GL/mask pool initializer."""
     from .candidate_selection import select_candidate_panel
-    from .candidate_rescue import CandidateRescueConfig, rescue_candidate_panel
+    from .candidate_rescue import CandidateRescueConfig, rescue_candidate_panel, reduce_empty_rows
     index, indices, latent, proposals, config, selection = task
     parallel.increment_active()
     try:
@@ -307,6 +307,8 @@ def select_worker(task):
             feedback=backbone, competing=dict(discrete_haps=competing.discrete_haps,
                 latent_haps=competing.selected_mode.haplotypes),
             config=CandidateRescueConfig(discovery=config.discovery), selection=selection)
+        result = reduce_empty_rows(evidence, mask, result,
+            config=config.discovery, selection=selection)
         result["diagnostic"]["candidate_selection"] = competing.diagnostic
         return index, result
     finally:

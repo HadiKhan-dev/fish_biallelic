@@ -30,6 +30,16 @@ alleles and protects each round's backbone during that rescue. Both use the
 original likelihoods and observation masks, and release unsupported alleles as
 unknown. These selection scores are not calibrated correctness probabilities;
 novelty filtering is a heuristic, not proof of a distinct biological founder.
+After each feedback selection, an entirely uncalled row triggers a bounded
+smaller-panel comparison. Single-row deletions (and deletion of all empty rows
+when nonempty rows remain) are refitted against the original observed likelihoods
+and accepted only if the existing BIC-like score does not worsen. Assignments,
+site support, probabilities and released calls are rebuilt together. Balanced
+selection permits the usual allele/assignment refit; strict selection additionally
+protects surviving backbone calls. Partially called rows do not trigger deletion,
+and an empty row whose deletion worsens the score remains explicit uncertainty. A final
+single unknown row is not converted into an invalid zero-founder panel.
+
 See [configuration and checkpointing](running.md#local-feedback-selection) and
 [local validation](validation.md#local-feedback-selection).
 
@@ -41,11 +51,30 @@ same convergence rule. The linker uses the input genetic map where supplied,
 or the configured scalar rate otherwise. L1 keeps its existing block grouping
 and unlimited beam-gap rule; higher levels retain their distance-based beam-gap
 limit. Missing-data component boundaries and founder-source provenance are
-preserved at every level. Large linking proxies are sampled from markers called
-in every frozen founder candidate; sample eligibility and boundary support are
-checked on those actual proxies. No usable evidence means unresolved components.
+preserved at every level. Large linking proxies are sampled from kept markers
+called in at least one frozen founder candidate; sample eligibility and boundary
+support are checked on those actual proxies. Wholly unsupported blocks remain
+unresolved, and explicit component breaks are not bridged.
 
-The implementation stores three genotype emissions per sample/site, reuses
+Partial sites use a fixed Bernoulli(1/2) predictive distribution for each unknown
+founder allele. A known 0 plus an unknown averages genotype likelihoods 0 and 1;
+a known 1 plus an unknown averages 1 and 2. Two different unknown founders use
+weights (1/4, 1/2, 1/4). Two copies of the same unknown atomic founder use
+(1/2, 0, 1/2): they share one allele, including when different assembled paths
+traverse the same local source row. This is a per-observation predictive
+approximation, not exact integration of shared latent alleles across samples.
+It changes linkage evidence, never imputes a released founder allele. It can
+prefer uncertain paths in ambiguous regions and is not a confidence guarantee.
+
+The binned panel scorer uses the same partial-founder distributions, applying
+its existing likelihood floor after marginalization. All candidate states use
+the same retained markers. Uniform sample evidence and all-founder-unknown
+markers are neutral. Fully called input retains the previous optimized kernels.
+Final founder refinement retains its separate fixed complete-site acceptance
+objective described below; partial proposal scoring does not relax that guard.
+
+The implementation stores three genotype emissions for complete input or seven
+predictive categories for partial input per sample/site, reuses
 state-constant-prior scans, omits unused terminal messages, and fits only mesh
 gaps consumed by the beam. Homologue edge counts use a cubic contraction with a
 cubic log-domain fallback; no quartic diploid transition tensor is needed. These
@@ -108,13 +137,14 @@ conceals a genuine crossover remains an identifiability and confidence-calibrati
 limitation.
 
 Assembly checkpoint identities record the coherent expected-count linker,
-unclipped mixture emissions and iteration cap. Incompatible assemblies are not
+partial-founder predictive emissions, empty-row refitting, unclipped mixture
+emissions and iteration cap. Incompatible assemblies are not
 silently reused; changing the linker requires new assembly/downstream identities,
 not regeneration of the underlying simulated reads or discovered blocks.
 
 ## Final founder-path refinement
 
-The hierarchy chooses component boundaries and founder counts. Its final pass
+The hierarchy chooses component boundaries and an initial founder count. Final refinement
 then reopens row choices from the original **prepared local panels** within each
 component. A locally supported founder can otherwise be pruned at L2 and remain
 unrecoverable to L3/L4, even when a better chromosome path exists in those local
@@ -156,14 +186,88 @@ the genotypes worse. It is a search-policy restriction, not a confidence
 threshold or proof of biological correctness; a true move that sacrifices
 some genotype fit can be withheld. Existing fine-scale proposals are unchanged.
 
-The default starts with width64, widens fourfold up to 1024 when the best beam
+The first pass starts with width 64, widens fourfold up to 1024 when the best beam
 improves on the cheaper proposal by more than one switch penalty, and retains
 that budget for subsequent sweeps. This is a computational heuristic, not a
-confidence threshold. There are at most20 sweeps, one focal path per sweep and
+confidence threshold. There are at most 20 sweeps, one focal path per sweep and
 16 candidate local rows per beam expansion. Unknown observations are neutral;
 the evidence mask is fixed across all original local candidate rows, so changing
 a path cannot improve its score by hiding difficult sites. Original missing
 calls can still move with the selected row.
+
+After that pass completes, a second, default-on escape pass uses chain dual
+decomposition. Each sample temporarily has its own copy of the focal founder's
+local choices. Zero-sum messages equalize conditional max-marginals across
+samples; alternating forward/reverse sweeps decode a **single common founder
+path**. Relaxed sample-specific founder copies are never released. The incumbent
+is retained unless a feasible decoded path improves its binned score, and the
+same full-site score and larger-move genotype-fit guard determine acceptance.
+This changes proposal search, not the likelihood or calling thresholds.
+
+The escape pass considers all current founders, both scan directions, original
+local rows and the same L1 pieces; it starts from the completed first pass, not
+raw L4. There are at most 20 outer refinement iterations and 20 dual sweeps per
+proposal, with the same 16-row branch cap. Width-independent dual proposals are
+not retried at larger nominal beam widths. The remaining positive dual gap is
+an optimization diagnostic for the restricted binned conditional problem, not
+a biological confidence interval or proof of a globally optimal assembly.
+The dual pass itself cannot recover a missing candidate allele or change count.
+
+The following default-on searches address different remaining barriers:
+
+1. Paired suffix exchanges change two founder paths together. Forward/backward
+   messages score these relabelings without a full chromosome refit per
+   boundary. In the pre-count phase pass, the best bounded proposals receive
+   canonical full-site rescoring and are accepted only when the full objective
+   improves. Because every marker retains its exact called/missing allele
+   multiset, this pass may trade a decrease in optimized genotype fit against
+   fewer sample diplotype changes. No separate genotype-loss bound is imposed
+   on these phase-only moves; the existing full objective controls the trade-off.
+   The separate genotype-fit veto is
+   retained for paired exchanges inside count-reduction refits, and for the
+   allele-changing macro moves and bounded interval polish below. This is a
+   phase-search policy change, not imputation or calibrated phase confidence.
+2. A bounded count comparison removes one founder, refits the remaining paths
+   with beam/dual search, and checks paired exchanges. It compares
+   `K * complexity_cost - 2 * full_site_score`, using the caller's existing
+   complexity scale and the same fixed evidence mask. An optimistic local
+   bound can skip a reduction only if even its relaxed score loses. At most
+   16 deletion/refits are attempted; larger panels prioritize low-occupancy
+   rows. This is one deletion round, not exhaustive count selection or an
+   assumed biological founder count. Components with at most two rows or one
+   local block bypass this count search.
+3. Two exact-flank window searches start from the same completed panel. One
+   retains stable incumbent-suffix ranking; the other breaks exact score ties
+   using a sample-relaxed future bound. Their **completed** full-site scores
+   decide which trajectory survives, retaining the stable result on ties.
+   A further upper-bound-ranked window pass explores beneficial tracts that
+   incumbent-prefix ranking can discard prematurely. Relaxed sample-specific
+   choices rank proposals only: released paths remain shared across the cohort
+   and must pass canonical full-site acceptance.
+4. Bounded paired intervals exchange two founders over a tract, not the whole
+   remaining chromosome. Local/local, L1-start/local-end and
+   local-start/L1-end boundary grids retain the original emission bins.
+   At most 16 pairs are considered (suffix-score shortlisting for larger
+   panels). Both full-site score improvement and nondecreasing optimized
+   genotype fit are required. These exchanges preserve the exact local
+   multiset of called **and missing** alleles and cannot fill absent sequence.
+
+The window width is 100 prepared blocks (or 100 L1 groups for the staggered
+interval grid), with half-window spacing for single-founder windows. These
+are bounded search budgets, not sample-count-specific biological parameters.
+The existing 20-iteration and 16-branch defaults remain in use. Count deletion
+can change representation; the paired exchanges alone preserve local
+representation. Neither mechanism creates a new local candidate allele.
+
+All passes have separate component, iteration and proposal checkpoints.
+Release identities include the added modules and actual search configuration;
+an older final result cannot silently bypass the new passes. Existing results
+are retained. A changed code identity can also invalidate feedback identities
+even though their mathematics is unchanged; cross-version reuse requires
+explicit compatibility checks, not relabeling an old final product.
+Within one code version, toggling final refinement reuses local feedback.
+Local feedback still excludes final refinement, and no pass uses pedigree
+information or truth. The CLI's `--founder-refinement off` disables them all.
 
 Symmetric emissions and the uniform change penalty permit exact unordered
 diploid states for this model alone. Full-site scoring costs `O(N L K²)`;
@@ -174,12 +278,21 @@ introduce cubic or quartic founder-state transitions into structured assembly.
 Macro emission packing adds `O(N M (K+R)²)` work/storage, with R the number of
 L1 context paths per piece. The additional genotype-fit check uses the same
 quadratic-state traceback only for score-improving macro proposals. There is no
-new cubic or quartic transition, and the original search budgets are retained.
+new cubic or quartic transition within a single diploid-state update.
+For the added dual solver, one focal founder costs `O(D N M C K²)`, where D
+is its bounded sweep count. Considering **all K founders** gives
+`O(D N M C K³)` proposal work per outer escape iteration, plus up to cubic
+aggregate full-site scoring across those candidates. Thus the all-founder
+escape pass is not a near-quadratic total-work guarantee at large K, even
+with structured hierarchy transitions. Its suffix workspace is
+`O(B N K²)` and messages use `O(B N C)`, for B proposal blocks.
 
 The method remains a bounded, non-convex search. Higher read likelihood does
-not guarantee fewer true founder errors; an absent local allele or incorrect
-final founder count cannot be repaired by this fixed-count pass. Conservative
-complete-site evidence can exclude useful partially observed markers. Those
+not guarantee fewer true founder errors. Absent local alleles, wholly unsampled
+ancestry and count errors beyond the bounded one-deletion search can remain.
+Greater likelihood can also trade off long-range phase accuracy. The refiner's
+conservative complete-site acceptance evidence still excludes partially observed
+markers, even though hierarchical linking and binned proposals use them. Those
 limitations require scientific validation, not claims of a global optimum.
 
 ## Pedigree
@@ -199,6 +312,16 @@ and leave-one-chromosome-out stability should be interpreted together. Tier B
 is the primary product; the complete table is not equally supported at every
 row. Fixed model priors do not require knowing the true M0/M1/M2 proportions.
 
+The full-data ancestry-depth mixture still chooses its component count by BIC.
+Chromosome bootstrap and leave-one-chromosome-out refits condition on that
+selected dimension, while refitting component means, variances, weights and
+sample depth posteriors. Uninformative resamples retain their neutral treatment;
+a component count is never supplied from true generations or a known pedigree.
+The diagnostic `AncestryDepthResampling` labels this as
+`conditional_full_data_component_count`. These support fractions measure
+stability **conditional on the selected model dimension**, not uncertainty
+about that dimension or calibrated probabilities of correct parentage.
+
 Real-data entry points use available design metadata for legitimate candidate
 eligibility and chronology, not as individual-level trio truth. In particular,
 G0/species labels do not establish parentage; sequenced outside-pedigree species
@@ -213,7 +336,13 @@ called genotypes and missingness. T11 has one phase-focused release policy:
 start phase assessment after 20 family iterations, then require five consecutive
 identical called-phase arrays, or actual family convergence. Each assessment
 restarts the polisher from the current family context, not the preceding polished
-path. If phase remains unstable at 520 iterations, retain work and refuse release.
+path. If phase remains unstable at 520 iterations, retain that attempt and
+restart from the scaffold with half damping, at most twice (0.5, then 0.25,
+then 0.125 by default). Tolerance scales with damping so the undamped residual
+criterion is unchanged. Successful ordinary solves are unaffected. Each attempt
+has a separate checkpoint; final summaries record attempted and final damping,
+and total solver iterations. Set `FamilyRefinementConfig.phase_retry_count=0`
+to disable retries. If every attempt remains unstable, no final phase is released.
 
 This is a phase point estimate, not a calibrated marginal posterior. Full family
 probability tensors and a separate imputed source product are not produced.

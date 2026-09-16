@@ -99,7 +99,7 @@ def _missing_aware_informative_sample_mask(batch_probs):
 
 
 def _missing_aware_block_indices(block, global_sites, max_sites=None):
-    """Marker indices used by the unchanged frozen-panel eligibility rule."""
+    """Marker indices with any observed founder allele in the frozen panel."""
 
     panel = assembly_observations.founder_inference_panel_from_block_result(block)
     keep_flags = getattr(block, 'keep_flags', None)
@@ -109,7 +109,7 @@ def _missing_aware_block_indices(block, global_sites, max_sites=None):
         retained = np.asarray(keep_flags, dtype=np.bool_)
         if retained.shape != (len(block.positions),):
             raise ValueError("block keep_flags are not aligned with positions")
-    globally_complete = retained & np.all(panel.called, axis=0)
+    globally_complete = retained & np.any(panel.called, axis=0)
     if max_sites is not None:
         sampled = _linking_proxy_indices(block, max_sites, panel=panel)
         proxy_mask = np.zeros(len(block.positions), dtype=np.bool_)
@@ -224,7 +224,7 @@ def _linking_proxy_indices(block, max_sites, panel=None):
     """Thin usable panel markers, not positions that later become empty.
 
     Fully called/kept panels retain the original stride selection. Small blocks
-    stay untouched; emission filtering still excludes their missing sites.
+    stay untouched; emissions marginalize missing alleles at partial sites.
     Wholly unsupported blocks stay intact for unresolved passthrough.
     """
     total = len(block.positions)
@@ -232,7 +232,7 @@ def _linking_proxy_indices(block, max_sites, panel=None):
         return np.arange(total, dtype=np.int64)
     if panel is None:
         panel = assembly_observations.founder_inference_panel_from_block_result(block)
-    usable = np.all(panel.called, axis=0)
+    usable = np.any(panel.called, axis=0)
     if block.keep_flags is not None:
         usable &= np.asarray(block.keep_flags, dtype=np.bool_)
     candidates = np.flatnonzero(usable)
@@ -834,7 +834,7 @@ def _process_single_batch(args):
 def _hmm_batch_memory_gb(input_blocks, batch_ranges, n_samples, max_sites):
     """Budget retained scan arrays plus one full log-tensor workspace.
 
-    Production stores three float32 log emissions and three float64 weights
+    Production stores up to seven float32 log emissions and seven float64 weights
     per sample/site, plus uint8 dosage indices. Reserve one dense fallback
     workspace as well. Proxy size is bounded by the cap, including after
     missing-aware marker selection; counting all samples is conservative.
@@ -852,7 +852,7 @@ def _hmm_batch_memory_gb(input_blocks, batch_ranges, n_samples, max_sites):
             haps = len(block.haplotypes)
             ordered = haps * haps
             folded = haps * (haps + 1) // 2
-            batch_bytes += (n_samples * proxy_sites * (3 * 12 + 4 * ordered)
+            batch_bytes += (n_samples * proxy_sites * (7 * 12 + 4 * ordered)
                             + proxy_sites * (ordered + folded))
         maximum_bytes = max(maximum_bytes, batch_bytes)
     return maximum_bytes / (1024 ** 3)

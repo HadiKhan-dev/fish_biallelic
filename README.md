@@ -73,17 +73,28 @@ L1 → blocks → selection, then L1+L2 → blocks → selection. The first sele
 panels feed the second context; original candidates remain available throughout.
 Use `--feedback-selection strict` to protect each round's clean feedback calls
 and rescue only private alleles instead of the default balanced trade-off.
-See [local feedback selection](docs/running.md#local-feedback-selection).
+Entirely uncalled feedback rows are now tested for evidence-supported removal
+and refitting after each round; necessary unknown rows remain explicit.
+Linking uses partially called founder panels without filling missing alleles
+merely to connect blocks. Neither change forces a known founder count.
+See [local feedback selection](docs/running.md#local-feedback-selection) and
+[partial-founder assumptions](docs/methods.md#hierarchical-linking).
 Use `--assembly-model structured` for the
 [near-quadratic alternative](docs/founder_scaling.md); this restricts the
 transition model and does not change discovery. Use `--assembly-search broad`
 to retain the optimized broader path/panel search instead of the default
 `bounded` search; this costs more full refits and is not guaranteed to improve
 accuracy. Final assembly also reopens the original local row choices in a
-fixed-count, chromosome-wide founder refinement; this runs after the hierarchy,
+chromosome-wide founder refinement; this runs after the hierarchy,
 not within the two local feedback rounds. If local search stalls, it can reopen
 larger L1 pieces, with a genotype-fit guard against penalty-only improvements.
-Use `--founder-refinement off` for a controlled comparison.
+The completed beam/dual search is followed by bounded paired exchanges,
+one-founder deletion/refitting under the existing complexity cost, and
+exact-flank window searches. Paired-interval polishing can repair coordinated
+two-founder errors while preserving every local called/missing allele.
+These passes use genotype evidence, not pedigree, generation labels or a known
+founder count. They are enabled by default and checkpointed separately.
+Use `--founder-refinement off` to disable final refinement for a comparison.
 See [the model and its limits](docs/methods.md#final-founder-path-refinement).
 T11 does not feed back into painting or pedigree inference, and the estimated
 T12 map is not automatically fed upstream.
@@ -91,7 +102,10 @@ Shared-family orientation-error evidence is enabled for T12 by default;
 `--no-shared-family-evidence` disables it. T11 releases final phase after five
 consecutive unchanged phase checks (starting after 20 family iterations), or
 actual family convergence. It preserves called genotypes and missingness; it
-does not publish full marginal-posterior tensors.
+does not publish full marginal-posterior tensors. If the 520-iteration solve
+remains unstable, it retries from the scaffold up to twice with half damping
+each time, retaining separate checkpoints; an unstable final attempt still
+produces no release.
 
 Pedigree Tier B is the primary supported output. M0 means **zero observed
 parents**, not necessarily a biological founder. Support tiers and bootstrap

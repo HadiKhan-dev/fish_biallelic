@@ -44,6 +44,7 @@ class FamilyRefinementConfig:
     max_iterations: int = 520
     minimum_iterations: int = 20
     required_unchanged: int = 5
+    phase_retry_count: int = 2
     tolerance: float = 1e-4
     phase_call_probability: float = 0.98
     checkpoint_every: int = 5
@@ -51,6 +52,9 @@ class FamilyRefinementConfig:
     branch_cluster_interval: int = 20
 
     def validated(self):
+        value = self.phase_retry_count
+        if isinstance(value, bool) or int(value) != value or value < 0:
+            raise ValueError("phase_retry_count must be a nonnegative integer")
         if self.scaffold_scope not in ("roots", "incomplete", "all"):
             raise ValueError("scaffold_scope must be roots, incomplete, or all")
         for name in ("max_iterations", "minimum_iterations", "required_unchanged", "checkpoint_every", "gauge_move_interval", "branch_cluster_after", "branch_cluster_interval"):

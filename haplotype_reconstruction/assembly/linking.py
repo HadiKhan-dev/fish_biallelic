@@ -24,6 +24,7 @@ MAX_LINKING_ITERATIONS = 20
 from .micro_hmm import PreparedBlockScans
 from .macro_hmm import propagate_homologue_priors
 from .edge_counts import homologue_edge_log_counts
+from . import partial_emissions
 
 
 class TransitionMesh:
@@ -147,9 +148,9 @@ def initial_transition_probabilities(haps_data, space_gap=1):
 
 
 class ViterbiBlockLikelihood:
-    """Compact float32 emissions for the three hard-founder genotype dosages.
+    """Compact emissions indexed by founder-pair genotype distribution.
 
-    Production stores three values per sample/site and a uint8 dosage per
+    Production stores three (complete) or seven (partial) values and a uint8 index per
     ordered founder pair. Dense tensors are materialized only for diagnostics.
     Scan arithmetic exponentiates the rounded float32 cells in float64.
     """
@@ -212,9 +213,9 @@ def _worker_generate_viterbi_emissions(args):
 
 
     panel = assembly_observations.founder_inference_panel_from_block_result(block_hap)
-    # Missing founder alleles are not probabilistic sample evidence. A site is
-    # usable for every candidate state or for none of them.
-    emission_keep_flags = keep_flags & np.all(panel.called, axis=0)
+    # Unknown alleles are integrated predictively, never cast to a called 0/1.
+    # Sites unsupported by every founder cannot establish local linkage.
+    emission_keep_flags = keep_flags & np.any(panel.called, axis=0)
 
     hap_keys = sorted(list(hap_dict.keys()))
     num_haps = len(hap_keys)
@@ -230,14 +231,20 @@ def _worker_generate_viterbi_emissions(args):
     valid_positions = np.array(block_hap.positions)[emission_keep_flags].astype(np.int64)
 
     # --- PROBABILISTIC MIXTURE CALCULATION ---
+    called = panel.called[:, emission_keep_flags]
     q = panel.q[:, emission_keep_flags]
-    if not np.all(np.isin(q, (0.0, 1.0))):
-        raise ValueError("called founder alleles must have hard q values")
-    alleles = q.astype(np.uint8)
-    dosages = np.ascontiguousarray(
-        (alleles[:, None, :] + alleles[None, :, :]).reshape(num_haps**2, -1).T)
-    ll_per_site = _genotype_emission_kernel(
-        np.ascontiguousarray(samples_masked), float(epsilon))
+    if np.all(called):
+        alleles = q.astype(np.uint8)
+        dosages = np.ascontiguousarray(
+            (alleles[:, None, :] + alleles[None, :, :]).reshape(num_haps**2, -1).T)
+        ll_per_site = _genotype_emission_kernel(
+            np.ascontiguousarray(samples_masked), float(epsilon))
+    else:
+        alleles = np.ascontiguousarray(np.where(called, q, -1), dtype=np.int8)
+        source_rows = partial_emissions.source_row_ids(block_hap)[:, emission_keep_flags]
+        dosages = partial_emissions.pair_codes(alleles, np.ascontiguousarray(source_rows))
+        ll_per_site = partial_emissions.compact_log_emissions(
+            np.ascontiguousarray(samples_masked), float(epsilon))
     return ViterbiBlockLikelihood(
         ll_per_site, valid_positions, state_defs, num_haps, dosages)
 
@@ -259,8 +266,8 @@ def generate_viterbi_block_emissions(
     during the kernel and parallelize effectively without pickling the
     large sample arrays through a process boundary.
 
-    Only sites explicitly called in every founder candidate contribute to the
-    emission likelihood.
+    Partial sites use predictive marginalization, never output allele filling.
+    Completely unsupported sites are excluded.
     """
     params = {'robustness_epsilon': DEFAULT_ROBUSTNESS_EPSILON}
 

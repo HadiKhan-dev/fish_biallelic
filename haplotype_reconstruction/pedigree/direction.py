@@ -45,6 +45,8 @@ def _fit_ancestry_depth_model(
     junction_counts: np.ndarray,
     callable_haplotype_bins: np.ndarray,
     seed: int,
+    *,
+    component_count: Optional[int] = None,
 ) -> _AncestryDepthModel:
     """Fit a deterministic BIC-selected mixture of relative ancestry burdens.
 
@@ -54,6 +56,11 @@ def _fit_ancestry_depth_model(
     rather than becoming spuriously certain shallow samples. Components are
     ordered by increasing burden and represent relative ancestry depth only;
     they are not generation labels.
+
+    With component_count, refit the full-data-selected model dimension instead
+    of selecting it again. This measures conditional chromosome-resampling
+    stability; means, variances, weights and sample posteriors are still refit.
+    It does not measure uncertainty about the selected model dimension.
     """
     counts = np.asarray(junction_counts, dtype=np.float64)
     callable_bins = np.asarray(callable_haplotype_bins, dtype=np.float64)
@@ -118,14 +125,30 @@ def _fit_ancestry_depth_model(
         len(distinct),
         max(1, len(observed) // 2),
     )
-    fitted = fit_bic_selected_gaussian_mixture_1d(
-        standardized,
-        maximum_components,
-        int(seed),
-        n_init=pedigree_states._ANCESTRY_DEPTH_GMM_N_INIT,
-        max_iter=pedigree_states._ANCESTRY_DEPTH_GMM_MAX_ITERATIONS,
-        reg_covar=pedigree_states._ANCESTRY_DEPTH_GMM_REGULARIZATION,
-    )
+    if component_count is None:
+        fitted = fit_bic_selected_gaussian_mixture_1d(
+            standardized,
+            maximum_components,
+            int(seed),
+            n_init=pedigree_states._ANCESTRY_DEPTH_GMM_N_INIT,
+            max_iter=pedigree_states._ANCESTRY_DEPTH_GMM_MAX_ITERATIONS,
+            reg_covar=pedigree_states._ANCESTRY_DEPTH_GMM_REGULARIZATION,
+        )
+    else:
+        count = min(int(component_count), maximum_components)
+        fit = _fit_fixed_components(
+            standardized, count, int(seed),
+            pedigree_states._ANCESTRY_DEPTH_GMM_N_INIT,
+            pedigree_states._ANCESTRY_DEPTH_GMM_MAX_ITERATIONS,
+            pedigree_states._ANCESTRY_DEPTH_GMM_REGULARIZATION,
+            _DEFAULT_TOLERANCE,
+        )
+        order = np.argsort(fit.means, kind="stable")
+        bic = _bic(standardized, fit)
+        fitted = GaussianMixture1DSelection(
+            fit.means[order], fit.variances[order], fit.weights[order],
+            count, bic, (bic,), fit.converged, fit.n_iter,
+        )
     if not fitted.converged:
         posterior = np.zeros((len(counts), 1), dtype=np.float64)
         posterior[valid, 0] = 1.0

@@ -24,6 +24,14 @@ CANONICAL_PHASE_CONFIG = polish.PhasePolishConfig(
     copy_error=.01, adaptive_window_sites=100, minimum_biological_gain=0.)
 
 
+class PhaseStabilityError(RuntimeError):
+    """The supported solve reached its limit without a stable called phase."""
+
+    def __init__(self, checks):
+        super().__init__("final called phase did not stabilize; iteration checkpoint retained, no final product released")
+        self.checks = tuple(checks)
+
+
 def _fit_phase(gl, observed, scaffold, positions, relationships, names, *,
                config, phase_config, identity, work_path=None, checkpoint_threads=1,
                checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None):
@@ -76,7 +84,7 @@ the preceding polished path is only a comparison, never a warm start.
         iteration = 0 if state is None else state.iteration
         if point is not None and iteration >= config.max_iterations:
             save(state, point, unchanged, force=True)
-            raise RuntimeError("final called phase did not stabilize; iteration checkpoint retained, no final product released")
+            raise PhaseStabilityError(checks)
         stop = (max(config.minimum_iterations, iteration) if point is None else iteration+1)
         if workspace is None:
             workspace = model.prepare_family_workspace(
@@ -152,17 +160,46 @@ def refine_chromosome(t09, gl, positions, observed, relationships, sample_ids, *
                         "phase_config": asdict(phase_config),
                         "code": conditioning.refinement_code_identity()}
     scaffold = conditioning.prepare_phase_scaffold(t09, positions)
-    phase, checks, converged = _fit_phase(
-        gl, observed, scaffold, positions, relationships, names, config=config,
-        phase_config=phase_config, identity=product_identity, work_path=work_path,
-        checkpoint_threads=checkpoint_threads, checkpoint_min_seconds=checkpoint_min_seconds,
-        progress_callback=progress_callback, chromosome_map=chromosome_map)
+    attempts = []
+    for retry in range(config.phase_retry_count + 1):
+        # Restart only after a genuine stability failure. Scale tolerance with
+        # damping so the undamped fixed-point residual criterion is unchanged.
+        scale = .5 ** retry
+        attempt_config = replace(config, damping=config.damping * scale,
+                                 tolerance=config.tolerance * scale)
+        product_identity = {**product_identity, "family": {
+            **family_identity, "config": asdict(attempt_config)}}
+        attempt_path = None if work_path is None else Path(work_path)
+        if retry and attempt_path is not None:
+            stem = attempt_path.name.removesuffix(".p5.b2")
+            attempt_path = attempt_path.with_name(f"{stem}.retry{retry}.p5.b2")
+        record = {"attempt": retry, "damping": attempt_config.damping,
+                  "tolerance": attempt_config.tolerance,
+                  "checkpoint": None if attempt_path is None else str(attempt_path)}
+        try:
+            phase, checks, converged = _fit_phase(
+                gl, observed, scaffold, positions, relationships, names, config=attempt_config,
+                phase_config=phase_config, identity=product_identity, work_path=attempt_path,
+                checkpoint_threads=checkpoint_threads, checkpoint_min_seconds=checkpoint_min_seconds,
+                progress_callback=progress_callback, chromosome_map=chromosome_map)
+        except PhaseStabilityError as error:
+            record.update(phase_stable=False, iterations=error.checks[-1]["iteration"])
+            attempts.append(record)
+            if retry == config.phase_retry_count:
+                raise
+            print(f"[T11 {contig}] Phase not stable at damping={attempt_config.damping:g}; "
+                  "retrying from the scaffold with half damping.", flush=True)
+        else:
+            record.update(phase_stable=True, iterations=checks[-1]["iteration"])
+            attempts.append(record)
+            break
     return {
         "identity": product_identity, "contig": str(contig), "sample_ids": names,
         "positions": np.asarray(positions), "component_ids": scaffold.component_ids,
         "phase": phase,
         "corrected_component_paintings": conditioning.paint_final_phase(t09, positions, phase.phase_map),
         "phase_stable": True, "phase_stability_checks": checks,
+        "phase_solver_attempts": attempts,
         "source_posterior_converged": converged,
         "posterior_and_recombination_products_included": False,
         "confidence_policy": "conditional phase point path; no marginal posterior probabilities are published or transferred",
@@ -177,6 +214,9 @@ def _summary(result, store, elapsed):
         "sites": len(result["positions"]), "phase_stable": result["phase_stable"],
         "source_posterior_converged": result["source_posterior_converged"],
         "iterations": checks[-1]["iteration"], "phase_stability_checks": len(checks),
+        "solver_attempts": len(result["phase_solver_attempts"]),
+        "total_solver_iterations": sum(a["iterations"] for a in result["phase_solver_attempts"]),
+        "final_damping": result["phase_solver_attempts"][-1]["damping"],
         "consecutive_unchanged": checks[-1]["consecutive_unchanged"],
         "called_alleles": phase["called_alleles"],
         "changed_observable_phase_sites": phase["changed_observable_phase_sites"],

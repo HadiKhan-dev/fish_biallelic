@@ -128,6 +128,9 @@ probability, support and assignment metadata. Neither rule uses truth.
 
     def polish(panel):
         nonlocal score_workspace
+        # Completing partial scaffold rows can produce exact duplicates. Use
+        # the fitter's distinct-row K for both caching and same-K selection.
+        panel = objectives.exact_unique_binary_rows(panel)
         key = (panel.shape, panel.tobytes())
         if key not in polish_cache:
             if score_workspace is None:
@@ -213,3 +216,96 @@ probability, support and assignment metadata. Neither rule uses truth.
             assignments=remap[fitted["assignments"]])
     result["diagnostic"] = diagnostic
     return result
+
+
+def reduce_empty_rows(evidence, observed_mask, result, *, config=None,
+                      selection="balanced"):
+    """Test smaller panels only when a released row is wholly unsupported.
+
+    Deletion is a model proposal, not an array filter. Refit assignments (and,
+    for balanced selection, alleles), accept under the existing BIC-like
+    objective, and rebuild all call/support metadata. A losing deletion keeps
+    the uncertainty explicit; partially called rows never initiate deletion.
+    Strict selection also requires preservation of surviving backbone calls.
+    """
+    if selection not in ("balanced", "strict"):
+        raise ValueError("selection must be balanced or strict")
+    calls = np.asarray(result["discrete_haps"])
+    if len(calls) < 2 or not np.any(~np.any(calls >= 0, axis=1)):
+        return result
+    base = search.ReversibleCavitySearchConfig() if config is None else config
+    observed = np.ascontiguousarray(observed_mask, dtype=np.bool_)
+    likelihood = np.array(evidence, dtype=np.float64, order="C", copy=True)
+    likelihood[~observed] = 1.0 / 3.0
+    workspace = fitting._prepare_fixed_k_fit_workspace(
+        likelihood, base.lambda_wildcard_penalty, observed_mask=observed)
+    complexity = objectives.compute_founder_complexity_cost(
+        .5, int(observed.any(axis=1).sum()), likelihood.shape[1])
+    current = dict(result)
+    diagnostic = dict(initial_k=len(calls), initial_empty_rows=int(
+        (~np.any(calls >= 0, axis=1)).sum()), reductions=[], tested_modes=0)
+
+    def release(panel):
+        assignment = workspace.compute_assignment_scalar(panel)
+        q, support, _, _, values = haplotypes._materialize_founder_site_pseudo_evidence(
+            likelihood, panel, assignment[0], observed, base.lambda_wildcard_penalty,
+            base.min_directional_supporters, base.min_hard_call_pseudo_probability)
+        return dict(discrete_haps=values, latent_haps=panel, q=q, support=support,
+                    assignments=assignment[0],
+                    score=float(-assignment[4] - .5 * len(panel) * complexity))
+
+    while len(current["discrete_haps"]) > 1:
+        panel = np.ascontiguousarray(current["latent_haps"], dtype=np.int64)
+        empty = np.flatnonzero(~np.any(current["discrete_haps"] >= 0, axis=1))
+        if not len(empty):
+            break
+        baseline_score = float(
+            -workspace.compute_assignment_scalar(panel)[4] - .5 * len(panel) * complexity)
+        starts = [np.delete(panel, int(row), axis=0) for row in empty]
+        if 1 < len(empty) < len(panel):
+            starts.append(np.delete(panel, empty, axis=0))
+        parallel.apply_dynamic_threads()
+        raw, fitted = modes._fit_starts_with_synchronized_endpoints(
+            likelihood, starts, search._internal_move_config(base), workspace,
+            max_iter=(0 if selection == "strict" else None))
+        options = []
+        for mode in modes._deduplicate_modes((*raw, *fitted)):
+            if mode.k >= len(panel):
+                continue
+            diagnostic["tested_modes"] += 1
+            candidate_score = -mode.total_nll - .5 * mode.k * complexity
+            if candidate_score < baseline_score - base.score_tolerance:
+                continue
+            candidate = release(mode.haplotypes)
+            if selection == "strict":
+                lookup = {row.tobytes(): i for i, row in enumerate(mode.haplotypes)}
+                protects_calls = True
+                for old, row in enumerate(panel):
+                    known = current["discrete_haps"][old] >= 0
+                    if not known.any():
+                        continue
+                    new = lookup.get(row.tobytes())
+                    if new is None or not np.array_equal(
+                            candidate["discrete_haps"][new, known],
+                            current["discrete_haps"][old, known]):
+                        protects_calls = False
+                        break
+                if not protects_calls:
+                    continue
+            options.append((candidate, mode.canonical_key))
+        if not options:
+            break
+        best, _ = min(options, key=lambda item: (
+            -item[0]["score"], len(item[0]["discrete_haps"]), item[1]))
+        diagnostic["reductions"].append(dict(
+            before_k=len(panel), after_k=len(best["discrete_haps"]),
+            score_gain=best["score"] - baseline_score))
+        current = best
+    diagnostic["final_k"] = len(current["discrete_haps"])
+    diagnostic["remaining_empty_rows"] = int(
+        (~np.any(current["discrete_haps"] >= 0, axis=1)).sum())
+    # Selection diagnostics remain diagnostic: do not reuse pre-reduction
+    # scores or assignments as if they described the reduced fit.
+    current["diagnostic"] = dict(result.get("diagnostic", {}),
+                                 empty_row_reduction=diagnostic)
+    return current

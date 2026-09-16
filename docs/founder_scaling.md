@@ -3,7 +3,10 @@
 The default is **dense transitions plus bounded panel search**. The optional
 structured transition model with bounded search gives near-quadratic
 founder-count scaling. An optimized broader search is also available. These
-choices affect L1–L4 assembly, independently of Stage 1.
+choices affect L1–L4 assembly, independently of Stage 1. The default additional
+all-founder refinement after final assembly has separate cubic total-work
+terms; the structured option does not make that pass near-quadratic. See
+[final refinement](methods.md#final-founder-path-refinement).
 
 The default uses **16 full proposal scores per category**, after the initial
 four-score budget caused serious localized reconstruction losses. The wider
@@ -84,8 +87,14 @@ not claims that sample count, chromosome length, iterations, or I/O are free.
 | Bounded-search candidate paths | Fixed endpoint quota; archive interior-state paths; no MMR all-selected comparisons | O(K² log K) for fixed B/quota |
 | Bounded panel selection | Conditional, no-switch and candidate/mate-HMM proposal scores; bounded full Viterbi/BIC refits | O(R (N m K² + B K² log K)) for an O(K) candidate pool |
 | Cavity carrier probabilities | Sum each pair-state mass at its one/two founder endpoints | O(N K²), replacing an O(N K³) dense incidence product |
+| Final all-founder dual escape | Same fixed-count score; all K focal paths, bounded dual sweeps and local choices | O(R D N m C K³), plus aggregate full-site scoring; D=20 and C≤16 by default |
+| Count deletion/refit | At most C refits plus an optimistic local bound, using the existing complexity cost | Bounded multiple of the refiner; the local bound can cost O(N L K³) |
+| Completed window searches | All K focal paths; bounded window, beam and local-row budgets | Cubic aggregate founder dependence, despite quadratic per-focal diploid updates |
+| Paired suffix/interval search | Exact suffix relabeling; capped interval pair shortlist and scan span | Suffix queries O(N B (K³ + K² log K)); bounded-pair interval DP quadratic per scanned bin |
 
-The near-quadratic/cubic whole-assembly comparisons assume bounded search.
+The near-quadratic/cubic hierarchy comparisons assume bounded search and exclude
+the later all-founder final refinement. Its per-focal diploid-state update is
+quadratic, but sweeping all K founders adds another factor of K.
 Broad search restores additional full rescoring and coordinated suffix
 proposals, including the historical quartic-style search costs. Selecting
 structured transitions alone does not bound that broader search quadratically.

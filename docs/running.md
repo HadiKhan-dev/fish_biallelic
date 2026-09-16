@@ -137,6 +137,14 @@ The flag works for `astcal` and `tropheops` too. TOML uses
 is `HAPLOTYPES_FEEDBACK_SELECTION`. Precedence is CLI > TOML > environment >
 balanced. This is local block feedback, **not** a T11 → T10 feedback loop.
 
+After both feedback rounds, entirely uncalled rows trigger smaller-panel
+refitting under the existing BIC-like objective. This is automatic in balanced
+and strict modes; strict also preserves surviving backbone calls. It is not
+unconditional deletion: a row can remain unknown if removing it worsens the
+fit. Partially called rows do not trigger this reduction. All four assembly
+levels use partial-founder predictive emissions; explicit unsupported breaks
+remain. No new flag or known founder count is required.
+
 Both modes retain unknown calls. Exact context-site inference is bounded to
 at most ten distinct context haplotypes; larger contexts or contexts that do
 not cover whole original blocks retain their input local proposals, with a
@@ -165,7 +173,8 @@ Switching modes does not overwrite raw discovery results.
 
 `--founder-refinement on` is the default for all three reconstruction commands.
 After final L1–L4 assembly, it reopens original prepared local-row choices while
-keeping component boundaries and founder counts fixed. The two L1/L2 context
+keeping component boundaries fixed; bounded deletion/refitting can reduce the
+initial founder count under the existing complexity cost. The two L1/L2 context
 passes and balanced local selection are unchanged. Use `--founder-refinement off`
 for a controlled comparison without this final pass.
 Toggling this final-only option reuses the same local feedback checkpoints;
@@ -180,6 +189,13 @@ L1 pieces supply larger proposals at the initial beam width. These must improve
 the total score without worsening genotype fit. This multiscale fallback is
 part of the default refiner; no extra flag is needed. See
 [methods](methods.md#final-founder-path-refinement).
+
+The final refinement also compares bounded one-founder deletions after refitting
+under the existing complexity cost, completed exact-flank window searches,
+and paired suffix/interval exchanges. These use no generation labels or known
+founder count; the off flag disables the entire final refiner. Count refits can
+be expensive on difficult chromosomes. See the measured limits in
+[validation](validation.md#expanded-founder-search-at-n80-and-5x).
 
 The final pass saves completed beams, iterations, components and its aggregate
 result under `09_painting_release_work/`. It uses the existing phase core ceiling

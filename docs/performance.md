@@ -37,6 +37,103 @@ timing. On chr4, final assembly plus refinement took 343.3 seconds, including
 229.1 seconds in refinement (about 92 seconds more than its stored predecessor).
 These component measurements must not be presented as a full-genome timing.
 
+The later default all-founder dual escape is an additional accuracy-oriented
+pass, not a speed optimization. Whole-genome prototype runs with smaller worker
+teams summed to 63–73 minutes per genome for this pass across five 5x seeds.
+These are sums of chromosome timings on mixed hardware, not measured sequential
+full-node runtimes. Production-path replays with complete node thread budgets
+added 605 seconds on seed409 chr19 (112 CPUs), 1,016 seconds on seed404 chr1
+(76 CPUs), and 870 seconds on fragmented seed406 chr3 (76 CPUs). The difficult
+seed409 chr3 added 3,062 seconds (128 CPUs). Per-block synchronization
+substantially limits useful CPU activity; larger thread teams
+are not necessarily faster. There is no matched fresh whole-genome timing for
+the newly integrated default yet. See [validation](validation.md#default-dual-decomposition-escape-pass)
+for the scientific results and scope of the integration checks.
+
+## Expanded founder-search timing at N80
+
+The later count/window/paired-interval default is an accuracy expansion, not a
+speed optimization. Its bounded deletion/refits can dominate difficult
+chromosomes. Fresh seed2006 (20/30/30, 5x) completed input/discovery in
+1,224 seconds. Five concurrent 19-core chromosome shards then took between
+8,227 and 17,420 seconds each; the longest contained four chromosomes.
+That is about 4h50 for the longest shard, **not** a single-node whole-genome
+timing or a matched speedup comparison. Shared hardware, first-use caches,
+different chromosome sets and sequential count refits limit extrapolation.
+
+The final candidate's seed2006 downstream replay, from completed assembly and
+typed paintings on 19 cores, measured 426 seconds for T10, 506 for T11 and
+49 for T12. These times exclude fresh upstream assembly. Two cached primary
+replays on 76 cores measured 244–267 seconds for T10, 259–263 for T11 and
+42–43 for T12; these used different seeds and are not a controlled scaling
+experiment. Final phase stability does not imply latent-posterior convergence.
+
+Validation used five 76-core allocations plus one 66-core allocation (446 CPUs
+in total), with independent chromosomes/genomes, disjoint CPU subsets and
+producer locks. New work reused released slots; CPU/thread budgets were not
+reserved for orchestration. Some tails remained dependency-limited or slowed
+by per-block synchronization. One sampled full-node T10 interval used about
+38 CPU-equivalents, not all 76: configured threads are not sustained CPU
+utilization. No complete aggregate peak-memory or CPU-efficiency measurement
+was collected for this multi-attempt validation. Count-refit implementation
+performance remains the clearest follow-up; do not quote older pipeline
+timings as the runtime of this expanded default.
+
+## Current planning estimates for N80 and N320
+
+For a comparable 22-chromosome simulation with about 9 million SNPs, six
+underlying founder haplotypes, 5x reads, dense/bounded assembly and balanced
+feedback, the following are **rough planning estimates for one 112-core node**.
+They are extrapolated from stored 38/76/112-core runs, not measurements of
+today's complete code on that hardware. No linear CPU-scaling assumption is
+made. N80 uses 20/30/30; N320 uses 20/100/200. First-use compilation, filesystem
+load, founder ambiguity and convergence can move the times substantially.
+
+| Disjoint portion | N=80 | N=320 |
+| --- | ---: | ---: |
+| Input/read simulation and evidence preparation | 2–5 min | 5–12 min |
+| Initial 200-SNP discovery | 8–18 min | 25–40 min |
+| L1 feedback, projection and local selection | 15–30 min | 35–50 min |
+| L1+L2 feedback, projection and local selection | 20–40 min | 40–60 min |
+| Final founder completion and L1–L4 hierarchy, excluding final refinement | 15–35 min | 30–50 min |
+| Expanded final founder-path/count/window refinement | Provision roughly 10–25+ h; very low-confidence full-node allowance | Current full-genome duration unmeasured; substantial additional hours possible |
+| T09 painting and release I/O | 1–3 min | 2–5 min |
+| T10 evidence preparation and pedigree inference together | 3–7 min | 12–20 min |
+| T11 family refinement and phase correction | 4–10 min | 12–25 min |
+| T12 recombination maps | 1–2 min | 2–5 min |
+
+The non-refinement portions total approximately **1–2.5 hours for N80** and
+**2.7–4.5 hours for N320**. These totals exclude optional truth evaluation,
+plot generation, installation, template generation from new real data and
+exceptionally long T11 retries. L1–L4 are grouped because the current saved
+measurements do not support a reliable fresh per-level breakdown.
+
+The N80 refinement allowance is deliberately broad, not a measured prediction:
+the fresh seed2006 v8 checkpoints record **55,833 seconds (15.51 hours)** of
+summed refinement time in 19-core chromosome shards, including **50,997 seconds
+(14.17 hours)** in count comparisons alone. The five shard wall durations sum
+to 62,642 seconds, but overlapped in real time. Their longest duration was
+17,420 seconds; neither sum nor longest shard is a 112-core sequential run.
+These measurements also precede partial-founder linking and the latest polish
+policy. Recent full-76-core cached-input cases range from 643 seconds on chr22
+to 10,253 seconds on chr11; the latter includes help from other nodes.
+Thus a rough N80 allocation allowance is **about 11–28+ hours**, not the older
+3–4-hour total. It is not a guaranteed upper bound.
+
+For N320, there is no defensible narrow total for the expanded default yet:
+use the roughly 3–4.5-hour non-refinement budget **plus the unmeasured new
+refiner**. Multiplying the N80 count-refit time by four would not be justified.
+More samples increase score cost but can strengthen the deletion bound and
+reduce ambiguity; search iterations and the number of surviving refits matter.
+An old N320 refinement time of 9.45 minutes covers a much smaller algorithm.
+
+Evidence for the better-constrained entries: seed2006 input/discovery took
+1,224 seconds on 38 cores, with 972 seconds inside discovery; the earlier
+76-core seed403 timings above give the N320 feedback/hierarchy split; current
+N80 downstream replays took roughly 4 minutes each for T10/T11 and under 1 minute
+for T12 on 76 cores. No new simulation or performance experiment was launched
+to prepare these estimates.
+
 ## CPU allocation and checkpoint reuse
 
 `core/parallel.py` owns the shared process/thread budget, forkserver pools,

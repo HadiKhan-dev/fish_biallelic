@@ -178,7 +178,10 @@ def process_single_block(vcf_path, chrom, start, end,
             # 3. Extract Reads (AD)
             ad = variant.format('AD')
 
-            if ad is None:
+            # HTSlib can represent an all-missing AD field as one sentinel
+            # column, even for biallelic records with Number=R. It is zero
+            # observed reads, not an observed reference allele.
+            if ad is None or (ad.shape[1] == 1 and np.all(ad < 0)):
                 n_samples = len(vcf.samples)
                 ad = np.zeros((n_samples, 2), dtype=np.int32)
             elif ad.shape[1] > 2:

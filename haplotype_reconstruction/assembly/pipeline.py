@@ -20,7 +20,7 @@ STAGE2_RELEASE_SCHEMA = "stage2-release-v1"
 
 
 STAGE2_RELEASE_BACKEND = (
-    "preprocess-original-layout-coherent-hierarchy-local-path-refinement-v7"
+    "preprocess-partial-founder-hierarchy-phase-refinement-v18"
 )
 
 
@@ -34,9 +34,12 @@ STAGE2_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
 
 STAGE2_RELEASE_CODE_IDENTITY_FILES += (
     'assembly/structured_transitions.py', 'assembly/panel_search.py',
-    'assembly/panel_scoring.py', 'assembly/panel_candidates.py',
+    'assembly/panel_scoring.py', 'assembly/panel_candidates.py', 'assembly/partial_emissions.py',
     'assembly/founder_refinement.py', 'assembly/founder_path_search.py',
-    'assembly/founder_scoring.py', 'assembly/evidence.py',
+    'assembly/founder_scoring.py', 'assembly/founder_dual_search.py',
+    'assembly/founder_exchanges.py', 'assembly/founder_windows.py',
+    'assembly/founder_intervals.py',
+    'assembly/founder_count.py', 'assembly/founder_count_bound.py', 'assembly/evidence.py',
 )
 
 _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
@@ -410,10 +413,10 @@ def stage2_release_identity_record(
             "batch_sample_rule": INTERSECTION_SAMPLE_RULE,
             "linking": "distance_aware_double_hmm",
             "linker_fit": "coherent_expected_counts",
-            "genotype_emission": "uniform_mixture_without_extra_log_floor",
+            "genotype_emission": "partial_founder_predictive_uniform_mixture",
             "max_linking_iterations": assembly_linking.MAX_LINKING_ITERATIONS,
             "observed_false_genotype_evidence": "uniform_state_neutral",
-            "final_founder_refinement": "fixed_count_full_site_potts_original_local_rows",
+            "final_founder_refinement": "full_site_potts_phase_count_staggered_intervals",
         },
     }
     if chromosome_map is not None:
@@ -886,7 +889,7 @@ def assemble_chromosome(
             "level": level,
             "linking": "hmm",
             "linker_fit": "coherent_expected_counts",
-            "genotype_emission": "uniform_mixture_without_extra_log_floor",
+            "genotype_emission": "partial_founder_predictive_uniform_mixture",
             "max_linking_iterations": assembly_linking.MAX_LINKING_ITERATIONS,
             "batch_size": batch_size,
             "component_count_before": before_count,
@@ -944,7 +947,7 @@ def assemble_chromosome(
                 preprocess_result.prepared_blocks, working, neutral_probs, sites,
                 config=config.founder_refinement_config,
                 num_threads=config.num_processes, checkpoints=release_checkpoints,
-                l1_blocks=refinement_context)
+                l1_blocks=refinement_context, cc_scale=config.cc_scale)
         else:
             output, refinement_diagnostics = refined["blocks"], refined["diagnostics"]
             resumed_phases.append(phase)

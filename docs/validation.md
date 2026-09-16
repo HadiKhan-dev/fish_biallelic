@@ -166,6 +166,16 @@ workflows, including reuse of local feedback checkpoints when final refinement
 is toggled off. The clean implementation matches all 26 paired prototype outputs
 exactly; seed401 chr16 is an additional clean-only control.
 
+An actual fragmented seed406 chr3 resume exposed a boundary-annotation issue:
+cached prepared leaves predate phase breaks introduced by the hierarchy.
+Rebuilding a changed final component now preserves its unchanged outer break
+flags, reasons and joint-information counts from the input component. A focused
+reproducer retains identical allele calls and source paths while fixing the
+annotation loss; the actual three-component chr3 replay matches the canonical
+inference arrays and boundary metadata and passes completed resume. Components
+were never joined by this issue. This is a metadata/resume fix, not an allele
+accuracy gain or a change to the fitting objective.
+
 The main refinement takes 435s on12 cores and 253s on38 cores of the measured Ice Lake
 node, with identical scientific output. Large chr3 takes 235s on13 cores and 164s
 on37 cores. These are additional refinement timings, not complete pipeline runtimes
@@ -234,6 +244,63 @@ measurement is 136.9s, so this case costs about 92s more. These are separate
 stored-run measurements, not a new full-seed or 112-core benchmark. The full
 refiner control at 38 cores takes 287.7s with the same six-error output.
 
+### Default dual-decomposition escape pass
+
+A second, all-founder search pass now follows the existing final refiner.
+It retains the same local candidates, full-site objective, fixed founder count,
+component spans, missingness rules and macro genotype-fit guard. It changes
+proposal search, not the observation model; truth and pedigree do not enter
+fitting. See [the method and cost](methods.md#final-founder-path-refinement).
+
+Matched seed409 chr3 ablations distinguish its mechanism: another beam pass,
+fixed-painting refinement alone and small-block-only dual search each leave
+2,742 founder errors. Dual search over the same L1 pieces, followed by ordinary
+polishing, reaches 81 across the same 9,034,784 called alleles. The first accepted
+macro move improves genotype fit and removes one internal sample switch.
+This is a search escape, not a changed scoring rule or a masking gain.
+
+Whole-genome prototype confirmation covers 132 chromosomes across six N=320,
+5x seeds (404–409), including a variable-map simulation. Two chromosomes improve
+and 130 remain unchanged, with no
+called-denominator or retained-variation regression. Across 322,435,082 identical
+called founder alleles, errors decrease 54,598 to 51,563. The changed cases are
+seed409 chr3 (2,742 to 81) and chr19 (376 to 2). The chr19 improvement was already
+attainable by an earlier broader search; chr3 is the decisive new mechanism.
+These are controlled additional passes after the completed original refiner,
+not validation of replacing its initial searches from unrefined L4.
+
+The full 22-chromosome downstream confirmation preserves 320/320 exact pedigree
+configurations (20 zero-parent roots, 300 correct pairs and 600 edges, no extras).
+Final genotype errors decrease 485,187 to 466,475; phase switches 692 to 677; called
+alleles increase 5,725,594,073 to 5,726,754,475. Other 20 chromosome metrics are
+unchanged. Matched-callable comparisons on both changed chromosomes confirm
+genuine corrections rather than improvements solely from lost calls.
+This is simulation evidence, not real-data trio ground truth or a global
+optimality guarantee.
+
+Production integration then passed four cached-input replays through the shared
+assembly API and typed T09 painting release. Both refinement passes recomputed
+from frozen, unrefined L1–L4 results. The first pass matched the original output;
+the final scientific founder and painting arrays matched the validated prototype
+exactly, including component boundaries and missing-data fields.
+
+| Production replay, all N=320 and 5x | Founder errors | Called founder alleles |
+| --- | ---: | ---: |
+| Seed409 chr3 | 81 | 9,034,784 |
+| Seed409 chr19 | 2 | 1,636,206 |
+| Seed406 chr3, fragmented control | 28 | 9,034,691 |
+| Seed404 chr1, clean control | 0 | 1,976,345 |
+
+Completed resume passed on all four. The clean control also passed interrupted
+proposal resume and rejection of a checkpoint with a changed sweep setting.
+Default-on/off wiring and 36 independent small numerical cases passed. These
+checks reused cached upstream results; they are not another fresh whole-genome
+or downstream run. The already validated downstream scientific inputs were
+reproduced. The additional pass has a material runtime cost: 10.1–16.9 minutes
+on the three shorter production controls and 51.0 minutes on the difficult chr3,
+using full-node budgets of 76–128 CPUs. These are component measurements, not
+a new whole-pipeline timing or evidence of efficient full-node scaling.
+
 ## Missing-data discovery and completion
 
 Focused cases cover missing read cells, wholly unobserved samples, long missing
@@ -288,6 +355,107 @@ final L1–L4 and painting, mode separation, completed/batch/interrupted resumes
 and preservation of original discovery inputs. Missing-read, noncontiguous
 marker-mask and genetic-map wiring checks accompany those comparisons.
 
+## Partial-founder linking and empty feedback rows
+
+Focused checks use seed2006, N=80 (20/30/30), 5x chr13 and small explicit
+likelihood controls. The actual isolated 200-SNP block at positions
+22,371,775–22,411,082 previously retained six rows, one entirely unknown.
+Balanced post-feedback refitting removes that row with a penalized-score gain
+of 2.6492902370. The five rows contain 200/200/199/200/200 called alleles.
+The canonical two-round feedback path reproduces this result. It withdraws
+one formerly called allele; it does not invent a value for the empty row.
+
+Strict selection correctly vetoes this particular reduction because that
+one backbone call would be lost. Both its calls and assignments remain stable
+on repetition. A genuinely distinct singleton row in a small read-likelihood
+control also vetoes deletion when deleting it worsens the fit. A partially
+called rare row does not initiate deletion.
+
+The seven compact predictive emission categories match an independent dense
+genotype-distribution calculation. Complete-input linker weights are identical;
+partial binned scores match the direct calculation within 1e-12. Forward and
+backward compact/dense scans and the log-domain fallback agree within 1e-10.
+Shared atomic unknown alleles retain the homozygous distribution rather than
+acquiring spurious heterozygote mass. Dense and structured transition fitting
+both consume partial inputs. Wholly unsupported blocks and explicit phase
+breaks remain unresolved.
+
+The seed2006 chr13 end-to-end assembly/painting check now produces one
+six-row chromosome component rather than three. The current production release
+and unchanged painter reproduce **334 founder-allele mismatches / 1,552,807
+called cells**, with 443 uncalled cells out of 1,553,250. The earlier fragmented
+result had 1,509 mismatches / 1,552,641 calls. Reverse truth-to-panel
+errors/missing decrease from 1,920 to 777. These are founder reconstruction
+metrics, not sample-painting phase-switch counts. Typed T09 reload and final
+release checkpoint replay both pass.
+
+The formerly isolated block has six final paths with 200 calls each, using
+five distinct local sequences. Existing joint completion fills the retained
+panel's one remaining unknown; its pre-fill inference snapshot stays unknown.
+The six true local patterns are not all recovered: the reverse local distance
+is two allele cells both before and after this change. Thus the successful
+bridge is not evidence that all rare local variation has been recovered.
+
+Joining the chromosome initially exposed a long-phase error. The existing
+pre-count paired suffix search proposed a much better full-objective phase but
+its extra nondecreasing-genotype-fit veto rejected it. The narrowly changed
+pre-count policy preserves every site's called/missing allele multiset and
+accepts improvement of the existing full objective. Allele-changing moves,
+count-reduction refits and final bounded intervals retain their genotype-fit
+guards. Truth is used only after inference. The integrated pre-count pass
+reproduces the isolated prototype exactly; on five other cached chromosome
+inputs, all called arrays and all atomic source-provenance arrays are unchanged.
+The default guarded call also reproduces the previous chr13 pre-count result.
+
+The completed bounded controls give the following founder-level results.
+Errors are nearest-true-founder mismatches for each assembled row; the reverse
+metric separately measures missing or misrepresented true variation.
+
+| Seed / chromosome | Components, before → after | Allele errors, before → after | Called cells, before → after | Reverse errors/missing, before → after |
+| --- | --- | --- | --- | --- |
+| 2000 / chr13 | 1 → 1 | 15 → 14 | 1,552,809 → 1,552,809 | 456 → 455 |
+| 2005 / chr23 | 1 → 1 | 496 → 450 | 2,951,836 → 2,951,531 | 3,012 → 3,271 |
+| 2006 / chr1 | 1 → 1 | 194 → 275 | 1,974,707 → 1,974,917 | 1,833 → 1,704 |
+| 2006 / chr6 | 9 → 1 | 443 → 544 | 2,445,303 → 2,446,566 | 2,776 → 2,812 |
+| 2006 / chr11 | 5 → 1 | 83 → 83 | 2,341,221 → 2,341,622 | 3,572 → 3,567 |
+| 2006 / chr13 | 3 → 1 | 1,509 → 334 | 1,552,641 → 1,552,807 | 1,920 → 777 |
+| 2006 / chr20 | 3 → 1 | 4,094 → 1,927 | 1,769,097 → 1,769,283 | 4,653 → 2,500 |
+| 2006 / chr22 | 3 → 1 | 12 → 3 | 2,398,215 → 2,398,409 | 145 → 142 |
+
+All completed candidates have six rows in one component, with successful
+unchanged painting, typed T09 validation and checkpoint resume. Chr13 uses the
+current production phase-only policy and canonical release replay. The five
+original controls have identical pre-count allele and atomic-provenance arrays
+under that policy, with unchanged downstream numerical functions; chr20 and
+chr22 run the complete latest-source path.
+
+These are not uniform accuracy improvements: chr6 and chr1 gain calls but add
+101 and 81 mismatches, respectively; chr23 loses 305 calls and its reverse
+metric worsens despite fewer called errors. Joining fragments also makes
+long-range orientation errors visible to chromosome-level scoring, which
+previously matched each fragment independently. Local 200-SNP errors for chr6
+increase from 43 to 56, whereas chr1 decreases from 33 to 29.
+
+Seed2006 chr11's completed final refinement and painting preserve its 83
+mismatches while adding 401 calls, with 3,484 unknown cells remaining.
+Its cached-input run took 10,253 seconds; the difficult founder-count proposal
+dominated, despite distributing other independent proposals to freed nodes.
+Seed2006 chr20 also finishes as one six-row component: 1,927 errors over
+1,769,283 calls, with 573 unknown cells. Its local 200-SNP errors decrease
+34 → 31, although the local reverse errors/missing increase 832 → 862.
+All five originally fragmented chromosomes (6, 11, 13, 20, 22) are now joined.
+Across all eight comparisons, called errors decrease 6,846 → 3,630 over
+16,985,829 → 16,987,944 calls; reverse errors/missing decrease 18,367 → 15,228.
+The final chr20 continuation took 196 seconds after expensive count proposals
+were cached; that is not its full runtime or a fresh-run timing comparison.
+The completed chr22 comparison uses the latest production source
+through both feedback rounds, assembly, refinement and painting; it took
+643 seconds on 76 allocated cores, excluding cached discovery. Its successful
+join adds 194 calls and reduces both forward and reverse errors.
+No fresh simulation, whole-genome T10–T12 run, high-N sweep or calibrated linkage
+confidence study is claimed. These checks establish targeted behavior and
+implementation agreement, not whole-pipeline biological accuracy.
+
 ## Painting and pedigree inference
 
 Painting comparisons retain sample/site order, component manifests, called
@@ -319,6 +487,163 @@ observed samples, not proof that an individual is a biological founder.
 Same-depth and missing-parent designs remain limitations of direction inference.
 Internal support and bootstrap fractions are not calibrated correctness
 probabilities. Real cichlid cohort labels do not establish individual parentage.
+
+### Conditional ancestry-depth resampling at N=80
+
+At 5x simulated coverage with 20 F1, 30 F2 and 30 F3 samples, full 22-chromosome,
+metadata-free decision replays gave the following exact Tier-B configurations:
+
+| Seed | Previously reselecting mixture dimension | Conditional dimension |
+| --- | ---: | ---: |
+| 2000 | 80/80 | 80/80 |
+| 2001 | 75/80 | 80/80 |
+| 2002 | 80/80 | 80/80 |
+| 2003 | 50/80 | 80/80 |
+| 2004, untouched validation | 51/80 | 80/80 |
+| 2005, untouched validation | 77/80 | 80/80 |
+
+Each conditional result retained all 20 roots and all 60 exact parental pairs:
+120 correct edges, no extras or missing edges. The full-data graph and mixture
+selection were unchanged. No true generation count, parent identities or
+sample metadata entered fitting; ground truth was used only after saving the
+inferred results. The native implementation reproduced the four prototype
+replays and passed serial/forkserver, uninformative-data and cached-resume
+checks. Seeds 2004 and 2005 were evaluated after selecting the method.
+
+This is evidence for conditional model stability in these simulated designs,
+not calibration of correctness probabilities or proof across arbitrary
+pedigrees. In particular it does not remove same-depth/missing-parent
+limitations. No higher-N rerun was used for this change. Separate N=80, 10/30/40-design
+checks at 5x also retained the exact full-data graphs. Conditional Tier-B
+recovery was 80/80 for seeds 2010 and 2011, versus 0/80 and 50/80 previously;
+each conditional result had 10 roots, 70 exact parent pairs and 140 correct
+edges, with none missing or extra. These are T10 decision-replay results,
+not a claim that downstream phase is unchanged after releasing more families.
+
+Standard T10-to-T12 replays on the unchanged, held-out seed2004/2005 assemblies
+and typed paintings reproduced the exact pedigrees and completed all 22
+chromosomes. Final sample phase-switch errors fell from 334 to 172 (2004) and
+186 to 171 (2005). Component-aligned sample allele errors fell from 11,358,562
+to 426,545 and from 1,551,077 to 427,747 respectively. These are sample-phase
+metrics, not reconstructed-founder allele errors. Called-allele totals remained
+1,432,247,927 and 1,431,929,896 out of 1,433,096,320, and genotype-error totals
+remained 109,486 and 107,975. This supports the downstream benefit of releasing
+the correctly inferred families without changing genotypes or coverage.
+
+The corresponding standard 22-chromosome downstream replays for the additional
+10/30/40 design completed as well: switches fell from 463 to 149 (seed2010)
+and from 371 to 196 (seed2011). Component-aligned sample allele errors fell
+from 19,595,833 to 639,973 and from 9,297,924 to 803,119. Called alleles stayed
+at 1,412,951,998 and 1,414,401,014 out of 1,433,096,320; genotype errors stayed
+at 147,197 and 133,058. Thus these changes improve phase conditional on the
+available calls, not the lower coverage of these two assemblies.
+
+A matched seed2003 control also completed standard T10–T12 on the unchanged
+assembly: 80/80 exact configurations, 120 correct edges and no extras. Switches
+fell from 330 to 155 and component-aligned sample allele errors from 11,244,419
+to 610,831. Called alleles (1,426,176,454) and genotype errors (128,427) were
+unchanged. This isolates the pedigree-resampling contribution; it does not
+include the separate provisional founder-assembly changes.
+
+## Expanded founder search at N80 and 5x
+
+The default final refiner now combines beam/dual search, guarded paired suffix
+moves, bounded one-founder deletion/refitting, completed exact-flank window
+searches, and guarded paired intervals. The local discovery and feedback models,
+genotype likelihoods, switch penalties and calling thresholds were not retuned
+for N=80. No generation labels, true founder count or true pedigree enter these
+searches. The normal simulation defaults were not changed.
+
+The following 22-chromosome comparisons held discovery and hierarchy inputs
+fixed within each seed. “Before” is the preceding dual-escape production
+refiner. Errors match each reconstructed haplotype to one truth founder over
+its whole component; they are **founder allele errors**, not sample phase
+switches. Called denominators can change when redundant paths are removed or
+different partially observed local rows are selected.
+
+| Design | Seed | Founder errors before → after | Called founder alleles before → after |
+| --- | ---: | ---: | ---: |
+| 20/30/30 | 2000 | 5,860 → 3,144 | 53,714,690 → 53,714,690 |
+| 20/30/30 | 2001 | 5,973 → 5,408 | 53,725,935 → 53,726,386 |
+| 20/30/30 | 2002 | 33,959 → 28,788 | 53,708,943 → 53,708,958 |
+| 20/30/30 | 2003 | 229,018 → 34,649 | 54,127,745 → 53,687,190 |
+| 20/30/30 | 2004 | 3,726 → 2,847 | 53,728,311 → 53,728,281 |
+| 20/30/30 | 2005 | 17,740 → 1,886 | 53,724,930 → 53,724,899 |
+| 10/30/40 | 2010 | 619,476 → 521,073 | 53,990,325 → 53,478,174 |
+| 10/30/40 | 2011 | 628,676 → 320,935 | 54,556,693 → 53,671,358 |
+
+Across the six primary seeds, founder errors fell 296,276 → 76,722
+(74.1% fewer); reverse truth-to-panel errors/missing fell
+368,649 → 200,402. Thus the gain is not simply fewer reported founder rows.
+Reverse errors/missing in ancestry carried by at least two sampled root
+lineages fell 242,771 → 90,888. Lineage support is an evaluation diagnostic,
+not proof that a tract is statistically identifiable. Unsupported ancestry
+was not used as a target for forced reconstruction.
+
+Every genome improves in aggregate, but not every chromosome does.
+For example, seed2002 chr3 has 432 additional founder errors; secondary
+seed2011 chr10 has 4,313 additional errors in multiply sampled ancestry.
+The 10/30/40 design remains materially harder, despite its correct pedigree.
+These development-seed comparisons support the mechanism, not uniform
+accuracy, global optimality, or a claim that all remaining ancestry is
+recoverable.
+
+A fresh primary seed2006 used the ordinary simulation/discovery/feedback and
+hierarchy CLI, followed by the same frozen candidate's native final release,
+typed T09 rebuilding and standard T10–T12. It finished with **13,086 errors /
+53,711,112 called founder alleles** (243.6 per million), and 40,894 reverse
+truth-to-panel errors/missing. It is not assigned a before/after comparison
+against the older dual-only default, which was not run on this seed.
+
+All nine final pipelines recovered **80/80 exact pedigree configurations**:
+20 roots, 60 exact parent pairs and 120 edges for each primary seed;
+10 roots, 70 exact parent pairs and 140 edges for each secondary seed.
+There were no missing or extra parent edges. All 22 chromosomes completed
+family refinement, final phase and conditional maps.
+
+| Seed | Final called sample alleles / 1,433,096,320 | Genotype errors | Final sample switch errors |
+| ---: | ---: | ---: | ---: |
+| 2000 | 1,432,069,069 | 110,857 | 188 |
+| 2001 | 1,432,028,139 | 106,996 | 129 |
+| 2002 | 1,431,690,483 | 109,127 | 163 |
+| 2003 | 1,431,849,349 | 129,585 | 154 |
+| 2004 | 1,432,248,237 | 109,427 | 172 |
+| 2005 | 1,432,011,021 | 106,017 | 168 |
+| 2006 | 1,431,525,586 | 112,539 | 154 |
+| 2010 | 1,424,163,119 | 147,225 | 147 |
+| 2011 | 1,425,839,280 | 131,986 | 196 |
+
+Matched downstream comparisons also expose trade-offs. Relative to the
+completed stable/tie-window search without the later upper-ranked and paired
+interval passes, seed2001 has 298 more genotype errors on identical calls;
+seed2002 has 769 more. Seed2011 has one additional switch on identical
+genotype-correct comparisons (193 → 194), and its component-aligned sample
+allele errors increase 717,280 → 740,672 on common calls, despite fewer
+genotype and founder errors. In contrast, seed2005's matched genotype errors
+fall 107,900 → 106,013 with the same 168 switches. Acceptance prioritizes the
+substantial founder/pedigree gains while retaining these measured costs;
+improved founder assembly is not automatically improved sample phase.
+
+The final paired-interval addition alone changed two of the 176 cached
+chromosomes: seed2005 chr23, 11,544 → 496 founder errors, and seed2011 chr1,
+31,058 → 4,580. It introduced no founder-error regression against its
+immediate predecessor on these controls. It reduced their genome-wide matched
+sample switches from 178 → 168 and 200 → 196, respectively.
+
+Canonical integration matched the frozen candidate's executable syntax trees
+(formatting and one explanatory module docstring aside). It passed 11,928
+independent interval-boundary/reversal/neutral/ragged score checks, 432
+exhaustive count-bound comparisons, 240 window-bound/proposal comparisons,
+and three missing-data/provenance/component-boundary/resume fixtures.
+Configuration routing exercised the caller's complexity scale and the
+disabled route. Every cached native chromosome reproduced its prototype,
+rebuilt typed T09, and resumed exactly.
+
+No higher-N simulation was run for this change. No N=80-specific inference
+branch or threshold was added; preservation at larger N has not been
+empirically re-established by these tests. The extra fresh 10/30/40 seed2012
+is separate, still provisional until all of its checkpoints and evaluations
+complete. Full validation artifacts remain in ignored work storage.
 
 ## Family refinement and final phase
 
@@ -354,6 +679,18 @@ Interrupted and completed resume, an interruption before phase assessment, and
 refusal to publish at an unstable cap were checked. Later exact reuse passed
 all 22 seed401 chromosome comparisons; the newest dirty-tile optimization
 retained all final-phase and stability fields on chr16 and chr3.
+
+A failure-only damping retry was validated using the actual exhausted
+seed408, N=40 (20/10/10), 5x chr15 checkpoint. Its original solve reached 520
+iterations without stable called phase. A cold retry at damping 0.25 stabilized
+after 25 iterations and exactly matched the independently computed lower-damping
+allele calls and phase map. The original failed checkpoint was retained.
+Cold ordinary-damping controls on seed407 with the same N/design chr15 and
+seed404, N=320, 5x chr1 exactly matched their previously accepted allele calls
+and phase maps; neither used a retry. All three passed resume checks, including
+the exhausted first attempt. These are targeted stability/equivalence checks,
+not a claim that the latent family posterior converged or that lower damping
+uniformly improves phase accuracy.
 
 ## Conditional recombination maps
 

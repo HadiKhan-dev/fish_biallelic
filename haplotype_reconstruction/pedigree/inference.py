@@ -368,6 +368,7 @@ def infer_from_parent_state_evidence(
             ),
             scaffold_data=scaffold_data,
             m1_direction_state_counts=m1_direction_state_counts,
+            depth_component_count=full_depth_model.posterior.shape[1],
         )
     )
 
@@ -400,6 +401,7 @@ def infer_from_parent_state_evidence(
                 total_callable_bins
                 - callable_matrix[omitted],
                 settings.bootstrap_seed,
+                component_count=full_depth_model.posterior.shape[1],
             )
             selection = evaluate(loco_weights, depth_model=loco_depth_model)
             if m1_direction_loco_counts is not None:
@@ -1150,6 +1152,7 @@ def infer_from_parent_state_evidence(
             "LatentAncestryDepthComponentWeights": depth_component_weights,
             "LatentAncestryDepthSelectedBIC": depth_selected_bic,
             "LatentAncestryDepthTestedBICs": depth_tested_bics,
+            "AncestryDepthResampling": "conditional_full_data_component_count",
             "InformativeContigCount": informative_count,
             "LocalStateBootstrapFraction": state_bootstrap,
             "LocalConfigurationBootstrapFraction": (

@@ -193,7 +193,7 @@ def _scaled_scan(weights, error_weights, invalid_emission, stay, switch, quality
 class PreparedBlockScans:
     """Fixed block data and cached zero-prior scores for one transition mesh.
 
-    Compact input has three genotype log weights and a dosage lookup. Its error
+    Compact input starts with three genotype log weights and a pair lookup. Its error
     emission averages those three weights: an independent uniformly drawn
     genotype, not an average over the represented founders. For dense diagnostic
     inputs supply error_log_emissions in the same per-site likelihood scale;
@@ -231,9 +231,10 @@ class PreparedBlockScans:
                 error_log_emissions = np.full(tensor.shape[:2], -math.log(3.0))
             else:
                 # Log-sum-exp retains the original common observation scale,
-                # including when the dense log fallback is needed.
+                # including for seven-category partial-founder inputs. Only the
+                # first three entries are genotypes, not all predictive categories.
                 error_log_emissions = np.logaddexp.reduce(
-                    tensor.astype(np.float64), axis=2) - math.log(3.0)
+                    tensor[:, :, :3].astype(np.float64), axis=2) - math.log(3.0)
         self.error_log_emissions = np.ascontiguousarray(error_log_emissions)
         self.error_weights = np.exp(self.error_log_emissions)
         self.invalid_emission |= np.any(

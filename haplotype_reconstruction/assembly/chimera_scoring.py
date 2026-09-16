@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from scipy.optimize import linear_sum_assignment
 from numba import njit, prange
+from . import partial_emissions
 
 
 _STACK_BYTES_BUDGET = 4 * 1024**3
@@ -63,8 +64,8 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites,
     Default None preserves the original behaviour (no thread resync) for
     any existing callers that don't pass the argument.
 
-    Founder alleles are scored only at sites called in every candidate. Missing
-    sites retain their bin geometry and contribute zero to every state.
+    Partial founder observations use the same predictive distributions as the
+    linker. All-unknown sites and uniform sample observations remain neutral.
 
     Returns list of dicts with keys: 'hap_keys', 'bin_emissions', 'n_bins'.
     bin_emissions shape: (num_samples, n_haps, n_haps, n_bins)
@@ -98,17 +99,19 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites,
             block_keep = np.ones(n_sites, dtype=np.bool_)
         else:
             block_keep = np.asarray(block_keep, dtype=np.bool_)
-        complete_sites = np.ascontiguousarray(
-            block_keep & np.all(panel.called, axis=0)
-        )
-        hap_q = np.ascontiguousarray(panel.q, dtype=np.float64)
-        if not np.all(np.isin(hap_q[:, complete_sites], (0.0, 1.0))):
-            raise ValueError("called founder alleles must have hard q values")
-        bin_emissions = assembly_chimera_kernels._compute_bin_emissions_numba(
-            block_samples, hap_q, n_haps, n_bins, snps_per_bin, n_sites,
-            complete_sites,
-        )
-        del block_samples, hap_q, complete_sites, panel
+        usable = np.ascontiguousarray(block_keep & np.any(panel.called, axis=0))
+        if np.all(panel.called[:, block_keep]):
+            # Preserve the optimized fully-called path exactly.
+            bin_emissions = assembly_chimera_kernels._compute_bin_emissions_numba(
+                block_samples, np.ascontiguousarray(panel.q), n_haps, n_bins,
+                snps_per_bin, n_sites, usable)
+        else:
+            alleles = np.ascontiguousarray(
+                np.where(panel.called, panel.q, -1), dtype=np.int8)
+            bin_emissions = partial_emissions.binned_log_emissions(
+                block_samples, alleles, partial_emissions.source_row_ids(block),
+                usable, snps_per_bin)
+        del block_samples, usable, panel
         # Precompute a {hap_key: local_index_in_hap_keys} dict so downstream
         # call sites that map path entries → local hap indices can use an
         # O(1) lookup instead of repeating list.index() (O(n_haps) per call).

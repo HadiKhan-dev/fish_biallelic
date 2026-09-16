@@ -205,6 +205,7 @@ def _evaluate_bootstrap_chunk(
             multiplicity @ junction_matrix,
             multiplicity @ callable_matrix,
             int(shared["bootstrap_seed"]),
+            component_count=shared["depth_component_count"],
         )
         selection = evaluate(multiplicity, depth_model)
         if m1_direction_counts is not None:
@@ -421,6 +422,7 @@ def _run_parent_state_bootstraps(
     direction_supported_parents: Optional[np.ndarray] = None,
     scaffold_data: Optional[Mapping[str, Any]] = None,
     m1_direction_state_counts: Optional[np.ndarray] = None,
+    depth_component_count: Optional[int] = None,
 ) -> tuple[int, int]:
     """Run fixed-seed bootstraps serially or in a shared-memory pool."""
     n_contigs = contig_log_likelihoods.shape[0]
@@ -470,6 +472,12 @@ def _run_parent_state_bootstraps(
         "bootstrap_seed": settings.bootstrap_seed,
         "contig_information_weights": information_weights,
     }
+    if depth_component_count is None:
+        full_depth = pedigree_direction._fit_ancestry_depth_model(
+            junction_matrix.sum(axis=0), callable_matrix.sum(axis=0),
+            settings.bootstrap_seed)
+        depth_component_count = full_depth.posterior.shape[1]
+    ordinary_shared["depth_component_count"] = int(depth_component_count)
     depth_refits = 0
     if worker_count == 1:
         shared = {

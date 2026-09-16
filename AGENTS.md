@@ -342,6 +342,52 @@ For this repository:
 
 `AGENTS.md` cannot disable an outer sandbox imposed by Codex, Claude Code, Kimi Code, a desktop app, a launcher, or CSD3.
 
+### Persistent Codex temporary directory
+
+The CSD3 Codex runner uses a persistent, private directory on shared HPC-work
+storage. The host-side `/home/ahk39/.codex/.env` contains:
+
+```dotenv
+TMPDIR=/rds/user/ahk39/hpc-work/codex-runner-tmp.gKhMfcvc
+```
+
+Preserve this setting and directory during cleanup. The random suffix comes
+from its original creation with `mktemp -d`; it does not make the directory
+automatically expire. This location is separate from the shared project quota
+and survives individual compute allocations. It is runner scratch space, not
+a location for accepted scientific results or permanent checkpoints.
+
+After a runner restart or host change, verify the effective setting with a
+small, normal sandboxed command before launching substantial work:
+
+```bash
+hostname
+printf 'TMPDIR=%s\n' "${TMPDIR:-unset}"
+df -h /rds/user/ahk39/hpc-work/codex-runner-tmp.gKhMfcvc
+df -i /rds/user/ahk39/hpc-work/codex-runner-tmp.gKhMfcvc
+```
+
+On 16 September 2026, persisting this setting and restarting the remote runner
+restored commands after this distinct pre-execution failure:
+
+```text
+failed to register synthetic bubblewrap mount target /tmp/.git: No space left on device (os error 28)
+```
+
+Do not conflate that error with the namespace-creation error above or infer
+that the project filesystem is full from the displayed mount target alone.
+Check the actual runner host, its effective temporary directory, and applicable
+space/file quotas. A separate login terminal may use a different host or
+temporary directory. Inspect only the relevant `TMPDIR` setting, never dump
+the complete `.env` file because it may contain credentials.
+
+If the startup setting must change, use an explicitly authorized host-side
+change and restart the appropriate remote runner; exporting a variable inside
+a command that cannot start is too late. Keep sandbox and approval policies
+unchanged. Do not purge live sandbox bookkeeping, kill unrelated runners or
+Slurm jobs, or add automatic checkpoint deletion. This persistent workaround
+does not guarantee against future quota exhaustion or unrelated sandbox faults.
+
 ## Concurrency and multiprocessing
 
 The project uses process-level parallelism and Numba-accelerated numerical
