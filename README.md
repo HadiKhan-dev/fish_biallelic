@@ -96,6 +96,10 @@ These passes use genotype evidence, not pedigree, generation labels or a known
 founder count. They are enabled by default and checkpointed separately.
 Use `--founder-refinement off` to disable final refinement for a comparison.
 See [the model and its limits](docs/methods.md#final-founder-path-refinement).
+Current validation confirms that the eight previously fragmented N320 controls
+can be joined, but final refinement worsens founder accuracy on seed407 chr15.
+This remains an [explicit accuracy limitation](docs/validation.md#n320-fragmentation-replay),
+not a completed scientific fix or a uniformly improved release.
 T11 does not feed back into painting or pedigree inference, and the estimated
 T12 map is not automatically fed upstream.
 Shared-family orientation-error evidence is enabled for T12 by default;

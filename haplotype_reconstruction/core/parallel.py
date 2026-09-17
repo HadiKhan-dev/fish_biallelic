@@ -183,6 +183,15 @@ else:
 
     os.environ["NUMBA_THREADING_LAYER"] = _selected_layer
 
+# Numba may already have been imported (including above) before this module
+# chooses its backend. Updating only os.environ then leaves config pointing
+# at the inherited backend until a later config reload. Apply the existing
+# selection before first pool initialization; never replace a running backend.
+try:
+    _numba.threading_layer()
+except ValueError:
+    _numba.config.THREADING_LAYER = os.environ["NUMBA_THREADING_LAYER"]
+
 
 _STARTED_COUNTER = None
 
@@ -685,5 +694,3 @@ def _log_alloc(n):
               file=sys.stderr, flush=True)
     except Exception:
         pass
-
-

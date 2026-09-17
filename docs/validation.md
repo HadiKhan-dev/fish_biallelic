@@ -19,7 +19,9 @@ choosing the T11 stopping rule, not from all project development.
 | Pre-L1 founder completion | 5,484 chr16 blocks across seeds400–402; independent 2×/3×/5× crossfits |
 | Dense q16 assembly and painting | All 22 seed402 chromosomes plus six controls; Stage1 and painter held fixed |
 | Final founder-path refinement | All 22 current balanced-input seed402 and seed403 chromosomes plus seed400–402 controls; geometry, missingness, provenance and resume checks |
-| Latest guarded multiscale refinement | All 22 seed403 chromosomes plus six controls; fresh chr4 final assembly, painting and typed T09 replay |
+| Guarded multiscale refinement | All 22 seed403 chromosomes plus six controls; fresh chr4 final assembly, painting and typed T09 replay |
+| Optimized final refiner | 217 N80 chromosomes across ten seeds; seven distinct N320 chromosomes; frozen-input, field-by-field and resume comparisons |
+| N320 fragmentation replay | Eight previously fragmented chromosomes now continuous; seed407 chr15 final-refinement regression remains unresolved |
 | Painting numerical implementation | All 22 seed402 q16 chromosomes, 148 components and 8,956,852 sites, plus seed400/401 chr16 controls |
 | Packed T09 evidence reuse | Full chr3/chr16 repaints, prepared fields and typed checkpoint round trips; memory-limited/uncached controls |
 | Metadata-free T10 | Full 22-chromosome seed402 q16 check and a subsequent full seed401 cached/uncached check |
@@ -33,6 +35,104 @@ with the balanced local feedback and final founder refinement. A subsequent
 feedback, L1-L4, founder refinement, painting, pedigree inference, family phase
 refinement and maps. Fixed-input comparisons must not be relabeled as fresh
 simulations or fresh block discovery.
+
+## Optimized founder refinement
+
+The latest performance comparison starts from unchanged cached L4 inputs;
+it does not repeat discovery, feedback or hierarchy. The 217 completed N80/5x
+chromosomes cover seeds2000–2006,2010,2011 and 19 available chromosomes from
+seed2012, spanning both 20/30/30 and 10/30/40 cohort designs. Every final product
+matches its independently recomputed frozen pre-optimization baseline:
+component geometry, ordered called/missing alleles, inference arrays,
+probabilities, atomic provenance and phase-boundary metadata. Complete resumes
+match for all 217, as do targeted partial resumes. Combined founder errors are
+unchanged at 1,164,185 / 530,043,572 called cells.
+
+The heuristic deep-count screen avoided 163 losing refits across 529 components
+and retained all 11 accepted count reductions. The largest cheap deficit of
+an accepted reduction was 4.54 per-founder complexity costs, below the default
+threshold of eight. This is empirical evidence, not a safe mathematical bound
+or a calibrated probability. The unscreened setting remains available.
+
+Seven distinct cached N320/5x chromosomes also match the frozen predecessor:
+seed404 chr1/11/20, seed405 chr20, seed406 chr3, seed407 chr10 and seed408 chr19.
+Paired warm repeats and one extra CPU-budget check bring this to 27 solves and
+14 optimized-versus-predecessor field comparisons. Both implementations give
+274 errors / 20,334,788 called alleles, 592 missing output cells and 470 reverse
+truth-to-panel errors/missing. Every completed resume passes.
+
+These checks establish preservation of the immediate pre-optimization output,
+not universal correctness of the accumulated search changes. In particular,
+the earlier cubic search redesign changed seed2006 chr20 from 1,927 to 2,785
+errors among the same 1,769,283 called cells. Later exact comparisons use that
+post-redesign baseline; they do not erase the earlier regression. Normalized
+beam variants and an algebraically simplified short dual were rejected after
+larger chromosome-level regressions and are not in the package.
+
+Truth was used only for evaluation after inference. The N320 cached-L4 tests
+preserve old fragment boundaries by design and therefore do not evaluate the
+upstream fragmentation fix. That separate replay follows below. Timings,
+cache conditions and memory measurements are in [performance](performance.md#final-founder-refinement).
+
+## N320 fragmentation replay
+
+An inventory of five stored N320/5x seeds found 102/110 chromosomes already
+represented by one six-row component. The other eight were rerun from cached
+Stage1 blocks and original genotype likelihoods through both balanced feedback
+rounds, current partial-founder-aware L1–L4, final refinement and unchanged
+painting. No old feedback/hierarchy output was reused.
+
+All eight now have one component with six rows spanning every input SNP.
+Each reconstructed row matches a different truth founder across the whole
+chromosome; a one-to-one assignment gives the same error count. The count
+was not forced and truth did not enter inference. Second-round entirely unknown
+local rows fall from 14 to zero. Final missing output cells fall from 3,112
+to 259, with 23,100,869 called cells in the new products.
+
+| Seed / chromosome | Components before → after | Founder-allele errors before → after | New called cells | New missing cells |
+| --- | ---: | ---: | ---: | ---: |
+| 404 chr20 | 3 → 1 | 245 → 18 | 1,769,856 | 0 |
+| 405 chr4 | 6 → 1 | 5 → 2 | 2,276,784 | 0 |
+| 405 chr17 | 5 → 1 | 44 → 44 | 2,043,402 | 60 |
+| 406 chr3 | 3 → 1 | 28 → 8 | 9,034,891 | 191 |
+| 406 chr8 | 5 → 1 | 19 → 23 | 1,537,476 | 6 |
+| 406 chr11 | 5 → 1 | 30 → 18 | 2,345,106 | 0 |
+| 407 chr15 | 3 → 1 | 2,075 → 4,994 | 2,123,634 | 0 |
+| 408 chr18 | 5 → 1 | 17 → 51 | 1,969,720 | 2 |
+
+Continuity passes, but this is **not an overall accuracy improvement**:
+whole-component errors increase 2,463 → 5,158, chiefly due to seed407 chr15.
+The other seven together improve 388 → 164. Old fragments match truth
+independently, whereas joined outputs match across a whole chromosome;
+splitting both products onto identical spans still gives 2,463 → 5,146, so
+the overall regression is genuine. Seed408 chr18 also worsens on identical
+spans; seed406 chr8 remains at 19 errors on those spans.
+
+The largest regression localizes to final refinement of seed407 chr15:
+
+| Stage | Old errors | New errors | Old / new errors on identical spans |
+| --- | ---: | ---: | ---: |
+| L1 | 250 | 320 | 250 / 269 |
+| L2 | 83 | 153 | 83 / 102 |
+| L3 | 1,756 | 1,826 | 1,756 / 1,775 |
+| L4 | 1,756 | 1,826 | 1,756 / 1,775 |
+| Final founder refinement | 2,075 | 4,994 | 2,075 / 4,994 |
+
+All 2,919 excess final chr15 errors occur at approximately 37–40 Mb. Its final
+local 200-marker errors are only 26 → 44, consistent with a predominantly
+long-range path problem. This locates the observed deterioration but does not
+prove its exact causal move, establish whether the affected ancestry is
+identifiable from the samples, or isolate a particular optimization. It remains
+an unresolved scientific limitation; joining more components is not itself
+evidence of better long-range phase.
+
+All eight typed T09/sample-order checks and complete checkpoint resumes pass.
+Original results remain untouched, with these replay products isolated pending
+scientific review. This is not a new 110-chromosome whole-pipeline validation:
+only eight chromosomes were reassembled, Stage1 was reused, and T10–T12 were
+not rerun. Detailed artifacts are retained locally in
+`.work/n320_refiner_20260917_g3ece5Py/` and
+`.work/n320_fragment_retry_20260917_UTISglBg/`.
 
 ## Seed403 end-to-end performance comparison
 
@@ -356,6 +456,11 @@ and preservation of original discovery inputs. Missing-read, noncontiguous
 marker-mask and genetic-map wiring checks accompany those comparisons.
 
 ## Partial-founder linking and empty feedback rows
+
+The following N80 results describe the earlier partial-founder integration.
+Later search changes and their regressions are distinguished in
+[optimized refinement](#optimized-founder-refinement); the subsequent N320
+replay is reported [above](#n320-fragmentation-replay).
 
 Focused checks use seed2006, N=80 (20/30/30), 5x chr13 and small explicit
 likelihood controls. The actual isolated 200-SNP block at positions

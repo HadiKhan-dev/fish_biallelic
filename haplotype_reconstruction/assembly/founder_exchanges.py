@@ -91,6 +91,12 @@ def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
     """Use neutral, called-only arrays, matching canonical full-site scoring."""
     logs = (founder_scoring.prepare_log_evidence(evidence, complete)
             if prepared is None else prepared)
+    dosages = founder_scoring._dosage_table(haps)
+    if dosages is not None:
+        from .founder_site_kernels import exchange_messages
+        forward, backward = exchange_messages(dosages, logs, cuts, float(penalty))
+        return exchange_scores(forward, backward, len(haps), float(penalty))
+    # The direct kernel avoids a large dosage table when workspace RAM is tight.
     # Neutral rows in canonical evidence have zero uncentered emission. Here
     # add the centering constant so neutral sites contribute exactly zero.
     usable = np.any(evidence != evidence[:,:,:1], axis=2) & (evidence.sum(axis=2) > 0)
@@ -110,7 +116,7 @@ from . import observations, paths, hierarchy
 
 
 def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
-                      iterations=20, quota=16, preserve_genotype_fit=True):
+                      iterations=20, quota=16, preserve_genotype_fit=True, workspaces=None):
     """Refine phase while preserving every local called/missing allele multiset.
 
     The pre-count phase pass uses the full objective: its optimized mosaic may
@@ -138,25 +144,40 @@ def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
         indices = np.searchsorted(sites, positions)
         if not np.array_equal(sites[indices], positions):
             raise ValueError("paired founder refinement evidence positions do not match")
-        fitting = np.ascontiguousarray(neutral[:, indices], np.float32)
-        leaves = List([np.ascontiguousarray(getattr(b, "missing_aware_inference_discrete_haps", b.discrete_haps), np.int8)
-                       for b in batch])
-        offsets = np.asarray([0, *np.cumsum([len(b.positions) for b in batch])], np.int64)
-        complete = np.concatenate([(np.ones(len(b.positions), np.bool_) if b.keep_flags is None
-            else np.asarray(b.keep_flags, np.bool_)) & np.all(
-                observations.founder_inference_panel_from_block_result(b).called, axis=0)
-            for b in batch])
-        penalty = chimera_scoring.compute_penalty(batch)
-        logs = founder_scoring.prepare_log_evidence(fitting, complete)
+        workspace = (None if workspaces is None else
+                     workspaces.get((int(positions[0]), int(positions[-1]))))
+        if workspace is None:
+            fitting = np.ascontiguousarray(neutral[:, indices], np.float32)
+            leaves = List([np.ascontiguousarray(getattr(b, "missing_aware_inference_discrete_haps", b.discrete_haps), np.int8)
+                           for b in batch])
+            offsets = np.asarray([0, *np.cumsum([len(b.positions) for b in batch])], np.int64)
+            complete = np.concatenate([(np.ones(len(b.positions), np.bool_) if b.keep_flags is None
+                else np.asarray(b.keep_flags, np.bool_)) & np.all(
+                    observations.founder_inference_panel_from_block_result(b).called, axis=0)
+                for b in batch])
+            penalty = chimera_scoring.compute_penalty(batch)
+            logs = founder_scoring.prepare_log_evidence(fitting, complete)
+        else:
+            fitting, leaves, offsets = workspace.evidence, workspace.leaves, workspace.offsets
+            complete, penalty, logs = workspace.complete, workspace.penalty, workspace.logs
         def evaluate(panel, paint=False):
             alleles = founder_scoring.selected_alleles(leaves, offsets, panel)
             if paint:
-                painted, values = founder_scoring.paint_panel(alleles, fitting, complete, penalty, logs)
-                return float(values.sum()), int(founder_path_search.count_diplotype_switches(painted))
+                values, switches = founder_scoring.score_and_switch_count(
+                    alleles, fitting, complete, penalty, logs)
+                return float(values.sum()), int(switches.sum())
             return float(founder_scoring.score_panel(alleles, fitting, complete, penalty, logs).sum())
         current, switches = evaluate(selected, paint=True)
         initial = current
         history = []
+        # Bound accumulated float64 addition error in both canonical and flank
+        # evaluations. Max is non-expansive. Include three operations/site,
+        # sample reduction, path magnitude and a factor for both evaluations.
+        operations = 3 * len(positions) + len(fitting) + 16
+        epsilon = np.finfo(np.float64).eps * operations
+        magnitude = max(abs(float(logs.min())), abs(float(logs.max())))
+        rounding_bound = (4 * epsilon / (1 - epsilon) * len(fitting)
+            * len(positions) * (magnitude + abs(np.log(1. / 3.)) + abs(penalty)))
         for iteration in range(iterations):
             phase = f"{token}.iteration{iteration}"
             cached = founder_refinement._load(checkpoints, phase)
@@ -179,11 +200,16 @@ def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
             gains = exact - current
             candidates = np.argsort(-gains.ravel(), kind="stable")[:quota]
             record = dict(iteration=iteration, reference_deviation=max_deviation,
-                          proposals=[], accepted=None)
+                          proposals=[], accepted=None, pruned_dominated=0)
             best = None
-            for flat in candidates:
+            for rank, flat in enumerate(candidates):
                 boundary, pair = divmod(int(flat), len(first))
                 if gains[boundary, pair] < .001:
+                    break
+                if best is not None and exact[boundary, pair] + rounding_bound < best[0]:
+                    # Sorted exact scores: none of the remaining proposals can
+                    # beat this guard-passing winner. Near ties still rescore.
+                    record["pruned_dominated"] = len(candidates) - rank
                     break
                 a, b = int(first[pair]), int(second[pair])
                 trial = selected.copy()

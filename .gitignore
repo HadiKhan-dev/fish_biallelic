@@ -2,6 +2,9 @@
 /work/
 /.work/
 
+# Local publication draft, kept separately from pipeline source control.
+/manuscript/
+
 # Python/build caches.
 __pycache__/
 *.py[cod]

@@ -34,7 +34,7 @@ def _log_genotype_evidence(values):
     )
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, nogil=True)
 def selected_alleles(leaves, offsets, selected):
     founders, blocks = selected.shape
     result = np.empty((founders, offsets[-1]), np.int8)
@@ -44,7 +44,7 @@ def selected_alleles(leaves, offsets, selected):
     return result
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, nogil=True)
 def painting_occupancy(painting, evidence, complete, founders, tolerance):
     counts = np.zeros((evidence.shape[0], founders), np.int64)
     for sample in prange(evidence.shape[0]):
@@ -58,7 +58,7 @@ def painting_occupancy(painting, evidence, complete, founders, tolerance):
     return counts.sum(axis=0)
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, nogil=True)
 def prepare_log_evidence(evidence, complete):
     """Compute the unchanged robust float64 emissions once per component."""
     result = np.zeros(evidence.shape, np.float64)
@@ -91,8 +91,8 @@ def _unordered_pairs(founders):
     return first, second
 
 
-@njit(parallel=True, cache=True)
-def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
+@njit(parallel=True, cache=True, nogil=True)
+def _score_panel_direct(haplotypes, evidence, complete, penalty, prepared=None):
     """Per-sample Viterbi scores in O(N*L*K²) time and O(threads*K²) work RAM."""
     samples, sites, _ = evidence.shape
     first, second = _unordered_pairs(len(haplotypes))
@@ -115,8 +115,8 @@ def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
     return answer
 
 
-@njit(parallel=True, cache=True)
-def paint_panel(haplotypes, evidence, complete, penalty, prepared=None):
+@njit(parallel=True, cache=True, nogil=True)
+def _paint_panel_direct(haplotypes, evidence, complete, penalty, prepared=None):
     """Exact site-level traceback, encoded as first_founder*K+second_founder."""
     samples, sites, _ = evidence.shape
     founders = len(haplotypes)
@@ -151,7 +151,92 @@ def paint_panel(haplotypes, evidence, complete, penalty, prepared=None):
     return answer, likelihood
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=True, nogil=True)
+def _count_panel_direct(haplotypes, evidence, complete, penalty, prepared=None):
+    """Canonical Viterbi score and switch count without a site traceback.
+
+    Carry the count of the chosen predecessor with each state. Strict switch
+    comparisons and first-argmax ties match paint_panel, including neutral
+    sites. The initial scores are equal and the switch penalty is positive,
+    so the first site never contributes a counted transition.
+    """
+    samples, sites, _ = evidence.shape
+    first, second = _unordered_pairs(len(haplotypes))
+    likelihood = np.empty(samples)
+    counts = np.empty(samples, np.int64)
+    center = math.log(1. / 3.)
+    for sample in prange(samples):
+        scores = np.zeros(len(first))
+        switches = np.zeros(len(first), np.int64)
+        for site in range(sites):
+            p = evidence[sample, site]
+            neutral = (not complete[site] or p.sum() <= 0.0
+                       or (p[0] == p[1] and p[1] == p[2]))
+            emission = (0.0, 0.0, 0.0) if neutral else _emission_at(
+                evidence, prepared, sample, site)
+            previous = int(np.argmax(scores))
+            switched = scores[previous]-penalty
+            next_count = switches[previous]+1
+            for state in range(len(first)):
+                if scores[state] < switched:
+                    switches[state] = next_count
+                dosage = 0 if neutral else (
+                    haplotypes[first[state], site]+haplotypes[second[state], site])
+                value = 0.0 if neutral else emission[dosage]-center
+                scores[state] = max(scores[state], switched)+value
+        state = int(np.argmax(scores))
+        likelihood[sample], counts[sample] = scores[state], switches[state]
+    return likelihood, counts
+
+
+
+def _dosage_table(haplotypes):
+    """Prepare shared dosages only within the existing workspace RAM allowance."""
+    from .founder_site_kernels import prepare_dosages
+    from ..painting.model import available_process_memory_bytes
+    founders, sites = haplotypes.shape
+    states = founders * (founders + 1) // 2
+    available = available_process_memory_bytes()
+    if available is not None and sites * states > available // 8:
+        return None
+    first, second = _unordered_pairs(founders)
+    return prepare_dosages(haplotypes, first, second)
+
+
+def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
+    """Canonical scores; share pair dosages without changing the observation model."""
+    from .founder_site_kernels import score_dosages
+    dosages = _dosage_table(haplotypes)
+    if dosages is None:
+        return _score_panel_direct(haplotypes, evidence, complete, penalty, prepared)
+    logs = prepare_log_evidence(evidence, complete) if prepared is None else prepared
+    return score_dosages(dosages, logs, float(penalty))
+
+
+def paint_panel(haplotypes, evidence, complete, penalty, prepared=None):
+    """Canonical full-site traceback with compact switch storage when possible."""
+    from .founder_site_kernels import paint_dosages
+    founders = len(haplotypes)
+    if founders * (founders + 1) // 2 > 64:
+        return _paint_panel_direct(haplotypes, evidence, complete, penalty, prepared)
+    dosages = _dosage_table(haplotypes)
+    if dosages is None:
+        return _paint_panel_direct(haplotypes, evidence, complete, penalty, prepared)
+    logs = prepare_log_evidence(evidence, complete) if prepared is None else prepared
+    first, second = _unordered_pairs(founders)
+    return paint_dosages(dosages, logs, float(penalty), first, second, founders)
+
+
+def score_and_switch_count(haplotypes, evidence, complete, penalty, prepared=None):
+    """Canonical scores and switch counts, with unchanged tie handling."""
+    from .founder_site_kernels import count_switches
+    dosages = _dosage_table(haplotypes)
+    if dosages is None:
+        return _count_panel_direct(haplotypes, evidence, complete, penalty, prepared)
+    logs = prepare_log_evidence(evidence, complete) if prepared is None else prepared
+    return count_switches(dosages, logs, float(penalty))
+
+@njit(parallel=True, cache=True, nogil=True)
 def fixed_path_proposals(leaves, offsets, selected, evidence, complete, painting, prepared=None):
     """Best original row per leaf under a fixed painting, including homozygotes.
 

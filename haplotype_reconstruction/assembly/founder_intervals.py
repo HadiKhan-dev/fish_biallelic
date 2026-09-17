@@ -11,55 +11,41 @@ Pair shortlisting, when needed, additionally uses the cubic-in-K suffix queries
 in founder_exchanges; the complete refinement is not claimed to be quadratic.
 """
 import numpy as np
-import math, time
+import time
 from numba import njit, prange, get_num_threads
-from numba.typed import List
 from . import founder_refinement as fr, founder_scoring as fs
-from . import founder_path_search as search, founder_exchanges as ex
-from . import observations, chimera_scoring, paths, hierarchy, panel_search
+from . import founder_exchanges as ex
+from . import paths, hierarchy
+from .founder_workspace import component_workspace
+from .founder_packing import emission_arrays, pack_selected, score_rows
 from ..core import haplotypes
 
 
-@njit(cache=True, parallel=True)
-def gather(emissions, selected, first, second):
-    result = List()
-    for block, value in enumerate(emissions):
-        packed = np.empty((value.shape[0], len(first), value.shape[3]), np.float64)
-        for sample in prange(value.shape[0]):
-            for state in range(len(first)):
-                a, b = (selected[first[state], block], selected[second[state], block])
-                packed[sample, state] = value[sample, a, b]
-        result.append(packed)
-    return result
-
-
-@njit(cache=True, parallel=True)
-def flanks(emissions, penalty):
-    blocks = len(emissions)
-    samples, states, _ = emissions[0].shape
-    prefix = np.zeros((blocks + 1, samples, states), np.float64)
+@njit(cache=True, parallel=True, nogil=True)
+def flanks(emissions, offsets, penalty):
+    blocks = len(offsets)-1
+    samples, _, states = emissions.shape
+    prefix = np.zeros((blocks+1, samples, states))
     suffix = np.zeros_like(prefix)
     for sample in prange(samples):
         row = np.zeros(states)
         value = np.empty(states)
         for block in range(blocks):
-            emission = emissions[block]
-            for site in range(emission.shape[2]):
-                switched = np.max(row) - penalty
+            for site in range(offsets[block], offsets[block+1]):
+                switched = np.max(row)-penalty
                 for state in range(states):
-                    row[state] = max(row[state], switched) + emission[sample, state, site]
-            prefix[block + 1, sample] = row
+                    row[state] = max(row[state], switched)+emissions[sample, site, state]
+            prefix[block+1, sample] = row
         row[:] = 0.0
-        for block in range(blocks - 1, -1, -1):
-            emission = emissions[block]
-            for site in range(emission.shape[2] - 1, -1, -1):
+        for block in range(blocks-1, -1, -1):
+            for site in range(offsets[block+1]-1, offsets[block]-1, -1):
                 for state in range(states):
-                    value[state] = row[state] + emission[sample, state, site]
-                switched = np.max(value) - penalty
+                    value[state] = row[state]+emissions[sample, site, state]
+                switched = np.max(value)-penalty
                 for state in range(states):
                     row[state] = max(value[state], switched)
             suffix[block, sample] = row
-    return (prefix, suffix)
+    return prefix, suffix
 
 
 def permutations(founders, pairs):
@@ -75,8 +61,7 @@ def permutations(founders, pairs):
 
 
 @njit(cache=True, parallel=True)
-def interval_scores(emissions, prefix, suffix, permutation, penalty, starts, stops):
-    blocks = len(emissions)
+def interval_scores(emissions, offsets, prefix, suffix, permutation, penalty, starts, stops):
     samples, states = prefix.shape[1:]
     width = int(np.max(stops - starts))
     result = np.full((len(permutation), len(starts), width), -np.inf, np.float64)
@@ -90,11 +75,10 @@ def interval_scores(emissions, prefix, suffix, permutation, penalty, starts, sto
             for state in range(states):
                 row[state] = prefix[start, sample, permutation[pair, state]]
             for block in range(start, stop):
-                emission = emissions[block]
-                for site in range(emission.shape[2]):
+                for site in range(offsets[block], offsets[block+1]):
                     switched = np.max(row) - penalty
                     for state in range(states):
-                        row[state] = max(row[state], switched) + emission[sample, state, site]
+                        row[state] = max(row[state], switched) + emissions[sample, site, state]
                 best = -np.inf
                 for state in range(states):
                     best = max(best, row[state] + suffix[block + 1, sample, permutation[pair, state]])
@@ -115,25 +99,34 @@ def _interval_ranges(blocks, window, groups=None):
     return (starts, stops)
 
 
-def score_intervals(submodels, selected, pairs, penalty, window, groups=None):
-    permutation, first, second = permutations(len(selected), pairs)
-    emissions = gather(
-        List([m['bin_emissions'] for m in submodels]), selected, first, second)
-    prefix, suffix = flanks(emissions, float(penalty))
-    starts, stops = _interval_ranges(len(emissions), window, groups)
+def prepare_intervals(submodels, selected, penalty):
+    first, second = np.triu_indices(len(selected))
+    arrays = emission_arrays(submodels)
+    offsets = np.asarray([0, *np.cumsum([m["bin_emissions"].shape[3] for m in submodels])], np.int64)
+    emissions = pack_selected(arrays, selected, offsets, first, second)
+    prefix, suffix = flanks(emissions, offsets, float(penalty))
+    return emissions, offsets, prefix, suffix
+
+
+def score_intervals(submodels, selected, pairs, penalty, window, groups=None, prepared=None):
+    permutation, _, _ = permutations(len(selected), pairs)
+    emissions, offsets, prefix, suffix = (
+        prepare_intervals(submodels, selected, penalty) if prepared is None else prepared)
+    starts, stops = _interval_ranges(len(offsets)-1, window, groups)
     values = interval_scores(
-        emissions, prefix, suffix, permutation, float(penalty), starts, stops)
-    return (values, float(np.max(prefix[-1], axis=1).sum()), starts)
+        emissions, offsets, prefix, suffix, permutation, float(penalty), starts, stops)
+    return values, float(np.max(prefix[-1], axis=1).sum()), starts
 
 
 def refine_components(prepared, components, neutral, sites, *, config,
-                      checkpoints=None, l1_blocks=None):
+                      checkpoints=None, l1_blocks=None, workspaces=None):
     """Refine bounded paired intervals inside unchanged phase components.
 
     The caller owns the Numba scope. This internal final-release pass takes
     the caller's actual search budgets and never reads truth or pedigree.
     """
-    quota, iterations = (config.branch_cap, config.max_iterations)
+    workspaces = {} if workspaces is None else workspaces
+    iterations = config.max_iterations
     output = []
     diagnostics = []
     for number, component in enumerate(components):
@@ -159,30 +152,16 @@ def refine_components(prepared, components, neutral, sites, *, config,
             output.append(component)
             diagnostics.append(dict(component=number, changed=False))
             continue
-        ix = np.searchsorted(sites, component.positions)
-        assert np.array_equal(sites[ix], component.positions)
-        evidence = np.ascontiguousarray(neutral[:, ix], np.float32)
-        leaves = List([
-            np.ascontiguousarray(b.missing_aware_inference_discrete_haps, np.int8)
-            for b in batch])
-        offsets = np.asarray([0, *np.cumsum([len(b.positions) for b in batch])], np.int64)
-        complete = np.concatenate([
-            (np.ones(len(b.positions), bool) if b.keep_flags is None
-             else np.asarray(b.keep_flags, dtype=np.bool_))
-            & np.all(observations.founder_inference_panel_from_block_result(b).called,
-                     axis=0)
-            for b in batch])
-        penalty = chimera_scoring.compute_penalty(batch)
-        logs = fs.prepare_log_evidence(evidence, complete)
-        bin_size = max(chimera_scoring.compute_spb(batch), math.ceil(len(ix) / config.proposal_max_bins))
-        submodels = chimera_scoring.compute_subblock_emissions(
-            batch, evidence, component.positions, bin_size,
-            num_threads=get_num_threads())
+        workspace = component_workspace(workspaces, batch, neutral, sites,
+            config.proposal_max_bins, get_num_threads())
+        evidence, leaves, offsets = workspace.evidence, workspace.leaves, workspace.offsets
+        complete, penalty, logs = workspace.complete, workspace.penalty, workspace.logs
+        submodels = workspace.models()
 
         def evaluate(rows):
             calls = fs.selected_alleles(leaves, offsets, rows)
-            painting, values = fs.paint_panel(calls, evidence, complete, penalty, logs)
-            return (float(values.sum()), int(search.count_diplotype_switches(painting)))
+            values, switches = fs.score_and_switch_count(calls, evidence, complete, penalty, logs)
+            return float(values.sum()), int(switches.sum())
         current, switches = evaluate(selected)
         initial = current
         history = []
@@ -196,19 +175,28 @@ def refine_components(prepared, components, neutral, sites, *, config,
                 continue
             started = time.monotonic()
             pairs = list(zip(*np.triu_indices(len(selected), 1)))
-            if len(pairs) > quota:
+            if len(pairs) > config.interval_partners * len(selected):
                 calls = fs.selected_alleles(leaves, offsets, selected)
                 value, reference, first, second = ex.score_exchanges(calls, evidence, complete, offsets[1:-1], penalty, logs)
                 assert np.max(abs(reference - current)) <= max(1e-06, abs(current) * 1e-10)
-                order = np.argsort(-value.max(axis=0), kind='stable')[:quota]
-                pairs = [pairs[i] for i in order]
+                ranking = value.max(axis=0)
+                retained = set()
+                for founder in range(len(selected)):
+                    incident = np.flatnonzero((first == founder) | (second == founder))
+                    order = np.argsort(-ranking[incident], kind="stable")[:config.interval_partners]
+                    retained.update(int(incident[i]) for i in order)
+                pairs = [pairs[i] for i in sorted(retained)]
             records = []
             best = None
             seen = set()
+            packed = {}
             for scale, groups, reverse in scales:
                 models = submodels if not reverse else [dict(m, bin_emissions=np.ascontiguousarray(m['bin_emissions'][:, :, :, ::-1])) for m in submodels[::-1]]
                 rows = np.ascontiguousarray(selected[:, ::-1]) if reverse else selected
-                values, binned, starts = score_intervals(models, rows, pairs, penalty, config.window_blocks, groups)
+                if reverse not in packed:
+                    packed[reverse] = prepare_intervals(models, rows, penalty)
+                values, binned, starts = score_intervals(models, rows, pairs, penalty,
+                    config.window_blocks, groups, packed[reverse])
                 for pair, (a, b) in enumerate(pairs):
                     index, length = np.unravel_index(np.argmax(values[pair]), values[pair].shape)
                     start = int(starts[index])
@@ -224,8 +212,7 @@ def refine_components(prepared, components, neutral, sites, *, config,
                     trial[[a, b], start:stop] = selected[[b, a], start:stop]
                     if np.array_equal(trial, selected):
                         continue
-                    keys = [[m['hap_keys'][i] for m, i in zip(submodels, row)] for row in trial]
-                    checked = panel_search.evaluate_panel(keys, submodels, penalty, len(evidence), num_threads=get_num_threads())
+                    checked = score_rows(submodels, trial, penalty)
                     assert abs(checked - predicted) <= max(1e-05, abs(checked) * 1e-10), (checked, predicted)
                     score, next_switches = evaluate(trial)
                     fit_gain = score - current + penalty * (next_switches - switches)

@@ -87,10 +87,10 @@ not claims that sample count, chromosome length, iterations, or I/O are free.
 | Bounded-search candidate paths | Fixed endpoint quota; archive interior-state paths; no MMR all-selected comparisons | O(K² log K) for fixed B/quota |
 | Bounded panel selection | Conditional, no-switch and candidate/mate-HMM proposal scores; bounded full Viterbi/BIC refits | O(R (N m K² + B K² log K)) for an O(K) candidate pool |
 | Cavity carrier probabilities | Sum each pair-state mass at its one/two founder endpoints | O(N K²), replacing an O(N K³) dense incidence product |
-| Final all-founder dual escape | Same fixed-count score; all K focal paths, bounded dual sweeps and local choices | O(R D N m C K³), plus aggregate full-site scoring; D=20 and C≤16 by default |
-| Count deletion/refit | At most C refits plus an optimistic local bound, using the existing complexity cost | Bounded multiple of the refiner; the local bound can cost O(N L K³) |
-| Completed window searches | All K focal paths; bounded window, beam and local-row budgets | Cubic aggregate founder dependence, despite quadratic per-focal diploid updates |
-| Paired suffix/interval search | Exact suffix relabeling; capped interval pair shortlist and scan span | Suffix queries O(N B (K³ + K² log K)); bounded-pair interval DP quadratic per scanned bin |
+| Final all-founder dual escape | Exact shared-background scans; candidate-specific states only contain the focal founder | O(R D N M [K³(s+1) + C K(K+s)]), plus full-site scoring |
+| Count deletion/refit | All K deletions get cheap conditional repairs; only the best repaired panel gets a deep refit | O(J N L (K³+K A)) repairs, one deep search, and O(N L A³) bound |
+| Completed window searches | Shared-background candidate scoring, safe optimistic pruning, and proven-equivalent trajectory reuse | Cubic in K for A=O(K) and fixed bin/beam budgets; details below |
+| Paired suffix/interval search | Exact suffix relabeling; at most p K expensive interval pairs | Suffix queries O(N B (K³ + K² log K)); interval work O(p N H M K³) |
 
 The near-quadratic/cubic hierarchy comparisons assume bounded search and exclude
 the later all-founder final refinement. Its per-focal diploid-state update is
@@ -110,6 +110,160 @@ sample cloud; pedigree retains its separate sample-count costs. Missing-allele
 joint enumeration still has a 2^U factor, with U capped at six unresolved
 founders per site in the supported completion route. It does not become cheap
 if that cap is allowed to grow with K.
+
+### Final founder refinement: explicit work and parallelism
+
+This remains a **final-only** pass, not progressive refinement at each assembly
+level. The cubic redesign changes candidate exploration, not the missing-aware
+likelihood, founder-count penalty, genotype-fit guard, or final full-site
+acceptance rule.
+
+Let A be the largest local or macro candidate alphabet, M the number of proposal
+bins, and s the largest number of bins inside one local or macro block. Let
+C=min(A,16), W be beam width (64 initially, up to 1024), R<=20 outer iterations,
+D<=20 dual sweeps, J=3 deletion-repair sweeps, p=3 interval partners per founder,
+and H be the interval span in prepared blocks. The configured window is 100;
+macro grouping can enlarge its span in original blocks. These are explicit
+work factors, not quantities assumed to be free.
+
+A focal founder changes only K of the O(K²) unordered diploid states. All
+other state emissions are shared across its local candidate choices. For a
+block with t bins, the exact max-plus kernel precomputes uninterrupted
+background-segment scores in O(K² t²). Each candidate then costs O(K t+t²),
+rather than another O(K² t) scan. Entries into the shared background include
+arbitrarily many switches: this is not a frozen-background approximation.
+Selected beam paths still materialize their full diploid states.
+
+| Work unit | Serial numerical work |
+| --- | --- |
+| Prepare local binned evidence | O(N L A²) |
+| Optimistic founder-count bound, worst case | O(N L A³) |
+| One complete-panel score or painting | O(N L K²) |
+| One focal beam round | O(N M [K²(s+W) + W C(K+s)]), plus O(B W C log(W C)) sorting |
+| One focal dual search | O(D N M [K²(s+1) + C(K+s)]) |
+| All-founder dual round, shared preparation enabled | O(N M K² s + D N M [K³ + C K(K+s)] + N L K³) |
+| All-founder window round, shared preparation enabled | O(N M [K² s + W K³ + W C K(K+s)] + N L K³), plus beam sorting |
+| All K cheap deletion repairs | O(J N L (K³+K A)) |
+| Paired suffix queries | O(N L K² + N B (K³ + K² log K)) |
+| At most p K interval scans | O(p N H M K³), plus O(p N L K³) full-site checks |
+
+Multiply iterative searches by their actual iteration counts. With A=O(K)
+and fixed s, W, R, D, J, p and H, total work is cubic in K, up to sorting
+factors. In particular, cubic scaling no longer depends on hiding an
+all-deletion deep-refit factor behind a fixed cap. Bin count is
+M=sum_b ceil(L_b / bin_size), not strictly 2,000; it can approach 2,000+B.
+The t² block-preparation term is real: long macro blocks can limit practical
+speed even when the K exponent is improved.
+
+**Invariant background reuse:** the production dual/window search prepares
+prefix/segment summaries once per fixed competing panel, not once per sweep
+or overlapping window. For each sample/bin interval, the best diploid state
+already gives the exclusion maximum for every focal founder except its one/two
+endpoints. Only those endpoints need another scan. All-founder preparation
+therefore costs O(N K² sum_b t_b²), rather than O(N K³ sum_b t_b²) on every
+sweep. Message updates, candidate paths and previous-state scores are not
+shared. These optimizations leave other cubic terms intact.
+
+The shared tables use O(N [K²(M+B) + K sum_b(t_b+1)²]) memory per panel,
+with four scan geometries. They are read-only across candidate threads.
+An estimate exceeding one eighth of available process memory selects the
+direct, mathematically identical kernels, retaining the preceding cubic
+bound without the shared-preparation reduction.
+
+**Localized full-site scoring:** unchanged-panel forward/backward messages
+at original block boundaries cost O(N L K²) to build, with O(N B K²) storage.
+An edit spanning ell SNPs can then be scored in O(N ell K²), rather than
+O(N L K²). Only edits covering at most half the chromosome use this route,
+and memory limits can disable the cache. A panel change invalidates its
+messages; differing founder counts never reuse them. Possible winners and
+near ties receive canonical full rescoring before selection. Final acceptance
+and macro genotype-fit guards therefore still use the original full-site
+scorer. This is not imputation, a frozen sample painting, or a local-only
+acceptance objective.
+
+**Count selection:** every deletion receives up to J repaint/conditional-row
+repair sweeps. Each sweep scores the simultaneous row update and the
+highest-gain single-row update, not K separately rescored updates. All repaired
+panels compete against the incumbent; only the best repaired deletion enters
+the expensive beam/dual search. A paired exchange can trigger one further
+deep refit of that same candidate. This is a search approximation: a
+second-ranked cheap repair could have led to a better deep optimum. The default
+also skips that deep refit when every repaired deletion still loses by more
+than eight per-founder complexity costs. This is a heuristic budget screen,
+not a rigorous likelihood bound; `count_refit_deficit_multiple=None` disables it.
+Neither improving repairs nor the initial optimistic bound are altered.
+
+**Intervals:** all pairs are retained when their number is at most p K
+(in particular K<=7 at the default p=3). At larger K, existing suffix scores
+rank partners for each founder; the union of its best p partners contains at
+most p K pairs. Every retained interval still receives exact binned and
+full-site checks. Shortlisting can miss an interval whose endpoints jointly
+help despite an unpromising suffix score.
+
+**Windows:** a sample-relaxed optimistic bound may prune windows that cannot
+beat the best proposal already found. The same bound can abort a partially
+expanded window when none of its remaining beam branches can win; no individual
+candidate is discarded merely for a weak heuristic score. A corrected dual
+bound can also certify that another coordinate sweep cannot improve the best
+feasible path, using a conservative numerical margin. Incumbent/tie trajectories are reused
+only when their retained branch orders provably agree on the same input
+rows; macro trajectories are excluded from this reuse. Exact flank scores
+select a winner before one canonical verification. This avoids full
+chromosome rescanning after every improving window. Floating-point tie
+ordering may change; accepted outputs are checked scientifically, not for
+bitwise intermediate equality.
+
+Immutable evidence and bounded caches remain shared. Cheap deletion repairs
+and deep focal/direction searches run in separately scheduled thread teams
+with subdivided, dynamically reallocated thread budgets. Native repair kernels
+release the GIL, each repair owns its painting/score workspace, and completed
+repairs are checkpointed on the controller before canonical-order selection. Running native
+kernels cannot acquire threads mid-call. Memory limits may reduce concurrency,
+and explicit Numba workqueue configurations retain serial inner searches.
+
+The current implementation packs selected-panel interval emissions into
+O(N M K²) ordinary-array storage and reuses its O(N B K²) flanks across grids;
+this removes shared typed-list bookkeeping from the hot scan, not a work term.
+Binned full checks and fixed-panel suffixes use contiguous emission buffers
+with scalar indexing, packed once per model workspace and released with it.
+Retained beam/window states alternate reusable thread-local destination buffers.
+These changes reduce native ownership/allocation overhead without removing bins.
+Where only a score and switch count are required, the exact first-argmax/strict-
+switch recurrence carries O(K²) values per active sample thread instead of a
+length-L traceback. Neutral and missing-site conventions are unchanged.
+
+Prepared evidence/logs/masks are shared read-only across deletion workers.
+Shallow checkpoints contain O(K B) row selections and scalar scores; only the
+selected contenders are reconstructed. Model/code checkpoint identities include
+the packing and compact-checkpoint helpers. Intermediate completed components
+store local-row paths plus non-derived metadata; loading reconstructs the same
+called/inference arrays and boundaries from identity-bound prepared inputs.
+All resume tokens remain, and final release products keep ordinary block arrays.
+Small dual coordinate updates cap their team at eight,
+while suffix and beam kernels retain their complete dynamic allocation.
+Independent queries remain separately scheduled, not co-batched into one solver.
+For one/two-bin leaves, exact beam scores use direct background stay/enter
+maxima and K affected states per candidate; larger macro blocks retain the
+generic sparse recurrence. Sample-major scratch avoids strided parallel writes.
+Stable partial selection replaces full branch sorting only at >=4096 branches;
+original indices resolve cutoff ties. The search width and alphabet do not change.
+
+Suffix exchanges stop canonical rescoring only after a guard-passing winner
+exceeds the remaining exact flank scores by a conservative accumulated float64
+error bound. Near ties and potentially winning candidates still receive the
+canonical score and genotype-fit guard. Proposal binning is unchanged.
+
+These changes improve measured constants without altering cubic total-work
+bounds or the final-only refinement schedule. Cross-query dual batching was
+tested but not retained: the existing dynamically scheduled queries were faster
+on the N80 controls.
+
+Evidence/models require O(N L + N M A²) space per component workspace.
+Shared-background scratch includes O(K² s+s²) per active sample, and candidate
+rows/entries add O(C(K+s)); beam, message and painting traceback storage remain
+additional. Painting traceback grows as O(L K²) per active sample thread.
+Parallelism changes elapsed time, not the work exponents. See
+[measured refinement performance](performance.md#final-founder-refinement).
 
 ### Structured boundaries are a model change
 

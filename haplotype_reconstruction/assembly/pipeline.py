@@ -40,6 +40,13 @@ STAGE2_RELEASE_CODE_IDENTITY_FILES += (
     'assembly/founder_exchanges.py', 'assembly/founder_windows.py',
     'assembly/founder_intervals.py',
     'assembly/founder_count.py', 'assembly/founder_count_bound.py', 'assembly/evidence.py',
+    'assembly/founder_workspace.py', 'assembly/founder_count_workers.py',
+    'assembly/founder_candidates.py', 'assembly/founder_sparse.py',
+    'assembly/founder_background.py', 'assembly/founder_delta.py',
+    'assembly/founder_packing.py', 'assembly/founder_checkpoints.py',
+    'assembly/founder_site_kernels.py', 'assembly/founder_dual_short.py',
+    'assembly/founder_evidence.py',
+    'assembly/founder_beam.py', 'assembly/founder_beam_kernels.py',
 )
 
 _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((

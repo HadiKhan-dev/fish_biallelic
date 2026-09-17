@@ -1,10 +1,10 @@
-"""Bounded deletion-and-refit search under the existing founder-count penalty.
+"""All-deletion repair screening, followed by one deep fixed-count refit.
 
 This pass asks whether one fewer assembled founder explains the cohort better
 after the remaining paths have been refitted. It never assumes a true count,
 uses pedigree metadata, changes local candidate alleles, or joins components.
-At most ``branch_cap`` complete refits are attempted per component; larger
-panels prioritize low-occupancy rows. Singleton local blocks and one/two-row
+Every deletion gets bounded conditional-row repairs; only the best repaired
+panel enters the expensive path search. Singleton local blocks and one/two-row
 panels remain the responsibility of discovery and ordinary hierarchy selection.
 
 The objective is the existing K * complexity_cost - 2 * full_site_score. The
@@ -13,10 +13,10 @@ One deletion round is deliberately bounded; this is not exhaustive count search.
 """
 import time
 import numpy as np
-from numba.typed import List
 
 from . import founder_refinement as refiner, founder_exchanges, founder_scoring
-from . import chimera_scoring, observations, paths, hierarchy, founder_count_bound
+from . import chimera_scoring, paths, hierarchy, founder_count_bound
+from .founder_workspace import component_workspace, resolve_threads
 from ..core import haplotypes, parallel
 from ..discovery.objectives import compute_outer_bic_from_log_likelihood as bic
 
@@ -48,9 +48,10 @@ def _reconstruct(selected, score, batch, original):
 
 
 def _fixed_count_refit(prepared, block, neutral, sites, config, num_threads,
-                       checkpoints, l1_blocks):
+                       checkpoints, l1_blocks, workspaces=None):
+    workspaces = {} if workspaces is None else workspaces
     options = dict(config=config, num_threads=num_threads,
-                   checkpoints=checkpoints, l1_blocks=l1_blocks)
+                   checkpoints=checkpoints, l1_blocks=l1_blocks, workspaces=workspaces)
     first, _ = refiner._refine_components(
         prepared, haplotypes.BlockResults([block]), neutral, sites, **options)
     second, _ = refiner._refine_components(
@@ -59,12 +60,14 @@ def _fixed_count_refit(prepared, block, neutral, sites, config, num_threads,
 
 
 def refine_components(prepared, components, neutral, sites, *, config,
-                      num_threads=1, checkpoints=None, l1_blocks=None, cc_scale=0.5):
+                      num_threads=1, checkpoints=None, l1_blocks=None, cc_scale=0.5,
+                      workspaces=None):
     """Compare one-deletion panels using the hierarchy's complexity scale."""
+    workspaces = {} if workspaces is None else workspaces
     results, diagnostics = [], []
     starts = {int(block.positions[0]): i for i, block in enumerate(prepared)}
     ends = {int(block.positions[-1]): i + 1 for i, block in enumerate(prepared)}
-    with parallel.numba_thread_scope(num_threads):
+    with parallel.numba_thread_scope(resolve_threads(num_threads)):
         for number, original in enumerate(components):
             token = f"founder_count.component{number}"
             cached = refiner._load(checkpoints, token)
@@ -84,27 +87,12 @@ def refine_components(prepared, components, neutral, sites, *, config,
                 diagnostics.append(dict(component=number, changed=False,
                     reason="single_local_block_or_at_most_two_founders"))
                 continue
-            indices = np.searchsorted(sites, positions)
-            if not np.array_equal(sites[indices], positions):
-                raise ValueError("founder count evidence positions do not match")
-            fitting = np.ascontiguousarray(neutral[:, indices], np.float32)
-            leaves = List([np.ascontiguousarray(
-                getattr(block, "missing_aware_inference_discrete_haps", block.discrete_haps), np.int8)
-                for block in batch])
-            offsets = np.asarray([0, *np.cumsum([len(block.positions) for block in batch])], np.int64)
-            complete = np.concatenate([
-                (np.ones(len(block.positions), np.bool_) if block.keep_flags is None
-                 else np.asarray(block.keep_flags, np.bool_))
-                & np.all(observations.founder_inference_panel_from_block_result(block).called, axis=0)
-                for block in batch])
-            penalty = chimera_scoring.compute_penalty(batch)
+            workspace = component_workspace(workspaces, batch, neutral, sites,
+                config.proposal_max_bins, num_threads)
+            fitting, leaves, offsets = workspace.evidence, workspace.leaves, workspace.offsets
+            complete, penalty, logs = workspace.complete, workspace.penalty, workspace.logs
             cost = float(chimera_scoring.compute_cc(batch, len(neutral), cc_scale))
-            logs = founder_scoring.prepare_log_evidence(fitting, complete)
-
-            def score(rows):
-                alleles = founder_scoring.selected_alleles(leaves, offsets, rows)
-                return float(founder_scoring.score_panel(
-                    alleles, fitting, complete, penalty, logs).sum())
+            score = workspace.evaluate
 
             initial_score = score(selected)
             initial_bic = float(bic(founders, initial_score, cost))
@@ -129,44 +117,84 @@ def refine_components(prepared, components, neutral, sites, *, config,
                 diagnostics.append(diagnostic)
                 continue
             order = np.arange(founders)
-            if founders > config.branch_cap:
-                alleles = founder_scoring.selected_alleles(leaves, offsets, selected)
-                painting = founder_scoring.paint_panel(alleles, fitting, complete, penalty, logs)[0]
-                occupancy = founder_scoring.painting_occupancy(
-                    painting, fitting, complete, founders, fitting.dtype.type(1e-10))
-                order = np.argsort(occupancy, kind="stable")[:config.branch_cap]
-                del alleles, painting, occupancy
             best, best_bic, best_score, best_drop = original, initial_bic, initial_score, None
-            proposals = []
+            from . import founder_count_workers
+            found_by_drop, pending = {}, []
             for dropped in order:
                 dropped = int(dropped)
                 scope = _ScopedCheckpoints(checkpoints, f"{token}.drop{dropped}")
                 found = scope.load("result")
                 if found is None:
-                    remaining = np.delete(selected, dropped, axis=0)
-                    reduced = _reconstruct(remaining, initial_score, batch, original)
-                    result = _fixed_count_refit(prepared, reduced, neutral, sites,
-                        config, num_threads, _ScopedCheckpoints(scope, "initial"), l1_blocks)
-                    result, paired = founder_exchanges.refine_components(
-                        prepared, result, neutral, sites, _ScopedCheckpoints(scope, "paired"),
-                        iterations=config.max_iterations, quota=config.branch_cap)
-                    if any(item["changed"] for item in paired["components"]):
-                        result = _fixed_count_refit(prepared, result[0], neutral, sites,
-                            config, num_threads, _ScopedCheckpoints(scope, "after_pair"), l1_blocks)
-                    rows = refiner._local_selection(result[0], batch)
-                    likelihood = score(rows)
-                    value = float(bic(len(rows), likelihood, cost))
-                    found = dict(block=result[0], score=likelihood, bic=value,
-                        paired_changed=any(item["changed"] for item in paired["components"]))
-                    scope.save("result", found)
+                    pending.append((dropped, scope))
+                else:
+                    found_by_drop[dropped] = found
+            if pending:
+                fitted = founder_count_workers.run(pending, batch=batch,
+                    selected=selected,
+                    neutral=neutral, sites=sites, config=config,
+                    threads=resolve_threads(num_threads),
+                    cost=cost, workspaces=workspaces)
+                found_by_drop.update((task[0], value) for task, value in zip(pending, fitted))
+            proposals = []
+            best_rows = None
+            # All K lightweight repairs compete; deeply search one winner only.
+            for dropped in order:
+                dropped = int(dropped)
+                found = found_by_drop[dropped]
                 proposals.append(dict(dropped=dropped, bic=float(found["bic"]),
                     bic_gain=initial_bic-float(found["bic"]),
-                    paired_changed=found["paired_changed"]))
+                    paired_changed=found["paired_changed"], runtime=found.get("runtime")))
                 if found["bic"] < best_bic - 1e-8:
-                    best, best_bic, best_score, best_drop = (
-                        found["block"], float(found["bic"]), float(found["score"]), dropped)
+                    best_rows, best_bic, best_score, best_drop = (
+                        found["selected"], float(found["bic"]), float(found["score"]), dropped)
+            if best_rows is not None:
+                best = _reconstruct(best_rows, best_score, batch, original)
+            winner = min((int(i) for i in order), key=lambda i: found_by_drop[i]["bic"])
+            deficit = float(found_by_drop[winner]["bic"]) - initial_bic
+            # A deliberately generous search-budget heuristic, not a bound.
+            # Every deletion has already had conditional repairs. Never screen
+            # an improving repaired panel; None requests the unscreened search.
+            multiple = config.count_refit_deficit_multiple
+            if best_drop is None and multiple is not None and deficit > multiple * cost:
+                diagnostic = dict(component=number, changed=False,
+                    reason="cheap_repair_deficit_screen",
+                    founders_before=founders, founders_after=founders,
+                    initial_likelihood=initial_score, final_likelihood=initial_score,
+                    initial_bic=initial_bic, final_bic=initial_bic,
+                    complexity_cost=cost, selected_deletion=None,
+                    proposals=proposals, bound=bound_record,
+                    screen_multiple=multiple, deficit_multiple=deficit/cost,
+                    elapsed_seconds=time.perf_counter()-started)
+                refiner._save(checkpoints, token, dict(block=original, diagnostic=diagnostic))
+                results.append(original)
+                diagnostics.append(diagnostic)
+                continue
+            scope = _ScopedCheckpoints(checkpoints, f"{token}.deep_drop{winner}")
+            deep = scope.load("result")
+            if deep is None:
+                found = found_by_drop[winner]
+                seed = (best if winner == best_drop else
+                        _reconstruct(found["selected"], found["score"], batch, original))
+                result = _fixed_count_refit(batch, seed, neutral, sites, config,
+                    num_threads, _ScopedCheckpoints(scope, "initial"), l1_blocks, workspaces)
+                result, paired = founder_exchanges.refine_components(
+                    batch, result, neutral, sites, _ScopedCheckpoints(scope, "paired"),
+                    iterations=config.max_iterations, quota=config.branch_cap,
+                    workspaces=workspaces)
+                if any(item["changed"] for item in paired["components"]):
+                    result = _fixed_count_refit(batch, result[0], neutral, sites, config,
+                        num_threads, _ScopedCheckpoints(scope, "after_pair"), l1_blocks, workspaces)
+                rows = refiner._local_selection(result[0], batch)
+                likelihood = score(rows)
+                deep = dict(block=result[0], score=likelihood,
+                            bic=float(bic(len(rows), likelihood, cost)))
+                scope.save("result", deep)
+            if deep["bic"] < best_bic - 1e-8:
+                best, best_bic, best_score, best_drop = (
+                    deep["block"], deep["bic"], deep["score"], winner)
             diagnostic = dict(component=number, changed=best_drop is not None,
                 founders_before=founders, founders_after=len(best.haplotypes),
+                deep_refit_deletion=winner, deep_refit_bic=float(deep["bic"]),
                 complexity_cost=cost, initial_likelihood=initial_score,
                 final_likelihood=best_score, initial_bic=initial_bic, final_bic=best_bic,
                 selected_deletion=best_drop, proposals=proposals, bound=bound_record,
@@ -175,4 +203,4 @@ def refine_components(prepared, components, neutral, sites, *, config,
             results.append(best)
             diagnostics.append(diagnostic)
     return haplotypes.BlockResults(results), dict(
-        model="bounded_delete_refit_pair_existing_complexity", components=diagnostics)
+        model="all_deletion_conditional_repairs_single_deep_refit", components=diagnostics)

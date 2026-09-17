@@ -3,7 +3,7 @@ import numpy as np
 from numba import njit, prange
 from numba.typed import List
 
-@njit(cache=True, parallel=True, fastmath=True)
+@njit(cache=True, parallel=True, fastmath=True, nogil=True)
 def score_emissions(emissions, local_indices, penalty, samples):
     k = local_indices.shape[1]
     pairs = k*k

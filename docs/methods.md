@@ -227,15 +227,22 @@ The following default-on searches address different remaining barriers:
    retained for paired exchanges inside count-reduction refits, and for the
    allele-changing macro moves and bounded interval polish below. This is a
    phase-search policy change, not imputation or calibrated phase confidence.
-2. A bounded count comparison removes one founder, refits the remaining paths
-   with beam/dual search, and checks paired exchanges. It compares
-   `K * complexity_cost - 2 * full_site_score`, using the caller's existing
-   complexity scale and the same fixed evidence mask. An optimistic local
-   bound can skip a reduction only if even its relaxed score loses. At most
-   16 deletion/refits are attempted; larger panels prioritize low-occupancy
-   rows. This is one deletion round, not exhaustive count selection or an
-   assumed biological founder count. Components with at most two rows or one
-   local block bypass this count search.
+2. A bounded count comparison tries all K single-founder deletions. Each gets
+   up to three cheap repaint/conditional-row repair sweeps, scoring the joint
+   row update and the best individual update. All repaired panels compete;
+   only the best repaired deletion receives deep beam/dual search and paired
+   exchanges. It compares `K * complexity_cost - 2 * full_site_score`, using
+   the existing complexity scale and fixed evidence mask. An optimistic local
+   bound skips a reduction only if even its relaxed score loses. This is one
+   deletion round, not exhaustive count selection or an assumed biological
+   founder count. Cheap ranking can miss the best deeply refitted deletion.
+   A second, explicitly heuristic budget screen now skips the deep refit if
+   the best repaired deletion still loses by more than eight per-founder
+   complexity costs. Improving repairs are never screened. This is **not**
+   an optimistic bound: a deeply recoverable deletion can in principle be
+   missed. Set `FounderRefinementConfig(count_refit_deficit_multiple=None)`
+   to retain the unscreened search; the chosen value is checkpointed.
+   Components with at most two rows or one local block bypass count search.
 3. Two exact-flank window searches start from the same completed panel. One
    retains stable incumbent-suffix ranking; the other breaks exact score ties
    using a sample-relaxed future bound. Their **completed** full-site scores
@@ -243,12 +250,17 @@ The following default-on searches address different remaining barriers:
    A further upper-bound-ranked window pass explores beneficial tracts that
    incumbent-prefix ranking can discard prematurely. Relaxed sample-specific
    choices rank proposals only: released paths remain shared across the cohort
-   and must pass canonical full-site acceptance.
+   and must pass canonical full-site acceptance. Optimistic bounds also prune
+   windows that cannot improve the best feasible proposal. Stable/tie searches
+   are reused only when all retained branch orders agree on identical inputs;
+   macro searches do not use this reuse.
 4. Bounded paired intervals exchange two founders over a tract, not the whole
    remaining chromosome. Local/local, L1-start/local-end and
    local-start/L1-end boundary grids retain the original emission bins.
-   At most 16 pairs are considered (suffix-score shortlisting for larger
-   panels). Both full-site score improvement and nondecreasing optimized
+   All pairs are considered up to seven founders. For larger panels, each
+   founder nominates its three best suffix-score partners; their union has
+   at most 3K pairs. This can miss a jointly beneficial interval whose suffix
+   scores are weak. Both full-site score improvement and nondecreasing optimized
    genotype fit are required. These exchanges preserve the exact local
    multiset of called **and missing** alleles and cannot fill absent sequence.
 
@@ -260,6 +272,14 @@ can change representation; the paired exchanges alone preserve local
 representation. Neither mechanism creates a new local candidate allele.
 
 All passes have separate component, iteration and proposal checkpoints.
+Intermediate component snapshots store selected prepared-row paths and
+non-derived metadata rather than repeated full-chromosome arrays. Resume
+reconstructs called/inference alleles, probabilities and source provenance from
+the bound prepared inputs; final outputs retain the ordinary block format.
+Packed scoring/suffix buffers belong to each component workspace. Independent
+deletion repairs share read-only evidence in one process, keep private fit
+workspaces, release the GIL in native kernels, and retain dynamic thread budgets.
+Completion order never determines scientific candidate-selection order.
 Release identities include the added modules and actual search configuration;
 an older final result cannot silently bypass the new passes. Existing results
 are retained. A changed code identity can also invalidate feedback identities
@@ -270,22 +290,62 @@ Local feedback still excludes final refinement, and no pass uses pedigree
 information or truth. The CLI's `--founder-refinement off` disables them all.
 
 Symmetric emissions and the uniform change penalty permit exact unordered
-diploid states for this model alone. Full-site scoring costs `O(N L K²)`;
-conditional beam work costs `O(N M W C K²)` per sweep, where M is the total
-proposal-bin count, W the bounded beam width and C the bounded local branch
-count. Traceback bookkeeping is linear in original block count. This does not
-introduce cubic or quartic founder-state transitions into structured assembly.
-Macro emission packing adds `O(N M (K+R)²)` work/storage, with R the number of
-L1 context paths per piece. The additional genotype-fit check uses the same
-quadratic-state traceback only for score-improving macro proposals. There is no
-new cubic or quartic transition within a single diploid-state update.
-For the added dual solver, one focal founder costs `O(D N M C K²)`, where D
-is its bounded sweep count. Considering **all K founders** gives
-`O(D N M C K³)` proposal work per outer escape iteration, plus up to cubic
-aggregate full-site scoring across those candidates. Thus the all-founder
-escape pass is not a near-quadratic total-work guarantee at large K, even
-with structured hierarchy transitions. Its suffix workspace is
-`O(B N K²)` and messages use `O(B N C)`, for B proposal blocks.
+diploid states for this model alone. Full-site scoring costs `O(N L K²)`.
+The conditional solver shares the states not involving its focal founder
+across candidate choices. For t bins per block, shared preparation costs
+`O(N K² t²)`, followed by `O(N (K t+t²))` per candidate. This is an exact
+max-plus representation, including switches among background states. Only
+retained beam paths materialize full diploid states.
+
+Immutable background summaries are prepared once for a fixed competing panel,
+then shared across focal founders, dual sweeps and overlapping windows. The
+all-founder exclusion maxima require only the global best state plus separate
+scans for its one/two endpoints. Forward/reverse geometries and focal state
+permutations remain explicit. Caches are discarded with the panel; memory
+limits select the direct equivalent kernels. Cache allocation uses one
+parallel initialization pass rather than launching fills at every block.
+
+Short full-site edits can use exact unchanged-panel flanking messages at
+original block boundaries. Missing evidence retains its canonical neutral
+meaning; missing founder calls are not invented. Possible winners and near
+ties are canonically rescored before selection, and macro genotype-fit checks
+retain the canonical full-site score and painting. A changed reference panel
+invalidates its flanks. Optimistic window bounds may abort the remaining beam
+only when every reachable candidate is unable to beat the best feasible
+proposal; no heuristic-only rejection is added.
+
+Across all K focal founders, the default work is cubic in K when local/macro
+alphabets grow as O(K) and bin, beam and iteration budgets remain fixed. Cheap
+all-deletion repairs also have cubic total work; the expensive refit is no
+longer repeated K times. The linear-sized interval-pair working set prevents
+a quartic interval scan. This is not a claim that chromosome length, the t²
+term, or the large search constants are negligible. See the
+[explicit complexity bounds](founder_scaling.md#final-founder-refinement-explicit-work-and-parallelism).
+Numerical acceleration does not reduce those search budgets. Fully called
+one/two-bin blocks use specialized packed beam and dual kernels; longer macro
+blocks retain the general recurrence with compiled beam orchestration.
+The short dual preserves the general recurrence's arithmetic order: an
+algebraically equivalent simplification changed a tied path in a difficult
+chromosome, so it was not retained. Beam states are neither merged nor
+renormalized. Wide, ordinary beam rankings use stable partial selection.
+
+Component-owned caches reuse packed emission addresses, invariant candidate
+rankings, reverse-bin models and exact ordered-panel scores. Capped candidate
+lists still retain the current incumbent in their original order. The score
+cache is bounded by 64 entries and 8 MiB of keys; no process-global array cache
+or stale-panel reuse is involved. Float32 full-chromosome evidence can be shared
+read-only; ragged components receive contiguous gathered evidence. Batched
+local emissions preserve missing-founder identity, neutral observations and
+each pair's original site accumulation.
+
+Complete-panel kernels use a site-major int8 dosage table when memory permits,
+with direct scoring otherwise. Up to 64 unordered states use one uint64
+traceback switch mask per marker; larger panels retain direct traceback.
+These are representation changes, not phase-confidence thresholds. Independent
+short windows run concurrently against the same incumbent, then replay pruning
+and diagnostics in the original order before scientific selection. The dynamic
+candidate allocator still redistributes released threads at kernel boundaries.
+Checkpoint reconstruction preserves each probability row's original dtype.
 
 The method remains a bounded, non-convex search. Higher read likelihood does
 not guarantee fewer true founder errors. Absent local alleles, wholly unsampled
@@ -294,6 +354,9 @@ Greater likelihood can also trade off long-range phase accuracy. The refiner's
 conservative complete-site acceptance evidence still excludes partially observed
 markers, even though hierarchical linking and binned proposals use them. Those
 limitations require scientific validation, not claims of a global optimum.
+The [N320 fragmentation replay](validation.md#n320-fragmentation-replay) includes
+an unresolved seed407 chr15 case where final refinement increases founder
+errors despite successfully joined chromosome paths.
 
 ## Pedigree
 
