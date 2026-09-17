@@ -14,13 +14,15 @@ choosing the T11 stopping rule, not from all project development.
 
 | Portion | Completed evidence |
 | --- | --- |
+| Current fresh end-to-end pipeline | Seed3000, N320/5×, all 22 chromosomes from simulation through T12 and truth evaluation; progressive refinement enabled |
 | Stage1 discovery | All 1,647 seed400 chr1 blocks; repeated batches and 76 approximately 2× seed401 missing-data controls |
 | Per-round balanced feedback | 9,287 local blocks in six seed/chromosome cases; full chr12 production parity plus bounded L1–L4/painting and resume checks |
 | Pre-L1 founder completion | 5,484 chr16 blocks across seeds400–402; independent 2×/3×/5× crossfits |
 | Dense q16 assembly and painting | All 22 seed402 chromosomes plus six controls; Stage1 and painter held fixed |
 | Final founder-path refinement | All 22 current balanced-input seed402 and seed403 chromosomes plus seed400–402 controls; geometry, missingness, provenance and resume checks |
 | Guarded multiscale refinement | All 22 seed403 chromosomes plus six controls; fresh chr4 final assembly, painting and typed T09 replay |
-| Optimized final refiner | 217 N80 chromosomes across ten seeds; seven distinct N320 chromosomes; frozen-input, field-by-field and resume comparisons |
+| Progressive final L1–L4 refinement | 98 N80/5× final-assembly comparisons across nine seeds, including 27 independent controls; two one-allele exceptions documented below |
+| Earlier final-only optimized refiner | 217 N80 chromosomes across ten seeds; seven distinct N320 chromosomes; frozen-input, field-by-field and resume comparisons |
 | N320 fragmentation replay | Eight previously fragmented chromosomes now continuous; seed407 chr15 final-refinement regression remains unresolved |
 | Painting numerical implementation | All 22 seed402 q16 chromosomes, 148 components and 8,956,852 sites, plus seed400/401 chr16 controls |
 | Packed T09 evidence reuse | Full chr3/chr16 repaints, prepared fields and typed checkpoint round trips; memory-limited/uncached controls |
@@ -29,16 +31,157 @@ choosing the T11 stopping rule, not from all project development.
 | Latest T11 dirty tiles | Two complete seed401 chromosomes; exact final phase/stability fields |
 | Latest T12 indexed trials | All 22 seed401 final-phase maps; variable/zero maps, missingness, overlapping flips and reset controls; later complete seed403 run before multiscale refinement |
 
-A fresh seed403 run has now exercised simulation through recombination maps
+A fresh seed3000 run has exercised the current progressive implementation
+from simulation through recombination maps and known-truth evaluation.
+The earlier fresh seed403 run exercised simulation through recombination maps
 with the balanced local feedback and final founder refinement. A subsequent
 22-chromosome optimization comparison held its Stage1 inputs fixed and reran
 feedback, L1-L4, founder refinement, painting, pedigree inference, family phase
 refinement and maps. Fixed-input comparisons must not be relabeled as fresh
 simulations or fresh block discovery.
 
+## Fresh seed3000 end-to-end validation
+
+Completed 17 September 2026 with 320 samples (20 F1, 100 F2, 200 F3), 5× mean
+depth, 2% read errors and 5 cM/Mb generating/inference defaults. Existing
+empirical founder-sequence templates were inputs; the pedigree, reads, block
+discovery, both balanced feedback rounds and downstream inference were fresh.
+The run used dense bounded assembly and progressive refinement after each
+executed final hierarchy level. No inference parameter was tuned against this
+seed's truth, and production scientific code was unchanged during the run.
+
+| Quantity | Result |
+| --- | ---: |
+| Chromosomes with one component and six long founder haplotypes | 22 / 22 |
+| Founder markers represented | 8,956,852 / 8,956,852 |
+| Called founder alleles | 53,740,022 / 53,741,112 |
+| Uncalled founder alleles | 1,090 |
+| Founder allele mismatches | 2,581 (48.03 per million called) |
+| Exact metadata-free pedigree configurations | 320 / 320 |
+| Correct M0 roots / M2 pairs | 20 / 300 |
+| Correct edges / extra edges / missing edges | 600 / 0 / 0 |
+| Called final sample alleles | 5,728,263,776 / 5,732,385,280 (99.9281%) |
+| Final phase switches / eligible comparisons | 784 / 495,689,840 |
+| Genotype errors / called genotypes | 486,200 / 2,864,125,767 |
+| Component-aligned sample allele errors | 1,856,972 |
+
+A one-to-one match to all six truth founders gives the same 2,581 founder
+mismatches; the founder count was not forced. Errors are concentrated on chr3
+(2,257), chr13 (166) and chr23 (115). Truth-to-panel errors plus missing alleles
+total 3,671. A continuous chromosome product can still contain unknown allele
+intervals; continuity is not a claim that every allele or long-range phase is
+correct. Founder errors, sample allele errors and phase switches are distinct
+metrics and must not be substituted for each other.
+
+All 22 T11 outputs satisfied the canonical phase-stability stopping rule, but
+full latent posterior convergence was not achieved. Switch comparisons do not
+cross missing calls, unsupported components or incorrect intervening
+heterozygotes, so the switch total must be read alongside coverage and genotype
+errors. The release is a stable conditional phase product, not a converged
+marginal posterior.
+
+All 22 recombination maps completed, with shared-family orientation fitting
+converged on its screened candidates. On correctly inferred edges within the
+same observable exposure, expected crossovers total 25,061.08 versus 25,076
+true crossovers (ratio 0.999405). This is a conditional, exposure-matched
+comparison, not complete genome-wide crossover recovery.
+
+All canonical completion, schema and sample-order checks passed. Frozen source
+matches the production package. A separate chr8 family-solver replay matched
+the distributed output's identity, every final allele call and its 25-iteration
+stopping point. The [runtime report](performance.md#fresh-seed3000-n320-and-5)
+distinguishes measured multi-node elapsed time from the estimated one-node
+runtime and explains the run-local T11 scheduling.
+
+This is one successful fresh seed, not validation of every cross design,
+sample size or depth. It does not revalidate or resolve the earlier seed407
+chr15 limitation below. The full readable report, canonical evaluation and
+checkpoints remain in `work/runs/seed_3000/`; frozen source, founder metrics and
+execution records remain in `.work/seed3000_full_20260917_cFrnkNJ8/`.
+
+## Progressive final L1–L4 refinement at N80
+
+The complete refiner now runs after each executed level of **final** L1–L4
+assembly. Neither of the two local feedback/context passes runs it.
+The controlled comparison reused identical cached, post-feedback local panels
+and original genotype likelihoods in both arms: the frozen predecessor
+`b6bc14e` with final-only refinement versus the progressive implementation.
+These are final-assembly replays, not new simulations or fresh discovery runs.
+
+All 98 comparisons completed at N80 and 5×. Four complete 22-chromosome
+genomes use the 20/30/30 design:
+
+| Seed | Called-allele errors, final-only → progressive | Called alleles, final-only → progressive | Missing alleles, final-only → progressive |
+| --- | ---: | ---: | ---: |
+| 2002 | 28,609 → 28,565 | 53,712,295 → 53,712,290 | 28,817 → 28,822 |
+| 2003 | 107,211 → 104,706 | 53,701,807 → 53,701,743 | 39,305 → 39,369 |
+| 2005 | 1,985 → 1,834 | 53,725,799 → 53,725,794 | 15,313 → 15,318 |
+| 2006 | 10,746 → 8,949 | 53,713,569 → 53,713,607 | 27,543 → 27,505 |
+
+Together these improve 148,551 → 144,054 errors among approximately
+214.85 million called founder alleles. Calls decrease by 36 overall, so
+errors plus missing alleles improve by 4,461 rather than 4,497.
+This is not evidence that every remaining error is recoverable.
+
+The other ten comparisons are seed2000 chr13, seed2001 chr20, five seed2004
+chromosomes, seed2010 chr18 and seed2011 chr8/20. The last three use the weaker
+10/30/40 design. Seed2010 chr18 improves 100,865 → 52,130 errors; seed2011 chr20
+improves 17,164 → 4,869. These deliberately difficult controls dominate the
+pooled improvement and should not be treated as a representative error rate.
+
+All 22 seed2003 chromosomes and seed2004 chr3/4/13/20/23 were declared as
+independent validation before observing their outcomes. They were not used to
+develop this change, although they are existing project simulations rather
+than globally untouched or freshly generated data. Those 27 cases improve
+107,772 → 105,267 errors, with 64 fewer called alleles. No inference parameters
+were retuned against their truth.
+
+Across all 98 cases, 21 improve their called-allele error count, 75 are unchanged,
+and two have one extra error each. Every progressive output is one component
+covering all input SNPs, with six rows matching six distinct truth founders;
+one-to-one matching gives the same forward error count. The count was not
+forced. There are two explicit exceptions to strict no-regression equivalence:
+
+- Seed2006 chr16: 76 → 77 errors, with 37 additional calls. Of those new calls,
+  36 are correct and one is wrong. Among previously called alleles, two errors
+  are corrected and two introduced. Errors plus missing alleles improve by 36.
+- Seed2003 chr16: 4,698 → 4,699 errors with unchanged coverage. One original
+  local-row choice changes one allele at approximately 5.93 Mb; both the
+  canonical primary and full-site secondary scores tie exactly. No rule was
+  added to choose this allele using truth. This is the only case where either
+  forward errors-plus-missing or reverse truth-to-panel errors/missing worsens,
+  by one.
+
+The implementation is retained for its overall accuracy/coverage improvement
+and bounded runtime cost, **not** as a claim of perfect per-site preservation.
+The original naive progressive versions had larger regressions; these were
+traced to partial-founder evidence ignored at primary-score ties and to useful
+primary-neutral alternatives not returned by the unrestricted search. The
+[secondary tie rule and primary-preserving search](methods.md#partial-evidence-at-primary-ties)
+address those mechanisms without changing the primary mask, inventing alleles,
+or selecting against truth. Early proposal coarsening remains a documented
+search approximation.
+
+Focused checks covered 24 real panels against the existing single-site
+predictive scorer (identical scores), complete-input equivalence, neutral
+unobserved samples, restricted-path primary invariance, serial/parallel
+component results, completed resumes for all 98 cases, partial component reuse,
+and exclusion from both feedback levels and the explicit off setting.
+Partial-resume soft probabilities differed by at most 2.98e-8 due to the
+existing fresh-hierarchy float32 conversion; calls and provenance were exact,
+and probabilities were identical at float32 precision. All paired local-input
+identities and local truth metrics matched.
+
+This validates final assembly, not a fresh T09–T12 rerun. The earlier N320
+seed407 chr15 limitation below has **not** been revalidated or established as
+fixed. Timing scope and CPU budgets are recorded in
+[performance](performance.md#progressive-final-assembly-at-n80).
+Frozen code, per-level checkpoints, per-chromosome CSV/JSON metrics and
+diagnostics remain in `.work/progressive_refinement_20260917_V2eVeIBe/`.
+
 ## Optimized founder refinement
 
-The latest performance comparison starts from unchanged cached L4 inputs;
+The earlier final-only performance comparison starts from unchanged cached L4 inputs;
 it does not repeat discovery, feedback or hierarchy. The 217 completed N80/5x
 chromosomes cover seeds2000–2006,2010,2011 and 19 available chromosomes from
 seed2012, spanning both 20/30/30 and 10/30/40 cohort designs. Every final product

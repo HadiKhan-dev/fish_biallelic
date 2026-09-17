@@ -1,7 +1,7 @@
 # Performance and resource use
 
 The supported pipeline uses missing-aware block discovery, local selection
-after each feedback round, L1–L4 assembly, final founder refinement, ragged
+after each feedback round, L1–L4 assembly with progressive founder refinement, ragged
 painting and pedigree inference, family phase correction, and conditional
 recombination maps. See [model choices](founder_scaling.md) and
 [scientific validation](validation.md).
@@ -13,7 +13,58 @@ matter. Configured threads are not a measure of sustained CPU utilization.
 
 ## Complete workflow timing
 
-There is no measured fresh-seed, full-genome runtime for the latest complete
+### Fresh seed3000, N320 and 5×
+
+The current implementation completed a fresh 22-chromosome run through T12 on
+17 September 2026, using five 76-core Ice Lake allocations and one 66-core
+allocation. Measured multi-node elapsed time was **93.67 minutes**, excluding
+the subsequent truth evaluation. This includes shared initialization,
+synchronization and a deliberate finish-controller restart to distribute T11.
+
+Summing disjoint measured work gives a **single-76-core estimate of about
+5 hours 10 minutes** (roughly 5–5¼ hours), not a measured continuous one-node
+runtime. The design uses 20/100/200 cohorts and 8,956,852 markers.
+
+| Portion | Estimated 76-core minutes from measured work |
+| --- | ---: |
+| Shared templates, simulation and read preparation | 10.1 |
+| Initial 200-SNP discovery | 39.5 |
+| Both feedback rounds, including balanced selection | 88.4 |
+| Final L1–L4 assembly and progressive founder refinement | 112.4 |
+| Painting computation | 2.6 |
+| Pedigree evidence preparation | 3.8 |
+| Genome-wide pedigree inference, including prepared-input loading | 15.8 |
+| Family refinement and final phase | 19.7 |
+| Recombination maps | 3.0 |
+| Remaining per-chromosome startup, I/O and bookkeeping | 12.3 |
+| **Total, before rounding individual rows** | **307.5** |
+
+The estimate counts shared initialization once, sums independent chromosome
+work, and does not add nested timers or multiply six-node elapsed time by six.
+It assumes ideal 66-to-76-core scaling only for work executed with 66 cores;
+without that normalization the sum is 313.8 minutes. Repeated cold compilation,
+process/cache loading, shared-filesystem contention and continuous-process
+reuse contribute uncertainty. The interrupted first finish attempt, repeated
+cached-stage verification and final truth evaluation are excluded from this
+fresh-work estimate.
+
+Independent chromosomes ran with each node's full CPU ceiling and existing
+dynamic allocation; this does not imply sustained full utilization. T10 ran
+genome-wide on one 76-core node. Once parentage was fixed, a **run-local** T11
+scheduler called the unchanged chromosome solver concurrently, retaining the
+full stage identity and canonical global completion checks. This scheduler is
+not a new production CLI feature. Its 4.35-minute parallel wall time is not the
+single-node T11 estimate: the latter sums chromosome solves. A separate chr8
+replay matched every final allele call and its 25-iteration stopping point.
+
+See [scientific outcomes and limitations](validation.md#fresh-seed3000-end-to-end-validation).
+Detailed timings and frozen source remain in
+`.work/seed3000_full_20260917_cFrnkNJ8/`; the readable run report and checkpoints
+remain under `work/runs/seed_3000/`, outside Git.
+
+### Earlier workflow measurements
+
+There is still no measured fresh-seed, full-genome runtime for this complete
 implementation on a 112-core node. The earlier seed403 comparison took 204.03
 minutes from cached Stage1 on 76-core Ice Lake hardware. Adding its unchanged
 input/discovery durations gives a 252.53-minute estimate, not a measured fresh
@@ -29,8 +80,11 @@ fresh-run measurement.
 
 ## Final founder refinement
 
-The refiner runs after final L4, not progressively after every hierarchy level.
-The current implementation shares invariant evidence and background scores,
+The complete refiner now runs after each executed level of final L1–L4
+assembly, never in the two local-feedback passes. Small components run
+concurrently and share a chromosome-derived early proposal resolution;
+late levels retain component-specific resolution. The implementation shares
+invariant evidence and background scores,
 uses compiled beam/dual scans and contiguous emission tables, scores localized
 edits with exact flanks, and bounds losing searches. Independent candidates
 share the verified CPU budget; freed threads become available at numerical
@@ -46,9 +100,49 @@ mathematical bound. Improving repairs are retained;
 deficit screen. Large-K interval partners are bounded as documented in the
 [work and storage analysis](founder_scaling.md#final-founder-refinement-explicit-work-and-parallelism).
 
-### N80 warm-cache measurements
+### Progressive final assembly at N80
 
-| Complete final-refiner replay, 5x, 76 CPUs | Starting implementation (s) | Optimized, unscreened count (s) | Current default (s) |
+Matched-input 5× controls on 76-core allocations give the following warm-native
+measurements. These include preprocessing, **all final hierarchy levels and
+their refinement**, and assembly checkpoint writes. They exclude initial input
+loading, truth evaluation, complete-resume verification, discovery, both local
+feedback rounds and downstream stages.
+
+| Control | Earlier final-only schedule (s) | Progressive schedule (s) |
+| --- | ---: | ---: |
+| Seed2005 chr6 | 68.08 | 101.48 |
+| Seed2006 chr20 | 64.24 | 99.98 |
+| Seed2006 chr3, 1,505,847 markers | 190.90 | 321.39 |
+
+These controls cost approximately 1.5–1.7× the previous final-only schedule,
+not four times as much. Seed2006 chr13 takes 81.23 seconds in the progressive
+implementation; its stored original comparison includes cold compilation, so
+it is not used as a warm speed ratio. Runs were not alternating repetitions;
+chr20 uses the same node, while chr6/chr3 compare different 76-core nodes.
+First-use native compilation added roughly 170 seconds in these experiments.
+
+The initial naive progressive chr3 run took 970.5 seconds, with approximately
+426 GiB of observed parent-process RSS. Sharing early proposal resolution,
+parallelizing complete independent components, reusing identical searches and
+accelerating metadata validation reduced the current run to 321.4 seconds and
+35.2 GiB peak parent RSS, with the same 145 called-allele errors. Parent RSS is
+not a node-wide peak-memory measurement. The new primary-preserving tie search
+retains the cubic founder-count bound.
+
+The validation used five 76-core allocations and one 66-core allocation
+(446 CPUs), with one full-node chromosome stream per allocation. Component and
+candidate teams subdivide each node's verified budget and grow at numerical
+boundaries. Compilation, metadata checks and I/O still contain serial work;
+configured cores must not be interpreted as sustained 100% utilization.
+The 66-core timings are kept separate from the table above.
+
+### Earlier final-only N80 warm-cache measurements
+
+These isolate one post-L4 refiner invocation. They predate the progressive
+schedule and partial-evidence tie search and are **not** current total
+L1–L4-plus-refinement timings.
+
+| Complete final-only refiner replay, 5x, 76 CPUs | Starting implementation (s) | Optimized, unscreened count (s) | Optimized final-only (s) |
 | --- | ---: | ---: | ---: |
 | Seed2006 chr11 | 114.60 | 47.34 | 20.50–20.62 |
 | Seed2006 chr20 | 110.22 | 41.25 | 25.17–25.46 |
@@ -74,7 +168,7 @@ retaining all 11 accepted count reductions. These are empirical comparisons,
 not a guarantee for unseen inputs or an accuracy claim for every earlier
 algorithm redesign. See [validation scope](validation.md#optimized-founder-refinement).
 
-### N320 warm-cache measurements
+### Earlier final-only N320 warm-cache measurements
 
 Seven distinct N320/5x chromosomes from seeds404–408 passed field-by-field
 comparisons against the frozen predecessor using unchanged cached L4 inputs.
@@ -82,7 +176,7 @@ Both versions give 274 founder-allele errors in 20,334,788 called cells, with
 592 unknown output cells. This test isolates refinement and deliberately
 retains the input component boundaries.
 
-| Same-node warm cache, fresh checkpoints | CPUs | Predecessor (s) | Current (s) |
+| Same-node warm cache, fresh final-only checkpoints | CPUs | Predecessor (s) | Optimized final-only (s) |
 | --- | ---: | ---: | ---: |
 | Seed404 chr1 | 76 | 255.96 | 58.48 |
 | Seed404 chr11 | 76 | 333.80 | 62.88 |
@@ -144,7 +238,8 @@ Phase boundaries, checkpoint I/O, memory traffic and synchronization remain.
 Detailed benchmark sources and artifacts stay in ignored work storage:
 `.work/founder_25s_20260916_EO7tojvt/`,
 `.work/n320_refiner_20260917_g3ece5Py/`, and
-`.work/n320_fragment_retry_20260917_UTISglBg/`.
+`.work/n320_fragment_retry_20260917_UTISglBg/`. Progressive assembly results are
+in `.work/progressive_refinement_20260917_V2eVeIBe/`.
 Earlier optimization-stage timings are archived locally rather than repeated
 here as competing descriptions of the current implementation.
 

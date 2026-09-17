@@ -21,7 +21,8 @@ def resolve_threads(budget):
 
 
 class ComponentWorkspace:
-    def __init__(self, batch, neutral, sites, max_bins, threads, prepared_arrays=None):
+    def __init__(self, batch, neutral, sites, max_bins, threads, prepared_arrays=None,
+                 minimum_bin_size=1):
         self.positions = np.concatenate([b.positions for b in batch])
         indices = np.searchsorted(sites, self.positions)
         if not np.array_equal(sites[indices], self.positions):
@@ -38,7 +39,7 @@ class ComponentWorkspace:
             for b in batch]) if prepared_arrays is None else prepared_arrays[1])
         self.offsets = np.asarray([0, *np.cumsum([len(b.positions) for b in batch])], np.int64)
         self.penalty = chimera_scoring.compute_penalty(batch)
-        self.bin_size = max(chimera_scoring.compute_spb(batch),
+        self.bin_size = max(minimum_bin_size, chimera_scoring.compute_spb(batch),
                             math.ceil(len(self.positions) / max_bins))
         self.logs = (founder_scoring.prepare_log_evidence(self.evidence, self.complete)
                      if prepared_arrays is None else prepared_arrays[2])
@@ -52,6 +53,12 @@ class ComponentWorkspace:
         self.reference = None
         self.flanks = None
         self.local_scores = 0
+        # The existing identical-order window reuse must also work when small
+        # components retain only a completed checkpoint, not proposal files.
+        # Entries carry their exact panel signature and live for this fit only.
+        self.path_proposals = {}
+        self.predictive_evidence = None
+        self.predictive_scores = OrderedDict()
 
     def models(self):
         if self.submodels is None:
@@ -84,6 +91,29 @@ class ComponentWorkspace:
                 alleles, self.evidence, self.complete, self.penalty, self.logs).sum())
         self._remember(key, value)
         return value
+
+    def predictive(self, panel):
+        """Secondary partial-founder score, never a replacement primary score."""
+        key = (panel.shape, panel.tobytes())
+        if key in self.predictive_scores:
+            self.predictive_scores.move_to_end(key)
+            return self.predictive_scores[key]
+        with parallel.numba_thread_scope(resolve_threads(self.threads)):
+            if self.predictive_evidence is None:
+                from .founder_predictive import PredictiveEvidence
+                self.predictive_evidence = PredictiveEvidence(self)
+            value = self.predictive_evidence.score(self, panel)
+        self.predictive_scores[key] = value
+        if len(self.predictive_scores) > 64:
+            self.predictive_scores.popitem(last=False)
+        return value
+
+    def primary_preserving_choices(self, panel, branch_cap):
+        if self.predictive_evidence is None:
+            from .founder_predictive import PredictiveEvidence
+            self.predictive_evidence = PredictiveEvidence(self)
+        return self.predictive_evidence.primary_preserving_choices(
+            self, panel, branch_cap)
 
     def _local_score(self, panel):
         if self.reference is None or panel.shape != self.reference.shape:
@@ -134,10 +164,12 @@ class ComponentWorkspace:
         return value
 
 
-def component_workspace(cache, batch, neutral, sites, max_bins, threads, prepared_arrays=None):
+def component_workspace(cache, batch, neutral, sites, max_bins, threads, prepared_arrays=None,
+                        minimum_bin_size=1):
     """Cache belongs to one final-refinement invocation with fixed inputs."""
     key = (int(batch[0].positions[0]), int(batch[-1].positions[-1]))
     if key not in cache:
-        cache[key] = ComponentWorkspace(batch, neutral, sites, max_bins, threads, prepared_arrays)
+        cache[key] = ComponentWorkspace(batch, neutral, sites, max_bins, threads,
+                                        prepared_arrays, minimum_bin_size)
     cache[key].threads = threads
     return cache[key]

@@ -70,8 +70,9 @@ The binned panel scorer uses the same partial-founder distributions, applying
 its existing likelihood floor after marginalization. All candidate states use
 the same retained markers. Uniform sample evidence and all-founder-unknown
 markers are neutral. Fully called input retains the previous optimized kernels.
-Final founder refinement retains its separate fixed complete-site acceptance
-objective described below; partial proposal scoring does not relax that guard.
+Founder refinement retains a separate fixed complete-site primary objective.
+A secondary full-site partial-founder score resolves exact primary ties;
+partial evidence never licenses a decrease of the primary score.
 
 The implementation stores three genotype emissions for complete input or seven
 predictive categories for partial input per sample/site, reuses
@@ -144,14 +145,25 @@ not regeneration of the underlying simulated reads or discovered blocks.
 
 ## Final founder-path refinement
 
-The hierarchy chooses component boundaries and an initial founder count. Final refinement
-then reopens row choices from the original **prepared local panels** within each
-component. A locally supported founder can otherwise be pruned at L2 and remain
+After each executed level of final L1–L4 assembly, the hierarchy's current
+components and founder counts initialize the **complete** founder refiner.
+Its refined rows feed the next level. Each pass reopens row choices from the
+same original **prepared local panels** within each component. A locally
+supported founder can otherwise be pruned at L2 and remain
 unrecoverable to L3/L4, even when a better chromosome path exists in those local
 panels. Refinement changes whole local-row selections, not their allele values,
 support metadata, or pre-fill inference snapshots. It neither crosses component
 breaks nor adds founders, and runs only for final assembly (`max_level=4`), not
-the L1/L2 feedback contexts.
+the L1/L2 feedback contexts. An irreducible hierarchy retains its existing
+early stop rather than running unused levels solely to repeat refinement.
+
+The proposal-bin minimum at L1/L2 is shared across the chromosome:
+`max(configured_minimum, ceil(chromosome_sites / proposal_max_bins))`.
+This avoids allocating a whole chromosome's proposal resolution to every small
+component. L3/L4 retain component-specific resolution. It is a search-resolution
+approximation, not mathematically equivalent to the finer early search.
+Acceptance still scans individual SNPs; the 20-iteration, 16-branch and existing
+count-search budgets are retained.
 
 This pass uses the full cohort's genotype likelihoods, without truth, pedigree
 or generation labels. It retains the panel scorer's normalized likelihoods,
@@ -167,10 +179,12 @@ founder while retaining every sample's diploid state against the other founders;
 an incumbent suffix supplies complete-path ranking in both scan directions.
 The first beam sees the original assembly and competes with warm proposals,
 rather than inheriting a potentially worse warm-start search basin. Every
-accepted proposal improves the same full-site, fixed-count objective.
+accepted fixed-count path edit improves the primary full-site score or,
+at an **exact** primary tie, improves the secondary score described below.
 
-If fine-scale proposals stall, paths from the **final hierarchy's L1 level**
-supply larger competing moves alongside the incumbent path pieces. These are
+If fine-scale proposals stall, both original and refined paths from the
+**final assembly's L1 level** supply larger competing moves alongside the
+incumbent path pieces. These are
 not a replacement of the local panels or another feedback round. Exact duplicate
 row sequences are removed; a bounded beam joins these pieces, then decodes the
 proposal back to original prepared rows. All original emission bins, sample
@@ -180,7 +194,8 @@ are followed by the ordinary fine-scale refinement.
 Larger moves have an additional genotype-fit guard. Write the optimized sample
 score as `Q = E - penalty * S`, where E is the cohort's centered genotype-emission
 score and S counts internal sample diplotype changes. A macro move must improve
-Q and must not lower E beyond numerical tolerance. This prevents accepting a
+Q, or improve partial evidence at an exact Q tie, and must not lower E beyond
+numerical tolerance. This prevents accepting a
 long founder rewrite solely because it saves switch penalties while fitting
 the genotypes worse. It is a search-policy restriction, not a confidence
 threshold or proof of biological correctness; a true move that sacrifices
@@ -212,6 +227,36 @@ not retried at larger nominal beam widths. The remaining positive dual gap is
 an optimization diagnostic for the restricted binned conditional problem, not
 a biological confidence interval or proof of a globally optimal assembly.
 The dual pass itself cannot recover a missing candidate allele or change count.
+
+### Partial evidence at primary ties
+
+The primary mask retains markers called in every original inference row.
+Consequently, two different local rows can have identical primary emissions
+while differing at well-observed partial-founder markers. Keeping whichever
+panel arrived first can discard real evidence. Fixed-count beam, dual and
+window proposals therefore use a lexicographic rule: primary score first,
+then full-site partial-founder predictive score only when primary scores are
+exactly equal. Near ties and small primary losses do not qualify.
+
+The secondary score uses the same seven genotype distributions, shared-unknown
+source-row identities, 1% mixture and likelihood floor as the proposal model.
+It permits sample-state changes at every SNP. Its mask is fixed from the original
+prepared inputs: keep flags plus at least one called founder. All-founder-unknown
+sites and unobserved sample evidence remain neutral. This is the existing
+per-observation predictive approximation, not joint latent-allele integration,
+a calibrated phase posterior, or new allele imputation. Count comparisons and
+the primary genotype-fit guard are unchanged.
+
+An unrestricted partial-data optimum can trade away primary fit elsewhere
+and consequently be rejected. When the ordinary dual/macro search stalls,
+a bounded extra dual search groups local rows by their **identical alleles at
+every primary-scored marker**. Each focal path may explore only its incumbent's
+equivalence class, with the same branch cap and sweep budget. Every decoded
+path must preserve the canonical primary score exactly and improve the full-site
+secondary score to be accepted. This reuses the existing solver and does not
+enumerate all local edits with a whole-chromosome refit for each.
+
+### Remaining passes and implementation
 
 The following default-on searches address different remaining barriers:
 
@@ -246,7 +291,8 @@ The following default-on searches address different remaining barriers:
 3. Two exact-flank window searches start from the same completed panel. One
    retains stable incumbent-suffix ranking; the other breaks exact score ties
    using a sample-relaxed future bound. Their **completed** full-site scores
-   decide which trajectory survives, retaining the stable result on ties.
+   decide which trajectory survives. Exact primary ties use the secondary
+   partial-founder score; a tie in both scores retains the stable result.
    A further upper-bound-ranked window pass explores beneficial tracts that
    incumbent-prefix ranking can discard prematurely. Relaxed sample-specific
    choices rank proposals only: released paths remain shared across the cohort
@@ -271,7 +317,11 @@ The existing 20-iteration and 16-branch defaults remain in use. Count deletion
 can change representation; the paired exchanges alone preserve local
 representation. Neither mechanism creates a new local candidate allele.
 
-All passes have separate component, iteration and proposal checkpoints.
+Each final hierarchy level has a separate refinement checkpoint namespace.
+Independent components run concurrently within the shared core and memory
+budget; each worker retains its own fitting workspace. Small components save
+compact completed results rather than thousands of tiny proposal files.
+Long components retain separate iteration and proposal checkpoints.
 Intermediate component snapshots store selected prepared-row paths and
 non-derived metadata rather than repeated full-chromosome arrays. Resume
 reconstructs called/inference alleles, probabilities and source provenance from

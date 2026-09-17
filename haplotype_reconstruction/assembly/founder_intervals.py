@@ -153,7 +153,8 @@ def refine_components(prepared, components, neutral, sites, *, config,
             diagnostics.append(dict(component=number, changed=False))
             continue
         workspace = component_workspace(workspaces, batch, neutral, sites,
-            config.proposal_max_bins, get_num_threads())
+            config.proposal_max_bins, get_num_threads(),
+            minimum_bin_size=config.proposal_min_sites_per_bin)
         evidence, leaves, offsets = workspace.evidence, workspace.leaves, workspace.offsets
         complete, penalty, logs = workspace.complete, workspace.penalty, workspace.logs
         submodels = workspace.models()

@@ -85,21 +85,25 @@ transition model and does not change discovery. Use `--assembly-search broad`
 to retain the optimized broader path/panel search instead of the default
 `bounded` search; this costs more full refits and is not guaranteed to improve
 accuracy. Final assembly also reopens the original local row choices in a
-chromosome-wide founder refinement; this runs after the hierarchy,
-not within the two local feedback rounds. If local search stalls, it can reopen
-larger L1 pieces, with a genotype-fit guard against penalty-only improvements.
+component-local founder refinement after **each executed L1–L4 level** of
+final assembly, never within the two local feedback rounds. Each complete
+refinement feeds the next hierarchy level. If local search stalls, original
+and refined L1 pieces supply larger proposals, with a genotype-fit guard
+against penalty-only improvements.
 The completed beam/dual search is followed by bounded paired exchanges,
 one-founder deletion/refitting under the existing complexity cost, and
 exact-flank window searches. Paired-interval polishing can repair coordinated
 two-founder errors while preserving every local called/missing allele.
 These passes use genotype evidence, not pedigree, generation labels or a known
 founder count. They are enabled by default and checkpointed separately.
-Use `--founder-refinement off` to disable final refinement for a comparison.
+Use `--founder-refinement off` to disable all final-assembly refinement passes
+for a comparison.
 See [the model and its limits](docs/methods.md#final-founder-path-refinement).
-Current validation confirms that the eight previously fragmented N320 controls
-can be joined, but final refinement worsens founder accuracy on seed407 chr15.
-This remains an [explicit accuracy limitation](docs/validation.md#n320-fragmentation-replay),
-not a completed scientific fix or a uniformly improved release.
+An earlier N320 replay joined all eight fragmented controls but exposed a
+final-refinement accuracy regression on seed407 chr15. The progressive N80
+validation does not establish that this N320 case is fixed; it remains an
+[explicit limitation requiring revalidation](docs/validation.md#n320-fragmentation-replay),
+not evidence of a uniformly improved release.
 T11 does not feed back into painting or pedigree inference, and the estimated
 T12 map is not automatically fed upstream.
 Shared-family orientation-error evidence is enabled for T12 by default;
@@ -122,6 +126,14 @@ The [validation notes](docs/validation.md) distinguish exact implementation
 regressions, short wiring checks and fresh full-genome simulation evaluation.
 [Performance notes](docs/performance.md) separate numerical speedups from
 scientific trade-offs.
+
+The latest [fresh end-to-end validation](docs/validation.md#fresh-seed3000-end-to-end-validation)
+uses seed3000, 320 samples and 5× mean depth. All 22 chromosomes contain six long
+founder haplotypes; founder mismatches total 2,581 / 53,740,022 called alleles,
+and metadata-free pedigree inference recovers all 320 configurations exactly.
+This is one successful simulation, not a guarantee across datasets. The
+[single-76-core runtime estimate](docs/performance.md#complete-workflow-timing)
+is approximately 5 hours 10 minutes.
 
 ## Repository layout
 

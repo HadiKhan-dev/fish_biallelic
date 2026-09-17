@@ -104,7 +104,8 @@ def canonical_score(submodels, known, path, penalty):
 
 
 def solve(submodels, known, incumbent, penalty, *, branch_cap=16,
-          reverse=False, sweeps=20, thread_budget=None, background=None):
+          reverse=False, sweeps=20, thread_budget=None, background=None,
+          candidate_choices=None):
     """Return a feasible path, its binned score and numerical search diagnostics.
 
     Alternating forward/reverse sweeps reuse quadratic diploid-state kernels.
@@ -121,7 +122,8 @@ def solve(submodels, known, incumbent, penalty, *, branch_cap=16,
     incumbent = np.asarray(incumbent, np.int64)
     first, second = (np.ascontiguousarray(x, np.int64)
                      for x in np.triu_indices(len(known) + 1))
-    choices, offsets = candidate_alphabet(submodels, incumbent, branch_cap)
+    choices, offsets = (candidate_alphabet(submodels, incumbent, branch_cap)
+                        if candidate_choices is None else candidate_choices)
     messages = np.zeros((emissions[0].shape[0], len(choices)))
     best_path = incumbent.copy()
     best_score = canonical_score(submodels, known, best_path, penalty)

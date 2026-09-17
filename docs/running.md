@@ -172,21 +172,28 @@ Switching modes does not overwrite raw discovery results.
 ## Final founder refinement
 
 `--founder-refinement on` is the default for all three reconstruction commands.
-After final L1–L4 assembly, it reopens original prepared local-row choices while
-keeping component boundaries fixed; bounded deletion/refitting can reduce the
-initial founder count under the existing complexity cost. The two L1/L2 context
-passes and balanced local selection are unchanged. Use `--founder-refinement off`
-for a controlled comparison without this final pass.
-Toggling this final-only option reuses the same local feedback checkpoints;
-only final assembly/painting and downstream products change identity.
+After each executed L1, L2, L3 and L4 level of **final assembly**, the complete
+refiner reopens original prepared local-row choices inside the current component
+boundaries. Its result feeds the next hierarchy level. Bounded deletion/refitting
+can reduce the initial founder count under the existing complexity cost.
+The existing early stop for an irreducible hierarchy is retained; unused levels
+do not cause extra refinement passes.
+
+The two L1/L2 context-feedback passes and balanced local selection are unchanged
+and never run this refiner. Use `--founder-refinement off` for a controlled
+comparison without any final-assembly refinement. Toggling this option within
+one code version reuses local feedback checkpoints; only final assembly/painting
+and downstream products change identity.
 
 TOML uses `[run].founder_refinement = "on"` or `"off"`; the environment variable
 is `HAPLOTYPES_FOUNDER_REFINEMENT`. Precedence is CLI > TOML > environment > on.
 The API exposes `AssemblyConfig.founder_refinement_config`. Its default beam
 budget grows from 64 to at most1024 only when the data-based search-gain rule
 warrants it; it is not a confidence cutoff. When this local search stalls, final
-L1 pieces supply larger proposals at the initial beam width. These must improve
-the total score without worsening genotype fit. This multiscale fallback is
+L1 pieces, both original and refined, supply larger proposals at the initial
+beam width. These must improve the primary score, or the partial-data score at
+an exact primary tie, without worsening primary genotype fit. This multiscale
+fallback is
 part of the default refiner; no extra flag is needed. See
 [methods](methods.md#final-founder-path-refinement).
 
@@ -197,10 +204,20 @@ founder count; the off flag disables the entire final refiner. Count refits can
 be expensive on difficult chromosomes. See the measured limits in
 [validation](validation.md#expanded-founder-search-at-n80-and-5x).
 
-The final pass saves completed beams, iterations, components and its aggregate
-result under `09_painting_release_work/`. It uses the existing phase core ceiling
-and does not overlap with the painting pool. Changed code/configuration is part
-of assembly and downstream cache identities; retain older accepted outputs and
+Each level saves its `refinement_l1` through `refinement_l4` result beneath
+`09_painting_release_work/`. Independent small components save compact completed
+paths; long components also retain detailed beams, iterations and proposals.
+A completed component can be reused when a sibling is interrupted. The
+`founder_refinement` aggregate remains the final-product checkpoint.
+
+Components share read-only chromosome evidence and divide the existing core
+budget; surviving components and focal searches acquire freed threads at
+numerical boundaries. The refiner does not overlap with the painting pool.
+At L1/L2, a chromosome-wide minimum proposal-bin size avoids giving every small
+component a full 2,000-bin search budget. L3/L4 retain component-specific proposal
+resolution. This changes candidate exploration, not full-site acceptance.
+Changed code/configuration is part of assembly and downstream cache identities;
+retain older accepted outputs and
 use a separate run root. Raw reads and original Stage1 discovery need not be
 regenerated. These are assembly checkpoints, not new globally complete stages.
 
@@ -277,7 +294,7 @@ Do not share a checkpoint directory between different seeds or configurations.
 | `02_feedback_<mode>_l2_assembly/` | Context assembly through L1+L2 from that mode's selected first-round panels |
 | `02_feedback_<mode>_l2/` | Second-round raw proposals, 128-block selection batches and final selected panels; `<mode>` is `balanced` or `strict` |
 | `00_genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
-| `09_painting_release_work/` | Preprocessing, L1–L4 levels, final founder-refinement beams/iterations/components and aggregate result |
+| `09_painting_release_work/` | Preprocessing, L1–L4 levels, per-level founder-refinement components/searches and final aggregate |
 | `09_painting/` | Typed component-local painting products |
 | `10_pedigree_evidence/` | Prepared/scored chromosome evidence |
 | `10_pedigree/` | Genome-wide inferred pedigree and support tables |

@@ -88,7 +88,8 @@ def refine_components(prepared, components, neutral, sites, *, config,
                     reason="single_local_block_or_at_most_two_founders"))
                 continue
             workspace = component_workspace(workspaces, batch, neutral, sites,
-                config.proposal_max_bins, num_threads)
+                config.proposal_max_bins, num_threads,
+                minimum_bin_size=config.proposal_min_sites_per_bin)
             fitting, leaves, offsets = workspace.evidence, workspace.leaves, workspace.offsets
             complete, penalty, logs = workspace.complete, workspace.penalty, workspace.logs
             cost = float(chimera_scoring.compute_cc(batch, len(neutral), cc_scale))

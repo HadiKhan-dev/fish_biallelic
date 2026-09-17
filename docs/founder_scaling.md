@@ -4,7 +4,7 @@ The default is **dense transitions plus bounded panel search**. The optional
 structured transition model with bounded search gives near-quadratic
 founder-count scaling. An optimized broader search is also available. These
 choices affect L1–L4 assembly, independently of Stage 1. The default additional
-all-founder refinement after final assembly has separate cubic total-work
+all-founder refinement within final assembly has separate cubic total-work
 terms; the structured option does not make that pass near-quadratic. See
 [final refinement](methods.md#final-founder-path-refinement).
 
@@ -113,10 +113,12 @@ if that cap is allowed to grow with K.
 
 ### Final founder refinement: explicit work and parallelism
 
-This remains a **final-only** pass, not progressive refinement at each assembly
-level. The cubic redesign changes candidate exploration, not the missing-aware
-likelihood, founder-count penalty, genotype-fit guard, or final full-site
-acceptance rule.
+The complete refiner runs after each executed level of **final L1–L4 assembly**,
+not in the two local-feedback contexts. For a fixed four-level hierarchy,
+summing work over disjoint components changes constants, not the founder-count
+exponent. Primary score and founder-count cost remain fixed; partial-founder
+evidence breaks exact primary ties as detailed in the
+[refinement model](methods.md#partial-evidence-at-primary-ties).
 
 Let A be the largest local or macro candidate alphabet, M the number of proposal
 bins, and s the largest number of bins inside one local or macro block. Let
@@ -139,6 +141,7 @@ Selected beam paths still materialize their full diploid states.
 | Prepare local binned evidence | O(N L A²) |
 | Optimistic founder-count bound, worst case | O(N L A³) |
 | One complete-panel score or painting | O(N L K²) |
+| One secondary partial-founder tie score | O(N L K²), with O(N P + L K²) extra storage for P partial sites |
 | One focal beam round | O(N M [K²(s+W) + W C(K+s)]), plus O(B W C log(W C)) sorting |
 | One focal dual search | O(D N M [K²(s+1) + C(K+s)]) |
 | All-founder dual round, shared preparation enabled | O(N M K² s + D N M [K³ + C K(K+s)] + N L K³) |
@@ -153,7 +156,16 @@ factors. In particular, cubic scaling no longer depends on hiding an
 all-deletion deep-refit factor behind a fixed cap. Bin count is
 M=sum_b ceil(L_b / bin_size), not strictly 2,000; it can approach 2,000+B.
 The t² block-preparation term is real: long macro blocks can limit practical
-speed even when the K exponent is improved.
+speed even when the K exponent is improved. L1/L2 share a chromosome-derived
+minimum proposal-bin size, avoiding a separate 2,000-bin budget for every
+small component; late levels retain their original component resolution.
+
+Primary-preserving fallback searches use the same bounded dual kernel, at most
+two directions per focal founder in an existing outer iteration. Equivalence
+groups require O(L A) preparation; caps and incumbent retention remain explicit.
+Full-site secondary checks add at most O(N L K³) per all-founder round, not
+quartic or quintic candidate rescanning. Unknown source identity is retained,
+and complete input requires no additional secondary evidence scan.
 
 **Invariant background reuse:** the production dual/window search prepares
 prefix/segment summaries once per fixed competing panel, not once per sweep
@@ -213,7 +225,12 @@ chromosome rescanning after every improving window. Floating-point tie
 ordering may change; accepted outputs are checked scientifically, not for
 bitwise intermediate equality.
 
-Immutable evidence and bounded caches remain shared. Cheap deletion repairs
+Independent components share immutable chromosome evidence and divide the
+verified CPU budget, with private component workspaces and bounded score caches.
+Small components checkpoint completion; large ones also checkpoint inner
+searches. Completion order does not alter genomic output order.
+
+Within a component, cheap deletion repairs
 and deep focal/direction searches run in separately scheduled thread teams
 with subdivided, dynamically reallocated thread budgets. Native repair kernels
 release the GIL, each repair owns its painting/score workspace, and completed
@@ -254,7 +271,7 @@ error bound. Near ties and potentially winning candidates still receive the
 canonical score and genotype-fit guard. Proposal binning is unchanged.
 
 These changes improve measured constants without altering cubic total-work
-bounds or the final-only refinement schedule. Cross-query dual batching was
+bounds. Those measurements used the earlier final-only schedule. Cross-query dual batching was
 tested but not retained: the existing dynamically scheduled queries were faster
 on the N80 controls.
 

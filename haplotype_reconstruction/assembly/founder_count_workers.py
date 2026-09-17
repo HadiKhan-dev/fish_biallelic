@@ -23,7 +23,8 @@ def fit_deletion(dropped, batch, selected, neutral, sites, config, threads,
     started, cpu_started = time.perf_counter(), time.process_time()
     rows = np.delete(selected, int(dropped), axis=0)
     workspace = component_workspace(workspaces, batch, neutral, sites,
-                                    config.proposal_max_bins, threads, prepared_arrays)
+                                    config.proposal_max_bins, threads, prepared_arrays,
+                                    minimum_bin_size=config.proposal_min_sites_per_bin)
     likelihood = workspace.evaluate(rows)
     history = []
     for iteration in range(config.count_repair_sweeps):
@@ -63,7 +64,8 @@ def run(tasks, *, batch, selected, neutral, sites,
         return []
     total = int(resolve_threads(threads))
     workspace = component_workspace(workspaces, batch, neutral, sites,
-                                    config.proposal_max_bins, threads)
+                                    config.proposal_max_bins, threads,
+                                    minimum_bin_size=config.proposal_min_sites_per_bin)
     arrays = workspace.evidence, workspace.complete, workspace.logs
     functions = []
     for dropped, _ in tasks:

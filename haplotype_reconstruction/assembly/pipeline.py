@@ -3,7 +3,7 @@ from __future__ import annotations
 from haplotype_reconstruction import PACKAGE_ROOT
 
 import copy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import math
@@ -20,7 +20,7 @@ STAGE2_RELEASE_SCHEMA = "stage2-release-v1"
 
 
 STAGE2_RELEASE_BACKEND = (
-    "preprocess-partial-founder-hierarchy-phase-refinement-v18"
+    "preprocess-progressive-founder-hierarchy-refinement-v19"
 )
 
 
@@ -40,12 +40,13 @@ STAGE2_RELEASE_CODE_IDENTITY_FILES += (
     'assembly/founder_exchanges.py', 'assembly/founder_windows.py',
     'assembly/founder_intervals.py',
     'assembly/founder_count.py', 'assembly/founder_count_bound.py', 'assembly/evidence.py',
+    'assembly/founder_components.py',
     'assembly/founder_workspace.py', 'assembly/founder_count_workers.py',
     'assembly/founder_candidates.py', 'assembly/founder_sparse.py',
     'assembly/founder_background.py', 'assembly/founder_delta.py',
     'assembly/founder_packing.py', 'assembly/founder_checkpoints.py',
     'assembly/founder_site_kernels.py', 'assembly/founder_dual_short.py',
-    'assembly/founder_evidence.py',
+    'assembly/founder_evidence.py', 'assembly/founder_predictive.py',
     'assembly/founder_beam.py', 'assembly/founder_beam_kernels.py',
 )
 
@@ -503,7 +504,10 @@ def _row_metadata(block, indices, row):
 
 
 def _metadata_equal(left, right) -> bool:
-    for first, second in zip(left, right):
+    # Exact called/inference rows reject unrelated candidates before the more
+    # expensive probability comparisons. This only reorders a conjunction.
+    for field in (1, 2, 0, 3, 4):
+        first, second = left[field], right[field]
         if first is None or second is None:
             if first is not None or second is not None:
                 return False
@@ -546,10 +550,19 @@ def _selected_path_snapshot(blocks):
 
 def _validate_hierarchy_selected_paths(before, after) -> None:
     covered_sources = []
+    source_starts = np.asarray([source["positions"][0] for source in before])
     for output in after:
         output_positions = np.asarray(output.positions)
         output_sources = 0
-        for source_index, source in enumerate(before):
+        # Sources and outputs are already validated in genomic order. Search
+        # their spans once instead of revisiting every source for each output.
+        first_source = int(np.searchsorted(source_starts, output_positions[0]))
+        last_source = int(np.searchsorted(
+            source_starts, output_positions[-1], side="right"))
+        output_rows = tuple(_row_metadata(output, slice(None), row)
+                            for row in range(len(output.haplotypes)))
+        for source_index in range(first_source, last_source):
+            source = before[source_index]
             source_positions = source["positions"]
             if (source_positions[0] < output_positions[0]
                     or source_positions[-1] > output_positions[-1]):
@@ -561,21 +574,25 @@ def _validate_hierarchy_selected_paths(before, after) -> None:
                 raise ValueError("hierarchy split or reordered an input component")
             covered_sources.append(source_index)
             output_sources += 1
-            source_indices = np.arange(len(source_positions))
+            # Hierarchy inputs normally occupy a contiguous output slice.
+            # Keep the indexed path for an interleaved marker layout.
+            if indices[-1] - indices[0] + 1 == len(indices):
+                indices = slice(int(indices[0]), int(indices[-1]) + 1)
             candidates = [
                 (
-                    source["haplotypes"][row][source_indices],
-                    source["discrete"][row, source_indices],
-                    source["inference"][row, source_indices],
+                    source["haplotypes"][row],
+                    source["discrete"][row],
+                    source["inference"][row],
                     None if source["probability"] is None else
-                    source["probability"][row, source_indices],
+                    source["probability"][row],
                     None if source["support"] is None else
-                    source["support"][row, source_indices],
+                    source["support"][row],
                 )
                 for row in range(len(source["haplotypes"]))
             ]
-            for row in range(len(output.haplotypes)):
-                observed = _row_metadata(output, indices, row)
+            for metadata in output_rows:
+                observed = tuple(None if value is None else value[indices]
+                                 for value in metadata)
                 if not any(
                         _metadata_equal(observed, candidate)
                         for candidate in candidates):
@@ -695,7 +712,7 @@ def assemble_chromosome(
     chromosome_map=None,
     chromosome_evidence=None,
 ) -> dict[str, Any]:
-    """Preprocess, assemble the hierarchy, then refine final local row choices."""
+    """Preprocess and refine local row choices after each final hierarchy level."""
 
     if not isinstance(config, AssemblyConfig):
         raise TypeError("config must be an AssemblyConfig")
@@ -819,7 +836,18 @@ def assemble_chromosome(
     # levels instead of repeating a chromosome-sized cast at each level.
     hierarchy_probs = None
     refinement_context = None
+    # Share chromosome-wide proposal resolution across the early levels.
+    # Otherwise each of many L1/L2 components gets an entire chromosome's bin
+    # budget, with quadratic-in-bin macro backgrounds. Acceptance always uses
+    # every observed site; this changes proposal resolution, not its objective.
+    refinement_config = replace(config.founder_refinement_config,
+        proposal_min_sites_per_bin=max(
+            config.founder_refinement_config.proposal_min_sites_per_bin,
+            math.ceil(len(expected_positions) /
+                      config.founder_refinement_config.proposal_max_bins)))
     level_diagnostics = []
+    refinement_levels = []
+    refinement_diagnostics = {"enabled": False, "components": []}
     stop_reason = "maximum_level_reached"
     for level in range(1, config.max_level + 1):
         before_count = len(working)
@@ -934,39 +962,67 @@ def assemble_chromosome(
                     "diagnostic": diagnostic,
                 })
         working = next_blocks
+        unrefined_l1 = list(working) if level == 1 else None
+        # Context feedback is explicitly disabled by its caller and has
+        # max_level < 4. Only the final assembly reopens original local rows.
+        if config.max_level == 4 and config.founder_refinement_config.enabled:
+            # Fine late-stage proposals retain the final-only refiner's
+            # component-specific resolution. Share a chromosome budget only
+            # across the numerous small early components.
+            active_refinement_config = (refinement_config if level <= 2
+                                        else config.founder_refinement_config)
+            phase = f"refinement_l{level}"
+            refined = (None if release_checkpoints is None
+                       else release_checkpoints.load(phase))
+            started = time.perf_counter()
+            if refined is None:
+                from .founder_components import scoped_checkpoints
+                output, refinement_diagnostics = founder_refinement.refine_components(
+                    preprocess_result.prepared_blocks, working, neutral_probs, sites,
+                    config=active_refinement_config,
+                    num_threads=config.num_processes,
+                    checkpoints=scoped_checkpoints(release_checkpoints, phase),
+                    l1_blocks=refinement_context, cc_scale=config.cc_scale)
+                refinement_diagnostics = dict(refinement_diagnostics,
+                    level=level, elapsed_seconds=time.perf_counter() - started,
+                    proposal_min_sites_per_bin=active_refinement_config.proposal_min_sites_per_bin)
+            else:
+                output = refined["blocks"]
+                refinement_diagnostics = refined["diagnostics"]
+                resumed_phases.append(phase)
+            _assert_position_coverage(output, expected_positions)
+            _validate_persistent_breaks(output, persistent_breaks)
+            _validate_hierarchy_selected_paths(
+                _selected_path_snapshot(preprocess_result.prepared_blocks), output)
+            _freeze_inference_snapshots(output)
+            core_runtime.strip_block_evidence(output)
+            working = output
+            if refined is None and release_checkpoints is not None:
+                release_checkpoints.save(phase, {
+                    "blocks": working, "diagnostics": refinement_diagnostics})
+            refinement_levels.append(refinement_diagnostics)
+            diagnostic = dict(diagnostic,
+                refinement_elapsed_seconds=refinement_diagnostics["elapsed_seconds"])
         if level == 1 and config.max_level == 4:
-            refinement_context = next_blocks
+            # Refined paths feed the next hierarchy level. For larger search
+            # moves retain BOTH refined and original L1 alternatives, so an
+            # early local optimum cannot erase a useful chromosome-wide move.
+            # The refiner deduplicates paths within each unchanged L1 span.
+            refinement_context = [*working, *unrefined_l1]
         level_diagnostics.append(diagnostic)
         if stopped is not None:
             stop_reason = stopped
             break
 
-    refinement_diagnostics = {"enabled": False, "components": []}
-    # L1/L2 context passes must not feed chromosome-wide refinement back into
-    # local discovery. Only a final release (including early-irreducible ones)
-    # reopens the prepared local rows discarded by the hierarchy.
-    if config.max_level == 4 and config.founder_refinement_config.enabled:
-        phase = "founder_refinement"
-        refined = (None if release_checkpoints is None
-                   else release_checkpoints.load(phase))
-        if refined is None:
-            output, refinement_diagnostics = founder_refinement.refine_components(
-                preprocess_result.prepared_blocks, working, neutral_probs, sites,
-                config=config.founder_refinement_config,
-                num_threads=config.num_processes, checkpoints=release_checkpoints,
-                l1_blocks=refinement_context, cc_scale=config.cc_scale)
-        else:
-            output, refinement_diagnostics = refined["blocks"], refined["diagnostics"]
-            resumed_phases.append(phase)
-        _assert_position_coverage(output, expected_positions)
-        _validate_persistent_breaks(output, persistent_breaks)
-        _validate_hierarchy_selected_paths(
-            _selected_path_snapshot(preprocess_result.prepared_blocks), output)
-        _freeze_inference_snapshots(output)
-        core_runtime.strip_block_evidence(output)
-        working = output
-        if refined is None and release_checkpoints is not None:
-            release_checkpoints.save(phase, {
+    if refinement_levels:
+        refinement_diagnostics = dict(refinement_diagnostics,
+            schedule="after_each_final_hierarchy_level",
+            levels=tuple(refinement_levels))
+        # Preserve the final-product checkpoint name consumed by diagnostics;
+        # per-level checkpoints above contain the resumable computation.
+        if (release_checkpoints is not None
+                and release_checkpoints.load("founder_refinement") is None):
+            release_checkpoints.save("founder_refinement", {
                 "blocks": working, "diagnostics": refinement_diagnostics})
 
     for component_id, block in enumerate(working):
