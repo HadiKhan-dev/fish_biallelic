@@ -1,4 +1,4 @@
-"""discovery / residuals for the canonical reconstruction pipeline."""
+"""Read-supported residual evidence and candidate proposal diagnostics."""
 from __future__ import annotations
 
 
@@ -19,7 +19,7 @@ PROPOSAL_MODE_SOFT_SPLIT = "soft_split"
 
 def allele_depths_to_likelihoods(
     reads: np.ndarray,
-    read_error_probability: float = core_config.DEFAULT_READ_ERROR_PROBABILITY,
+    read_error_probability: float=core_config.DEFAULT_READ_ERROR_PROBABILITY,
 ) -> np.ndarray:
     """Return normalized raw P(reads | genotype) for genotypes 0, 1, 2.
 
@@ -44,7 +44,7 @@ def _candidate_alt_probabilities(
     if array.ndim == 3 and array.shape[2] == 2:
         denominator = np.sum(array, axis=2)
         array = np.divide(
-            array[:, :, 1],
+            array[:,:, 1],
             denominator,
             out=np.full(denominator.shape, 0.5, dtype=np.float64),
             where=denominator > 0.0,
@@ -76,14 +76,14 @@ def diplotype_genotype_probabilities(
     genotype = np.empty((len(pair_i), q.shape[1], 3), dtype=np.float64)
     qi = q[pair_i]
     qj = q[pair_j]
-    genotype[:, :, 0] = (1.0 - qi) * (1.0 - qj)
-    genotype[:, :, 2] = qi * qj
-    genotype[:, :, 1] = 1.0 - genotype[:, :, 0] - genotype[:, :, 2]
+    genotype[:,:, 0] = (1.0 - qi) * (1.0 - qj)
+    genotype[:,:, 2] = qi * qj
+    genotype[:,:, 1] = 1.0 - genotype[:,:, 0] - genotype[:,:, 2]
     diagonal = pair_i == pair_j
     if np.any(diagonal):
-        genotype[diagonal, :, 0] = 1.0 - qi[diagonal]
-        genotype[diagonal, :, 1] = 0.0
-        genotype[diagonal, :, 2] = qi[diagonal]
+        genotype[diagonal,:, 0] = 1.0 - qi[diagonal]
+        genotype[diagonal,:, 1] = 0.0
+        genotype[diagonal,:, 2] = qi[diagonal]
     # Guard only roundoff; this is also an invariant check for future edits.
     genotype = np.clip(genotype, 0.0, 1.0)
     genotype /= np.sum(genotype, axis=2, keepdims=True)
@@ -189,9 +189,9 @@ class ResidualInputWorkspace:
 
 def prepare_residual_inputs(
     reads_array: np.ndarray,
-    read_error_probability: float = core_config.DEFAULT_READ_ERROR_PROBABILITY,
+    read_error_probability: float=core_config.DEFAULT_READ_ERROR_PROBABILITY,
     *,
-    likelihood: np.ndarray | None = None,
+    likelihood: np.ndarray | None=None,
 ) -> ResidualInputWorkspace:
     """Prepare reusable, model-identical inputs for residual extraction."""
 
@@ -453,7 +453,7 @@ def _binary_panel_responsibility(
     keep_mask: np.ndarray,
     pair_i: np.ndarray,
     pair_j: np.ndarray,
-    prepared_log_likelihood: np.ndarray | None = None,
+    prepared_log_likelihood: np.ndarray | None=None,
 ) -> np.ndarray:
     """Exact hard-panel responsibilities with a bounded predictive workspace.
 
@@ -486,7 +486,7 @@ def _binary_panel_responsibility(
         log_likelihood = np.asarray(prepared_log_likelihood)
         if log_likelihood.shape != likelihood.shape:
             raise ValueError("prepared log likelihood and likelihood disagree")
-    kept_log_likelihood = log_likelihood[:, keep_mask, :]
+    kept_log_likelihood = log_likelihood[:, keep_mask,:]
     kept_haplotypes = np.ascontiguousarray(haplotypes[:, keep_mask])
     n_samples = len(likelihood)
     n_pairs = len(pair_i)
@@ -542,8 +542,8 @@ def _extract_soft_residual_records(
     hard_probability: float,
     minimum_responsibility: float,
     *,
-    residual_input_workspace: ResidualInputWorkspace | None = None,
-    binary_panel_fast_path: bool = False,
+    residual_input_workspace: ResidualInputWorkspace | None=None,
+    binary_panel_fast_path: bool=False,
 ) -> tuple[ResidualRecord, ...]:
     """Create all-assignment residuals from neutral diplotype posteriors.
 
@@ -577,7 +577,7 @@ def _extract_soft_residual_records(
     minimum_known = int(
         math.ceil(usable_founder_known_fraction * int(np.sum(keep_mask)))
     )
-    founder_known = ((discrete == 0) | (discrete == 1)) & keep_mask[None, :]
+    founder_known = ((discrete == 0) | (discrete == 1)) & keep_mask[None,:]
     usable_indices = np.flatnonzero(
         np.sum(founder_known, axis=1) >= minimum_known
     )
@@ -618,8 +618,8 @@ def _extract_soft_residual_records(
         )
         predictive = np.einsum(
             "nlg,plg->npl",
-            likelihood[:, keep_mask, :],
-            genotype[:, keep_mask, :],
+            likelihood[:, keep_mask,:],
+            genotype[:, keep_mask,:],
             optimize=True,
         )
         log_emission = np.sum(

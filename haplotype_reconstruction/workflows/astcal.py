@@ -1,21 +1,9 @@
-"""workflows / astcal for the canonical reconstruction pipeline."""
+"""AstCal cross driver from variant input through final phase and maps."""
 from __future__ import annotations
 
-import json
-
-
-def configured_regions(default, *, template_regions=False):
-    requested = os.environ.get("HAPLOTYPES_CONTIGS")
-    if requested is None:
-        return default
-    names = json.loads(requested)
-    if not names or len(names) != len(set(names)):
-        raise ValueError("contigs must be a nonempty unique ordered list")
-    return [dict(contig=str(name), **({'start': 0, 'end': 3000} if template_regions else {}))
-            for name in names]
-
-
 import os
+
+from ..core.environment import configured_regions
 import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
 import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
@@ -39,7 +27,10 @@ CHECKPOINT_DIR = (
 )
 
 
-ASAC_METADATA_PATH = os.environ.get("HAPLOTYPES_METADATA", "work/data/fish_vcf_restriped/X_AsAc_metafile.xlsx")
+ASAC_METADATA_PATH = os.environ.get(
+    "HAPLOTYPES_METADATA",
+    "work/data/fish_vcf_restriped/X_AsAc_metafile.xlsx"
+)
 
 
 ASAC_METADATA_SHEET = os.environ.get("HAPLOTYPES_METADATA_SHEET", "main_data")
@@ -113,12 +104,15 @@ def run():
     # =========================================================================
     # Configuration
     # =========================================================================
-    vcf_path = os.environ.get("HAPLOTYPES_VCF", "work/data/fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz")
+    vcf_path = os.environ.get(
+        "HAPLOTYPES_VCF",
+        "work/data/fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz"
+    )
 
     regions_config = configured_regions([
-        {"contig": "chr1"},  {"contig": "chr2"},  {"contig": "chr3"},
-        {"contig": "chr4"},  {"contig": "chr5"},  {"contig": "chr6"},
-        {"contig": "chr7"},  {"contig": "chr8"},  {"contig": "chr9"},
+        {"contig": "chr1"}, {"contig": "chr2"}, {"contig": "chr3"},
+        {"contig": "chr4"}, {"contig": "chr5"}, {"contig": "chr6"},
+        {"contig": "chr7"}, {"contig": "chr8"}, {"contig": "chr9"},
         {"contig": "chr10"}, {"contig": "chr11"}, {"contig": "chr12"},
         {"contig": "chr13"}, {"contig": "chr14"}, {"contig": "chr15"},
         {"contig": "chr16"}, {"contig": "chr17"}, {"contig": "chr18"},

@@ -7,10 +7,10 @@ to genomic order; completion order affects only the available CPU budget.
 import copy
 from functools import partial
 
-from .checkpoints import AssemblyCheckpointStore
-from .founder_candidates import completed_candidates
-from .founder_workspace import resolve_threads
-from ..core import haplotypes, parallel
+from..checkpoints import AssemblyCheckpointStore
+from.candidates import completed_candidates
+from.workspace import resolve_threads
+from ...core import haplotypes, parallel
 
 
 class ScopedCheckpoints:
@@ -47,7 +47,7 @@ def _renumber(value, number):
 
 
 def _refine_one(batch, component, neutral, sites, options, budget):
-    from .founder_refinement import _refine_serial_components
+    from..founder_refinement import _refine_serial_components
     return _refine_serial_components(batch, haplotypes.BlockResults([component]),
         neutral, sites, **dict(options, num_threads=budget or options["num_threads"]))
 
@@ -58,7 +58,7 @@ def refine_independent_components(prepared, components, neutral, sites, *,
     prepared = list(prepared)
     starts = {int(b.positions[0]): i for i, b in enumerate(prepared)}
     ends = {int(b.positions[-1]): i + 1 for i, b in enumerate(prepared)}
-    from .founder_checkpoints import FounderCheckpointStore
+    from.checkpoints import FounderCheckpointStore
     completed_store = (None if checkpoints is None else FounderCheckpointStore(
         scoped_checkpoints(checkpoints, "completed"), prepared))
     functions, indices = [], []
@@ -85,7 +85,7 @@ def refine_independent_components(prepared, components, neutral, sites, *,
         largest_sites = max(largest_sites, len(block.positions))
     # Immutable chromosome evidence is shared; private models/logs/traceback
     # scale with the component. Include ample Python/native workspace headroom.
-    per_component = 512 * 1024**2 + 128 * len(neutral) * largest_sites
+    per_component = 512 * 1024 ** 2 + 128 * len(neutral) * largest_sites
     with parallel.numba_thread_scope(resolve_threads(num_threads)):
         for index, result in completed_candidates(functions, num_threads, per_component):
             number = indices[index]

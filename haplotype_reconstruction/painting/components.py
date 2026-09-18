@@ -1,4 +1,4 @@
-"""painting / components for the canonical reconstruction pipeline."""
+"""Component-local sample paintings and released ancestry chunks."""
 from __future__ import annotations
 
 
@@ -10,7 +10,7 @@ from typing import Any, List, Tuple, NamedTuple
 
 
 import haplotype_reconstruction.painting.model as module_painting_model
-from . import evidence as painting_evidence
+from.import evidence as painting_evidence
 
 PAINTING_MODEL_RAGGED = "unified-open-set-public-unknown-v3"
 
@@ -58,9 +58,12 @@ class BlockPainting:
         self.samples = samples
         self.num_samples = len(samples)
 
-    def __len__(self): return self.num_samples
-    def __getitem__(self, idx): return self.samples[idx]
-    def __iter__(self): return iter(self.samples)
+    def __len__(self):
+        return self.num_samples
+    def __getitem__(self, idx):
+        return self.samples[idx]
+    def __iter__(self):
+        return iter(self.samples)
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""discovery / assignments for the canonical reconstruction pipeline."""
+"""Sample diplotype assignments for fixed founder panels, including wildcards."""
 from __future__ import annotations
 
 
@@ -238,7 +238,7 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
             Hf = H_c.astype(np.float64)
         else:
             Hf = np.zeros((K, Lpad), dtype=np.float64)
-            Hf[:, :L] = H_c
+            Hf[:,:L] = H_c
         Hrb = np.ascontiguousarray(
             Hf.reshape(K, int(n_bins), int(snps_per_bin)).transpose(1, 0, 2))
         # Ub[k,s,b]   = sum_{l in bin b} (a1-a0)[s,l] * H[k,l]
@@ -345,7 +345,7 @@ def _update_A_baseline_kernel(probs_k, H_k, lam):
     N = probs_k.shape[0]
     L = probs_k.shape[1]
     K = H_k.shape[0]
-    W = K   # wildcard sentinel = one past last real founder index
+    W = K  # wildcard sentinel = one past last real founder index
 
     A = np.empty((N, 2), dtype=np.int64)
     per_sample_cost = np.empty(N, dtype=np.float64)
@@ -858,7 +858,7 @@ def _update_A_fused_blas_kernel(C0b, Ub, Mb, kW_Cb, kW_Ub,
     N = C0b.shape[0]
     n_rr = Mb.shape[0]
     K_states = n_rr + K + 1
-    W = K   # wildcard sentinel
+    W = K  # wildcard sentinel
 
     A = np.empty((N, 2), dtype=np.int64)
     baseline_cost = np.empty(N, dtype=np.float64)
@@ -915,7 +915,7 @@ def _update_A_fused_blas_kernel(C0b, Ub, Mb, kW_Cb, kW_Ub,
         if best_state_idx < n_rr:
             remaining = best_state_idx
             for i in range(K):
-                row_len = K - i           # pairs (i, j) with j in [i, K)
+                row_len = K - i  # pairs (i, j) with j in [i, K)
                 if remaining < row_len:
                     A[s, 0] = i
                     A[s, 1] = i + remaining
@@ -975,7 +975,7 @@ def _update_A_fused_pattern_kernel(C0b, diff1_table, w_table,
     N = C0b.shape[0]
     n_rr = pair_patterns.shape[0]
     K_states = n_rr + K + 1
-    W = K   # wildcard sentinel
+    W = K  # wildcard sentinel
 
     A = np.empty((N, 2), dtype=np.int64)
     wildcard_slots = np.empty(N, dtype=np.int64)
@@ -1112,7 +1112,7 @@ def _update_A_fused_pattern_kernel_serial(C0b, diff1_table, w_table,
     N = C0b.shape[0]
     n_rr = pair_patterns.shape[0]
     K_states = n_rr + K + 1
-    W = K   # wildcard sentinel
+    W = K  # wildcard sentinel
 
     A = np.empty((N, 2), dtype=np.int64)
     wildcard_slots = np.empty(N, dtype=np.int64)

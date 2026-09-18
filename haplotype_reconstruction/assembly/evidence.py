@@ -90,6 +90,6 @@ def block_views(neutral, observed, indices):
         # block-local copies; do not allocate an extra chromosome of copies.
         selection = (slice(int(index[0]), int(index[-1]) + 1)
                      if len(index) == index[-1] - index[0] + 1 else index)
-        evidence.append(neutral[:, selection, :])
+        evidence.append(neutral[:, selection,:])
         masks.append(observed[:, selection])
     return neutral, tuple(evidence), tuple(masks)

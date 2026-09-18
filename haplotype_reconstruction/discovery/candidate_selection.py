@@ -15,8 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
-from . import cavity, fitting, modes, objectives, search
-from ..core import haplotypes, parallel
+from.import cavity, fitting, modes, objectives, search
+from..core import haplotypes, parallel
 
 
 @dataclass(frozen=True)
@@ -249,7 +249,7 @@ Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
         old_count = len(scored)
         fit_and_score(_neighbours(selected.mode.haplotypes, bank))
         selected = min(scored.values(), key=rank)
-        rounds.append(dict(round=iteration+1, scores=len(scored)-old_count,
+        rounds.append(dict(round=iteration + 1, scores=len(scored) - old_count,
                            k=selected.mode.k, score=float(selection_score(selected))))
         if selection_score(selected) <= selection_score(before) + base.score_tolerance:
             break

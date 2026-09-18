@@ -1,4 +1,4 @@
-"""pedigree / evidence for the canonical reconstruction pipeline."""
+"""Canonicalize comparable chromosome-level M0/M1/M2 evidence."""
 from __future__ import annotations
 
 
@@ -11,7 +11,7 @@ import numpy as np
 def _as_parent_state_evidence(
     value: Any,
     n_samples: int,
-    eligibility: Optional[pedigree_eligibility._ResolvedParentEligibility] = None,
+    eligibility: Optional[pedigree_eligibility._ResolvedParentEligibility]=None,
 ) -> pedigree_models.ParentStateEvidence:
     """Validate one comparable parent-state evidence object."""
     if isinstance(value, pedigree_models.ParentStateEvidence):
@@ -149,7 +149,7 @@ def _as_parent_state_evidence(
 def _canonical_parent_state_evidence(
     evidence: Sequence[pedigree_models.ParentStateEvidence],
     n_samples: int,
-    eligibility: Optional[pedigree_eligibility._ResolvedParentEligibility] = None,
+    eligibility: Optional[pedigree_eligibility._ResolvedParentEligibility]=None,
 ) -> tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
     Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray],

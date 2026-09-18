@@ -11,15 +11,15 @@ import os
 
 import numba
 
-from ..core import parallel
-from .founder_workspace import resolve_threads
+from ...core import parallel
+from.workspace import resolve_threads
 
 
 def completed_candidates(functions, budget, bytes_per_candidate):
     """Yield (input index, result), without prescribing scientific selection."""
     total = int(resolve_threads(budget))
     workers = min(len(functions), total)
-    from ..painting.model import available_process_memory_bytes
+    from ...painting.model import available_process_memory_bytes
     available = available_process_memory_bytes()
     if available is not None:
         # Count-refit processes share a node. Restrict this thread team's

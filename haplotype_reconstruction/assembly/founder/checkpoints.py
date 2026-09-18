@@ -4,7 +4,7 @@ The enclosing assembly store binds these paths to the exact prepared inputs and
 code/configuration identity. Final release products retain their ordinary block
 format. Only derived chromosome arrays are omitted from intermediate snapshots.
 """
-from . import hierarchy, paths
+from..import hierarchy, paths
 
 
 _DERIVED_FIELDS = {
@@ -26,7 +26,7 @@ class FounderCheckpointStore:
         self.ends = {int(b.positions[-1]): i + 1 for i, b in enumerate(self.prepared)}
 
     def _encode(self, block):
-        from .founder_refinement import _local_selection
+        from..founder_refinement import _local_selection
         start = self.starts[int(block.positions[0])]
         stop = self.ends[int(block.positions[-1])]
         return {
@@ -39,7 +39,7 @@ class FounderCheckpointStore:
         }
 
     def _decode(self, value):
-        from .founder_refinement import _LeafKeyMap
+        from..founder_refinement import _LeafKeyMap
         batch = self.prepared[value["start"]:value["stop"]]
         reconstruction = paths.reconstruct_haplotypes_from_beam(
             [(list(row), 0.) for row in value["rows"]], _LeafKeyMap(batch), batch)

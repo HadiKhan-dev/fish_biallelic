@@ -15,11 +15,12 @@ import time
 import numpy as np
 from numba import set_num_threads
 
-from . import chimera_scoring, founder_dual_search, founder_path_search, founder_scoring
-from . import hierarchy, panel_search, paths
-from .founder_workspace import component_workspace, resolve_threads
-from .founder_packing import score_rows
-from ..core import haplotypes, parallel
+from.import chimera_scoring
+from.founder import dual_search as founder_dual_search, path_search as founder_path_search, scoring as founder_scoring
+from.import hierarchy, panel_search, paths
+from.founder.workspace import component_workspace, resolve_threads
+from.founder.packing import score_rows
+from..core import haplotypes, parallel
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,7 @@ def _compute_path_proposal(models, known, incumbent, penalty, config,
                            width, reverse, dual, window, thread_budget=None, background=None,
                            candidate_choices=None):
     if window:
-        from . import founder_windows
+        from.founder import windows as founder_windows
         path, score, diagnostic = founder_windows.solve(
             models, known, incumbent, penalty, branch_cap=config.branch_cap,
             reverse=reverse, width=config.beam_width, window_blocks=config.window_blocks,
@@ -151,7 +152,7 @@ def _compute_path_proposal(models, known, incumbent, penalty, config,
 
 def _path_proposals(requests, models, penalty, config, checkpoints, width,
                     dual, window, num_threads, proposal_cache=None, candidate_choices=None):
-    from .founder_candidates import completed_candidates
+    from.founder.candidates import completed_candidates
     answers, missing = {}, []
     for index, (_, _, known, incumbent, phase) in enumerate(requests):
         candidate = _load(checkpoints, phase)
@@ -173,7 +174,7 @@ def _path_proposals(requests, models, penalty, config, checkpoints, width,
     shared = None
     if missing and (dual or window) and any(
             model['bin_emissions'].shape[3] > 2 for model in models):
-        from .founder_background import SharedBackground
+        from.founder.background import SharedBackground
         focal, _, known, incumbent, _ = requests[0]
         panel = np.insert(known, focal, incumbent, axis=0)
         with parallel.numba_thread_scope(resolve_threads(num_threads)):
@@ -223,7 +224,7 @@ def _refine_panel(selected, leaves, offsets, evidence, complete, submodels,
         value = evaluate(trial)
         # Local flank summation can round differently. Canonicalize every
         # possible winner (including near ties), not just the final winner.
-        margin = max(1e-6, 1e-10*max(abs(value), abs(threshold)))
+        margin = max(1e-6, 1e-10 * max(abs(value), abs(threshold)))
         if workspace is not None and value + margin >= threshold:
             value = workspace.canonical(trial)
         return value
@@ -408,7 +409,7 @@ def _refine_panel(selected, leaves, offsets, evidence, complete, submodels,
                     best = score, trial
         if best is not None and workspace is not None:
             checked = workspace.canonical(best[1])
-            if abs(checked-best[0]) > max(1e-6, 1e-10*abs(checked)):
+            if abs(checked - best[0]) > max(1e-6, 1e-10 * abs(checked)):
                 raise RuntimeError("localized founder score disagrees with complete panel")
             best = ((checked, best[1]) if better(
                 checked, best[1], likelihood, selected) else None)
@@ -462,7 +463,7 @@ def refine_components(prepared_blocks, components, neutral_probs, global_sites, 
                       checkpoints=None, l1_blocks=None, cc_scale=0.5):
     """Run every refinement pass independently inside each phase component."""
     if config.enabled and len(components) > 1:
-        from .founder_components import refine_independent_components
+        from.founder.components import refine_independent_components
         return refine_independent_components(
             prepared_blocks, components, neutral_probs, global_sites,
             config=config, num_threads=num_threads, checkpoints=checkpoints,
@@ -492,7 +493,7 @@ def _refine_serial_components(prepared_blocks, components, neutral_probs, global
     No truth or pedigree enters these passes.
     """
     if checkpoints is not None and config.enabled:
-        from .founder_checkpoints import FounderCheckpointStore
+        from.founder.checkpoints import FounderCheckpointStore
         checkpoints = FounderCheckpointStore(checkpoints, prepared_blocks)
     options = dict(config=config, num_threads=num_threads,
                    checkpoints=checkpoints, l1_blocks=l1_blocks, workspaces={})
@@ -502,7 +503,7 @@ def _refine_serial_components(prepared_blocks, components, neutral_probs, global
         return refined, first
     output, second = _refine_components(
         prepared_blocks, refined, neutral_probs, global_sites, dual=True, **options)
-    from . import founder_exchanges, founder_count
+    from.founder import exchanges as founder_exchanges, count as founder_count
     with parallel.numba_thread_scope(resolve_threads(num_threads)):
         output, exchanges = founder_exchanges.refine_components(
             prepared_blocks, output, neutral_probs, global_sites,
@@ -531,7 +532,7 @@ def _refine_serial_components(prepared_blocks, components, neutral_probs, global
     # Bounded paired intervals can repair a coordinated two-founder barrier.
     # Retain exact flank scores and the genotype-fit guard; do not reopen the
     # unbounded chromosome-wide suffix permutations after local polishing.
-    from . import founder_intervals
+    from.founder import intervals as founder_intervals
     with parallel.numba_thread_scope(resolve_threads(num_threads)):
         output, interval_windows = founder_intervals.refine_components(
             prepared_blocks, output, neutral_probs, global_sites,

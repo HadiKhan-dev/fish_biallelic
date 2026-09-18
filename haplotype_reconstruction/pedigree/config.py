@@ -1,4 +1,4 @@
-"""pedigree / config for the canonical reconstruction pipeline."""
+"""Scientific configuration for parent-count, identity and direction inference."""
 from __future__ import annotations
 
 
@@ -262,5 +262,3 @@ class PedigreeConfig:
                 "probability triples summing to one"
             )
         return self
-
-

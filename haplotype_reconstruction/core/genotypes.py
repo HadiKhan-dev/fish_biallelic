@@ -1,4 +1,4 @@
-"""core / genotypes for the canonical reconstruction pipeline."""
+"""Read-depth genotype likelihoods and normalized evidence validation."""
 from __future__ import annotations
 
 
@@ -71,14 +71,14 @@ def allele_depths_to_raw_genotype_likelihoods(
     # than several whole GL tensors. NumPy retains the same per-cell order.
     tile_sites = max(1, min(counts.shape[1], _GL_TILE_CELLS))
     tile_samples = max(1, _GL_TILE_CELLS // tile_sites)
-    tiles = ((sample, min(sample+tile_samples, counts.shape[0]),
-              first, min(first+tile_sites, counts.shape[1]))
+    tiles = ((sample, min(sample + tile_samples, counts.shape[0]),
+              first, min(first + tile_sites, counts.shape[1]))
              for sample in range(0, counts.shape[0], tile_samples)
              for first in range(0, counts.shape[1], tile_sites))
     threads = 1
-    if counts.shape[0]*counts.shape[1] >= _GL_PARALLEL_MIN_CELLS:
+    if counts.shape[0] * counts.shape[1] >= _GL_PARALLEL_MIN_CELLS:
         from numba import get_num_threads
-        from .runtime import available_cpu_count
+        from.runtime import available_cpu_count
         # Reuse the caller's active budget, including discovery worker masks.
         # No Numba/BLAS numerical work runs concurrently with this tile pool.
         threads = min(get_num_threads(), available_cpu_count())
@@ -92,7 +92,6 @@ def allele_depths_to_raw_genotype_likelihoods(
         for tile in tiles:
             worker(tile)
     return likelihood
-
 
 
 def validate_normalized_genotype_evidence(

@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 
 
-np.seterr(divide='ignore',invalid="ignore")
+np.seterr(divide='ignore', invalid="ignore")
 
 
 def match_best_vectorised(haps_dict, diploids, keep_flags=None):
@@ -25,7 +25,7 @@ def match_best_vectorised(haps_dict, diploids, keep_flags=None):
     elif keep_flags.dtype != bool:
         keep_flags = np.array(keep_flags, dtype=bool)
 
-    diploids_masked = diploids[:, keep_flags, :]
+    diploids_masked = diploids[:, keep_flags,:]
     masked_sites = diploids_masked.shape[1]
 
     if masked_sites == 0:
@@ -42,14 +42,14 @@ def match_best_vectorised(haps_dict, diploids, keep_flags=None):
     # Stack haps: (Num_Haps, Masked_Sites, 2)
     hap_tensor = np.array([haps_dict[k][keep_flags] for k in hap_keys])
 
-    p0 = hap_tensor[:, :, 0]
-    p1 = hap_tensor[:, :, 1]
+    p0 = hap_tensor[:,:, 0]
+    p1 = hap_tensor[:,:, 1]
 
     # Broadcasting: (Num_Haps, Num_Haps, Masked_Sites)
     # This generates the probability for every possible combination (i, j)
-    prob_00 = p0[:, None, :] * p0[None, :, :]
-    prob_11 = p1[:, None, :] * p1[None, :, :]
-    prob_01 = (p0[:, None, :] * p1[None, :, :]) + (p1[:, None, :] * p0[None, :, :])
+    prob_00 = p0[:, None,:] * p0[None,:,:]
+    prob_11 = p1[:, None,:] * p1[None,:,:]
+    prob_01 = (p0[:, None,:] * p1[None,:,:]) + (p1[:, None,:] * p0[None,:,:])
 
     combinations_4d = np.stack([prob_00, prob_01, prob_11], axis=-1)
     # Reshape to (N*N, Sites, 3)
@@ -135,13 +135,16 @@ def relative_haplotype_usage(first_hap, first_matches, second_matches):
     use_indices = []
 
     # 1. Validate Inputs
-    if not first_matches or len(first_matches) < 1: return {}
-    if not second_matches or len(second_matches) < 1: return {}
+    if not first_matches or len(first_matches) < 1:
+        return {}
+    if not second_matches or len(second_matches) < 1:
+        return {}
 
     match_list_1 = first_matches[0]
     match_list_2 = second_matches[0]
 
-    if not match_list_1 or not match_list_2: return {}
+    if not match_list_1 or not match_list_2:
+        return {}
 
     len_1 = len(match_list_1)
     len_2 = len(match_list_2)
@@ -191,26 +194,28 @@ def hap_matching_comparison(haps_data, matches_data, first_block_index, second_b
     for hap in first_haps_dict.keys():
         hap_usages = relative_haplotype_usage(hap, first_matches, second_matches)
         total_matches = sum(hap_usages.values())
-        if total_matches == 0: continue
+        if total_matches == 0:
+            continue
 
         hap_percs = {x: 100 * count / total_matches for x, count in hap_usages.items()}
 
         for other_hap in second_haps_dict.keys():
             perc = hap_percs.get(other_hap, 0)
-            scaled_val = 100 * (min(1, 2 * perc / 100))**2
+            scaled_val = 100 * (min(1, 2 * perc / 100)) ** 2
             key = ((first_block_index, hap), (second_block_index, other_hap))
             forward_scores[key] = scaled_val
 
     for hap in second_haps_dict.keys():
         hap_usages = relative_haplotype_usage(hap, second_matches, first_matches)
         total_matches = sum(hap_usages.values())
-        if total_matches == 0: continue
+        if total_matches == 0:
+            continue
 
         hap_percs = {x: 100 * count / total_matches for x, count in hap_usages.items()}
 
         for other_hap in first_haps_dict.keys():
             perc = hap_percs.get(other_hap, 0)
-            scaled_val = 100 * (min(1, 2 * perc / 100))**2
+            scaled_val = 100 * (min(1, 2 * perc / 100)) ** 2
             key = ((first_block_index, other_hap), (second_block_index, hap))
             backward_scores[key] = scaled_val
 
@@ -364,7 +369,9 @@ def evaluate_run(output_dir, *, cores=None):
         for contig in simulation["region_keys"]:
             source = store.load_contig("00_simulated_reads", contig, nthreads=workers)
             truth = np.asarray(source["truth_alleles"], dtype=np.int8)
-            events = {(r["parent"], r["child"]): r["crossover_positions_bp"] for r in source["truth_crossovers"]}
+            events = {
+                (r["parent"], r["child"]): r["crossover_positions_bp"] for r in source["truth_crossovers"]
+            }
             del source
             final = store.load_contig(FINAL_PHASE_STAGE, contig, nthreads=workers)
             calls = final["phase"].allele_calls
@@ -386,7 +393,9 @@ def evaluate_run(output_dir, *, cores=None):
                     continue
                 for span in mapping["informative_spans"][edge]:
                     left, right = span[:2]
-                    true_observed += int(np.searchsorted(raw, right, side="right") - np.searchsorted(raw, left, side="right"))
+                    true_observed += int(
+                        np.searchsorted(raw, right, side="right") - np.searchsorted(raw, left, side="right")
+                    )
                 expected += float(mapping["expected_crossovers_by_edge_bin"][edge].sum())
                 exposure += float(mapping["exposure_by_edge_bin"][edge].sum())
             row.update(true_crossovers_in_inferred_exposure=true_observed,

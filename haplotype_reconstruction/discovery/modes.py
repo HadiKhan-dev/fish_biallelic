@@ -1,4 +1,4 @@
-"""discovery / modes for the canonical reconstruction pipeline."""
+"""Canonical factorization modes and fixed-count fit configuration."""
 from __future__ import annotations
 
 
@@ -200,7 +200,7 @@ class FactorizationMode:
         total_nll: float,
         fixed_point_certified: bool,
         *,
-        canonical_key: bytes | None = None,
+        canonical_key: bytes | None=None,
     ) -> None:
         if haplotypes.ndim != 2 or len(haplotypes) < 1:
             raise ValueError("haplotypes must have shape (K, sites), K >= 1")
@@ -337,8 +337,8 @@ class GaugeRewireProposal:
 def _validate_evidence(
     evidence: np.ndarray,
     *,
-    n_sites: int | None = None,
-    n_samples: int | None = None,
+    n_sites: int | None=None,
+    n_samples: int | None=None,
 ) -> np.ndarray:
     return core_genotypes.validate_normalized_genotype_evidence(
         evidence, n_sites=n_sites, n_samples=n_samples
@@ -348,7 +348,7 @@ def _validate_evidence(
 def _canonicalize_fit(
     fit: Sequence[Any],
     *,
-    fit_workspace: Any | None = None,
+    fit_workspace: Any | None=None,
 ) -> FactorizationMode:
     if len(fit) != 6:
         raise ValueError("fixed-K fit must contain six fields")
@@ -421,7 +421,7 @@ def _has_distinct_rows(mode: FactorizationMode) -> bool:
 
 def _deduplicate_modes(
     modes: Sequence[FactorizationMode],
-    beam_width: int | None = None,
+    beam_width: int | None=None,
 ) -> tuple[FactorizationMode, ...]:
     unique: dict[bytes, FactorizationMode] = {}
     for mode in modes:
@@ -451,7 +451,7 @@ def _fit_starts_with_synchronized_endpoints(
     config: FixedKPanelFitConfig,
     workspace: Any,
     *,
-    max_iter: int | None = None,
+    max_iter: int | None=None,
 ) -> tuple[tuple[FactorizationMode, ...], tuple[FactorizationMode, ...]]:
     """Fit starts once, returning exact raw and refitted mode collections.
 
@@ -655,69 +655,86 @@ def _component_exact_cuts(weights, max_ties):
     retaining the smallest codes preserves the public byte-lexicographic tie
     rule. Non-bipartite components retain exhaustive weighted maximum cuts.
     """
-    k=len(weights)
-    component=np.full(k,-1,dtype=np.int64)
-    color=np.zeros(k,dtype=np.bool_)
-    vertices=np.empty((k,k),dtype=np.int64)
-    sizes=np.zeros(k,dtype=np.int64)
-    bipartite=np.ones(k,dtype=np.bool_)
-    count=0
+    k = len(weights)
+    component = np.full(k, -1, dtype=np.int64)
+    color = np.zeros(k, dtype=np.bool_)
+    vertices = np.empty((k, k), dtype=np.int64)
+    sizes = np.zeros(k, dtype=np.int64)
+    bipartite = np.ones(k, dtype=np.bool_)
+    count = 0
     for root in range(k):
-        if component[root]>=0:continue
-        component[root]=count
-        vertices[count,0]=root;sizes[count]=1
-        head=0
-        while head<sizes[count]:
-            vertex=vertices[count,head];head+=1
+        if component[root] >= 0:
+            continue
+        component[root] = count
+        vertices[count, 0] = root
+        sizes[count] = 1
+        head = 0
+        while head < sizes[count]:
+            vertex = vertices[count, head]
+            head += 1
             for other in range(k):
-                if weights[vertex,other]==0:continue
-                if component[other]<0:
-                    component[other]=count;color[other]=not color[vertex]
-                    vertices[count,sizes[count]]=other;sizes[count]+=1
-                elif color[other]==color[vertex]:
-                    bipartite[count]=False
-        count+=1
+                if weights[vertex, other] == 0:
+                    continue
+                if component[other] < 0:
+                    component[other] = count
+                    color[other] = not color[vertex]
+                    vertices[count, sizes[count]] = other
+                    sizes[count] += 1
+                elif color[other] == color[vertex]:
+                    bipartite[count] = False
+        count += 1
     # One extra permits omission of the all-False empty cut at the end.
-    limit=max_ties+1
-    combined=np.zeros(1,dtype=np.int64)
+    limit = max_ties + 1
+    combined = np.zeros(1, dtype=np.int64)
     for c in range(count):
-        members=np.sort(vertices[c,:sizes[c]])
-        mask=np.int64(0)
-        for vertex in members:mask|=np.int64(1)<<(k-1-vertex)
+        members = np.sort(vertices[c,:sizes[c]])
+        mask = np.int64(0)
+        for vertex in members:
+            mask |= np.int64(1) << (k - 1 - vertex)
         if bipartite[c]:
-            code=np.int64(0)
+            code = np.int64(0)
             for vertex in members:
-                if color[vertex]:code|=np.int64(1)<<(k-1-vertex)
-            choices=np.empty(1 if c==0 else 2,dtype=np.int64)
-            choices[0]=code
-            if c>0:choices[1]=code^mask
+                if color[vertex]:
+                    code |= np.int64(1) << (k - 1 - vertex)
+            choices = np.empty(1 if c == 0 else 2, dtype=np.int64)
+            choices[0] = code
+            if c > 0:
+                choices[1] = code ^ mask
         else:
-            m=len(members)
-            local=np.empty((m,m),dtype=np.int64)
+            m = len(members)
+            local = np.empty((m, m), dtype=np.int64)
             for i in range(m):
-                for j in range(m):local[i,j]=weights[members[i],members[j]]
-            cross,_=_exact_cut_score_table(local)
-            best=np.max(cross)
-            winners=np.flatnonzero(cross==best)
-            choices=np.empty(len(winners)*(1 if c==0 else 2),dtype=np.int64)
-            cursor=0
+                for j in range(m):
+                    local[i, j] = weights[members[i], members[j]]
+            cross, _ = _exact_cut_score_table(local)
+            best = np.max(cross)
+            winners = np.flatnonzero(cross == best)
+            choices = np.empty(len(winners) * (1 if c == 0 else 2), dtype=np.int64)
+            cursor = 0
             for index in winners:
-                bits=index+1;code=np.int64(0)
-                for j in range(1,m):
-                    if bits & (1<<(j-1)):code|=np.int64(1)<<(k-1-members[j])
-                choices[cursor]=code;cursor+=1
-                if c>0:choices[cursor]=code^mask;cursor+=1
-        choices=np.sort(choices)[:limit]
-        joined=np.empty(len(combined)*len(choices),dtype=np.int64)
-        cursor=0
+                bits = index + 1
+                code = np.int64(0)
+                for j in range(1, m):
+                    if bits & (1 << (j - 1)):
+                        code |= np.int64(1) << (k - 1 - members[j])
+                choices[cursor] = code
+                cursor += 1
+                if c > 0:
+                    choices[cursor] = code ^ mask
+                    cursor += 1
+        choices = np.sort(choices)[:limit]
+        joined = np.empty(len(combined) * len(choices), dtype=np.int64)
+        cursor = 0
         for previous in combined:
-            for choice in choices:joined[cursor]=previous|choice;cursor+=1
-        combined=np.sort(joined)[:limit]
-    combined=combined[combined!=0][:max_ties]
-    result=np.zeros((len(combined),k),dtype=np.bool_)
+            for choice in choices:
+                joined[cursor] = previous | choice
+                cursor += 1
+        combined = np.sort(joined)[:limit]
+    combined = combined[combined != 0][:max_ties]
+    result = np.zeros((len(combined), k), dtype=np.bool_)
     for row in range(len(combined)):
         for vertex in range(k):
-            result[row,vertex]=bool(combined[row] & (np.int64(1)<<(k-1-vertex)))
+            result[row, vertex] = bool(combined[row] & (np.int64(1) << (k - 1 - vertex)))
     return result
 
 
@@ -776,7 +793,7 @@ def _cut_score(weights: np.ndarray, side: np.ndarray) -> tuple[int, int]:
 def _locally_improve_cut(
     weights: np.ndarray,
     initial: np.ndarray,
-    order: np.ndarray | None = None,
+    order: np.ndarray | None=None,
 ) -> np.ndarray:
     if order is None:
         order = np.asarray(sorted(
@@ -813,8 +830,8 @@ def _maximum_cut_cache_put(
 def maximum_cut_partitions(
     weights: np.ndarray,
     *,
-    exact_max_k: int = DEFAULT_EXACT_CUT_MAX_K,
-    max_ties: int = DEFAULT_MAX_CUT_TIES,
+    exact_max_k: int=DEFAULT_EXACT_CUT_MAX_K,
+    max_ties: int=DEFAULT_MAX_CUT_TIES,
 ) -> tuple[np.ndarray, ...]:
     """Return deterministic maximum-weight bipartitions.
 
@@ -905,10 +922,10 @@ def _gauge_site_mask(haplotypes: np.ndarray, side: np.ndarray) -> np.ndarray:
     first_anchor = haplotypes[first_side[0]]
     second_anchor = haplotypes[second_side[0]]
     first_constant = np.all(
-        haplotypes[first_side] == first_anchor[None, :], axis=0
+        haplotypes[first_side] == first_anchor[None,:], axis=0
     )
     second_constant = np.all(
-        haplotypes[second_side] == second_anchor[None, :], axis=0
+        haplotypes[second_side] == second_anchor[None,:], axis=0
     )
     return first_constant & second_constant & (first_anchor != second_anchor)
 
@@ -945,8 +962,8 @@ def _propose_bipartite_gauge_starts(
     *,
     exact_cut_max_k: int,
     max_cut_ties: int,
-    assignment_weights: np.ndarray | None = None,
-    cut_partitions: Sequence[np.ndarray] | None = None,
+    assignment_weights: np.ndarray | None=None,
+    cut_partitions: Sequence[np.ndarray] | None=None,
 ) -> tuple[GaugeRewireProposal, ...]:
     weights = (
         assignment_graph(mode)
@@ -1072,8 +1089,8 @@ def _initial_complete_modes(
     lambda_wildcard_penalty: float,
     max_iter_per_k: int,
     *,
-    fit_workspace: Any | None = None,
-    seed_sample_mask: np.ndarray | None = None,
+    fit_workspace: Any | None=None,
+    seed_sample_mask: np.ndarray | None=None,
 ) -> tuple[FactorizationMode, ...]:
 
 
@@ -1100,7 +1117,7 @@ def _initial_complete_modes(
             )
         ]
     starts = [
-        np.asarray(seed, dtype=np.int64)[None, :]
+        np.asarray(seed, dtype=np.int64)[None,:]
         for seed in seeds
     ]
     fits = discovery_fitting._fit_at_fixed_K_many(
@@ -1123,12 +1140,12 @@ def _expand_one_complete_mode(
     lambda_wildcard_penalty: float,
     max_iter_per_k: int,
     *,
-    fit_workspace: Any | None = None,
-    oracle_nll: np.ndarray | None = None,
-    decisiveness: np.ndarray | None = None,
-    dosage_by_sample: np.ndarray | None = None,
-    seed_haplotypes_by_sample: np.ndarray | None = None,
-    active_sample_mask: np.ndarray | None = None,
+    fit_workspace: Any | None=None,
+    oracle_nll: np.ndarray | None=None,
+    decisiveness: np.ndarray | None=None,
+    dosage_by_sample: np.ndarray | None=None,
+    seed_haplotypes_by_sample: np.ndarray | None=None,
+    active_sample_mask: np.ndarray | None=None,
 ) -> tuple[tuple[FactorizationMode, ...], int, int]:
     """Generate data-derived K+1 children without rewarding diffuse reads.
 
@@ -1245,7 +1262,7 @@ def _expand_one_complete_mode(
                 continue
             attempted_seed_keys.add(seed_key)
             candidate_initials.append(np.vstack(
-                [parent.haplotypes, contiguous[None, :]]
+                [parent.haplotypes, contiguous[None,:]]
             ))
             if len(candidate_initials) >= maximum_attempts:
                 break

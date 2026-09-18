@@ -11,11 +11,11 @@ import time
 
 import numpy as np
 
-from ..core import parallel
-from .founder_workspace import component_workspace, resolve_threads
-from .founder_candidates import completed_candidates
-from . import founder_scoring
-from ..discovery.objectives import compute_outer_bic_from_log_likelihood as bic
+from ...core import parallel
+from.workspace import component_workspace, resolve_threads
+from.candidates import completed_candidates
+from.import scoring as founder_scoring
+from ...discovery.objectives import compute_outer_bic_from_log_likelihood as bic
 
 
 def fit_deletion(dropped, batch, selected, neutral, sites, config, threads,
@@ -80,7 +80,7 @@ def run(tasks, *, batch, selected, neutral, sites,
     # is already resident. Allow a full tail budget when bounding scratch RAM.
     per_candidate = (2 * workspace.evidence.nbytes + samples * length * 4
                      + min(total, samples) * length * (states + 4)
-                     + 512 * 1024**2)
+                     + 512 * 1024 ** 2)
     answers = [None] * len(tasks)
     for index, result in completed_candidates(functions, threads, per_candidate):
         answers[index] = result

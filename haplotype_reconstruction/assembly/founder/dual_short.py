@@ -88,7 +88,21 @@ def dual_suffix(data, bases, sizes, bins, known, choices, offsets, messages, pen
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def window_suffix(data, bases, sizes, bins, known, choices, offsets, penalty, start, stop, terminal, first, second):
+def window_suffix(
+    data,
+    bases,
+    sizes,
+    bins,
+    known,
+    choices,
+    offsets,
+    penalty,
+    start,
+    stop,
+    terminal,
+    first,
+    second
+):
     blocks, samples, states = (stop - start, len(data), len(first))
     focal = len(known)
     affected = np.flatnonzero(second == focal)
@@ -164,7 +178,22 @@ def pack_coordinate(models, packed):
         return models.sample_contiguous_dual
 
 @njit(cache=True, nogil=True)
-def coordinate_sweep(data, bases, sizes, bins, known, incumbent, choices, offsets, messages, suffixes, penalty, reverse, first, second):
+def coordinate_sweep(
+    data,
+    bases,
+    sizes,
+    bins,
+    known,
+    incumbent,
+    choices,
+    offsets,
+    messages,
+    suffixes,
+    penalty,
+    reverse,
+    first,
+    second
+):
     blocks, samples, states = (len(bins), data.shape[1], len(first))
     focal = len(known)
     affected = np.flatnonzero(second == focal)
@@ -317,9 +346,39 @@ def coordinate_sweep(data, bases, sizes, bins, known, incumbent, choices, offset
     return (decoded, scales.sum(), predicted)
 
 
-def coordinate(data, bases, sizes, bins, known, incumbent, choices, offsets, messages, suffixes, penalty, reverse, first, second):
+def coordinate(
+    data,
+    bases,
+    sizes,
+    bins,
+    known,
+    incumbent,
+    choices,
+    offsets,
+    messages,
+    suffixes,
+    penalty,
+    reverse,
+    first,
+    second
+):
     weights = np.ascontiguousarray(messages.T)
     suffix = np.ascontiguousarray(suffixes.transpose(0, 2, 1))
-    result = coordinate_sweep(data, bases, sizes, bins, known, incumbent, choices, offsets, weights, suffix, penalty, reverse, first, second)
+    result = coordinate_sweep(
+        data,
+        bases,
+        sizes,
+        bins,
+        known,
+        incumbent,
+        choices,
+        offsets,
+        weights,
+        suffix,
+        penalty,
+        reverse,
+        first,
+        second
+    )
     messages[:] = weights.T
     return result

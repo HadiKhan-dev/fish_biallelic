@@ -21,10 +21,10 @@ DEFAULT_ROBUSTNESS_EPSILON = 1e-2
 MAX_LINKING_ITERATIONS = 20
 
 
-from .micro_hmm import PreparedBlockScans
-from .macro_hmm import propagate_homologue_priors
-from .edge_counts import homologue_edge_log_counts
-from . import partial_emissions
+from.micro_hmm import PreparedBlockScans
+from.macro_hmm import propagate_homologue_priors
+from.edge_counts import homologue_edge_log_counts
+from.import partial_emissions
 
 
 class TransitionMesh:
@@ -97,30 +97,30 @@ def initial_transition_probabilities(haps_data, space_gap=1):
     transition_dict_reverse = {}
 
     # Forward Pass initialization
-    for i in range(0,len(haps_data)-space_gap):
+    for i in range(0, len(haps_data) - space_gap):
         transition_dict_forward[i] = {}
 
         these_haps = haps_data[i].haplotypes
-        next_haps = haps_data[i+space_gap].haplotypes
+        next_haps = haps_data[i + space_gap].haplotypes
 
         for first_idx in these_haps.keys():
-            first_hap_name = (i,first_idx)
+            first_hap_name = (i, first_idx)
             for second_idx in next_haps.keys():
-                second_hap_name = (i+space_gap,second_idx)
-                transition_dict_forward[i][(first_hap_name,second_hap_name)] = 1
+                second_hap_name = (i + space_gap, second_idx)
+                transition_dict_forward[i][(first_hap_name, second_hap_name)] = 1
 
     # Backward Pass initialization
-    for i in range(len(haps_data)-1,space_gap-1,-1):
+    for i in range(len(haps_data) - 1, space_gap - 1, -1):
         transition_dict_reverse[i] = {}
 
         these_haps = haps_data[i].haplotypes
-        next_haps = haps_data[i-space_gap].haplotypes
+        next_haps = haps_data[i - space_gap].haplotypes
 
         for first_idx in these_haps.keys():
-            first_hap_name = (i,first_idx)
+            first_hap_name = (i, first_idx)
             for second_idx in next_haps.keys():
-                second_hap_name = (i-space_gap,second_idx)
-                transition_dict_reverse[i][(first_hap_name,second_hap_name)] = 1
+                second_hap_name = (i - space_gap, second_idx)
+                transition_dict_reverse[i][(first_hap_name, second_hap_name)] = 1
 
     # Normalize Forward
     scaled_dict_forward = {}
@@ -131,7 +131,7 @@ def initial_transition_probabilities(haps_data, space_gap=1):
             start_dict[s[0]] = start_dict.get(s[0], 0) + transition_dict_forward[idx][s]
 
         for s in transition_dict_forward[idx].keys():
-            scaled_dict_forward[idx][s] = transition_dict_forward[idx][s]/start_dict[s[0]]
+            scaled_dict_forward[idx][s] = transition_dict_forward[idx][s] / start_dict[s[0]]
 
     # Normalize Backward
     scaled_dict_reverse = {}
@@ -142,7 +142,7 @@ def initial_transition_probabilities(haps_data, space_gap=1):
             start_dict[s[0]] = start_dict.get(s[0], 0) + transition_dict_reverse[idx][s]
 
         for s in transition_dict_reverse[idx].keys():
-            scaled_dict_reverse[idx][s] = transition_dict_reverse[idx][s]/start_dict[s[0]]
+            scaled_dict_reverse[idx][s] = transition_dict_reverse[idx][s] / start_dict[s[0]]
 
     return [scaled_dict_forward, scaled_dict_reverse]
 
@@ -166,16 +166,19 @@ class ViterbiBlockLikelihood:
         if self.dosages is None:
             return self.log_emissions
         return np.take_along_axis(
-            self.log_emissions, self.dosages[None, :, :], axis=2)
+            self.log_emissions, self.dosages[None,:,:], axis=2)
 
 
 class ViterbiBlockList:
     """Simple container for ViterbiBlockLikelihood objects."""
     def __init__(self, blocks_list):
         self.blocks = blocks_list
-    def __len__(self): return len(self.blocks)
-    def __getitem__(self, idx): return self.blocks[idx]
-    def __iter__(self): return iter(self.blocks)
+    def __len__(self):
+        return len(self.blocks)
+    def __getitem__(self, idx):
+        return self.blocks[idx]
+    def __iter__(self):
+        return iter(self.blocks)
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -224,10 +227,10 @@ def _worker_generate_viterbi_emissions(args):
 
     # State Definitions: Map flattened index 0..K-1 to (h1, h2)
     # Full Directed State Space (no symmetry folding)
-    idx_i, idx_j = np.unravel_index(np.arange(num_haps**2), (num_haps, num_haps))
+    idx_i, idx_j = np.unravel_index(np.arange(num_haps ** 2), (num_haps, num_haps))
     state_defs = np.stack([idx_i, idx_j], axis=1).astype(np.int32)
 
-    samples_masked = samples_matrix[:, emission_keep_flags, :]
+    samples_masked = samples_matrix[:, emission_keep_flags,:]
     valid_positions = np.array(block_hap.positions)[emission_keep_flags].astype(np.int64)
 
     # --- PROBABILISTIC MIXTURE CALCULATION ---
@@ -236,7 +239,7 @@ def _worker_generate_viterbi_emissions(args):
     if np.all(called):
         alleles = q.astype(np.uint8)
         dosages = np.ascontiguousarray(
-            (alleles[:, None, :] + alleles[None, :, :]).reshape(num_haps**2, -1).T)
+            (alleles[:, None,:] + alleles[None,:,:]).reshape(num_haps ** 2, -1).T)
         ll_per_site = _genotype_emission_kernel(
             np.ascontiguousarray(samples_masked), float(epsilon))
     else:
@@ -276,7 +279,7 @@ def generate_viterbi_block_emissions(
         tasks = []
         for block in block_results:
             indices = np.searchsorted(sample_sites, block.positions)
-            block_samples = samples_matrix[:, indices, :]
+            block_samples = samples_matrix[:, indices,:]
             tasks.append((block_samples, block, params))
 
         with ThreadPoolExecutor(max_workers=min(num_processes, len(tasks))) as executor:
@@ -287,7 +290,7 @@ def generate_viterbi_block_emissions(
         results = []
         for block in block_results:
             indices = np.searchsorted(sample_sites, block.positions)
-            block_samples = samples_matrix[:, indices, :]
+            block_samples = samples_matrix[:, indices,:]
             result = _worker_generate_viterbi_emissions((block_samples, block, params))
             del block_samples
             results.append(result)
@@ -358,7 +361,7 @@ def global_forward_backward_pass(raw_blocks, block_results, transition_probs,
         if priors is None:
             # Normalized initial diploid prior for each independent chain.
             k = raw_blocks[i].num_haps
-            priors = np.full((raw_blocks[i].log_emissions.shape[0], k*k),
+            priors = np.full((raw_blocks[i].log_emissions.shape[0], k * k),
                              -2.0 * math.log(k))
         S_results[i] = prepared_scans[i].scan(priors)
 
@@ -559,15 +562,15 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
 
         # Preserve the established damping of forward parameters. The
         # reverse table is a local evidence summary, never a beta operator.
-        final_p_mat = ((1.0-learning_rate)*np.exp(hap_log_t)
-                       + learning_rate*final_p_mat)
+        final_p_mat = ((1.0 - learning_rate) * np.exp(hap_log_t)
+                       + learning_rate * final_p_mat)
         log_row_mass = np.logaddexp.reduce(
             np.logaddexp(data_log_count, LOG_PSEUDO), axis=1)
         log_joint = log_row_mass[:, None] + np.log(final_p_mat)
         reverse = np.exp((log_joint - np.logaddexp.reduce(
-            log_joint, axis=0)[None, :]).T)
+            log_joint, axis=0)[None,:]).T)
         new_trans_bwd[next_idx] = {
-            ((next_idx, next_keys[v]), (i, curr_keys[u])): float(reverse[v,u])
+            ((next_idx, next_keys[v]), (i, curr_keys[u])): float(reverse[v, u])
             for v in range(n_n) for u in range(n_c)
         }
 
@@ -684,7 +687,7 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
             current_trans, next_trans)
         current_trans = next_trans
         if diagnostics is not None:
-            diagnostics.append(dict(iteration=it+1, log_likelihood=_current_ll,
+            diagnostics.append(dict(iteration=it + 1, log_likelihood=_current_ll,
                                     max_change=max_transition_change))
         if max_transition_change <= min_cutoff_change:
             break
@@ -725,7 +728,7 @@ def generate_transition_probability_mesh(
                 dynamic_cores_fn=dynamic_cores_fn, chromosome_map=chromosome_map,
                 prepared_scans=prepared)
         else:
-            from .structured_transitions import fit_gap
+            from.structured_transitions import fit_gap
             results[gap] = fit_gap(precalculated_viterbi_emissions, prepared,
                 [sorted(block.haplotypes) for block in haps_data], gap,
                 max_iterations=max_num_iterations, config=structured_config,

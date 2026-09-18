@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 import numpy as np
 from numba import njit
 
-from . import cavity, fitting, modes, objectives, search
-from ..core import haplotypes, parallel
+from.import cavity, fitting, modes, objectives, search
+from..core import haplotypes, parallel
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,7 @@ this is a novelty heuristic, not proof that a rejected founder is redundant.
     for site in range(length):
         best = np.min(costs)
         for row in range(k):
-            if candidate[site] < 0 or backbone[row,site] < 0 or backbone[row,site] == candidate[site]:
+            if candidate[site] < 0 or backbone[row, site] < 0 or backbone[row, site] == candidate[site]:
                 costs[row] = min(costs[row], best + 1, impossible)
             else:
                 costs[row] = impossible
@@ -135,12 +135,12 @@ probability, support and assignment metadata. Neither rule uses truth.
         if key not in polish_cache:
             if score_workspace is None:
                 score_evidence = likelihood if active.all() else np.ascontiguousarray(likelihood[active])
-                score_workspace = cavity._prepare_cavity_scoring_workspace(score_evidence,score_config)
+                score_workspace = cavity._prepare_cavity_scoring_workspace(score_evidence, score_config)
             raw, fitted = modes._fit_starts_with_synchronized_endpoints(
                 likelihood, [panel], search._internal_move_config(base), workspace)
-            candidates = [mode for mode in modes._deduplicate_modes((*raw,*fitted)) if mode.k == len(panel)]
-            scores = search._score_stage(likelihood,candidates,score_config,score_workspace,active)
-            best = min(scores,key=lambda s:(-s.log_score,s.mode.total_nll,s.mode.canonical_key))
+            candidates = [mode for mode in modes._deduplicate_modes((*raw, *fitted)) if mode.k == len(panel)]
+            scores = search._score_stage(likelihood, candidates, score_config, score_workspace, active)
+            best = min(scores, key=lambda s: (-s.log_score, s.mode.total_nll, s.mode.canonical_key))
             polished = fit(best.mode.haplotypes)
             polish_cache[key] = polished
         return polish_cache[key]
@@ -183,10 +183,10 @@ probability, support and assignment metadata. Neither rule uses truth.
         winner = min(choices, key=lambda x: (-x[0], x[1], x[2]))
         current_score, _, index, current, calls = winner
         released = combine_supported_calls(released, [calls])
-        accepted.append(dict(gain=float(current_score-fit(current[:-1])["score"]),
+        accepted.append(dict(gain=float(current_score - fit(current[:-1])["score"]),
                              private_sites=int(private_allele_mask(released[:-1], calls).sum())))
         remaining.pop(index)
-        remaining = [(r,h) for r,h in remaining if not any(np.array_equal(h,x) for x in current)]
+        remaining = [(r, h) for r, h in remaining if not any(np.array_equal(h, x) for x in current)]
     label = "nonmosaic1_bic_add" if selection == "balanced" else "private_bic_add"
     diagnostic["accepted"][label] = accepted
     diagnostic["scored_panels"] = len(cache)
@@ -207,7 +207,7 @@ probability, support and assignment metadata. Neither rule uses truth.
             if np.any(calls[i] >= 0) and key not in seen:
                 seen.add(key)
                 indices.append(i)
-        remap = np.full(len(current)+1, len(indices), dtype=np.int64)
+        remap = np.full(len(current) + 1, len(indices), dtype=np.int64)
         remap[indices] = np.arange(len(indices))
         result = dict(discrete_haps=calls[indices],
             latent_haps=current[indices],

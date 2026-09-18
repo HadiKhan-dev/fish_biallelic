@@ -112,6 +112,6 @@ def source_row_ids(block):
     Its missing allele is shared, just as for a diagonal local diplotype.
     Position columns are compared only within one atomic block.
     """
-    from .paths import missing_aware_atomic_source_provenance
+    from.paths import missing_aware_atomic_source_provenance
     rows, _, counts, _ = missing_aware_atomic_source_provenance(block)
     return np.ascontiguousarray(np.repeat(rows, counts, axis=1), dtype=np.int32)

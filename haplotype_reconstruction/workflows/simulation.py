@@ -1,24 +1,13 @@
-"""workflows / simulation for the canonical reconstruction pipeline."""
+"""Checkpointed known-pedigree simulation and end-to-end reconstruction driver."""
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import os
 from pathlib import Path
 
-
-def configured_regions(default, *, template_regions=False):
-    requested = os.environ.get("HAPLOTYPES_CONTIGS")
-    if requested is None:
-        return default
-    names = json.loads(requested)
-    if not names or len(names) != len(set(names)):
-        raise ValueError("contigs must be a nonempty unique ordered list")
-    return [dict(contig=str(name), **({'start': 0, 'end': 3000} if template_regions else {}))
-            for name in names]
-
-
-import os
-import hashlib
-import math
+from ..core.environment import configured_regions
 import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
 import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
@@ -350,12 +339,16 @@ def run():
         n = 0
         for r_name in list(multi_contig_results.keys()):
             if key in multi_contig_results.get(r_name, {}):
-                del multi_contig_results[r_name][key]; n += 1
+                del multi_contig_results[r_name][key]
+                n += 1
         if n > 0:
             gc.collect()
             print(f"  [Prune] Dropped '{key}' from {n} contigs")
 
-    vcf_path = os.environ.get("HAPLOTYPES_VCF", "work/data/fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz")
+    vcf_path = os.environ.get(
+        "HAPLOTYPES_VCF",
+        "work/data/fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz"
+    )
 
     # Define the regions you want to use for inference.
     regions_config = configured_regions([
@@ -438,7 +431,7 @@ def run():
 
                 print(f"\n" + "="*60)
                 print(f"PROCESSING REGION: ({region['contig']} blocks {region['start']}-{region['end']})")
-                print("="*60)
+                print("=" * 60)
 
                 # 1. Load Data
                 start = time.time()
@@ -764,7 +757,7 @@ def run():
         read_seed = realized_simulation_seed + 1_000_000
         read_seed_rng = np.random.default_rng(read_seed)
         contig_read_seeds = [
-            int(read_seed_rng.integers(0, 2**63))
+            int(read_seed_rng.integers(0, 2 ** 63))
             for _ in region_keys
         ]
         print(

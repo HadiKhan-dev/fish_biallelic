@@ -1,4 +1,4 @@
-"""assembly / components for the canonical reconstruction pipeline."""
+"""Founder-row mappings and component-preserving block joins."""
 from __future__ import annotations
 
 

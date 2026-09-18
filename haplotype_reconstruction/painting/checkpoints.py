@@ -1,4 +1,4 @@
-"""painting / checkpoints for the canonical reconstruction pipeline."""
+"""Typed painting checkpoints with scientific and execution provenance."""
 from __future__ import annotations
 
 
@@ -353,7 +353,7 @@ def _validate_ragged_diagnostics(
     expected_status = class_status[state_indices]
     expected_labels = class_labels[state_indices]
     expected_classes = viterbi_grid.copy()
-    low = np.broadcast_to((qv < threshold)[:, None, :], expected_grid)
+    low = np.broadcast_to((qv < threshold)[:, None,:], expected_grid)
     expected_status[low] = int(status_type.LOW_POSTERIOR_ABSTENTION)
     expected_labels[low] = -1
     expected_classes[low] = -1

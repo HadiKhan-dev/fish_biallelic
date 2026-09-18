@@ -1,4 +1,4 @@
-"""workflows / reconstruction for the canonical reconstruction pipeline."""
+"""Connect local feedback, component assembly, painting and evidence caches."""
 from __future__ import annotations
 from haplotype_reconstruction import PACKAGE_ROOT
 
@@ -27,7 +27,14 @@ STAGE2_PRODUCTION_BACKEND = (
 PAINTING_STAGE = "09_painting"
 
 
-STAGE2_PAINTING_CODE_FILES = ('core/numerics.py', 'core/genetic_map.py', 'painting/components.py', 'assembly/observations.py', 'painting/model.py', 'painting/evidence.py')
+STAGE2_PAINTING_CODE_FILES = (
+    'core/numerics.py',
+    'core/genetic_map.py',
+    'painting/components.py',
+    'assembly/observations.py',
+    'painting/model.py',
+    'painting/evidence.py'
+)
 
 
 EXACT_OBSERVED_MASK_MODE = "positive_read_depth_v1"

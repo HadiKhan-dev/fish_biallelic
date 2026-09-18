@@ -1,4 +1,4 @@
-"""assembly / boundaries for the canonical reconstruction pipeline."""
+"""Diplotype boundary posteriors and evidence-supported whole-bin cavity fills."""
 from __future__ import annotations
 
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import logsumexp
 from numba import njit
-from .allele_polynomials import shared_sample_likelihoods
+from.allele_polynomials import shared_sample_likelihoods
 import haplotype_reconstruction.assembly.observations as assembly_observations
 
 @dataclass(frozen=True)
@@ -166,9 +166,9 @@ def exact_shared_latent_site_posterior(
     pairs: np.ndarray,
     pair_state_probabilities: np.ndarray,
     *,
-    uniform_mix: float = 0.01,
-    uniform_tolerance: float = 1e-12,
-    tie_tolerance: float = 1e-12,
+    uniform_mix: float=0.01,
+    uniform_tolerance: float=1e-12,
+    tie_tolerance: float=1e-12,
 ) -> SharedLatentSitePosterior:
     """Exactly marginalize shared unresolved alleles at one founder site.
 
@@ -198,7 +198,7 @@ def exact_shared_latent_site_posterior(
     focal = np.asarray(genotype_likelihoods, dtype=np.float64)
     if focal.ndim != 2 or focal.shape[1] != 3:
         raise ValueError("focal genotype likelihoods must have shape (samples, 3)")
-    evidence = _normalised_evidence(focal[:, None, :])[:, 0, :]
+    evidence = _normalised_evidence(focal[:, None,:])[:, 0,:]
     observed = np.asarray(observed, dtype=np.bool_)
     if observed.shape != (evidence.shape[0],):
         raise ValueError("focal observed must have shape (samples,)")
@@ -222,7 +222,7 @@ def exact_shared_latent_site_posterior(
     assignment_codes = np.arange(1 << n_unresolved, dtype=np.uint64)
     bit_positions = np.arange(n_unresolved, dtype=np.uint64)
     assignments = (
-        (assignment_codes[:, None] >> bit_positions[None, :]) & 1
+        (assignment_codes[:, None] >> bit_positions[None,:]) & 1
     ).astype(np.int8)
 
     robust_evidence = (1.0 - uniform_mix) * evidence + uniform_mix / 3.0
@@ -308,7 +308,7 @@ def _whole_bin_statistics(panel, evidence, observed, rule, uniform_tolerance,
                           informative_focal):
     """Compute each site's contribution once, retaining immutable holdouts."""
     evidence, informative = _informative_cells(evidence, observed, uniform_tolerance)
-    informative &= np.all(panel.called, axis=0)[None, :]
+    informative &= np.all(panel.called, axis=0)[None,:]
     samples, sites = informative.shape
     k = len(panel.keys)
     bins = (sites + rule.snps_per_bin - 1) // rule.snps_per_bin
@@ -326,10 +326,10 @@ def _whole_bin_statistics(panel, evidence, observed, rule, uniform_tolerance,
         emissions = assembly_observations.site_log_emissions(
             evidence[:, start:stop], distribution, uniform_mix=rule.uniform_mix)
         mask = informative[:, start:stop]
-        emissions *= mask[:, None, None, :]
+        emissions *= mask[:, None, None,:]
         counts[block] = np.sum(mask, axis=1)
         for state, (first, second) in enumerate(pairs):
-            scores[block, :, state] = np.sum(emissions[:, first, second, :], axis=1)
+            scores[block,:, state] = np.sum(emissions[:, first, second,:], axis=1)
         observable = (np.all(subpanel.called, axis=0)
                       & np.any(informative_focal[:, start:stop], axis=0))
         for first in range(k):
@@ -354,9 +354,9 @@ def cavity_fill_unknown_alleles(
     panel: assembly_observations.FounderPanel,
     genotype_likelihoods: np.ndarray,
     observed: np.ndarray,
-    rule: CavityFillRule = CavityFillRule(),
+    rule: CavityFillRule=CavityFillRule(),
     *,
-    uniform_tolerance: float = 1e-12,
+    uniform_tolerance: float=1e-12,
 ) -> CavityFillResult:
     """Fill unknown cells with coherent leave-whole-bin-out evidence.
 
@@ -445,7 +445,7 @@ def cavity_fill_unknown_alleles(
             joint = exact_shared_latent_site_posterior(
                 panel,
                 site,
-                evidence[:, site, :],
+                evidence[:, site,:],
                 observed[:, site],
                 cavity.pairs,
                 cavity.probabilities,

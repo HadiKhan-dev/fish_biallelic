@@ -124,7 +124,7 @@ Only the outer reconstruction runner publishes genome-wide completion.
             print(f"[Feedback] {contig}: resumed L{level} proposals", flush=True)
         else:
             print(f"[Feedback] {contig}: assembling context through L{level}", flush=True)
-            assembly_io = AssemblyCheckpointStore(store, work_stage=stage+"_assembly", contig=contig)
+            assembly_io = AssemblyCheckpointStore(store, work_stage=stage + "_assembly", contig=contig)
             with parallel.numba_thread_scope(cpus):
                 context = assembly.assemble_chromosome(current, gl, sites, observed, sample_ids,
                     stage1_identity=dict(stage1_identity, feedback_pass=pass_identity),

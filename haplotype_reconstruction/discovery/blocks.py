@@ -1,4 +1,4 @@
-"""discovery / blocks for the canonical reconstruction pipeline."""
+"""Missing-aware 200-SNP discovery entry points and worker orchestration."""
 from __future__ import annotations
 
 
@@ -58,7 +58,7 @@ _MALLOC_TRIM_INTERVAL = _nonnegative_env_int(
 
 def _readonly(
     value: np.ndarray,
-    dtype: np.dtype[Any] | type | None = None,
+    dtype: np.dtype[Any] | type | None=None,
 ) -> np.ndarray:
     result = np.array(value, dtype=dtype, order="C", copy=True)
     result.setflags(write=False)
@@ -422,7 +422,7 @@ class CavityMaterializedBlockData:
                     "unknown public cells must be (0.5, 0.5)"
                 )
 
-    def to_block_result(self, block_result_class: type | None = None) -> Any:
+    def to_block_result(self, block_result_class: type | None=None) -> Any:
         """Construct the public block result without changing H or A."""
 
         self.validate()
@@ -598,7 +598,7 @@ class CavityBlockDiscoveryResult:
         keep_mask = self.keep_flags > 0
         n_sites = len(self.positions)
         observed_kept = np.ascontiguousarray(
-            np.sum(self.reads_count_matrix[:, keep_mask, :], axis=2) > 0
+            np.sum(self.reads_count_matrix[:, keep_mask,:], axis=2) > 0
         )
         (
             q_kept,
@@ -689,7 +689,7 @@ class CavityBlockDiscoveryResult:
     def to_block_result(
         self,
         *,
-        block_result_class: type | None = None,
+        block_result_class: type | None=None,
     ) -> Any:
         return self.materialize().to_block_result(block_result_class)
 
@@ -766,7 +766,7 @@ class BlockDiscoveryPool:
     def __init__(
         self,
         num_processes: int,
-        total_numba_threads: int | None = None,
+        total_numba_threads: int | None=None,
     ) -> None:
         (
             self.num_processes,
@@ -884,9 +884,9 @@ class BlockDiscoveryPool:
 def discover_block_reversible_cavity(
     positions: np.ndarray,
     reads_array: np.ndarray,
-    keep_flags: np.ndarray | None = None,
+    keep_flags: np.ndarray | None=None,
     *,
-    config: discovery_search.ReversibleCavitySearchConfig | None = None,
+    config: discovery_search.ReversibleCavitySearchConfig | None=None,
 ) -> CavityBlockDiscoveryResult:
     """Discover and select one block panel by adaptive reversible search.
 
@@ -906,9 +906,9 @@ def discover_block_reversible_cavity(
     evidence_kept = np.ascontiguousarray(
         _raw_genotype_likelihoods(
             reads, settings.read_error_probability
-        )[:, keep_mask, :]
+        )[:, keep_mask,:]
     )
-    depths_kept = np.ascontiguousarray(reads[:, keep_mask, :])
+    depths_kept = np.ascontiguousarray(reads[:, keep_mask,:])
 
     search = discovery_search.search_reversible_cavity(
         evidence_kept,
@@ -1041,7 +1041,7 @@ def _block_has_informative_retained_data(positions, reads, keep_flags):
         raise ValueError("keep_flags must match positions")
     if not np.any(retained):
         return False
-    return bool(np.any(reads_value[:, retained, :] > 0))
+    return bool(np.any(reads_value[:, retained,:] > 0))
 
 
 def _worker_generate_block_direct(args):

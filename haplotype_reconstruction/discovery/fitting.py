@@ -1,4 +1,4 @@
-"""discovery / fitting for the canonical reconstruction pipeline."""
+"""Fixed-count panel fitting with read masks and shared sample trajectories."""
 from __future__ import annotations
 
 

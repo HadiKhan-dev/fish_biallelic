@@ -13,35 +13,36 @@ in founder_exchanges; the complete refinement is not claimed to be quadratic.
 import numpy as np
 import time
 from numba import njit, prange, get_num_threads
-from . import founder_refinement as fr, founder_scoring as fs
-from . import founder_exchanges as ex
-from . import paths, hierarchy
-from .founder_workspace import component_workspace
-from .founder_packing import emission_arrays, pack_selected, score_rows
-from ..core import haplotypes
+from..import founder_refinement as fr
+from.import scoring as fs
+from.import exchanges as ex
+from..import paths, hierarchy
+from.workspace import component_workspace
+from.packing import emission_arrays, pack_selected, score_rows
+from ...core import haplotypes
 
 
 @njit(cache=True, parallel=True, nogil=True)
 def flanks(emissions, offsets, penalty):
-    blocks = len(offsets)-1
+    blocks = len(offsets) - 1
     samples, _, states = emissions.shape
-    prefix = np.zeros((blocks+1, samples, states))
+    prefix = np.zeros((blocks + 1, samples, states))
     suffix = np.zeros_like(prefix)
     for sample in prange(samples):
         row = np.zeros(states)
         value = np.empty(states)
         for block in range(blocks):
-            for site in range(offsets[block], offsets[block+1]):
-                switched = np.max(row)-penalty
+            for site in range(offsets[block], offsets[block + 1]):
+                switched = np.max(row) - penalty
                 for state in range(states):
-                    row[state] = max(row[state], switched)+emissions[sample, site, state]
-            prefix[block+1, sample] = row
+                    row[state] = max(row[state], switched) + emissions[sample, site, state]
+            prefix[block + 1, sample] = row
         row[:] = 0.0
-        for block in range(blocks-1, -1, -1):
-            for site in range(offsets[block+1]-1, offsets[block]-1, -1):
+        for block in range(blocks - 1, -1, -1):
+            for site in range(offsets[block + 1] - 1, offsets[block] - 1, -1):
                 for state in range(states):
-                    value[state] = row[state]+emissions[sample, site, state]
-                switched = np.max(value)-penalty
+                    value[state] = row[state] + emissions[sample, site, state]
+                switched = np.max(value) - penalty
                 for state in range(states):
                     row[state] = max(value[state], switched)
             suffix[block, sample] = row
@@ -75,7 +76,7 @@ def interval_scores(emissions, offsets, prefix, suffix, permutation, penalty, st
             for state in range(states):
                 row[state] = prefix[start, sample, permutation[pair, state]]
             for block in range(start, stop):
-                for site in range(offsets[block], offsets[block+1]):
+                for site in range(offsets[block], offsets[block + 1]):
                     switched = np.max(row) - penalty
                     for state in range(states):
                         row[state] = max(row[state], switched) + emissions[sample, site, state]
@@ -83,7 +84,7 @@ def interval_scores(emissions, offsets, prefix, suffix, permutation, penalty, st
                 for state in range(states):
                     best = max(best, row[state] + suffix[block + 1, sample, permutation[pair, state]])
                 total[block - start] += best
-        result[pair, index, :stop - start] = total
+        result[pair, index,:stop - start] = total
     return result
 
 
@@ -95,7 +96,10 @@ def _interval_ranges(blocks, window, groups=None):
         assert groups[0][0] == 0 and groups[-1][1] == blocks
         assert all((a[1] == b[0] for a, b in zip(groups, groups[1:])))
         starts = np.asarray([a for a, b in groups], np.int64)
-        stops = np.asarray([groups[min(len(groups), i + window) - 1][1] for i in range(len(groups))], np.int64)
+        stops = np.asarray(
+            [groups[min(len(groups), i + window) - 1][1] for i in range(len(groups))],
+            np.int64
+        )
     return (starts, stops)
 
 
@@ -112,7 +116,7 @@ def score_intervals(submodels, selected, pairs, penalty, window, groups=None, pr
     permutation, _, _ = permutations(len(selected), pairs)
     emissions, offsets, prefix, suffix = (
         prepare_intervals(submodels, selected, penalty) if prepared is None else prepared)
-    starts, stops = _interval_ranges(len(offsets)-1, window, groups)
+    starts, stops = _interval_ranges(len(offsets) - 1, window, groups)
     values = interval_scores(
         emissions, offsets, prefix, suffix, permutation, float(penalty), starts, stops)
     return values, float(np.max(prefix[-1], axis=1).sum()), starts
@@ -170,7 +174,9 @@ def refine_components(prepared, components, neutral, sites, *, config,
             phase = f'{token}.iteration{iteration}'
             cached = fr._load(checkpoints, phase)
             if cached is not None:
-                selected, current, switches, history = (cached[k] for k in ('selected', 'score', 'switches', 'history'))
+                selected, current, switches, history = (
+                    cached[k] for k in ('selected', 'score', 'switches', 'history')
+                )
                 if cached['converged']:
                     break
                 continue
@@ -178,7 +184,14 @@ def refine_components(prepared, components, neutral, sites, *, config,
             pairs = list(zip(*np.triu_indices(len(selected), 1)))
             if len(pairs) > config.interval_partners * len(selected):
                 calls = fs.selected_alleles(leaves, offsets, selected)
-                value, reference, first, second = ex.score_exchanges(calls, evidence, complete, offsets[1:-1], penalty, logs)
+                value, reference, first, second = ex.score_exchanges(
+                    calls,
+                    evidence,
+                    complete,
+                    offsets[1:-1],
+                    penalty,
+                    logs
+                )
                 assert np.max(abs(reference - current)) <= max(1e-06, abs(current) * 1e-10)
                 ranking = value.max(axis=0)
                 retained = set()
@@ -192,8 +205,10 @@ def refine_components(prepared, components, neutral, sites, *, config,
             seen = set()
             packed = {}
             for scale, groups, reverse in scales:
-                models = submodels if not reverse else [dict(m, bin_emissions=np.ascontiguousarray(m['bin_emissions'][:, :, :, ::-1])) for m in submodels[::-1]]
-                rows = np.ascontiguousarray(selected[:, ::-1]) if reverse else selected
+                models = submodels if not reverse else [
+                    dict(m, bin_emissions=np.ascontiguousarray(m['bin_emissions'][:,:,:,::-1])) for m in submodels[::-1]
+                ]
+                rows = np.ascontiguousarray(selected[:,::-1]) if reverse else selected
                 if reverse not in packed:
                     packed[reverse] = prepare_intervals(models, rows, penalty)
                 values, binned, starts = score_intervals(models, rows, pairs, penalty,
@@ -218,27 +233,62 @@ def refine_components(prepared, components, neutral, sites, *, config,
                     score, next_switches = evaluate(trial)
                     fit_gain = score - current + penalty * (next_switches - switches)
                     eligible = bool(score > current + 1e-06 and fit_gain >= -1e-06)
-                    records.append(dict(pair=[int(a), int(b)], scale=scale, start=int(start), stop=int(stop), binned_gain=predicted - binned, gain=score - current, genotype_fit_gain=fit_gain, switch_delta=next_switches - switches, eligible=eligible))
+                    records.append(
+                        dict(pair=[int(a), int(b)], scale=scale, start=int(start), stop=int(stop), binned_gain=predicted - binned, gain=score - current, genotype_fit_gain=fit_gain, switch_delta=next_switches - switches, eligible=eligible)
+                    )
                     if eligible and (best is None or score > best[0]):
                         best = (score, next_switches, trial, records[-1])
-            record = dict(iteration=iteration, proposals=records, accepted=None, seconds=time.monotonic() - started)
+            record = dict(
+                iteration=iteration,
+                proposals=records,
+                accepted=None,
+                seconds=time.monotonic() - started
+            )
             if best is not None:
                 current, switches, selected, record['accepted'] = best
             history.append(record)
-            fr._save(checkpoints, phase, dict(selected=selected, score=current, switches=switches, history=history, converged=best is None))
+            fr._save(
+                checkpoints,
+                phase,
+                dict(selected=selected, score=current, switches=switches, history=history, converged=best is None)
+            )
             if best is None:
                 break
         result = component
         if not np.array_equal(selected, original):
-            reconstructed = paths.reconstruct_haplotypes_from_beam([(list(row), current) for row in selected], fr._LeafKeyMap(batch), batch)
+            reconstructed = paths.reconstruct_haplotypes_from_beam(
+                [(list(row), current) for row in selected],
+                fr._LeafKeyMap(batch),
+                batch
+            )
             result = hierarchy.convert_reconstruction_to_superblock(reconstructed, batch)
             for side in ('before', 'after'):
-                for stem in ('missing_aware_break', 'missing_aware_break_reason', 'missing_aware_joint_informative_samples'):
+                for stem in (
+                    'missing_aware_break',
+                    'missing_aware_break_reason',
+                    'missing_aware_joint_informative_samples'
+                ):
                     name = f'{stem}_{side}'
-                    setattr(result, name, getattr(component, name, False if stem == 'missing_aware_break' else None))
-            assert np.array_equal(np.sort(result.discrete_haps, axis=0), np.sort(component.discrete_haps, axis=0))
-        diagnostic = dict(component=number, initial_score=initial, final_score=current, changed=not np.array_equal(selected, original), history=history)
+                    setattr(
+                        result,
+                        name,
+                        getattr(component, name, False if stem == 'missing_aware_break' else None)
+                    )
+            assert np.array_equal(
+                np.sort(result.discrete_haps, axis=0),
+                np.sort(component.discrete_haps, axis=0)
+            )
+        diagnostic = dict(
+            component=number,
+            initial_score=initial,
+            final_score=current,
+            changed=not np.array_equal(selected, original),
+            history=history
+        )
         fr._save(checkpoints, token, dict(block=result, diagnostic=diagnostic))
         output.append(result)
         diagnostics.append(diagnostic)
-    return (haplotypes.BlockResults(output), dict(model='bounded_staggered_paired_intervals', components=diagnostics))
+    return (
+        haplotypes.BlockResults(output),
+        dict(model='bounded_staggered_paired_intervals', components=diagnostics)
+    )

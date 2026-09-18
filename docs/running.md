@@ -262,6 +262,20 @@ Combining `structured` transitions with `broad` search is allowed, but no longer
 gives the near-quadratic whole-assembly bound. Search breadth changes L1–L4,
 not Stage 1 or downstream models.
 
+For Python callers, `AssemblyConfig.panel_search_config=PanelSearchConfig(...)`
+selects bounded search. Its controls are `paths_per_endpoint` (default 16),
+`max_sweeps` (20), `full_scores_per_kind` (16), `max_bins` (2000) and
+`tensor_budget_mb` (256). These are not one-to-one replacements for broad
+search's controls.
+
+The `AssemblyConfig` fields `beam_width`, `max_founders`, `top_n_swap`,
+`max_cr_iterations`, `paint_penalty` and `min_hotspot_samples` apply **only to
+broad search**, selected by `panel_search_config=None`. Their stored defaults
+are inactive placeholders in bounded mode; changing them in that mode raises
+an error instead of silently doing nothing. In particular, bounded search does
+not use `max_founders` as a fixed founder-count cap. Shared settings such as
+`cc_scale` and the transition model remain applicable to both searches.
+
 Structured transitions are a restricted statistical model, not an exact
 acceleration of arbitrary dense transitions. Read the
 [scaling and accuracy trade-offs](founder_scaling.md).
@@ -321,6 +335,12 @@ source stage. Iteration checkpoints retain family messages, the preceding
 polished phase and the consecutive-stability count; large numerical caches are
 rebuilt on restart. A 520-iteration safety limit refuses release if phase has
 not stabilized. Stable phase does not assert marginal-posterior convergence.
+
+T11 preserves published genotype calls and missingness: family-supported fills
+may inform polishing internally, but are not released as newly imputed alleles.
+The retired `--impute-missing` flag and TOML `[refinement].impute_missing` key
+are rejected. Remove the TOML key (even if set to `false`); there is no replacement
+switch for publishing the former separate imputed product.
 
 Changes confined to T11 can reuse compatible T09/T10/raw checkpoints in a new
 downstream output root. The local-feedback change described above also changes

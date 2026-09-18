@@ -1,9 +1,9 @@
-"""assembly / pipeline for the canonical reconstruction pipeline."""
+"""Checkpointed founder completion, L1-L4 assembly and progressive path refinement."""
 from __future__ import annotations
 from haplotype_reconstruction import PACKAGE_ROOT
 
 import copy
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 import hashlib
 import json
 import math
@@ -12,9 +12,9 @@ import time
 from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.assembly.completion as assembly_completion
-from .structured_transitions import StructuredTransitionConfig, configured_transition
-from .panel_search import PanelSearchConfig, configured_panel_search
-from . import founder_refinement, evidence as assembly_evidence
+from.structured_transitions import StructuredTransitionConfig, configured_transition
+from.panel_search import PanelSearchConfig, configured_panel_search
+from.import founder_refinement, evidence as assembly_evidence
 
 STAGE2_RELEASE_SCHEMA = "stage2-release-v1"
 
@@ -28,26 +28,48 @@ INTERSECTION_SAMPLE_RULE = "intersection_across_linking_proxy_batch_v2"
 
 
 STAGE2_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
-    assembly_completion.STAGE2_PREPROCESS_SCIENTIFIC_DEPENDENCIES + ('core/numerics.py', 'core/config.py', 'core/genotypes.py', 'discovery/objectives.py', 'discovery/blocks.py', 'assembly/paths.py', 'assembly/linking.py', 'assembly/chimera_kernels.py', 'assembly/chimera_resolution.py', 'assembly/chimera_scoring.py', 'core/parallel.py', 'assembly/hierarchy.py', 'core/genetic_map.py', 'assembly/micro_hmm.py', 'assembly/micro_hmm_log.py', 'assembly/macro_hmm.py', 'assembly/edge_counts.py', 'core/runtime.py', 'core/environment.py', 'assembly/pipeline.py', 'assembly/checkpoints.py')
+    assembly_completion.STAGE2_PREPROCESS_SCIENTIFIC_DEPENDENCIES + (
+        'core/numerics.py',
+        'core/config.py',
+        'core/genotypes.py',
+        'discovery/objectives.py',
+        'discovery/blocks.py',
+        'assembly/paths.py',
+        'assembly/linking.py',
+        'assembly/chimera_kernels.py',
+        'assembly/chimera_resolution.py',
+        'assembly/chimera_scoring.py',
+        'core/parallel.py',
+        'assembly/hierarchy.py',
+        'core/genetic_map.py',
+        'assembly/micro_hmm.py',
+        'assembly/micro_hmm_log.py',
+        'assembly/macro_hmm.py',
+        'assembly/edge_counts.py',
+        'core/runtime.py',
+        'core/environment.py',
+        'assembly/pipeline.py',
+        'assembly/checkpoints.py'
+    )
 )))
 
 
 STAGE2_RELEASE_CODE_IDENTITY_FILES += (
     'assembly/structured_transitions.py', 'assembly/panel_search.py',
     'assembly/panel_scoring.py', 'assembly/panel_candidates.py', 'assembly/partial_emissions.py',
-    'assembly/founder_refinement.py', 'assembly/founder_path_search.py',
-    'assembly/founder_scoring.py', 'assembly/founder_dual_search.py',
-    'assembly/founder_exchanges.py', 'assembly/founder_windows.py',
-    'assembly/founder_intervals.py',
-    'assembly/founder_count.py', 'assembly/founder_count_bound.py', 'assembly/evidence.py',
-    'assembly/founder_components.py',
-    'assembly/founder_workspace.py', 'assembly/founder_count_workers.py',
-    'assembly/founder_candidates.py', 'assembly/founder_sparse.py',
-    'assembly/founder_background.py', 'assembly/founder_delta.py',
-    'assembly/founder_packing.py', 'assembly/founder_checkpoints.py',
-    'assembly/founder_site_kernels.py', 'assembly/founder_dual_short.py',
-    'assembly/founder_evidence.py', 'assembly/founder_predictive.py',
-    'assembly/founder_beam.py', 'assembly/founder_beam_kernels.py',
+    'assembly/founder_refinement.py', 'assembly/founder/path_search.py',
+    'assembly/founder/scoring.py', 'assembly/founder/dual_search.py',
+    'assembly/founder/exchanges.py', 'assembly/founder/windows.py',
+    'assembly/founder/intervals.py',
+    'assembly/founder/count.py', 'assembly/founder/count_bound.py', 'assembly/evidence.py',
+    'assembly/founder/components.py',
+    'assembly/founder/workspace.py', 'assembly/founder/count_workers.py',
+    'assembly/founder/candidates.py', 'assembly/founder/sparse.py',
+    'assembly/founder/background.py', 'assembly/founder/delta.py',
+    'assembly/founder/packing.py', 'assembly/founder/checkpoints.py',
+    'assembly/founder/site_kernels.py', 'assembly/founder/dual_short.py',
+    'assembly/founder/evidence.py', 'assembly/founder/predictive.py',
+    'assembly/founder/beam.py', 'assembly/founder/beam_kernels.py',
 )
 
 _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
@@ -60,14 +82,20 @@ _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
 
 
 def _configured_founder_refinement():
-    from ..core.environment import assembly_founder_refinement
+    from..core.environment import assembly_founder_refinement
     return founder_refinement.FounderRefinementConfig(
         enabled=assembly_founder_refinement())
 
 
 @dataclass(frozen=True)
 class AssemblyConfig:
-    """Dense transitions and bounded panel search by default; one core ceiling."""
+    """Dense transitions and bounded panel search by default; one core ceiling.
+
+    Bounded search uses panel_search_config. The broad-only controls
+    beam_width, max_founders, top_n_swap, max_cr_iterations, paint_penalty
+    and min_hotspot_samples must retain their defaults in bounded mode.
+    Set panel_search_config=None to use and customize those broad controls.
+    """
 
     preprocess_config: assembly_completion.CompletionConfig = field(
         default_factory=assembly_completion.CompletionConfig
@@ -92,7 +120,9 @@ class AssemblyConfig:
     min_gb_per_worker: float = 4.0
     preprocess_diagnostics_mode: str = "compact"
     verbose: bool = False
-    structured_transition_config: StructuredTransitionConfig | None = field(default_factory=configured_transition)
+    structured_transition_config: StructuredTransitionConfig | None = field(
+        default_factory=configured_transition
+    )
     panel_search_config: PanelSearchConfig | None = field(default_factory=configured_panel_search)
     founder_refinement_config: founder_refinement.FounderRefinementConfig = field(
         default_factory=_configured_founder_refinement)
@@ -100,7 +130,10 @@ class AssemblyConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.founder_refinement_config, founder_refinement.FounderRefinementConfig):
             raise TypeError("founder_refinement_config must be FounderRefinementConfig")
-        if self.panel_search_config is not None and not isinstance(self.panel_search_config, PanelSearchConfig):
+        if self.panel_search_config is not None and not isinstance(
+            self.panel_search_config,
+            PanelSearchConfig
+        ):
             raise TypeError("panel_search_config must be PanelSearchConfig or None")
         if (self.structured_transition_config is not None
                 and not isinstance(self.structured_transition_config, StructuredTransitionConfig)):
@@ -136,6 +169,22 @@ class AssemblyConfig:
             raise ValueError(
                 "preprocess_diagnostics_mode must be 'full' or 'compact'"
             )
+
+        if self.panel_search_config is not None:
+            broad_only = (
+                "beam_width", "max_founders", "top_n_swap", "max_cr_iterations",
+                "paint_penalty", "min_hotspot_samples",
+            )
+            changed = [
+                item.name for item in fields(self)
+                if item.name in broad_only and getattr(self, item.name) != item.default
+            ]
+            if changed:
+                raise ValueError(
+                    f"Broad-search-only settings changed in bounded mode: {', '.join(changed)}. "
+                    "Use PanelSearchConfig for bounded search, or set "
+                    "panel_search_config=None to select broad search."
+                )
 
 
 def _release_scientific_config(config: AssemblyConfig) -> dict[str, Any]:
@@ -705,10 +754,10 @@ def assemble_chromosome(
     sample_ids,
     *,
     stage1_identity: Mapping[str, Any],
-    config: AssemblyConfig = AssemblyConfig(),
-    fold_assignments: np.ndarray | None = None,
+    config: AssemblyConfig=AssemblyConfig(),
+    fold_assignments: np.ndarray | None=None,
     code_digest_overrides=None,
-    release_checkpoints: assembly_checkpoints.AssemblyCheckpointIO | None = None,
+    release_checkpoints: assembly_checkpoints.AssemblyCheckpointIO | None=None,
     chromosome_map=None,
     chromosome_evidence=None,
 ) -> dict[str, Any]:
@@ -976,7 +1025,7 @@ def assemble_chromosome(
                        else release_checkpoints.load(phase))
             started = time.perf_counter()
             if refined is None:
-                from .founder_components import scoped_checkpoints
+                from.founder.components import scoped_checkpoints
                 output, refinement_diagnostics = founder_refinement.refine_components(
                     preprocess_result.prepared_blocks, working, neutral_probs, sites,
                     config=active_refinement_config,

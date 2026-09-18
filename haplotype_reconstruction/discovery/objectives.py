@@ -1,4 +1,4 @@
-"""discovery / objectives for the canonical reconstruction pipeline."""
+"""Founder complexity, panel objectives and binary candidate utilities."""
 from __future__ import annotations
 
 
@@ -271,7 +271,7 @@ def _init_hap_from_sample_dosage(probs, sample_idx, kept_mask):
         h: (L,) int array of {0, 1} alleles
     """
     L = probs.shape[1]
-    dosage = probs[sample_idx].argmax(axis=1)   # (L,) ∈ {0, 1, 2}
+    dosage = probs[sample_idx].argmax(axis=1)  # (L,) ∈ {0, 1, 2}
 
     # Population alt-allele frequency per site.  Posterior expected
     # P(allele=1) per site = sum over samples of (0.5 * P(g=01) + P(g=11))
@@ -304,7 +304,7 @@ def _select_initial_seed(probs, kept_mask):
         sample_idx: int
     """
     if kept_mask is not None:
-        probs_kept = probs[:, kept_mask, :]
+        probs_kept = probs[:, kept_mask,:]
     else:
         probs_kept = probs
     decisiveness = _decisiveness(probs_kept)
@@ -384,7 +384,7 @@ def _ww_bin_emis_from_cost_ww(cost_WW, snps_per_bin, n_bins):
                 end = L
             acc = 0.0
             for l in range(start, end):
-                acc -= cost_WW[s, l]   # = log p_max - 2*lam
+                acc -= cost_WW[s, l]  # = log p_max - 2*lam
             out[s, b] = acc
     return out
 
@@ -521,7 +521,7 @@ def soft_agreement_similarity(probs_k):
     # Sum the three per-genotype Gram matrices (g = 0, 1, 2), then scale by
     # 1/L.  Each slice is forced C-contiguous so BLAS takes its fast path.
     for g in range(3):
-        Pg = np.ascontiguousarray(probs_c[:, :, g])
+        Pg = np.ascontiguousarray(probs_c[:,:, g])
         S += Pg @ Pg.T
     S /= float(L)
     return S
@@ -542,7 +542,7 @@ def alt_fractions(probs_k):
     channels, with no reduction across samples), so it is fully
     deterministic and needs no kernel.
     """
-    return 0.5 * probs_k[:, :, 1] + probs_k[:, :, 2]
+    return 0.5 * probs_k[:,:, 1] + probs_k[:,:, 2]
 
 
 def pooled_alt_to_hap(pooled_alt):
@@ -605,5 +605,3 @@ def viterbi_score_selection(ll_tensor, penalty):
         best_scores[s] = final_max
 
     return best_scores
-
-

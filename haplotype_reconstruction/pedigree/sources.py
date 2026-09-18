@@ -1,4 +1,4 @@
-"""pedigree / sources for the canonical reconstruction pipeline."""
+"""Ragged parental ancestry factors and source posterior calculations."""
 from __future__ import annotations
 
 
@@ -140,10 +140,10 @@ def _structure_features(
 class RaggedSourceBatchFactors:
     """Compact posterior-chain factors for all candidate sources."""
 
-    initial_probability: np.ndarray       # candidates, S, S
-    right_weight: np.ndarray              # candidates, boundaries, S, S
-    available: np.ndarray                 # candidates
-    informative_site_count: np.ndarray    # candidates
+    initial_probability: np.ndarray  # candidates, S, S
+    right_weight: np.ndarray  # candidates, boundaries, S, S
+    available: np.ndarray  # candidates
+    informative_site_count: np.ndarray  # candidates
     transition: Any
     robustness_epsilon: float
     preparation_seconds: float
@@ -172,7 +172,7 @@ class RaggedSourceBatchFactors:
 
 def build_ragged_founder_model(
     named_alleles: np.ndarray,
-    bin_site_indices: Iterable[np.ndarray] | None = None,
+    bin_site_indices: Iterable[np.ndarray] | None=None,
 ) -> RaggedFounderModel:
     """Build T09 allele priors from unique ``{-1,0,1}`` trajectory classes.
 
@@ -193,7 +193,7 @@ def build_ragged_founder_model(
         raise ValueError("every retained T09 site must have a named founder call")
     alt_called = np.sum(np.where(called, alleles, 0), axis=0)
     frequency = (1.0 + alt_called) / (2.0 + n_called)
-    q = np.where(called, alleles, frequency[None, :]).astype(np.float64)
+    q = np.where(called, alleles, frequency[None,:]).astype(np.float64)
 
     n_sites = alleles.shape[1]
     if bin_site_indices is None:
@@ -242,10 +242,10 @@ def build_t09_hamming_transition(
     bin_centers: np.ndarray,
     n_states: int,
     *,
-    recomb_rate: float = 1e-8,
-    switch_penalty_per_snp: float = 1.0,
-    snps_per_bin: int = 100,
-    double_recomb_factor: float = 1.5,
+    recomb_rate: float=1e-8,
+    switch_penalty_per_snp: float=1.0,
+    snps_per_bin: int=100,
+    double_recomb_factor: float=1.5,
     chromosome_map=None,
 ) -> HammingTransition:
     """Build T09's normalized non-separable source transition."""
@@ -725,8 +725,8 @@ def infer_candidate_source_factors_batch(
     transition,
     informative_site_count: np.ndarray,
     *,
-    minimum_informative_sites: int = 1,
-    robustness_epsilon: float = 0.01,
+    minimum_informative_sites: int=1,
+    robustness_epsilon: float=0.01,
 ) -> RaggedSourceBatchFactors:
     """Infer exact source posterior-chain factors from precomputed T09 emissions.
 
@@ -935,22 +935,22 @@ def _validated_trios(values: Any, n_samples: int) -> np.ndarray:
 def _child_likelihood_coefficients(child_gl, mismatch):
     """Precompute L(a,b) = c0 + c1*(a+b) + c2*a*b."""
 
-    g0 = child_gl[:, :, 0]
-    g1 = child_gl[:, :, 1]
-    g2 = child_gl[:, :, 2]
+    g0 = child_gl[:,:, 0]
+    g1 = child_gl[:,:, 1]
+    g2 = child_gl[:,:, 2]
     linear_genotype = g1 - g0
     quadratic_genotype = g0 - 2.0 * g1 + g2
     inherited_scale = 1.0 - 2.0 * mismatch
     coefficient = np.empty(child_gl.shape, dtype=np.float64)
-    coefficient[:, :, 0] = 3.0 * (
+    coefficient[:,:, 0] = 3.0 * (
         g0
         + 2.0 * mismatch * linear_genotype
         + mismatch * mismatch * quadratic_genotype
     )
-    coefficient[:, :, 1] = 3.0 * inherited_scale * (
+    coefficient[:,:, 1] = 3.0 * inherited_scale * (
         linear_genotype + mismatch * quadratic_genotype
     )
-    coefficient[:, :, 2] = (
+    coefficient[:,:, 2] = (
         3.0 * inherited_scale * inherited_scale * quadratic_genotype
     )
     return np.ascontiguousarray(coefficient)
@@ -962,7 +962,7 @@ def posterior_expected_structure(
     required_edges: Any,
     trios: Any,
     *,
-    sample_available: Any | None = None,
+    sample_available: Any | None=None,
 ) -> RaggedExpectedStructure:
     """Integrate component-local edge and M2 compatibility.
 
@@ -1012,7 +1012,7 @@ def posterior_expected_structure(
     )
 
     active_edges = np.triu(
-        edges & available[:, None] & available[None, :], k=1
+        edges & available[:, None] & available[None,:], k=1
     )
     edge_first, edge_second = np.nonzero(active_edges)
     edge_first = np.ascontiguousarray(edge_first, dtype=np.int64)
@@ -1165,5 +1165,3 @@ def _probability_matrix(value, rows, columns, name):
     ):
         raise ValueError(f"{name} must be scalar, (boundaries,), or requested matrix in [0, 1]")
     return np.ascontiguousarray(value)
-
-

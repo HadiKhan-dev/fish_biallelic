@@ -1,4 +1,4 @@
-"""core / genetic map for the canonical reconstruction pipeline."""
+"""Cumulative genetic maps, interpolation and fallback recombination rates."""
 from __future__ import annotations
 
 
@@ -299,5 +299,3 @@ def load_genetic_maps_from_environment():
     """Read BHD_RECOMBINATION_MAP and BHD_RECOMBINATION_RATE_CM_PER_MB."""
     return load_genetic_maps(os.environ.get('BHD_RECOMBINATION_MAP') or None,
                              float(os.environ.get('BHD_RECOMBINATION_RATE_CM_PER_MB', '5.0')))
-
-

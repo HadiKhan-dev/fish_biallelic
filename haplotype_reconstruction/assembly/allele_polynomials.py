@@ -47,19 +47,19 @@ def quadratic_values(constant, unary, coupling):
     then add it to the previous quadratic table. Summing the geometric
     table sizes costs O(2**U), without a long Gray-path rounding recurrence.
     """
-    count=1<<len(unary)
-    result=np.empty(count)
-    result[0]=constant
+    count = 1 << len(unary)
+    result = np.empty(count)
+    result[0] = constant
     for bit in range(len(unary)):
-        width=1<<bit
-        difference=np.empty(width)
-        difference[0]=unary[bit]
+        width = 1 << bit
+        difference = np.empty(width)
+        difference[0] = unary[bit]
         for previous in range(bit):
-            half=1<<previous
+            half = 1 << previous
             for code in range(half):
-                difference[half+code]=difference[code]+coupling[bit,previous]
+                difference[half + code] = difference[code] + coupling[bit, previous]
         for code in range(width):
-            result[width+code]=result[code]+difference[code]
+            result[width + code] = result[code] + difference[code]
     return result
 
 

@@ -1,4 +1,4 @@
-"""core / parallel for the canonical reconstruction pipeline."""
+"""Forkserver pools, shared arrays and dynamically shared Numba thread budgets."""
 from __future__ import annotations
 
 

@@ -1,4 +1,4 @@
-"""painting / model for the canonical reconstruction pipeline."""
+"""Ragged diploid founder HMM with an explicit unknown state."""
 from __future__ import annotations
 
 
@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import numba
 from numba import njit, prange
-from . import evidence as painting_evidence
+from.import evidence as painting_evidence
 
 
 T09_EMISSION_CACHE_MAX_BYTES = 1024 ** 3  # Bounded reusable T10 evidence, per chromosome.
@@ -69,8 +69,8 @@ def resolve_ragged_working_memory_budget(
         fixed_working_bytes: int,
         thread_count: int,
         *,
-        requested_bytes: int | None = None,
-        available_bytes: int | None = None,
+        requested_bytes: int | None=None,
+        available_bytes: int | None=None,
 ) -> int:
     """Choose a bounded scheduling budget large enough to occupy threads.
 
@@ -204,7 +204,7 @@ def build_ragged_state_space(
         panel,
         retained: np.ndarray,
         *,
-        active: np.ndarray | None = None,
+        active: np.ndarray | None=None,
 ) -> RaggedStateSpace:
     """Construct fixed whole-component trajectory classes plus BACKGROUND.
 
@@ -395,8 +395,8 @@ def calculate_ragged_binned_emissions(
         observed: np.ndarray,
         state_space: RaggedStateSpace,
         binning: RaggedBinning,
-        *, robustness_epsilon: float = 0.01,
-        log_floor: float = -50.0,
+        *, robustness_epsilon: float=0.01,
+        log_floor: float=-50.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute exact emissions in O(N*S²*L) with sample×state parallelism."""
 
@@ -458,7 +458,7 @@ def viterbi_label_grid(
     final_scores = np.empty((n_samples, n_diplotypes), dtype=np.float64)
     log_n_minus_one = math.log(float(n_states - 1)) if n_states > 1 else 0.0
     for sample in prange(n_samples):
-        previous = emissions[sample, :, 0].copy()
+        previous = emissions[sample,:, 0].copy()
         previous -= np.max(previous)
         current_scores = np.empty(n_diplotypes, dtype=np.float64)
         row_best_value = np.empty(n_states, dtype=np.float64)
@@ -639,7 +639,7 @@ def posterior_class_summaries(
     for sample in prange(n_samples):
         forward = np.zeros((n_bins, n_states, n_states), dtype=np.float64)
         scales = np.empty(n_bins, dtype=np.float64)
-        emission_max = np.max(emissions[sample, :, 0])
+        emission_max = np.max(emissions[sample,:, 0])
         scale = 0.0
         for row in range(n_states):
             for column in range(n_states):
@@ -678,7 +678,7 @@ def posterior_class_summaries(
                     row_sums[row] += value
                     column_sums[column] += value
                     total += value
-            emission_max = np.max(emissions[sample, :, bin_index])
+            emission_max = np.max(emissions[sample,:, bin_index])
             scale = 0.0
             for row in range(n_states):
                 for column in range(n_states):
@@ -778,7 +778,7 @@ def posterior_class_summaries(
             weight_one = math.exp(cost_one - maximum_cost)
             weight_two = math.exp(cost_two - maximum_cost)
 
-            emission_max = np.max(emissions[sample, :, bin_index])
+            emission_max = np.max(emissions[sample,:, bin_index])
             weighted_next = np.empty((n_states, n_states), dtype=np.float64)
             row_sums = np.zeros(n_states, dtype=np.float64)
             column_sums = np.zeros(n_states, dtype=np.float64)
@@ -826,8 +826,8 @@ def minimum_unordered_switch_counts(label_grid: np.ndarray) -> np.ndarray:
         raise ValueError("label grid must have shape (samples, 2, bins)")
     if labels.shape[2] < 2:
         return np.zeros(labels.shape[0], dtype=np.int64)
-    previous = labels[:, :, :-1]
-    current = labels[:, :, 1:]
+    previous = labels[:,:,:-1]
+    current = labels[:,:, 1:]
     direct = ((previous[:, 0] != current[:, 0]).astype(np.int8)
               + (previous[:, 1] != current[:, 1]).astype(np.int8))
     swapped = ((previous[:, 0] != current[:, 1]).astype(np.int8)
@@ -930,7 +930,7 @@ def release_ragged_states(
         else:
             status_by_class[class_index] = int(PaintingTrackStatus.SINGLETON_NAMED)
     status_grid = status_by_class[internal_grid]
-    low = np.broadcast_to((qv < threshold)[:, None, :], internal_grid.shape)
+    low = np.broadcast_to((qv < threshold)[:, None,:], internal_grid.shape)
     class_grid[low] = -1
     label_grid[low] = -1
     status_grid[low] = int(PaintingTrackStatus.LOW_POSTERIOR_ABSTENTION)
@@ -965,17 +965,17 @@ def paint_ragged_component(
         observed: np.ndarray,
         retained: np.ndarray,
         *,
-        active: np.ndarray | None = None,
-        recomb_rate: float = 1e-8,
-        switch_penalty_per_snp: float = 1.0,
-        robustness_epsilon: float = 0.01,
-        double_recomb_factor: float = 1.5,
-        snps_per_bin: int = 100,
-        batch_size: int = 32,
-        working_memory_bytes: int | None = None,
-        minimum_viterbi_public_class_posterior: float = 0.90,
+        active: np.ndarray | None=None,
+        recomb_rate: float=1e-8,
+        switch_penalty_per_snp: float=1.0,
+        robustness_epsilon: float=0.01,
+        double_recomb_factor: float=1.5,
+        snps_per_bin: int=100,
+        batch_size: int=32,
+        working_memory_bytes: int | None=None,
+        minimum_viterbi_public_class_posterior: float=0.90,
         chromosome_map=None,
-        source_emission_cache_bytes: int = T09_EMISSION_CACHE_MAX_BYTES,
+        source_emission_cache_bytes: int=T09_EMISSION_CACHE_MAX_BYTES,
 ) -> RaggedPainting:
     """Paint one component in bounded sample batches with exact recurrences.
 
@@ -1049,7 +1049,7 @@ def paint_ragged_component(
     if fixed_working_bytes + estimated_bytes_per_sample > working_memory_budget:
         fixed_working_bytes = 0
     source_log_emission_upper = (
-        np.empty((evidence.shape[0],n_symmetric,n_bins),dtype=np.float64)
+        np.empty((evidence.shape[0], n_symmetric, n_bins), dtype=np.float64)
         if fixed_working_bytes else None
     )
     effective_batch_size = choose_ragged_batch_size(

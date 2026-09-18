@@ -1,4 +1,4 @@
-"""pedigree / likelihoods for the canonical reconstruction pipeline."""
+"""Aggregate parent-state likelihoods and structure evidence across chromosomes."""
 from __future__ import annotations
 
 
@@ -78,7 +78,7 @@ def _compact_component_gl(component: pedigree_components.PreparedComponentPedigr
     # ragged GL field was added.
     cache = component.cache
     return np.ascontiguousarray(np.concatenate([
-        cache.genotype_likelihoods[:, block, :int(count), :]
+        cache.genotype_likelihoods[:, block,:int(count),:]
         for block, count in enumerate(cache.selected_markers_per_bin)
     ], axis=1))
 
@@ -144,8 +144,11 @@ def _score_projected_component_with_diagnostics(
         eligible_child_mask: np.ndarray,
         eligible_parent_mask: np.ndarray,
         *,
-        reuse_screen: pedigree_components._ProjectedParentScreen | None = None,
-) -> tuple[pedigree_candidates.ChromosomeLikelihoods, pedigree_components.ProjectedComponentScoringDiagnostics]:
+        reuse_screen: pedigree_components._ProjectedParentScreen | None=None,
+) -> tuple[
+    pedigree_candidates.ChromosomeLikelihoods,
+    pedigree_components.ProjectedComponentScoringDiagnostics
+]:
     model = component.ragged_model
     factors = component.ragged_source_factors
     observed = component.compact_observed
@@ -334,7 +337,7 @@ def _score_prepared_chromosome(
         *,
         ragged_screen_scores: Sequence[
             pedigree_sources.RaggedSourceBatchScores | pedigree_components._ProjectedParentScreen
-        ] | None = None,
+        ] | None=None,
 ) -> pedigree_components.ComponentPedigreeChromosomeResult:
     if not prepared.components:
         return pedigree_components.ComponentPedigreeChromosomeResult(
@@ -700,7 +703,7 @@ def _panel_diagnostics(
         trio_row_count: int,
         *,
         applied: bool,
-        fallback_reason: str | None = None,
+        fallback_reason: str | None=None,
 ) -> pedigree_components.AdaptiveParentPanelDiagnostics:
     selected = tuple(int(value) for value in selected_k_by_child)
     eligible_counts = [
@@ -867,19 +870,19 @@ def _adaptive_trio_panel(
 def score_prepared_t09_parent_state_evidence(
         prepared: pedigree_components.PreparedPedigree,
         *,
-        parent_eligibility: Any = None,
-        config: module_pedigree_config.PedigreeConfig | None = None,
-        top_k: int = 20,
-        adaptive_initial_top_k: int | None = None,
-        anchor_k: int = 5,
-        use_anchor_union: bool = False,
-        mismatch_penalty: float = pedigree_models.DEFAULT_MISMATCH_PENALTY,
-        candidate_source_mode: str | None = None,
-        evidence_identity: Mapping[str, Any] | None = None,
+        parent_eligibility: Any=None,
+        config: module_pedigree_config.PedigreeConfig | None=None,
+        top_k: int=20,
+        adaptive_initial_top_k: int | None=None,
+        anchor_k: int=5,
+        use_anchor_union: bool=False,
+        mismatch_penalty: float=pedigree_models.DEFAULT_MISMATCH_PENALTY,
+        candidate_source_mode: str | None=None,
+        evidence_identity: Mapping[str, Any] | None=None,
         chromosome_evidence_callback: Callable[[
             pedigree_components.Stage10ChromosomeEvidenceRequest,
             Callable[[], pedigree_components.ScoredT09ChromosomeEvidence],
-        ], pedigree_components.ScoredT09ChromosomeEvidence] | None = None,
+        ], pedigree_components.ScoredT09ChromosomeEvidence] | None=None,
 ) -> pedigree_components.ScoredT09ParentStateEvidence:
     """Compute or resume all expensive score-stage evidence.
 
@@ -1078,9 +1081,9 @@ def score_prepared_t09_parent_state_evidence(
 def infer_scored_t09_parent_state_evidence(
         scored: pedigree_components.ScoredT09ParentStateEvidence,
         *,
-        parent_eligibility: Any = None,
-        config: module_pedigree_config.PedigreeConfig | None = None,
-        n_workers: int | None = None,
+        parent_eligibility: Any=None,
+        config: module_pedigree_config.PedigreeConfig | None=None,
+        n_workers: int | None=None,
 ) -> pedigree_components.ComponentPedigreeRunResult:
     """Run decision policy and bootstraps without T09/raw/scorer reload."""
 
@@ -1199,20 +1202,20 @@ def infer_scored_t09_parent_state_evidence(
 def infer_prepared_t09_component_pedigree(
         prepared: pedigree_components.PreparedPedigree,
         *,
-        parent_eligibility: Any = None,
-        config: module_pedigree_config.PedigreeConfig | None = None,
-        top_k: int = 20,
-        adaptive_initial_top_k: int | None = None,
-        anchor_k: int = 5,
-        use_anchor_union: bool = False,
-        mismatch_penalty: float = pedigree_models.DEFAULT_MISMATCH_PENALTY,
-        n_workers: int | None = None,
-        candidate_source_mode: str | None = None,
-        evidence_identity: Mapping[str, Any] | None = None,
+        parent_eligibility: Any=None,
+        config: module_pedigree_config.PedigreeConfig | None=None,
+        top_k: int=20,
+        adaptive_initial_top_k: int | None=None,
+        anchor_k: int=5,
+        use_anchor_union: bool=False,
+        mismatch_penalty: float=pedigree_models.DEFAULT_MISMATCH_PENALTY,
+        n_workers: int | None=None,
+        candidate_source_mode: str | None=None,
+        evidence_identity: Mapping[str, Any] | None=None,
         chromosome_evidence_callback: Callable[[
             pedigree_components.Stage10ChromosomeEvidenceRequest,
             Callable[[], pedigree_components.ScoredT09ChromosomeEvidence],
-        ], pedigree_components.ScoredT09ChromosomeEvidence] | None = None,
+        ], pedigree_components.ScoredT09ChromosomeEvidence] | None=None,
 ) -> pedigree_components.ComponentPedigreeRunResult:
     """Score prepared chromosomes, then apply parent-state decision policy."""
 

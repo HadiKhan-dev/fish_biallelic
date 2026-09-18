@@ -1,4 +1,4 @@
-"""pedigree / direction for the canonical reconstruction pipeline."""
+"""Ancestry-depth direction evidence and direction-qualified parent selection."""
 from __future__ import annotations
 
 
@@ -46,7 +46,7 @@ def _fit_ancestry_depth_model(
     callable_haplotype_bins: np.ndarray,
     seed: int,
     *,
-    component_count: Optional[int] = None,
+    component_count: Optional[int]=None,
 ) -> _AncestryDepthModel:
     """Fit a deterministic BIC-selected mixture of relative ancestry burdens.
 
@@ -169,13 +169,13 @@ def _fit_ancestry_depth_model(
     posterior = np.zeros((len(counts), len(weights)), dtype=np.float64)
     valid_standardized = (adjusted[valid] - center) / scale
     log_density = (
-        -0.5 * np.log(2.0 * math.pi * standardized_variances)[None, :]
+        -0.5 * np.log(2.0 * math.pi * standardized_variances)[None,:]
         -0.5 * (
-            valid_standardized[:, None] - standardized_means[None, :]
-        ) ** 2 / standardized_variances[None, :]
+            valid_standardized[:, None] - standardized_means[None,:]
+        ) ** 2 / standardized_variances[None,:]
     )
     log_scores = (
-        np.log(weights)[None, :]
+        np.log(weights)[None,:]
         + callability[valid, None] * log_density
     )
     log_scores -= np.max(log_scores, axis=1, keepdims=True)
@@ -298,14 +298,14 @@ def _kmeans_plusplus_centers_1d(
             out=candidate_indices,
         )
         candidates = values[candidate_indices]
-        candidate_squared_distance = -2.0 * candidates[:, None] * values[None, :]
+        candidate_squared_distance = -2.0 * candidates[:, None] * values[None,:]
         candidate_squared_distance += candidates[:, None] * candidates[:, None]
-        candidate_squared_distance += values[None, :] * values[None, :]
+        candidate_squared_distance += values[None,:] * values[None,:]
         np.maximum(
             candidate_squared_distance, 0.0, out=candidate_squared_distance
         )
         np.minimum(
-            closest_squared_distance[None, :],
+            closest_squared_distance[None,:],
             candidate_squared_distance,
             out=candidate_squared_distance,
         )
@@ -449,7 +449,7 @@ def _initial_parameters(
     reg_covar: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     responsibilities = np.equal(
-        labels[:, None], np.arange(component_count)[None, :]
+        labels[:, None], np.arange(component_count)[None,:]
     ).astype(np.float64)
     weights, means, variances = _estimate_parameters(
         values, responsibilities, reg_covar
@@ -468,7 +468,7 @@ def _estimate_parameters(
     epsilon_count = 10.0 * np.finfo(responsibilities.dtype).eps
     effective_counts = np.sum(responsibilities, axis=0) + epsilon_count
     means = (responsibilities.T @ values) / effective_counts
-    differences = values[:, None] - means[None, :]
+    differences = values[:, None] - means[None,:]
     variances = (
         np.sum(responsibilities * differences * differences, axis=0)
         / effective_counts
@@ -485,13 +485,13 @@ def _e_step(
 ) -> tuple[float, np.ndarray, np.ndarray]:
     precision_cholesky = 1.0 / np.sqrt(variances)
     transformed = (
-        values[:, None] * precision_cholesky[None, :]
-        - means[None, :] * precision_cholesky[None, :]
+        values[:, None] * precision_cholesky[None,:]
+        - means[None,:] * precision_cholesky[None,:]
     )
     weighted_log_probability = (
         -0.5 * (_LOG_2_PI + transformed * transformed)
-        + np.log(precision_cholesky)[None, :]
-        + np.log(weights)[None, :]
+        + np.log(precision_cholesky)[None,:]
+        + np.log(weights)[None,:]
     )
     row_maximum = np.max(weighted_log_probability, axis=1)
     log_probability = row_maximum + np.log(
@@ -705,10 +705,10 @@ def fit_bic_selected_gaussian_mixture_1d(
     maximum_components: int,
     seed: int,
     *,
-    n_init: int = _DEFAULT_N_INIT,
-    max_iter: int = _DEFAULT_MAX_ITER,
-    reg_covar: float = _DEFAULT_REG_COVAR,
-    tolerance: float = _DEFAULT_TOLERANCE,
+    n_init: int=_DEFAULT_N_INIT,
+    max_iter: int=_DEFAULT_MAX_ITER,
+    reg_covar: float=_DEFAULT_REG_COVAR,
+    tolerance: float=_DEFAULT_TOLERANCE,
 ) -> GaussianMixture1DSelection:
     """Fit and BIC-select deterministic Gaussian mixtures with 1..k components.
 

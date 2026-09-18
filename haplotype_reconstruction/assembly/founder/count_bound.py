@@ -13,7 +13,7 @@ This bound may be loose, but must never rule out an improving admissible fit.
 import math
 import numpy as np
 from numba import njit, prange
-from .founder_scoring import _unordered_pairs
+from.scoring import _unordered_pairs
 
 
 @njit(cache=True)
@@ -34,7 +34,7 @@ def _block_score(haps, logs, start, stop, penalty, removed):
                 continue
             switched = np.max(scores) - penalty
             for state in range(len(first)):
-                dosage = haps[rows[first[state]], site-start] + haps[rows[second[state]], site-start]
+                dosage = haps[rows[first[state]], site - start] + haps[rows[second[state]], site - start]
                 scores[state] = max(scores[state], switched) + emission[dosage] - center
         total += np.max(scores)
     return total
@@ -50,10 +50,10 @@ def upper_bound(leaves, offsets, logs, penalty, target):
         if len(haps) == target + 1:
             best = -np.inf
             for removed in range(len(haps)):
-                best = max(best, _block_score(haps, logs, offsets[block], offsets[block+1],
+                best = max(best, _block_score(haps, logs, offsets[block], offsets[block + 1],
                                               penalty, removed))
             bounds[block] = best
             constrained[block] = 1
         else:
-            bounds[block] = _block_score(haps, logs, offsets[block], offsets[block+1], penalty, -1)
+            bounds[block] = _block_score(haps, logs, offsets[block], offsets[block + 1], penalty, -1)
     return bounds, constrained

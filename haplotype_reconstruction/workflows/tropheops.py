@@ -1,21 +1,9 @@
-"""workflows / tropheops for the canonical reconstruction pipeline."""
+"""Tropheops cross driver from variant input through final phase and maps."""
 from __future__ import annotations
 
-import json
-
-
-def configured_regions(default, *, template_regions=False):
-    requested = os.environ.get("HAPLOTYPES_CONTIGS")
-    if requested is None:
-        return default
-    names = json.loads(requested)
-    if not names or len(names) != len(set(names)):
-        raise ValueError("contigs must be a nonempty unique ordered list")
-    return [dict(contig=str(name), **({'start': 0, 'end': 3000} if template_regions else {}))
-            for name in names]
-
-
 import os
+
+from ..core.environment import configured_regions
 import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
 import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
@@ -145,9 +133,9 @@ def run():
     # the 22 autosomes (chrM has no recombination; U_scaffolds are short/unplaced
     # and not useful for pedigree-scale linkage).
     regions_config = configured_regions([
-        {"contig": "chr1"},  {"contig": "chr2"},  {"contig": "chr3"},
-        {"contig": "chr4"},  {"contig": "chr5"},  {"contig": "chr6"},
-        {"contig": "chr7"},  {"contig": "chr8"},  {"contig": "chr9"},
+        {"contig": "chr1"}, {"contig": "chr2"}, {"contig": "chr3"},
+        {"contig": "chr4"}, {"contig": "chr5"}, {"contig": "chr6"},
+        {"contig": "chr7"}, {"contig": "chr8"}, {"contig": "chr9"},
         {"contig": "chr10"}, {"contig": "chr11"}, {"contig": "chr12"},
         {"contig": "chr13"}, {"contig": "chr14"}, {"contig": "chr15"},
         {"contig": "chr16"}, {"contig": "chr17"}, {"contig": "chr18"},
@@ -185,7 +173,7 @@ def run():
     # reference call if the allele-level disagreement rate is below this
     # threshold (in %).
     MATCH_THRESHOLD_PCT = 2.0
-    MIN_CONF_SITES = 10   # min confident G0 sites to score a founder in a block
+    MIN_CONF_SITES = 10  # min confident G0 sites to score a founder in a block
 
     def extract_g0_block_haps(g0_probs, g0_sites, block_positions):
         """Build observed G0 reference genotypes for one block.
@@ -212,8 +200,8 @@ def run():
         g0_geno = np.full((n_g0, n_block), -1, dtype=np.int8)
 
         for g in range(n_g0):
-            probs_g = g0_probs[g, pos_idx, :]
-            argmax = np.argmax(probs_g, axis=1)          # 0/1/2 = dosage
+            probs_g = g0_probs[g, pos_idx,:]
+            argmax = np.argmax(probs_g, axis=1)  # 0/1/2 = dosage
             maxp = probs_g[np.arange(n_block), argmax]
             conf = (maxp >= HOM_CONFIDENCE) & matched
             g0_geno[g, conf] = argmax[conf].astype(np.int8)
@@ -338,13 +326,13 @@ def run():
                 geno_m = g0_geno[g, conf].astype(np.int16)
                 Dm = D[:, conf]
                 valid = (
-                    (Dm[:, None, :] >= 0)
-                    & (Dm[None, :, :] >= 0)
+                    (Dm[:, None,:] >= 0)
+                    & (Dm[None,:,:] >= 0)
                 )
-                dosage = Dm[:, None, :] + Dm[None, :, :]
+                dosage = Dm[:, None,:] + Dm[None,:,:]
                 n_valid = np.sum(valid, axis=2)
                 mismatch = np.sum(
-                    (dosage != geno_m[None, None, :]) & valid,
+                    (dosage != geno_m[None, None,:]) & valid,
                     axis=2,
                 )
                 error = np.divide(
@@ -679,7 +667,7 @@ def run():
                 # ALWAYS extract G0 reads separately for post-hoc validation.
                 # This slice is independent of the INCLUDE_REFERENCE_SAMPLES flag — we want ground
                 # truth available regardless of what the pipeline sees.
-                g0_reads = global_reads_full[g0_vcf_indices, :, :]
+                g0_reads = global_reads_full[g0_vcf_indices,:,:]
                 (_, g0_probs) = core_numerics.reads_to_probabilities(
                     g0_reads,
                     use_hwe_prior=False,
@@ -697,11 +685,11 @@ def run():
                 if INCLUDE_REFERENCE_SAMPLES:
                     active_reads_full = global_reads_full
                 else:
-                    active_reads_full = global_reads_full[active_vcf_indices, :, :]
+                    active_reads_full = global_reads_full[active_vcf_indices,:,:]
                     # Also filter genomic_data in place so block discovery sees 112 samples
                     for bi in range(len(genomic_data.reads)):
                         if genomic_data.reads[bi].shape[0] == n_samples_total:
-                            genomic_data.reads[bi] = genomic_data.reads[bi][active_vcf_indices, :, :]
+                            genomic_data.reads[bi] = genomic_data.reads[bi][active_vcf_indices,:,:]
 
                 # Preserve the exact observation event before read counts are
                 # released. Zero-depth cells are scientifically distinct from

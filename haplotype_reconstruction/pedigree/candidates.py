@@ -1,4 +1,4 @@
-"""pedigree / candidates for the canonical reconstruction pipeline."""
+"""Candidate ancestry trajectories and chromosome-level screening likelihoods."""
 from __future__ import annotations
 
 
@@ -175,7 +175,7 @@ def _pool_local_ibs_states(
     pooled_founders = np.ascontiguousarray(
         pooled_founders[:maximum_classes]
     )
-    active = np.ascontiguousarray(active[:, :maximum_classes])
+    active = np.ascontiguousarray(active[:,:maximum_classes])
     pooled_labels = _pool_local_label_kernel(labels, mapping)
 
     # Class numbers are local to a bin.  Preserve physical ancestry continuity

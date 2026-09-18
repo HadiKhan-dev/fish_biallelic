@@ -1,4 +1,4 @@
-"""pedigree / eligibility for the canonical reconstruction pipeline."""
+"""Explicit child, parent and parent-pair eligibility rules."""
 from __future__ import annotations
 
 
@@ -226,7 +226,7 @@ def _resolve_parent_eligibility(
             )
         for child in range(n_samples):
             child_allowed = (
-                parents[child, :, None] & parents[child, None, :]
+                parents[child,:, None] & parents[child, None,:]
             )
             if np.any(pairs[child] & ~child_allowed):
                 raise pedigree_models.PedigreeEvidenceError(

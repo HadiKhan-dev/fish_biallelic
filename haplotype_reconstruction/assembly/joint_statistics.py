@@ -12,7 +12,7 @@ No independence, allele, likelihood, prior or convergence assumption changes.
 import math
 import numpy as np
 from numba import njit
-from .allele_polynomials import add_dosage_term, quadratic_values, binary_dosage_marginals
+from.allele_polynomials import add_dosage_term, quadratic_values, binary_dosage_marginals
 
 
 def prepare(configurations, log_priors, log_emission, n_founders):

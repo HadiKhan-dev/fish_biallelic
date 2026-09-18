@@ -11,7 +11,7 @@ All accepted changes are rescored by the canonical full-site objective.
 """
 import numpy as np
 from numba import njit, prange
-from haplotype_reconstruction.assembly import founder_scoring
+from haplotype_reconstruction.assembly.founder import scoring as founder_scoring
 
 
 @njit(cache=True, parallel=True)
@@ -35,7 +35,7 @@ def messages(haps, logs, cuts, penalty):
                 row[state] = max(row[state], switched) + value
         row[:] = 0.
         cut = len(cuts) - 1
-        for site in range(sites-1, -1, -1):
+        for site in range(sites - 1, -1, -1):
             switched = np.max(row) - penalty
             for state in range(len(first)):
                 dosage = haps[first[state], site] + haps[second[state], site]
@@ -77,12 +77,12 @@ def exchange_scores(forward, backward, founders, penalty):
                             or (i == a and j == b)):
                         best = max(best, terms[state])
                         break
-                best = max(best, left[index[a,a]] + right[index[b,b]])
-                best = max(best, left[index[b,b]] + right[index[a,a]])
+                best = max(best, left[index[a, a]] + right[index[b, b]])
+                best = max(best, left[index[b, b]] + right[index[a, a]])
                 for c in range(founders):
                     if c != a and c != b:
-                        best = max(best, left[index[a,c]] + right[index[b,c]])
-                        best = max(best, left[index[b,c]] + right[index[a,c]])
+                        best = max(best, left[index[a, c]] + right[index[b, c]])
+                        best = max(best, left[index[b, c]] + right[index[a, c]])
                 values[sample, boundary, p] = best
     return values.sum(axis=0), baseline.sum(axis=0), pair_a, pair_b
 
@@ -93,7 +93,7 @@ def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
             if prepared is None else prepared)
     dosages = founder_scoring._dosage_table(haps)
     if dosages is not None:
-        from .founder_site_kernels import exchange_messages
+        from.site_kernels import exchange_messages
         forward, backward = exchange_messages(dosages, logs, cuts, float(penalty))
         return exchange_scores(forward, backward, len(haps), float(penalty))
     # The direct kernel avoids a large dosage table when workspace RAM is tight.
@@ -102,7 +102,7 @@ def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
     usable = np.any(evidence != evidence[:,:,:1], axis=2) & (evidence.sum(axis=2) > 0)
     usable &= complete[None,:]
     safe_logs = logs.copy()
-    safe_logs[~usable] = np.log(1./3.)
+    safe_logs[~usable] = np.log(1. / 3.)
     safe_haps = np.where(complete[None,:], haps, 0).astype(np.int8)
     assert np.all(safe_haps >= 0)
     forward, backward = messages(safe_haps, safe_logs, cuts, float(penalty))
@@ -110,9 +110,11 @@ def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
 
 
 from numba.typed import List
-from ..core import haplotypes
-from . import founder_refinement, founder_path_search, chimera_scoring
-from . import observations, paths, hierarchy
+from ...core import haplotypes
+from..import founder_refinement
+from.import path_search as founder_path_search
+from..import chimera_scoring
+from..import observations, paths, hierarchy
 
 
 def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
@@ -213,17 +215,17 @@ def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
                     break
                 a, b = int(first[pair]), int(second[pair])
                 trial = selected.copy()
-                trial[[a,b], boundary+1:] = selected[[b,a], boundary+1:]
+                trial[[a, b], boundary + 1:] = selected[[b, a], boundary + 1:]
                 score, next_switches = evaluate(trial, paint=True)
-                assert abs(score - exact[boundary,pair]) <= score_tolerance
+                assert abs(score - exact[boundary, pair]) <= score_tolerance
                 emission_gain = score - current + penalty * (next_switches - switches)
-                proposal = dict(first=a, second=b, prepared_boundary=boundary+1,
-                    site_index=int(indices[offsets[boundary+1]]),
-                    gain=score-current, genotype_fit_gain=emission_gain,
-                    switch_delta=next_switches-switches,
+                proposal = dict(first=a, second=b, prepared_boundary=boundary + 1,
+                    site_index=int(indices[offsets[boundary + 1]]),
+                    gain=score - current, genotype_fit_gain=emission_gain,
+                    switch_delta=next_switches - switches,
                     genotype_fit_guard_passed=emission_gain >= -1e-6)
                 record["proposals"].append(proposal)
-                if (score > current+1e-6
+                if (score > current + 1e-6
                         and (not preserve_genotype_fit or emission_gain >= -1e-6)
                         and (best is None or score > best[0])):
                     best = score, next_switches, trial, proposal

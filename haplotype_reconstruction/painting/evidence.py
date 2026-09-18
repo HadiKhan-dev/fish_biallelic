@@ -38,13 +38,13 @@ def select_site_evidence(evidence, observed, indices):
     else:
         if evidence.dtype in (np.dtype("float32"), np.dtype("float64")):
             return _gather_painting_sites(evidence, observed, indices)
-        values = np.ascontiguousarray(evidence[:, indices, :])
+        values = np.ascontiguousarray(evidence[:, indices,:])
         flags = (
             np.ones(values.shape[:2], dtype=np.bool_) if observed is None
             else np.ascontiguousarray(observed[:, indices])
         )
         return values, flags
-    values = evidence[:, start:stop, :]
+    values = evidence[:, start:stop,:]
     flags = (
         np.ones(values.shape[:2], dtype=np.bool_) if observed is None
         else observed[:, start:stop]
@@ -52,28 +52,28 @@ def select_site_evidence(evidence, observed, indices):
     return values, flags
 
 
-@njit(cache=True,parallel=True,fastmath=False)
-def gather_component_evidence(evidence,observed,indices,epsilon):
+@njit(cache=True, parallel=True, fastmath=False)
+def gather_component_evidence(evidence, observed, indices, epsilon):
     """Copy selected raw rows and count observed rows with spread > epsilon."""
-    samples=evidence.shape[0]
-    sites=len(indices)
-    values=np.empty((samples,sites,3),dtype=evidence.dtype)
-    called=np.empty((samples,sites),dtype=np.bool_)
-    counts=np.zeros(samples,dtype=np.int64)
+    samples = evidence.shape[0]
+    sites = len(indices)
+    values = np.empty((samples, sites, 3), dtype=evidence.dtype)
+    called = np.empty((samples, sites), dtype=np.bool_)
+    counts = np.zeros(samples, dtype=np.int64)
     for sample in prange(samples):
-        count=0
+        count = 0
         for site in range(sites):
-            source=indices[site]
-            a,b,c=evidence[sample,source,0],evidence[sample,source,1],evidence[sample,source,2]
-            values[sample,site,0]=a
-            values[sample,site,1]=b
-            values[sample,site,2]=c
-            flag=observed[sample,source]
-            called[sample,site]=flag
-            if flag and max(a,b,c)-min(a,b,c)>epsilon:
-                count+=1
-        counts[sample]=count
-    return values,called,counts
+            source = indices[site]
+            a, b, c = evidence[sample, source, 0], evidence[sample, source, 1], evidence[sample, source, 2]
+            values[sample, site, 0] = a
+            values[sample, site, 1] = b
+            values[sample, site, 2] = c
+            flag = observed[sample, source]
+            called[sample, site] = flag
+            if flag and max(a, b, c) - min(a, b, c) > epsilon:
+                count += 1
+        counts[sample] = count
+    return values, called, counts
 
 
 @njit(cache=True, inline="always")
@@ -157,16 +157,17 @@ def direct_callability(internal_grid, released_grid, called, observed,
     return result
 
 
-@njit(cache=True,parallel=True)
-def count_component_information(evidence,observed,indices,epsilon):
+@njit(cache=True, parallel=True)
+def count_component_information(evidence, observed, indices, epsilon):
     """The T10 normalized-row criterion without gathering an unused GL copy."""
-    counts=np.zeros(evidence.shape[0],dtype=np.int64)
+    counts = np.zeros(evidence.shape[0], dtype=np.int64)
     for sample in prange(evidence.shape[0]):
-        count=0
+        count = 0
         for source in indices:
-            a,b,c=evidence[sample,source,0],evidence[sample,source,1],evidence[sample,source,2]
-            if observed[sample,source] and max(a,b,c)-min(a,b,c)>epsilon:count+=1
-        counts[sample]=count
+            a, b, c = evidence[sample, source, 0], evidence[sample, source, 1], evidence[sample, source, 2]
+            if observed[sample, source] and max(a, b, c) - min(a, b, c) > epsilon:
+                count += 1
+        counts[sample] = count
     return counts
 
 

@@ -1,4 +1,4 @@
-"""pedigree / states for the canonical reconstruction pipeline."""
+"""Parent-count priors, state posteriors and candidate identity support."""
 from __future__ import annotations
 
 
@@ -68,8 +68,8 @@ def _parent_state_alternatives(
     one: np.ndarray,
     two: np.ndarray,
     contamination: float,
-    eligibility: Optional[pedigree_eligibility._ResolvedParentEligibility] = None,
-    candidate_source_mode: str = "hard_painted",
+    eligibility: Optional[pedigree_eligibility._ResolvedParentEligibility]=None,
+    candidate_source_mode: str="hard_painted",
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -444,7 +444,7 @@ def _parent_state_score_components(
     by_child: Sequence[np.ndarray],
     full_counts: np.ndarray,
     child_state_priors: np.ndarray,
-    state_log_evidence: Optional[np.ndarray] = None,
+    state_log_evidence: Optional[np.ndarray]=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build marginal state and conditional-identity decision evidence."""
     n_samples = len(by_child)
@@ -542,18 +542,18 @@ def _evaluate_parent_state_aggregate(
     prior_tolerance: float,
     n_samples: int,
     local_search_passes: int,
-    ancestry_depth_model: Optional[pedigree_direction._AncestryDepthModel] = None,
+    ancestry_depth_model: Optional[pedigree_direction._AncestryDepthModel]=None,
     *,
-    state_log_evidence_override: Optional[np.ndarray] = None,
-    use_cohort_prior: bool = True,
-    algorithm_mode: str = "b0",
-    m1_over_m0_edge_gains: Optional[np.ndarray] = None,
-    m2_over_first_m1_edge_gains: Optional[np.ndarray] = None,
-    m2_over_second_m1_edge_gains: Optional[np.ndarray] = None,
-    predictive_fold_count: int = 0,
-    graph_downward_fallback: bool = False,
-    identity_log_likelihoods_override: Optional[np.ndarray] = None,
-    use_fixed_base_priors: bool = False,
+    state_log_evidence_override: Optional[np.ndarray]=None,
+    use_cohort_prior: bool=True,
+    algorithm_mode: str="b0",
+    m1_over_m0_edge_gains: Optional[np.ndarray]=None,
+    m2_over_first_m1_edge_gains: Optional[np.ndarray]=None,
+    m2_over_second_m1_edge_gains: Optional[np.ndarray]=None,
+    predictive_fold_count: int=0,
+    graph_downward_fallback: bool=False,
+    identity_log_likelihoods_override: Optional[np.ndarray]=None,
+    use_fixed_base_priors: bool=False,
 ) -> _ParentStateSelection:
     state_log_evidence = (
         _integrated_parent_state_log_evidence(
@@ -805,7 +805,7 @@ def _edge_direction_state_compatibility(
 
     posterior_mass = np.sum(depth_posterior, axis=1)
     observed = np.isfinite(posterior_mass) & (posterior_mass > 0.0)
-    testable = observed[:, None] & observed[None, :]
+    testable = observed[:, None] & observed[None,:]
     threshold = float(settings.parent_state_minimum_direction_probability)
     if policy == "strict_gate":
         contradicted = testable & (values < threshold)
@@ -836,10 +836,10 @@ def _parent_state_structure_mask(
     structure_total_bins_by_contig: np.ndarray,
     depth_posterior: Optional[np.ndarray],
     settings: module_pedigree_config.PedigreeConfig,
-    edge_exposure_presence_words: Optional[np.ndarray] = None,
-    pair_exposure_presence_words: Optional[np.ndarray] = None,
-    direction_supported_parents: Optional[np.ndarray] = None,
-    scaffold_descendant_veto: Optional[np.ndarray] = None,
+    edge_exposure_presence_words: Optional[np.ndarray]=None,
+    pair_exposure_presence_words: Optional[np.ndarray]=None,
+    direction_supported_parents: Optional[np.ndarray]=None,
+    scaffold_descendant_veto: Optional[np.ndarray]=None,
 ) -> tuple[np.ndarray, ...]:
     """Separate C/X diagnostics, direction-aware state, and identity gates.
 
@@ -1031,9 +1031,9 @@ def _structure_state_and_identity_aggregates(
     states: np.ndarray,
     exposure_testable: np.ndarray,
     selection_compatible: np.ndarray,
-    identity_eligible: Optional[np.ndarray] = None,
+    identity_eligible: Optional[np.ndarray]=None,
     *,
-    direction_available: Optional[bool] = None,
+    direction_available: Optional[bool]=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build separate state-marginal and selectable-identity score rows.
 
@@ -1088,10 +1088,10 @@ def _prepare_parent_state_weighted_contigs(
     structure_total_bins_by_contig: Optional[np.ndarray],
     edge_exposure_presence_words: Optional[np.ndarray],
     pair_exposure_presence_words: Optional[np.ndarray],
-    direction_supported_parents: Optional[np.ndarray] = None,
-    scaffold_prepared: Any = None,
-    contig_information_weights: Optional[np.ndarray] = None,
-    scaffold_descendant_veto: Optional[np.ndarray] = None,
+    direction_supported_parents: Optional[np.ndarray]=None,
+    scaffold_prepared: Any=None,
+    contig_information_weights: Optional[np.ndarray]=None,
+    scaffold_descendant_veto: Optional[np.ndarray]=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Prepare likelihood and exposure/C/X/direction state and identity rows."""
     weights = np.asarray(contig_weights, dtype=np.float64)
@@ -1162,19 +1162,19 @@ def _evaluate_parent_state_weighted_contigs(
     full_counts: np.ndarray,
     settings: module_pedigree_config.PedigreeConfig,
     n_samples: int,
-    ancestry_depth_model: Optional[pedigree_direction._AncestryDepthModel] = None,
-    base_priors: Optional[Sequence[float]] = None,
-    structure_pair_indices: Optional[np.ndarray] = None,
-    edge_matched_by_contig: Optional[np.ndarray] = None,
-    edge_exposed_by_contig: Optional[np.ndarray] = None,
-    pair_explained_by_contig: Optional[np.ndarray] = None,
-    pair_exposed_by_contig: Optional[np.ndarray] = None,
-    structure_total_bins_by_contig: Optional[np.ndarray] = None,
-    edge_exposure_presence_words: Optional[np.ndarray] = None,
-    pair_exposure_presence_words: Optional[np.ndarray] = None,
-    direction_supported_parents: Optional[np.ndarray] = None,
-    prepared_aggregates: Optional[tuple[np.ndarray, np.ndarray]] = None,
-    scaffold_prepared: Any = None,
+    ancestry_depth_model: Optional[pedigree_direction._AncestryDepthModel]=None,
+    base_priors: Optional[Sequence[float]]=None,
+    structure_pair_indices: Optional[np.ndarray]=None,
+    edge_matched_by_contig: Optional[np.ndarray]=None,
+    edge_exposed_by_contig: Optional[np.ndarray]=None,
+    pair_explained_by_contig: Optional[np.ndarray]=None,
+    pair_exposed_by_contig: Optional[np.ndarray]=None,
+    structure_total_bins_by_contig: Optional[np.ndarray]=None,
+    edge_exposure_presence_words: Optional[np.ndarray]=None,
+    pair_exposure_presence_words: Optional[np.ndarray]=None,
+    direction_supported_parents: Optional[np.ndarray]=None,
+    prepared_aggregates: Optional[tuple[np.ndarray, np.ndarray]]=None,
+    scaffold_prepared: Any=None,
 ) -> _ParentStateSelection:
     """Evaluate the combined method using internal B1 likelihood evidence."""
     if ancestry_depth_model is None:
@@ -1388,4 +1388,3 @@ import haplotype_reconstruction.pedigree.bootstrap as pedigree_bootstrap
 import haplotype_reconstruction.pedigree.config as module_pedigree_config
 import haplotype_reconstruction.pedigree.eligibility as pedigree_eligibility
 import haplotype_reconstruction.pedigree.graph as pedigree_graph
-

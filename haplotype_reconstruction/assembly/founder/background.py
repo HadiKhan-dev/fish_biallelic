@@ -77,8 +77,8 @@ class SharedBackground:
         geometries = [(reverse, back) for back in ((False, True) if backward else (False,))
                       for reverse in (False, True)]
         required = 8 * samples * len(geometries) * (
-            states * (sum(sizes) + len(sizes)) + self.founders * sum(t*t for t in sizes))
-        from ..painting.model import available_process_memory_bytes
+            states * (sum(sizes) + len(sizes)) + self.founders * sum(t * t for t in sizes))
+        from ...painting.model import available_process_memory_bytes
         available = available_process_memory_bytes()
         # Keep seven eighths of the remaining allowance for evidence, messages,
         # parallel candidates and traceback. No scientific fallback is used.

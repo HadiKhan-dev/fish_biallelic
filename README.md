@@ -67,6 +67,10 @@ units and interpretation.
 | Family refinement and phase correction (T11) | `refinement/` | Stable, genotype-preserving final phase |
 | Recombination estimation (T12) | `recombination/` | Posterior rates, crossover intervals and observable exposure |
 
+T11 corrects phase while preserving called genotypes and missingness. It does
+not publish a separate family-imputed allele product or full marginal posterior
+tensors; internal family-supported fills only inform phase polishing.
+
 Assembly defaults to dense learned transitions plus bounded panel search.
 Before final assembly, two checkpointed feedback rounds refine local panels:
 L1 → blocks → selection, then L1+L2 → blocks → selection. The first selected
@@ -136,6 +140,9 @@ This is one successful simulation, not a guarantee across datasets. The
 is approximately 5 hours 10 minutes.
 
 ## Repository layout
+
+The [code map and development guide](docs/development.md) explains module
+responsibilities, the two refinement stages, thread allocation and checkpoints.
 
 `haplotype_reconstruction/` contains the implementation, organized by scientific
 step. `core/` supplies genotype data structures, VCF/BCF loading, maps,

@@ -1,4 +1,4 @@
-"""assembly / completion for the canonical reconstruction pipeline."""
+"""Freeze evidence-supported local founder panels before hierarchical assembly."""
 from __future__ import annotations
 from haplotype_reconstruction import PACKAGE_ROOT
 
@@ -127,8 +127,8 @@ class FrozenPreprocessIdentity:
 def stage2_preprocess_identity(
     config: CompletionConfig,
     *,
-    fold_assignments: np.ndarray | None = None,
-    n_samples: int | None = None,
+    fold_assignments: np.ndarray | None=None,
+    n_samples: int | None=None,
 ) -> FrozenPreprocessIdentity:
     if not isinstance(config, CompletionConfig):
         raise TypeError("config must be a CompletionConfig")
@@ -407,7 +407,7 @@ def _validate_and_clone_inputs(
             raise ValueError(
                 f"block {index} observed mask must have shape (samples, sites)"
             )
-        mask &= kept_sites[None, :]
+        mask &= kept_sites[None,:]
         if n_samples is None:
             n_samples = values.shape[0]
         elif values.shape[0] != n_samples:
@@ -469,7 +469,7 @@ def _stage1_underfit_flags(
             else np.asarray(keep_flags) > 0
         )
         inference_eligible_unknown_count = int(np.count_nonzero(
-            (discrete < 0) & kept[None, :]
+            (discrete < 0) & kept[None,:]
         ))
         depth_value = getattr(
             block, "sample_has_observed_kept_depth", None
@@ -771,7 +771,7 @@ def _preprocess_worker_arrays(block_index: int):
     start = int(_PREPROCESS_WORKER_OFFSETS[block_index])
     stop = int(_PREPROCESS_WORKER_OFFSETS[block_index + 1])
     evidence = np.ascontiguousarray(
-        _PREPROCESS_WORKER_EVIDENCE[:, start:stop, :]
+        _PREPROCESS_WORKER_EVIDENCE[:, start:stop,:]
     )
     observed = np.ascontiguousarray(
         _PREPROCESS_WORKER_OBSERVED[:, start:stop]
@@ -1136,13 +1136,13 @@ def run_stage2_preprocess(
     genotype_evidence: Sequence[np.ndarray],
     observed_masks: Sequence[np.ndarray],
     *,
-    fold_assignments: np.ndarray | None = None,
-    config: CompletionConfig = CompletionConfig(),
-    num_processes: int = 1,
-    diagnostics_mode: str = "full",
-    crossfit_fn: Callable[..., assembly_joint_completion.CrossFitBlock] = assembly_joint_completion.crossfit_block,
-    cavity_fn: Callable[..., assembly_boundaries.CavityFillResult] = assembly_boundaries.cavity_fill_unknown_alleles,
-    partial_link_fn: Callable[..., assembly_partial_links.PartialBoundaryLink] = assembly_partial_links.link_partial_profiles,
+    fold_assignments: np.ndarray | None=None,
+    config: CompletionConfig=CompletionConfig(),
+    num_processes: int=1,
+    diagnostics_mode: str="full",
+    crossfit_fn: Callable[..., assembly_joint_completion.CrossFitBlock]=assembly_joint_completion.crossfit_block,
+    cavity_fn: Callable[..., assembly_boundaries.CavityFillResult]=assembly_boundaries.cavity_fill_unknown_alleles,
+    partial_link_fn: Callable[..., assembly_partial_links.PartialBoundaryLink]=assembly_partial_links.link_partial_profiles,
 ) -> Stage2PreprocessResult:
     """Run the truth-free Stage-2 reference or parallel production path.
 

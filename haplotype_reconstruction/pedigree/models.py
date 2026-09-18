@@ -1,4 +1,4 @@
-"""pedigree / models for the canonical reconstruction pipeline."""
+"""Shared parent-state evidence types, model identifiers and scoring contracts."""
 from __future__ import annotations
 
 
@@ -106,5 +106,3 @@ class ComponentEvidenceArrays:
     genotype_likelihoods: np.ndarray | None = None
     selected_positions: np.ndarray | None = None
     state_evidence_mode: str = "hard_allele"
-
-

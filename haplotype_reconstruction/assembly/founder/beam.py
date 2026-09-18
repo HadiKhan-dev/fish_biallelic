@@ -5,10 +5,8 @@ full-site acceptance remain unchanged. Independent windows are orchestrated by f
 """
 import numpy as np
 from numba import set_num_threads
-from . import founder_path_search as search, founder_sparse, founder_beam_kernels as kernels
-from .founder_packing import (
-    emission_arrays, packed_emissions, candidate_alphabet, short_models,
-)
+from.import path_search as search, sparse as founder_sparse, beam_kernels as kernels
+from.packing import emission_arrays, packed_emissions, candidate_alphabet, short_models
 
 def workspace(blocks, samples, states, width, max_choices):
     dp = np.empty((width, samples, states))
@@ -20,24 +18,76 @@ def workspace(blocks, samples, states, width, max_choices):
     rows = np.empty_like(ancestry)
     return (dp, alternate, values, uppers, ancestry, rows)
 
-def conditional_path(submodels, known, incumbent, penalty, *, width=64, branch_cap=16, reverse=False, thread_budget=None):
+def conditional_path(
+    submodels,
+    known,
+    incumbent,
+    penalty,
+    *,
+    width=64,
+    branch_cap=16,
+    reverse=False,
+    thread_budget=None
+):
     emissions = emission_arrays(submodels)
     if not short_models(submodels):
-        return _macro_conditional(submodels, known, incumbent, penalty, width=width, branch_cap=branch_cap, reverse=reverse, thread_budget=thread_budget)
+        return _macro_conditional(
+            submodels,
+            known,
+            incumbent,
+            penalty,
+            width=width,
+            branch_cap=branch_cap,
+            reverse=reverse,
+            thread_budget=thread_budget
+        )
     known = np.ascontiguousarray(known, np.int64)
     choices, offsets = candidate_alphabet(submodels, incumbent, branch_cap)
     first, second = (np.ascontiguousarray(x, np.int64) for x in np.triu_indices(len(known) + 1))
     suffix = search._incumbent_suffix(submodels, known, incumbent, float(penalty), reverse, first, second)
     packed = packed_emissions(submodels)
     blocks = len(emissions)
-    dp, alternate, values, uppers, ancestry, rows = workspace(blocks, len(packed[0]), len(first), width, int(np.max(np.diff(offsets))))
+    dp, alternate, values, uppers, ancestry, rows = workspace(
+        blocks,
+        len(packed[0]),
+        len(first),
+        width,
+        int(np.max(np.diff(offsets)))
+    )
     beams = 1
     trace_upper = np.empty(blocks)
     trace_equivalent = np.ones(blocks, bool)
     for start in range(0, blocks, 32):
         if thread_budget is not None:
             set_num_threads(thread_budget())
-        dp, alternate, beams, scores, order, aborted, _ = kernels.chunk(*packed, known, choices, offsets, float(penalty), reverse, first, second, suffix, suffix, False, 0, -np.inf, 0, start, min(blocks, start + 32), dp, alternate, beams, width, values, uppers, ancestry, rows, trace_upper, trace_equivalent)
+        dp, alternate, beams, scores, order, aborted, _ = kernels.chunk(
+            *packed,
+            known,
+            choices,
+            offsets,
+            float(penalty),
+            reverse,
+            first,
+            second,
+            suffix,
+            suffix,
+            False,
+            0,
+            -np.inf,
+            0,
+            start,
+            min(blocks, start + 32),
+            dp,
+            alternate,
+            beams,
+            width,
+            values,
+            uppers,
+            ancestry,
+            rows,
+            trace_upper,
+            trace_equivalent
+        )
         assert not aborted
     path = np.empty(blocks, np.int64)
     node = 0
@@ -52,19 +102,65 @@ def setup(models, known, incumbent, cap, width):
     choices, offsets = candidate_alphabet(models, incumbent, cap)
     first, second = (np.ascontiguousarray(x, np.int64) for x in np.triu_indices(len(known) + 1))
     packed = packed_emissions(models)
-    dp, alternate, _, _, ancestry, rows = workspace(len(models), len(packed[0]), len(first), width, int(np.max(np.diff(offsets))))
+    dp, alternate, _, _, ancestry, rows = workspace(
+        len(models),
+        len(packed[0]),
+        len(first),
+        width,
+        int(np.max(np.diff(offsets)))
+    )
     return (emissions, choices, offsets, first, second, packed, dp, alternate, ancestry, rows)
 
-def _macro_conditional(models, known, incumbent, penalty, *, width=64, branch_cap=16, reverse=False, thread_budget=None):
+def _macro_conditional(
+    models,
+    known,
+    incumbent,
+    penalty,
+    *,
+    width=64,
+    branch_cap=16,
+    reverse=False,
+    thread_budget=None
+):
     known = np.ascontiguousarray(known, np.int64)
-    emissions, choices, offsets, first, second, packed, dp, alternate, ancestry, rows = setup(models, known, incumbent, branch_cap, width)
+    emissions, choices, offsets, first, second, packed, dp, alternate, ancestry, rows = setup(
+        models,
+        known,
+        incumbent,
+        branch_cap,
+        width
+    )
     suffix = search._incumbent_suffix(models, known, incumbent, float(penalty), reverse, first, second)
     beams = 1
     blocks = len(models)
     for start in range(0, blocks, 32):
         if thread_budget is not None:
             set_num_threads(thread_budget())
-        dp, alternate, beams, scores, order, aborted, _ = kernels.macro_chunk(emissions, *packed, known, choices, offsets, float(penalty), reverse, first, second, suffix, suffix, False, 0, -np.inf, 0, start, min(blocks, start + 32), dp, alternate, beams, width, ancestry, rows)
+        dp, alternate, beams, scores, order, aborted, _ = kernels.macro_chunk(
+            emissions,
+            *packed,
+            known,
+            choices,
+            offsets,
+            float(penalty),
+            reverse,
+            first,
+            second,
+            suffix,
+            suffix,
+            False,
+            0,
+            -np.inf,
+            0,
+            start,
+            min(blocks, start + 32),
+            dp,
+            alternate,
+            beams,
+            width,
+            ancestry,
+            rows
+        )
         assert not aborted
     node = 0
     path = np.empty(blocks, np.int64)
@@ -74,11 +170,30 @@ def _macro_conditional(models, known, incumbent, penalty, *, width=64, branch_ca
         node = ancestry[step, node]
     return (path, float(scores[order[0]]))
 
-def macro_proposals(models, known, incumbent, penalty, *, width=64, branch_cap=16, window=100, ranking='tie', thread_budget=None, statistics=None, background=None):
+def macro_proposals(
+    models,
+    known,
+    incumbent,
+    penalty,
+    *,
+    width=64,
+    branch_cap=16,
+    window=100,
+    ranking='tie',
+    thread_budget=None,
+    statistics=None,
+    background=None
+):
     known = np.ascontiguousarray(known, np.int64)
     blocks = len(models)
-    emissions, choices, offsets, first, second, packed, dp, alternate, ancestry, rows = setup(models, known, incumbent, branch_cap, width)
-    from . import founder_windows as windows
+    emissions, choices, offsets, first, second, packed, dp, alternate, ancestry, rows = setup(
+        models,
+        known,
+        incumbent,
+        branch_cap,
+        width
+    )
+    from.import windows as windows
     local = windows.local_choices(emissions, incumbent, branch_cap)
     backward = None if background is None else background.get(True, True)
     forward = None if background is None else background.get(False, False)
@@ -93,7 +208,20 @@ def macro_proposals(models, known, incumbent, penalty, *, width=64, branch_cap=1
     rank = {'incumbent': 0, 'tie': 1, 'upper': 2}[ranking]
     for start in starts:
         stop = min(blocks, start + window)
-        bound = windows.relaxed_suffix(emissions, known, local, float(penalty), start, stop, np.ascontiguousarray(suffix[stop]), first, second, backward, bgmap, focal)
+        bound = windows.relaxed_suffix(
+            emissions,
+            known,
+            local,
+            float(penalty),
+            start,
+            stop,
+            np.ascontiguousarray(suffix[stop]),
+            first,
+            second,
+            backward,
+            bgmap,
+            focal
+        )
         dp[0] = prefix[blocks - start]
         optimistic = float(np.max(dp[0] + bound[0], axis=1).sum())
         margin = 1e-10 * max(1.0, abs(optimistic), abs(best_seen))
@@ -106,7 +234,34 @@ def macro_proposals(models, known, incumbent, penalty, *, width=64, branch_cap=1
         for begin in range(start, stop, 32):
             if thread_budget is not None:
                 set_num_threads(thread_budget())
-            dp, alternate, beams, scores, order, aborted, equivalent = kernels.macro_chunk(emissions, *packed, known, choices, offsets, float(penalty), False, first, second, suffix, bound, True, start, best_seen, rank, begin, min(stop, begin + 32), dp, alternate, beams, width, ancestry, rows, forward, bgmap, focal)
+            dp, alternate, beams, scores, order, aborted, equivalent = kernels.macro_chunk(
+                emissions,
+                *packed,
+                known,
+                choices,
+                offsets,
+                float(penalty),
+                False,
+                first,
+                second,
+                suffix,
+                bound,
+                True,
+                start,
+                best_seen,
+                rank,
+                begin,
+                min(stop, begin + 32),
+                dp,
+                alternate,
+                beams,
+                width,
+                ancestry,
+                rows,
+                forward,
+                bgmap,
+                focal
+            )
             if statistics is not None and (not equivalent):
                 statistics['equivalent_incumbent_tie'] = False
             if aborted:

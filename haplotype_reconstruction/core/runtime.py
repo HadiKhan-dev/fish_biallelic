@@ -1,4 +1,4 @@
-"""core / runtime for the canonical reconstruction pipeline."""
+"""Run logging, stage checkpoint stores and lightweight workflow utilities."""
 from __future__ import annotations
 
 

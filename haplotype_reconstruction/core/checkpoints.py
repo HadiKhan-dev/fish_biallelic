@@ -1,4 +1,4 @@
-"""core / checkpoints for the canonical reconstruction pipeline."""
+"""Atomic protocol-5/Blosc checkpoint serialization for scientific arrays."""
 from __future__ import annotations
 
 
@@ -464,4 +464,3 @@ def read(path, nthreads=1):
                 return pickle.Unpickler(metadata, buffers=buffers).load()
             except (EOFError, pickle.UnpicklingError) as error:
                 raise ValueError("corrupt checkpoint: invalid pickle metadata") from error
-

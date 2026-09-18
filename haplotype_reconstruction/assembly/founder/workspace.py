@@ -11,9 +11,11 @@ import math
 import numpy as np
 from numba.typed import List
 
-from . import chimera_scoring, founder_scoring, founder_delta, observations
-from ..core import parallel
-from .founder_evidence import gather_evidence, build_models
+from..import chimera_scoring
+from.import scoring as founder_scoring, delta as founder_delta
+from..import observations
+from ...core import parallel
+from.evidence import gather_evidence, build_models
 
 
 def resolve_threads(budget):
@@ -100,7 +102,7 @@ class ComponentWorkspace:
             return self.predictive_scores[key]
         with parallel.numba_thread_scope(resolve_threads(self.threads)):
             if self.predictive_evidence is None:
-                from .founder_predictive import PredictiveEvidence
+                from.predictive import PredictiveEvidence
                 self.predictive_evidence = PredictiveEvidence(self)
             value = self.predictive_evidence.score(self, panel)
         self.predictive_scores[key] = value
@@ -110,7 +112,7 @@ class ComponentWorkspace:
 
     def primary_preserving_choices(self, panel, branch_cap):
         if self.predictive_evidence is None:
-            from .founder_predictive import PredictiveEvidence
+            from.predictive import PredictiveEvidence
             self.predictive_evidence = PredictiveEvidence(self)
         return self.predictive_evidence.primary_preserving_choices(
             self, panel, branch_cap)
@@ -121,16 +123,16 @@ class ComponentWorkspace:
         changed = np.flatnonzero(np.any(panel != self.reference, axis=0))
         if not len(changed):
             return None
-        start, stop = int(changed[0]), int(changed[-1])+1
+        start, stop = int(changed[0]), int(changed[-1]) + 1
         # Whole/long edits retain the linear full scan; cache only short edits.
-        if self.offsets[stop]-self.offsets[start] > len(self.positions)//2:
+        if self.offsets[stop] - self.offsets[start] > len(self.positions) // 2:
             return None
         if self.flanks is None:
-            from ..painting.model import available_process_memory_bytes
+            from ...painting.model import available_process_memory_bytes
             available = available_process_memory_bytes()
-            states = len(panel)*(len(panel)+1)//2
-            required = 16*(len(self.batch)+1)*len(self.evidence)*states
-            if available is not None and required > available//8:
+            states = len(panel) * (len(panel) + 1) // 2
+            required = 16 * (len(self.batch) + 1) * len(self.evidence) * states
+            if available is not None and required > available // 8:
                 return None
             alleles = founder_scoring.selected_alleles(self.leaves, self.offsets, self.reference)
             self.flanks = founder_delta.messages(alleles, self.logs, self.offsets, self.penalty)

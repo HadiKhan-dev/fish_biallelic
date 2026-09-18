@@ -1,4 +1,4 @@
-"""discovery / founder updates for the canonical reconstruction pipeline."""
+"""Founder allele updates conditional on sample assignments."""
 from __future__ import annotations
 
 
@@ -52,7 +52,9 @@ def _update_H(probs_k, H_k, A, lam, cost_WW=None, log_probs=None,
     # `_fit_at_fixed_K`, log_probs arrives precomputed and is reused
     # across all K founder updates AND across all CD iterations.
     if log_probs is None:
-        log_probs = discovery_objectives._log_probs_kernel(discovery_objectives._maybe_c_contig(probs_k, np.float64))
+        log_probs = discovery_objectives._log_probs_kernel(
+            discovery_objectives._maybe_c_contig(probs_k, np.float64)
+        )
 
     if h_genotype_cost is None or h_wildcard_cost is None:
         (_, h_genotype_cost, h_wildcard_cost) = discovery_fitting._prepare_fit_cost_tables(

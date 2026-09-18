@@ -1,4 +1,4 @@
-"""pedigree / inference for the canonical reconstruction pipeline."""
+"""Genome-wide parent-state, identity and acyclic pedigree decisions."""
 from __future__ import annotations
 
 
@@ -12,15 +12,15 @@ import pandas as pd
 def infer_from_parent_state_evidence(
     evidence: Sequence[pedigree_models.ParentStateEvidence],
     sample_ids: Sequence[Any],
-    config: Optional[module_pedigree_config.PedigreeConfig] = None,
+    config: Optional[module_pedigree_config.PedigreeConfig]=None,
     *,
-    parent_eligibility: Optional[pedigree_eligibility.ParentEligibility | Mapping[str, Any]] = None,
-    ancestry_junction_counts: Optional[np.ndarray] = None,
-    ancestry_callable_haplotype_bins: Optional[np.ndarray] = None,
-    n_workers: Optional[int] = None,
-    candidate_source_available: Optional[np.ndarray] = None,
-    child_informative_marker_count: Optional[np.ndarray] = None,
-    scaffold_contig_names: Optional[Sequence[str]] = None,
+    parent_eligibility: Optional[pedigree_eligibility.ParentEligibility | Mapping[str, Any]]=None,
+    ancestry_junction_counts: Optional[np.ndarray]=None,
+    ancestry_callable_haplotype_bins: Optional[np.ndarray]=None,
+    n_workers: Optional[int]=None,
+    candidate_source_available: Optional[np.ndarray]=None,
+    child_informative_marker_count: Optional[np.ndarray]=None,
+    scaffold_contig_names: Optional[Sequence[str]]=None,
 ) -> pedigree_results.PedigreeResult:
     """Infer a DAG from comparable 0/1/2-observed-parent likelihoods.
 
@@ -155,11 +155,11 @@ def infer_from_parent_state_evidence(
 
     def evaluate(
         weights: np.ndarray,
-        base_priors: Sequence[float] = settings.parent_state_priors,
-        depth_model: Optional[pedigree_direction._AncestryDepthModel] = None,
+        base_priors: Sequence[float]=settings.parent_state_priors,
+        depth_model: Optional[pedigree_direction._AncestryDepthModel]=None,
         prepared_aggregates: Optional[
             tuple[np.ndarray, np.ndarray]
-        ] = None,
+        ]=None,
     ) -> pedigree_states._ParentStateSelection:
         return pedigree_states._evaluate_parent_state_weighted_contigs(
             contig_log_likelihoods,

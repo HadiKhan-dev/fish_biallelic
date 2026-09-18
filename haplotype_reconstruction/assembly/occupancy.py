@@ -1,4 +1,4 @@
-"""assembly / occupancy for the canonical reconstruction pipeline."""
+"""Cross-block founder occupancy and variable-count boundary eligibility."""
 from __future__ import annotations
 
 
@@ -132,7 +132,7 @@ def focal_informative_masks(
     genotype_likelihoods: Sequence[np.ndarray],
     observed: Sequence[np.ndarray],
     *,
-    uniform_tolerance: float = 1e-12,
+    uniform_tolerance: float=1e-12,
 ) -> tuple[np.ndarray, ...]:
     """Return immutable observed, non-uniform sample-by-site masks."""
 
@@ -452,9 +452,9 @@ def apply_variable_k_occupancy_gate(
     profiles: Sequence[assembly_joint_completion.CarrierProfiles],
     focal_informative: Sequence[np.ndarray],
     links: Sequence[assembly_partial_links.PartialBoundaryLink],
-    rule: CrossBlockOccupancyRule = CrossBlockOccupancyRule(),
+    rule: CrossBlockOccupancyRule=CrossBlockOccupancyRule(),
     *,
-    block_underfit_flags: Sequence[bool] | None = None,
+    block_underfit_flags: Sequence[bool] | None=None,
 ) -> VariableKOccupancyGateResult:
     """Gate fills using pre-cavity occupancy and Stage-1 underfit flags."""
 

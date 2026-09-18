@@ -1,4 +1,4 @@
-"""discovery / cavity for the canonical reconstruction pipeline."""
+"""Leave-one-out cavity scores and founder-panel selection."""
 from __future__ import annotations
 
 
@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from numba import njit, prange
 
-from .cavity_groups import grouped_cavity_predictions
+from.cavity_groups import grouped_cavity_predictions
 
 # Workspace budget, not a statistical parameter. One site is the minimum;
 # larger K therefore needs O(N K²) space, never O(N L K²).
@@ -573,7 +573,7 @@ def _score_mode_cavity_kernel(
     # Dense lookup is tiny at the intended K<=16 and avoids repeatedly
     # deriving triangular-state offsets in the hot held-out loop.
     state_lookup = np.empty((k + 1, k + 1), dtype=np.int64)
-    state_lookup[:, :] = -1
+    state_lookup[:,:] = -1
     for state in range(n_states):
         kind = state_kind[state]
         if kind == 0:
@@ -605,7 +605,7 @@ def _score_mode_cavity_kernel(
     edge_first = np.empty(k * (k - 1) // 2, dtype=np.int64)
     edge_second = np.empty(k * (k - 1) // 2, dtype=np.int64)
     edge_lookup = np.empty((k, k), dtype=np.int64)
-    edge_lookup[:, :] = -1
+    edge_lookup[:,:] = -1
     n_edges = 0
     for first_founder in range(k):
         for second_founder in range(first_founder + 1, k):
@@ -888,7 +888,7 @@ def _score_given_cavity_q_kernel(
     wildcard = k
     n_states = state_kind.shape[0]
     state_lookup = np.empty((k + 1, k + 1), dtype=np.int64)
-    state_lookup[:, :] = -1
+    state_lookup[:,:] = -1
     state_counts = np.zeros(n_states, dtype=np.int64)
     for state in range(n_states):
         kind = state_kind[state]
@@ -1039,8 +1039,8 @@ def select_cavity_predictive_k(
     evidence: np.ndarray,
     modes_by_k: Mapping[int, Sequence[Any]],
     *,
-    config: CavitySelectionConfig | None = None,
-    _workspace: _CavityScoringWorkspace | None = None,
+    config: CavitySelectionConfig | None=None,
+    _workspace: _CavityScoringWorkspace | None=None,
 ) -> CavitySelection:
     """Compare represented K values using fixed-A sample cavities.
 

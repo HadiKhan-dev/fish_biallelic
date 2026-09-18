@@ -1,4 +1,4 @@
-"""assembly / partial links for the canonical reconstruction pipeline."""
+"""Boundary evidence and row-class matching for partially observed founders."""
 from __future__ import annotations
 
 
@@ -249,13 +249,13 @@ def _cost_matrix(
             dtype=np.float64,
         )
     copy_difference = (
-        left_copies[samples, :, None] - right_copies[samples, None, :]
+        left_copies[samples,:, None] - right_copies[samples, None,:]
     )
     carrier_difference = (
-        left_carriers[samples, :, None] - right_carriers[samples, None, :]
+        left_carriers[samples,:, None] - right_carriers[samples, None,:]
     )
     return np.mean(
-        0.5 * (copy_difference**2 + carrier_difference**2), axis=0
+        0.5 * (copy_difference ** 2 + carrier_difference ** 2), axis=0
     )
 
 
@@ -436,8 +436,8 @@ def link_partial_profiles(
     right: assembly_joint_completion.CarrierProfiles,
     *,
     fold_assignments: np.ndarray,
-    config: PartialLinkConfig = PartialLinkConfig(),
-    external_identity_anchors: Sequence[tuple[int, int]] = (),
+    config: PartialLinkConfig=PartialLinkConfig(),
+    external_identity_anchors: Sequence[tuple[int, int]]=(),
 ) -> PartialBoundaryLink:
     """Infer an injective *partial* class correspondence at one boundary.
 
@@ -613,7 +613,7 @@ def link_partial_profiles(
         plausible = (
             (pooled_cost <= config.maximum_mean_cost)
             & (pooled_left_support[:, None] >= config.minimum_effective_copies)
-            & (pooled_right_support[None, :] >= config.minimum_effective_copies)
+            & (pooled_right_support[None,:] >= config.minimum_effective_copies)
         )
     deaths: list[BoundaryEvent] = []
     births: list[BoundaryEvent] = []

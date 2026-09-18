@@ -1,4 +1,4 @@
-"""assembly / checkpoints for the canonical reconstruction pipeline."""
+"""Atomic assembly work checkpoints and scientific resume identities."""
 from __future__ import annotations
 
 

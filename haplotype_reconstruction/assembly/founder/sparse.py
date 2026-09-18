@@ -104,7 +104,6 @@ def candidate_into(previous, emission, known, choice, penalty, reverse, backward
             outside = max(outside, entries[start] + segment[start, step + 1])
 
 
-
 @njit(cache=True, inline="always")
 def candidate(previous, emission, known, choice, penalty, reverse, backward,
               first, affected, initial, segment):
@@ -190,7 +189,15 @@ def forward_details(previous, emission, known, choices, penalty, reverse, first,
         prefix, shift, segment, affected = cached_background(
             emission[sample], known, reverse, False, first, second, prepared, focal_index, sample)
         initial = initial_background(previous[sample], prefix, shift, second, len(known), mapping)
-        terminal = terminal_background(previous[sample], prefix, shift, second, len(known), suffix[sample], mapping)
+        terminal = terminal_background(
+            previous[sample],
+            prefix,
+            shift,
+            second,
+            len(known),
+            suffix[sample],
+            mapping
+        )
         for index, choice in enumerate(choices):
             candidate_into(previous[sample], emission[sample], known, choice,
                 penalty, reverse, False, first, affected, initial, segment,
@@ -251,9 +258,27 @@ def _score_general_branches(dp, emission, known, choices, penalty, reverse, suff
         for beam in range(beams):
             previous = dp[beam, sample]
             initial_background(previous, prefix, shift, second, len(known), mapping, initial)
-            terminal_background(previous, prefix, shift, second, len(known), suffix[sample], mapping, terminal)
+            terminal_background(
+                previous,
+                prefix,
+                shift,
+                second,
+                len(known),
+                suffix[sample],
+                mapping,
+                terminal
+            )
             if two_flanks:
-                terminal_background(previous, prefix, shift, second, len(known), upper_suffix[sample], mapping, optimistic)
+                terminal_background(
+                    previous,
+                    prefix,
+                    shift,
+                    second,
+                    len(known),
+                    upper_suffix[sample],
+                    mapping,
+                    optimistic
+                )
             for index, choice in enumerate(choices):
                 candidate_into(previous, emission[sample], known, choice, penalty,
                     reverse, False, first, affected, initial, segment, row, entries)

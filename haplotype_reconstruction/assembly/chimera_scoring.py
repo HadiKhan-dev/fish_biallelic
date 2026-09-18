@@ -1,4 +1,4 @@
-"""assembly / chimera scoring for the canonical reconstruction pipeline."""
+"""Full-panel Viterbi scores, emissions and founder-complexity penalties."""
 from __future__ import annotations
 
 
@@ -9,10 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from scipy.optimize import linear_sum_assignment
 from numba import njit, prange
-from . import partial_emissions
+from.import partial_emissions
 
 
-_STACK_BYTES_BUDGET = 4 * 1024**3
+_STACK_BYTES_BUDGET = 4 * 1024 ** 3
 
 
 def compute_penalty(batch_blocks):
@@ -365,7 +365,7 @@ def score_path_sets_parallel(path_sets, sub_emissions, penalty, num_samples,
         # Parallelism comes from the (path-set x sample) axis inside the build
         # kernel and from (batch x samples) in the scorer, so a small n_chunk
         # still saturates the pool; n_chunk only governs the dispatch count.
-        per_set_bytes = num_samples * n_pairs * total_b * 4   # float32
+        per_set_bytes = num_samples * n_pairs * total_b * 4  # float32
         cs = max(1, min(chunk_size,
                         int(_STACK_BYTES_BUDGET // max(1, per_set_bytes))))
         for chunk_start in range(0, len(group_items), cs):
@@ -516,10 +516,10 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
         unique_beam_idx.append(bi)
         unique_keypaths.append(kp)
 
-    selected_keypaths = []          # list of key-paths (parallel to ...)
-    selected_beam_idx = []          # ... this list of beam-row indices
-    selected_tuples = set()         # for O(1) "is path in S?" checks
-    bic_S = float('inf')            # empty set has +inf BIC; any K>=1
+    selected_keypaths = []  # list of key-paths (parallel to ...)
+    selected_beam_idx = []  # ... this list of beam-row indices
+    selected_tuples = set()  # for O(1) "is path in S?" checks
+    bic_S = float('inf')  # empty set has +inf BIC; any K>=1
                                     # set with finite LL strictly improves
     n_adds = 0
     n_drops = 0
@@ -528,7 +528,7 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
     for beam_idx, kp in zip(unique_beam_idx, unique_keypaths):
         kt = tuple(kp)
         if kt in selected_tuples:
-            continue                # already in selected, skip
+            continue  # already in selected, skip
         if len(selected_keypaths) >= max_K_cap:
             break
 
@@ -585,7 +585,7 @@ def beam_warmstart_select(beam_results, fast_mesh, sub_emissions,
                         best_drop_i = i
 
                 if best_drop_i < 0:
-                    break                       # no drop improves; done
+                    break  # no drop improves; done
 
                 # Commit drop.  Remove from all parallel structures so
                 # selected_beam_idx[i] continues to align with
@@ -1102,7 +1102,7 @@ def _step5_find_active_paths(W, threshold):
     np.fill_diagonal(W_off, 0)
     active = []
     for i in range(K_):
-        row_max = W_off[i, :].max()
+        row_max = W_off[i,:].max()
         col_max = W_off[:, i].max()
         if row_max >= threshold or col_max >= threshold:
             active.append(i)
@@ -1217,7 +1217,7 @@ def _step5_hungarian_active(W, threshold):
     """
     K_ = W.shape[0]
     active = _step5_find_active_paths(W, threshold)
-    sigma = np.arange(K_, dtype=np.int64)         # identity baseline
+    sigma = np.arange(K_, dtype=np.int64)  # identity baseline
     if len(active) == 0:
         return sigma, active
     W_active = W[np.ix_(active, active)].copy()

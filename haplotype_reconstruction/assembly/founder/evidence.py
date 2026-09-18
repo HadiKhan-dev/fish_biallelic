@@ -10,8 +10,8 @@ import math
 import numpy as np
 from numba import njit, prange
 from numba.typed import List
-from . import observations, partial_emissions
-from .founder_packing import PreparedModels
+from..import observations, partial_emissions
+from.packing import PreparedModels
 
 @njit(cache=True, parallel=True, nogil=True)
 def _gather_evidence(neutral, indices):
@@ -27,7 +27,7 @@ def _gather_evidence(neutral, indices):
 
 def gather_evidence(neutral, indices):
     if len(indices) and indices[-1] - indices[0] + 1 == len(indices) and np.all(np.diff(indices) == 1):
-        view = neutral[:, indices[0]:indices[-1] + 1, :]
+        view = neutral[:, indices[0]:indices[-1] + 1,:]
         if view.dtype == np.float32 and view.flags.c_contiguous:
             return view
     return _gather_evidence(neutral, indices)
@@ -66,7 +66,11 @@ def fill(evidence, offsets, alleles, source, keeps, full, bin_size, outputs):
                     if full[block]:
                         code = local[first, site] + local[second, site]
                     else:
-                        code = partial_emissions.pair_code(local[first, site], local[second, site], rows[first, site] == rows[second, site])
+                        code = partial_emissions.pair_code(
+                            local[first, site],
+                            local[second, site],
+                            rows[first, site] == rows[second, site]
+                        )
                     value = logs[code]
                     bin_index = site // bin_size
                     out[sample, first, second, bin_index] += value
@@ -91,7 +95,20 @@ def build_models(workspace):
         alleles.append(np.ascontiguousarray(np.where(panel.called, panel.q, -1), np.int8))
         source.append(np.empty((0, 0), np.int32) if complete else partial_emissions.source_row_ids(block))
         bins = (len(block.positions) + workspace.bin_size - 1) // workspace.bin_size
-        outputs.append(np.zeros((len(workspace.evidence), len(panel.keys), len(panel.keys), bins), np.float64))
+        outputs.append(
+            np.zeros((len(workspace.evidence), len(panel.keys), len(panel.keys), bins), np.float64)
+        )
         keys.append(list(panel.keys))
-    fill(workspace.evidence, workspace.offsets, alleles, source, keeps, np.asarray(full, bool), workspace.bin_size, outputs)
-    return PreparedModels([dict(hap_keys=k, bin_emissions=e, n_bins=e.shape[3], key_to_local_idx={key: i for i, key in enumerate(k)}) for k, e in zip(keys, outputs)])
+    fill(
+        workspace.evidence,
+        workspace.offsets,
+        alleles,
+        source,
+        keeps,
+        np.asarray(full, bool),
+        workspace.bin_size,
+        outputs
+    )
+    return PreparedModels(
+        [dict(hap_keys=k, bin_emissions=e, n_bins=e.shape[3], key_to_local_idx={key: i for i, key in enumerate(k)}) for k, e in zip(keys, outputs)]
+    )

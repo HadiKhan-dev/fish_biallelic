@@ -1,4 +1,4 @@
-"""pedigree / results for the canonical reconstruction pipeline."""
+"""Pedigree result tables, support summaries and readable exports."""
 from __future__ import annotations
 
 
@@ -30,5 +30,3 @@ class PedigreeResult:
         self.ibd0_matrix = ibd0_matrix
         self.trio_scores = trio_scores if trio_scores is not None else {}
         self.total_bins = total_bins
-
-

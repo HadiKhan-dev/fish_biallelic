@@ -1,4 +1,4 @@
-"""assembly / hierarchy for the canonical reconstruction pipeline."""
+"""Shared-memory hierarchical assembly with dynamic process/thread budgeting."""
 from __future__ import annotations
 
 
@@ -92,8 +92,8 @@ def _missing_aware_informative_sample_mask(batch_probs):
     probabilities = np.asarray(batch_probs)
     positive_mass = np.sum(probabilities, axis=2) > 0.0
     nonuniform = (
-        (probabilities[:, :, 0] != probabilities[:, :, 1])
-        | (probabilities[:, :, 1] != probabilities[:, :, 2])
+        (probabilities[:,:, 0] != probabilities[:,:, 1])
+        | (probabilities[:,:, 1] != probabilities[:,:, 2])
     )
     return np.any(positive_mass & nonuniform, axis=1)
 
@@ -261,7 +261,7 @@ def create_downsampled_proxy(block, max_sites=2000):
     new_haps = {}
     for k, v in block.haplotypes.items():
         if v.ndim > 1:
-            new_haps[k] = np.ascontiguousarray(v[sampled_indices, :])
+            new_haps[k] = np.ascontiguousarray(v[sampled_indices,:])
         else:
             new_haps[k] = np.ascontiguousarray(v[sampled_indices])
 
@@ -272,11 +272,11 @@ def create_downsampled_proxy(block, max_sites=2000):
 
     new_reads = None
     if block.reads_count_matrix is not None:
-        new_reads = np.ascontiguousarray(block.reads_count_matrix[:, sampled_indices, :])
+        new_reads = np.ascontiguousarray(block.reads_count_matrix[:, sampled_indices,:])
 
     new_probs = None
     if block.probs_array is not None:
-        new_probs = np.ascontiguousarray(block.probs_array[:, sampled_indices, :])
+        new_probs = np.ascontiguousarray(block.probs_array[:, sampled_indices,:])
 
     proxy = core_haplotypes.BlockResult(
         positions=new_pos,
@@ -419,7 +419,7 @@ def convert_reconstruction_to_superblock(
             np.any(atomic_source_row_paths < 0)
             or np.any(
                 atomic_source_row_paths
-                >= atomic_source_row_counts[None, :]
+                >= atomic_source_row_counts[None,:]
             )):
         raise ValueError("reconstructed atomic source path is out of range")
 
@@ -618,8 +618,8 @@ def _process_single_batch(args):
         all_positions = np.concatenate([b.positions for b in original_portion])
         batch_indices = np.searchsorted(global_sites, all_positions)
         idx_min, idx_max = batch_indices.min(), batch_indices.max()
-        batch_probs = np.ascontiguousarray(global_probs[:, idx_min:idx_max+1, :])
-        batch_sites = np.ascontiguousarray(global_sites[idx_min:idx_max+1])
+        batch_probs = np.ascontiguousarray(global_probs[:, idx_min:idx_max + 1,:])
+        batch_sites = np.ascontiguousarray(global_sites[idx_min:idx_max + 1])
         total_sample_count = batch_probs.shape[0]
         informative_sample_mask = np.asarray(
             precomputed_informative_sample_mask, dtype=np.bool_
@@ -667,7 +667,8 @@ def _process_single_batch(args):
                                            chromosome_map=chromosome_map)
         else:
             beam_max_gap = None
-        if _prof: _acc('setup(proxy+slice+gap)', _t)
+        if _prof:
+            _acc('setup(proxy+slice+gap)', _t)
 
         # =================================================================
         # 4. Generate Mesh — DYNAMIC SEQUENTIAL phase.
@@ -687,7 +688,8 @@ def _process_single_batch(args):
             inference_batch_probs, batch_sites, portion_proxy,
             num_processes=pool_budget,
         )
-        if _prof: _acc('mesh_emissions', _t)
+        if _prof:
+            _acc('mesh_emissions', _t)
         _t = time.perf_counter()
         mesh = assembly_linking.generate_transition_probability_mesh(
             None, None, portion_proxy,
@@ -699,7 +701,8 @@ def _process_single_batch(args):
             max_gap=beam_max_gap,
             structured_config=structured_transition_config,
         )
-        if _prof: _acc('mesh_transition', _t)
+        if _prof:
+            _acc('mesh_transition', _t)
         del viterbi_emissions
 
         # =================================================================
@@ -713,7 +716,8 @@ def _process_single_batch(args):
             max_gap=beam_max_gap, verbose=verbose,
             endpoint_quota=None if panel_search_config is None else panel_search_config.paths_per_endpoint,
         )
-        if _prof: _acc('beam_search', _t)
+        if _prof:
+            _acc('beam_search', _t)
 
         if not beam_results:
             return {
@@ -735,7 +739,7 @@ def _process_single_batch(args):
         _t = time.perf_counter()
         search_diagnostics = []
         if panel_search_config is not None:
-            from .panel_search import select_and_resolve
+            from.panel_search import select_and_resolve
             resolved_beam = select_and_resolve(
                 beam_results, fast_mesh, list(original_portion),
                 inference_batch_probs, batch_sites, config=panel_search_config,
@@ -757,7 +761,8 @@ def _process_single_batch(args):
                 cc_scale=cc_scale,
                 num_threads=core_parallel.get_dynamic_threads,
             )
-        if _prof: _acc('select_and_resolve(CR)', _t)
+        if _prof:
+            _acc('select_and_resolve(CR)', _t)
 
         del beam_results
         core_parallel.malloc_trim()
@@ -770,7 +775,8 @@ def _process_single_batch(args):
         reconstructed_data = assembly_paths.reconstruct_haplotypes_from_beam(
             resolved_beam, fast_mesh, original_portion,
         )
-        if _prof: _acc('reconstruction', _t)
+        if _prof:
+            _acc('reconstruction', _t)
 
         del resolved_beam, fast_mesh
         core_parallel.malloc_trim()
@@ -790,7 +796,8 @@ def _process_single_batch(args):
             super_block.hierarchy_informative_sample_rule = (
                 'intersection_across_linking_proxy_batch_v2'
             )
-        if _prof: _acc('package', _t)
+        if _prof:
+            _acc('package', _t)
 
         del reconstructed_data, inference_batch_probs
         del batch_probs, batch_sites, portion_proxy, proxy_list
@@ -1013,7 +1020,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         'sites': sites_meta,
     }
 
-    probs_gb = global_probs.nbytes / (1024**3)
+    probs_gb = global_probs.nbytes / (1024 ** 3)
     print(f"  Shared memory created: {probs_gb:.1f} GB probs + sites ({time.time()-t0:.1f}s)")
 
     # Auto-size worker count based on available RAM, read AFTER shared

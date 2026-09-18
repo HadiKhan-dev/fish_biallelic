@@ -8,8 +8,8 @@ backward scan is the adjoint of that same operator, not a reversed heuristic.
 import math
 import numpy as np
 from numba import njit, prange
-from . import micro_hmm_log
-from ..core import config as core_config
+from.import micro_hmm_log
+from..core import config as core_config
 
 # Numerical range guards, not confidence thresholds.
 _MIN_SCALED_MASS = 1e-250
@@ -33,7 +33,7 @@ def _transition_weights(positions, rate, haps, genetic_distances):
         if theta < 1e-15 or haps == 1:
             stay[site], switch[site] = 1.0, 0.0
         else:
-            same = (1.0 - theta)**2
+            same = (1.0 - theta) ** 2
             other = theta * (1.0 - theta) / (haps - 1)
             mass = same + 2.0 * (haps - 1) * other
             stay[site], switch[site] = same / mass, other / mass
@@ -50,7 +50,7 @@ def _quality_transitions(positions, fraction, tract_bp):
     moved = -np.expm1(-distances / ((1.0 - fraction) * tract_bp))
     enter = fraction * moved
     leave = (1.0 - fraction) * moved
-    return np.ascontiguousarray(np.column_stack((1-enter, enter, leave, 1-leave)))
+    return np.ascontiguousarray(np.column_stack((1 - enter, enter, leave, 1 - leave)))
 
 
 @njit(cache=True, parallel=True)
@@ -183,10 +183,10 @@ def _scaled_scan(weights, error_weights, invalid_emission, stay, switch, quality
         if not unsafe[sample]:
             for a in range(haps):
                 for b in range(a, haps):
-                    value = ((1-error_fraction)*normal[a, b] + error_fraction*error[a, b]
+                    value = ((1 - error_fraction) * normal[a, b] + error_fraction * error[a, b]
                              if backward else normal[a, b] + error[a, b])
                     score = math.log(value) + log_scale
-                    result[sample, a*haps+b] = result[sample, b*haps+a] = score
+                    result[sample, a * haps + b] = result[sample, b * haps + a] = score
     return result, unsafe
 
 
@@ -212,18 +212,18 @@ class PreparedBlockScans:
         self.tensor, self.positions, self.rate = tensor, positions, float(rate)
         self.definitions, self.haps, self.distances = definitions, int(haps), distances
         self.dosages = dosages
-        upper = np.array([a*haps+b for a in range(haps) for b in range(a,haps)])
+        upper = np.array([a * haps + b for a in range(haps) for b in range(a, haps)])
         if dosages is None:
             self.weights, self.invalid_emission = _emission_weights(tensor, self.haps)
             self.emission_indices = np.broadcast_to(
-                np.arange(len(upper)), (len(positions),len(upper)))
+                np.arange(len(upper)), (len(positions), len(upper)))
             self.log_emission_indices = np.broadcast_to(upper, self.emission_indices.shape)
         else:
-            self.emission_indices = np.ascontiguousarray(dosages[:,upper])
+            self.emission_indices = np.ascontiguousarray(dosages[:, upper])
             self.log_emission_indices = self.emission_indices
             values = tensor.astype(np.float64)
             invalid = ~np.isfinite(values) | (np.abs(values) > _MAX_LOG_RANGE)
-            self.invalid_emission = np.any(invalid, axis=(1,2))
+            self.invalid_emission = np.any(invalid, axis=(1, 2))
             values[invalid] = 0.0
             self.weights = np.exp(values)
         if error_log_emissions is None:
@@ -234,20 +234,20 @@ class PreparedBlockScans:
                 # including for seven-category partial-founder inputs. Only the
                 # first three entries are genotypes, not all predictive categories.
                 error_log_emissions = np.logaddexp.reduce(
-                    tensor[:, :, :3].astype(np.float64), axis=2) - math.log(3.0)
+                    tensor[:,:,:3].astype(np.float64), axis=2) - math.log(3.0)
         self.error_log_emissions = np.ascontiguousarray(error_log_emissions)
         self.error_weights = np.exp(self.error_log_emissions)
         self.invalid_emission |= np.any(
             ~np.isfinite(self.error_weights) | (self.error_weights <= 0), axis=1)
-        self.stay, self.switch = _transition_weights(positions,self.rate,self.haps,distances)
-        self.quality = _quality_transitions(positions,self.error_fraction,tract_bp)
-        self.zero_priors = np.zeros((tensor.shape[0],self.haps*self.haps))
-        self.fixed_scores = [None,None]
+        self.stay, self.switch = _transition_weights(positions, self.rate, self.haps, distances)
+        self.quality = _quality_transitions(positions, self.error_fraction, tract_bp)
+        self.zero_priors = np.zeros((tensor.shape[0], self.haps * self.haps))
+        self.fixed_scores = [None, None]
         self.scan_calls = self.cached_calls = self.fallback_samples = 0
 
     def scan(self, priors=None, *, backward=False):
         direction = int(backward)
-        if priors is not None and np.all(np.isfinite(priors[:,0])) and np.all(
+        if priors is not None and np.all(np.isfinite(priors[:, 0])) and np.all(
                 priors == priors[:,:1]):
             return self.scan(backward=backward) + priors[:,:1]
         if priors is None and self.fixed_scores[direction] is not None:
@@ -255,17 +255,17 @@ class PreparedBlockScans:
             return self.fixed_scores[direction]
         incoming = self.zero_priors if priors is None else priors
         result, unsafe = _scaled_scan(
-            self.weights,self.error_weights,self.invalid_emission,self.stay,self.switch,
-            self.quality,incoming,self.haps,backward,self.emission_indices,self.error_fraction)
+            self.weights, self.error_weights, self.invalid_emission, self.stay, self.switch,
+            self.quality, incoming, self.haps, backward, self.emission_indices, self.error_fraction)
         self.scan_calls += 1
         count = int(np.count_nonzero(unsafe))
         self.fallback_samples += count
         if count:
             selected = slice(None) if count == len(unsafe) else unsafe
             result[unsafe] = micro_hmm_log.scan_sum_product(
-                self.tensor[selected],self.error_log_emissions[selected],self.stay,self.switch,
-                self.quality,incoming[selected],self.haps,backward,
-                self.log_emission_indices,self.error_fraction)
+                self.tensor[selected], self.error_log_emissions[selected], self.stay, self.switch,
+                self.quality, incoming[selected], self.haps, backward,
+                self.log_emission_indices, self.error_fraction)
         if priors is None:
             self.fixed_scores[direction] = result
         return result
@@ -274,11 +274,11 @@ class PreparedBlockScans:
 def scan_distance_aware_forward(tensor, positions, rate, definitions, priors, haps,
                                 genetic_distances=None, **model_options):
     return PreparedBlockScans(
-        tensor,positions,rate,definitions,haps,genetic_distances,**model_options).scan(priors)
+        tensor, positions, rate, definitions, haps, genetic_distances, **model_options).scan(priors)
 
 
 def scan_distance_aware_backward(tensor, positions, rate, definitions, priors, haps,
                                  genetic_distances=None, **model_options):
     return PreparedBlockScans(
-        tensor,positions,rate,definitions,haps,genetic_distances,**model_options).scan(
-            priors,backward=True)
+        tensor, positions, rate, definitions, haps, genetic_distances, **model_options).scan(
+            priors, backward=True)

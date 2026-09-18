@@ -17,7 +17,7 @@ import numpy as np
 from numba import njit, prange
 from numba.typed import List
 
-from . import observations, partial_emissions
+from..import observations, partial_emissions
 
 
 @njit(cache=True, parallel=True, nogil=True)

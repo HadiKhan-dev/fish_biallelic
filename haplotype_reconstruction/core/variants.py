@@ -1,4 +1,4 @@
-"""core / variants for the canonical reconstruction pipeline."""
+"""VCF/BCF loading and genomic block construction."""
 from __future__ import annotations
 
 
@@ -69,7 +69,7 @@ def concatenate_unique_block_reads(genomic_data):
     # order while keeping the first read tensor for every duplicated site.
     _, first_indices = np.unique(all_positions, return_index=True)
     first_indices.sort()
-    return all_positions[first_indices], all_reads[:, first_indices, :]
+    return all_positions[first_indices], all_reads[:, first_indices,:]
 
 
 def generate_block_coordinates(vcf_file_path, contig,
@@ -86,7 +86,7 @@ def generate_block_coordinates(vcf_file_path, contig,
     except:
         contig_len = 300_000_000
 
-    vcf.close() # Close handle immediately
+    vcf.close()  # Close handle immediately
 
     cur_start = 0
     while cur_start < contig_len:
@@ -112,7 +112,7 @@ def generate_snp_count_coordinates(vcf_file_path, contig,
         for v in vcf(contig):
             positions.append(v.POS)
     except Exception:
-        pass # Handle empty contigs or read errors gracefully
+        pass  # Handle empty contigs or read errors gracefully
 
     vcf.close()
 
@@ -186,7 +186,7 @@ def process_single_block(vcf_path, chrom, start, end,
                 ad = np.zeros((n_samples, 2), dtype=np.int32)
             elif ad.shape[1] > 2:
                 # If multi-allelic, just take Ref and First Alt
-                ad = ad[:, :2]
+                ad = ad[:,:2]
 
             reads_list.append(ad)
             positions_list.append(variant.POS)
@@ -198,7 +198,7 @@ def process_single_block(vcf_path, chrom, start, end,
 
     # --- If block was empty ---
     if not positions_list:
-        return (np.array([]), np.array([]), np.empty((0,0,0)))
+        return (np.array([]), np.array([]), np.empty((0, 0, 0)))
 
     # --- Finalize Numpy Arrays ---
     positions = np.array(positions_list, dtype=np.int64)

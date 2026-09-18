@@ -1,4 +1,4 @@
-"""assembly / joint completion for the canonical reconstruction pipeline."""
+"""Joint local founder completion and supported allele release."""
 from __future__ import annotations
 
 
@@ -7,7 +7,7 @@ import hashlib
 import math
 import numpy as np
 
-from . import joint_statistics
+from.import joint_statistics
 
 
 @dataclass(frozen=True)
@@ -193,7 +193,7 @@ def _prepare_inputs(
     return evidence, observed_mask, log_emission
 
 
-def _softmax(log_values: np.ndarray, axis: int = -1) -> np.ndarray:
+def _softmax(log_values: np.ndarray, axis: int=-1) -> np.ndarray:
     maximum = np.max(log_values, axis=axis, keepdims=True)
     values = np.exp(log_values - maximum)
     values /= np.sum(values, axis=axis, keepdims=True)
@@ -210,7 +210,7 @@ def _entropy_term(probability: np.ndarray, log_prior: np.ndarray | float) -> flo
 def _stable_unit_interval(key: object) -> float:
     digest = hashlib.blake2b(repr(key).encode("utf-8"), digest_size=8).digest()
     integer = int.from_bytes(digest, "little")
-    return (integer + 0.5) / float(2**64)
+    return (integer + 0.5) / float(2 ** 64)
 
 
 def _initial_logit(
@@ -289,11 +289,11 @@ def _complete_site_state_scores(
     panel: HardFounderPanel, log_emission: np.ndarray, observed: np.ndarray, pairs: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     complete = np.all(panel.called, axis=0)
-    usable = complete[None, :] & observed
+    usable = complete[None,:] & observed
     scores = np.zeros((log_emission.shape[0], pairs.shape[0]), dtype=np.float64)
     for state, (first, second) in enumerate(pairs):
         dosage = panel.alleles[first] + panel.alleles[second]
-        chosen = np.take_along_axis(log_emission, dosage[None, :, None], axis=2)[..., 0]
+        chosen = np.take_along_axis(log_emission, dosage[None,:, None], axis=2)[..., 0]
         scores[:, state] = np.sum(chosen * usable, axis=1)
     return scores, np.sum(usable, axis=1, dtype=np.int64)
 
@@ -404,8 +404,8 @@ def _fit_one_start(
 def fit_joint_block(
     panel: HardFounderPanel,
     genotype_evidence: np.ndarray,
-    observed: np.ndarray | None = None,
-    config: JointBlockConfig = JointBlockConfig(),
+    observed: np.ndarray | None=None,
+    config: JointBlockConfig=JointBlockConfig(),
 ) -> JointBlockFit:
     """Fit the bounded joint-allele variational model with deterministic starts."""
 
@@ -496,7 +496,7 @@ def fit_joint_block(
 
 def release_joint_calls(
     fit: JointBlockFit,
-    config: JointBlockConfig = JointBlockConfig(),
+    config: JointBlockConfig=JointBlockConfig(),
 ) -> ReleasedPanel:
     """Release conservative hard calls; posterior probabilities stay separate."""
 
@@ -505,11 +505,11 @@ def release_joint_calls(
     confidence = np.maximum(
         fit.marginal_alt_probability, 1.0 - fit.marginal_alt_probability
     )
-    cap_skipped = initially_unknown & ~fit.enumerated_sites[None, :]
+    cap_skipped = initially_unknown & ~fit.enumerated_sites[None,:]
     exchangeable_skipped = initially_unknown & fit.exchangeable_founders[:, None]
     eligible = (
         initially_unknown
-        & fit.enumerated_sites[None, :]
+        & fit.enumerated_sites[None,:]
         & ~exchangeable_skipped
         & (fit.effective_carriers[:, None] >= config.minimum_effective_carriers)
         & (confidence >= config.minimum_call_probability)
@@ -531,8 +531,8 @@ def release_joint_calls(
 def infer_from_complete_sites(
     panel: HardFounderPanel,
     genotype_evidence: np.ndarray,
-    observed: np.ndarray | None = None,
-    config: JointBlockConfig = JointBlockConfig(),
+    observed: np.ndarray | None=None,
+    config: JointBlockConfig=JointBlockConfig(),
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Coherent baseline posterior using the same complete sites for all states."""
 
@@ -580,7 +580,7 @@ def founder_profiles(
     )
 
 
-def deterministic_two_folds(n_samples: int, seed: int = 1729) -> np.ndarray:
+def deterministic_two_folds(n_samples: int, seed: int=1729) -> np.ndarray:
     if n_samples < 2:
         raise ValueError("two-fold cross-fitting requires at least two samples")
     rng = np.random.default_rng(seed)
@@ -593,10 +593,10 @@ def deterministic_two_folds(n_samples: int, seed: int = 1729) -> np.ndarray:
 def crossfit_block(
     panel: HardFounderPanel,
     genotype_evidence: np.ndarray,
-    observed: np.ndarray | None = None,
+    observed: np.ndarray | None=None,
     *,
-    fold_assignments: np.ndarray | None = None,
-    config: JointBlockConfig = JointBlockConfig(),
+    fold_assignments: np.ndarray | None=None,
+    config: JointBlockConfig=JointBlockConfig(),
 ) -> CrossFitBlock:
     """Learn calls on one fold and paint only the complementary held-out fold."""
 

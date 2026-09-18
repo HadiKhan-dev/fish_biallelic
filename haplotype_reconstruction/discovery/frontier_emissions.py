@@ -34,7 +34,7 @@ def prepare_frontier(H_batch, rr_i, rr_j):
     unique_pairs, pair_inverse = np.unique(pair_keys, return_inverse=True)
     n_pairs = len(unique_pairs)
     state_indices = np.empty((B, len(rr_i) + K), dtype=np.int64)
-    state_indices[:, :len(rr_i)] = pair_inverse.reshape(B, -1)
+    state_indices[:,:len(rr_i)] = pair_inverse.reshape(B, -1)
     state_indices[:, len(rr_i):] = row_inverse + n_pairs
     rows = np.ascontiguousarray(H_batch.reshape(B * K, L)[row_first])
     return (

@@ -1,4 +1,4 @@
-"""workflows / design for the canonical reconstruction pipeline."""
+"""Real-cross eligibility and chronology without assumed individual parentage."""
 from __future__ import annotations
 
 
@@ -46,13 +46,13 @@ def _eligible_parent_pair_template(
 ) -> np.ndarray:
     """Return the symmetric two-parent mask for one candidate cohort."""
     parent_samples = np.asarray(eligible_parent_samples, dtype=np.bool_)
-    pairs = np.logical_and(parent_samples[:, None], parent_samples[None, :])
+    pairs = np.logical_and(parent_samples[:, None], parent_samples[None,:])
     if require_opposite_sex_pair:
         female = sex == "F"
         male = sex == "M"
         pairs &= (
-            (female[:, None] & male[None, :])
-            | (male[:, None] & female[None, :])
+            (female[:, None] & male[None,:])
+            | (male[:, None] & female[None,:])
         )
     np.fill_diagonal(pairs, False)
     return np.ascontiguousarray(pairs, dtype=np.bool_)
@@ -111,7 +111,7 @@ def _explicit_direction_supported_parents(
     return np.ascontiguousarray(direction)
 
 
-def build_current_pedigree_config(*, bootstrap_replicates: int = 1000):
+def build_current_pedigree_config(*, bootstrap_replicates: int=1000):
     """Return the promoted ragged quadratic / strict-direction configuration."""
 
 
@@ -133,7 +133,7 @@ def build_tropheops_parent_eligibility(
     metadata: pd.DataFrame,
     sample_ids: Sequence[Any],
     *,
-    require_opposite_sex_pair: bool = True,
+    require_opposite_sex_pair: bool=True,
 ) -> dict[str, Any]:
     """Build the explicit exploratory F2 <- F1 candidate universe.
 
@@ -174,7 +174,7 @@ def build_tropheops_parent_eligibility(
     eligible_children = generation == "F2"
     eligible_parent_samples = generation == "F1"
     eligible_parents = (
-        eligible_children[:, None] & eligible_parent_samples[None, :]
+        eligible_children[:, None] & eligible_parent_samples[None,:]
     )
     np.fill_diagonal(eligible_parents, False)
 
@@ -189,7 +189,7 @@ def build_tropheops_parent_eligibility(
     )
     np.logical_and(
         eligible_children[:, None, None],
-        pair_template[None, :, :],
+        pair_template[None,:,:],
         out=eligible_pairs,
     )
 
@@ -237,7 +237,7 @@ def build_asac_parent_eligibility(
     metadata: pd.DataFrame,
     sample_ids: Sequence[Any],
     *,
-    require_opposite_sex_pair: bool = True,
+    require_opposite_sex_pair: bool=True,
 ) -> dict[str, Any]:
     """Build the exploratory AsAc F2<-F1 and F3<-F2 universe.
 
@@ -300,8 +300,8 @@ def build_asac_parent_eligibility(
     f2_parent_samples = generation == "F2"
     n_samples = len(ordered_ids)
     eligible_parents = np.zeros((n_samples, n_samples), dtype=np.bool_)
-    eligible_parents[f2_children, :] = f1_parent_samples
-    eligible_parents[f3_children, :] = f2_parent_samples
+    eligible_parents[f2_children,:] = f1_parent_samples
+    eligible_parents[f3_children,:] = f2_parent_samples
     np.fill_diagonal(eligible_parents, False)
 
     eligible_pairs = np.zeros(
@@ -317,8 +317,8 @@ def build_asac_parent_eligibility(
         sex,
         require_opposite_sex_pair=require_opposite_sex_pair,
     )
-    eligible_pairs[f2_children, :, :] = f1_pair_template
-    eligible_pairs[f3_children, :, :] = f2_pair_template
+    eligible_pairs[f2_children,:,:] = f1_pair_template
+    eligible_pairs[f3_children,:,:] = f2_pair_template
 
     policy_name = (
         ASAC_GENERATION_STEP_POLICY
@@ -454,7 +454,7 @@ def summarize_parent_eligibility(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def pedigree_stage_names(backend: str = PEDIGREE_BACKEND) -> tuple[str, str]:
+def pedigree_stage_names(backend: str=PEDIGREE_BACKEND) -> tuple[str, str]:
     """Return evidence preparation and genome-wide inference stages."""
     if backend != PEDIGREE_BACKEND:
         raise ValueError(f"unsupported pedigree backend identity {backend!r}")

@@ -14,11 +14,13 @@ One deletion round is deliberately bounded; this is not exhaustive count search.
 import time
 import numpy as np
 
-from . import founder_refinement as refiner, founder_exchanges, founder_scoring
-from . import chimera_scoring, paths, hierarchy, founder_count_bound
-from .founder_workspace import component_workspace, resolve_threads
-from ..core import haplotypes, parallel
-from ..discovery.objectives import compute_outer_bic_from_log_likelihood as bic
+from..import founder_refinement as refiner
+from.import exchanges as founder_exchanges, scoring as founder_scoring
+from..import chimera_scoring, paths, hierarchy
+from.import count_bound as founder_count_bound
+from.workspace import component_workspace, resolve_threads
+from ...core import haplotypes, parallel
+from ...discovery.objectives import compute_outer_bic_from_log_likelihood as bic
 
 
 class _ScopedCheckpoints:
@@ -112,14 +114,14 @@ def refine_components(prepared, components, neutral, sites, *, config,
                     initial_likelihood=initial_score, final_likelihood=initial_score,
                     initial_bic=initial_bic, final_bic=initial_bic,
                     complexity_cost=cost, selected_deletion=None, proposals=[],
-                    bound=bound_record, elapsed_seconds=time.perf_counter()-started)
+                    bound=bound_record, elapsed_seconds=time.perf_counter() - started)
                 refiner._save(checkpoints, token, dict(block=original, diagnostic=diagnostic))
                 results.append(original)
                 diagnostics.append(diagnostic)
                 continue
             order = np.arange(founders)
             best, best_bic, best_score, best_drop = original, initial_bic, initial_score, None
-            from . import founder_count_workers
+            from.import count_workers as founder_count_workers
             found_by_drop, pending = {}, []
             for dropped in order:
                 dropped = int(dropped)
@@ -143,7 +145,7 @@ def refine_components(prepared, components, neutral, sites, *, config,
                 dropped = int(dropped)
                 found = found_by_drop[dropped]
                 proposals.append(dict(dropped=dropped, bic=float(found["bic"]),
-                    bic_gain=initial_bic-float(found["bic"]),
+                    bic_gain=initial_bic - float(found["bic"]),
                     paired_changed=found["paired_changed"], runtime=found.get("runtime")))
                 if found["bic"] < best_bic - 1e-8:
                     best_rows, best_bic, best_score, best_drop = (
@@ -164,8 +166,8 @@ def refine_components(prepared, components, neutral, sites, *, config,
                     initial_bic=initial_bic, final_bic=initial_bic,
                     complexity_cost=cost, selected_deletion=None,
                     proposals=proposals, bound=bound_record,
-                    screen_multiple=multiple, deficit_multiple=deficit/cost,
-                    elapsed_seconds=time.perf_counter()-started)
+                    screen_multiple=multiple, deficit_multiple=deficit / cost,
+                    elapsed_seconds=time.perf_counter() - started)
                 refiner._save(checkpoints, token, dict(block=original, diagnostic=diagnostic))
                 results.append(original)
                 diagnostics.append(diagnostic)
@@ -199,7 +201,7 @@ def refine_components(prepared, components, neutral, sites, *, config,
                 complexity_cost=cost, initial_likelihood=initial_score,
                 final_likelihood=best_score, initial_bic=initial_bic, final_bic=best_bic,
                 selected_deletion=best_drop, proposals=proposals, bound=bound_record,
-                elapsed_seconds=time.perf_counter()-started)
+                elapsed_seconds=time.perf_counter() - started)
             refiner._save(checkpoints, token, dict(block=best, diagnostic=diagnostic))
             results.append(best)
             diagnostics.append(diagnostic)

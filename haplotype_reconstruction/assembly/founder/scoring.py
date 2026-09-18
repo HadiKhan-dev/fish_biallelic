@@ -175,25 +175,24 @@ def _count_panel_direct(haplotypes, evidence, complete, penalty, prepared=None):
             emission = (0.0, 0.0, 0.0) if neutral else _emission_at(
                 evidence, prepared, sample, site)
             previous = int(np.argmax(scores))
-            switched = scores[previous]-penalty
-            next_count = switches[previous]+1
+            switched = scores[previous] - penalty
+            next_count = switches[previous] + 1
             for state in range(len(first)):
                 if scores[state] < switched:
                     switches[state] = next_count
                 dosage = 0 if neutral else (
-                    haplotypes[first[state], site]+haplotypes[second[state], site])
-                value = 0.0 if neutral else emission[dosage]-center
-                scores[state] = max(scores[state], switched)+value
+                    haplotypes[first[state], site] + haplotypes[second[state], site])
+                value = 0.0 if neutral else emission[dosage] - center
+                scores[state] = max(scores[state], switched) + value
         state = int(np.argmax(scores))
         likelihood[sample], counts[sample] = scores[state], switches[state]
     return likelihood, counts
 
 
-
 def _dosage_table(haplotypes):
     """Prepare shared dosages only within the existing workspace RAM allowance."""
-    from .founder_site_kernels import prepare_dosages
-    from ..painting.model import available_process_memory_bytes
+    from.site_kernels import prepare_dosages
+    from ...painting.model import available_process_memory_bytes
     founders, sites = haplotypes.shape
     states = founders * (founders + 1) // 2
     available = available_process_memory_bytes()
@@ -205,7 +204,7 @@ def _dosage_table(haplotypes):
 
 def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
     """Canonical scores; share pair dosages without changing the observation model."""
-    from .founder_site_kernels import score_dosages
+    from.site_kernels import score_dosages
     dosages = _dosage_table(haplotypes)
     if dosages is None:
         return _score_panel_direct(haplotypes, evidence, complete, penalty, prepared)
@@ -215,7 +214,7 @@ def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
 
 def paint_panel(haplotypes, evidence, complete, penalty, prepared=None):
     """Canonical full-site traceback with compact switch storage when possible."""
-    from .founder_site_kernels import paint_dosages
+    from.site_kernels import paint_dosages
     founders = len(haplotypes)
     if founders * (founders + 1) // 2 > 64:
         return _paint_panel_direct(haplotypes, evidence, complete, penalty, prepared)
@@ -229,7 +228,7 @@ def paint_panel(haplotypes, evidence, complete, penalty, prepared=None):
 
 def score_and_switch_count(haplotypes, evidence, complete, penalty, prepared=None):
     """Canonical scores and switch counts, with unchanged tie handling."""
-    from .founder_site_kernels import count_switches
+    from.site_kernels import count_switches
     dosages = _dosage_table(haplotypes)
     if dosages is None:
         return _count_panel_direct(haplotypes, evidence, complete, penalty, prepared)

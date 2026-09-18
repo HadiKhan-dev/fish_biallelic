@@ -1,4 +1,4 @@
-"""assembly / chimera kernels for the canonical reconstruction pipeline."""
+"""Numba scoring kernels for broad panel selection and chimera proposals."""
 from __future__ import annotations
 
 
@@ -478,10 +478,12 @@ def _viterbi_traceback(tensor, penalty):
             current_scores[p] = tensor[s, p, 0]
         backptrs = np.zeros((n_bins, n_pairs), dtype=np.int32)
         for t in range(1, n_bins):
-            best_prev = -np.inf; best_prev_idx = 0
+            best_prev = -np.inf
+            best_prev_idx = 0
             for p in range(n_pairs):
                 if current_scores[p] > best_prev:
-                    best_prev = current_scores[p]; best_prev_idx = p
+                    best_prev = current_scores[p]
+                    best_prev_idx = p
             switch_base = best_prev - penalty
             new_scores = np.empty(n_pairs, dtype=np.float64)
             for p in range(n_pairs):
@@ -489,15 +491,19 @@ def _viterbi_traceback(tensor, penalty):
                 stay = current_scores[p] + emission
                 switch = switch_base + emission
                 if stay >= switch:
-                    new_scores[p] = stay; backptrs[t, p] = p
+                    new_scores[p] = stay
+                    backptrs[t, p] = p
                 else:
-                    new_scores[p] = switch; backptrs[t, p] = best_prev_idx
+                    new_scores[p] = switch
+                    backptrs[t, p] = best_prev_idx
             for p in range(n_pairs):
                 current_scores[p] = new_scores[p]
-        best_final = -np.inf; best_final_idx = 0
+        best_final = -np.inf
+        best_final_idx = 0
         for p in range(n_pairs):
             if current_scores[p] > best_final:
-                best_final = current_scores[p]; best_final_idx = p
+                best_final = current_scores[p]
+                best_final_idx = p
         sample_paths[s, n_bins - 1] = best_final_idx
         for t in range(n_bins - 1, 0, -1):
             sample_paths[s, t - 1] = backptrs[t, sample_paths[s, t]]
@@ -816,5 +822,3 @@ def _cheap_score_all_block_numba(bin_em, temp_haps, bm, n_haps_local):
                 total += cb
         hap_contribs[h] = total
     return hap_contribs
-
-

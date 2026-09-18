@@ -1,4 +1,4 @@
-"""pedigree / components for the canonical reconstruction pipeline."""
+"""Prepare component-local paintings and raw likelihoods for pedigree scoring."""
 from __future__ import annotations
 from haplotype_reconstruction import PACKAGE_ROOT
 
@@ -28,7 +28,14 @@ _EVIDENCE_SCORE_IDENTITY_SCHEMA = "t10-parent-state-score-identity-v1"
 _EVIDENCE_SCORE_CODE_VERSION = "component-local-parent-state-score-v1"
 
 
-_EVIDENCE_SCORE_CODE_FILES = ('pedigree/sources.py', 'pedigree/transmission.py', 'core/genetic_map.py', 'painting/model.py')
+_EVIDENCE_SCORE_CODE_FILES = (
+    'pedigree/sources.py',
+    'pedigree/transmission.py',
+    'pedigree/transmission_projection.py',
+    'pedigree/transmission_scoring.py',
+    'core/genetic_map.py',
+    'painting/model.py'
+)
 
 
 @dataclass(frozen=True)
@@ -572,7 +579,7 @@ def _identity_digest(value: Mapping[str, Any]) -> str:
 
 
 def stage10_evidence_scoring_code_identity(
-        digest_overrides: Mapping[str, str] | None = None,
+        digest_overrides: Mapping[str, str] | None=None,
 ) -> dict[str, Any]:
     """Return the code identity for evidence preparation and scoring only.
 
@@ -1066,7 +1073,7 @@ def _compact_ragged_model(
         marker_counts: np.ndarray,
 ) -> pedigree_sources.RaggedFounderModel:
     parts = [
-        founder_grid[:, block, :int(count)]
+        founder_grid[:, block,:int(count)]
         for block, count in enumerate(marker_counts)
     ]
     alleles = np.ascontiguousarray(np.concatenate(parts, axis=1))
@@ -1103,7 +1110,7 @@ def _selected_marker_grid(
                 dtype=np.int64,
             )
         marker_counts[block] = len(chosen)
-        selected[block, :len(chosen)] = chosen
+        selected[block,:len(chosen)] = chosen
     return selected, marker_counts
 
 
@@ -1163,7 +1170,7 @@ def _prepare_component(
         del source_gl, source_observed
     else:
         states = state.background_index + 1
-        if source_emissions.shape != (raw_gl.shape[0], states*(states+1)//2, len(centers)):
+        if source_emissions.shape != (raw_gl.shape[0], states * (states + 1) // 2, len(centers)):
             raise pedigree_models.PedigreeEvidenceError("cached T09 emissions have incompatible axes")
         source_emissions = painting_evidence.expand_symmetric_emissions(source_emissions, states)
         informative_counts = painting_evidence.count_component_information(
@@ -1204,7 +1211,7 @@ def _prepare_component(
         dtype=np.float64,
     )
     blocks, slots = np.nonzero(selected_mask)
-    compact_gl[:, blocks, slots, :] = raw_gl[:, raw_indices, :]
+    compact_gl[:, blocks, slots,:] = raw_gl[:, raw_indices,:]
     compact_observed_grid = np.zeros(
         (raw_gl.shape[0], len(centers), max_snps_per_bin), dtype=np.bool_
     )
@@ -1214,9 +1221,9 @@ def _prepare_component(
         | (compact_gl[..., 1] != compact_gl[..., 2])
     )
     real_slots = (
-        np.arange(max_snps_per_bin)[None, :] < marker_counts[:, None]
+        np.arange(max_snps_per_bin)[None,:] < marker_counts[:, None]
     )
-    if not np.any(nonuniform & real_slots[None, :, :]):
+    if not np.any(nonuniform & real_slots[None,:,:]):
         return None
 
     founder_grid = np.full(
@@ -1231,28 +1238,28 @@ def _prepare_component(
     labels = np.ascontiguousarray(np.transpose(label_grid, (0, 2, 1))).copy()
     direct_bin_track = np.transpose(direct, (0, 2, 1)).copy()
     informative_by_sample_bin = np.any(
-        nonuniform & real_slots[None, :, :], axis=2
+        nonuniform & real_slots[None,:,:], axis=2
     )
-    direct_bin_track &= informative_by_sample_bin[:, :, None]
+    direct_bin_track &= informative_by_sample_bin[:,:, None]
     direct_labels = labels.copy()
     direct_labels[~direct_bin_track] = -1
 
     safe_labels = np.maximum(labels, 0)
-    bin_axis = np.arange(len(centers))[None, :, None]
+    bin_axis = np.arange(len(centers))[None,:, None]
     stacked = np.empty(
         (raw_gl.shape[0], len(centers), 2, max_snps_per_bin),
         dtype=np.int8,
     )
     for track in range(2):
-        stacked[:, :, track, :] = founder_grid[
-            safe_labels[:, :, track], bin_axis[:, :, 0], :
+        stacked[:,:, track,:] = founder_grid[
+            safe_labels[:,:, track], bin_axis[:,:, 0],:
         ]
-        stacked[:, :, track, :][labels[:, :, track] < 0] = -1
-    jointly_valid = (stacked[:, :, 0] >= 0) & (stacked[:, :, 1] >= 0)
+        stacked[:,:, track,:][labels[:,:, track] < 0] = -1
+    jointly_valid = (stacked[:,:, 0] >= 0) & (stacked[:,:, 1] >= 0)
     hom = (
         ~np.any(jointly_valid, axis=2)
         | np.all(
-            ~jointly_valid | (stacked[:, :, 0] == stacked[:, :, 1]), axis=2
+            ~jointly_valid | (stacked[:,:, 0] == stacked[:,:, 1]), axis=2
         )
     )
     theta, switch_costs, stay_costs = core_genetic_map.poisson_switch_stay_terms(
@@ -1276,7 +1283,7 @@ def _prepare_component(
         ),
     )
     compact_genotype_likelihoods = np.ascontiguousarray(
-        compact_gl[:, blocks, slots, :]
+        compact_gl[:, blocks, slots,:]
     )
     compact_observed = np.ascontiguousarray(
         compact_observed_grid[:, blocks, slots]
@@ -1302,11 +1309,11 @@ def prepare_t09_chromosome_components(
         raw_sample_ids: Sequence[Any],
         *,
         contig: str,
-        recombination_rate: float = 1e-8,
-        max_snps_per_bin: int = 10,
-        markers_per_information_block: int = 100,
-        effective_markers_per_information_block: float = 1.0,
-        candidate_source_mode: str = pedigree_models.RAGGED_QUADRATIC_MODEL,
+        recombination_rate: float=1e-8,
+        max_snps_per_bin: int=10,
+        markers_per_information_block: int=100,
+        effective_markers_per_information_block: float=1.0,
+        candidate_source_mode: str=pedigree_models.RAGGED_QUADRATIC_MODEL,
         chromosome_map=None,
 ) -> PreparedChromosome:
     """Validate and prepare independently rooted component HMM inputs."""

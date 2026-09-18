@@ -16,14 +16,12 @@ import time
 import numpy as np
 from numba import njit, prange, set_num_threads, get_num_threads
 from numba.typed import List
-from . import founder_path_search as search, founder_sparse, founder_dual_short
-from . import founder_beam_kernels as kernels
-from .founder_beam import workspace, macro_proposals
-from .founder_candidates import completed_candidates
-from .founder_dual_search import canonical_score
-from .founder_packing import (
-    emission_arrays, packed_emissions, candidate_alphabet, short_models, reversed_models,
-)
+from.import path_search as search, sparse as founder_sparse, dual_short as founder_dual_short
+from.import beam_kernels as kernels
+from.beam import workspace, macro_proposals
+from.candidates import completed_candidates
+from.dual_search import canonical_score
+from.packing import emission_arrays, packed_emissions, candidate_alphabet, short_models, reversed_models
 
 @njit(cache=True, parallel=True, nogil=True)
 def relaxed_suffix(emissions, known, choices, penalty, start, stop, terminal,
@@ -63,10 +61,35 @@ def local_choices(emissions, incumbent, branch_cap):
 def excluded(upper, best):
     return upper + 1e-10 * max(1.0, abs(upper), abs(best)) <= best + 1e-06
 
-def proposals(models, known, incumbent, penalty, *, width=64, branch_cap=16, window=100, ranking='tie', thread_budget=None, statistics=None, background=None):
+def proposals(
+    models,
+    known,
+    incumbent,
+    penalty,
+    *,
+    width=64,
+    branch_cap=16,
+    window=100,
+    ranking='tie',
+    thread_budget=None,
+    statistics=None,
+    background=None
+):
     emissions = emission_arrays(models)
     if not short_models(models):
-        yield from macro_proposals(models, known, incumbent, penalty, width=width, branch_cap=branch_cap, window=window, ranking=ranking, thread_budget=thread_budget, statistics=statistics, background=background)
+        yield from macro_proposals(
+            models,
+            known,
+            incumbent,
+            penalty,
+            width=width,
+            branch_cap=branch_cap,
+            window=window,
+            ranking=ranking,
+            thread_budget=thread_budget,
+            statistics=statistics,
+            background=background
+        )
         return
     known = np.ascontiguousarray(known, np.int64)
     blocks = len(models)
@@ -84,11 +107,28 @@ def proposals(models, known, incumbent, penalty, *, width=64, branch_cap=16, win
 
     def task(start, budget):
         stop = min(blocks, start + window)
-        bound = founder_dual_short.window_suffix(*packed, known, choices, offsets, float(penalty), start, stop, np.ascontiguousarray(suffix[stop]), first, second)
+        bound = founder_dual_short.window_suffix(
+            *packed,
+            known,
+            choices,
+            offsets,
+            float(penalty),
+            start,
+            stop,
+            np.ascontiguousarray(suffix[stop]),
+            first,
+            second
+        )
         optimistic = float(np.max(prefix[blocks - start] + bound[0], axis=1).sum())
         if excluded(optimistic, initial):
             return dict(start=start, stop=stop, optimistic=optimistic, pruned=True)
-        dp, alternate, values, uppers, ancestry, rows = workspace(blocks, len(packed[0]), len(first), width, max_choices)
+        dp, alternate, values, uppers, ancestry, rows = workspace(
+            blocks,
+            len(packed[0]),
+            len(first),
+            width,
+            max_choices
+        )
         dp[0] = prefix[blocks - start]
         beams = 1
         aborted = False
@@ -97,10 +137,45 @@ def proposals(models, known, incumbent, penalty, *, width=64, branch_cap=16, win
         for begin in range(start, stop, 32):
             if budget is not None:
                 set_num_threads(budget())
-            dp, alternate, beams, scores, order, aborted, equivalent = kernels.chunk(*packed, known, choices, offsets, float(penalty), False, first, second, suffix, bound, True, start, initial, rank, begin, min(stop, begin + 32), dp, alternate, beams, width, values, uppers, ancestry, rows, trace_upper, trace_equivalent)
+            dp, alternate, beams, scores, order, aborted, equivalent = kernels.chunk(
+                *packed,
+                known,
+                choices,
+                offsets,
+                float(penalty),
+                False,
+                first,
+                second,
+                suffix,
+                bound,
+                True,
+                start,
+                initial,
+                rank,
+                begin,
+                min(stop, begin + 32),
+                dp,
+                alternate,
+                beams,
+                width,
+                values,
+                uppers,
+                ancestry,
+                rows,
+                trace_upper,
+                trace_equivalent
+            )
             if aborted:
                 break
-        record = dict(start=start, stop=stop, optimistic=optimistic, pruned=False, upper=trace_upper[start:stop], equivalent=trace_equivalent[start:stop], aborted=aborted)
+        record = dict(
+            start=start,
+            stop=stop,
+            optimistic=optimistic,
+            pruned=False,
+            upper=trace_upper[start:stop],
+            equivalent=trace_equivalent[start:stop],
+            aborted=aborted
+        )
         if not aborted:
             best = int(np.argmax(scores[order]))
             node = best
@@ -150,7 +225,7 @@ def solve(submodels, known, incumbent, penalty, *, branch_cap=16, reverse=False,
     models = submodels
     if reverse:
         models = reversed_models(submodels)
-        known = np.ascontiguousarray(known[:, ::-1])
+        known = np.ascontiguousarray(known[:,::-1])
         incumbent = incumbent[::-1].copy()
         if background is not None:
             background = background.reversed()

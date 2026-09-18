@@ -1,4 +1,4 @@
-"""assembly / chimera resolution for the canonical reconstruction pipeline."""
+"""Broad-search panel selection, swaps and chimera resolution."""
 from __future__ import annotations
 
 
@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 _CR_PROFILE = os.environ.get('BHD_CR_PROFILE', '') not in ('', '0', 'false', 'False')
 
 
-_CR_STACK_BYTES_BUDGET = 4 * 1024**3
+_CR_STACK_BYTES_BUDGET = 4 * 1024 ** 3
 
 
 def select_and_resolve(beam_results, fast_mesh, batch_blocks,
@@ -94,9 +94,15 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
 
 
     # --- Compute parameters ---
-    pen_sel = penalty_override if penalty_override is not None else assembly_chimera_scoring.compute_penalty(batch_blocks)
+    pen_sel = penalty_override if penalty_override is not None else assembly_chimera_scoring.compute_penalty(
+        batch_blocks
+    )
     spb = spb_override if spb_override is not None else assembly_chimera_scoring.compute_spb(batch_blocks)
-    batch_cc = cc_override if cc_override is not None else assembly_chimera_scoring.compute_cc(batch_blocks, num_samples, cc_scale)
+    batch_cc = cc_override if cc_override is not None else assembly_chimera_scoring.compute_cc(
+        batch_blocks,
+        num_samples,
+        cc_scale
+    )
 
     # --- env-gated coarse phase timing (no effect on results when off:
     # _cacc only mutates _cpt inside `if _crp`, and the report is gated) ---
@@ -123,7 +129,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         batch_blocks, global_probs, global_sites, spb,
         num_threads=num_threads,
     )
-    if _crp: _cacc('emission', _ct)
+    if _crp:
+        _cacc('emission', _ct)
     _ct = _time.perf_counter()
     total_bins = sum(e['n_bins'] for e in sub_em)
 
@@ -167,7 +174,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             padded = np.zeros(
                 (bin_em.shape[0], _max_n_haps, _max_n_haps, bin_em.shape[3]),
                 dtype=bin_em.dtype)
-            padded[:, :n_haps_b, :n_haps_b, :] = bin_em
+            padded[:,:n_haps_b,:n_haps_b,:] = bin_em
             _padded_bin_ems.append(padded)
             _n_padded += 1
     stacked_bin_em = np.concatenate(_padded_bin_ems, axis=-1)
@@ -182,7 +189,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         f"bin offset mismatch: cumulative={_off} total_bins={total_bins}")
     map_matrix_c = np.ascontiguousarray(map_matrix).astype(np.int64)
     del _padded_bin_ems
-    if _crp: _cacc('cr_setup_stack', _ct)
+    if _crp:
+        _cacc('cr_setup_stack', _ct)
     _ct = _time.perf_counter()
 
     # --- Local tensor builders ---
@@ -276,7 +284,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         num_threads=num_threads,
     )
 
-    if _crp: _cacc('warmstart', _ct)
+    if _crp:
+        _cacc('warmstart', _ct)
 
     # =========================================================================
     # STEP 1: Forward Selection (sample-chunked)
@@ -305,7 +314,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         # 2*cand_pos+1 cand pairs, far smaller than the n_pairs = K_next²
         # full grid, so this fits comfortably at production shapes.
         _ncp_s1 = 2 * (K_next - 1) + 1
-        _cand_bytes_s1 = num_samples * _ncp_s1 * total_bins * 4   # float32
+        _cand_bytes_s1 = num_samples * _ncp_s1 * total_bins * 4  # float32
         max_chunk = max(4, min(64,
             int(_CR_STACK_BYTES_BUDGET // max(1, _cand_bytes_s1))))
         # One sample pass when a single candidate's full-sample slab fits the
@@ -328,7 +337,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                 for ii in range(K_next - 1):
                     for jj in range(K_next - 1):
                         pos = ii * K_next + jj
-                        template[:, bin_off:bin_off + nb, pos] = bin_em[:, sel_haps[ii], sel_haps[jj], :]
+                        template[:, bin_off:bin_off + nb, pos] = bin_em[:, sel_haps[ii], sel_haps[jj],:]
                 bin_off += nb
         else:
             for b_i in range(len(sub_em)):
@@ -415,7 +424,11 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         del template
         core_parallel.malloc_trim()
         best_idx = max(all_scores, key=all_scores.get)
-        new_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(len(selected) + 1, all_scores[best_idx], batch_cc)
+        new_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(
+            len(selected) + 1,
+            all_scores[best_idx],
+            batch_cc
+        )
         if new_bic < current_best_bic:
             current_best_bic = new_bic
             selected.append(best_idx)
@@ -442,7 +455,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             # crashing).
             return []
 
-    if _crp: _cacc('step1_forward_select', _ct)
+    if _crp:
+        _cacc('step1_forward_select', _ct)
 
     # =========================================================================
     # OUTER LOOP: iterate Steps 2, 3, 4 to full convergence (max 3 rounds)
@@ -570,7 +584,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             # cand_sv stores only the 2*cand_pos+1 cand pairs, far smaller
             # than the n_pairs = K² full grid.
             _ncp = 2 * cand_pos + 1
-            _cand_bytes = num_samples * _ncp * total_bins * 4   # float32
+            _cand_bytes = num_samples * _ncp * total_bins * 4  # float32
             sc = max(4, min(64, int(_CR_STACK_BYTES_BUDGET
                                     // max(1, _cand_bytes))))
             _sc_eff = (num_samples if _cand_bytes <= _CR_STACK_BYTES_BUDGET
@@ -732,7 +746,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             # cand_sv stores only the 2*cand_pos+1 cand pairs, far smaller
             # than the n_pairs_r = K_result² full grid.
             _ncp = 2 * cand_pos + 1
-            _cand_bytes = num_samples * _ncp * total_bins * 4   # float32
+            _cand_bytes = num_samples * _ncp * total_bins * 4  # float32
             sc = max(4, min(64, int(_CR_STACK_BYTES_BUDGET
                                     // max(1, _cand_bytes))))
             _sc_eff = (num_samples if _cand_bytes <= _CR_STACK_BYTES_BUDGET
@@ -844,7 +858,11 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
 
                         for j_idx, ci in enumerate(chunk_cands):
                             new_score = float(accum_scores[j_idx])
-                            new_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(K_result, new_score, batch_cc)
+                            new_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(
+                                K_result,
+                                new_score,
+                                batch_cc
+                            )
                             if new_bic < best_bic - 1e-4:
                                 best_bic = new_bic
                                 best_2for1 = (selected[i], selected[j], ci)
@@ -922,9 +940,14 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             best_rem, best_bic = None, cur_bic
             for idx in selected:
                 trial = [x for x in selected if x != idx]
-                trial_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(k_now - 1, score_subset(trial), batch_cc)
+                trial_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(
+                    k_now - 1,
+                    score_subset(trial),
+                    batch_cc
+                )
                 if trial_bic < best_bic:
-                    best_bic = trial_bic; best_rem = idx
+                    best_bic = trial_bic
+                    best_rem = idx
             if best_rem is not None:
                 selected.remove(best_rem)
             else:
@@ -1036,7 +1059,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             core_parallel.malloc_trim()
 
             # 4e. Pick best improving option
-            best_option = None; best_gain = 0.0
+            best_option = None
+            best_gain = 0.0
             for group in candidate_groups:
                 gs, ge = group['option_range']
                 for i in range(gs, ge):
@@ -1065,7 +1089,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                         k_now - 1, assembly_chimera_scoring.score_path_set(trial, sub_em, pen_sel, num_samples,
                                                  num_threads=num_threads), batch_cc)
                     if trial_bic < best_bic:
-                        best_bic = trial_bic; best_rem = i
+                        best_bic = trial_bic
+                        best_rem = i
                 if best_rem is not None:
                     current_paths = (current_paths[:best_rem]
                                     + current_paths[best_rem + 1:])
@@ -1127,7 +1152,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
         for _bi in selected
     ]
 
-    if _crp: _cacc('step2_3_4_loop', _ct)
+    if _crp:
+        _cacc('step2_3_4_loop', _ct)
     _ct = _time.perf_counter()
     # =========================================================================
     # STEP 5: Painter-Guided Escape (V10 + V11)
@@ -1179,7 +1205,11 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             _step5_cur_ll = assembly_chimera_scoring.score_path_set(
                 current_paths, sub_em, pen_sel, num_samples,
                 num_threads=num_threads)
-            _step5_cur_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(K_s5, _step5_cur_ll, batch_cc)
+            _step5_cur_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(
+                K_s5,
+                _step5_cur_ll,
+                batch_cc
+            )
 
             _step5_best_bic = _step5_cur_bic
             _step5_best_paths = current_paths
@@ -1216,7 +1246,11 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     _step5_new_ll = assembly_chimera_scoring.score_path_set(
                         _step5_new_paths, sub_em, pen_sel, num_samples,
                         num_threads=num_threads)
-                    _step5_new_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(K_s5, _step5_new_ll, batch_cc)
+                    _step5_new_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(
+                        K_s5,
+                        _step5_new_ll,
+                        batch_cc
+                    )
                     _step5_n_evals += 1
                     if _step5_new_bic < _step5_best_bic:
                         _step5_best_bic = _step5_new_bic
@@ -1236,13 +1270,17 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
                     if np.array_equal(_step5_sig_v11, np.arange(K_s5)):
                         continue
                     if np.array_equal(_step5_sig_v11, _step5_sigma_v10):
-                        continue              # already V10-evaluated
+                        continue  # already V10-evaluated
                     _step5_new_paths = assembly_chimera_scoring._step5_apply_sigma(
                         current_paths, _step5_sig_v11, _step5_sb)
                     _step5_new_ll = assembly_chimera_scoring.score_path_set(
                         _step5_new_paths, sub_em, pen_sel, num_samples,
                         num_threads=num_threads)
-                    _step5_new_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(K_s5, _step5_new_ll, batch_cc)
+                    _step5_new_bic = discovery_objectives.compute_outer_bic_from_log_likelihood(
+                        K_s5,
+                        _step5_new_ll,
+                        batch_cc
+                    )
                     _step5_n_evals += 1
                     if _step5_new_bic < _step5_best_bic:
                         _step5_best_bic = _step5_new_bic
@@ -1263,7 +1301,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks,
             pass
 
 
-    if _crp: _cacc('step5_escape', _ct)
+    if _crp:
+        _cacc('step5_escape', _ct)
     if _crp:
         try:
             _tot = sum(v[0] for v in _cpt.values())

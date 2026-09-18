@@ -236,7 +236,7 @@ def _solve_cavity_site(
             elbo += q_first * (1.0 - q_second) * v10
             elbo += q_first * q_second * v11
         candidate_elbo[start_index] = elbo
-        candidate_q[start_index, :] = q
+        candidate_q[start_index,:] = q
 
     any_converged = False
     best_start = 0
@@ -290,7 +290,7 @@ def _solve_cavity_site(
         )
     if best_start != 0:
         heldout_alternate_wins += 1
-    q[:] = candidate_q[best_start, :]
+    q[:] = candidate_q[best_start,:]
 
     return (q, heldout_iterations, heldout_not_converged, n_zero_support,
             heldout_alternate_wins, heldout_initialization_spread,

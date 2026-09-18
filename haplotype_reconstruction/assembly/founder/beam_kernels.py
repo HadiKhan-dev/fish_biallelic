@@ -8,10 +8,31 @@ floating ties changed downstream founder paths/counts in validation.
 """
 import numpy as np
 from numba import njit, prange
-from . import founder_sparse
+from.import sparse as founder_sparse
 
 @njit(cache=True, parallel=True, nogil=True)
-def score(data, base, size, width, known, block, choices, begin, end, penalty, reverse, first, second, dp, beams, flank, upper_flank, two_flanks, values, uppers):
+def score(
+    data,
+    base,
+    size,
+    width,
+    known,
+    block,
+    choices,
+    begin,
+    end,
+    penalty,
+    reverse,
+    first,
+    second,
+    dp,
+    beams,
+    flank,
+    upper_flank,
+    two_flanks,
+    values,
+    uppers
+):
     focal, samples = (len(known), len(data))
     affected = np.flatnonzero(second == focal)
     s0, s1 = (width - 1, 0) if reverse else (0, width - 1)
@@ -83,7 +104,25 @@ def score(data, base, size, width, known, block, choices, begin, end, penalty, r
                     uppers[sample, index] = upvalue
 
 @njit(cache=True, parallel=True, nogil=True)
-def retain(data, base, size, bins, known, block, choices, begin, branches, penalty, reverse, first, second, dp, order, count, output):
+def retain(
+    data,
+    base,
+    size,
+    bins,
+    known,
+    block,
+    choices,
+    begin,
+    branches,
+    penalty,
+    reverse,
+    first,
+    second,
+    dp,
+    order,
+    count,
+    output
+):
     samples, states = (len(data), len(first))
     focal = len(known)
     addresses = np.empty((branches, states), np.int64)
@@ -128,7 +167,37 @@ def ordered(scores, uppers, ranking, width=0):
 
 
 @njit(cache=True, nogil=True)
-def chunk(data, bases, sizes, bins, known, choices, offsets, penalty, reverse, first, second, suffix, upper_suffix, two_flanks, upper_start, best_seen, ranking, start, stop, dp, alternate, beams, beam_width, values, uppers, ancestry, local_rows, trace_upper, trace_equivalent):
+def chunk(
+    data,
+    bases,
+    sizes,
+    bins,
+    known,
+    choices,
+    offsets,
+    penalty,
+    reverse,
+    first,
+    second,
+    suffix,
+    upper_suffix,
+    two_flanks,
+    upper_start,
+    best_seen,
+    ranking,
+    start,
+    stop,
+    dp,
+    alternate,
+    beams,
+    beam_width,
+    values,
+    uppers,
+    ancestry,
+    local_rows,
+    trace_upper,
+    trace_equivalent
+):
     last_scores = np.empty(0)
     last_order = np.empty(0, np.int64)
     equivalent = True
@@ -138,7 +207,28 @@ def chunk(data, bases, sizes, bins, known, choices, offsets, penalty, reverse, f
         branches = end - begin
         flank = suffix[step + 1]
         upper_flank = upper_suffix[step - upper_start + 1] if two_flanks else flank
-        score(data, bases[block], sizes[block], bins[block], known, block, choices, begin, end, penalty, reverse, first, second, dp, beams, flank, upper_flank, two_flanks, values, uppers)
+        score(
+            data,
+            bases[block],
+            sizes[block],
+            bins[block],
+            known,
+            block,
+            choices,
+            begin,
+            end,
+            penalty,
+            reverse,
+            first,
+            second,
+            dp,
+            beams,
+            flank,
+            upper_flank,
+            two_flanks,
+            values,
+            uppers
+        )
         length = beams * branches
         scores = np.zeros(length)
         upper = np.zeros(length)
@@ -165,7 +255,25 @@ def chunk(data, bases, sizes, bins, known, choices, offsets, penalty, reverse, f
         for i in range(count):
             ancestry[step, i] = order[i] // branches
             local_rows[step, i] = choices[begin + order[i] % branches]
-        retain(data, bases[block], sizes[block], bins[block], known, block, choices, begin, branches, penalty, reverse, first, second, dp, order, count, alternate)
+        retain(
+            data,
+            bases[block],
+            sizes[block],
+            bins[block],
+            known,
+            block,
+            choices,
+            begin,
+            branches,
+            penalty,
+            reverse,
+            first,
+            second,
+            dp,
+            order,
+            count,
+            alternate
+        )
         dp, alternate = (alternate, dp)
         beams = count
         last_scores = scores
@@ -173,13 +281,85 @@ def chunk(data, bases, sizes, bins, known, choices, offsets, penalty, reverse, f
     return (dp, alternate, beams, last_scores, last_order, False, equivalent)
 
 @njit(cache=True, nogil=True)
-def branch_scores(dp, emission, known, choices, penalty, reverse, suffix, upper_suffix, first, second, two_flanks, prepared=None, mapping=None, focal_index=0):
+def branch_scores(
+    dp,
+    emission,
+    known,
+    choices,
+    penalty,
+    reverse,
+    suffix,
+    upper_suffix,
+    first,
+    second,
+    two_flanks,
+    prepared=None,
+    mapping=None,
+    focal_index=0
+):
     if emission.shape[3] <= 2:
-        return founder_sparse._score_short_branches(dp, emission, known, choices, penalty, reverse, suffix, upper_suffix, first, second, two_flanks)
-    return founder_sparse._score_general_branches(dp, emission, known, choices, penalty, reverse, suffix, upper_suffix, first, second, two_flanks, prepared, mapping, focal_index)
+        return founder_sparse._score_short_branches(
+            dp,
+            emission,
+            known,
+            choices,
+            penalty,
+            reverse,
+            suffix,
+            upper_suffix,
+            first,
+            second,
+            two_flanks
+        )
+    return founder_sparse._score_general_branches(
+        dp,
+        emission,
+        known,
+        choices,
+        penalty,
+        reverse,
+        suffix,
+        upper_suffix,
+        first,
+        second,
+        two_flanks,
+        prepared,
+        mapping,
+        focal_index
+    )
 
 @njit(cache=True, nogil=True)
-def macro_chunk(emissions, data, bases, sizes, bins, known, choices, offsets, penalty, reverse, first, second, suffix, upper_suffix, two_flanks, upper_start, best_seen, ranking, start, stop, dp, alternate, beams, width, ancestry, rows, prepared=None, mapping=None, focal=0):
+def macro_chunk(
+    emissions,
+    data,
+    bases,
+    sizes,
+    bins,
+    known,
+    choices,
+    offsets,
+    penalty,
+    reverse,
+    first,
+    second,
+    suffix,
+    upper_suffix,
+    two_flanks,
+    upper_start,
+    best_seen,
+    ranking,
+    start,
+    stop,
+    dp,
+    alternate,
+    beams,
+    width,
+    ancestry,
+    rows,
+    prepared=None,
+    mapping=None,
+    focal=0
+):
     scores = np.empty(0)
     order = np.empty(0, np.int64)
     equivalent = True
@@ -190,9 +370,36 @@ def macro_chunk(emissions, data, bases, sizes, bins, known, choices, offsets, pe
         flank = suffix[step + 1]
         bound = upper_suffix[step - upper_start + 1] if two_flanks else flank
         if prepared is None:
-            scores, upper = branch_scores(dp[:beams], emissions[block], np.ascontiguousarray(known[:, block]), choices[begin:end], penalty, reverse, flank, bound, first, second, two_flanks)
+            scores, upper = branch_scores(
+                dp[:beams],
+                emissions[block],
+                np.ascontiguousarray(known[:, block]),
+                choices[begin:end],
+                penalty,
+                reverse,
+                flank,
+                bound,
+                first,
+                second,
+                two_flanks
+            )
         else:
-            scores, upper = branch_scores(dp[:beams], emissions[block], np.ascontiguousarray(known[:, block]), choices[begin:end], penalty, reverse, flank, bound, first, second, two_flanks, prepared[block], mapping, focal)
+            scores, upper = branch_scores(
+                dp[:beams],
+                emissions[block],
+                np.ascontiguousarray(known[:, block]),
+                choices[begin:end],
+                penalty,
+                reverse,
+                flank,
+                bound,
+                first,
+                second,
+                two_flanks,
+                prepared[block],
+                mapping,
+                focal
+            )
         if two_flanks:
             remaining = np.max(upper)
             margin = 1e-10 * max(1.0, abs(remaining), abs(best_seen))
@@ -208,7 +415,25 @@ def macro_chunk(emissions, data, bases, sizes, bins, known, choices, offsets, pe
         for i in range(len(order)):
             ancestry[step, i] = order[i] // branches
             rows[step, i] = choices[begin + order[i] % branches]
-        retain(data, bases[block], sizes[block], bins[block], known, block, choices, begin, branches, penalty, reverse, first, second, dp, order, len(order), alternate)
+        retain(
+            data,
+            bases[block],
+            sizes[block],
+            bins[block],
+            known,
+            block,
+            choices,
+            begin,
+            branches,
+            penalty,
+            reverse,
+            first,
+            second,
+            dp,
+            order,
+            len(order),
+            alternate
+        )
         dp, alternate = (alternate, dp)
         beams = len(order)
     return (dp, alternate, beams, scores, order, False, equivalent)

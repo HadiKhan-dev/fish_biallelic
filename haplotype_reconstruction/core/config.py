@@ -1,4 +1,4 @@
-"""core / config for the canonical reconstruction pipeline."""
+"""Shared scientific constants; stage-specific settings live beside their models."""
 from __future__ import annotations
 
 
@@ -26,5 +26,3 @@ DEFAULT_SOFT_SEED_MIN_CLUSTER_SIZE = 3
 
 
 CANDIDATE_DEDUP_HAMMING_PERCENT = 0.5
-
-

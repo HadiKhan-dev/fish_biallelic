@@ -12,10 +12,8 @@ It is neither a global assembly certificate nor a biological confidence score.
 import time
 import numpy as np
 from numba import njit, prange, get_num_threads, set_num_threads
-from . import founder_sparse, founder_dual_short
-from .founder_packing import (
-    emission_arrays, score_rows, packed_emissions, candidate_alphabet, short_models,
-)
+from.import sparse as founder_sparse, dual_short as founder_dual_short
+from.packing import emission_arrays, score_rows, packed_emissions, candidate_alphabet, short_models
 _COORDINATE_THREADS = 8
 
 
@@ -95,7 +93,7 @@ def coordinate_sweep(emissions, known, incumbent, choices, offsets, messages,
 def residual_correction(residual, offsets):
     result = 0.0
     for block in range(len(offsets) - 1):
-        result += np.min(residual[offsets[block]:offsets[block+1]])
+        result += np.min(residual[offsets[block]:offsets[block + 1]])
     return result
 
 

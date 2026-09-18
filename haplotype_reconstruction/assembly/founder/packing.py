@@ -73,7 +73,7 @@ def reversed_models(models):
     def build():
         return PreparedModels([
             dict(model, bin_emissions=np.ascontiguousarray(
-                model["bin_emissions"][:, :, :, ::-1]))
+                model["bin_emissions"][:,:,:,::-1]))
             for model in models[::-1]
         ])
 
@@ -164,7 +164,7 @@ def score_rows(models, selected, penalty):
     value = float(score_selected(*packed_emissions(models), selected, penalty).sum())
     # Small memory-only caps, not proposal/search budgets. Duplicate concurrent
     # evaluations are harmless; never serialize their numerical kernels.
-    limit = 8 * 1024**2
+    limit = 8 * 1024 ** 2
     if len(key[-1]) <= limit:
         with models._pack_lock:
             if key not in models._scores:
@@ -185,7 +185,7 @@ def pack_selected(emissions, selected, offsets, first, second):
         values = emissions[block]
         for site in range(values.shape[3]):
             for state in range(len(first)):
-                result[sample, offsets[block]+site, state] = values[
+                result[sample, offsets[block] + site, state] = values[
                     sample, selected[first[state], block], selected[second[state], block], site]
     return result
 
@@ -210,10 +210,10 @@ def gather_macro(emissions, groups, rows_by_group):
         for block in range(start, stop):
             value = emissions[block]
             for a in range(len(rows)):
-                aa = rows[a, block-start]
+                aa = rows[a, block - start]
                 for b in range(len(rows)):
-                    bb = rows[b, block-start]
+                    bb = rows[b, block - start]
                     for site in range(value.shape[3]):
-                        output[sample, a, b, offset+site] = value[sample, aa, bb, site]
+                        output[sample, a, b, offset + site] = value[sample, aa, bb, site]
             offset += value.shape[3]
     return outputs

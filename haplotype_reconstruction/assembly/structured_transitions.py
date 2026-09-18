@@ -43,7 +43,7 @@ class StructuredTransitionConfig:
 
 
 def configured_transition():
-    from ..core.environment import assembly_transition_model
+    from..core.environment import assembly_transition_model
     return StructuredTransitionConfig() if assembly_transition_model() == "structured" else None
 
 
@@ -60,9 +60,9 @@ class StructuredTransition:
         return len(self.log_source_background), len(self.log_destination)
 
     def dense(self):
-        result = np.exp(self.log_source_background[:, None] + self.log_destination[None, :])
+        result = np.exp(self.log_source_background[:, None] + self.log_destination[None,:])
         for source in range(self.shape[0]):
-            lo, hi = self.offsets[source:source+2]
+            lo, hi = self.offsets[source:source + 2]
             result[source, self.destinations[lo:hi]] += np.exp(self.log_specific[lo:hi])
         return result
 
@@ -92,7 +92,7 @@ def _transpose_apply(values, offsets, destinations, specific, source_bg, destina
             result[target, column] = destination_bg[target] + background
         for source in range(left):
             value = values[source, column]
-            for edge in range(offsets[source], offsets[source+1]):
+            for edge in range(offsets[source], offsets[source + 1]):
                 target = destinations[edge]
                 result[target, column] = np.logaddexp(
                     result[target, column], specific[edge] + value)
@@ -102,7 +102,7 @@ def _transpose_apply(values, offsets, destinations, specific, source_bg, destina
 @njit(cache=True, parallel=True)
 def _propagate(scores, offsets, destinations, specific, source_bg, destination_bg):
     left, right = len(source_bg), len(destination_bg)
-    result = np.empty((len(scores), right*right))
+    result = np.empty((len(scores), right * right))
     for sample in prange(len(scores)):
         matrix = scores[sample].reshape((left, left))
         first = _transpose_apply(matrix, offsets, destinations, specific, source_bg, destination_bg)
@@ -112,9 +112,9 @@ def _propagate(scores, offsets, destinations, specific, source_bg, destination_b
 
 
 def propagate(scores, transition):
-    safe_background=(np.min(transition.log_source_background)
-                     +np.min(transition.log_destination)>-100.)
-    kernel=_propagate_probability if safe_background else _propagate
+    safe_background = (np.min(transition.log_source_background)
+                     +np.min(transition.log_destination) > -100.)
+    kernel = _propagate_probability if safe_background else _propagate
     return kernel(np.ascontiguousarray(scores), transition.offsets,
         transition.destinations, transition.log_specific,
         transition.log_source_background, transition.log_destination)
@@ -159,7 +159,7 @@ def _statistics(forward, backward, offsets, destinations, specific, source_bg, d
                 z = np.logaddexp(z, predicted[first, second] + b[first, second])
         log_normalizer[sample] = z
         for first in range(left):
-            for edge in range(offsets[first], offsets[first+1]):
+            for edge in range(offsets[first], offsets[first + 1]):
                 second = destinations[edge]
                 derivative = -np.inf
                 for partner in range(right):
@@ -186,59 +186,70 @@ def _statistics(forward, backward, offsets, destinations, specific, source_bg, d
 @njit(cache=True)
 def _right_apply_probability(a, offsets, destinations, specific, source_bg, destination_bg):
     """A @ T with a sparse accumulation and one outer product."""
-    left=len(source_bg);right=len(destination_bg)
-    background=a @ source_bg
-    result=background[:,None]*destination_bg[None,:]
+    left = len(source_bg)
+    right = len(destination_bg)
+    background = a @ source_bg
+    result = background[:, None] * destination_bg[None,:]
     for source in range(left):
-        for edge in range(offsets[source],offsets[source+1]):
-            target=destinations[edge]
+        for edge in range(offsets[source], offsets[source + 1]):
+            target = destinations[edge]
             for row in range(a.shape[0]):
-                result[row,target]+=a[row,source]*specific[edge]
+                result[row, target] += a[row, source] * specific[edge]
     return result
 
 
-@njit(cache=True,parallel=True)
-def _propagate_probability(scores,offsets,destinations,log_specific,log_u,log_q):
-    samples,left,right=len(scores),len(log_u),len(log_q)
-    specific=np.exp(log_specific);u=np.exp(log_u);q=np.exp(log_q)
-    result=np.empty((samples,right*right))
+@njit(cache=True, parallel=True)
+def _propagate_probability(scores, offsets, destinations, log_specific, log_u, log_q):
+    samples, left, right = len(scores), len(log_u), len(log_q)
+    specific = np.exp(log_specific)
+    u = np.exp(log_u)
+    q = np.exp(log_q)
+    result = np.empty((samples, right * right))
     for sample in prange(samples):
-        shift=np.max(scores[sample])
-        a=np.exp(scores[sample]-shift).reshape((left,left))
-        first=_right_apply_probability(a,offsets,destinations,specific,u,q)
-        second=_right_apply_probability(first.T,offsets,destinations,specific,u,q).T
-        result[sample]=np.log(second).flatten()+shift
+        shift = np.max(scores[sample])
+        a = np.exp(scores[sample] - shift).reshape((left, left))
+        first = _right_apply_probability(a, offsets, destinations, specific, u, q)
+        second = _right_apply_probability(first.T, offsets, destinations, specific, u, q).T
+        result[sample] = np.log(second).flatten() + shift
     return result
 
 
-@njit(cache=True,parallel=True)
-def _statistics_probability(forward,backward,offsets,destinations,log_specific,log_u,log_q):
+@njit(cache=True, parallel=True)
+def _statistics_probability(forward, backward, offsets, destinations, log_specific, log_u, log_q):
     """Scaled positive contractions; no dense matrix-matrix products."""
-    samples,left,right=len(forward),len(log_u),len(log_q)
-    specific=np.exp(log_specific);bg=np.exp(log_u);q=np.exp(log_q)
-    edges=np.empty((samples,len(specific)))
-    source=np.empty((samples,left));target=np.empty((samples,right));zs=np.empty(samples)
+    samples, left, right = len(forward), len(log_u), len(log_q)
+    specific = np.exp(log_specific)
+    bg = np.exp(log_u)
+    q = np.exp(log_q)
+    edges = np.empty((samples, len(specific)))
+    source = np.empty((samples, left))
+    target = np.empty((samples, right))
+    zs = np.empty(samples)
     for sample in prange(samples):
-        ashift=np.max(forward[sample]);bshift=np.max(backward[sample])
-        a=np.exp(forward[sample]-ashift).reshape((left,left))
-        b=np.exp(backward[sample]-bshift).reshape((right,right))
-        m=_right_apply_probability(a,offsets,destinations,specific,bg,q)
-        u=_right_apply_probability(a.T,offsets,destinations,specific,bg,q)
-        source1=m @ (b.T @ q);source2=u @ (b @ q)
-        z=np.dot(bg,source1)
+        ashift = np.max(forward[sample])
+        bshift = np.max(backward[sample])
+        a = np.exp(forward[sample] - ashift).reshape((left, left))
+        b = np.exp(backward[sample] - bshift).reshape((right, right))
+        m = _right_apply_probability(a, offsets, destinations, specific, bg, q)
+        u = _right_apply_probability(a.T, offsets, destinations, specific, bg, q)
+        source1 = m @ (b.T @ q)
+        source2 = u @ (b @ q)
+        z = np.dot(bg, source1)
         for first in range(left):
-            for edge in range(offsets[first],offsets[first+1]):
-                second=destinations[edge];w1=0.;w2=0.
+            for edge in range(offsets[first], offsets[first + 1]):
+                second = destinations[edge]
+                w1 = 0.
+                w2 = 0.
                 for partner in range(right):
-                    w1+=m[first,partner]*b[second,partner]
-                    w2+=u[first,partner]*b[partner,second]
-                edges[sample,edge]=specific[edge]*(w1+w2)
-                z+=specific[edge]*w1
-        edges[sample]/=z
-        source[sample]=bg*(source1+source2)/z
-        target[sample]=q*(b @ (m.T @ bg)+b.T @ (u.T @ bg))/z
-        zs[sample]=math.log(z)+ashift+bshift
-    return edges,source,target,zs
+                    w1 += m[first, partner] * b[second, partner]
+                    w2 += u[first, partner] * b[partner, second]
+                edges[sample, edge] = specific[edge] * (w1 + w2)
+                z += specific[edge] * w1
+        edges[sample] /= z
+        source[sample] = bg * (source1 + source2) / z
+        target[sample] = q * (b @ (m.T @ bg) + b.T @ (u.T @ bg)) / z
+        zs[sample] = math.log(z) + ashift + bshift
+    return edges, source, target, zs
 
 
 def sufficient_statistics(forward, backward, transition, *, per_sample=False):
@@ -246,9 +257,9 @@ def sufficient_statistics(forward, backward, transition, *, per_sample=False):
     # Underflowed A/B terms (< exp(-745)) cannot contribute materially.
     # If the positive background becomes smaller, use the log-domain
     # structured kernel: both routes retain the same near-quadratic bound.
-    safe_background=(np.min(transition.log_source_background)
-                     +np.min(transition.log_destination)>-100.)
-    kernel=_statistics_probability if safe_background else _statistics
+    safe_background = (np.min(transition.log_source_background)
+                     +np.min(transition.log_destination) > -100.)
+    kernel = _statistics_probability if safe_background else _statistics
     values = kernel(np.ascontiguousarray(forward), np.ascontiguousarray(backward),
         transition.offsets, transition.destinations, transition.log_specific,
         transition.log_source_background, transition.log_destination)
@@ -276,16 +287,16 @@ def initialize(left_scores, right_scores, config=StructuredTransitionConfig()):
     a, b = _homologue_marginals(left_scores), _homologue_marginals(right_scores)
     left, right = a.shape[1], b.shape[1]
     ac, bc = a - a.mean(axis=0), b - b.mean(axis=0)
-    scale = np.sqrt(np.sum(ac*ac, axis=0)[:, None] * np.sum(bc*bc, axis=0)[None, :])
+    scale = np.sqrt(np.sum(ac * ac, axis=0)[:, None] * np.sum(bc * bc, axis=0)[None,:])
     association = np.divide(ac.T @ bc, scale, out=np.zeros((left, right)), where=scale > 0)
     degree = config.degree(right)
-    destinations = np.argsort(-association, axis=1, kind="stable")[:, :degree]
+    destinations = np.argsort(-association, axis=1, kind="stable")[:,:degree]
     destinations.sort(axis=1)
     q = (b.sum(axis=0) + config.destination_prior_strength / right)
     q /= q.sum()
-    return StructuredTransition(np.arange(left+1, dtype=np.int64)*degree,
+    return StructuredTransition(np.arange(left + 1, dtype=np.int64) * degree,
         np.ascontiguousarray(destinations.ravel(), dtype=np.int64),
-        np.full(left*degree, math.log(config.initial_specific_mass / degree)),
+        np.full(left * degree, math.log(config.initial_specific_mass / degree)),
         np.full(left, math.log1p(-config.initial_specific_mass)), np.log(q))
 
 
@@ -301,20 +312,20 @@ def update(transition, statistics, config=StructuredTransitionConfig(), learning
     background = np.empty_like(source)
     row_mass = np.empty_like(source)
     for first in range(transition.shape[0]):
-        lo, hi = transition.offsets[first:first+2]
-        prior_edge = config.row_prior_strength * config.prior_specific_mass / (hi-lo)
+        lo, hi = transition.offsets[first:first + 2]
+        prior_edge = config.row_prior_strength * config.prior_specific_mass / (hi - lo)
         row = edges[lo:hi] + prior_edge
-        bg = source[first] + config.row_prior_strength * (1-config.prior_specific_mass)
+        bg = source[first] + config.row_prior_strength * (1 - config.prior_specific_mass)
         row_mass[first] = row.sum() + bg
         mass = max(config.minimum_background_mass, bg / row_mass[first])
-        specific[lo:hi] = (1-mass) * row / row.sum()
+        specific[lo:hi] = (1 - mass) * row / row.sum()
         background[first] = mass
     q = target + config.destination_prior_strength / len(target)
     q /= q.sum()
-    specific = (1-learning_rate)*np.exp(transition.log_specific) + learning_rate*specific
-    background = ((1-learning_rate)*np.exp(transition.log_source_background)
-                  + learning_rate*background)
-    q = (1-learning_rate)*np.exp(transition.log_destination) + learning_rate*q
+    specific = (1 - learning_rate) * np.exp(transition.log_specific) + learning_rate * specific
+    background = ((1 - learning_rate) * np.exp(transition.log_source_background)
+                  + learning_rate * background)
+    q = (1 - learning_rate) * np.exp(transition.log_destination) + learning_rate * q
     return StructuredTransition(transition.offsets, transition.destinations,
         np.log(specific), np.log(background), np.log(q)), row_mass
 
@@ -325,7 +336,7 @@ def export_mesh(transitions, row_masses, hap_keys, gap):
         second = first + gap
         dense = transition.dense()
         joint = row_masses[first][:, None] * dense
-        reverse = (joint / joint.sum(axis=0)[None, :]).T
+        reverse = (joint / joint.sum(axis=0)[None,:]).T
         forward[first] = {((first, a), (second, b)): float(dense[i, j])
             for i, a in enumerate(hap_keys[first]) for j, b in enumerate(hap_keys[second])}
         backward[second] = {((second, b), (first, a)): float(reverse[j, i])
@@ -345,36 +356,36 @@ def fit_gap(raw_blocks, prepared_scans, hap_keys, gap, *, max_iterations=20,
         if dynamic_cores_fn is not None:
             numba.set_num_threads(dynamic_cores_fn())
         k = raw_blocks[block].num_haps
-        prior = np.full((raw_blocks[block].log_emissions.shape[0], k*k), -2*math.log(k))
+        prior = np.full((raw_blocks[block].log_emissions.shape[0], k * k), -2 * math.log(k))
         independent_forward.append(prepared_scans[block].scan(prior))
         independent_backward.append(prepared_scans[block].scan(None, backward=True))
-    transitions = [initialize(independent_forward[i], independent_backward[i+gap], config)
-                   for i in range(blocks-gap)]
+    transitions = [initialize(independent_forward[i], independent_backward[i + gap], config)
+                   for i in range(blocks - gap)]
     row_masses = [np.ones(item.shape[0]) for item in transitions]
     for iteration in range(max_iterations):
         if dynamic_cores_fn is not None:
             numba.set_num_threads(dynamic_cores_fn())
-        forward, backward = [None]*blocks, [None]*blocks
+        forward, backward = [None] * blocks, [None] * blocks
         for block in range(blocks):
             forward[block] = (independent_forward[block] if block < gap else
-                prepared_scans[block].scan(propagate(forward[block-gap], transitions[block-gap])))
-        for block in range(blocks-1, -1, -1):
-            backward[block] = (independent_backward[block] if block >= blocks-gap else
-                prepared_scans[block].scan(propagate(backward[block+gap],
+                prepared_scans[block].scan(propagate(forward[block - gap], transitions[block - gap])))
+        for block in range(blocks - 1, -1, -1):
+            backward[block] = (independent_backward[block] if block >= blocks - gap else
+                prepared_scans[block].scan(propagate(backward[block + gap],
                     transitions[block].transpose()), backward=True))
         log_likelihood = sum(float(np.logaddexp.reduce(forward[i], axis=1).sum())
-                             for i in range(blocks-gap, blocks))
+                             for i in range(blocks - gap, blocks))
         change = 0.0
         for first, old in enumerate(transitions):
             if dynamic_cores_fn is not None:
                 numba.set_num_threads(dynamic_cores_fn())
-            stats = sufficient_statistics(forward[first], backward[first+gap], old)
-            new, row_masses[first] = update(old, stats, config, max(0.1, 0.9**iteration))
+            stats = sufficient_statistics(forward[first], backward[first + gap], old)
+            new, row_masses[first] = update(old, stats, config, max(0.1, 0.9 ** iteration))
             # O(K**2) export/comparison is allowed, unlike a cubic contraction.
-            change = max(change, float(np.max(np.abs(new.dense()-old.dense()))))
+            change = max(change, float(np.max(np.abs(new.dense() - old.dense()))))
             transitions[first] = new
         if diagnostics is not None:
-            diagnostics.append(dict(iteration=iteration+1, log_likelihood=log_likelihood,
+            diagnostics.append(dict(iteration=iteration + 1, log_likelihood=log_likelihood,
                 max_change=change, explicit_edges=sum(len(t.destinations) for t in transitions),
                 dense_edge_gradient_evaluations=0))
         if change <= min_change:

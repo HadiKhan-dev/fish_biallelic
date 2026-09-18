@@ -1,4 +1,4 @@
-"""discovery / candidates for the canonical reconstruction pipeline."""
+"""Local haplotype candidate construction, support and duplicate handling."""
 from __future__ import annotations
 
 
@@ -354,10 +354,10 @@ def _soft_consensus_candidate(
     keep_mask: np.ndarray,
     candidate_call_probability: float,
     *,
-    record_log_odds: np.ndarray | None = None,
-    record_sample_indices: np.ndarray | None = None,
-    record_weights: np.ndarray | None = None,
-    record_compatible: np.ndarray | None = None,
+    record_log_odds: np.ndarray | None=None,
+    record_sample_indices: np.ndarray | None=None,
+    record_weights: np.ndarray | None=None,
+    record_compatible: np.ndarray | None=None,
 ) -> tuple[np.ndarray, float]:
     """Return a continuous posterior consensus with one vote per sample.
 
@@ -546,7 +546,7 @@ def _closest_existing(
     keep_mask: np.ndarray,
     minimum_joint_known_fraction: float,
     *,
-    known_probability: float = 1.0,
+    known_probability: float=1.0,
 ) -> tuple[float | None, float | None, float | None, float | None]:
     """Return the exact nearest-candidate metrics using one compiled scan."""
 
@@ -697,7 +697,7 @@ def _soft_cluster_sources(
     keep_mask: np.ndarray,
     minimum_joint_known_fraction: float,
     maximum_cluster_hamming: float,
-    cluster_cache: dict[tuple[Any, ...], Any] | None = None,
+    cluster_cache: dict[tuple[Any, ...], Any] | None=None,
 ) -> tuple[
     tuple[tuple[str, str, int | None, tuple[int, ...], float], ...],
     int,
@@ -799,23 +799,23 @@ def augment_combined_soft_candidates(
     block_result: Any,
     reads_array: np.ndarray,
     *,
-    base_candidates: np.ndarray | None = None,
-    keep_flags: np.ndarray | None = None,
-    read_error_probability: float = core_config.DEFAULT_READ_ERROR_PROBABILITY,
-    usable_founder_known_fraction: float = 0.80,
-    residual_hard_probability: float = 0.80,
-    minimum_residual_joint_known_fraction: float = 0.10,
-    maximum_cluster_hamming: float = 0.10,
-    candidate_call_probability: float = 0.90,
-    minimum_candidate_known_fraction: float = 0.80,
-    minimum_dedup_joint_known_fraction: float = 0.60,
-    minimum_dedup_bidirectional_coverage: float = 0.95,
-    dedup_hamming_fraction: float = core_config.CANDIDATE_DEDUP_HAMMING_PERCENT / 100.0,
-    minimum_soft_responsibility: float = 0.25,
-    minimum_soft_unique_sample_support: int = 2,
-    minimum_soft_effective_sample_support: float = 1.50,
-    residual_input_workspace: discovery_residuals.ResidualInputWorkspace | None = None,
-    binary_panel_fast_path: bool = False,
+    base_candidates: np.ndarray | None=None,
+    keep_flags: np.ndarray | None=None,
+    read_error_probability: float=core_config.DEFAULT_READ_ERROR_PROBABILITY,
+    usable_founder_known_fraction: float=0.80,
+    residual_hard_probability: float=0.80,
+    minimum_residual_joint_known_fraction: float=0.10,
+    maximum_cluster_hamming: float=0.10,
+    candidate_call_probability: float=0.90,
+    minimum_candidate_known_fraction: float=0.80,
+    minimum_dedup_joint_known_fraction: float=0.60,
+    minimum_dedup_bidirectional_coverage: float=0.95,
+    dedup_hamming_fraction: float=core_config.CANDIDATE_DEDUP_HAMMING_PERCENT / 100.0,
+    minimum_soft_responsibility: float=0.25,
+    minimum_soft_unique_sample_support: int=2,
+    minimum_soft_effective_sample_support: float=1.50,
+    residual_input_workspace: discovery_residuals.ResidualInputWorkspace | None=None,
+    binary_panel_fast_path: bool=False,
 ) -> discovery_residuals.CandidatePoolAugmentation:
     """Add combined posterior-residual proposals to a candidate pool.
 

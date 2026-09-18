@@ -1,4 +1,4 @@
-"""discovery / search for the canonical reconstruction pipeline."""
+"""Reversible cavity-guided growth, replacement and reduction of local panels."""
 from __future__ import annotations
 
 
@@ -9,7 +9,7 @@ import numpy as np
 import haplotype_reconstruction.core.config as core_config
 import haplotype_reconstruction.discovery.cavity as discovery_cavity
 import haplotype_reconstruction.discovery.modes as discovery_modes
-from .batched_search import BatchedSearchConfig, configured_search
+from.batched_search import BatchedSearchConfig, configured_search
 
 _SCORE_TOLERANCE = 1e-9
 
@@ -59,7 +59,10 @@ class ReversibleCavitySearchConfig:
     cavity: discovery_cavity.HybridCavitySelectionConfig = discovery_cavity.HybridCavitySelectionConfig()
 
     def __post_init__(self) -> None:
-        if self.batched_search_config is not None and not isinstance(self.batched_search_config, BatchedSearchConfig):
+        if self.batched_search_config is not None and not isinstance(
+            self.batched_search_config,
+            BatchedSearchConfig
+        ):
             raise TypeError('batched_search_config must be BatchedSearchConfig or None')
         for name in (
             "beam_width",
@@ -268,7 +271,7 @@ def _canonical_candidate_rows(
         return ()
     matrix = np.asarray(candidate_haplotypes)
     if matrix.ndim == 1:
-        matrix = matrix[None, :]
+        matrix = matrix[None,:]
     if matrix.ndim != 2 or matrix.shape[1] != n_sites:
         raise ValueError(
             "candidate_haplotypes must have shape (candidates, sites)"
@@ -304,8 +307,8 @@ def _score_stage(
     evidence: np.ndarray,
     modes: Sequence[discovery_modes.FactorizationMode],
     config: discovery_cavity.CavitySelectionConfig,
-    cavity_workspace: Any | None = None,
-    active_sample_mask: np.ndarray | None = None,
+    cavity_workspace: Any | None=None,
+    active_sample_mask: np.ndarray | None=None,
 ) -> tuple[_StageModeScore, ...]:
     # Refresh the shared block-pool allocation immediately before the
     # parallel held-out cavity kernel, so late stragglers can claim cores
@@ -396,7 +399,7 @@ def _internal_move_config(
 
 def _prepare_growth_inputs(
         evidence: np.ndarray,
-        observed_mask: np.ndarray | None = None,
+        observed_mask: np.ndarray | None=None,
 ) -> _GrowthInputs:
     """Prepare evidence-only K-growth quantities once per search."""
 
@@ -419,7 +422,7 @@ def _prepare_growth_inputs(
         seed_haplotypes_by_sample[dosage_by_sample == 2] = 1
         heterozygous = dosage_by_sample == 1
         seed_haplotypes_by_sample[
-            heterozygous & (population_alt_frequency[None, :] > 0.5)
+            heterozygous & (population_alt_frequency[None,:] > 0.5)
         ] = 1
     else:
         observed = np.asarray(observed_mask, dtype=np.bool_)
@@ -453,7 +456,7 @@ def _prepare_growth_inputs(
         seed_haplotypes_by_sample[observed & (dosage_by_sample == 2)] = 1
         ambiguous = (~observed) | (dosage_by_sample == 1)
         seed_haplotypes_by_sample[
-            ambiguous & (population_alt_frequency[None, :] > 0.5)
+            ambiguous & (population_alt_frequency[None,:] > 0.5)
         ] = 1
     for value in (
         oracle_nll, decisiveness, dosage_by_sample, seed_haplotypes_by_sample,
@@ -492,7 +495,7 @@ def _ordered_binary_candidate_rows(
     if soft.ndim != 2 or soft.shape[1] != evidence.shape[1]:
         raise ValueError("soft residual candidates must match evidence sites")
     marginal = np.mean(
-        0.5 * evidence[:, :, 1] + evidence[:, :, 2], axis=0
+        0.5 * evidence[:,:, 1] + evidence[:,:, 2], axis=0
     )
     binary = soft > 0.5
     ties = np.isclose(soft, 0.5, rtol=0.0, atol=1e-12)
@@ -558,7 +561,7 @@ def _v2_soft_births(
     move_config: Any,
     workspace: Any,
     residual_input_workspace: Any,
-    soft_cache: dict[tuple[bytes, bytes], Any] | None = None,
+    soft_cache: dict[tuple[bytes, bytes], Any] | None=None,
 ) -> tuple[tuple[discovery_modes.FactorizationMode, ...], int, int, tuple[str, ...]]:
     """Batch-fit proposal-D/base-plus-soft residual rows for one mode."""
 
@@ -608,7 +611,7 @@ def _v2_soft_births(
         np.asarray(row, dtype=np.int8).tobytes() for row in mode.haplotypes
     }
     starts = [
-        np.vstack((mode.haplotypes, row[None, :]))
+        np.vstack((mode.haplotypes, row[None,:]))
         for row in rows
         if np.asarray(row, dtype=np.int8).tobytes() not in existing
     ]
@@ -676,7 +679,7 @@ def _v2_ordinary_moves(
             for row in mode.haplotypes
         }
         buckets[1].extend(
-            np.vstack((mode.haplotypes, row[None, :]))
+            np.vstack((mode.haplotypes, row[None,:]))
             for row in candidate_rows
             if np.asarray(row, dtype=np.int8).tobytes() not in existing
         )
@@ -746,11 +749,11 @@ def _score_sort_key(score: ReversibleModeScore) -> tuple[float, int, bytes]:
 
 def search_reversible_cavity(
     evidence: np.ndarray,
-    seed_haplotypes: Sequence[np.ndarray | discovery_modes.FactorizationMode] = (),
+    seed_haplotypes: Sequence[np.ndarray | discovery_modes.FactorizationMode]=(),
     *,
-    candidate_haplotypes: np.ndarray | Sequence[np.ndarray] | None = None,
+    candidate_haplotypes: np.ndarray | Sequence[np.ndarray] | None=None,
     allele_depths: np.ndarray,
-    config: ReversibleCavitySearchConfig | None = None,
+    config: ReversibleCavitySearchConfig | None=None,
 ) -> ReversibleCavitySearchResult:
     """Run adaptive reversible search without an enumerated K grid.
 
@@ -797,7 +800,7 @@ def search_reversible_cavity(
         likelihood=likelihood,
     )
     if settings.batched_search_config is not None:
-        from .batched_search import run
+        from.batched_search import run
         return run(likelihood, reads, seed_haplotypes, candidate_rows, settings,
                    workspace, growth_inputs, residual_input_workspace)
     data_modes = discovery_modes._initial_complete_modes(
@@ -828,7 +831,7 @@ def search_reversible_cavity(
         # A supplied FactorizationMode contributes H only.  Assignments and
         # costs are rebuilt from the current evidence below.
         panel_starts.append(haplotypes)
-    panel_starts.extend(row[None, :] for row in candidate_rows)
+    panel_starts.extend(row[None,:] for row in candidate_rows)
 
     limits: list[str] = []
     if len(panel_starts) > settings.max_candidate_start_rows:

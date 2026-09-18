@@ -1,4 +1,4 @@
-"""core / haplotypes for the canonical reconstruction pipeline."""
+"""Shared block result types and supported founder-site evidence."""
 from __future__ import annotations
 
 
@@ -15,10 +15,10 @@ class BlockResult:
                  keep_flags=None, probs_array=None,
                  genotype_evidence_mode=None):
         self.positions = positions
-        self.haplotypes = haplotypes # Dictionary {id: numpy_array}
-        self.reads_count_matrix = reads_count_matrix # Optional: source reads (Samples x Sites x 2)
+        self.haplotypes = haplotypes  # Dictionary {id: numpy_array}
+        self.reads_count_matrix = reads_count_matrix  # Optional: source reads (Samples x Sites x 2)
         self.keep_flags = keep_flags
-        self.probs_array = probs_array # New Optional: genotype probabilities (Samples x Sites x 3)
+        self.probs_array = probs_array  # New Optional: genotype probabilities (Samples x Sites x 3)
         # Optional provenance describing the genotype-evidence representation.
         self.genotype_evidence_mode = genotype_evidence_mode
 
@@ -159,5 +159,3 @@ def _materialize_founder_site_pseudo_evidence_kernel(
                     hard_values[k, l] = 0
 
     return q, supporters, log_pseudo_odds, hard_mask, hard_values
-
-

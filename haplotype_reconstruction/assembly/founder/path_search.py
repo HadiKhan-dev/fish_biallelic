@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange, set_num_threads
 from numba.typed import List
-from .founder_packing import PreparedModels, emission_arrays, gather_macro, packed_emissions, selected_emission_addresses
+from.packing import PreparedModels, emission_arrays, gather_macro, packed_emissions, selected_emission_addresses
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -46,7 +46,7 @@ def _incumbent_suffix(models, known, incumbent, penalty, reverse, first, second)
 def conditional_path(submodels, known, incumbent, penalty, *, width=64,
                      branch_cap=16, reverse=False, thread_budget=None):
     """Bounded beam; packed short blocks and ordinary compiled macro states."""
-    from .founder_beam import conditional_path as solve
+    from.beam import conditional_path as solve
     return solve(submodels, known, incumbent, penalty, width=width,
                  branch_cap=branch_cap, reverse=reverse, thread_budget=thread_budget)
 

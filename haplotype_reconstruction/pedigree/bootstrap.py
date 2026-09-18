@@ -1,4 +1,4 @@
-"""pedigree / bootstrap for the canonical reconstruction pipeline."""
+"""Chromosome resampling, packed exposure masks and parallel support estimates."""
 from __future__ import annotations
 
 
@@ -306,7 +306,7 @@ def _accumulate_bootstrap_chunk(
     _graph_state_counts: Optional[np.ndarray],
     local_parent_counts: np.ndarray,
     graph_parent_counts: np.ndarray,
-    m1_direction_state_counts: Optional[np.ndarray] = None,
+    m1_direction_state_counts: Optional[np.ndarray]=None,
 ) -> int:
     """Reduce one worker result with order-independent integer additions."""
     local_rows, graph_rows, local_states, depth_refits = chunk[:4]
@@ -410,19 +410,19 @@ def _run_parent_state_bootstraps(
     local_parent_counts: np.ndarray,
     graph_parent_counts: np.ndarray,
     *,
-    contig_information_weights: Optional[np.ndarray] = None,
-    structure_pair_indices: Optional[np.ndarray] = None,
-    edge_matched_by_contig: Optional[np.ndarray] = None,
-    edge_exposed_by_contig: Optional[np.ndarray] = None,
-    pair_explained_by_contig: Optional[np.ndarray] = None,
-    pair_exposed_by_contig: Optional[np.ndarray] = None,
-    structure_total_bins_by_contig: Optional[np.ndarray] = None,
-    edge_exposure_presence_words: Optional[np.ndarray] = None,
-    pair_exposure_presence_words: Optional[np.ndarray] = None,
-    direction_supported_parents: Optional[np.ndarray] = None,
-    scaffold_data: Optional[Mapping[str, Any]] = None,
-    m1_direction_state_counts: Optional[np.ndarray] = None,
-    depth_component_count: Optional[int] = None,
+    contig_information_weights: Optional[np.ndarray]=None,
+    structure_pair_indices: Optional[np.ndarray]=None,
+    edge_matched_by_contig: Optional[np.ndarray]=None,
+    edge_exposed_by_contig: Optional[np.ndarray]=None,
+    pair_explained_by_contig: Optional[np.ndarray]=None,
+    pair_exposed_by_contig: Optional[np.ndarray]=None,
+    structure_total_bins_by_contig: Optional[np.ndarray]=None,
+    edge_exposure_presence_words: Optional[np.ndarray]=None,
+    pair_exposure_presence_words: Optional[np.ndarray]=None,
+    direction_supported_parents: Optional[np.ndarray]=None,
+    scaffold_data: Optional[Mapping[str, Any]]=None,
+    m1_direction_state_counts: Optional[np.ndarray]=None,
+    depth_component_count: Optional[int]=None,
 ) -> tuple[int, int]:
     """Run fixed-seed bootstraps serially or in a shared-memory pool."""
     n_contigs = contig_log_likelihoods.shape[0]

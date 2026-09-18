@@ -1,4 +1,4 @@
-"""pedigree / pipeline for the canonical reconstruction pipeline."""
+"""Checkpointed preparation, inference and export of genome-wide pedigrees."""
 from __future__ import annotations
 from haplotype_reconstruction import PACKAGE_ROOT
 
@@ -35,7 +35,30 @@ EVIDENCE_STAGE, PEDIGREE_STAGE = (
 )
 
 
-T10_INFERENCE_CODE_FILES = ('pedigree/pipeline.py', 'pedigree/components.py', 'pedigree/likelihoods.py', 'pedigree/bootstrap.py', 'pedigree/candidates.py', 'pedigree/config.py', 'pedigree/direction.py', 'pedigree/eligibility.py', 'pedigree/evidence.py', 'pedigree/graph.py', 'pedigree/inference.py', 'pedigree/models.py', 'pedigree/states.py', 'pedigree/sources.py', 'pedigree/transmission.py', 'painting/model.py', 'painting/evidence.py', 'core/genetic_map.py', 'core/raw_evidence.py', 'pedigree/results.py')
+T10_INFERENCE_CODE_FILES = (
+    'pedigree/pipeline.py',
+    'pedigree/components.py',
+    'pedigree/likelihoods.py',
+    'pedigree/bootstrap.py',
+    'pedigree/candidates.py',
+    'pedigree/config.py',
+    'pedigree/direction.py',
+    'pedigree/eligibility.py',
+    'pedigree/evidence.py',
+    'pedigree/graph.py',
+    'pedigree/inference.py',
+    'pedigree/models.py',
+    'pedigree/states.py',
+    'pedigree/sources.py',
+    'pedigree/transmission.py',
+    'pedigree/transmission_projection.py',
+    'pedigree/transmission_scoring.py',
+    'painting/model.py',
+    'painting/evidence.py',
+    'core/genetic_map.py',
+    'core/raw_evidence.py',
+    'pedigree/results.py'
+)
 
 
 @dataclass(frozen=True)
@@ -139,7 +162,7 @@ def _canonical_digest(value: Mapping[str, Any]) -> str:
 
 
 def stage10_inference_code_identity(
-        digest_overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+        digest_overrides: Mapping[str, str] | None=None) -> dict[str, str]:
     """Hash the complete scientific T10 inference implementation closure."""
 
     overrides = {} if digest_overrides is None else dict(digest_overrides)
@@ -371,7 +394,7 @@ def _validate_ragged_component(
     expected_frequency = (
         1.0 + np.sum(np.where(called, named, 0), axis=0)
     ) / (2.0 + np.sum(called, axis=0))
-    expected_probability = np.where(called, named, expected_frequency[None, :])
+    expected_probability = np.where(called, named, expected_frequency[None,:])
     if (
         not np.array_equal(background, expected_frequency)
         or not np.array_equal(allele_probability, expected_probability)
@@ -393,7 +416,7 @@ def _validate_ragged_component(
     ):
         raise ValueError("T10a ragged marker/model alignment is invalid")
     compact_named = np.ascontiguousarray(np.concatenate([
-        founder_grid[:, block, :int(count)]
+        founder_grid[:, block,:int(count)]
         for block, count in enumerate(marker_counts)
     ], axis=1))
     if not np.array_equal(named, compact_named):

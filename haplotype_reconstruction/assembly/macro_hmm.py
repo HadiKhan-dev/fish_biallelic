@@ -1,7 +1,7 @@
 """Independent-homologue boundary propagation without a diploid H^4 matrix."""
 import numpy as np
 from numba import njit, prange
-from .edge_counts import _log_matmul, _MAX_PRODUCT_LOG_RANGE
+from.edge_counts import _log_matmul, _MAX_PRODUCT_LOG_RANGE
 
 
 @njit(cache=True, parallel=True)

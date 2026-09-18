@@ -1,4 +1,4 @@
-"""assembly / observations for the canonical reconstruction pipeline."""
+"""Missing-aware founder panels and diploid observation likelihoods."""
 from __future__ import annotations
 
 
@@ -134,8 +134,8 @@ def diploid_genotype_distributions(panel: FounderPanel) -> np.ndarray:
     only homozygous-reference and homozygous-alternate mass.
     """
 
-    q_first = panel.q[:, None, :]
-    q_second = panel.q[None, :, :]
+    q_first = panel.q[:, None,:]
+    q_second = panel.q[None,:,:]
     distribution = np.empty(
         (panel.q.shape[0], panel.q.shape[0], panel.q.shape[1], 3),
         dtype=np.float64,
@@ -146,9 +146,9 @@ def diploid_genotype_distributions(panel: FounderPanel) -> np.ndarray:
     )
     distribution[..., 2] = q_first * q_second
     for founder in range(panel.q.shape[0]):
-        distribution[founder, founder, :, 0] = 1.0 - panel.q[founder]
-        distribution[founder, founder, :, 1] = 0.0
-        distribution[founder, founder, :, 2] = panel.q[founder]
+        distribution[founder, founder,:, 0] = 1.0 - panel.q[founder]
+        distribution[founder, founder,:, 1] = 0.0
+        distribution[founder, founder,:, 2] = panel.q[founder]
     return distribution
 
 
@@ -168,7 +168,7 @@ def site_emission_probabilities(
     genotype_evidence: np.ndarray,
     genotype_distributions: np.ndarray,
     *,
-    uniform_mix: float = 0.01,
+    uniform_mix: float=0.01,
 ) -> np.ndarray:
     """Return robust per-site diplotype likelihoods, shape ``(N,K,K,L)``.
 
@@ -203,8 +203,8 @@ def site_log_emissions(
     genotype_evidence: np.ndarray,
     genotype_distributions: np.ndarray,
     *,
-    uniform_mix: float = 0.01,
-    log_floor: float = -2.0,
+    uniform_mix: float=0.01,
+    log_floor: float=-2.0,
 ) -> np.ndarray:
     """Return robust log emissions relative to uninformative evidence.
 
@@ -224,5 +224,3 @@ def site_log_emissions(
     np.maximum(log_emission, log_floor, out=log_emission)
     uniform_log = max(float(np.log(1.0 / 3.0)), float(log_floor))
     return log_emission - uniform_log
-
-

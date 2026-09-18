@@ -1,4 +1,4 @@
-"""assembly / paths for the canonical reconstruction pipeline."""
+"""Mesh path search, source provenance and haplotype reconstruction."""
 from __future__ import annotations
 
 
@@ -51,12 +51,14 @@ class FastMesh:
             # Forward Dictionary: P(Next | Curr)
             fwd_dict = transition_mesh[gap][0]
 
-            if fwd_dict is None: continue
+            if fwd_dict is None:
+                continue
 
             for i_idx, transitions in fwd_dict.items():
                 j_idx = i_idx + gap
 
-                if j_idx >= self.num_blocks: continue
+                if j_idx >= self.num_blocks:
+                    continue
 
                 n_from = len(self.mappings[i_idx])
                 n_to = len(self.mappings[j_idx])
@@ -72,7 +74,8 @@ class FastMesh:
                         c = self.mappings[j_idx][v_key]
                         mat[r, c] = math.log(prob)
 
-                if i_idx not in self.registry: self.registry[i_idx] = {}
+                if i_idx not in self.registry:
+                    self.registry[i_idx] = {}
                 self.registry[i_idx][j_idx] = mat
 
         # 3. Build Backward Dense Matrices Registry
@@ -82,12 +85,14 @@ class FastMesh:
             # Backward Dictionary: P(Prev | Curr)
             bwd_dict = transition_mesh[gap][1]
 
-            if bwd_dict is None: continue
+            if bwd_dict is None:
+                continue
 
             for j_idx, transitions in bwd_dict.items():
                 i_idx = j_idx - gap  # the earlier block
 
-                if i_idx < 0: continue
+                if i_idx < 0:
+                    continue
 
                 # Rows = later block (j_idx), Cols = earlier block (i_idx)
                 # mat[h_later, h_earlier] = log P(h_earlier | h_later)
@@ -98,7 +103,7 @@ class FastMesh:
 
                 for (key_from, key_to), prob in transitions.items():
                     u_key = key_from[1]  # hap in later block (j_idx)
-                    v_key = key_to[1]    # hap in earlier block (i_idx)
+                    v_key = key_to[1]  # hap in earlier block (i_idx)
 
                     if u_key in self.mappings[j_idx] and v_key in self.mappings[i_idx]:
                         r = self.mappings[j_idx][u_key]
@@ -301,7 +306,7 @@ def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
                 past_h = path[past_idx]
                 mat = fast_mesh.get_transition_matrix(past_idx, curr_block)
                 if mat is not None:
-                    transition_to_curr += mat[past_h, :]
+                    transition_to_curr += mat[past_h,:]
                     n_transitions += 1
 
             # MEAN scoring: divide by number of transitions actually used
@@ -318,7 +323,7 @@ def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
         if endpoint_quota is None:
             forward_beam = _select_beam_mmr_forward(candidates, beam_width, mmr_lambda)
         else:
-            from .panel_search import endpoint_select
+            from.panel_search import endpoint_select
             forward_beam = endpoint_select(candidates, curr_block, endpoint_quota)
 
     if verbose:
@@ -436,7 +441,7 @@ def _select_beam_mmr(candidates, beam_width, mmr_lambda=0.7):
         selected.append(best)
         remaining[best] = False
         similarities = np.mean(
-            all_paths == all_paths[best][None, :], axis=1
+            all_paths == all_paths[best][None,:], axis=1
         )
         max_similarity = np.maximum(max_similarity, similarities)
     return [candidates[index] for index in selected]
@@ -541,7 +546,7 @@ def missing_aware_atomic_source_provenance(block):
         raise ValueError(
             "atomic position offsets/counts must exactly partition positions"
         )
-    if np.any(paths < 0) or np.any(paths >= row_counts[None, :]):
+    if np.any(paths < 0) or np.any(paths >= row_counts[None,:]):
         raise ValueError("atomic source row path contains an out-of-range row")
     return paths, offsets, counts, row_counts
 

@@ -7,7 +7,7 @@ painting/pedigree code still verifies the exact evidence array identities.
 from __future__ import annotations
 
 import os
-from . import checkpoints
+from.import checkpoints
 
 
 STAGE = "00_genotype_evidence"

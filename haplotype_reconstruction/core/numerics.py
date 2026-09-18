@@ -1,4 +1,4 @@
-"""core / numerics for the canonical reconstruction pipeline."""
+"""Reusable numerical kernels for likelihoods, distances and stable reductions."""
 from __future__ import annotations
 
 
@@ -426,7 +426,7 @@ def log_matmul(A, B):
 
     # Fallback for broadcasting / non-2D-or-3D cases: original scipy-based
     # implementation, preserved for API compatibility.
-    return logsumexp(A[..., np.newaxis] + B[..., np.newaxis, :, :], axis=-2)
+    return logsumexp(A[..., np.newaxis] + B[..., np.newaxis,:,:], axis=-2)
 
 
 def reads_to_probabilities(reads_array,
@@ -511,7 +511,7 @@ def reads_to_probabilities(reads_array,
 
     # Broadcast priors (1, Sites, 3) against likelihoods (Samples, Sites, 3).
     log_site_priors = np.log(site_priors)
-    log_evidence = log_likli_matrix + log_site_priors[np.newaxis, :, :]
+    log_evidence = log_likli_matrix + log_site_priors[np.newaxis,:,:]
 
     # Softmax normalizes in log space
     genotype_probs = softmax(log_evidence, axis=-1)
@@ -525,9 +525,9 @@ def calc_distance(first_row, second_row, calc_type="diploid"):
     Used for single comparisons.
     """
     if calc_type == "diploid":
-        distances = np.array([[0,1,2],[1,0,1],[2,1,0]], dtype=float)
+        distances = np.array([[0, 1, 2], [1, 0, 1], [2, 1, 0]], dtype=float)
     else:
-        distances = np.array([[0,1],[1,0]], dtype=float)
+        distances = np.array([[0, 1], [1, 0]], dtype=float)
 
     ens = np.einsum("ij,ik->ijk", first_row, second_row)
     ensd = ens * distances
@@ -542,11 +542,13 @@ def probability_to_information(probs_list):
     """
     p = probs_list[1]
 
-    if p >= 1.0: return 1.0
-    if p <= 0.0: return -1.0
+    if p >= 1.0:
+        return 1.0
+    if p <= 0.0:
+        return -1.0
 
     sgn = -1.0 if p < 0.5 else 1.0
-    entropy = -(1-p)*math.log2(1-p) - p*math.log2(p)
+    entropy = -(1 - p) * math.log2(1 - p) - p * math.log2(p)
 
     return sgn * (1.0 - entropy)
 

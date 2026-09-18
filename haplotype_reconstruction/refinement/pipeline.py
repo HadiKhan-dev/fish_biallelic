@@ -16,7 +16,7 @@ from haplotype_reconstruction.pedigree import components as pedigree_components
 from haplotype_reconstruction.pedigree import pipeline as pedigree_pipeline
 from haplotype_reconstruction.painting import checkpoints as painting_checkpoints
 from haplotype_reconstruction.workflows.reconstruction import PAINTING_STAGE
-from . import conditioning, model, polish
+from.import conditioning, model, polish
 
 
 FINAL_PHASE_STAGE = "11_phase_correction"
@@ -63,7 +63,7 @@ the preceding polished path is only a comparison, never a warm start.
 
     def save(messages, phase, stable_count, *, force=False):
         nonlocal last_saved
-        if work is not None and (force or time.perf_counter()-last_saved >= checkpoint_min_seconds):
+        if work is not None and (force or time.perf_counter() - last_saved >= checkpoint_min_seconds):
             checkpoints.write(str(work), {
                 "identity": identity, "messages": messages, "phase": phase,
                 "unchanged": stable_count, "checks": tuple(checks),
@@ -85,7 +85,7 @@ the preceding polished path is only a comparison, never a warm start.
         if point is not None and iteration >= config.max_iterations:
             save(state, point, unchanged, force=True)
             raise PhaseStabilityError(checks)
-        stop = (max(config.minimum_iterations, iteration) if point is None else iteration+1)
+        stop = (max(config.minimum_iterations, iteration) if point is None else iteration + 1)
         if workspace is None:
             workspace = model.prepare_family_workspace(
                 gl, observed, scaffold.reference_alleles, positions, scaffold.phase_bins,
@@ -115,8 +115,10 @@ the preceding polished path is only a comparison, never a warm start.
             # phase check. Retry this exact iteration after an interruption.
             save(state, None, 0, force=True)
             raise
-        changed = None if point is None else int(np.count_nonzero(point.allele_calls != following.allele_calls))
-        unchanged = unchanged+1 if changed == 0 else 0
+        changed = None if point is None else int(
+            np.count_nonzero(point.allele_calls != following.allele_calls)
+        )
+        unchanged = unchanged + 1 if changed == 0 else 0
         point, converged = following, bool(family.converged)
         item = {"iteration": state.iteration, "latent_delta": state.deltas[-1],
                 "latent_converged": converged, "changed_called_alleles": changed,
@@ -245,7 +247,8 @@ phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
     workers = runtime.available_cpu_count() if n_workers is None else int(n_workers)
     if not 1 <= workers <= runtime.available_cpu_count():
         raise ValueError("Stage11 CPU budget exceeds allocation")
-    names = tuple(map(str, sample_ids)); contigs = tuple(map(str, contigs))
+    names = tuple(map(str, sample_ids))
+    contigs = tuple(map(str, contigs))
     if (tuple(map(str, pedigree_payload["ordered_sample_ids"])) != names or
             tuple(map(str, pedigree_payload["ordered_contigs"])) != contigs):
         raise ValueError("Stage11 axes differ from the complete T10 pedigree")
@@ -302,11 +305,12 @@ phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
                 checkpoints.write(checkpoints.contig_path(checkpoint_store.root, FINAL_PHASE_STAGE, contig),
                                   result, nthreads=workers)
                 del t09, gl, pos, observed
-            summaries.append(_summary(result, checkpoint_store, time.perf_counter()-started))
+            summaries.append(_summary(result, checkpoint_store, time.perf_counter() - started))
             print(f"[T11 {contig}] Stable final phase released; latent converged="
                   f"{result['source_posterior_converged']}", flush=True)
             del result
-            gc.collect(); parallel.malloc_trim()
+            gc.collect()
+            parallel.malloc_trim()
     runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
     checkpoint_store.save_global(FINAL_PHASE_STAGE, {"identity": identity, "summaries": summaries})
     conditioning._write_summary_table(output, FINAL_PHASE_STAGE, summaries)

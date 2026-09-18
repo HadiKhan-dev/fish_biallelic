@@ -1,4 +1,4 @@
-"""pedigree / graph for the canonical reconstruction pipeline."""
+"""Acyclic pedigree selection and graph-conflict diagnostics."""
 from __future__ import annotations
 
 
@@ -83,8 +83,8 @@ def _acyclic_parent_state_selection(
     identity_margins: np.ndarray,
     n_samples: int,
     local_search_passes: int,
-    depth_posterior: Optional[np.ndarray] = None,
-    downward_fallback: bool = False,
+    depth_posterior: Optional[np.ndarray]=None,
+    downward_fallback: bool=False,
 ) -> pedigree_direction._GraphParentStateSelection:
     """Choose a DAG without converting graph feasibility into parent evidence.
 
@@ -126,7 +126,7 @@ def _acyclic_parent_state_selection(
             for parent in _observed_parents(alternatives, row)
         )
 
-    def add(row: int, displaced_local: bool = False) -> None:
+    def add(row: int, displaced_local: bool=False) -> None:
         child = int(alternatives[row, 0])
         for parent in _observed_parents(alternatives, row):
             adjacency[parent].add(child)

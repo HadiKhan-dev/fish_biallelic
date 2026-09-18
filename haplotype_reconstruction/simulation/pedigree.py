@@ -1,4 +1,4 @@
-"""simulation / pedigree for the canonical reconstruction pipeline."""
+"""Generate experimental-cross pedigrees, inherited haplotypes and sequencing reads."""
 from __future__ import annotations
 
 
@@ -205,18 +205,18 @@ def _sample_profile_crossovers(site_locs, recomb_rate,
 
 def _sample_map_crossovers(site_locs, chromosome_map, rng):
     """Sample a Poisson process uniform in integrated genetic coordinates."""
-    start,end = float(site_locs[0]),float(site_locs[-1])
-    distance = float(chromosome_map.interval_morgans(start,end))
+    start, end = float(site_locs[0]), float(site_locs[-1])
+    distance = float(chromosome_map.interval_morgans(start, end))
     if distance == 0:
-        return np.empty(0,dtype=np.float64)
+        return np.empty(0, dtype=np.float64)
     count = int(rng.poisson(distance))
     genetic_start = float(chromosome_map.cumulative_morgans(start))
-    coordinates = genetic_start + rng.uniform(0.,distance,size=count)
+    coordinates = genetic_start + rng.uniform(0., distance, size=count)
     return np.sort(chromosome_map.inverse_morgans(coordinates))
 
 
 def recombine_haps(hap_pair, ancestry_pair, site_locs,
-                   recomb_rate=10**-8, mutate_rate=10**-8, rng=None,
+                   recomb_rate=10 ** -8, mutate_rate=10 ** -8, rng=None,
                    recombination_profile=None,
                    return_crossover_events=False, chromosome_map=None):
     """Simulate one gamete, tracking alleles and founder ancestry.
@@ -256,7 +256,7 @@ def recombine_haps(hap_pair, ancestry_pair, site_locs,
     final_hap_ancestry = []
     crossover_events = []
 
-    if recombination_profile is None and not using_absolute_map and recomb_rate>0:
+    if recombination_profile is None and not using_absolute_map and recomb_rate > 0:
         # Keep this historical path structurally unchanged. Recording events
         # performs no additional random draws.
         recomb_scale = 1.0 / recomb_rate
@@ -285,9 +285,9 @@ def recombine_haps(hap_pair, ancestry_pair, site_locs,
                 break
     else:
         if using_absolute_map:
-            sampled_events = _sample_map_crossovers(site_locs,chromosome_map,rng)
+            sampled_events = _sample_map_crossovers(site_locs, chromosome_map, rng)
         elif recomb_rate == 0:
-            sampled_events = np.empty(0,dtype=np.float64)
+            sampled_events = np.empty(0, dtype=np.float64)
         else:
             sampled_events = _sample_profile_crossovers(
                 site_locs, recomb_rate, recombination_profile, rng
@@ -344,8 +344,8 @@ def recombine_haps(hap_pair, ancestry_pair, site_locs,
 
 def create_offspring(first_pair, second_pair,
                      first_ancestry, second_ancestry,
-                     site_locs, recomb_rate=10**-8,
-                     mutate_rate=10**-8, rng=None,
+                     site_locs, recomb_rate=10 ** -8,
+                     mutate_rate=10 ** -8, rng=None,
                      recombination_profile=None,
                      return_crossover_events=False, chromosome_map=None):
     """Create one diploid offspring from two parents."""
@@ -441,7 +441,7 @@ def chunk_up_data(positions_list, reads_array,
     range_end_idx = np.searchsorted(positions_list, ending_pos)
 
     positions_slice = positions_list[range_start_idx:range_end_idx]
-    reads_slice = reads_array[:, range_start_idx:range_end_idx, :]
+    reads_slice = reads_array[:, range_start_idx:range_end_idx,:]
 
     slice_len = len(positions_slice)
 
@@ -456,7 +456,7 @@ def chunk_up_data(positions_list, reads_array,
                 break
 
             block_positions = positions_slice[curr_idx:end_idx]
-            block_reads_array = reads_slice[:, curr_idx:end_idx, :]
+            block_reads_array = reads_slice[:, curr_idx:end_idx,:]
 
             total_read_pos = np.sum(block_reads_array, axis=(0, 2))
             block_keep_flags = (total_read_pos >= max(min_total_reads, error_rate * num_samples)).astype(int)
@@ -481,7 +481,7 @@ def chunk_up_data(positions_list, reads_array,
             block_positions = positions_slice[cur_idx_in_slice:end_idx_in_slice]
 
             if len(block_positions) > 0:
-                block_reads_array = reads_slice[:, cur_idx_in_slice:end_idx_in_slice, :]
+                block_reads_array = reads_slice[:, cur_idx_in_slice:end_idx_in_slice,:]
                 total_read_pos = np.sum(block_reads_array, axis=(0, 2))
                 block_keep_flags = (total_read_pos >= max(min_total_reads, error_rate * num_samples)).astype(int)
 
@@ -584,7 +584,14 @@ def plot_ground_truth_pedigree(relationships_df, output_file="ground_truth_pedig
         plt.figure(figsize=(20, fig_height))
         node_colors = [G.nodes[n]['color'] for n in G.nodes()]
 
-        nx.draw_networkx_nodes(G, pos, node_size=120, node_color=node_colors, edgecolors='black', linewidths=0.5)
+        nx.draw_networkx_nodes(
+            G,
+            pos,
+            node_size=120,
+            node_color=node_colors,
+            edgecolors='black',
+            linewidths=0.5
+        )
         nx.draw_networkx_edges(G, pos, edge_color='gray', alpha=0.3, width=0.5, arrows=False)
 
         first_gen = sorted_gens[0]
@@ -809,10 +816,10 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
     if genetic_maps is not None and genetic_maps.maps and contig_names is None:
         raise ValueError("contig_names are required for an absolute simulation map")
     if contig_names is not None:
-        contig_names = tuple(map(str,contig_names))
-        if len(contig_names)!=num_contigs or len(set(contig_names))!=num_contigs:
+        contig_names = tuple(map(str, contig_names))
+        if len(contig_names) != num_contigs or len(set(contig_names)) != num_contigs:
             raise ValueError("contig_names must uniquely match the simulation contig axis")
-    resolved_maps = [None]*num_contigs
+    resolved_maps = [None] * num_contigs
     if genetic_maps is not None:
         resolved_maps = [genetic_maps.for_contig(contig_names[c] if contig_names is not None else str(c))
                          for c in range(num_contigs)]
@@ -873,7 +880,7 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
     # Seed stdlib random for pedigree structure (parent selection).
     # Derive a sub-seed from master_rng so a single seed controls everything.
     if seed is not None:
-        pedigree_seed = int(master_rng.integers(0, 2**31))
+        pedigree_seed = int(master_rng.integers(0, 2 ** 31))
         random.seed(pedigree_seed)
         print(f"Seeded simulation: master={seed}, pedigree_structure={pedigree_seed}")
 
@@ -907,7 +914,7 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
         # B. Generate Genetics. Materialise one seed for every
         # contig/generation/child before batching; resources only schedule work.
         child_seeds_by_contig = master_rng.integers(
-            0, 2**63, size=(num_contigs, num_offspring), dtype=np.int64
+            0, 2 ** 63, size=(num_contigs, num_offspring), dtype=np.int64
         )
         scheduled_inner_workers = inner_workers if use_parallel else 1
         worker_args = []
@@ -989,9 +996,11 @@ def convert_truth_to_painting_objects(all_paintings_flat, num_workers=8):
 
         breaks = set()
         for s, e, _ in p1:
-            breaks.add(s); breaks.add(e)
+            breaks.add(s)
+            breaks.add(e)
         for s, e, _ in p2:
-            breaks.add(s); breaks.add(e)
+            breaks.add(s)
+            breaks.add(e)
 
         sorted_breaks = sorted(breaks)
         chunks = []
