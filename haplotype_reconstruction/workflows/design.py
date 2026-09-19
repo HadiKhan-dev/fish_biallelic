@@ -112,7 +112,7 @@ def _explicit_direction_supported_parents(
 
 
 def build_current_pedigree_config(*, bootstrap_replicates: int=1000):
-    """Return the promoted ragged quadratic / strict-direction configuration."""
+    """Return the ragged quadratic / finite family-direction configuration."""
 
 
     return module_pedigree_config.PedigreeConfig(
@@ -125,7 +125,8 @@ def build_current_pedigree_config(*, bootstrap_replicates: int=1000):
         parent_state_minimum_pair_exposed_bins=1.0,
         parent_state_minimum_exposed_fraction=0.10,
         parent_state_minimum_exposed_contigs=3,
-        parent_state_minimum_direction_probability=0.01,
+        parent_state_direction_model="continuous_family",
+        parent_state_family_message_passes=4,
     ).validated()
 
 

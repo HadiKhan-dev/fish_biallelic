@@ -122,8 +122,9 @@ produces no release.
 Pedigree Tier B is the primary supported output. M0 means **zero observed
 parents**, not necessarily a biological founder. Support tiers and bootstrap
 fractions are internal stability measures, not calibrated probabilities of
-biological correctness. The direction model has limitations in same-depth and
-missing-parent designs. Read [scientific assumptions](docs/methods.md) before
+biological correctness. [Finite family-direction evidence](docs/pedigree_direction.md)
+replaces hard ancestry-layer gating; ambiguous and missing-parent designs still
+require care. Read [scientific assumptions](docs/methods.md) before
 interpreting parentage or recombination rates.
 
 The [validation notes](docs/validation.md) distinguish exact implementation

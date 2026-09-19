@@ -1,6 +1,8 @@
 """Chromosome resampling, packed exposure masks and parallel support estimates."""
 from __future__ import annotations
 
+from . import orientation as pedigree_orientation
+
 
 import numpy as np
 from numba import njit
@@ -156,6 +158,7 @@ def _evaluate_bootstrap_chunk(
     full_counts = shared["full_counts"]
     junction_matrix = shared["junction_matrix"]
     callable_matrix = shared["callable_matrix"]
+    settings = shared["settings"]
     n_samples = int(shared["n_samples"])
     n_replicates = len(multiplicities)
     local_rows = np.full((n_replicates, n_samples), -1, dtype=np.int64)
@@ -201,10 +204,9 @@ def _evaluate_bootstrap_chunk(
         )
 
     for replicate, multiplicity in enumerate(multiplicities):
-        depth_model = pedigree_direction._fit_ancestry_depth_model(
-            multiplicity @ junction_matrix,
-            multiplicity @ callable_matrix,
-            int(shared["bootstrap_seed"]),
+        depth_model = pedigree_orientation.fit_direction(
+            junction_matrix, callable_matrix, shared["structure_total_bins_by_contig"],
+            multiplicity, settings,
             component_count=shared["depth_component_count"],
         )
         selection = evaluate(multiplicity, depth_model)

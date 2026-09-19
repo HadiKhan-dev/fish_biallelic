@@ -272,12 +272,14 @@ The current supported route performs missing-aware block-haplotype discovery,
 joint founder completion, component-preserving L1-L4 hierarchical assembly, and
 component-local sample painting through typed T09 checkpoints. Stage 10 consumes
 those paintings plus raw genotype likelihoods with ragged quadratic scoring,
-strict direction gating, a fixed top-20 pair panel, and Tier B as primary output.
+finite continuous direction and four reciprocal-family cavity-message passes,
+a fixed top-20 pair panel, and Tier B as primary output.
 Stage 11 performs pedigree-conditioned refinement and genotype-preserving final
 phase polishing. Stage 12 consumes final phase for missing-aware, conditional
 recombination maps, with separate posterior-mean rates, called crossover
 intervals, and observable meiosis exposure. Neither stage feeds back upstream.
-The direction assumption has known limitations for same-depth/missing-parent crosses.
+The direction/family approximation remains painting-dependent; ambiguous,
+missing-parent and highly structured-missingness crosses require validation.
 
 This is a guide, not an authoritative inventory. Inspect the current repository before relying on filenames, stage numbers, or relationships.
 

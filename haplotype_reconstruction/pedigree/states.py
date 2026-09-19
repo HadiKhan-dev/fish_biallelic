@@ -12,6 +12,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 import haplotype_reconstruction.pedigree.direction as pedigree_direction
+import haplotype_reconstruction.pedigree.orientation as pedigree_orientation
 import haplotype_reconstruction.pedigree.models as pedigree_models
 
 _CONTRAST_ULP_FACTOR = 512.0
@@ -682,7 +683,7 @@ def _evaluate_parent_state_aggregate(
     depth_posterior = (
         None
         if ancestry_depth_model is None
-        else ancestry_depth_model.posterior
+        else ancestry_depth_model
     )
     if pedigree_bootstrap.is_acyclic_parent_rows(local_row_vector, alternatives):
         graph_tie_conflicts = frozenset()
@@ -798,7 +799,7 @@ def _edge_direction_state_compatibility(
     values = np.asarray(direction, dtype=np.float64)
     compatible = np.ones(values.shape, dtype=np.bool_)
     policy = settings.parent_state_direction_state_policy
-    if policy == "identity_only":
+    if policy == "identity_only" or settings.parent_state_direction_model != "cluster":
         return compatible
     if depth_posterior is None or depth_posterior.shape[1] < 2:
         return compatible
@@ -840,6 +841,7 @@ def _parent_state_structure_mask(
     pair_exposure_presence_words: Optional[np.ndarray]=None,
     direction_supported_parents: Optional[np.ndarray]=None,
     scaffold_descendant_veto: Optional[np.ndarray]=None,
+    direction_probability: Optional[np.ndarray]=None,
 ) -> tuple[np.ndarray, ...]:
     """Separate C/X diagnostics, direction-aware state, and identity gates.
 
@@ -925,6 +927,8 @@ def _parent_state_structure_mask(
         direction = np.clip(
             depth_posterior @ lower_depth_probability.T, 0.0, 1.0
         )
+    if direction_probability is not None:
+        direction = direction_probability
     explicit_direction = (
         np.zeros((n_samples, n_samples), dtype=np.bool_)
         if direction_supported_parents is None
@@ -933,6 +937,9 @@ def _parent_state_structure_mask(
     direction_supported = explicit_direction | (
         direction >= settings.parent_state_minimum_direction_probability
     )
+
+    if settings.parent_state_direction_model != "cluster":
+        direction_supported = np.ones_like(direction_supported)
 
     m0_rows = np.flatnonzero(states == pedigree_models._ZERO_OBSERVED)
     m1_rows = np.flatnonzero(states == pedigree_models._ONE_OBSERVED)
@@ -1092,6 +1099,7 @@ def _prepare_parent_state_weighted_contigs(
     scaffold_prepared: Any=None,
     contig_information_weights: Optional[np.ndarray]=None,
     scaffold_descendant_veto: Optional[np.ndarray]=None,
+    full_counts: Optional[np.ndarray]=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Prepare likelihood and exposure/C/X/direction state and identity rows."""
     weights = np.asarray(contig_weights, dtype=np.float64)
@@ -1141,14 +1149,19 @@ def _prepare_parent_state_weighted_contigs(
         edge_exposure_presence_words=edge_exposure_presence_words,
         pair_exposure_presence_words=pair_exposure_presence_words,
         scaffold_descendant_veto=scaffold_descendant_veto,
+        direction_probability=ancestry_depth_model.edge_probability,
     )
-    return _structure_state_and_identity_aggregates(
+    state_scores, identity_scores = _structure_state_and_identity_aggregates(
         aggregate,
         alternatives,
         states,
         exposure_testable,
         selection_compatible,
         identity_eligible,
+    )
+    return pedigree_orientation.adjust_scores(
+        state_scores, identity_scores, alternatives, states, full_counts,
+        ancestry_depth_model, settings, direction_supported_parents,
     )
 
 
@@ -1203,6 +1216,7 @@ def _evaluate_parent_state_weighted_contigs(
                 direction_supported_parents,
                 scaffold_prepared,
                 contig_information_weights,
+                full_counts=full_counts,
             )
         )
     else:

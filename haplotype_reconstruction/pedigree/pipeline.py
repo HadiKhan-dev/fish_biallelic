@@ -43,6 +43,7 @@ T10_INFERENCE_CODE_FILES = (
     'pedigree/candidates.py',
     'pedigree/config.py',
     'pedigree/direction.py',
+    'pedigree/orientation.py',
     'pedigree/eligibility.py',
     'pedigree/evidence.py',
     'pedigree/graph.py',
@@ -1173,7 +1174,7 @@ def run_pedigree(
     workers = core_runtime.available_cpu_count() if n_workers is None else int(n_workers)
     if not 1 <= workers <= core_runtime.available_cpu_count():
         raise ValueError("T10 workers must fit the current CPU affinity")
-    print(f"STAGE 10: ragged quadratic, strict direction, top-20, Tier B; {workers} CPUs")
+    print(f"STAGE 10: ragged quadratic, finite family direction, top-20, Tier B; {workers} CPUs")
     print("Direction is a model assumption; same-depth and missing-parent crosses need caution.")
     with core_parallel.numba_thread_scope(workers):
         summaries, payload = run_or_resume_stage10(

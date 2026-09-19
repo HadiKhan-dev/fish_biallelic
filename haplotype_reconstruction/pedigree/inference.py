@@ -1,6 +1,8 @@
 """Genome-wide parent-state, identity and acyclic pedigree decisions."""
 from __future__ import annotations
 
+from . import orientation as pedigree_orientation
+
 
 from typing import Any, Mapping, Optional, Sequence
 
@@ -27,8 +29,8 @@ def infer_from_parent_state_evidence(
     State evidence is integrated over candidate identities only after contig
     log likelihoods have been summed. The sole supported combined method uses
     fixed B1 state priors, exposure and source-mode-specific C/X selection,
-    configurable ancestry-direction parent-count screening, and a separate
-    ancestry-depth-or-explicit direction identity gate; other analysed
+    finite continuous orientation and reciprocal-family cavity messages
+    (or the explicitly selected cluster comparison policy); other analysed
     children do not alter a focal child's parent-count prior. Parent-count,
     conditional identity, and graph support are resampled separately so the DAG
     cannot create biological confidence.
@@ -198,10 +200,9 @@ def infer_from_parent_state_evidence(
     )
     total_junction_counts = np.sum(junction_matrix, axis=0)
     total_callable_bins = np.sum(callable_matrix, axis=0)
-    full_depth_model = pedigree_direction._fit_ancestry_depth_model(
-        total_junction_counts,
-        total_callable_bins,
-        settings.bootstrap_seed,
+    full_depth_model = pedigree_orientation.fit_direction(
+        junction_matrix, callable_matrix, structure_total_bins_by_contig,
+        full_weights, settings,
     )
     full_scaffold_veto = full_scaffold_result = None
 
@@ -224,6 +225,7 @@ def infer_from_parent_state_evidence(
         scaffold_prepared=scaffold_prepared,
         contig_information_weights=contig_information_weights,
         scaffold_descendant_veto=full_scaffold_veto,
+        full_counts=full_counts,
     )
     full_selection = evaluate(
         full_weights, depth_model=full_depth_model,
@@ -252,6 +254,7 @@ def infer_from_parent_state_evidence(
         structure_total_bins_by_contig,
         full_depth_model.posterior,
         settings,
+        direction_probability=full_depth_model.edge_probability,
         direction_supported_parents=eligibility.direction_supported_parents,
         edge_exposure_presence_words=edge_exposure_presence_words,
         pair_exposure_presence_words=pair_exposure_presence_words,
@@ -395,12 +398,9 @@ def infer_from_parent_state_evidence(
         for omitted in range(len(contig_names)):
             loco_weights = full_weights.copy()
             loco_weights[omitted] = 0.0
-            loco_depth_model = pedigree_direction._fit_ancestry_depth_model(
-                total_junction_counts
-                - junction_matrix[omitted],
-                total_callable_bins
-                - callable_matrix[omitted],
-                settings.bootstrap_seed,
+            loco_depth_model = pedigree_orientation.fit_direction(
+                junction_matrix, callable_matrix, structure_total_bins_by_contig,
+                loco_weights, settings,
                 component_count=full_depth_model.posterior.shape[1],
             )
             selection = evaluate(loco_weights, depth_model=loco_depth_model)
@@ -525,7 +525,7 @@ def infer_from_parent_state_evidence(
                 (
                     None
                     if full_depth_model is None
-                    else full_depth_model.posterior
+                    else full_depth_model
                 ),
             )
         )
@@ -981,6 +981,13 @@ def infer_from_parent_state_evidence(
             depth_tested_bics = ";".join(
                 f"{value:.8g}" for value in full_depth_model.tested_bics
             )
+            if full_depth_model.edge_probability is not None:
+                # A continuous model does not infer discrete ancestry layers.
+                depth_posterior_text = depth_component_means = ""
+                depth_component_standard_deviations = depth_component_weights = ""
+                depth_tested_bics = ""
+                depth_map = depth_selected_bic = np.nan
+                depth_component_count = 0
 
         structure_selected_cx_compatible = bool(
             local_row is not None and full_cx_compatible[local_row]
@@ -1026,6 +1033,8 @@ def infer_from_parent_state_evidence(
             ),
             "ParentStateDirectionStatePolicy": (
                 settings.parent_state_direction_state_policy
+                if settings.parent_state_direction_model == "cluster"
+                else "finite_score"
             ),
             "DirectionStateRejectedAlternativeCount": int(np.count_nonzero(
                 full_direction_state_rejected[child_rows]
@@ -1152,7 +1161,17 @@ def infer_from_parent_state_evidence(
             "LatentAncestryDepthComponentWeights": depth_component_weights,
             "LatentAncestryDepthSelectedBIC": depth_selected_bic,
             "LatentAncestryDepthTestedBICs": depth_tested_bics,
-            "AncestryDepthResampling": "conditional_full_data_component_count",
+            "DirectionModel": settings.parent_state_direction_model,
+            "FamilyMessagePasses": (
+                settings.parent_state_family_message_passes
+                if settings.parent_state_direction_model in {"family", "continuous_family"}
+                else 0
+            ),
+            "AncestryDepthResampling": (
+                "conditional_full_data_component_count"
+                if settings.parent_state_direction_model == "cluster"
+                else "paired_contig_refit"
+            ),
             "InformativeContigCount": informative_count,
             "LocalStateBootstrapFraction": state_bootstrap,
             "LocalConfigurationBootstrapFraction": (
@@ -1519,6 +1538,8 @@ def infer_from_parent_state_evidence(
     )
     result.direction_state_policy = (
         settings.parent_state_direction_state_policy
+        if settings.parent_state_direction_model == "cluster"
+        else "finite_score"
     )
     result.parent_state_algorithm_mode = pedigree_models._PARENT_STATE_LIKELIHOOD
     result.b3_heldout_state_mask_policy = "none"
@@ -1602,6 +1623,25 @@ def infer_from_parent_state_evidence(
         "forward B1 likelihood; its probability also orders graph construction "
         "and conflict resolution."
     )
+    if settings.parent_state_direction_model != "cluster":
+        result.ancestry_depth_model_parameters = {
+            "direction_model": settings.parent_state_direction_model,
+            "family_message_passes": settings.parent_state_family_message_passes,
+            "direction_robustness_mixture": settings.parent_state_contamination_probability,
+            "direction_gate": False,
+            "family_constraint": "no_reciprocal_parent_edges",
+        }
+        result.ancestry_depth_model_specification = (
+            "Paired chromosome junction contrasts provide finite, neutral-centered "
+            "orientation support with summary-level callability adjustment. "
+            "Family modes marginalize competing M0/M1/M2 configurations using "
+            "bounded synchronous cavity messages that exclude immediate reverse "
+            "feedback. These are composite/loopy approximations, not calibrated "
+            "parenthood probabilities. All direction evidence and family messages "
+            "are recomputed for each bootstrap and leave-one-contig-out fit. "
+            "Exposure and caller eligibility remain mandatory; no inferred "
+            "generation or ancestry-layer order excludes a candidate."
+        )
     result.selection_method = (
         "marginal parent-state selection followed by conditional identity; "
         "deterministic ancestry-direction-then-confidence-ordered variable-edge "
@@ -1637,19 +1677,15 @@ def infer_from_parent_state_evidence(
         )
         + "State support is based on the fixed-prior tempered B1 composite "
         "likelihood, not a calibrated posterior probability. Incomplete-screen "
-        "integrated B1 evidence is a lower bound. Relative ancestry depth is "
-        "unsupervised and painting-dependent: it is inferred from a conservative "
-        "minimum-switch burden, not from known generation, age, or breeding "
-        "metadata. Callability tempers each sample's component posterior, but "
-        "callability-adjusted burdens still enter mixture fitting and BIC equally; "
-        "highly incomplete paintings therefore remain a validation risk. Depth "
-        "supplies a configurable candidate-identity direction gate unless caller "
-        "eligibility explicitly supports the edge, and its probabilities order "
-        "graph construction. Under the configured direction-state policy it can "
-        "also exclude testable direction contradictions from parent-count state "
-        "mass; unavailable direction remains neutral. It can therefore affect "
-        "state calls, resolved identities, the DAG-selected configuration, and "
-        "Tier A/B release; it is not an independent likelihood source. Reconstructed "
+        "integrated B1 evidence is a lower bound. Direction uses painting-derived "
+        "minimum-switch burden, not known generation, age, or breeding metadata. "
+        "The selected policy is recorded in ancestry_depth_model_parameters. "
+        "The finite family model uses summary-level callability adjustment, not "
+        "an exact common-interval recount; structured missingness remains a risk. "
+        "Family messages are a bounded loopy approximation and exclude immediate "
+        "reverse feedback, not every longer dependency. Shared genetic/painting "
+        "evidence is not independent. Direction and family terms can affect state "
+        "calls, identities, graph selection and Tier A/B release. Reconstructed "
         "paintings and hard founder alleles "
         "inherit upstream errors; raw genotype likelihoods are not double-"
         "counted as an independent source. Zero observed parents may mean a "

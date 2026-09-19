@@ -26,6 +26,7 @@ class _AncestryDepthModel:
     component_weights: np.ndarray
     selected_bic: float
     tested_bics: tuple[float, ...]
+    edge_probability: Optional[np.ndarray] = None
 
 
 _DEFAULT_MAX_ITER = 500
@@ -200,9 +201,9 @@ _DEFAULT_TOLERANCE = 1e-3
 def _parent_role_probability(
     row: int,
     alternatives: np.ndarray,
-    depth_posterior: Optional[np.ndarray],
+    depth_posterior: Optional[np.ndarray | _AncestryDepthModel],
 ) -> float:
-    """Probability all observed parents occupy an earlier latent depth."""
+    """Orientation-ordering support, not calibrated parenthood probability."""
     parents = tuple(
         int(parent)
         for parent in alternatives[row, 1:]
@@ -210,6 +211,11 @@ def _parent_role_probability(
     )
     if not parents:
         return 1.0
+    if isinstance(depth_posterior, _AncestryDepthModel):
+        if depth_posterior.edge_probability is not None:
+            child = int(alternatives[row, 0])
+            return float(np.prod(depth_posterior.edge_probability[child, list(parents)]))
+        depth_posterior = depth_posterior.posterior
     if depth_posterior is None or depth_posterior.shape[1] < 2:
         return 0.0
     child = int(alternatives[row, 0])

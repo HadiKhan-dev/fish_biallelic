@@ -26,7 +26,7 @@ choosing the T11 stopping rule, not from all project development.
 | N320 fragmentation replay | Eight previously fragmented chromosomes now continuous; seed407 chr15 final-refinement regression remains unresolved |
 | Painting numerical implementation | All 22 seed402 q16 chromosomes, 148 components and 8,956,852 sites, plus seed400/401 chr16 controls |
 | Packed T09 evidence reuse | Full chr3/chr16 repaints, prepared fields and typed checkpoint round trips; memory-limited/uncached controls |
-| Metadata-free T10 | Full 22-chromosome seed402 q16 check and a subsequent full seed401 cached/uncached check |
+| Metadata-free T10 | 20 full-genome finite-direction controls at N80/N160/N320, missing-parent and backcross controls; earlier seed401/402 wiring checks |
 | Phase-focused T11 | All 22 chromosomes of seeds400–402 on frozen earlier q4 inputs; later complete dense q16 seed403 run before multiscale refinement |
 | Latest T11 dirty tiles | Two complete seed401 chromosomes; exact final phase/stability fields |
 | Latest T12 indexed trials | All 22 seed401 final-phase maps; variable/zero maps, missingness, overlapping flips and reset controls; later complete seed403 run before multiscale refinement |
@@ -98,6 +98,64 @@ sample size or depth. It does not revalidate or resolve the earlier seed407
 chr15 limitation below. The full readable report, canonical evaluation and
 checkpoints remain in `work/runs/seed_3000/`; frozen source, founder metrics and
 execution records remain in `.work/seed3000_full_20260917_cFrnkNJ8/`.
+
+## Finite family direction
+
+On 18 September 2026 the default T10 direction policy changed from a hard
+ancestry-layer gate to [finite continuous and family evidence](pedigree_direction.md).
+All comparisons below use 22 chromosomes at 5x, no generation/parent metadata,
+unchanged eligibility/exposure and release thresholds, and truth only for
+evaluation. Assembly, painting and the genetic likelihood scorer are fixed.
+
+| Saved full-genome controls | Seeds | Baseline exact Tier B | New exact Tier B |
+| --- | ---: | ---: | ---: |
+| N160, 20/60/80, seeds4000–4015 | 16 | 2,555 / 2,560 | 2,560 / 2,560 |
+| N80, seeds2003/2005 (20/30/30), seed2010 (10/30/40) | 3 | 240 / 240 | 240 / 240 |
+| N320, seed3000 | 1 | 320 / 320 | 320 / 320 |
+
+The new model recovers all 3,120 individual configurations at **both** tiers,
+including all 390 roots as M0, with no missing or extra edges. Full-data local
+calls have no graph conflicts: cycle removal is not rescuing these roots.
+The five N160 baseline failures were abstentions; their correct pairs already
+ranked first genetically but failed direction or resampling support.
+
+Missing-parent controls remove a seeded 25% or 50% of samples from each N160
+input: 32 tests, 3,200 retained sample evaluations comprising 815 M0, 1,131 M1
+and 1,254 M2 targets. Tier B improves 3,194 to 3,200 exact, without extra edges.
+These controls initially hold the full-cohort background and screen fixed;
+they are not 32 independent fresh simulations. Full-cohort permutations also
+preserve the results. Three additional tests remove rows before recomputing
+T10 screening, background and likelihoods from saved T09 inputs
+(seed4000/75%, seed4006/50%, seed4011/50%). Both new tiers recover 280/280;
+the old Tier B recovers 279/280. Upstream assembly/painting remains fixed.
+
+Two focused N40 backcross simulations each contain eight generated roots,
+16 ordinary offspring and 16 offspring crossed to one actual parent.
+They use six supplied founder haplotypes, 5x reads with 2% errors and
+5 cM/Mb, with one test adding contiguous missing reads and partial founder
+sequence. Read-derived source factors, not inherited truth labels, enter T10.
+Tier B improves from 24/40 and 26/40 to 40/40 in each. Tier A is 40/40 and
+33/40; its remaining calls abstain or leave identities unresolved, with no
+extra edges. This checks T09-source/T10 backcross inference, **not** discovery
+or assembly of an entire backcross dataset.
+
+An initial single-pass family correction lost root support under sample
+withholding and was rejected. Four synchronous cavity-message passes resolved
+that issue. Four versus eight passes produced identical relationship tables
+on six controls; serial versus 112-worker execution preserved tables and
+inspected support columns on seed4011. Small tree factors match exact
+enumeration. A log-odds implementation also handles strong reverse messages
+without rounding away a small probability before removing that message.
+After this correction, all 20 full-seed tables and all missing-parent/backcross
+metrics above remained unchanged.
+
+This is empirical support for the tested designs, not proof of calibrated
+parenthood probabilities or general correctness. Loopy family dependence,
+painting errors, incompletely screened alternatives and structured missingness
+remain limitations. T11/T12 were not rerun after this T10-only change; the
+fresh end-to-end results elsewhere on this page refer to their recorded
+earlier code versions. Detailed attempt logs and isolated outputs are retained
+locally in `.work/pedigree_direction_20260918_UtLS28/`.
 
 ## Progressive final L1–L4 refinement at N80
 

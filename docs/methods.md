@@ -417,23 +417,22 @@ top-20 parent panel keeps candidate-pair evaluation bounded per sample. The
 parent-state model distinguishes zero, one and two observed parents. A missing
 biological parent is not replaced by an unsupported candidate.
 
-Ancestry-depth direction gating addresses reverse relationships and root
-overcalls. It is a model assumption, not sample read-depth metadata, and may
-be insufficient when generations have similar ancestry depth or parents are
-missing. Exact identities, ambiguous support sets, graph adjustments, bootstrap
-and leave-one-chromosome-out stability should be interpreted together. Tier B
-is the primary product; the complete table is not equally supported at every
-row. Fixed model priors do not require knowing the true M0/M1/M2 proportions.
+T10 uses [finite direction and family evidence](pedigree_direction.md) rather
+than a mandatory ordering of inferred ancestry layers. Paired chromosome
+junction contrasts give finite, neutral-centred orientation support; four
+synchronous reciprocal-family cavity-message passes compare competing M0/M1/M2
+families while excluding immediate reverse feedback. Both are recomputed during
+bootstrap and leave-one-chromosome-out fits. Exposure requirements, explicit
+eligibility, the fixed top-20 pair panel, fixed state priors and release
+thresholds remain unchanged.
 
-The full-data ancestry-depth mixture still chooses its component count by BIC.
-Chromosome bootstrap and leave-one-chromosome-out refits condition on that
-selected dimension, while refitting component means, variances, weights and
-sample depth posteriors. Uninformative resamples retain their neutral treatment;
-a component count is never supplied from true generations or a known pedigree.
-The diagnostic `AncestryDepthResampling` labels this as
-`conditional_full_data_component_count`. These support fractions measure
-stability **conditional on the selected model dimension**, not uncertainty
-about that dimension or calibrated probabilities of correct parentage.
+This is a bounded composite/loopy approximation, not exact global pedigree
+marginalization. Callability correction uses chromosome summaries rather than
+exact common-interval counts. Tier B remains the primary product, and internal
+support is not a calibrated correctness probability. M0 means zero observed
+parents, not that the fish cannot have observed descendants. The prior
+cluster policy remains available for controlled API comparisons; it is not the
+workflow default.
 
 Real-data entry points use available design metadata for legitimate candidate
 eligibility and chronology, not as individual-level trio truth. In particular,

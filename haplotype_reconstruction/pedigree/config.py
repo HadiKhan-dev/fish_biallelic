@@ -53,6 +53,10 @@ class PedigreeConfig:
     parent_state_minimum_exposed_fraction: float = 0.10
     parent_state_minimum_exposed_contigs: int = 3
     parent_state_minimum_direction_probability: float = 0.01
+    # Finite orientation plus four reciprocal-family cavity-message passes.
+    # "cluster" retains the previous policy for controlled comparisons.
+    parent_state_direction_model: str = "continuous_family"
+    parent_state_family_message_passes: int = 4
     parent_state_direction_state_policy: str = field(default="strict_gate", init=False)
     parent_state_scaffold_policy: str = field(default="none", init=False)
     parent_state_candidate_source_mode: str = field(
@@ -82,6 +86,10 @@ class PedigreeConfig:
     parent_state_prior_tolerance: float = 1e-10
 
     def validated(self) -> "PedigreeConfig":
+        if self.parent_state_direction_model not in {
+            "cluster", "continuous", "family", "continuous_family"
+        }:
+            raise pedigree_models.PedigreeEvidenceError("unknown direction model")
         def require_integer(name: str, minimum: int) -> None:
             raw_value = getattr(self, name)
             if isinstance(raw_value, (bool, np.bool_)):
@@ -100,6 +108,7 @@ class PedigreeConfig:
                 )
 
         for integer_name, minimum in (
+            ("parent_state_family_message_passes", 1),
             ("bootstrap_replicates", 1),
             ("bootstrap_seed", 0),
             ("markers_per_information_block", 1),
