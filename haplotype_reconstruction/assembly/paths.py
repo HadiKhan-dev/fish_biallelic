@@ -491,7 +491,7 @@ _ATOMIC_SOURCE_PROVENANCE_ATTRIBUTES = (
 def missing_aware_atomic_source_provenance(block):
     """Return validated atomic row/span provenance for a block.
 
-    Stage-1 blocks do not carry hierarchy provenance, so their rows are the
+    block discovery blocks do not carry hierarchy provenance, so their rows are the
     atomic sources: row ordinals follow the sorted haplotype-key order already
     used by FastMesh. Hierarchical blocks must carry the complete set of
     arrays, whose span offsets/counts exactly partition their position axis.

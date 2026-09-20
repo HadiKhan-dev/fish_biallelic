@@ -1,5 +1,6 @@
 """Checkpointed founder completion, L1-L4 assembly and progressive path refinement."""
 from __future__ import annotations
+from ..core.run_record import timed_stage
 from haplotype_reconstruction import PACKAGE_ROOT
 
 import copy
@@ -16,10 +17,10 @@ from.structured_transitions import StructuredTransitionConfig, configured_transi
 from.panel_search import PanelSearchConfig, configured_panel_search
 from.import founder_refinement, evidence as assembly_evidence
 
-STAGE2_RELEASE_SCHEMA = "stage2-release-v1"
+ASSEMBLY_RELEASE_SCHEMA = "assembly-release-v1"
 
 
-STAGE2_RELEASE_BACKEND = (
+ASSEMBLY_RELEASE_BACKEND = (
     "preprocess-progressive-founder-hierarchy-refinement-v19"
 )
 
@@ -27,8 +28,8 @@ STAGE2_RELEASE_BACKEND = (
 INTERSECTION_SAMPLE_RULE = "intersection_across_linking_proxy_batch_v2"
 
 
-STAGE2_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
-    assembly_completion.STAGE2_PREPROCESS_SCIENTIFIC_DEPENDENCIES + (
+ASSEMBLY_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
+    assembly_completion.ASSEMBLY_PREPROCESS_SCIENTIFIC_DEPENDENCIES + (
         'core/numerics.py',
         'core/config.py',
         'core/genotypes.py',
@@ -54,7 +55,7 @@ STAGE2_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
 )))
 
 
-STAGE2_RELEASE_CODE_IDENTITY_FILES += (
+ASSEMBLY_RELEASE_CODE_IDENTITY_FILES += (
     'assembly/structured_transitions.py', 'assembly/panel_search.py',
     'assembly/panel_scoring.py', 'assembly/panel_candidates.py', 'assembly/partial_emissions.py',
     'assembly/founder_refinement.py', 'assembly/founder/path_search.py',
@@ -150,7 +151,7 @@ class AssemblyConfig:
             if isinstance(value, bool) or int(value) != value or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         if self.max_level > 4:
-            raise ValueError("the Stage-2 release supports hierarchy L1-L4")
+            raise ValueError("the assembly release supports hierarchy L1-L4")
         if self.maxtasksperchild is not None and (
                 isinstance(self.maxtasksperchild, bool)
                 or int(self.maxtasksperchild) != self.maxtasksperchild
@@ -248,7 +249,7 @@ def _block_discrete(block: core_haplotypes.BlockResult) -> np.ndarray:
     positions = np.asarray(block.positions)
     discrete = np.asarray(getattr(block, "discrete_haps", None))
     if not keys or positions.ndim != 1 or positions.size == 0:
-        raise ValueError("every Stage-2 input block must be nonempty")
+        raise ValueError("every assembly input block must be nonempty")
     if discrete.shape != (len(keys), positions.size):
         raise ValueError("block.discrete_haps is not founder-by-site aligned")
     if np.any(~np.isin(discrete, (-1, 0, 1))):
@@ -324,16 +325,16 @@ def _input_block_digest(input_blocks) -> str:
     return digest.hexdigest()
 
 
-def stage2_release_code_identity(digest_overrides=None) -> dict[str, str]:
+def assembly_release_code_identity(digest_overrides=None) -> dict[str, str]:
     overrides = {} if digest_overrides is None else dict(digest_overrides)
-    unknown = set(overrides) - set(STAGE2_RELEASE_CODE_IDENTITY_FILES)
+    unknown = set(overrides) - set(ASSEMBLY_RELEASE_CODE_IDENTITY_FILES)
     if unknown:
         raise ValueError(
             "unknown code identity override files: " + ", ".join(sorted(unknown))
         )
     root = PACKAGE_ROOT
     result = {}
-    for filename in STAGE2_RELEASE_CODE_IDENTITY_FILES:
+    for filename in ASSEMBLY_RELEASE_CODE_IDENTITY_FILES:
         if filename in overrides:
             value = str(overrides[filename]).lower()
             if (len(value) != 64
@@ -409,10 +410,10 @@ def _preprocess_inputs(input_blocks, probabilities, sites, observed,
     return assembly_evidence.block_views(neutral, effective_observed, indices)
 
 
-def stage2_release_identity_record(
+def assembly_release_identity_record(
     config: AssemblyConfig,
     *,
-    stage1_identity: Mapping[str, Any],
+    discovery_identity: Mapping[str, Any],
     sample_ids,
     input_blocks,
     global_probs,
@@ -434,7 +435,7 @@ def stage2_release_identity_record(
     )
     ordered_ids = _canonical_sample_ids(sample_ids, probabilities.shape[0])
     if preprocess_identity is None:
-        preprocess_identity = assembly_completion.stage2_preprocess_identity(
+        preprocess_identity = assembly_completion.assembly_preprocess_identity(
             config.preprocess_config,
             fold_assignments=fold_assignments,
             n_samples=probabilities.shape[0],
@@ -444,10 +445,10 @@ def stage2_release_identity_record(
             preprocess_identity, "preprocess_identity"
         )
     record = {
-        "schema": STAGE2_RELEASE_SCHEMA,
-        "backend": STAGE2_RELEASE_BACKEND,
-        "stage1_identity": _canonical_mapping(
-            stage1_identity, "stage1_identity"
+        "schema": ASSEMBLY_RELEASE_SCHEMA,
+        "backend": ASSEMBLY_RELEASE_BACKEND,
+        "discovery_identity": _canonical_mapping(
+            discovery_identity, "discovery_identity"
         ),
         "ordered_sample_ids": ordered_ids,
         "preprocess_identity": preprocess_identity,
@@ -461,7 +462,7 @@ def stage2_release_identity_record(
                 "global_sites": _array_digest(sites),
                 "global_observed_mask": _array_digest(observed),
             }),
-        "code_identity_sha256": stage2_release_code_identity(
+        "code_identity_sha256": assembly_release_code_identity(
             code_digest_overrides
         ),
         "hierarchy_model": {
@@ -481,7 +482,7 @@ def stage2_release_identity_record(
             chromosome_map.fallback_rate_per_bp)
         if chromosome_map.has_map:
             record["genetic_map"] = chromosome_map.identity()
-    return _canonical_mapping(record, "stage2_release_identity")
+    return _canonical_mapping(record, "assembly_release_identity")
 
 
 def _expected_inference_snapshot(source: core_haplotypes.BlockResult) -> np.ndarray:
@@ -513,13 +514,13 @@ def _validate_preprocess_result(source, result) -> core_haplotypes.BlockResults:
     prepared = getattr(result, "prepared_blocks", None)
     direct = getattr(result, "direct_components", None)
     if not isinstance(prepared, core_haplotypes.BlockResults) or not prepared:
-        raise TypeError("Stage-2 preprocessing must return prepared_blocks")
+        raise TypeError("assembly preprocessing must return prepared_blocks")
     if not isinstance(direct, core_haplotypes.BlockResults) or not direct:
         raise TypeError(
-            "Stage-2 preprocessing must return diagnostic direct_components"
+            "assembly preprocessing must return diagnostic direct_components"
         )
     if _layout(prepared) != _layout(source):
-        raise ValueError("preprocessing changed the original Stage-1 block layout")
+        raise ValueError("preprocessing changed the original block discovery block layout")
     for raw, block in zip(source, prepared):
         snapshot = np.asarray(
             getattr(block, "missing_aware_inference_discrete_haps", None)
@@ -699,7 +700,7 @@ def _validate_persistent_breaks(blocks, boundaries) -> None:
                 np.asarray(block.positions)[0] <= left_end
                 and np.asarray(block.positions)[-1] >= right_start
                 for block in source):
-            raise ValueError("hierarchy crossed a persistent Stage-1 phase break")
+            raise ValueError("hierarchy crossed a persistent block discovery phase break")
         left = next((
             block for block in source
             if int(np.asarray(block.positions)[-1]) == left_end
@@ -709,15 +710,15 @@ def _validate_persistent_breaks(blocks, boundaries) -> None:
             if int(np.asarray(block.positions)[0]) == right_start
         ), None)
         if left is None or right is None:
-            raise ValueError("hierarchy lost a persistent Stage-1 phase break")
+            raise ValueError("hierarchy lost a persistent block discovery phase break")
         if not (
                 getattr(left, "missing_aware_break_after", False)
                 and getattr(right, "missing_aware_break_before", False)):
-            raise ValueError("hierarchy lost persistent Stage-1 break markers")
+            raise ValueError("hierarchy lost persistent block discovery break markers")
         if reason is not None and not (
                 getattr(left, "missing_aware_break_reason_after", None) == reason
                 and getattr(right, "missing_aware_break_reason_before", None) == reason):
-            raise ValueError("hierarchy changed a persistent Stage-1 break reason")
+            raise ValueError("hierarchy changed a persistent block discovery break reason")
 
 
 def _assert_position_coverage(blocks, expected_positions) -> None:
@@ -725,7 +726,7 @@ def _assert_position_coverage(blocks, expected_positions) -> None:
         raise ValueError("hierarchy produced no phase components")
     observed = np.concatenate([np.asarray(block.positions) for block in blocks])
     if not np.array_equal(observed, expected_positions):
-        raise ValueError("hierarchy changed Stage-2 position coverage or order")
+        raise ValueError("hierarchy changed assembly position coverage or order")
 
 
 def _hierarchy_stop_reason(level: int, before: int, after: int) -> str | None:
@@ -746,6 +747,7 @@ def _preprocess_result_diagnostics_mode(preprocess_result) -> str:
     return mode
 
 
+@timed_stage("assembly")
 def assemble_chromosome(
     input_blocks,
     global_probs,
@@ -753,7 +755,7 @@ def assemble_chromosome(
     global_observed_mask,
     sample_ids,
     *,
-    stage1_identity: Mapping[str, Any],
+    discovery_identity: Mapping[str, Any],
     config: AssemblyConfig=AssemblyConfig(),
     fold_assignments: np.ndarray | None=None,
     code_digest_overrides=None,
@@ -782,15 +784,15 @@ def assemble_chromosome(
         input_blocks, probabilities, sites, observed, chromosome_evidence
     )
     expected_preprocess_identity = (
-        assembly_completion.stage2_preprocess_identity(
+        assembly_completion.assembly_preprocess_identity(
             config.preprocess_config,
             fold_assignments=fold_assignments,
             n_samples=probabilities.shape[0],
         ).record()
     )
-    identity = stage2_release_identity_record(
+    identity = assembly_release_identity_record(
         config,
-        stage1_identity=stage1_identity,
+        discovery_identity=discovery_identity,
         sample_ids=ordered_ids,
         input_blocks=input_blocks,
         global_probs=probabilities,
@@ -830,7 +832,7 @@ def assemble_chromosome(
         else:
             resumed_phases.append("preprocess")
     if preprocess_result is None:
-        preprocess_result = assembly_completion.run_stage2_preprocess(
+        preprocess_result = assembly_completion.run_assembly_preprocess(
             input_blocks,
             evidence_by_block,
             observed_by_block,
@@ -856,9 +858,9 @@ def assemble_chromosome(
                 "preprocess checkpoint has the wrong scientific identity"
             )
     else:
-        identity = stage2_release_identity_record(
+        identity = assembly_release_identity_record(
             config,
-            stage1_identity=stage1_identity,
+            discovery_identity=discovery_identity,
             sample_ids=ordered_ids,
             input_blocks=input_blocks,
             global_probs=probabilities,
@@ -948,7 +950,7 @@ def assemble_chromosome(
             if (
                     not isinstance(checkpoint_payload, Mapping)
                     or checkpoint_payload.get("schema")
-                    != "stage2-release-hierarchy-phase-v1"
+                    != "assembly-release-hierarchy-phase-v1"
                     or checkpoint_payload.get("level") != level):
                 raise ValueError("unrecognized hierarchy-level checkpoint")
             output = checkpoint_payload.get("blocks")
@@ -1002,10 +1004,15 @@ def assemble_chromosome(
             diagnostic = {
                 **expected_diagnostic,
                 "elapsed_seconds": elapsed_seconds,
+                "panel_search": tuple({
+                    "position_start": int(block.positions[0]),
+                    "position_end": int(block.positions[-1]),
+                    "records": getattr(block, "panel_search_diagnostics", ()),
+                } for block in next_blocks),
             }
             if release_checkpoints is not None:
                 release_checkpoints.save(phase, {
-                    "schema": "stage2-release-hierarchy-phase-v1",
+                    "schema": "assembly-release-hierarchy-phase-v1",
                     "level": level,
                     "blocks": next_blocks,
                     "diagnostic": diagnostic,
@@ -1076,17 +1083,23 @@ def assemble_chromosome(
 
     for component_id, block in enumerate(working):
         block.missing_aware_phase_component_id = component_id
-        block.stage2_component_identity = copy.deepcopy(identity)
+        block.assembly_component_identity = copy.deepcopy(identity)
+    # Small score/budget records only; no ancestral sequences or full tensors.
+    # Retain every level, since refinement can replace component objects.
+    assembly_search_history = tuple({"level": row["level"], "panels": row.get("panel_search", ())}
+                                    for row in level_diagnostics)
+    if working:
+        working[0].assembly_search_history = assembly_search_history
     component_manifest = core_runtime.create_phase_component_manifest(working)
     core_runtime.validate_phase_component_manifest(component_manifest)
 
     if _layout(input_blocks) != source_layout or any(
             not np.array_equal(value, _block_discrete(block))
             for value, block in zip(source_calls, input_blocks)):
-        raise AssertionError("the Stage-2 release mutated its Stage-1 inputs")
+        raise AssertionError("the assembly release mutated its block discovery inputs")
 
     return {
-        "schema": STAGE2_RELEASE_SCHEMA,
+        "schema": ASSEMBLY_RELEASE_SCHEMA,
         "identity": identity,
         "preprocess_result": preprocess_result,
         "components": working,
@@ -1107,7 +1120,7 @@ def assemble_chromosome(
             ),
             "preprocess_checkpoint_upgraded": preprocess_checkpoint_upgraded,
             "resumed_phases": tuple(resumed_phases),
-            "inference_snapshot": "immutable_pre_fill_stage1_calls",
+            "inference_snapshot": "immutable_pre_fill_discovery_calls",
             "batch_sample_rule": INTERSECTION_SAMPLE_RULE,
             "ordered_sample_ids": ordered_ids,
             "phase_core_ceiling": config.num_processes,

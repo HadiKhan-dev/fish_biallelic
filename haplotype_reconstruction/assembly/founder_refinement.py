@@ -3,7 +3,7 @@
 Hierarchy supplies the initial founder count and fixed phase-component boundaries.
 Final refinement reopens local row choices and compares bounded count reductions
 without inventing alleles, merging components or using pedigree information.
-The sample-level fitting HMM is internal to assembly; it does not replace T09
+The sample-level fitting HMM is internal to assembly; it does not replace painting
 painting or publish sample ancestry. Path edits improve the same full-site
 cohort objective; count changes compete under the existing complexity penalty.
 """

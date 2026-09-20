@@ -50,16 +50,16 @@ _PARENT_STATE_METHOD = "combined_v1"
 _PARENT_STATE_LIKELIHOOD = "b1"
 
 
-T09_RAGGED_POSTERIOR_MODE = "t09_ragged_posterior_v1"
+PAINTING_RAGGED_POSTERIOR_MODE = "painting_ragged_posterior_v1"
 
 
 RAGGED_QUADRATIC_MODEL = (
-    "t09_ragged_projected_quadratic_v1"
+    "painting_ragged_projected_quadratic_v1"
 )
 
 
-T09_RAGGED_POSTERIOR_SOURCE_MODES = frozenset((
-    T09_RAGGED_POSTERIOR_MODE,
+PAINTING_RAGGED_POSTERIOR_SOURCE_MODES = frozenset((
+    PAINTING_RAGGED_POSTERIOR_MODE,
     RAGGED_QUADRATIC_MODEL,
 ))
 

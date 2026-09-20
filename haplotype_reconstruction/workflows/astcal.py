@@ -14,13 +14,9 @@ import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.discovery.blocks as discovery_blocks
 import haplotype_reconstruction.discovery.search as discovery_search
-import haplotype_reconstruction.pedigree.pipeline as pedigree_pipeline
-import haplotype_reconstruction.recombination.model as module_recombination_model
-import haplotype_reconstruction.recombination.pipeline as recombination_pipeline
-import haplotype_reconstruction.refinement.pipeline as refinement_pipeline
-import haplotype_reconstruction.refinement.model as refinement_model
 import haplotype_reconstruction.workflows.design as workflows_design
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
+from .downstream import run_downstream
 
 CHECKPOINT_DIR = (
     os.environ.get("HAPLOTYPES_CHECKPOINT_DIR", "work/runs/astcal/checkpoints")
@@ -36,11 +32,10 @@ ASAC_METADATA_PATH = os.environ.get(
 ASAC_METADATA_SHEET = os.environ.get("HAPLOTYPES_METADATA_SHEET", "main_data")
 
 
+@core_runtime.logged_workflow("astcal")
 def run():
     """Execute or resume the configured, chromosome-checkpointed workflow."""
     import os
-    import sys
-    from datetime import datetime
 
     # FORCE NUMPY/BLAS TO USE 1 THREAD PER PROCESS
     core_environment.force_single_threaded_numeric_libraries()
@@ -49,17 +44,11 @@ def run():
     # DUAL LOGGING: Console + File
     # =============================================================================
 
-    os.makedirs(os.environ.get("HAPLOTYPES_LOG_DIR", "work/logs"), exist_ok=True)
-    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join(os.environ.get("HAPLOTYPES_LOG_DIR", "work/logs"), f"run_{run_timestamp}.log")
-    sys.stdout = core_runtime.TeeOutput(log_path, sys.stdout)
-    print(f"Logging to: {log_path}")
-    print(f"Run started: {run_timestamp}")
+
 
     import numpy as np
     import pandas as pd
     import time
-    import warnings
     import platform
     import gc
     from dataclasses import asdict
@@ -68,15 +57,14 @@ def run():
     np.seterr(divide='ignore', invalid='ignore')
 
 
-    stage1_config = discovery_search.ReversibleCavitySearchConfig()
-    stage1_config_record = asdict(stage1_config)
-    stage1_identity_record = {
-        "backend": discovery_blocks.STAGE1_BACKEND,
-        "config": stage1_config_record,
+    discovery_config = discovery_search.ReversibleCavitySearchConfig()
+    discovery_config_record = asdict(discovery_config)
+    discovery_identity_record = {
+        "backend": discovery_blocks.DISCOVERY_BACKEND,
+        "config": discovery_config_record,
     }
 
 
-    from dataclasses import replace
 
     rate_maps = core_genetic_map.load_genetic_maps_from_environment()
     inference_recombination_rate = rate_maps.default_rate_cm_per_mb / 1e8
@@ -152,24 +140,24 @@ def run():
     total_pipeline_start = time.time()
 
     # =========================================================================
-    # STAGE R01: VCF Loading + Block Discovery + Global Probabilities
+    # STAGE block discovery: VCF Loading + Block Discovery + Global Probabilities
     # =========================================================================
-    STAGE_R1 = "R00_founder_templates"
+    DISCOVERY_STAGE = "block_discovery"
     checkpoint_store.bind_stage_identity(
-        STAGE_R1, stage1_identity_record
+        DISCOVERY_STAGE, discovery_identity_record
     )
 
-    if stage_complete(STAGE_R1):
+    if stage_complete(DISCOVERY_STAGE):
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
     else:
         print(f"\n{'='*60}")
-        print("STAGE R01: VCF Loading + Block Haplotype Discovery")
+        print("STAGE block discovery: VCF Loading + Block Haplotype Discovery")
         print(f"{'='*60}")
         start = time.time()
 
         with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
             for r_name in region_keys:
-                if contig_done(STAGE_R1, r_name):
+                if contig_done(DISCOVERY_STAGE, r_name):
                     print(f"  [RESUME] {r_name} already done")
                     continue
                 print(f"\n  Processing {r_name}...")
@@ -212,7 +200,7 @@ def run():
                     genomic_data,
                     num_processes=n_processes,
                     block_pool=block_pool,
-                    discovery_config=stage1_config,
+                    discovery_config=discovery_config,
                 )
                 valid_blocks = [b for b in block_results if len(b.positions) > 0]
                 block_results = core_haplotypes.BlockResults(valid_blocks)
@@ -222,7 +210,7 @@ def run():
                       f"min={min(hap_counts)}, max={max(hap_counts)}, "
                       f"mean={np.mean(hap_counts):.1f} in {time.time()-t0:.1f}s")
 
-                save_contig(STAGE_R1, r_name, {
+                save_contig(DISCOVERY_STAGE, r_name, {
                     'global_probs': global_probs,
                     'global_sites': global_sites,
                     'global_observed_mask': global_observed_mask,
@@ -234,14 +222,14 @@ def run():
                     ),
                     'block_results': block_results,
                     'avg_depth': avg_depth,
-                    'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-                    'stage1_config': stage1_config_record,
+                    'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+                    'discovery_config': discovery_config_record,
                 })
                 del genomic_data, block_results, global_probs, global_sites
                 del global_observed_mask
                 gc.collect()
 
-        save_global(STAGE_R1, {
+        save_global(DISCOVERY_STAGE, {
             'sample_ids': sample_names,
             'contigs': region_keys,
             'genotype_evidence_mode': (
@@ -250,16 +238,16 @@ def run():
             'observed_call_mask_mode': (
                 workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
             ),
-            'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-            'stage1_config': stage1_config_record,
+            'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+            'discovery_config': discovery_config_record,
         })
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
-        mark_stage_complete(STAGE_R1)
+        mark_stage_complete(DISCOVERY_STAGE)
 
     # =========================================================================
-    # STAGE 2: COMPONENT ASSEMBLY AND PAINTING
+    # ASSEMBLY: COMPONENT ASSEMBLY AND PAINTING
     # =========================================================================
-    stage2_config = workflows_reconstruction.ReconstructionConfig(
+    assembly_config = workflows_reconstruction.ReconstructionConfig(
         release_config=assembly_pipeline.AssemblyConfig(
             num_processes=n_processes,
             maxtasksperchild=WORKER_MAXTASKS,
@@ -270,7 +258,7 @@ def run():
     )
     print()
     print("=" * 60)
-    print("STAGE 2: R01 -> COMPONENT T09")
+    print("ASSEMBLY: block discovery -> COMPONENT painting")
     print(f"{'='*60}")
     print(
         "  Sequential contigs; release and painting are non-overlapping "
@@ -280,10 +268,10 @@ def run():
         checkpoint_store,
         region_keys,
         sample_names,
-        stage1_identity=stage1_identity_record,
-        config=stage2_config,
+        discovery_identity=discovery_identity_record,
+        config=assembly_config,
         genetic_maps=inference_genetic_maps,
-        source_stage=STAGE_R1,
+        source_stage=DISCOVERY_STAGE,
     )
     for summary in summaries:
         status = "resumed" if summary.resumed else "completed"
@@ -302,29 +290,14 @@ def run():
     parent_eligibility = workflows_design.build_asac_parent_eligibility(
         asac_metadata, sample_names, require_opposite_sex_pair=True,
     )
-    _stage10_summaries, stage10_payload = pedigree_pipeline.run_pedigree(
+    run_downstream(
         checkpoint_store, region_keys, sample_names,
         output_dir=output_dir, n_workers=n_processes,
-        raw_gl_stage=STAGE_R1, raw_sites_stage=STAGE_R1,
+        raw_gl_stage=DISCOVERY_STAGE, raw_sites_stage=DISCOVERY_STAGE,
         parent_eligibility=parent_eligibility,
         genetic_maps=inference_genetic_maps, recombination_rate=inference_recombination_rate,
     )
-    print("STAGE 11: pedigree-conditioned refinement and canonical final phase polishing")
-    refinement_pipeline.run_refinement(
-        checkpoint_store, region_keys, sample_names,
-        pedigree_payload=stage10_payload, output_dir=output_dir,
-        raw_gl_stage=STAGE_R1, raw_sites_stage=STAGE_R1,
-        n_workers=n_processes,
-        genetic_maps=inference_genetic_maps,
-        config=refinement_model.FamilyRefinementConfig(recombination_rate=inference_recombination_rate),
-    )
-    recombination_pipeline.run_recombination(
-        checkpoint_store, region_keys, sample_names,
-        pedigree_payload=stage10_payload, output_dir=output_dir,
-        n_workers=n_processes,
-        genetic_maps=inference_genetic_maps,
-        config=module_recombination_model.RecombinationMapConfig(recombination_rate=inference_recombination_rate),
-    )
+
 
 
 if __name__ == "__main__":

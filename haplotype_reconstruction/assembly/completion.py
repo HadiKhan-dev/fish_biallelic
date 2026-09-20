@@ -19,15 +19,15 @@ import haplotype_reconstruction.assembly.occupancy as assembly_occupancy
 import haplotype_reconstruction.assembly.partial_links as assembly_partial_links
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 
-STAGE2_PREPROCESS_SCHEMA = "stage2-missing-aware-preprocess-v2"
+ASSEMBLY_PREPROCESS_SCHEMA = "assembly-missing-aware-preprocess-v2"
 
 
-STAGE2_PREPROCESS_BACKEND = (
+ASSEMBLY_PREPROCESS_BACKEND = (
     "joint-crossfit-partial-link-cavity-variable-occupancy-v2"
 )
 
 
-STAGE2_PREPROCESS_SCIENTIFIC_DEPENDENCIES = tuple(sorted((
+ASSEMBLY_PREPROCESS_SCIENTIFIC_DEPENDENCIES = tuple(sorted((
     'core/haplotypes.py',
     'assembly/components.py',
     'assembly/joint_completion.py',
@@ -45,7 +45,7 @@ def _scientific_dependency_digests() -> dict[str, str]:
     root = PACKAGE_ROOT
     return {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-        for name in STAGE2_PREPROCESS_SCIENTIFIC_DEPENDENCIES
+        for name in ASSEMBLY_PREPROCESS_SCIENTIFIC_DEPENDENCIES
     }
 
 
@@ -80,7 +80,7 @@ class CompletionConfig:
     occupancy_rule: assembly_occupancy.CrossBlockOccupancyRule = field(
         default_factory=assembly_occupancy.CrossBlockOccupancyRule
     )
-    maximum_stage1_wildcard_mass_for_fill_release: float = 0.0
+    maximum_discovery_wildcard_mass_for_fill_release: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.joint_block_config, assembly_joint_completion.JointBlockConfig):
@@ -92,19 +92,19 @@ class CompletionConfig:
         if not isinstance(self.occupancy_rule, assembly_occupancy.CrossBlockOccupancyRule):
             raise TypeError("occupancy_rule must be a CrossBlockOccupancyRule")
         if self.joint_block_config.minimum_call_probability != 0.99:
-            raise ValueError("Stage-2 joint-block release probability must be 0.99")
+            raise ValueError("assembly joint-block release probability must be 0.99")
         if self.cavity_fill_rule.minimum_posterior_probability != 0.99:
-            raise ValueError("Stage-2 cavity release probability must be 0.99")
+            raise ValueError("assembly cavity release probability must be 0.99")
         if self.cavity_fill_rule.maximum_enumerated_unresolved_founders != 6:
-            raise ValueError("Stage-2 cavity unresolved-founder cap must be 6")
-        threshold = self.maximum_stage1_wildcard_mass_for_fill_release
+            raise ValueError("assembly cavity unresolved-founder cap must be 6")
+        threshold = self.maximum_discovery_wildcard_mass_for_fill_release
         if (
                 isinstance(threshold, bool)
                 or not np.isfinite(threshold)
                 or threshold < 0.0
                 or threshold > 1.0):
             raise ValueError(
-                "maximum Stage-1 wildcard mass for fill release must be "
+                "maximum block discovery wildcard mass for fill release must be "
                 "finite and in [0, 1]"
             )
 
@@ -118,13 +118,13 @@ class FrozenPreprocessIdentity:
     def record(self) -> dict[str, Any]:
         value = json.loads(self.canonical_json)
         if (
-                value.get("schema") != STAGE2_PREPROCESS_SCHEMA
-                or value.get("backend") != STAGE2_PREPROCESS_BACKEND):
-            raise ValueError("Stage-2 preprocessing identity schema mismatch")
+                value.get("schema") != ASSEMBLY_PREPROCESS_SCHEMA
+                or value.get("backend") != ASSEMBLY_PREPROCESS_BACKEND):
+            raise ValueError("assembly preprocessing identity schema mismatch")
         return value
 
 
-def stage2_preprocess_identity(
+def assembly_preprocess_identity(
     config: CompletionConfig,
     *,
     fold_assignments: np.ndarray | None=None,
@@ -173,8 +173,8 @@ def stage2_preprocess_identity(
             ).hexdigest(),
         }
     record = {
-        "schema": STAGE2_PREPROCESS_SCHEMA,
-        "backend": STAGE2_PREPROCESS_BACKEND,
+        "schema": ASSEMBLY_PREPROCESS_SCHEMA,
+        "backend": ASSEMBLY_PREPROCESS_BACKEND,
         "scientific_config": asdict(config),
         "scientific_code_sha256": _scientific_dependency_digests(),
         "fold_semantics": fold_semantics,
@@ -199,8 +199,8 @@ class BlockCavityGateDiagnostic:
 
 
 @dataclass(frozen=True)
-class Stage1WildcardDiagnostic:
-    """Validated Stage-1 wildcard evidence behind one block veto."""
+class DiscoveryWildcardDiagnostic:
+    """Validated block discovery wildcard evidence behind one block veto."""
 
     block_index: int
     metadata_present: bool
@@ -252,13 +252,13 @@ class PreprocessExecutionDiagnostics:
 
 
 @dataclass(frozen=True)
-class Stage2PreprocessResult:
-    """Typed output of truth-free Stage-2 preprocessing."""
+class FounderCompletionResult:
+    """Typed output of truth-free assembly preprocessing."""
 
     config_identity: FrozenPreprocessIdentity
     fold_assignments: np.ndarray
     raw_panels: tuple[assembly_observations.FounderPanel, ...]
-    stage1_wildcard_diagnostics: tuple[Stage1WildcardDiagnostic, ...]
+    discovery_wildcard_diagnostics: tuple[DiscoveryWildcardDiagnostic, ...]
     crossfit_blocks: tuple[assembly_joint_completion.CrossFitBlock | CompactCrossFitBlock, ...]
     partial_links: tuple[assembly_partial_links.PartialBoundaryLink, ...]
     cavity_fills: tuple[assembly_boundaries.CavityFillResult, ...]
@@ -347,7 +347,7 @@ def _validate_and_clone_inputs(
         raise TypeError("raw_blocks must be a BlockResults")
     source = tuple(raw_blocks)
     if not source:
-        raise ValueError("at least one raw Stage-2 block is required")
+        raise ValueError("at least one raw assembly block is required")
     evidence_values = tuple(genotype_evidence)
     observed_values = tuple(observed_masks)
     if (
@@ -451,12 +451,12 @@ def _validated_wildcard_mass(value, block_index: int) -> float:
     return mass
 
 
-def _stage1_underfit_flags(
+def _discovery_underfit_flags(
     blocks: Sequence[core_haplotypes.BlockResult],
     n_samples: int,
     maximum_mass_for_fill_release: float,
-) -> tuple[tuple[bool, ...], tuple[Stage1WildcardDiagnostic, ...]]:
-    """Validate Stage-1 wildcard provenance and flag fitted-panel underfit."""
+) -> tuple[tuple[bool, ...], tuple[DiscoveryWildcardDiagnostic, ...]]:
+    """Validate block discovery wildcard provenance and flag fitted-panel underfit."""
 
     flags = []
     diagnostics = []
@@ -483,7 +483,7 @@ def _stage1_underfit_flags(
             if not has_mass:
                 underfit = inference_eligible_unknown_count > 0
                 flags.append(underfit)
-                diagnostics.append(Stage1WildcardDiagnostic(
+                diagnostics.append(DiscoveryWildcardDiagnostic(
                     block_index=index,
                     metadata_present=False,
                     observed_kept_depth_sample_count=None,
@@ -498,10 +498,10 @@ def _stage1_underfit_flags(
                     ),
                     underfit=underfit,
                     reason=(
-                        "stage1_wildcard_metadata_absent_with_unknown_"
+                        "discovery_wildcard_metadata_absent_with_unknown_"
                         "founder_cells"
                         if underfit
-                        else "stage1_wildcard_metadata_absent_no_unknown_"
+                        else "discovery_wildcard_metadata_absent_no_unknown_"
                         "founder_cells"
                     ),
                 ))
@@ -509,7 +509,7 @@ def _stage1_underfit_flags(
             summary_mass = _validated_wildcard_mass(mass_value, index)
             underfit = summary_mass > maximum_mass_for_fill_release
             flags.append(underfit)
-            diagnostics.append(Stage1WildcardDiagnostic(
+            diagnostics.append(DiscoveryWildcardDiagnostic(
                 block_index=index,
                 metadata_present=True,
                 observed_kept_depth_sample_count=None,
@@ -523,12 +523,12 @@ def _stage1_underfit_flags(
                     inference_eligible_unknown_count
                 ),
                 underfit=underfit,
-                reason="stage1_wildcard_mass_summary_only",
+                reason="discovery_wildcard_mass_summary_only",
             ))
             continue
         if not (has_depth and has_slots):
             raise ValueError(
-                f"block {index} has incomplete Stage-1 wildcard metadata"
+                f"block {index} has incomplete block discovery wildcard metadata"
             )
 
         raw_depth = np.asarray(depth_value)
@@ -576,13 +576,13 @@ def _stage1_underfit_flags(
             and expected_mass > maximum_mass_for_fill_release
         )
         if underfit:
-            reason = "stage1_wildcard_panel_underfit"
+            reason = "discovery_wildcard_panel_underfit"
         elif np.any(observed_wildcard):
-            reason = "stage1_wildcard_mass_within_configured_threshold"
+            reason = "discovery_wildcard_mass_within_configured_threshold"
         else:
             reason = "no_observed_kept_depth_wildcards"
         flags.append(underfit)
-        diagnostics.append(Stage1WildcardDiagnostic(
+        diagnostics.append(DiscoveryWildcardDiagnostic(
             block_index=index,
             metadata_present=True,
             observed_kept_depth_sample_count=int(np.sum(depth)),
@@ -767,7 +767,7 @@ def _preprocess_worker_arrays(block_index: int):
             _PREPROCESS_WORKER_EVIDENCE is None
             or _PREPROCESS_WORKER_OBSERVED is None
             or _PREPROCESS_WORKER_OFFSETS is None):
-        raise RuntimeError("Stage-2 preprocess worker is not initialized")
+        raise RuntimeError("assembly preprocess worker is not initialized")
     start = int(_PREPROCESS_WORKER_OFFSETS[block_index])
     stop = int(_PREPROCESS_WORKER_OFFSETS[block_index + 1])
     evidence = np.ascontiguousarray(
@@ -1128,10 +1128,10 @@ def _materialize_kept_fills(
     block.cavity_effective_supporters = _readonly(
         fill.effective_supporters, np.float64
     )
-    block.genotype_evidence_mode = "stage2_missing_aware_preprocessed"
+    block.genotype_evidence_mode = "assembly_missing_aware_preprocessed"
 
 
-def run_stage2_preprocess(
+def run_assembly_preprocess(
     raw_blocks: core_haplotypes.BlockResults,
     genotype_evidence: Sequence[np.ndarray],
     observed_masks: Sequence[np.ndarray],
@@ -1143,8 +1143,8 @@ def run_stage2_preprocess(
     crossfit_fn: Callable[..., assembly_joint_completion.CrossFitBlock]=assembly_joint_completion.crossfit_block,
     cavity_fn: Callable[..., assembly_boundaries.CavityFillResult]=assembly_boundaries.cavity_fill_unknown_alleles,
     partial_link_fn: Callable[..., assembly_partial_links.PartialBoundaryLink]=assembly_partial_links.link_partial_profiles,
-) -> Stage2PreprocessResult:
-    """Run the truth-free Stage-2 reference or parallel production path.
+) -> FounderCompletionResult:
+    """Run the truth-free assembly reference or parallel production path.
 
     Process parallelism is limited to independent block computations.  Every
     worker is restricted to one numerical thread, so the aggregate compute
@@ -1157,10 +1157,10 @@ def run_stage2_preprocess(
         raw_blocks, genotype_evidence, observed_masks, num_threads=num_processes
     )
     blocks = tuple(prepared)
-    block_underfit_flags, wildcard_diagnostics = _stage1_underfit_flags(
+    block_underfit_flags, wildcard_diagnostics = _discovery_underfit_flags(
         blocks,
         n_samples,
-        config.maximum_stage1_wildcard_mass_for_fill_release,
+        config.maximum_discovery_wildcard_mass_for_fill_release,
     )
     raw_panels = tuple(_freeze_founder_panel(block) for block in blocks)
     hard_panels = tuple(_hard_panel(panel) for panel in raw_panels)
@@ -1276,21 +1276,21 @@ def run_stage2_preprocess(
         boundary_mappings.append(assembly_components.BoundaryMapping(None, reason))
 
     components = assembly_components.assemble_phase_components(blocks, boundary_mappings)
-    identity = stage2_preprocess_identity(
+    identity = assembly_preprocess_identity(
         config,
         fold_assignments=(folds if fold_assignments is not None else None),
         n_samples=n_samples,
     )
     for block in blocks:
-        block.stage2_preprocess_identity = identity.record()
+        block.assembly_preprocess_identity = identity.record()
     for block in components:
-        block.stage2_preprocess_identity = identity.record()
+        block.assembly_preprocess_identity = identity.record()
 
-    return Stage2PreprocessResult(
+    return FounderCompletionResult(
         config_identity=identity,
         fold_assignments=folds,
         raw_panels=raw_panels,
-        stage1_wildcard_diagnostics=wildcard_diagnostics,
+        discovery_wildcard_diagnostics=wildcard_diagnostics,
         crossfit_blocks=crossfit_blocks,
         partial_links=partial_links,
         cavity_fills=cavity_fills,

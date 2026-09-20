@@ -325,7 +325,7 @@ def _decision_for_row(
     if block_underfit:
         return FounderOccupancyDecision(
             block_index, row_index, False, "abstain",
-            "stage1_wildcard_panel_underfit",
+            "discovery_wildcard_panel_underfit",
             sum_squared, high_confidence_count, maximum_local,
             len(atomic_neighbors), None, None, None, 0.0, 0.0, 0.0, 0, (),
         )
@@ -456,7 +456,7 @@ def apply_variable_k_occupancy_gate(
     *,
     block_underfit_flags: Sequence[bool] | None=None,
 ) -> VariableKOccupancyGateResult:
-    """Gate fills using pre-cavity occupancy and Stage-1 underfit flags."""
+    """Gate fills using pre-cavity occupancy and block discovery underfit flags."""
 
     masks = tuple(np.asarray(value, dtype=np.bool_) for value in cavity_fill_masks)
     if not masks:

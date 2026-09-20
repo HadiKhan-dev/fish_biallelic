@@ -126,7 +126,6 @@ def _init_bootstrap_worker(shared: Mapping[str, Any]) -> None:
             _BOOTSTRAP_SHARED[key] = array
         else:
             _BOOTSTRAP_SHARED[key] = value
-    _BOOTSTRAP_SHARED["scaffold_prepared"] = None
 
 
 @njit(cache=True, fastmath=False, nogil=True)
@@ -150,7 +149,7 @@ def _evaluate_bootstrap_chunk(
     shared: Mapping[str, Any],
     multiplicities: np.ndarray,
 ) -> tuple:
-    """Return baseline counts plus optional opt-in M1 direction-state counts."""
+    """Return per-replicate local/graph selections and direction-refit counts."""
     alternatives = shared["alternatives"]
     states = shared["states"]
     contig_log_likelihoods = shared["contig_log_likelihoods"]
@@ -164,8 +163,6 @@ def _evaluate_bootstrap_chunk(
     local_rows = np.full((n_replicates, n_samples), -1, dtype=np.int64)
     graph_rows = np.full((n_replicates, n_samples), -1, dtype=np.int64)
     local_states = np.full((n_replicates, n_samples), -1, dtype=np.int8)
-    m1_direction_counts = (
-        None)
     depth_refits = 0
 
     def evaluate(
@@ -200,7 +197,6 @@ def _evaluate_bootstrap_chunk(
             direction_supported_parents=shared.get(
                 "direction_supported_parents"
             ),
-            scaffold_prepared=shared.get("scaffold_prepared"),
         )
 
     for replicate, multiplicity in enumerate(multiplicities):
@@ -210,8 +206,6 @@ def _evaluate_bootstrap_chunk(
             component_count=shared["depth_component_count"],
         )
         selection = evaluate(multiplicity, depth_model)
-        if m1_direction_counts is not None:
-            m1_direction_counts += selection.m1_direction_state_supported
         depth_refits += 1
         for child, state in selection.local_states.items():
             local_states[replicate, child] = state
@@ -219,8 +213,7 @@ def _evaluate_bootstrap_chunk(
             local_rows[replicate, child] = row
         for child, row in selection.graph_rows.items():
             graph_rows[replicate, child] = row
-    result = (local_rows, graph_rows, local_states, depth_refits)
-    return result if m1_direction_counts is None else result + (m1_direction_counts,)
+    return local_rows, graph_rows, local_states, depth_refits
 
 
 def count_exposed_contigs(
@@ -305,17 +298,11 @@ def _accumulate_bootstrap_chunk(
     local_configuration_counts: np.ndarray,
     graph_configuration_counts: np.ndarray,
     local_state_counts: np.ndarray,
-    _graph_state_counts: Optional[np.ndarray],
     local_parent_counts: np.ndarray,
     graph_parent_counts: np.ndarray,
-    m1_direction_state_counts: Optional[np.ndarray]=None,
 ) -> int:
     """Reduce one worker result with order-independent integer additions."""
-    local_rows, graph_rows, local_states, depth_refits = chunk[:4]
-    if m1_direction_state_counts is not None:
-        m1_direction_state_counts += chunk[4]
-    # Graph-state counts have always been an unused compatibility argument;
-    # leave them untouched while compiling every count that is consumed.
+    local_rows, graph_rows, local_states, depth_refits = chunk
     accumulate_bootstrap_counts_into(
         local_rows,
         graph_rows,
@@ -408,7 +395,6 @@ def _run_parent_state_bootstraps(
     local_configuration_counts: np.ndarray,
     graph_configuration_counts: np.ndarray,
     local_state_counts: np.ndarray,
-    graph_state_counts: np.ndarray,
     local_parent_counts: np.ndarray,
     graph_parent_counts: np.ndarray,
     *,
@@ -422,8 +408,6 @@ def _run_parent_state_bootstraps(
     edge_exposure_presence_words: Optional[np.ndarray]=None,
     pair_exposure_presence_words: Optional[np.ndarray]=None,
     direction_supported_parents: Optional[np.ndarray]=None,
-    scaffold_data: Optional[Mapping[str, Any]]=None,
-    m1_direction_state_counts: Optional[np.ndarray]=None,
     depth_component_count: Optional[int]=None,
 ) -> tuple[int, int]:
     """Run fixed-seed bootstraps serially or in a shared-memory pool."""
@@ -463,11 +447,7 @@ def _run_parent_state_bootstraps(
         cpu_budget,
     )
 
-    scaffold_arrays = {}
-    scaffold_metadata = None
     ordinary_shared = {
-        "scaffold_metadata": scaffold_metadata,
-        "scaffold_array_names": tuple(scaffold_arrays),
         "by_child": tuple(np.asarray(rows, dtype=np.int64) for rows in by_child),
         "settings": settings,
         "n_samples": len(by_child),
@@ -500,8 +480,6 @@ def _run_parent_state_bootstraps(
             "direction_supported_parents": direction_supported_parents,
             "pair_exposure_presence_words": pair_exposure_presence_words,
         }
-        shared.update({"scaffold_" + key: value for key, value in scaffold_arrays.items()})
-        shared["scaffold_prepared"] = None
         results = (_evaluate_bootstrap_chunk(shared, multiplicities),)
         for chunk in results:
             depth_refits += _accumulate_bootstrap_chunk(
@@ -510,10 +488,8 @@ def _run_parent_state_bootstraps(
                 local_configuration_counts,
                 graph_configuration_counts,
                 local_state_counts,
-                graph_state_counts,
                 local_parent_counts,
                 graph_parent_counts,
-                m1_direction_state_counts,
             )
         return worker_count, depth_refits
 
@@ -535,7 +511,7 @@ def _run_parent_state_bootstraps(
         ("direction_supported_parents", direction_supported_parents),
         ("edge_exposure_presence_words", edge_exposure_presence_words),
         ("pair_exposure_presence_words", pair_exposure_presence_words),
-    ) + tuple(("scaffold_" + key, value) for key, value in scaffold_arrays.items()):
+    ):
         if array is None:
             shared[key] = None
         else:
@@ -572,10 +548,8 @@ def _run_parent_state_bootstraps(
                 local_configuration_counts,
                 graph_configuration_counts,
                 local_state_counts,
-                graph_state_counts,
                 local_parent_counts,
                 graph_parent_counts,
-                m1_direction_state_counts,
             )
     return worker_count, depth_refits
 

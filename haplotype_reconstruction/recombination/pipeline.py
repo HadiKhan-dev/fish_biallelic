@@ -1,5 +1,6 @@
 """recombination / pipeline for the canonical reconstruction pipeline."""
 from __future__ import annotations
+from ..core.run_record import timed_stage
 from haplotype_reconstruction import PACKAGE_ROOT
 
 from dataclasses import asdict, replace
@@ -12,7 +13,7 @@ import warnings
 import pandas as pd
 import haplotype_reconstruction.recombination.model as module_recombination_model
 
-RECOMBINATION_STAGE = "12_recombination"
+RECOMBINATION_STAGE = "recombination"
 
 
 def resolve_shared_family_evidence(value=None):
@@ -103,11 +104,12 @@ def write_chromosome_outputs(result, output):
     temporary.replace(path)
 
 
+@timed_stage("recombination")
 def run_recombination(checkpoint_store, contigs, sample_ids, *, pedigree_payload, output_dir,
                         n_workers=None, config=module_recombination_model.RecombinationMapConfig(), genetic_maps=None,
                         shared_family_evidence=None, shared_config=module_recombination_model.SharedOrientationConfig()):
     if pedigree_payload is None:
-        print("[T12] Awaiting the complete T10 pedigree and final phase products.")
+        print("[recombination] Awaiting the complete pedigree and final phase products.")
         return None
     shared_family_evidence = resolve_shared_family_evidence(shared_family_evidence)
     if shared_family_evidence:
@@ -117,14 +119,14 @@ def run_recombination(checkpoint_store, contigs, sample_ids, *, pedigree_payload
     config = config.validated()
     workers = core_runtime.available_cpu_count() if n_workers is None else int(n_workers)
     if not 1 <= workers <= core_runtime.available_cpu_count():
-        raise ValueError("Stage12 CPU budget exceeds allocation")
+        raise ValueError("Recombination CPU budget exceeds allocation")
     names = tuple(map(str, sample_ids))
     contigs = tuple(map(str, contigs))
     if (tuple(map(str, pedigree_payload["ordered_sample_ids"])) != names or
             tuple(map(str, pedigree_payload["ordered_contigs"])) != contigs):
-        raise ValueError("Stage12 axes differ from the complete T10 pedigree")
+        raise ValueError("Recombination axes differ from the complete pedigree")
     if not checkpoint_store.stage_complete(refinement_pipeline.FINAL_PHASE_STAGE):
-        raise ValueError("Stage12 requires the completed canonical final phase stage")
+        raise ValueError("Recombination requires the completed canonical final phase stage")
     core_runtime.require_contig_checkpoints(checkpoint_store, refinement_pipeline.FINAL_PHASE_STAGE, contigs)
     relationships = pedigree_payload["tier_b_relationships"]
     pedigree_hash = refinement_conditioning.relationship_identity(relationships)
@@ -154,19 +156,19 @@ def run_recombination(checkpoint_store, contigs, sample_ids, *, pedigree_payload
         core_runtime.require_contig_checkpoints(checkpoint_store, RECOMBINATION_STAGE, contigs)
         saved = checkpoint_store.load_global(RECOMBINATION_STAGE)
         if saved["identity"] != identity:
-            raise ValueError("Stage12 completed summary identity differs")
+            raise ValueError("Recombination completed summary identity differs")
         _csv(pd.DataFrame(saved["summaries"]), output / "summary.csv")
-        print("[T12] Resumed complete missing-aware recombination maps.")
+        print("[recombination] Resumed complete missing-aware recombination maps.")
         return saved["summaries"]
     summaries = []
-    print(f"STAGE 12: missing-aware recombination maps; one chromosome, {workers} Numba threads",flush=True)
-    print(f"[T12] Shared-family orientation evidence: {'on' if shared_family_evidence else 'off'}",flush=True)
+    print(f"RECOMBINATION: missing-aware recombination maps; one chromosome, {workers} Numba threads",flush=True)
+    print(f"[recombination] Shared-family orientation evidence: {'on' if shared_family_evidence else 'off'}",flush=True)
     with core_parallel.numba_thread_scope(workers):
         for contig in contigs:
             if checkpoint_store.contig_done(RECOMBINATION_STAGE, contig):
                 result = checkpoint_store.load_contig(RECOMBINATION_STAGE, contig, nthreads=workers)
                 if result["identity"] != identity:
-                    raise ValueError("Stage12 chromosome identity differs")
+                    raise ValueError("Recombination chromosome identity differs")
             else:
                 phase = checkpoint_store.load_contig(
                     refinement_pipeline.FINAL_PHASE_STAGE,
@@ -200,7 +202,7 @@ def run_recombination(checkpoint_store, contigs, sample_ids, *, pedigree_payload
                               RuntimeWarning)
             write_chromosome_outputs(result, output)
             summaries.append(result["summary"])
-            print(f"[T12 {contig}] {result['summary']}",flush=True)
+            print(f"[recombination {contig}] {result['summary']}",flush=True)
             del result
             gc.collect()
     checkpoint_store.save_global(RECOMBINATION_STAGE, {"identity": identity, "summaries": summaries})
@@ -212,7 +214,7 @@ def run_recombination(checkpoint_store, contigs, sample_ids, *, pedigree_payload
 
 def run_from_checkpoints(root, output_dir, *, n_workers=None, config=module_recombination_model.RecombinationMapConfig(), genetic_maps=None,
                          shared_family_evidence=None, shared_config=module_recombination_model.SharedOrientationConfig()):
-    """Standalone entrypoint uses the exact accepted T10 pedigree, never truth."""
+    """Standalone entrypoint uses the exact accepted pedigree, never truth."""
 
     store = core_runtime.CheckpointStore(root)
     pedigree = store.load_global(pedigree_pipeline.PEDIGREE_STAGE)

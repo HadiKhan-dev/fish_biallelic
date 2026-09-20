@@ -15,11 +15,11 @@ matter. Configured threads are not a measure of sustained CPU utilization.
 
 ### Fresh seed3000, N320 and 5×
 
-The current implementation completed a fresh 22-chromosome run through T12 on
+The current implementation completed a fresh 22-chromosome run through recombination on
 17 September 2026, using five 76-core Ice Lake allocations and one 66-core
 allocation. Measured multi-node elapsed time was **93.67 minutes**, excluding
 the subsequent truth evaluation. This includes shared initialization,
-synchronization and a deliberate finish-controller restart to distribute T11.
+synchronization and a deliberate finish-controller restart to distribute family phase.
 
 Summing disjoint measured work gives a **single-76-core estimate of about
 5 hours 10 minutes** (roughly 5–5¼ hours), not a measured continuous one-node
@@ -49,12 +49,12 @@ cached-stage verification and final truth evaluation are excluded from this
 fresh-work estimate.
 
 Independent chromosomes ran with each node's full CPU ceiling and existing
-dynamic allocation; this does not imply sustained full utilization. T10 ran
-genome-wide on one 76-core node. Once parentage was fixed, a **run-local** T11
+dynamic allocation; this does not imply sustained full utilization. pedigree ran
+genome-wide on one 76-core node. Once parentage was fixed, a **run-local** family phase
 scheduler called the unchanged chromosome solver concurrently, retaining the
 full stage identity and canonical global completion checks. This scheduler is
 not a new production CLI feature. Its 4.35-minute parallel wall time is not the
-single-node T11 estimate: the latter sums chromosome solves. A separate chr8
+single-node family phase estimate: the latter sums chromosome solves. A separate chr8
 replay matched every final allele call and its 25-iteration stopping point.
 
 See [scientific outcomes and limitations](validation.md#fresh-seed3000-end-to-end-validation).
@@ -66,14 +66,14 @@ remain under `work/runs/seed_3000/`, outside Git.
 
 There is still no measured fresh-seed, full-genome runtime for this complete
 implementation on a 112-core node. The earlier seed403 comparison took 204.03
-minutes from cached Stage1 on 76-core Ice Lake hardware. Adding its unchanged
+minutes from cached block discovery on 76-core Ice Lake hardware. Adding its unchanged
 input/discovery durations gives a 252.53-minute estimate, not a measured fresh
 run. It predates the expanded and subsequently accelerated founder refiner.
 The [recorded stage breakdown](validation.md#seed403-end-to-end-performance-comparison)
 must not be presented as timings of the current full pipeline.
 
-Earlier N80 downstream replays on 76 cores took 244–267 seconds for T10,
-259–263 for T11 and 42–43 for T12. They used completed upstream products and
+Earlier N80 downstream replays on 76 cores took 244–267 seconds for pedigree,
+259–263 for family phase and 42–43 for recombination. They used completed upstream products and
 different seeds, not a matched scaling or fresh whole-pipeline experiment.
 Discovery, both feedback rounds and final assembly must be included in any
 fresh-run measurement.
@@ -196,17 +196,17 @@ All 27 refinement solves, including paired warm repeats and the additional
 were compared against recomputed predecessor outputs. No discovery or
 upstream assembly was rerun in this comparison.
 
-### Cached-Stage1 reconstruction replay
+### Cached block-discovery reconstruction replay
 
 The subsequent eight-fragmented-chromosome check reran both balanced feedback
 rounds, partial-founder-aware L1–L4, final refinement and painting. Seven
 existing nodes provided 558 CPUs: five with 76, one with 66 and one with 112.
 The first available node picked up the eighth chromosome.
 
-From loaded Stage1 inputs through painting/checkpoint output, seven chromosomes
+From loaded block discovery inputs through painting/checkpoint output, seven chromosomes
 took 372–590 seconds each; large seed406 chr3 took 1,087 seconds on 112 cores.
 These include fresh per-node native-cache costs except for the queued chr15
-case. They exclude discovery, initial reads, truth evaluation and T10–T12, so
+case. They exclude discovery, initial reads, truth evaluation and pedigree–recombination, so
 are neither isolated refiner timings nor full fresh-seed timings.
 
 All eight now contain one six-row component, but joining is not uniformly an
@@ -258,7 +258,7 @@ budget. Memory bandwidth, memory-limited worker counts, I/O and straggler tails
 can limit useful activity; a nominal thread count is not a utilization measure.
 
 Atomic stage/chromosome checkpoints retain scientific identities. A lossless
-`00_genotype_evidence` cache holds GLs, positions and observed masks so T10/T11
+`genotype_evidence` cache holds GLs, positions and observed masks so pedigree/family phase
 can avoid repeatedly decoding rich simulation/discovery payloads. Original
 inputs remain available; uncached runs use the original reader. This adds disk
 space and one cache write, not lossy evidence or relaxed input validation.
@@ -276,7 +276,7 @@ measurements. On chr3, GL-construction peak RSS fell from 46.96 to 26.48 GiB and
 reader RSS from 38.82 to 11.52 GiB. Compact chr16/chr3 caches occupy approximately
 0.77/3.04 GiB and cost approximately 1.76/6.86 s to write.
 
-## Stage 1: 200-SNP discovery
+## block discovery: 200-SNP discovery
 
 The canonical reversible-cavity search retains its likelihoods, three mean-field
 starts, convergence, wildcard interpretation, ties and release rules.
@@ -378,41 +378,41 @@ seeds401/402 rose from 107.56/104.53 s to 112.11/110.50 s, and chr3 from 418.98
 to 428.76 s, including added downstream-evidence cache writes.
 The last non-assembly optimization round changed none of the L1–L4 algorithms.
 
-## T09 painting and T10 pedigree inference
+## sample painting and pedigree inference
 
 Painting uses bounded sample batches, direct ragged emissions and efficient
-release/chunk construction. T09 coverage validation uses sorted-bin searches
+release/chunk construction. painting coverage validation uses sorted-bin searches
 and difference arrays: O(C log M + M) instead of O(C M) for C chunks/M bins.
 
-T10 fuses strict raw normalization and gathering, reuses named-founder emissions
+Pedigree fuses strict raw normalization and gathering, reuses named-founder emissions
 only where both alleles are called, and specializes exactly classified star
 bridge operators. Missing/BACKGROUND states retain their general likelihoods.
 The child-tiled scoring cache is capped at 256 MiB; uncached scoring preserves
 the same quadratic state calculation. Deterministic transmitted alleles avoid
 an unnecessary mate-state sum.
 
-Separately, T09 can retain the upper triangle of its symmetric diploid emission
+Separately, painting can retain the upper triangle of its symmetric diploid emission
 table. Its aggregate budget is at most 1 GiB per chromosome, also constrained
-by an explicit painting workspace limit. T10 reuses it after existing
+by an explicit painting workspace limit. pedigree reuses it after existing
 raw-input, sample-order and configuration checks. Transitions remain ordered;
 high-K, memory-limited and uncached products recompute emissions normally.
 
 | Packed-cache comparison, 112 CPUs | Before | Updated |
 | --- | ---: | ---: |
-| chr16 T10 preparation | 5.06 s | 3.45 s |
-| chr3 T10 preparation | 20.74 s | 18.35 s |
+| chr16 pedigree preparation | 5.06 s | 3.45 s |
+| chr3 pedigree preparation | 20.74 s | 18.35 s |
 | chr16 painting + checkpoint write/read + preparation | 7.32 s | 6.36 s |
 | chr3 painting + checkpoint write/read + preparation | 29.14 s | 27.80 s |
 
 Net savings are 5–13% for these measured portions, after added I/O. Compressed
-T09 files grow from 48.6 to 261.8 MB on chr16 and 197.3 to 541.7 MB on chr3;
+painting files grow from 48.6 to 261.8 MB on chr16 and 197.3 to 541.7 MB on chr3;
 retained arrays occupy 250/406 MiB.
 
 Earlier paired painting tests on 19 seed402 chromosomes at 76 threads reduced
 painting-call time from 247.87 to 74.74 s; largest chr3 fell from 48.50 to 13.12 s.
 These exclude discovery, assembly, input loading and checkpoint writes.
 
-The latest full 22-chromosome metadata-free seed401 T10 call took **15.04 min**,
+The latest full 22-chromosome metadata-free seed401 pedigree call took **15.04 min**,
 including loading/preparation/output; inference itself took **9.44 min** on
 112 CPUs. Peak process RSS was about 66.9 GiB and sampled CPU activity 97.9%.
 It used new packed chr3/chr16 paintings and the uncached path elsewhere.
@@ -420,7 +420,7 @@ All seven result tables matched the accepted reference: 20 M0 roots, 300 exact
 M2 pairs and 600 correct edges with no extras. This is a measured duration,
 not a paired whole-stage speedup or an untouched-seed accuracy claim.
 
-## T11 family refinement and phase correction
+## family refinement and final phase and phase correction
 
 The phase-focused product begins checking final phase after 20 iterations and
 requires five consecutive unchanged checks unless family inference converges
@@ -444,7 +444,7 @@ The latest dirty-tile comparison gave chr16 27.80 ->26.30 s and paired chr3 mean
 stability results. Earlier exact reuse reduced summed 22-chromosome calls from
 586.55 to 542.70 s; those sums exclude external raw reads/final checkpoint writes.
 
-## T12 conditional recombination maps
+## Recombination conditional recombination maps
 
 Shared-family orientation trials use indexed four-state transfer products,
 lazy parent/child XOR updates, and a separate tree for the asymmetric
@@ -468,7 +468,7 @@ and coverage matched; floating map values matched rtol=2e-9, atol=2e-8.
 
 - Five-bit split pattern tables: 16-fold table-memory reduction but about 7%
   slower warm discovery; some search diagnostics/assignments changed.
-- Full unpacked T09 emission caching: extra I/O erased most chr3 benefit.
+- Full unpacked painting emission caching: extra I/O erased most chr3 benefit.
 - Simple optimistic M2 bounds: eliminated 0 of 60,800 candidate trios; pruning
   MAP losers alone would not preserve integrated state/bootstrapping results.
 - Persistent VCF handles/coarse queries and packed assembly traceback: no

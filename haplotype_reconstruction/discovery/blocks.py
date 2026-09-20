@@ -1,5 +1,6 @@
 """Missing-aware 200-SNP discovery entry points and worker orchestration."""
 from __future__ import annotations
+from ..core.run_record import timed_stage
 
 
 from dataclasses import asdict, dataclass
@@ -17,7 +18,7 @@ import haplotype_reconstruction.discovery.search as discovery_search
 RAW_EVIDENCE_MODE = "raw_likelihood"
 
 
-STAGE1_BACKEND = "reversible_cavity_depth_observation_v1"
+DISCOVERY_BACKEND = "reversible_cavity_depth_observation_v1"
 
 
 CAVITY_SCORE_CALIBRATION = (
@@ -1080,6 +1081,7 @@ def _worker_generate_block_direct(args):
         core_parallel.decrement_active()
 
 
+@timed_stage("block_discovery")
 def generate_all_block_haplotypes(
     genomic_data,
     *,

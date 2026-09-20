@@ -159,7 +159,7 @@ def direct_callability(internal_grid, released_grid, called, observed,
 
 @njit(cache=True, parallel=True)
 def count_component_information(evidence, observed, indices, epsilon):
-    """The T10 normalized-row criterion without gathering an unused GL copy."""
+    """The pedigree normalized-row criterion without gathering an unused GL copy."""
     counts = np.zeros(evidence.shape[0], dtype=np.int64)
     for sample in prange(evidence.shape[0]):
         count = 0

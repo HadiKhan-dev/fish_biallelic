@@ -20,9 +20,6 @@ def infer_from_parent_state_evidence(
     ancestry_junction_counts: Optional[np.ndarray]=None,
     ancestry_callable_haplotype_bins: Optional[np.ndarray]=None,
     n_workers: Optional[int]=None,
-    candidate_source_available: Optional[np.ndarray]=None,
-    child_informative_marker_count: Optional[np.ndarray]=None,
-    scaffold_contig_names: Optional[Sequence[str]]=None,
 ) -> pedigree_results.PedigreeResult:
     """Infer a DAG from comparable 0/1/2-observed-parent likelihoods.
 
@@ -37,10 +34,6 @@ def infer_from_parent_state_evidence(
     Every contig must supply parenthood-structure counts. Per-contig ancestry
     junction and callability matrices are also required, must have shape
     ``(len(evidence), len(sample_ids))``, and must be supplied together.
-    The opt-in scaffold policy additionally requires source/child availability
-    on those axes plus explicit matching scaffold_contig_names. Its biological
-    M1 release uses direction-qualified mass and resample support; genetic local
-    state diagnostics remain separate. Prior sensitivity re-fits the scaffold.
     """
     settings = (config or module_pedigree_config.PedigreeConfig()).validated()
     samples = list(sample_ids)
@@ -152,7 +145,6 @@ def infer_from_parent_state_evidence(
     structure_pair_indices = pedigree_states._structure_pair_indices(
         alternatives, states, trios
     )
-    scaffold_data = scaffold_prepared = None
 
 
     def evaluate(
@@ -187,7 +179,6 @@ def infer_from_parent_state_evidence(
                 eligibility.direction_supported_parents
             ),
             prepared_aggregates=prepared_aggregates,
-            scaffold_prepared=scaffold_prepared,
         )
 
     full_weights = np.ones(len(contig_names), dtype=np.float64)
@@ -204,8 +195,8 @@ def infer_from_parent_state_evidence(
         junction_matrix, callable_matrix, structure_total_bins_by_contig,
         full_weights, settings,
     )
-    full_scaffold_veto = full_scaffold_result = None
 
+    score_diagnostics = {}
     full_prepared_aggregates = pedigree_states._prepare_parent_state_weighted_contigs(
         contig_log_likelihoods,
         full_weights,
@@ -222,10 +213,9 @@ def infer_from_parent_state_evidence(
         edge_exposure_presence_words,
         pair_exposure_presence_words,
         eligibility.direction_supported_parents,
-        scaffold_prepared=scaffold_prepared,
         contig_information_weights=contig_information_weights,
-        scaffold_descendant_veto=full_scaffold_veto,
         full_counts=full_counts,
+        score_diagnostics=score_diagnostics,
     )
     full_selection = evaluate(
         full_weights, depth_model=full_depth_model,
@@ -269,15 +259,6 @@ def infer_from_parent_state_evidence(
         & full_pre_direction_selection
         & ~full_selection_compatible
     )
-    full_scaffold_state_rejected = np.zeros(len(alternatives), dtype=np.bool_)
-    if full_scaffold_veto is not None:
-        for parent_column in (1, 2):
-            rows = np.flatnonzero(alternatives[:, parent_column] >= 0)
-            full_scaffold_state_rejected[rows] |= full_scaffold_veto[
-                alternatives[rows, 0], alternatives[rows, parent_column]]
-        full_scaffold_state_rejected &= full_exposure_testable
-        full_selection_compatible[full_scaffold_state_rejected] = False
-        full_identity_eligible[full_scaffold_state_rejected] = False
     informative = np.zeros(
         (len(contig_names), n_samples), dtype=np.bool_
     )
@@ -338,8 +319,6 @@ def infer_from_parent_state_evidence(
                 if parent >= 0:
                     parent_counts[child, parent] += 1
 
-    m1_direction_state_counts = (
-        None)
     bootstrap_worker_count, bootstrap_depth_refits = (
         pedigree_bootstrap._run_parent_state_bootstraps(
             contig_log_likelihoods,
@@ -354,7 +333,6 @@ def infer_from_parent_state_evidence(
             local_configuration_counts,
             graph_configuration_counts,
             local_state_counts,
-            graph_state_counts,
             local_parent_counts,
             graph_parent_counts,
             contig_information_weights=contig_information_weights,
@@ -369,8 +347,6 @@ def infer_from_parent_state_evidence(
             direction_supported_parents=(
                 eligibility.direction_supported_parents
             ),
-            scaffold_data=scaffold_data,
-            m1_direction_state_counts=m1_direction_state_counts,
             depth_component_count=full_depth_model.posterior.shape[1],
         )
     )
@@ -391,8 +367,6 @@ def infer_from_parent_state_evidence(
     loco_graph_parent_counts = np.zeros(
         (n_samples, n_samples), dtype=np.int64
     )
-    m1_direction_loco_counts = (
-        None)
     n_loco = 0
     if len(contig_names) > 1:
         for omitted in range(len(contig_names)):
@@ -404,8 +378,6 @@ def infer_from_parent_state_evidence(
                 component_count=full_depth_model.posterior.shape[1],
             )
             selection = evaluate(loco_weights, depth_model=loco_depth_model)
-            if m1_direction_loco_counts is not None:
-                m1_direction_loco_counts += selection.m1_direction_state_supported
             n_loco += 1
             accumulate(
                 selection,
@@ -424,7 +396,6 @@ def infer_from_parent_state_evidence(
 
     sensitivity_runs = []
     sensitivity_summary_rows = []
-    scaffold_prior_sensitivity_refits = 0
     for base_priors in settings.parent_state_prior_sensitivity:
 
         selection = (
@@ -468,7 +439,6 @@ def infer_from_parent_state_evidence(
     complete_rows: dict[int, Optional[int]] = {}
     complete_states: dict[int, int] = {}
     complete_status = {}
-    scaffold_direction_unresolved = np.zeros(n_samples, dtype=np.bool_)
     tier_a_rows: dict[int, Optional[int]] = {}
     tier_b_rows: dict[int, Optional[int]] = {}
     tier_a_states: dict[int, int] = {}
@@ -630,9 +600,6 @@ def infer_from_parent_state_evidence(
             and not m0_sensitivity_state_agreement
         )
 
-        scaffold_direction_unresolved[child] = bool(
-            scaffold_prepared is not None and local_state == pedigree_models._ONE_OBSERVED
-            and not full_selection.m1_direction_state_supported[child])
 
         def tier_decision(
             state_bootstrap_cutoff: float,
@@ -645,13 +612,6 @@ def infer_from_parent_state_evidence(
                 and state_bootstrap >= state_bootstrap_cutoff
                 and state_loco >= loco_cutoff
                 and m0_sensitivity_state_agreement
-                and not scaffold_direction_unresolved[child]
-                and (scaffold_prepared is None or local_state != pedigree_models._ONE_OBSERVED or (
-                    stable_fraction(m1_direction_state_counts[child], bootstrap_denominator)
-                    >= state_bootstrap_cutoff
-                    and stable_fraction(m1_direction_loco_counts[child], loco_denominator)
-                    >= loco_cutoff
-                ))
             )
             parent_flags = tuple(
                 bool(
@@ -698,9 +658,6 @@ def infer_from_parent_state_evidence(
         if not eligibility.eligible_children[child]:
             complete_rows[child] = None
             complete_status[child] = "excluded_by_parent_eligibility"
-        elif scaffold_direction_unresolved[child]:
-            complete_rows[child] = None
-            complete_status[child] = "genetic_m1_directionally_unresolved"
         elif graph_tie_conflict:
             complete_rows[child] = None
             complete_states[child] = local_state
@@ -748,10 +705,6 @@ def infer_from_parent_state_evidence(
             if not eligibility.eligible_children[child]:
                 tier_rows[child] = None
                 tier_status[child] = "excluded_by_parent_eligibility"
-                return
-            if scaffold_direction_unresolved[child]:
-                tier_rows[child] = None
-                tier_status[child] = "genetic_m1_directionally_unresolved"
                 return
             if not state_pass or local_state is None:
                 if m0_sensitivity_tier_veto:
@@ -1167,6 +1120,11 @@ def infer_from_parent_state_evidence(
                 if settings.parent_state_direction_model in {"family", "continuous_family"}
                 else 0
             ),
+            "AncestryPathBudget": (
+                settings.parent_state_ancestry_path_budget
+                if settings.parent_state_direction_model in {"family", "continuous_family"}
+                else 0
+            ),
             "AncestryDepthResampling": (
                 "conditional_full_data_component_count"
                 if settings.parent_state_direction_model == "cluster"
@@ -1458,11 +1416,7 @@ def infer_from_parent_state_evidence(
         supported_second = supported_singleton(parent2_set)
         exact = tier_b_rows.get(child) is not None
         if state is None:
-            status = (
-                "genetic_m1_directionally_unresolved"
-                if scaffold_direction_unresolved[child]
-                else "unresolved_below_tier_b_state_support"
-            )
+            status = "unresolved_below_tier_b_state_support"
         elif exact:
             status = "tier_b_exact_configuration"
         elif supported_first is not None or supported_second is not None:
@@ -1552,6 +1506,11 @@ def infer_from_parent_state_evidence(
     result.complete_relationships = complete_frame
     result.parent_state_calls = pd.DataFrame(state_call_rows)
     result.diagnostics = pd.DataFrame(diagnostics)
+    from .explanations import explain_calls
+    result.call_explanations, result.alternative_explanations = explain_calls(
+        samples, alternatives, states, by_child, full_counts, scored_counts,
+        full_selection, score_diagnostics, full_prepared_aggregates,
+        result.diagnostics, tier_b_candidate_sets)
 
     result.prior_sensitivity_summary = pd.DataFrame(
         sensitivity_summary_rows
@@ -1629,14 +1588,29 @@ def infer_from_parent_state_evidence(
             "family_message_passes": settings.parent_state_family_message_passes,
             "direction_robustness_mixture": settings.parent_state_contamination_probability,
             "direction_gate": False,
-            "family_constraint": "no_reciprocal_parent_edges",
+            "ancestry_path_budget": settings.parent_state_ancestry_path_budget,
+            "family_constraint": (
+                "reciprocal_and_joint_reverse_two_edge_paths"
+                if settings.parent_state_direction_model in {"family", "continuous_family"}
+                and settings.parent_state_ancestry_path_budget else
+                "no_reciprocal_parent_edges"
+                if settings.parent_state_direction_model in {"family", "continuous_family"}
+                else "none"
+            ),
+            "ancestry_path_tail": "neutral_omitted_configuration_mass",
+            "explicit_direction_policy": "exempt_supported_focal_parental_side",
         }
         result.ancestry_depth_model_specification = (
             "Paired chromosome junction contrasts provide finite, neutral-centered "
             "orientation support with summary-level callability adjustment. "
             "Family modes marginalize competing M0/M1/M2 configurations using "
             "bounded synchronous cavity messages that exclude immediate reverse "
-            "feedback. These are composite/loopy approximations, not calibrated "
+            "feedback. With a positive ancestry-path budget, an additional "
+            "one-way joint-family factor averages over uncertain reverse two-edge "
+            "paths, counts shared intermediates once and conditions on both "
+            "focal parents. Omitted configuration mass is neutral. Explicit "
+            "caller direction support exempts that parental side, not an "
+            "uncertain co-parent. These are composite/loopy approximations, not calibrated "
             "parenthood probabilities. All direction evidence and family messages "
             "are recomputed for each bootstrap and leave-one-contig-out fit. "
             "Exposure and caller eligibility remain mandatory; no inferred "

@@ -1,5 +1,6 @@
 """Checkpointed preparation, inference and export of genome-wide pedigrees."""
 from __future__ import annotations
+from ..core.run_record import timed_stage
 from haplotype_reconstruction import PACKAGE_ROOT
 
 import copy
@@ -13,21 +14,22 @@ import time
 from typing import Any, Mapping, Sequence
 import numpy as np
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints
+from . import cache as pedigree_cache
 import haplotype_reconstruction.pedigree.components as pedigree_components
 import haplotype_reconstruction.pedigree.models as pedigree_models
 import haplotype_reconstruction.workflows.design as workflows_design
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
 
-T10_PREPARATION_SCHEMA = "t10a-component-pedigree-preparation-v4"
+PEDIGREE_PREPARATION_SCHEMA = "pedigree_preparation-component-pedigree-preparation-v5"
 
 
-T10_PREPARATION_BACKEND = "component-local-ragged-source-preparation-v4"
+PEDIGREE_PREPARATION_BACKEND = "component-local-ragged-source-preparation-v4"
 
 
-T10_GLOBAL_SCHEMA = "t10b-component-pedigree-result-v4"
+PEDIGREE_GLOBAL_SCHEMA = "pedigree_scoring-component-pedigree-result-v5"
 
 
-T10_GLOBAL_BACKEND = "component-local-parent-state-combined-v4"
+PEDIGREE_GLOBAL_BACKEND = "component-local-parent-state-combined-v4"
 
 
 EVIDENCE_STAGE, PEDIGREE_STAGE = (
@@ -35,8 +37,10 @@ EVIDENCE_STAGE, PEDIGREE_STAGE = (
 )
 
 
-T10_INFERENCE_CODE_FILES = (
+PEDIGREE_INFERENCE_CODE_FILES = (
     'pedigree/pipeline.py',
+    'pedigree/cache.py',
+    'pedigree/explanations.py',
     'pedigree/components.py',
     'pedigree/likelihoods.py',
     'pedigree/bootstrap.py',
@@ -44,6 +48,7 @@ T10_INFERENCE_CODE_FILES = (
     'pedigree/config.py',
     'pedigree/direction.py',
     'pedigree/orientation.py',
+    'pedigree/ancestry_paths.py',
     'pedigree/eligibility.py',
     'pedigree/evidence.py',
     'pedigree/graph.py',
@@ -100,19 +105,19 @@ class EvidenceConfig:
 
 @dataclass(frozen=True)
 class PedigreeEvidenceCheckpoint:
-    """Compact T10a product bound to its exact typed T09 identities."""
+    """Compact pedigree preparation product bound to its exact typed painting identities."""
 
     schema: str
     contig: str
     sample_ids: tuple[str, ...]
     prepared_chromosome: pedigree_components.PreparedChromosome
-    t09_release_identity: painting_checkpoints.ScientificIdentity
-    t09_painting_identity: painting_checkpoints.ScientificIdentity
+    assembly_identity: painting_checkpoints.ScientificIdentity
+    tpainting_identity: painting_checkpoints.ScientificIdentity
     preparation_identity: painting_checkpoints.ScientificIdentity
 
 
 @dataclass(frozen=True)
-class Stage10ContigSummary:
+class PedigreeContigSummary:
     """Small operational summary for one prepared physical chromosome."""
 
     contig: str
@@ -162,20 +167,20 @@ def _canonical_digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def stage10_inference_code_identity(
+def pedigree_inference_code_identity(
         digest_overrides: Mapping[str, str] | None=None) -> dict[str, str]:
-    """Hash the complete scientific T10 inference implementation closure."""
+    """Hash the complete scientific pedigree inference implementation closure."""
 
     overrides = {} if digest_overrides is None else dict(digest_overrides)
-    unknown = set(overrides).difference(T10_INFERENCE_CODE_FILES)
+    unknown = set(overrides).difference(PEDIGREE_INFERENCE_CODE_FILES)
     if unknown:
         raise ValueError(
-            "unknown T10 code identity override files: "
+            "unknown pedigree code identity override files: "
             + ", ".join(sorted(unknown))
         )
     root = PACKAGE_ROOT
     result = {}
-    for filename in T10_INFERENCE_CODE_FILES:
+    for filename in PEDIGREE_INFERENCE_CODE_FILES:
         if filename in overrides:
             digest = str(overrides[filename]).lower()
             if len(digest) != 64 or any(
@@ -221,13 +226,13 @@ def _eligibility_provenance(parent_eligibility, sample_ids):
     return _canonical_digest(unrestricted), summary
 
 
-def stage10_preparation_identity(
+def pedigree_preparation_identity(
         preparation_config,
         pedigree_config,
         *,
         sample_ids,
         contigs,
-        t09_stage,
+        painting_stage,
         raw_gl_stage,
         raw_sites_stage,
         raw_gl_key,
@@ -235,17 +240,18 @@ def stage10_preparation_identity(
         raw_observed_mask_key,
         parent_eligibility_identity,
         code_digest_overrides=None,
+        source_files=None,
 ) -> dict[str, Any]:
-    """Return the common T10a identity, excluding runtime scheduling."""
+    """Return the common pedigree preparation identity, excluding runtime scheduling."""
 
     if not isinstance(preparation_config, EvidenceConfig):
-        raise TypeError("preparation_config must be Stage10PreparationConfig")
+        raise TypeError("preparation_config must be EvidenceConfig")
     if not isinstance(pedigree_config, module_pedigree_config.PedigreeConfig):
         raise TypeError("pedigree_config must be PedigreeConfig")
     settings = pedigree_config.validated()
     return _canonical_mapping({
-        "schema": T10_PREPARATION_SCHEMA,
-        "backend": T10_PREPARATION_BACKEND,
+        "schema": PEDIGREE_PREPARATION_SCHEMA,
+        "backend": PEDIGREE_PREPARATION_BACKEND,
         "config": {
             "preparation": {
                 **{f.name: getattr(preparation_config, f.name)
@@ -253,14 +259,16 @@ def stage10_preparation_identity(
                 **({"genetic_maps": preparation_config.genetic_maps.identity()}
                    if preparation_config.genetic_maps is not None else {}),
             },
-            "pedigree": asdict(settings),
-            "parent_eligibility_identity": str(parent_eligibility_identity),
+            "pedigree": {name: getattr(settings, name) for name in (
+                "markers_per_information_block",
+                "parent_state_effective_markers_per_information_block",
+                "parent_state_candidate_source_mode")},
         },
         "ordered_sample_ids": _canonical_sample_ids(sample_ids),
         "ordered_contigs": _canonical_contigs(contigs, "contigs"),
         "source": {
-            "t09_stage": str(t09_stage),
-            "t09_schema": painting_checkpoints.T09_COMPONENT_CHECKPOINT_SCHEMA,
+            "painting_stage": str(painting_stage),
+            "painting_schema": painting_checkpoints.PAINTING_COMPONENT_CHECKPOINT_SCHEMA,
             "raw_gl_stage": str(raw_gl_stage),
             "raw_sites_stage": str(raw_sites_stage),
             "raw_gl_key": str(raw_gl_key),
@@ -269,22 +277,25 @@ def stage10_preparation_identity(
             "genotype_evidence_mode": workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
             "observed_mask_mode": workflows_reconstruction.EXACT_OBSERVED_MASK_MODE,
         },
-        "inference_code_identity_sha256": stage10_inference_code_identity(
-            code_digest_overrides
-        ),
-    }, "T10 preparation identity")
+        "source_files": source_files,
+        "preparation_code_identity": pedigree_cache.preparation_code_identity(),
+    }, "pedigree preparation identity")
 
 
-def stage10_global_identity(preparation_identity) -> dict[str, Any]:
-    """Return the T10b identity inherited from the complete T10a closure."""
+def pedigree_global_identity(preparation_identity, settings, eligibility_identity, scoring_identity) -> dict[str, Any]:
+    """Decision identity, independent of the reusable genetic-score product."""
 
     prepared = _canonical_mapping(preparation_identity, "preparation_identity")
     return _canonical_mapping({
-        "schema": T10_GLOBAL_SCHEMA,
-        "backend": T10_GLOBAL_BACKEND,
+        "schema": PEDIGREE_GLOBAL_SCHEMA,
+        "backend": PEDIGREE_GLOBAL_BACKEND,
         "config": {"preparation_identity_sha256": _canonical_digest(prepared)},
         "preparation_identity": prepared,
-    }, "T10 global identity")
+        "scoring_identity": scoring_identity,
+        "pedigree_config": asdict(settings),
+        "parent_eligibility_identity": eligibility_identity,
+        "decision_code_identity": pedigree_inference_code_identity(),
+    }, "pedigree global identity")
 
 
 def _validate_source_modes(payload, stage, contig) -> None:
@@ -348,17 +359,17 @@ def _validate_ragged_component(
         sample_count: int,
         bin_count: int,
 ) -> None:
-    """Validate the compact T09 posterior law persisted in one T10a component."""
+    """Validate the compact painting posterior law persisted in one pedigree preparation component."""
 
     model = component.ragged_model
     factors = component.ragged_source_factors
     observed = np.asarray(component.compact_observed)
     if not isinstance(model, pedigree_sources.RaggedFounderModel):
-        raise ValueError("T10a ragged component lacks its founder model")
+        raise ValueError("pedigree preparation ragged component lacks its founder model")
     if not isinstance(factors, pedigree_sources.RaggedSourceBatchFactors):
-        raise ValueError("T10a ragged component lacks source posterior factors")
+        raise ValueError("pedigree preparation ragged component lacks source posterior factors")
     if observed.dtype != np.dtype(np.bool_) or observed.ndim != 2:
-        raise ValueError("T10a ragged observed mask is invalid")
+        raise ValueError("pedigree preparation ragged observed mask is invalid")
 
     named = np.asarray(model.named_alleles)
     called = np.asarray(model.called)
@@ -391,7 +402,7 @@ def _validate_ragged_component(
         or not np.any(anchored_states[:-1])
         or len(model.bin_site_indices) != bin_count
     ):
-        raise ValueError("T10a ragged founder model shape/content is invalid")
+        raise ValueError("pedigree preparation ragged founder model shape/content is invalid")
     expected_frequency = (
         1.0 + np.sum(np.where(called, named, 0), axis=0)
     ) / (2.0 + np.sum(called, axis=0))
@@ -400,7 +411,7 @@ def _validate_ragged_component(
         not np.array_equal(background, expected_frequency)
         or not np.array_equal(allele_probability, expected_probability)
     ):
-        raise ValueError("T10a ragged founder allele probabilities changed")
+        raise ValueError("pedigree preparation ragged founder allele probabilities changed")
 
     cache = component.cache
     founder_grid = np.asarray(cache.founder_alleles)
@@ -415,13 +426,13 @@ def _validate_ragged_component(
         or np.any(marker_counts < 1)
         or np.any(marker_counts > founder_grid.shape[2])
     ):
-        raise ValueError("T10a ragged marker/model alignment is invalid")
+        raise ValueError("pedigree preparation ragged marker/model alignment is invalid")
     compact_named = np.ascontiguousarray(np.concatenate([
         founder_grid[:, block,:int(count)]
         for block, count in enumerate(marker_counts)
     ], axis=1))
     if not np.array_equal(named, compact_named):
-        raise ValueError("T10a ragged founder model disagrees with compact markers")
+        raise ValueError("pedigree preparation ragged founder model disagrees with compact markers")
     expected_bins = []
     offset = 0
     for count in marker_counts:
@@ -433,14 +444,14 @@ def _validate_ragged_component(
         or not np.array_equal(np.asarray(actual), expected)
         for actual, expected in zip(model.bin_site_indices, expected_bins)
     ):
-        raise ValueError("T10a ragged bin/site partition is invalid")
+        raise ValueError("pedigree preparation ragged bin/site partition is invalid")
     expected_site_to_bin = np.repeat(
         np.arange(bin_count, dtype=np.int64), marker_counts.astype(np.int64)
     )
     if not np.array_equal(site_to_bin, expected_site_to_bin):
-        raise ValueError("T10a ragged site-to-bin alignment is invalid")
+        raise ValueError("pedigree preparation ragged site-to-bin alignment is invalid")
     if observed.shape != (sample_count, named.shape[1]):
-        raise ValueError("T10a ragged observed-mask shape is invalid")
+        raise ValueError("pedigree preparation ragged observed-mask shape is invalid")
 
     initial = np.asarray(factors.initial_probability)
     right = np.asarray(factors.right_weight)
@@ -465,12 +476,12 @@ def _validate_ragged_component(
         or not isinstance(transition, pedigree_sources.HammingTransition)
         or int(transition.n_states) != state_count
     ):
-        raise ValueError("T10a ragged source-factor shape/content is invalid")
+        raise ValueError("pedigree preparation ragged source-factor shape/content is invalid")
     initial_mass = np.sum(initial, axis=(1, 2))
     if np.any(
         ~np.isclose(initial_mass, 1.0, rtol=1e-12, atol=1e-14)
     ):
-        raise ValueError("T10a ragged source initial probabilities are invalid")
+        raise ValueError("pedigree preparation ragged source initial probabilities are invalid")
     same = np.asarray(transition.same)
     one = np.asarray(transition.one_change)
     two = np.asarray(transition.two_changes)
@@ -482,12 +493,12 @@ def _validate_ragged_component(
         or not math.isfinite(float(transition.double_recomb_factor))
         or float(transition.double_recomb_factor) <= 0.0
     ):
-        raise ValueError("T10a ragged transition is invalid")
+        raise ValueError("pedigree preparation ragged transition is invalid")
     row_mass = same + 2.0 * (state_count - 1) * one + (
         state_count - 1
     ) ** 2 * two
     if not np.allclose(row_mass, 1.0, rtol=2e-13, atol=2e-15):
-        raise ValueError("T10a ragged transition rows are not normalized")
+        raise ValueError("pedigree preparation ragged transition rows are not normalized")
     if (
         not math.isfinite(float(factors.robustness_epsilon))
         or not 0.0 <= float(factors.robustness_epsilon) <= 1.0
@@ -495,7 +506,7 @@ def _validate_ragged_component(
         or float(factors.preparation_seconds) < 0.0
         or hasattr(factors, "denominator")
     ):
-        raise ValueError("T10a ragged factor metadata is invalid")
+        raise ValueError("pedigree preparation ragged factor metadata is invalid")
 
 
 def _validate_prepared_checkpoint(
@@ -504,29 +515,29 @@ def _validate_prepared_checkpoint(
         expected_contig,
         expected_sample_ids,
         expected_preparation_identity,
-        expected_t09=None,
+        expected_painting=None,
 ) -> PedigreeEvidenceCheckpoint:
     if not isinstance(payload, PedigreeEvidenceCheckpoint):
-        raise TypeError("T10a requires a typed prepared checkpoint")
-    if payload.schema != T10_PREPARATION_SCHEMA:
-        raise ValueError("unknown T10a checkpoint schema")
+        raise TypeError("pedigree preparation requires a typed prepared checkpoint")
+    if payload.schema != PEDIGREE_PREPARATION_SCHEMA:
+        raise ValueError("unknown pedigree preparation checkpoint schema")
     if payload.contig != str(expected_contig):
-        raise ValueError("T10a physical contig mismatch")
+        raise ValueError("pedigree preparation physical contig mismatch")
     sample_ids = _canonical_sample_ids(expected_sample_ids)
     if payload.sample_ids != sample_ids:
-        raise ValueError("T10a sample order mismatch")
+        raise ValueError("pedigree preparation sample order mismatch")
     expected_identity = painting_checkpoints.ScientificIdentity.from_record(
         expected_preparation_identity
     )
     if payload.preparation_identity != expected_identity:
-        raise ValueError("T10a preparation identity mismatch")
+        raise ValueError("pedigree preparation preparation identity mismatch")
     prepared = payload.prepared_chromosome
     try:
         expected_source_mode = str(expected_identity.record()["config"][
             "pedigree"
         ]["parent_state_candidate_source_mode"])
     except (KeyError, TypeError) as exc:
-        raise ValueError("T10a preparation identity lacks source mode") from exc
+        raise ValueError("pedigree preparation preparation identity lacks source mode") from exc
     if (
         not isinstance(prepared, pedigree_components.PreparedChromosome)
         or prepared.contig != payload.contig
@@ -539,16 +550,16 @@ def _validate_prepared_checkpoint(
         or prepared.source_mode != expected_source_mode
         or prepared.source_mode not in {
             "hard_painted",
-            pedigree_models.T09_RAGGED_POSTERIOR_MODE,
+            pedigree_models.PAINTING_RAGGED_POSTERIOR_MODE,
             pedigree_models.RAGGED_QUADRATIC_MODEL,
         }
     ):
-        raise ValueError("T10a prepared chromosome layout is invalid")
+        raise ValueError("pedigree preparation prepared chromosome layout is invalid")
     component_ids = []
     for component, exponent in zip(
             prepared.components, prepared.information_exponents):
         if not isinstance(component, pedigree_components.PreparedComponentPedigree):
-            raise ValueError("T10a component is not a typed prepared component")
+            raise ValueError("pedigree preparation component is not a typed prepared component")
         labels = np.asarray(component.cache.stacked_labels)
         weights = np.asarray(exponent)
         if (labels.ndim != 3 or labels.shape[0] != len(sample_ids)
@@ -558,24 +569,24 @@ def _validate_prepared_checkpoint(
                 or np.any(weights < 0.0)
                 or np.any(weights > 1.0)
                 or component.source_mode != prepared.source_mode):
-            raise ValueError("T10a component information weights/mode are invalid")
+            raise ValueError("pedigree preparation component information weights/mode are invalid")
         _validate_ragged_component(
             component, len(sample_ids), labels.shape[1]
         )
         component_ids.append(int(component.component_index))
     if component_ids != sorted(component_ids) or len(set(component_ids)) != len(
             component_ids):
-        raise ValueError("T10a component IDs are not ordered and unique")
-    payload.t09_release_identity.record()
-    payload.t09_painting_identity.record()
-    if expected_t09 is not None:
-        t09 = painting_checkpoints.validate_t09_component_checkpoint(
-            expected_t09, expected_sample_ids=sample_ids
+        raise ValueError("pedigree preparation component IDs are not ordered and unique")
+    payload.assembly_identity.record()
+    payload.tpainting_identity.record()
+    if expected_painting is not None:
+        painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(
+            expected_painting, expected_sample_ids=sample_ids
         )
-        if payload.t09_release_identity != t09.release_identity:
-            raise ValueError("T10a source T09 release identity mismatch")
-        if payload.t09_painting_identity != t09.painting_product_identity:
-            raise ValueError("T10a source T09 painting identity mismatch")
+        if payload.assembly_identity != painting_checkpoint.release_identity:
+            raise ValueError("pedigree preparation source painting release identity mismatch")
+        if payload.tpainting_identity != painting_checkpoint.painting_product_identity:
+            raise ValueError("pedigree preparation source sample painting identity mismatch")
     return payload
 
 
@@ -583,38 +594,38 @@ def _checkpoint_source_identity(checkpoint: PedigreeEvidenceCheckpoint) -> str:
     return _canonical_digest({
         "contig": checkpoint.contig,
         "preparation_identity": checkpoint.preparation_identity.record(),
-        "t09_release_identity": checkpoint.t09_release_identity.record(),
-        "t09_painting_identity": checkpoint.t09_painting_identity.record(),
+        "assembly_identity": checkpoint.assembly_identity.record(),
+        "tpainting_identity": checkpoint.tpainting_identity.record(),
     })
 
 
 def _serialize_ragged_scoring_diagnostics(diagnostics) -> dict[str, Any]:
-    """Return stable T10a/T10b phase diagnostics for the global summary.
+    """Return stable pedigree preparation/pedigree scoring phase diagnostics for the global summary.
 
     The component-level timings are additive diagnostic work times, not an
     alternative wall-clock total.  ``runtime.inference_elapsed_seconds``
-    remains the authoritative end-to-end T10b elapsed time.
+    remains the authoritative end-to-end pedigree scoring elapsed time.
     """
 
     return {
         "component_count": int(diagnostics.component_count),
         "phase_timings_seconds": {
-            "t10a_source_preparation": float(
+            "pedigree_preparation_source_preparation": float(
                 diagnostics.source_preparation_seconds
             ),
-            "t10b_source_marginal_preparation": float(
+            "pedigree_scoring_source_marginal_preparation": float(
                 diagnostics.source_marginal_preparation_seconds
             ),
-            "t10b_hard_structure": float(diagnostics.hard_structure_seconds),
-            "t10b_posterior_expected_structure": float(
+            "pedigree_scoring_hard_structure": float(diagnostics.hard_structure_seconds),
+            "pedigree_scoring_posterior_expected_structure": float(
                 diagnostics.posterior_expected_structure_seconds
             ),
-            "t10b_transmission_preparation": float(
+            "pedigree_scoring_transmission_preparation": float(
                 diagnostics.transmission_preparation_seconds
             ),
-            "t10b_m0_scoring": float(diagnostics.m0_scoring_seconds),
-            "t10b_m1_scoring": float(diagnostics.m1_scoring_seconds),
-            "t10b_m2_scoring": float(diagnostics.m2_scoring_seconds),
+            "pedigree_scoring_m0_scoring": float(diagnostics.m0_scoring_seconds),
+            "pedigree_scoring_m1_scoring": float(diagnostics.m1_scoring_seconds),
+            "pedigree_scoring_m2_scoring": float(diagnostics.m2_scoring_seconds),
         },
         "m2_row_counts": {
             "active": int(diagnostics.m2_active_trio_count),
@@ -658,22 +669,22 @@ def _serialize_projected_scoring_diagnostics(diagnostics) -> dict[str, Any]:
         },
         "component_count": int(diagnostics.component_count),
         "phase_timings_seconds": {
-            "t10a_source_preparation": float(
+            "pedigree_preparation_source_preparation": float(
                 diagnostics.source_preparation_seconds
             ),
-            "t10b_source_marginal_preparation": float(
+            "pedigree_scoring_source_marginal_preparation": float(
                 diagnostics.source_marginal_preparation_seconds
             ),
-            "t10b_hard_structure": float(diagnostics.hard_structure_seconds),
-            "t10b_posterior_expected_structure": float(
+            "pedigree_scoring_hard_structure": float(diagnostics.hard_structure_seconds),
+            "pedigree_scoring_posterior_expected_structure": float(
                 diagnostics.posterior_expected_structure_seconds
             ),
-            "t10b_projection_preparation": float(
+            "pedigree_scoring_projection_preparation": float(
                 diagnostics.projection_preparation_seconds
             ),
-            "t10b_m0_scoring": float(diagnostics.m0_scoring_seconds),
-            "t10b_m1_scoring": float(diagnostics.m1_scoring_seconds),
-            "t10b_m2_scoring": float(diagnostics.m2_scoring_seconds),
+            "pedigree_scoring_m0_scoring": float(diagnostics.m0_scoring_seconds),
+            "pedigree_scoring_m1_scoring": float(diagnostics.m1_scoring_seconds),
+            "pedigree_scoring_m2_scoring": float(diagnostics.m2_scoring_seconds),
         },
         "m2_row_counts": {
             "active": int(diagnostics.m2_active_trio_count),
@@ -718,16 +729,16 @@ def _prepare_one_contig(
         preparation_config,
         pedigree_config,
         *,
-        t09_stage,
+        painting_stage,
         raw_gl_stage,
         raw_sites_stage,
         raw_gl_key,
         raw_sites_key,
         raw_observed_mask_key,
         target_stage,
-) -> Stage10ContigSummary:
-    t09 = painting_checkpoints.validate_t09_component_checkpoint(
-        checkpoint_store.load_contig(t09_stage, contig),
+) -> PedigreeContigSummary:
+    painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(
+        checkpoint_store.load_contig(painting_stage, contig),
         expected_sample_ids=sample_ids,
     )
     if checkpoint_store.contig_done(target_stage, contig):
@@ -736,10 +747,10 @@ def _prepare_one_contig(
             expected_contig=contig,
             expected_sample_ids=sample_ids,
             expected_preparation_identity=preparation_identity,
-            expected_t09=t09,
+            expected_painting=painting_checkpoint,
         )
         prepared = checkpoint.prepared_chromosome
-        return Stage10ContigSummary(
+        return PedigreeContigSummary(
             contig, True, prepared.component_count, len(prepared.components),
             prepared.omitted_reason,
         )
@@ -757,8 +768,8 @@ def _prepare_one_contig(
                 raw_observed_mask_key=raw_observed_mask_key,
             )
         )
-        prepared = pedigree_components.prepare_t09_chromosome_components(
-            t09,
+        prepared = pedigree_components.prepare_painted_chromosome_components(
+            painting_checkpoint,
             raw_gl,
             raw_sites,
             raw_observed,
@@ -779,36 +790,37 @@ def _prepare_one_contig(
             ),
         )
         checkpoint = PedigreeEvidenceCheckpoint(
-            schema=T10_PREPARATION_SCHEMA,
+            schema=PEDIGREE_PREPARATION_SCHEMA,
             contig=contig,
             sample_ids=sample_ids,
             prepared_chromosome=prepared,
-            t09_release_identity=t09.release_identity,
-            t09_painting_identity=t09.painting_product_identity,
+            assembly_identity=painting_checkpoint.release_identity,
+            tpainting_identity=painting_checkpoint.painting_product_identity,
             preparation_identity=painting_checkpoints.ScientificIdentity.from_record(
                 preparation_identity
             ),
         )
         _validate_prepared_checkpoint(
             checkpoint, expected_contig=contig, expected_sample_ids=sample_ids,
-            expected_preparation_identity=preparation_identity, expected_t09=t09)
+            expected_preparation_identity=preparation_identity, expected_painting=painting_checkpoint)
         # Atomic checkpoint I/O already propagates write failures. Validate
         # this exact object before writing; global inference validates the
         # persisted copy on load, without an immediate duplicate disk read.
         checkpoint_store.save_contig(target_stage, contig, checkpoint)
     finally:
-        del raw_gl, raw_sites, raw_observed, gl_payload, sites_payload, t09
+        del raw_gl, raw_sites, raw_observed, gl_payload, sites_payload, painting_checkpoint
         gc.collect()
         core_parallel.malloc_trim()
 
     prepared = checkpoint.prepared_chromosome
-    return Stage10ContigSummary(
+    return PedigreeContigSummary(
         contig, False, prepared.component_count, len(prepared.components),
         prepared.omitted_reason,
     )
 
 
-def prepare_stage10_contigs(
+@timed_stage("pedigree_evidence")
+def prepare_pedigree_contigs(
         checkpoint_store,
         contigs,
         sample_ids,
@@ -816,7 +828,7 @@ def prepare_stage10_contigs(
         pedigree_config,
         parent_eligibility=None,
         preparation_config=EvidenceConfig(),
-        t09_stage=workflows_reconstruction.PAINTING_STAGE,
+        painting_stage=workflows_reconstruction.PAINTING_STAGE,
         raw_gl_stage,
         raw_sites_stage,
         raw_gl_key="global_probs",
@@ -825,11 +837,11 @@ def prepare_stage10_contigs(
         all_contigs=None,
         publish_completion=True,
         target_stage=EVIDENCE_STAGE,
-) -> tuple[Stage10ContigSummary, ...]:
-    """Prepare requested T10a contigs; shards never publish full completion."""
+) -> tuple[PedigreeContigSummary, ...]:
+    """Prepare requested pedigree preparation contigs; shards never publish full completion."""
 
     if not isinstance(preparation_config, EvidenceConfig):
-        raise TypeError("preparation_config must be Stage10PreparationConfig")
+        raise TypeError("preparation_config must be EvidenceConfig")
     settings = pedigree_config.validated()
     requested = _canonical_contigs(contigs, "contigs")
     ordered_ids = _canonical_sample_ids(sample_ids)
@@ -846,25 +858,32 @@ def prepare_stage10_contigs(
         raise TypeError("publish_completion must be boolean")
     if publish_completion and requested != all_ordered:
         raise ValueError(
-            "only the complete configured contig set may publish T10a completion"
+            "only the complete configured contig set may publish pedigree preparation completion"
         )
     eligibility_identity, _ = _eligibility_provenance(
         parent_eligibility, ordered_ids
     )
-    identity = stage10_preparation_identity(
+    identity = pedigree_preparation_identity(
         preparation_config,
         settings,
         sample_ids=ordered_ids,
         contigs=all_ordered,
-        t09_stage=t09_stage,
+        painting_stage=painting_stage,
         raw_gl_stage=raw_gl_stage,
         raw_sites_stage=raw_sites_stage,
         raw_gl_key=raw_gl_key,
         raw_sites_key=raw_sites_key,
         raw_observed_mask_key=raw_observed_mask_key,
         parent_eligibility_identity=eligibility_identity,
+        source_files=pedigree_cache.source_files(
+            checkpoint_store, (painting_stage, raw_gl_stage, raw_sites_stage), all_ordered),
     )
+    target_stage = pedigree_cache.versioned(target_stage, identity)
     checkpoint_store.bind_stage_identity(target_stage, identity)
+    if checkpoint_store.stage_complete(target_stage) and checkpoint_store.global_done(target_stage):
+        stored = checkpoint_store.load_global(target_stage)
+        return tuple(PedigreeContigSummary(**dict(row, resumed=True))
+                     for row in stored["summaries"] if row["contig"] in requested_set)
     if checkpoint_store.stage_complete(target_stage):
         missing = [
             contig for contig in all_ordered
@@ -882,7 +901,7 @@ def prepare_stage10_contigs(
             identity,
             preparation_config,
             settings,
-            t09_stage=t09_stage,
+            painting_stage=painting_stage,
             raw_gl_stage=raw_gl_stage,
             raw_sites_stage=raw_sites_stage,
             raw_gl_key=raw_gl_key,
@@ -896,10 +915,11 @@ def prepare_stage10_contigs(
         checkpoint_store, target_stage, requested
     )
     if publish_completion:
-        if not checkpoint_store.stage_complete(t09_stage):
-            raise RuntimeError(f"{t09_stage} must be complete before T10a completion")
+        checkpoint_store.save_global(target_stage, {"summaries": [asdict(row) for row in summaries]})
+        if not checkpoint_store.stage_complete(painting_stage):
+            raise RuntimeError(f"{painting_stage} must be complete before pedigree preparation completion")
         core_runtime.require_contig_checkpoints(
-            checkpoint_store, t09_stage, all_ordered
+            checkpoint_store, painting_stage, all_ordered
         )
         core_runtime.require_contig_checkpoints(
             checkpoint_store, target_stage, all_ordered
@@ -917,32 +937,32 @@ def _load_prepared_run(
         pedigree_config,
         preparation_config,
         *,
-        t09_stage,
+        painting_stage,
         preparation_stage,
 ):
     chromosomes = []
     omissions = []
     source_identities = []
     for contig in contigs:
-        t09 = checkpoint_store.load_contig(t09_stage, contig)
+        painting_checkpoint = checkpoint_store.load_contig(painting_stage, contig)
         prepared_checkpoint = _validate_prepared_checkpoint(
             checkpoint_store.load_contig(preparation_stage, contig),
             expected_contig=contig,
             expected_sample_ids=sample_ids,
             expected_preparation_identity=preparation_identity,
-            expected_t09=t09,
+            expected_painting=painting_checkpoint,
         )
         source_identities.append(_checkpoint_source_identity(prepared_checkpoint))
         chromosome = prepared_checkpoint.prepared_chromosome
         if chromosome.components:
             chromosomes.append(chromosome)
         else:
-            omissions.append(pedigree_components.OmittedT09Chromosome(
+            omissions.append(pedigree_components.OmittedPaintingChromosome(
                 contig,
                 chromosome.component_count,
                 chromosome.omitted_reason or "no_component_evidence",
             ))
-        del t09, prepared_checkpoint, chromosome
+        del painting_checkpoint, prepared_checkpoint, chromosome
     return (
         pedigree_components.PreparedPedigree(
             recombination_rate=preparation_config.recombination_rate,
@@ -962,7 +982,8 @@ def _load_prepared_run(
     )
 
 
-def run_global_stage10_inference(
+@timed_stage("pedigree")
+def run_global_pedigree_inference(
         checkpoint_store,
         contigs,
         sample_ids,
@@ -971,7 +992,7 @@ def run_global_stage10_inference(
         parent_eligibility=None,
         preparation_config=EvidenceConfig(),
         n_workers=None,
-        t09_stage=workflows_reconstruction.PAINTING_STAGE,
+        painting_stage=workflows_reconstruction.PAINTING_STAGE,
         preparation_stage=EVIDENCE_STAGE,
         target_stage=PEDIGREE_STAGE,
         raw_gl_stage,
@@ -980,7 +1001,7 @@ def run_global_stage10_inference(
         raw_sites_key="global_sites",
         raw_observed_mask_key="global_observed_mask",
 ):
-    """Require complete T09/T10a inputs and run or resume global T10b."""
+    """Require complete painting/pedigree preparation inputs and run or resume global pedigree scoring."""
 
     ordered_contigs = _canonical_contigs(contigs, "contigs")
     ordered_ids = _canonical_sample_ids(sample_ids)
@@ -988,41 +1009,39 @@ def run_global_stage10_inference(
     eligibility_identity, eligibility_summary = _eligibility_provenance(
         parent_eligibility, ordered_ids
     )
-    preparation_identity = stage10_preparation_identity(
+    preparation_identity = pedigree_preparation_identity(
         preparation_config,
         settings,
         sample_ids=ordered_ids,
         contigs=ordered_contigs,
-        t09_stage=t09_stage,
+        painting_stage=painting_stage,
         raw_gl_stage=raw_gl_stage,
         raw_sites_stage=raw_sites_stage,
         raw_gl_key=raw_gl_key,
         raw_sites_key=raw_sites_key,
         raw_observed_mask_key=raw_observed_mask_key,
         parent_eligibility_identity=eligibility_identity,
+        source_files=pedigree_cache.source_files(
+            checkpoint_store, (painting_stage, raw_gl_stage, raw_sites_stage), ordered_contigs),
     )
-    global_identity = stage10_global_identity(preparation_identity)
+    scoring_identity = pedigree_cache.scoring_identity(
+        preparation_identity, settings, parent_eligibility, ordered_ids, preparation_config)
+    global_identity = pedigree_global_identity(
+        preparation_identity, settings, eligibility_identity, scoring_identity)
+    preparation_stage = pedigree_cache.versioned(preparation_stage, preparation_identity)
+    published_stage = target_stage
+    target_stage = pedigree_cache.versioned(target_stage, global_identity)
     checkpoint_store.bind_stage_identity(preparation_stage, preparation_identity)
     checkpoint_store.bind_stage_identity(target_stage, global_identity)
-    for required_stage in (t09_stage, preparation_stage):
+    for required_stage in (painting_stage, preparation_stage):
         if not checkpoint_store.stage_complete(required_stage):
             raise RuntimeError(
-                f"{required_stage} must be complete before global T10 inference"
+                f"{required_stage} must be complete before global pedigree inference"
             )
         core_runtime.require_contig_checkpoints(
             checkpoint_store, required_stage, ordered_contigs
         )
 
-    prepared_run, source_identities = _load_prepared_run(
-        checkpoint_store,
-        ordered_contigs,
-        ordered_ids,
-        preparation_identity,
-        settings,
-        preparation_config,
-        t09_stage=t09_stage,
-        preparation_stage=preparation_stage,
-    )
     target_complete = checkpoint_store.stage_complete(target_stage)
     target_global = checkpoint_store.global_done(target_stage)
     if target_complete and not target_global:
@@ -1030,31 +1049,31 @@ def run_global_stage10_inference(
     if target_global:
         payload = checkpoint_store.load_global(target_stage)
         if (
-            payload.get("schema") != T10_GLOBAL_SCHEMA
-            or payload.get("backend") != T10_GLOBAL_BACKEND
+            payload.get("schema") != PEDIGREE_GLOBAL_SCHEMA
+            or payload.get("backend") != PEDIGREE_GLOBAL_BACKEND
             or payload.get("identity") != global_identity
             or tuple(payload.get("ordered_sample_ids", ())) != ordered_ids
             or tuple(payload.get("ordered_contigs", ())) != ordered_contigs
-            or tuple(payload.get("prepared_source_identity_sha256", ()))
-            != source_identities
         ):
-            raise RuntimeError("global T10 checkpoint identity/order mismatch")
+            raise RuntimeError("global pedigree checkpoint identity/order mismatch")
         if not target_complete:
             checkpoint_store.mark_stage_complete(target_stage)
+        pedigree_cache.publish_decision(checkpoint_store, published_stage, payload)
         return payload
 
     started = time.perf_counter()
-    result = pedigree_likelihoods.infer_prepared_t09_component_pedigree(
-        prepared_run,
-        parent_eligibility=parent_eligibility,
-        config=settings,
-        top_k=preparation_config.top_k,
-        anchor_k=preparation_config.anchor_k,
-        use_anchor_union=preparation_config.use_anchor_union,
-        mismatch_penalty=preparation_config.mismatch_penalty,
-        n_workers=n_workers,
-        candidate_source_mode=settings.parent_state_candidate_source_mode,
-    )
+    def prepare():
+        return _load_prepared_run(
+            checkpoint_store, ordered_contigs, ordered_ids, preparation_identity,
+            settings, preparation_config, painting_stage=painting_stage,
+            preparation_stage=preparation_stage)
+
+    scored, source_identities, scores_resumed = pedigree_cache.load_or_score(
+        checkpoint_store, scoring_identity, prepare, settings, parent_eligibility, preparation_config)
+    scoring_elapsed = time.perf_counter() - started
+    decision_started = time.perf_counter()
+    result = pedigree_likelihoods.infer_scored_parent_state_evidence(
+        scored, parent_eligibility=parent_eligibility, config=settings, n_workers=n_workers)
     elapsed = time.perf_counter() - started
     pedigree_result = result.pedigree_result
     tables = {
@@ -1091,16 +1110,20 @@ def run_global_stage10_inference(
                 "informative_markers": 0,
             })
         else:
-            raise RuntimeError(f"T10 result lacks physical contig {contig}")
+            raise RuntimeError(f"pedigree result lacks physical contig {contig}")
     payload = {
-        "schema": T10_GLOBAL_SCHEMA,
-        "backend": T10_GLOBAL_BACKEND,
+        "schema": PEDIGREE_GLOBAL_SCHEMA,
+        "backend": PEDIGREE_GLOBAL_BACKEND,
         "identity": global_identity,
         "ordered_sample_ids": ordered_ids,
         "ordered_contigs": ordered_contigs,
         "prepared_source_identity_sha256": source_identities,
         **tables,
         'diagnostics': pedigree_result.diagnostics,
+        'call_explanations': pedigree_result.call_explanations,
+        'alternative_explanations': pedigree_result.alternative_explanations,
+        'search_diagnostics': pedigree_result.search_diagnostics,
+        'tier_b_candidate_sets': pedigree_result.tier_b_candidate_sets,
         'parent_state_calls': pedigree_result.parent_state_calls,
         'evidence_summary': pedigree_result.evidence_summary,
         'config': settings,
@@ -1115,6 +1138,9 @@ def run_global_stage10_inference(
         } for value in result.omitted_chromosomes),
         "runtime": {
             "inference_elapsed_seconds": float(elapsed),
+            "scoring_elapsed_seconds": float(scoring_elapsed),
+            "decision_elapsed_seconds": time.perf_counter() - decision_started,
+            "genetic_scores_resumed": scores_resumed,
             "requested_n_workers": (
                 None if n_workers is None else int(n_workers)
             ),
@@ -1140,10 +1166,11 @@ def run_global_stage10_inference(
     if not checkpoint_store.global_done(target_stage):
         raise OSError(f"failed to checkpoint {target_stage}/_global")
     checkpoint_store.mark_stage_complete(target_stage)
+    pedigree_cache.publish_decision(checkpoint_store, published_stage, payload)
     return payload
 
 
-def write_stage10_outputs(payload, output_dir):
+def write_pedigree_outputs(payload, output_dir):
     """Publish the primary pedigree, evidence tiers, and supporting diagnostics."""
     output = Path(output_dir) / "pedigree"
     output.mkdir(parents=True, exist_ok=True)
@@ -1152,6 +1179,8 @@ def write_stage10_outputs(payload, output_dir):
         "tier_a_relationships", "tier_b_relationships",
         'diagnostics',
         'parent_state_calls', 'evidence_summary',
+        'call_explanations', 'alternative_explanations', 'search_diagnostics',
+        'tier_b_candidate_sets',
     )
     for name in names:
         temporary = output / f".{name}.csv.tmp"
@@ -1165,7 +1194,7 @@ def run_pedigree(
         raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
         n_workers=None, parent_eligibility=None, all_contigs=None,
         publish_global=True, genetic_maps=None, recombination_rate=5e-8):
-    """Canonical entry-point bridge: T09 plus raw GL -> Tier-B pedigree.
+    """Canonical entry-point bridge: painting plus raw GL -> Tier-B pedigree.
 
     Numerical scoring uses one process with the allocated Numba threads;
     bootstrap uses up to that many single-threaded workers, in a later phase.
@@ -1173,11 +1202,11 @@ def run_pedigree(
     """
     workers = core_runtime.available_cpu_count() if n_workers is None else int(n_workers)
     if not 1 <= workers <= core_runtime.available_cpu_count():
-        raise ValueError("T10 workers must fit the current CPU affinity")
-    print(f"STAGE 10: ragged quadratic, finite family direction, top-20, Tier B; {workers} CPUs")
+        raise ValueError("pedigree workers must fit the current CPU affinity")
+    print(f"PEDIGREE: ragged quadratic, finite family direction, top-20, Tier B; {workers} CPUs")
     print("Direction is a model assumption; same-depth and missing-parent crosses need caution.")
     with core_parallel.numba_thread_scope(workers):
-        summaries, payload = run_or_resume_stage10(
+        summaries, payload = run_or_resume_pedigree(
             checkpoint_store, contigs, sample_ids,
             pedigree_config=workflows_design.build_current_pedigree_config(),
             preparation_config=EvidenceConfig(
@@ -1188,15 +1217,15 @@ def run_pedigree(
             publish_global=publish_global,
         )
     if payload is not None:
-        output = write_stage10_outputs(payload, output_dir)
+        output = write_pedigree_outputs(payload, output_dir)
         print(f"Pedigree output: {output / 'tier_b_relationships.csv'}")
     else:
-        print("T10a shard cached; genome-wide pedigree awaits the complete contig set.")
+        print("pedigree preparation shard cached; genome-wide pedigree awaits the complete contig set.")
     print("[COMPLETE] Pedigree ready for family refinement and final phase correction.")
     return summaries, payload
 
 
-def run_or_resume_stage10(
+def run_or_resume_pedigree(
         checkpoint_store,
         contigs,
         sample_ids,
@@ -1205,7 +1234,7 @@ def run_or_resume_stage10(
         parent_eligibility=None,
         preparation_config=EvidenceConfig(),
         n_workers=None,
-        t09_stage=workflows_reconstruction.PAINTING_STAGE,
+        painting_stage=workflows_reconstruction.PAINTING_STAGE,
         raw_gl_stage,
         raw_sites_stage,
         raw_gl_key="global_probs",
@@ -1214,16 +1243,16 @@ def run_or_resume_stage10(
         all_contigs=None,
         publish_global=True,
 ):
-    """Prepare T10a and, for a complete unsharded run, publish global T10b."""
+    """Prepare pedigree preparation and, for a complete unsharded run, publish global pedigree scoring."""
 
-    summaries = prepare_stage10_contigs(
+    summaries = prepare_pedigree_contigs(
         checkpoint_store,
         contigs,
         sample_ids,
         pedigree_config=pedigree_config,
         parent_eligibility=parent_eligibility,
         preparation_config=preparation_config,
-        t09_stage=t09_stage,
+        painting_stage=painting_stage,
         raw_gl_stage=raw_gl_stage,
         raw_sites_stage=raw_sites_stage,
         raw_gl_key=raw_gl_key,
@@ -1235,7 +1264,7 @@ def run_or_resume_stage10(
     if not publish_global:
         return summaries, None
     configured_contigs = contigs if all_contigs is None else all_contigs
-    payload = run_global_stage10_inference(
+    payload = run_global_pedigree_inference(
         checkpoint_store,
         configured_contigs,
         sample_ids,
@@ -1243,7 +1272,7 @@ def run_or_resume_stage10(
         parent_eligibility=parent_eligibility,
         preparation_config=preparation_config,
         n_workers=n_workers,
-        t09_stage=t09_stage,
+        painting_stage=painting_stage,
         raw_gl_stage=raw_gl_stage,
         raw_sites_stage=raw_sites_stage,
         raw_gl_key=raw_gl_key,

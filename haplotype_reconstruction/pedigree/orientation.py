@@ -1,8 +1,9 @@
-"""Finite continuous orientation and reciprocal-family cavity scores.
+"""Finite continuous orientation, reciprocal and short-ancestry family scores.
 
 Finite composite-evidence corrections, not independent biological direction
 probabilities. Four synchronous family-message passes exclude immediate reverse
-feedback; loopy graphs are approximate, not solved exactly or to convergence.
+feedback; a one-way joint-family correction also checks reverse two-edge paths.
+Loopy graphs are approximate, not solved exactly or to convergence.
 Genetic scoring and final parent-state priors are unchanged.
 """
 from __future__ import annotations
@@ -10,6 +11,7 @@ import math
 import numpy as np
 from numba import njit
 from . import direction
+from .ancestry_paths import joint_path_correction
 
 
 @njit(cache=True, nogil=True)
@@ -165,8 +167,11 @@ def _family_avoidance(log_scores, alternatives, states, log_multiplicity, sample
 
 
 def adjust_scores(state_scores, identity_scores, alternatives, states,
-                  full_counts, model, settings, explicit_direction=None):
+                  full_counts, model, settings, explicit_direction=None, *, score_diagnostics=None):
     """Apply finite evidence to both state and identity; exposure remains hard."""
+    if score_diagnostics is not None:
+        for name in ("direction", "reciprocal_family", "ancestry_paths"):
+            score_diagnostics[name] = np.zeros(len(alternatives))
     probability = model.edge_probability
     if probability is None:
         return state_scores, identity_scores
@@ -181,6 +186,8 @@ def adjust_scores(state_scores, identity_scores, alternatives, states,
         for slot in (1, 2):
             present = (alternatives[:, slot] >= 0) & eligible
             correction[present] += log_direction[alternatives[present, 0], alternatives[present, slot]]
+    if score_diagnostics is not None:
+        score_diagnostics["direction"] = correction.copy()
     state_scores = state_scores + correction
     identity_scores = identity_scores + correction
     if settings.parent_state_direction_model in {"family", "continuous_family"}:
@@ -198,6 +205,21 @@ def adjust_scores(state_scores, identity_scores, alternatives, states,
             if explicit_direction is not None:
                 values = np.where(explicit_direction[c, p], 0.0, values)
             family[present] += values
+        if score_diagnostics is not None:
+            score_diagnostics["reciprocal_family"] = family.copy()
         state_scores = state_scores + family
         identity_scores = identity_scores + family
+        if settings.parent_state_ancestry_path_budget:
+            supported = (np.zeros((samples, samples), dtype=np.bool_)
+                         if explicit_direction is None else explicit_direction)
+            paths = joint_path_correction(
+                identity_scores, alternatives, states, log_multiplicity,
+                avoidance, settings.parent_state_ancestry_path_budget, supported,
+            )
+            # One-way evidence: never feed these corrections back into the
+            # reciprocal messages or parent configurations supporting them.
+            if score_diagnostics is not None:
+                score_diagnostics["ancestry_paths"] = paths.copy()
+            state_scores = state_scores + paths
+            identity_scores = identity_scores + paths
     return state_scores, identity_scores

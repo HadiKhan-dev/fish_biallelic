@@ -989,7 +989,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         core_parallel.malloc_trim()
         print(f"  Stripped probs_array from blocks ({_stripped_bytes / (1024**3):.1f} GB freed)")
 
-    # Downcast to float32: global_probs is float64 from R01 (HDBSCAN
+    # Downcast to float32: global_probs is float64 from block discovery (HDBSCAN
     # needs float64) but assembly only uses it for emission scoring
     # where float32 precision is sufficient.  Halves shared memory,
     # per-worker batch_probs slices, and all downstream emission/

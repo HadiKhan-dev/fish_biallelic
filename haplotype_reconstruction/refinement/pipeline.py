@@ -1,9 +1,10 @@
 """Checkpointed family inference and stable, genotype-preserving final phase.
 
-T11 publishes one conditional phase product. Phase stability is not a claim of
+family phase publishes one conditional phase product. Phase stability is not a claim of
 marginal-posterior convergence; full family probability tensors are not built.
 """
 from __future__ import annotations
+from ..core.run_record import timed_stage
 
 from dataclasses import asdict, replace
 import gc
@@ -19,7 +20,7 @@ from haplotype_reconstruction.workflows.reconstruction import PAINTING_STAGE
 from.import conditioning, model, polish
 
 
-FINAL_PHASE_STAGE = "11_phase_correction"
+FINAL_PHASE_STAGE = "family_phase"
 CANONICAL_PHASE_CONFIG = polish.PhasePolishConfig(
     copy_error=.01, adaptive_window_sites=100, minimum_biological_gain=0.)
 
@@ -54,7 +55,7 @@ the preceding polished path is only a comparison, never a warm start.
     if work is not None and work.is_file():
         saved = checkpoints.read(str(work), nthreads=checkpoint_threads)
         if saved["identity"] != identity:
-            raise ValueError("Stage11 iteration checkpoint inputs/configuration differ")
+            raise ValueError("Family phase iteration checkpoint inputs/configuration differ")
         state, point, unchanged = saved["messages"], saved["phase"], saved["unchanged"]
         checks = list(saved["checks"])
         del saved
@@ -126,7 +127,7 @@ the preceding polished path is only a comparison, never a warm start.
         checks.append(item)
         stable = converged or unchanged >= config.required_unchanged
         save(state, point, unchanged, force=stable or state.iteration >= config.max_iterations)
-        print(f"  [T11] iteration={state.iteration} delta={state.deltas[-1]:.6g} "
+        print(f"  [family phase] iteration={state.iteration} delta={state.deltas[-1]:.6g} "
               f"changed_alleles={changed} unchanged_checks={unchanged}", flush=True)
         if progress_callback is not None:
             progress_callback(item)
@@ -134,26 +135,26 @@ the preceding polished path is only a comparison, never a warm start.
     return point, tuple(checks), converged
 
 
-def refine_chromosome(t09, gl, positions, observed, relationships, sample_ids, *,
+def refine_chromosome(painting_checkpoint, gl, positions, observed, relationships, sample_ids, *,
                       contig, config=model.FamilyRefinementConfig(), phase_config=None,
                       identity=None, work_path=None, checkpoint_threads=1,
                       checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None):
-    """Produce one independently resumable T11 chromosome from frozen T09/T10."""
+    """Produce one independently resumable family phase chromosome from frozen painting/pedigree."""
     names = tuple(map(str, sample_ids))
-    t09 = painting_checkpoints.validate_t09_component_checkpoint(t09, expected_sample_ids=names)
+    painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(painting_checkpoint, expected_sample_ids=names)
     pedigree_components._validate_release_array_identity(
-        t09, np.asarray(gl), np.asarray(positions), np.asarray(observed))
+        painting_checkpoint, np.asarray(gl), np.asarray(positions), np.asarray(observed))
     if chromosome_map is not None:
         if chromosome_map.contig != str(contig):
-            raise ValueError("Stage11 chromosome map name differs from input contig")
+            raise ValueError("Family phase chromosome map name differs from input contig")
         config = replace(config, recombination_rate=chromosome_map.fallback_rate_per_bp)
     config = config.validated()
     phase_config = replace(phase_config or CANONICAL_PHASE_CONFIG,
                            recombination_rate=config.recombination_rate)
     family_identity = {
         "model": model.MODEL_VERSION, "config": asdict(config), "sample_ids": names,
-        "contig": str(contig), "t09_release": t09.release_identity.record(),
-        "t09_painting": t09.painting_product_identity.record(),
+        "contig": str(contig), "assembly": painting_checkpoint.release_identity.record(),
+        "tpainting": painting_checkpoint.painting_product_identity.record(),
         "pedigree_sha256": conditioning.relationship_identity(relationships),
         "recombination_map": None if chromosome_map is None else chromosome_map.identity(),
         "external": identity,
@@ -161,7 +162,7 @@ def refine_chromosome(t09, gl, positions, observed, relationships, sample_ids, *
     product_identity = {"schema": conditioning.SCHEMA, "family": family_identity,
                         "phase_config": asdict(phase_config),
                         "code": conditioning.refinement_code_identity()}
-    scaffold = conditioning.prepare_phase_scaffold(t09, positions)
+    scaffold = conditioning.prepare_phase_scaffold(painting_checkpoint, positions)
     attempts = []
     for retry in range(config.phase_retry_count + 1):
         # Restart only after a genuine stability failure. Scale tolerance with
@@ -189,7 +190,7 @@ def refine_chromosome(t09, gl, positions, observed, relationships, sample_ids, *
             attempts.append(record)
             if retry == config.phase_retry_count:
                 raise
-            print(f"[T11 {contig}] Phase not stable at damping={attempt_config.damping:g}; "
+            print(f"[family phase {contig}] Phase not stable at damping={attempt_config.damping:g}; "
                   "retrying from the scaffold with half damping.", flush=True)
         else:
             record.update(phase_stable=True, iterations=checks[-1]["iteration"])
@@ -199,7 +200,7 @@ def refine_chromosome(t09, gl, positions, observed, relationships, sample_ids, *
         "identity": product_identity, "contig": str(contig), "sample_ids": names,
         "positions": np.asarray(positions), "component_ids": scaffold.component_ids,
         "phase": phase,
-        "corrected_component_paintings": conditioning.paint_final_phase(t09, positions, phase.phase_map),
+        "corrected_component_paintings": conditioning.paint_final_phase(painting_checkpoint, positions, phase.phase_map),
         "phase_stable": True, "phase_stability_checks": checks,
         "phase_solver_attempts": attempts,
         "source_posterior_converged": converged,
@@ -230,28 +231,29 @@ def _summary(result, store, elapsed):
     }
 
 
+@timed_stage("family_phase")
 def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
                    output_dir, raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
                    n_workers=None, config=None, genetic_maps=None):
-    """Run canonical T11 sequentially by chromosome with the full CPU budget.
+    """Run canonical family phase sequentially by chromosome with the full CPU budget.
 
 Only final phase is a release product. Work-in-progress messages and consecutive
 phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
 """
     if pedigree_payload is None:
-        print("[T11] Waiting for the complete genome-wide T10 pedigree; no shard inference.")
+        print("[family phase] Waiting for the complete genome-wide pedigree; no shard inference.")
         return None
     config = (config or model.FamilyRefinementConfig()).validated()
     if genetic_maps is not None:
         config = replace(config, recombination_rate=genetic_maps.default_rate_cm_per_mb / 1e8).validated()
     workers = runtime.available_cpu_count() if n_workers is None else int(n_workers)
     if not 1 <= workers <= runtime.available_cpu_count():
-        raise ValueError("Stage11 CPU budget exceeds allocation")
+        raise ValueError("Family phase CPU budget exceeds allocation")
     names = tuple(map(str, sample_ids))
     contigs = tuple(map(str, contigs))
     if (tuple(map(str, pedigree_payload["ordered_sample_ids"])) != names or
             tuple(map(str, pedigree_payload["ordered_contigs"])) != contigs):
-        raise ValueError("Stage11 axes differ from the complete T10 pedigree")
+        raise ValueError("Family phase axes differ from the complete pedigree")
     relationships = pedigree_payload["tier_b_relationships"]
     source_files = []
     for source in dict.fromkeys((PAINTING_STAGE, raw_gl_stage, raw_sites_stage)):
@@ -276,22 +278,22 @@ phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
         runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
         saved = checkpoint_store.load_global(FINAL_PHASE_STAGE)
         if saved["identity"] != identity:
-            raise ValueError("Stage11 final summary identity differs")
+            raise ValueError("Family phase final summary identity differs")
         conditioning._write_summary_table(output, FINAL_PHASE_STAGE, saved["summaries"])
-        print("[T11] Resumed complete final phase output from its compact summary.")
+        print("[family phase] Resumed complete final phase output from its compact summary.")
         return saved["summaries"]
     summaries = []
     evidence_store = runtime.CheckpointStore(checkpoint_store.root, nthreads=workers)
-    print(f"[T11] Stable final phase; one chromosome, {workers} Numba threads.", flush=True)
+    print(f"[family phase] Stable final phase; one chromosome, {workers} Numba threads.", flush=True)
     with parallel.numba_thread_scope(workers):
         for contig in contigs:
             started = time.perf_counter()
             if checkpoint_store.contig_done(FINAL_PHASE_STAGE, contig):
                 result = checkpoint_store.load_contig(FINAL_PHASE_STAGE, contig, nthreads=workers)
                 if result["identity"]["family"]["external"] != identity:
-                    raise ValueError("Stage11 final chromosome identity differs")
+                    raise ValueError("Family phase final chromosome identity differs")
             else:
-                t09 = checkpoint_store.load_contig(PAINTING_STAGE, contig, nthreads=workers)
+                painting_checkpoint = checkpoint_store.load_contig(PAINTING_STAGE, contig, nthreads=workers)
                 gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
                     evidence_store, contig, raw_gl_stage=raw_gl_stage,
                     raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key,
@@ -299,14 +301,14 @@ phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
                 del gl_payload, sites_payload
                 chromosome_map = None if genetic_maps is None else genetic_maps.for_contig(contig)
                 result = refine_chromosome(
-                    t09, gl, pos, observed, relationships, names, contig=contig, config=config,
+                    painting_checkpoint, gl, pos, observed, relationships, names, contig=contig, config=config,
                     work_path=Path(checkpoint_store.stage_dir(FINAL_PHASE_STAGE)) / f"{contig}.iterations.p5.b2",
                     identity=identity, checkpoint_threads=workers, chromosome_map=chromosome_map)
                 checkpoints.write(checkpoints.contig_path(checkpoint_store.root, FINAL_PHASE_STAGE, contig),
                                   result, nthreads=workers)
-                del t09, gl, pos, observed
+                del painting_checkpoint, gl, pos, observed
             summaries.append(_summary(result, checkpoint_store, time.perf_counter() - started))
-            print(f"[T11 {contig}] Stable final phase released; latent converged="
+            print(f"[family phase {contig}] Stable final phase released; latent converged="
                   f"{result['source_posterior_converged']}", flush=True)
             del result
             gc.collect()

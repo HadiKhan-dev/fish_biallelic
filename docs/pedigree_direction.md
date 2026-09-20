@@ -1,8 +1,9 @@
 # Pedigree direction and family evidence
 
-The default T10 policy is `continuous_family`: finite chromosome-paired
+The default pedigree policy is `continuous_family`: finite chromosome-paired
 orientation evidence plus four synchronous reciprocal-family cavity-message
-passes. Tier B remains the primary product. This changes pedigree decisions,
+passes plus a one-way joint-family check of reverse two-edge ancestry paths.
+Tier B remains the primary product. This changes pedigree decisions,
 not block discovery, L1–L4 assembly, painting, genetic likelihood scoring,
 candidate eligibility, or the top-20 parent-pair panel.
 
@@ -61,9 +62,43 @@ scaffold, inferred root-count target, generation label, age, sex or sample-name
 rule in metadata-free simulation inference. Explicit caller eligibility remains
 mandatory, including exclusions of outside-pedigree real samples.
 
-With `A` scored configurations, `C` chromosomes and `N` samples, the additional
-work per resample is `O(C*N^2 + T*(A + N^2))`, with `T=4`. Extra message storage
-is `O(A + N^2)`. With the fixed M2 panel, `A=O(N^2)`. No exponential pedigree
+## Joint short-ancestry paths
+
+Direct reciprocity does not identify a proposed parent who is actually a
+grandchild. This can matter after related individuals mate: a double grandchild
+can share enough genetic material with a grandparent to resemble a direct
+parent in chromosome resamples.
+
+For a proposed child `c` with parental set `S`, the additional factor averages
+over uncertain joint parent configurations of the members of `S`. Condition
+each on not choosing `c` directly, since direct reciprocity is handled already.
+For each distinct intermediate ancestor `g` in these configurations, multiply
+the outgoing cavity probability that `g` does **not** choose `c` as parent.
+Exclude members of `S` from these intermediates: a reverse path through the
+other focal parent is already forbidden by reciprocity. Count shared
+intermediates once. These distinctions preserve legitimate backcrosses.
+
+Add the log averaged compatibility to both state and identity scores. It is
+finite evidence, not a veto based on a called pedigree. The new term is not fed
+back into the beliefs supporting it. Independent cavity-belief approximations
+remain; removing immediate feedback does not remove every loopy dependence.
+
+The calculation retains at most `R=16` parent configurations per fish, with
+all omitted mass treated as compatible. This truncation weakens, never
+strengthens, the full-enumeration penalty under the same approximate beliefs.
+Ties at the panel boundary join the neutral tail, avoiding sample-order bias.
+
+Explicit caller chronology exempts that focal parental side from the added
+path penalty, just as it overrides the existing direction/reciprocal terms.
+An uncertain co-parent is still evaluated, conditioning on both focal parents.
+Chronology does not assert that a specific candidate really is a parent.
+Eligibility masks remain authoritative and unchanged.
+
+With `A` scored configurations, `A2` two-parent rows, `C` chromosomes and
+`N` samples, the extra direction/family work per resample is
+`O(C*N^2 + T*(A + N^2) + R*A + R*N^2 + R^2*A2)`, with `T=4`, `R=16`.
+Storage is `O(A + N^2 + N*R)`. The fixed M2 panel gives `A=O(N^2)` and
+`A2=O(N)`, so this remains quadratic in sample count. No exponential pedigree
 enumeration or higher-order founder-state HMM is introduced.
 
 ## Configuration and interpretation
@@ -74,20 +109,25 @@ The normal workflow builder selects:
 PedigreeConfig(
     parent_state_direction_model="continuous_family",
     parent_state_family_message_passes=4,
+    parent_state_ancestry_path_budget=16,
 )
 ```
 
 For controlled Python-API comparisons, `parent_state_direction_model="cluster"`
 selects the previous policy. `continuous` and `family` are component ablations,
-not the production recommendation. These are configuration/API settings, not
+not the production recommendation. Setting `parent_state_ancestry_path_budget=0`
+is a path-only ablation; positive values bound its configuration panel. The
+path correction applies to the `family` and `continuous_family` modes.
+These are configuration/API settings, not
 new CLI flags. Existing hard exposure requirements and Tier-A/Tier-B thresholds
 are unchanged.
 
-Diagnostics record `DirectionModel`, `FamilyMessagePasses`, and the resampling
+Diagnostics record `DirectionModel`, `FamilyMessagePasses`, `AncestryPathBudget`,
+and the resampling
 method. The continuous model reports no fictitious discrete ancestry layer.
-Source/configuration identities distinguish the new T10 checkpoints; accepted
+Source/configuration identities distinguish the new pedigree checkpoints; accepted
 historical results are not overwritten or relabelled by the validation runs.
-Stage 11 continues to consume the same Tier-B relationship table and binds its
+family phase continues to consume the same Tier-B relationship table and binds its
 checkpoint identity to that table.
 
 The genetic and painting-derived evidence share data. Neither message weights,
@@ -95,4 +135,6 @@ state support nor bootstrap fractions are calibrated probabilities of correct
 parentage. Long feedback loops, incomplete candidate panels, unsampled parents,
 closely related alternatives and highly structured missingness can still cause
 ambiguity. See the [validation record](validation.md#finite-family-direction)
-for the actual tested designs and their limits.
+for the actual tested designs and their limits. The subsequent
+[joint-path validation](validation.md#joint-short-ancestry-paths) includes
+deep-generation, backcross and sample-withholding controls.

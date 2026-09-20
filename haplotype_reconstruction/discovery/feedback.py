@@ -467,7 +467,7 @@ def select_blocks(originals, proposals, gl, sites, observed, cpus, config, selec
                 diagnostic = dict(skipped="no_fitted_local_mode_or_observed_kept_sites")
                 diagnostics[index] = diagnostic
                 # Strip large raw arrays from a fallback checkpoint without
-                # modifying the original Stage-1 object.
+                # modifying the original block discovery object.
                 fallback = copy.copy(block)
                 fallback.reads_count_matrix = fallback.probs_array = None
                 output.blocks[index] = fallback

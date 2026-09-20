@@ -11,12 +11,17 @@ command all enter `haplotype_reconstruction/cli.py`. The CLI resolves run
 settings before importing the selected workflow. This ordering matters:
 workflow configuration and numerical-library limits are read during import.
 
-The three reconstruction drivers live in `workflows/`: `simulation.py`,
-`astcal.py`, and `tropheops.py`. They share `reconstruction.py` for local
-feedback, component assembly and painting, then call the pedigree, family
-refinement and recombination pipelines. The simulation driver additionally
-generates observations and retains truth for evaluation; inference does not
-receive that truth.
+The four reconstruction drivers live in `workflows/`: `variants.py` provides
+the general AD-VCF/BCF route, `simulation.py` generates known-pedigree data, and
+`astcal.py` / `tropheops.py` apply their dataset-specific sample policies.
+All share `reconstruction.py` for local feedback, assembly and painting, then
+`downstream.py` for the one-way pedigree → family phase → recombination handoff.
+Simulation truth is retained for evaluation and never supplied to inference.
+
+`reports.py` holds discovery-search summaries and observed-reference
+consistency reports. Reporting neither selects haplotypes nor establishes
+individual parentage. G0 reference agreement is explicitly distinguished from
+known-truth simulation validation.
 
 | Step | Start reading here | Main responsibility |
 | --- | --- | --- |
@@ -30,7 +35,10 @@ receive that truth.
 | Pedigree inference | `pedigree/pipeline.py`, `pedigree/inference.py` | Aggregate chromosome evidence and infer observed-parent states and identities |
 | Family phase correction | `refinement/pipeline.py`, `refinement/polish.py` | Pedigree-conditioned, genotype-preserving final phase |
 | Recombination maps | `recombination/pipeline.py`, `recombination/model.py` | Conditional rates, crossover intervals and observable exposure |
-| Truth evaluation | `simulation/metrics.py` | Evaluate cached simulated outputs without feeding truth into inference |
+| Truth evaluation | `simulation/evaluation.py`, `simulation/founder_metrics.py`, `simulation/metrics.py` | Founder completeness, sample phase and pedigree metrics, never inference inputs |
+| Portable simulation controls | `simulation/designs.py`, `simulation/example.py` | Backcrosses, observed-only sampling, read perturbations and generated examples |
+| Interoperable export | `workflows/export.py`, `core/products.py` | Lossless component-local founder tracks and final sample GT/PS |
+| Run provenance and timing | `core/run_record.py` | Coordinator records and non-overlapping wall times |
 
 Paths in this table are relative to `haplotype_reconstruction/`.
 
@@ -71,6 +79,8 @@ and score types remain there, while the numerical work is separated into:
   persistence-constrained bridges;
 - `transmission_scoring.py`: quadratic forward scoring kernels.
 
+`cache.py` independently versions preparation, genetic scores and decisions;
+`explanations.py` separates score contributions and release/ambiguity summaries.
 `inference.py` combines chromosomes and applies the decision procedure.
 `direction.py`, `eligibility.py`, `states.py`, `bootstrap.py` and `graph.py`
 separate chronology/eligibility, parent-count evidence, resampling and acyclic
@@ -100,7 +110,9 @@ The [running guide](running.md) distinguishes broad-only assembly controls
 from bounded-search budgets.
 
 `core/haplotypes.py` owns shared block types. `core/checkpoints.py` implements
-compressed atomic serialization; `core/runtime.py` owns run-stage stores.
+compressed atomic serialization; `core/runtime.py` owns run-stage stores and
+scoped logging. Each workflow restores stdout and closes its log on normal
+return, interruption or failure.
 Assembly and painting add their own typed checkpoint and scientific-identity
 handling. Keep public serialized types at stable module paths when possible.
 

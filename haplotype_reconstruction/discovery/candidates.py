@@ -600,7 +600,7 @@ def _candidate_discrete_rows(block_result: Any, n_sites: int) -> np.ndarray:
     Final discrete_haps rows share coordinates with final assignments and can
     therefore differ from the permissive proposal rows. Canonical results
     preserve those proposal rows explicitly; a result without that provenance
-    is not a supported Stage-1 input.
+    is not a supported block discovery input.
     """
 
     precleanup = getattr(
@@ -608,7 +608,7 @@ def _candidate_discrete_rows(block_result: Any, n_sites: int) -> np.ndarray:
     )
     if precleanup is None:
         raise ValueError(
-            "canonical Stage-1 results require "
+            "canonical block discovery results require "
             "precleanup_candidate_discrete_haps"
         )
     source_name = "precleanup_candidate_discrete_haps"

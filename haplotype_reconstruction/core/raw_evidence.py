@@ -10,7 +10,7 @@ import os
 from.import checkpoints
 
 
-STAGE = "00_genotype_evidence"
+STAGE = "genotype_evidence"
 SCHEMA = "compact-raw-genotype-evidence-v1"
 
 

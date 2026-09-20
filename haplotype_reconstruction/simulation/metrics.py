@@ -1,10 +1,7 @@
 """Simulation-template matching and post-inference evaluation against known truth."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from numba import njit, prange
-import pandas as pd
 
 import numpy as np
 
@@ -319,97 +316,3 @@ def phase_counts(calls, truth, components):
         for component in range(component_count):
             result[sample, 6] += min(direct[component], swapped[component])
     return result.sum(axis=0)
-
-
-def evaluate_run(output_dir, *, cores=None):
-    """Evaluate completed simulated outputs; never provide truth to inference."""
-    from haplotype_reconstruction.core.runtime import CheckpointStore, available_cpu_count
-    from haplotype_reconstruction.core.parallel import numba_thread_scope
-    from haplotype_reconstruction.pedigree.pipeline import PEDIGREE_STAGE
-    from haplotype_reconstruction.refinement.pipeline import FINAL_PHASE_STAGE
-    from haplotype_reconstruction.recombination.pipeline import RECOMBINATION_STAGE
-
-    output = Path(output_dir).resolve()
-    store = CheckpointStore(output / "checkpoints")
-    workers = available_cpu_count() if cores is None else int(cores)
-    if not 1 <= workers <= available_cpu_count():
-        raise ValueError("evaluation cores must fit the current affinity")
-    for stage in ("00_simulated_reads", PEDIGREE_STAGE, FINAL_PHASE_STAGE, RECOMBINATION_STAGE):
-        if not store.stage_complete(stage):
-            raise ValueError(f"evaluation requires completed {stage}")
-    simulation = store.load_global("00_simulated_reads")
-    inferred = store.load_global(PEDIGREE_STAGE)["tier_b_relationships"]
-    truth_pedigree = simulation["truth_pedigree"].set_index("Sample")
-    names = tuple(simulation["sample_names"])
-    if tuple(inferred.Sample) != names:
-        raise ValueError("inferred and true sample axes differ")
-    known = set(names)
-    states = ("zero_observed_parents", "one_observed_parent", "two_observed_parents")
-    exact = correct_states = true_edges = inferred_edges = shared_edges = 0
-    expected_states = {state: 0 for state in states}
-    for row in inferred.itertuples(index=False):
-        truth_row = truth_pedigree.loc[row.Sample]
-        expected = {truth_row.Parent1, truth_row.Parent2} & known
-        actual = {parent for parent in (row.Parent1, row.Parent2) if pd.notna(parent)}
-        state = states[len(expected)]
-        expected_states[state] += 1
-        exact += int(expected == actual and row.ParentState == state)
-        correct_states += int(row.ParentState == state)
-        true_edges += len(expected)
-        inferred_edges += len(actual)
-        shared_edges += len(expected & actual)
-    report = {"seed": simulation["simulation_seed"], "samples": len(names),
-        "pedigree": {"exact_configurations": exact, "correct_parent_states": correct_states,
-            "expected_states": expected_states, "true_edges": true_edges,
-            "correct_edges": shared_edges, "extra_edges": inferred_edges - shared_edges,
-            "missing_edges": true_edges - shared_edges}, "chromosomes": []}
-    columns = ("called_alleles", "called_genotypes", "genotype_errors", "eligible_heterozygotes",
-               "phase_comparisons", "phase_switch_errors", "component_aligned_allele_errors")
-    with numba_thread_scope(workers):
-        for contig in simulation["region_keys"]:
-            source = store.load_contig("00_simulated_reads", contig, nthreads=workers)
-            truth = np.asarray(source["truth_alleles"], dtype=np.int8)
-            events = {
-                (r["parent"], r["child"]): r["crossover_positions_bp"] for r in source["truth_crossovers"]
-            }
-            del source
-            final = store.load_contig(FINAL_PHASE_STAGE, contig, nthreads=workers)
-            calls = final["phase"].allele_calls
-            if tuple(final["sample_ids"]) != names or truth.shape != calls.shape:
-                raise ValueError(f"{contig}: incompatible true/final allele axes")
-            values = phase_counts(calls, truth, final["component_ids"])
-            row = {"contig": contig, "sites": int(calls.shape[1]), "total_alleles": int(calls.size),
-                   **dict(zip(columns, map(int, values)))}
-            row["called_fraction"] = row["called_alleles"] / row["total_alleles"]
-            del final, calls, truth
-            mapping = store.load_contig(RECOMBINATION_STAGE, contig, nthreads=workers)
-            true_observed = 0
-            expected = exposure = 0.0
-            unmatched = 0
-            for edge, (parent, child) in enumerate(zip(mapping["edge_parent"], mapping["edge_child"])):
-                raw = events.get((names[int(parent)], names[int(child)]))
-                if raw is None:
-                    unmatched += 1
-                    continue
-                for span in mapping["informative_spans"][edge]:
-                    left, right = span[:2]
-                    true_observed += int(
-                        np.searchsorted(raw, right, side="right") - np.searchsorted(raw, left, side="right")
-                    )
-                expected += float(mapping["expected_crossovers_by_edge_bin"][edge].sum())
-                exposure += float(mapping["exposure_by_edge_bin"][edge].sum())
-            row.update(true_crossovers_in_inferred_exposure=true_observed,
-                expected_crossovers_on_correct_edges=expected, correct_edge_exposure_meiosis_bp=exposure,
-                inferred_edges_absent_from_truth=unmatched)
-            report["chromosomes"].append(row)
-            print(f"[EVALUATE] {contig}: {row['phase_switch_errors']} phase switches; {row['called_fraction']:.4%} called", flush=True)
-            del mapping, events
-    report["totals"] = {key: sum(row[key] for row in report["chromosomes"]) for key in (*columns, "total_alleles")}
-    report["interpretation"] = "Known-truth simulation only. Component-aligned phase; gaps/incorrect heterozygotes break switch comparisons. Map truth uses only correctly inferred edges within inferred observable spans."
-    destination = output / "evaluation"
-    destination.mkdir(exist_ok=True)
-    temporary = destination / "summary.json.tmp"
-    temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    temporary.replace(destination / "summary.json")
-    pd.DataFrame(report["chromosomes"]).to_csv(destination / "chromosomes.csv", index=False)
-    return report

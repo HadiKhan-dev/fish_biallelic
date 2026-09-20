@@ -13,7 +13,7 @@ import pandas as pd
 PEDIGREE_BACKEND = "component_ragged_parent_state_v1"
 
 
-TROPHEOPS_CANDIDATE_SOURCE_MODE = "t09_ragged_projected_quadratic_v1"
+TROPHEOPS_CANDIDATE_SOURCE_MODE = "painting_ragged_projected_quadratic_v1"
 
 
 PARENT_ELIGIBILITY_FORMAT_VERSION = 1
@@ -127,6 +127,7 @@ def build_current_pedigree_config(*, bootstrap_replicates: int=1000):
         parent_state_minimum_exposed_contigs=3,
         parent_state_direction_model="continuous_family",
         parent_state_family_message_passes=4,
+        parent_state_ancestry_path_budget=16,
     ).validated()
 
 
@@ -460,8 +461,8 @@ def pedigree_stage_names(backend: str=PEDIGREE_BACKEND) -> tuple[str, str]:
     if backend != PEDIGREE_BACKEND:
         raise ValueError(f"unsupported pedigree backend identity {backend!r}")
     return (
-        "10_pedigree_evidence",
-        "10_pedigree",
+        "pedigree_evidence",
+        "pedigree",
     )
 
 import haplotype_reconstruction.pedigree.config as module_pedigree_config

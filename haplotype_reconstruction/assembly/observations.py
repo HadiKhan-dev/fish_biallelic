@@ -50,10 +50,10 @@ class FounderPanel:
 def founder_panel_from_block_result(block: Any) -> FounderPanel:
     """Build the canonical panel from a ``BlockResult``-like object.
 
-    Stage-1 results expose discrete_haps; its non-negative cells are the
+    block discovery results expose discrete_haps; its non-negative cells are the
     authoritative release mask. Released values become hard q=0/1 and all
     other cells become q=0.5. Directional supporter counts are retained when
-    present. A block without this explicit mask is not a valid Stage-2 input.
+    present. A block without this explicit mask is not a valid assembly input.
     """
 
     positions = np.asarray(block.positions)
@@ -63,7 +63,7 @@ def founder_panel_from_block_result(block: Any) -> FounderPanel:
 
     discrete = getattr(block, "discrete_haps", None)
     if discrete is None:
-        raise ValueError("Stage-2 founder blocks require discrete_haps")
+        raise ValueError("assembly founder blocks require discrete_haps")
     discrete = np.asarray(discrete)
     if discrete.shape != (n_founders, n_sites):
         raise ValueError("block.discrete_haps has the wrong shape")
@@ -84,7 +84,7 @@ def founder_panel_from_block_result(block: Any) -> FounderPanel:
 
 
 def founder_inference_panel_from_block_result(block: Any) -> FounderPanel:
-    """Build the immutable pre-fill panel used for Stage-2 inference.
+    """Build the immutable pre-fill panel used for assembly inference.
 
     Missing-aware postprocessing may publish filled alleles in
     ``discrete_haps`` while retaining its pre-cavity evidence snapshot in the
@@ -173,7 +173,7 @@ def site_emission_probabilities(
     """Return robust per-site diplotype likelihoods, shape ``(N,K,K,L)``.
 
     The robust mixture is ``(1-uniform_mix) * likelihood + uniform_mix/3``.
-    It is the existing one-hot Stage-2 observation model generalized to a
+    It is the existing one-hot assembly observation model generalized to a
     genotype distribution.  Therefore fully called one-hot panels retain the
     established emission probabilities exactly.
     """
@@ -209,7 +209,7 @@ def site_log_emissions(
     """Return robust log emissions relative to uninformative evidence.
 
     Clipping is applied on the ordinary likelihood scale exactly as in the
-    current one-hot Stage-2 kernel, then ``log(1/3)`` is subtracted.  This
+    current one-hot assembly kernel, then ``log(1/3)`` is subtracted.  This
     additive state-independent centering makes every uniform sample/site row
     exactly zero while preserving all diplotype comparisons and Viterbi paths.
     """

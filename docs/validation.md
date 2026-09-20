@@ -8,34 +8,80 @@ not imply perfect founder reconstruction or sample phase.
 Default simulations use frozen empirical founder templates, 5× mean read depth
 and 20/100/200 sample cohorts. The 22 template contigs are chr1–20, chr22 and chr23.
 Seeds400–402 are development data; seed401 was held out specifically when
-choosing the T11 stopping rule, not from all project development.
+choosing the family phase stopping rule, not from all project development.
+
+## Release cleanup and descriptive stages — 20 September 2026
+
+The workflow cleanup shares downstream orchestration and reporting, scopes run
+logs, removes unreachable pedigree scaffolding, and replaces historical stage
+codes with descriptive names throughout the public source and CLI. It does
+not change scientific models, priors or release thresholds.
+
+Validation against the frozen pre-cleanup working tree included:
+
+- Six saved 22-chromosome pedigree controls (820 samples) with identical
+  Tier A, Tier B and complete relationship tables at the default 1,000
+  chromosome bootstraps. These cover backcross, deeper-generation,
+  missing-parent, N80 and N160 inputs.
+- A fresh matched three-chromosome simulation (40 samples, 5×, seed920047)
+  exercised discovery stop/resume, chromosome sharding, assembly, painting,
+  pedigree, final phase, maps and evaluation. All 135 exported arrays matched
+  exactly, including simulated reads, founder calls/missingness, paintings
+  and final sample phase.
+- The indexed AD-BCF fixture completed the same general reconstruction and
+  resume route. All 132 exported founder/painting/final-phase arrays matched.
+  Across both integrations, compared scientific CSV fields were unchanged;
+  elapsed-time fields were excluded.
+- Both short integrations released no pedigree edges: they validate
+  orchestration and output parity, **not pedigree or recombination accuracy**.
+  The saved full-genome replays above test the pedigree decisions separately.
+- Eight observed-reference reporting fixtures retained the same numerical
+  comparisons. Column names now distinguish observed-reference consistency
+  from known founder truth or proven chimeras. Sample-selection policies
+  and reference inclusion/withholding are unchanged.
+- All 142 package modules and six CLI help routes imported successfully;
+  scoped logging, sample/GL/map/CPU handoffs and shard boundaries passed
+  focused checks. A wheel built without dependency installation and its CLI
+  ran from the extracted artifact, with no private files or compiled caches.
+
+The matched simulation emitted a non-fatal multiprocessing semaphore-tracker
+warning at shutdown; it and its resume both exited successfully. This is not
+claimed to be a warning-free run.
+
+This validation does not add a new full-genome discovery/assembly simulation
+or rerun the real datasets. Old checkpoint directories, serialized type names
+and source identities are intentionally not migrated: start renamed workflows
+in a fresh run root, retaining frozen source for historical results.
+Readable AstCal/Tropheops deliverables remain unchanged. Private source snapshots,
+fixtures and comparison records are in
+`.work/publication_refactor_20260920_K1BWViis/`, outside the public package.
 
 ## Current acceptance coverage
 
 | Portion | Completed evidence |
 | --- | --- |
-| Current fresh end-to-end pipeline | Seed3000, N320/5×, all 22 chromosomes from simulation through T12 and truth evaluation; progressive refinement enabled |
-| Stage1 discovery | All 1,647 seed400 chr1 blocks; repeated batches and 76 approximately 2× seed401 missing-data controls |
+| Current fresh end-to-end pipeline | Seed3000, N320/5×, all 22 chromosomes from simulation through recombination and truth evaluation; progressive refinement enabled |
+| Block discovery | All 1,647 seed400 chr1 blocks; repeated batches and 76 approximately 2× seed401 missing-data controls |
 | Per-round balanced feedback | 9,287 local blocks in six seed/chromosome cases; full chr12 production parity plus bounded L1–L4/painting and resume checks |
 | Pre-L1 founder completion | 5,484 chr16 blocks across seeds400–402; independent 2×/3×/5× crossfits |
-| Dense q16 assembly and painting | All 22 seed402 chromosomes plus six controls; Stage1 and painter held fixed |
+| Dense q16 assembly and painting | All 22 seed402 chromosomes plus six controls; block discovery and painter held fixed |
 | Final founder-path refinement | All 22 current balanced-input seed402 and seed403 chromosomes plus seed400–402 controls; geometry, missingness, provenance and resume checks |
-| Guarded multiscale refinement | All 22 seed403 chromosomes plus six controls; fresh chr4 final assembly, painting and typed T09 replay |
+| Guarded multiscale refinement | All 22 seed403 chromosomes plus six controls; fresh chr4 final assembly, painting and typed painting replay |
 | Progressive final L1–L4 refinement | 98 N80/5× final-assembly comparisons across nine seeds, including 27 independent controls; two one-allele exceptions documented below |
 | Earlier final-only optimized refiner | 217 N80 chromosomes across ten seeds; seven distinct N320 chromosomes; frozen-input, field-by-field and resume comparisons |
 | N320 fragmentation replay | Eight previously fragmented chromosomes now continuous; seed407 chr15 final-refinement regression remains unresolved |
 | Painting numerical implementation | All 22 seed402 q16 chromosomes, 148 components and 8,956,852 sites, plus seed400/401 chr16 controls |
-| Packed T09 evidence reuse | Full chr3/chr16 repaints, prepared fields and typed checkpoint round trips; memory-limited/uncached controls |
-| Metadata-free T10 | 20 full-genome finite-direction controls at N80/N160/N320, missing-parent and backcross controls; earlier seed401/402 wiring checks |
-| Phase-focused T11 | All 22 chromosomes of seeds400–402 on frozen earlier q4 inputs; later complete dense q16 seed403 run before multiscale refinement |
-| Latest T11 dirty tiles | Two complete seed401 chromosomes; exact final phase/stability fields |
-| Latest T12 indexed trials | All 22 seed401 final-phase maps; variable/zero maps, missingness, overlapping flips and reset controls; later complete seed403 run before multiscale refinement |
+| Packed painting evidence reuse | Full chr3/chr16 repaints, prepared fields and typed checkpoint round trips; memory-limited/uncached controls |
+| Metadata-free pedigree | 20 full-genome finite-direction controls at N80/N160/N320, missing-parent and backcross controls; earlier seed401/402 wiring checks |
+| Family phase correction | All 22 chromosomes of seeds400–402 on frozen earlier q4 inputs; later complete dense q16 seed403 run before multiscale refinement |
+| Latest family phase dirty tiles | Two complete seed401 chromosomes; exact final phase/stability fields |
+| Latest recombination indexed trials | All 22 seed401 final-phase maps; variable/zero maps, missingness, overlapping flips and reset controls; later complete seed403 run before multiscale refinement |
 
 A fresh seed3000 run has exercised the current progressive implementation
 from simulation through recombination maps and known-truth evaluation.
 The earlier fresh seed403 run exercised simulation through recombination maps
 with the balanced local feedback and final founder refinement. A subsequent
-22-chromosome optimization comparison held its Stage1 inputs fixed and reran
+22-chromosome optimization comparison held its block discovery inputs fixed and reran
 feedback, L1-L4, founder refinement, painting, pedigree inference, family phase
 refinement and maps. Fixed-input comparisons must not be relabeled as fresh
 simulations or fresh block discovery.
@@ -73,7 +119,7 @@ intervals; continuity is not a claim that every allele or long-range phase is
 correct. Founder errors, sample allele errors and phase switches are distinct
 metrics and must not be substituted for each other.
 
-All 22 T11 outputs satisfied the canonical phase-stability stopping rule, but
+All 22 family phase outputs satisfied the canonical phase-stability stopping rule, but
 full latent posterior convergence was not achieved. Switch comparisons do not
 cross missing calls, unsupported components or incorrect intervening
 heterozygotes, so the switch total must be read alongside coverage and genotype
@@ -91,7 +137,7 @@ matches the production package. A separate chr8 family-solver replay matched
 the distributed output's identity, every final allele call and its 25-iteration
 stopping point. The [runtime report](performance.md#fresh-seed3000-n320-and-5)
 distinguishes measured multi-node elapsed time from the estimated one-node
-runtime and explains the run-local T11 scheduling.
+runtime and explains the run-local family phase scheduling.
 
 This is one successful fresh seed, not validation of every cross design,
 sample size or depth. It does not revalidate or resolve the earlier seed407
@@ -101,7 +147,7 @@ execution records remain in `.work/seed3000_full_20260917_cFrnkNJ8/`.
 
 ## Finite family direction
 
-On 18 September 2026 the default T10 direction policy changed from a hard
+On 18 September 2026 the default pedigree direction policy changed from a hard
 ancestry-layer gate to [finite continuous and family evidence](pedigree_direction.md).
 All comparisons below use 22 chromosomes at 5x, no generation/parent metadata,
 unchanged eligibility/exposure and release thresholds, and truth only for
@@ -125,7 +171,7 @@ and 1,254 M2 targets. Tier B improves 3,194 to 3,200 exact, without extra edges.
 These controls initially hold the full-cohort background and screen fixed;
 they are not 32 independent fresh simulations. Full-cohort permutations also
 preserve the results. Three additional tests remove rows before recomputing
-T10 screening, background and likelihoods from saved T09 inputs
+pedigree screening, background and likelihoods from saved painting inputs
 (seed4000/75%, seed4006/50%, seed4011/50%). Both new tiers recover 280/280;
 the old Tier B recovers 279/280. Upstream assembly/painting remains fixed.
 
@@ -133,10 +179,10 @@ Two focused N40 backcross simulations each contain eight generated roots,
 16 ordinary offspring and 16 offspring crossed to one actual parent.
 They use six supplied founder haplotypes, 5x reads with 2% errors and
 5 cM/Mb, with one test adding contiguous missing reads and partial founder
-sequence. Read-derived source factors, not inherited truth labels, enter T10.
+sequence. Read-derived source factors, not inherited truth labels, enter pedigree.
 Tier B improves from 24/40 and 26/40 to 40/40 in each. Tier A is 40/40 and
 33/40; its remaining calls abstain or leave identities unresolved, with no
-extra edges. This checks T09-source/T10 backcross inference, **not** discovery
+extra edges. This checks painting-source/pedigree backcross inference, **not** discovery
 or assembly of an entire backcross dataset.
 
 An initial single-pass family correction lost root support under sample
@@ -152,10 +198,70 @@ metrics above remained unchanged.
 This is empirical support for the tested designs, not proof of calibrated
 parenthood probabilities or general correctness. Loopy family dependence,
 painting errors, incompletely screened alternatives and structured missingness
-remain limitations. T11/T12 were not rerun after this T10-only change; the
+remain limitations. Family phase/recombination were not rerun after this pedigree-only change; the
 fresh end-to-end results elsewhere on this page refer to their recorded
 earlier code versions. Detailed attempt logs and isolated outputs are retained
 locally in `.work/pedigree_direction_20260918_UtLS28/`.
+
+## Joint short-ancestry paths
+
+On 20 September 2026 the family-direction default gained a one-way
+[joint ancestry-path correction](pedigree_direction.md#joint-short-ancestry-paths).
+This is a scientific decision-model change, not a new genotype likelihood or
+an assembly modification. Release thresholds, fixed state priors, candidate
+eligibility and the top-20 M2 panel are unchanged.
+
+In the F4–F6-only seed5001 simulation, F4_9 was correctly selected as M0 in the
+full fit but withheld at Tier B: M0 bootstrap support was 553/1,000, against a
+strong alternative assigning its double grandchild as parent. The new factor
+uses uncertain observed two-edge ancestry paths to penalize that reversal,
+without using generations, sample names or simulation truth. Both focal
+parents are considered jointly so legitimate backcrosses are not penalized by
+a redundant reciprocal constraint.
+
+| Seed5001 quantity | Reciprocal-only default | Joint-path default |
+| --- | ---: | ---: |
+| Exact Tier-B configurations | 299/300 | 300/300 |
+| Exact Tier-A configurations | 297/300 | 300/300 |
+| Target M0 bootstrap support | 553/1,000 | 1,000/1,000 |
+| Target M0 leave-one-chromosome-out support | 18/22 | 22/22 |
+| Correct edges / extra edges | 400/0 | 400/0 |
+
+Prototype validation covered 31 full-cohort/rescored controls: seeds4000–4015,
+N80 seeds2003/2005/2010, N320 seed3000, deep-generation seed5001, complex-cross
+seeds5000/5003/5004/5005/5007, two supplied-founder backcross controls and three
+rescored missing-parent subsets. All 4,580 configurations are correct at both
+tiers. These include random missing individuals, 50%/100% backcrossing, and
+combined backcross/missing-individual designs. The structured-missingness
+supplied-founder control additionally improves Tier A from 33/40 to 40/40.
+
+Another 32 decision-only sample-withholding tests preserve 3,200/3,200 Tier-B
+configurations. Their three Tier-A abstentions were already present before
+this change. Six sample-order permutations and configuration budgets 8/16/32
+on four controls preserve relationship tables and state-bootstrap support.
+These are repeated evaluations of cached datasets, not independent fresh
+end-to-end runs.
+
+The integrated canonical code, including normal forkserver bootstrap workers,
+reproduced all 31 full-cohort/rescored controls and three representative
+withholding controls, matching prototype tables and inspected resampling
+support. Full and partial caller-chronology tests each recover 40/40 at both
+tiers. Twelve exact-enumeration checks cover joint configurations, shared
+intermediates, co-parent conditioning, chronology exemptions and conservative
+omitted-mass bounds; six full-score fixtures match the accepted prototype.
+Checkpoint round trips retain the Tier-B schema, and pedigree identities include
+the new configuration and source module.
+
+An initial edgewise variant lost two Tier-B backcross calls and was rejected;
+the accepted joint factor avoids that redundant conditioning. The factor
+remains a composite/loopy approximation, not a calibrated global pedigree
+posterior. The independent deep-generation seed5006 is still running and is
+not counted as validated here. Assembly, painting, family phase refinement and
+recombination maps were not rerun for this integration.
+
+Detailed experiment artifacts are retained locally in
+`.work/pedigree_ancestral_direction_20260920_fIUxZk1F/`; canonical integration
+checks are in `.work/pedigree_path_default_20260920_YdXINPmE/`.
 
 ## Progressive final L1–L4 refinement at N80
 
@@ -230,7 +336,7 @@ existing fresh-hierarchy float32 conversion; calls and provenance were exact,
 and probabilities were identical at float32 precision. All paired local-input
 identities and local truth metrics matched.
 
-This validates final assembly, not a fresh T09–T12 rerun. The earlier N320
+This validates final assembly, not a fresh painting–recombination rerun. The earlier N320
 seed407 chr15 limitation below has **not** been revalidated or established as
 fixed. Timing scope and CPU budgets are recorded in
 [performance](performance.md#progressive-final-assembly-at-n80).
@@ -279,7 +385,7 @@ cache conditions and memory measurements are in [performance](performance.md#fin
 
 An inventory of five stored N320/5x seeds found 102/110 chromosomes already
 represented by one six-row component. The other eight were rerun from cached
-Stage1 blocks and original genotype likelihoods through both balanced feedback
+block discovery blocks and original genotype likelihoods through both balanced feedback
 rounds, current partial-founder-aware L1–L4, final refinement and unchanged
 painting. No old feedback/hierarchy output was reused.
 
@@ -319,7 +425,26 @@ The largest regression localizes to final refinement of seed407 chr15:
 | L4 | 1,756 | 1,826 | 1,756 / 1,775 |
 | Final founder refinement | 2,075 | 4,994 | 2,075 / 4,994 |
 
-All 2,919 excess final chr15 errors occur at approximately 37–40 Mb. Its final
+All 2,919 excess final chr15 errors occur at approximately 37–40 Mb. A later
+truth-only ancestry audit (20 September 2026) separates this headline result:
+
+| Historical final product | All called errors | Errors where ancestry is represented | Errors where ancestry is absent |
+| --- | ---: | ---: | ---: |
+| Original | 2,075 | 16 | 2,059 |
+| Fragmentation replay | 4,994 | 34 | 4,960 |
+
+Thus 2,901 of the 2,919 additional errors (99.38%) are in founder ancestry absent
+from every sampled individual. The replay has 2,110,984 represented called
+alleles and 12,650 absent-ancestry called alleles. All 34 represented errors
+have at least two carriers, which does not establish independent-lineage
+support. This is an audit of the historical saved products, not a fresh run of
+the latest progressive refiner, and it does not make unsupported calls correct.
+No model was tuned against these labels. The 18-error represented increase
+remains, but the large hotspot is predominantly outside sampled ancestry.
+Neutral arrays, matching, and ancestry strata are retained in
+`.work/release_tools_20260920_k0scCHon/chr15_historical/`.
+
+Its final
 local 200-marker errors are only 26 → 44, consistent with a predominantly
 long-range path problem. This locates the observed deterioration but does not
 prove its exact causal move, establish whether the affected ancestry is
@@ -327,10 +452,10 @@ identifiable from the samples, or isolate a particular optimization. It remains
 an unresolved scientific limitation; joining more components is not itself
 evidence of better long-range phase.
 
-All eight typed T09/sample-order checks and complete checkpoint resumes pass.
+All eight typed painting/sample-order checks and complete checkpoint resumes pass.
 Original results remain untouched, with these replay products isolated pending
 scientific review. This is not a new 110-chromosome whole-pipeline validation:
-only eight chromosomes were reassembled, Stage1 was reused, and T10–T12 were
+only eight chromosomes were reassembled, block discovery was reused, and pedigree–recombination were
 not rerun. Detailed artifacts are retained locally in
 `.work/n320_refiner_20260917_g3ece5Py/` and
 `.work/n320_fragment_retry_20260917_UTISglBg/`.
@@ -367,13 +492,13 @@ floating values matched within absolute 1e-8 plus relative 2e-9 tolerance.
 | Family refinement and phase correction | 16.71 | 16.10 |
 | Recombination maps | 2.98 | 2.61 |
 
-The measured run reusing Stage1 took 204.03 minutes, excluding final evaluation.
+The measured run reusing block discovery took 204.03 minutes, excluding final evaluation.
 Adding the unchanged baseline input/discovery durations gives a **252.53-minute
 fresh-run estimate**, versus 282.87 measured baseline minutes (10.7% less).
 This is not a measured fresh-seed optimized runtime, a 112-core measurement,
 or evidence that every stage improved. Node differences, filesystem throughput
-and native-cache warmth affect elapsed times. The single-read Stage1 I/O change
-was not timed by this cached-Stage1 comparison.
+and native-cache warmth affect elapsed times. The single-read block discovery I/O change
+was not timed by this cached block-discovery comparison.
 
 A further coordinator optimization batches missing-data scans, fuses validated
 snapshot copies, packs worker inputs in parallel and avoids large eligibility
@@ -459,9 +584,9 @@ The implementation checks full-site scores against a reference, exact unordered
 states and linear traceback against the original beam, missing and flat evidence,
 composed provenance, metadata commutation, input preservation and partial/complete
 checkpoint resume. A36-block canonical run exercises both feedback rounds, final
-refinement, unchanged painting and typed T09 replay; refinement is absent from
+refinement, unchanged painting and typed painting replay; refinement is absent from
 the L1/L2 context checkpoints. A fresh full chr10 final hierarchy/refiner run
-reproduces the result and passes unchanged painting, typed T09 publication and
+reproduces the result and passes unchanged painting, typed painting publication and
 exact assembly replay. CLI/TOML/environment configuration is checked for all three
 workflows, including reuse of local feedback checkpoints when final refinement
 is toggled off. The clean implementation matches all 26 paired prototype outputs
@@ -534,10 +659,10 @@ score agreement, genotype-score decomposition, missing/neutral evidence,
 composed provenance and full/partial checkpoint replay.
 
 A fresh chr4 final L1–L4 run reproduces every upstream founder allele exactly,
-then reaches the same six-error result. Unchanged painting, typed T09 publication
+then reaches the same six-error result. Unchanged painting, typed painting publication
 and replay pass; the installed production code also replays all six cached
-assembly/refinement phases with identical founder alleles. No Stage1 or feedback
-regeneration was needed. T10–T12 were not rerun after this founder change.
+assembly/refinement phases with identical founder alleles. No block discovery or feedback
+regeneration was needed. pedigree–recombination were not rerun after this founder change.
 
 On the 76-core node, fresh final assembly plus refinement takes 343.3s, of which
 229.1s is refinement; painting takes 15.0s. The stored earlier 76-core chr4 refiner
@@ -580,7 +705,7 @@ This is simulation evidence, not real-data trio ground truth or a global
 optimality guarantee.
 
 Production integration then passed four cached-input replays through the shared
-assembly API and typed T09 painting release. Both refinement passes recomputed
+assembly API and typed sample painting release. Both refinement passes recomputed
 from frozen, unrefined L1–L4 results. The first pass matched the original output;
 the final scientific founder and painting arrays matched the validated prototype
 exactly, including component boundaries and missing-data fields.
@@ -609,7 +734,7 @@ tracts, duplicate/rare founders, partial founder calls, wildcard assignments,
 dtype differences, ties and multiple thread counts. Unknown alleles are not
 treated as reference or as independently guessed copies of one shared founder.
 
-All compared Stage1 scientific outputs matched exactly. Across the 5,484
+All compared block discovery scientific outputs matched exactly. Across the 5,484
 completion blocks, every discrete field matched and maximum float-array
 differences were 1.01e-12. Completion tests separately checked positive dosage
 marginals, exact shared-site cavity likelihoods, whole-bin exclusion, crossfits,
@@ -692,7 +817,7 @@ and unchanged painter reproduce **334 founder-allele mismatches / 1,552,807
 called cells**, with 443 uncalled cells out of 1,553,250. The earlier fragmented
 result had 1,509 mismatches / 1,552,641 calls. Reverse truth-to-panel
 errors/missing decrease from 1,920 to 777. These are founder reconstruction
-metrics, not sample-painting phase-switch counts. Typed T09 reload and final
+metrics, not sample-painting phase-switch counts. Typed painting reload and final
 release checkpoint replay both pass.
 
 The formerly isolated block has six final paths with 200 calls each, using
@@ -729,7 +854,7 @@ metric separately measures missing or misrepresented true variation.
 | 2006 / chr22 | 3 → 1 | 12 → 3 | 2,398,215 → 2,398,409 | 145 → 142 |
 
 All completed candidates have six rows in one component, with successful
-unchanged painting, typed T09 validation and checkpoint resume. Chr13 uses the
+unchanged painting, typed painting validation and checkpoint resume. Chr13 uses the
 current production phase-only policy and canonical release replay. The five
 original controls have identical pre-count allele and atomic-provenance arrays
 under that policy, with unchanged downstream numerical functions; chr20 and
@@ -758,7 +883,7 @@ The completed chr22 comparison uses the latest production source
 through both feedback rounds, assembly, refinement and painting; it took
 643 seconds on 76 allocated cores, excluding cached discovery. Its successful
 join adds 194 calls and reduces both forward and reverse errors.
-No fresh simulation, whole-genome T10–T12 run, high-N sweep or calibrated linkage
+No fresh simulation, whole-genome pedigree–recombination run, high-N sweep or calibrated linkage
 confidence study is claimed. These checks establish targeted behavior and
 implementation agreement, not whole-pipeline biological accuracy.
 
@@ -769,12 +894,12 @@ alleles, uncertainty, resets and raw-evidence identities. Additional checks
 cover float32/64, sparse/read-only arrays, pooled/unknown states, invalid raw
 mass, missing samples and fragmented components exhausting the cache budget.
 
-T09's optional packed emission cache and T10's child-tiled common-emission cache
+painting's optional packed emission cache and pedigree's child-tiled common-emission cache
 are distinct performance mechanisms. Neither replaces uncertain alleles by
 calls or changes candidate eligibility. Absent or oversized caches use the
 same underlying scorer. Source transitions remain ordered.
 
-Full metadata-free T10 checks retain all seven published result tables,
+Full metadata-free pedigree checks retain all seven published result tables,
 including Tier A/B, support/confidence diagnostics and evidence summaries.
 Independent simulation truth is read only after inference. Both the q16
 seed402 check and the latest seed401 check recovered:
@@ -823,10 +948,10 @@ limitations. No higher-N rerun was used for this change. Separate N=80, 10/30/40
 checks at 5x also retained the exact full-data graphs. Conditional Tier-B
 recovery was 80/80 for seeds 2010 and 2011, versus 0/80 and 50/80 previously;
 each conditional result had 10 roots, 70 exact parent pairs and 140 correct
-edges, with none missing or extra. These are T10 decision-replay results,
+edges, with none missing or extra. These are pedigree decision-replay results,
 not a claim that downstream phase is unchanged after releasing more families.
 
-Standard T10-to-T12 replays on the unchanged, held-out seed2004/2005 assemblies
+Standard pedigree-to-recombination replays on the unchanged, held-out seed2004/2005 assemblies
 and typed paintings reproduced the exact pedigrees and completed all 22
 chromosomes. Final sample phase-switch errors fell from 334 to 172 (2004) and
 186 to 171 (2005). Component-aligned sample allele errors fell from 11,358,562
@@ -844,7 +969,7 @@ at 1,412,951,998 and 1,414,401,014 out of 1,433,096,320; genotype errors stayed
 at 147,197 and 133,058. Thus these changes improve phase conditional on the
 available calls, not the lower coverage of these two assemblies.
 
-A matched seed2003 control also completed standard T10–T12 on the unchanged
+A matched seed2003 control also completed standard pedigree–recombination on the unchanged
 assembly: 80/80 exact configurations, 120 correct edges and no extras. Switches
 fell from 330 to 155 and component-aligned sample allele errors from 11,244,419
 to 610,831. Called alleles (1,426,176,454) and genotype errors (128,427) were
@@ -896,7 +1021,7 @@ recoverable.
 
 A fresh primary seed2006 used the ordinary simulation/discovery/feedback and
 hierarchy CLI, followed by the same frozen candidate's native final release,
-typed T09 rebuilding and standard T10–T12. It finished with **13,086 errors /
+typed painting rebuilding and standard pedigree–recombination. It finished with **13,086 errors /
 53,711,112 called founder alleles** (243.6 per million), and 40,894 reverse
 truth-to-panel errors/missing. It is not assigned a before/after comparison
 against the older dual-only default, which was not run on this seed.
@@ -943,7 +1068,7 @@ exhaustive count-bound comparisons, 240 window-bound/proposal comparisons,
 and three missing-data/provenance/component-boundary/resume fixtures.
 Configuration routing exercised the caller's complexity scale and the
 disabled route. Every cached native chromosome reproduced its prototype,
-rebuilt typed T09, and resumed exactly.
+rebuilt typed painting, and resumed exactly.
 
 No higher-N simulation was run for this change. No N=80-specific inference
 branch or threshold was added; preservation at larger N has not been
@@ -953,12 +1078,12 @@ complete. Full validation artifacts remain in ignored work storage.
 
 ## Family refinement and final phase
 
-T11 begins phase assessment after 20 family iterations and requires five
+Family phase begins phase assessment after 20 family iterations and requires five
 consecutive unchanged final-phase checks unless the family fit converges sooner.
 It preserves called genotypes and missingness and does not release full
 marginal-posterior tensors. Phase stability is not latent convergence.
 
-Full 22-chromosome comparisons on frozen earlier q4 T09/T10/raw inputs showed:
+Full 22-chromosome comparisons on frozen earlier q4 painting/pedigree/raw inputs showed:
 
 | Seed | Switch errors: full fit → phase-focused | Component-aligned allele errors: full fit → phase-focused |
 | --- | ---: | ---: |
@@ -1000,7 +1125,7 @@ uniformly improves phase accuracy.
 
 ## Conditional recombination maps
 
-T12 consumes final phase without feeding upstream. Shared-family orientation
+Recombination consumes final phase without feeding upstream. Shared-family orientation
 corrections are distinct from independent crossovers. Expected rate, called
 crossover intervals and observable meiosis exposure are reported separately.
 
@@ -1046,3 +1171,121 @@ recoverably rather than included in the public package.
 Tropheops and AstCal readable handoffs were preserved byte-for-byte. They have
 no established individual-level trio ground truth; preservation is not a
 real-data accuracy test. See each deliverable's README for historical caveats.
+
+## Pedigree cache separation and release diagnostics — 20 September 2026
+
+The preparation/genetic-scoring/decision cache split, readable pedigree
+explanations, founder-support/search reports and general AD-BCF command were
+validated without changing inference defaults:
+
+- Six saved-genome controls, **820 sample rows**, retained identical Tier A,
+  Tier B and complete pedigree tables. Controls covered N80/N160, the N300
+  deeper-generation case, canonical parent withholding and ragged backcrosses.
+  Full-fit reported score contributions sum to the actual adjusted scores.
+- The instrumented bounded assembly selector retained exactly the same paths,
+  scores and accepted edits as the pre-change implementation, at the production
+  proposal budget and an intentionally small budget exercising truncation.
+- A real indexed BCF fixture (40 samples, three chromosomes, 4,800 SNPs,
+  approximately 5x, missing AD and sample tracts) completed the public command
+  from discovery through final phase and map output. Input read counts, raw
+  likelihoods and observation masks round-trip exactly. Founder calls and
+  final phase are unchanged by the added reports. This short fixture released
+  no parent edges, so it is **integration validation, not map or pedigree
+  accuracy validation**. A warm-code 112-core run took 35.5 seconds; a full
+  resume took 0.6 seconds after imports. These are not whole-genome estimates.
+- Actual checkpoint round trips confirm that direction-policy changes reuse
+  preparation and genetic scoring; eligibility changes reuse preparation but
+  rescore. Unchanged Tier-B relationships reuse family phase. Previous decisions remain
+  available in versioned checkpoints.
+- Focused fixtures cover component-local missing-founder support, counting
+  each observed homozygous carrier once, chronology/eligibility parsing and
+  score tracing without numerical changes. Syntax and whitespace checks pass.
+
+An initial integration canary exposed a stale preparation-identity field lookup,
+which was repaired before the final clean run. The successful CLI test emitted
+non-fatal loky semaphore-tracker shutdown warnings; both full run and resume
+exited successfully with all final checkpoints complete. Existing accepted
+campaign results were not rewritten. Diagnostic support remains model-dependent
+and is not presented as calibrated probability or new scientific validation.
+
+## Balanced transmission evidence and missing parents — 20 September 2026
+
+The seed6200 missing-individual control exposed a residual uncertainty problem:
+three fish had a strongly supported observed parent but unstable M1/M2 state,
+and one had unstable M0 support. Their missing biological parents had observed
+relatives that competed as parent candidates. The existing finite direction,
+reciprocal-family and short-ancestry-path corrections were active. This was
+a distinct scoring limitation, not an absent direction correction.
+
+Ablations showed that the information exponent inside the transmission forward
+algorithm could conceal distinguishing genetic contradictions. Full-strength
+scoring alone fixed this control but lost one Tier-B call under read stress;
+it was not adopted. The default now uses the fixed equal-weight log-score pool
+described in [Methods](methods.md#pedigree). No release thresholds, state priors,
+eligibility rules, error rates or family-message settings were relaxed.
+
+All following counts are exact **Tier-B configurations**, including M0/M1/M2
+state and the identities of every observed parent. Candidate shortlists were
+rebuilt with the proposed score; the results are not limited to a frozen
+shortlist.
+
+| Seed6200, 5× control | Samples | Previous | Balanced |
+|---|---:|---:|---:|
+| Ordinary 20/30/30 cross, reduced density | 80 | 80 | 80 |
+| Backcross, reduced density | 80 | 80 | 80 |
+| Randomly observed 80% of a 200-fish cross, reduced density | 160 | 156 | 160 |
+| Read stress, reduced density | 80 | 80 | 80 |
+| Observed F4–F6 only, reduced density | 80 | 77 | 80 |
+| Missing-individual cross, full density | 160 | 160 | 160 |
+| Backcross, full density | 80 | 80 | 80 |
+
+Reduced density means every tenth template SNP at its original coordinate,
+across all 22 physical contigs: 895,695 sites rather than approximately
+8.96 million. These seed6200 designs are related development controls, not
+independent seeds. Read stress combines depth CV 0.6, 10% contiguous marker
+dropout, heterozygote alternate-read probability 0.6 and generating read-error
+probability 0.04, with inference assuming 0.02. The original complete pipelines
+were run from discovery onward; scoring comparisons reuse their frozen
+founders, painting and prepared evidence. The new scoring model was not used
+to regenerate their downstream family phase or recombination maps.
+
+The reduced missing-individual result recovers all **234 true observed-parent
+edges with no extras**, and all four previously unresolved configurations.
+Each has 1,000/1,000 chromosome-bootstrap state/configuration agreement and
+22/22 leave-one-chromosome-out agreement. These are internal stability measures,
+not calibrated probabilities of correctness. The 147 founder allele errors
+among 5,374,026 called alleles are unchanged: this intervention changes
+pedigree scoring, not assembly.
+
+Further controls held out when choosing the equal weight passed with complete
+candidate rescreening: full-density seeds2003 (80/80), 2010 (80/80), 4000
+(160/160), 4006 (160/160), and the previously difficult F4–F6 seed5001
+(300/300, including all 100 M0 roots and all 400 edges). They are independent
+simulation seeds, but not seeds unused in all earlier project development.
+There were no extra or missing released edges in these controls.
+
+Additional random 20% sample withholding *before* candidate screening gave
+64/64, 64/64, 128/128 and 128/128 for seeds2003, 2010, 4000 and 4006,
+respectively, under both the previous and balanced models. These tests freeze
+the original upstream assembly/painting; they validate pedigree candidate
+withholding, not a new end-to-end missing-parent reconstruction.
+
+The trade-offs are explicit. Strict Tier-A coverage in the noisy-read control
+falls from 80 to 77, while all 80 remain exact in the primary Tier-B product.
+Full-strength weights of 25% and 50% retained all five reduced-control
+pedigrees; 75% lost the stress call. The default retains the originally tested
+equal weight, without per-sample selection. Matched full-density withholding
+tests took about 1.5–1.6 times as long for genetic scoring plus pedigree
+decisions; this is not a whole-pipeline slowdown factor. Warm reduced-density
+score/decision times were about 47 seconds for N160 and 17 seconds for N80
+on 112 allocated CPUs, excluding prepared-input loading. The larger N300
+F4–F6 rescreen took about 13 minutes for scoring plus decisions on the same
+CPU allocation.
+
+Focused checks verify missing-child neutrality, missing-parent M2-to-M1
+reduction, lower-order score reuse, candidate/sample order, independent
+score-array agreement (atol 1e-7, rtol 1e-11), and ordinary versioned-checkpoint
+round trips. Preparation identities remain unchanged, score identities change,
+and unchanged relationship tables retain their downstream refinement identity.
+These finite controls support the change; they do not establish universal
+identifiability or calibrated pedigree probabilities.

@@ -71,7 +71,7 @@ reconstruct the painting law. This does not merge disconnected phase components.
 
 ## What an inferred map means
 
-The input map is a process prior, not ground truth. T12 estimates rates
+The input map is a process prior, not ground truth. recombination estimates rates
 conditional on the final phase and fixed inferred pedigree. Informative data
 can support spatial departures from a positive input prior; unobserved regions
 remain prior-sensitive, and a zero prior forbids crossover mass in that interval.
@@ -80,7 +80,7 @@ map's integrated genetic mass, so structure entirely between uninformative
 markers is not independently learned.
 
 Shared-family orientation-error evidence is on by default; disable it with
-`--no-shared-family-evidence`. This affects T12's conditional decoding and does
+`--no-shared-family-evidence`. This affects recombination's conditional decoding and does
 not overwrite upstream phase. Expected crossover counts, high-confidence
 interval calls and observable meiosis exposure are separate outputs. Unknown
 gaps are not reported as measured zero-recombination regions.

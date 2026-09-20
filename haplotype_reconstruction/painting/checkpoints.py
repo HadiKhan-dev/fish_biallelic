@@ -9,10 +9,10 @@ from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.painting.components as painting_components
 
-T09_COMPONENT_CHECKPOINT_SCHEMA = "t09-component-painting-checkpoint-v4"
+PAINTING_COMPONENT_CHECKPOINT_SCHEMA = "painting_checkpoint-component-painting-checkpoint-v4"
 
 
-COMPONENT_PAINTING_PRODUCT_SCHEMA = "stage2-component-painting-product-v3"
+COMPONENT_PAINTING_PRODUCT_SCHEMA = "assembly-component-painting-product-v3"
 
 
 COMPONENT_PAINTING_PRODUCT_BACKEND = (
@@ -20,7 +20,7 @@ COMPONENT_PAINTING_PRODUCT_BACKEND = (
 )
 
 
-def _validate_identity_record(record, label="Stage-2 identity"):
+def _validate_identity_record(record, label="assembly identity"):
     if not isinstance(record, Mapping) or not record:
         raise ValueError(f"{label} must be a nonempty mapping")
     schema = record.get("schema")
@@ -51,7 +51,7 @@ def component_painting_product_identity(
         "backend": COMPONENT_PAINTING_PRODUCT_BACKEND,
         "config": copy.deepcopy(dict(scientific_config)),
         "code_identity_sha256": copy.deepcopy(dict(code_identity_sha256)),
-        "component_checkpoint_schema": T09_COMPONENT_CHECKPOINT_SCHEMA,
+        "component_checkpoint_schema": PAINTING_COMPONENT_CHECKPOINT_SCHEMA,
     }
     _validate_identity_record(record, "painting-product identity")
     return json.loads(json.dumps(
@@ -61,7 +61,7 @@ def component_painting_product_identity(
 
 @dataclass(frozen=True)
 class ScientificIdentity:
-    """Canonical immutable copy of the Stage-2 backend/configuration identity."""
+    """Canonical immutable copy of the assembly backend/configuration identity."""
 
     canonical_json: str
 
@@ -80,7 +80,7 @@ class ScientificIdentity:
         try:
             value = json.loads(self.canonical_json)
         except (TypeError, ValueError) as error:
-            raise ValueError("Stage-2 identity is not valid canonical JSON") from error
+            raise ValueError("assembly identity is not valid canonical JSON") from error
         _validate_identity_record(value)
         return value
 
@@ -118,7 +118,7 @@ class RuntimeProvenance:
 class PaintingCheckpoint:
     """Atomic release-bound component painting product.
 
-    ``release_identity`` binds the exact canonical Stage-2 components and
+    ``release_identity`` binds the exact canonical assembly components and
     their inputs. ``painting_product_identity`` independently binds the
     scientific painting model and its code. Scheduling choices live only in
     ``runtime_provenance`` and therefore are not scientific product identity.
@@ -133,12 +133,12 @@ class PaintingCheckpoint:
     runtime_provenance: RuntimeProvenance
 
 
-def _freeze_stage2_identity(value) -> ScientificIdentity:
+def _freeze_assembly_identity(value) -> ScientificIdentity:
     if isinstance(value, ScientificIdentity):
         value.record()
         return value
     if not isinstance(value, Mapping):
-        raise ValueError("Stage-2 identity is missing")
+        raise ValueError("assembly identity is missing")
     return ScientificIdentity.from_record(value)
 
 
@@ -174,7 +174,7 @@ def _snapshot_component_manifest(manifest) -> dict[str, Any]:
     }
 
 
-def build_t09_component_checkpoint(
+def build_painting_checkpoint(
         component_manifest,
         painting_bundle,
         sample_ids,
@@ -182,18 +182,18 @@ def build_t09_component_checkpoint(
         painting_product_identity,
         runtime_provenance,
 ) -> PaintingCheckpoint:
-    """Build and validate one schema-versioned T09 checkpoint payload."""
+    """Build and validate one schema-versioned painting checkpoint payload."""
 
     payload = PaintingCheckpoint(
-        schema=T09_COMPONENT_CHECKPOINT_SCHEMA,
+        schema=PAINTING_COMPONENT_CHECKPOINT_SCHEMA,
         component_manifest=_snapshot_component_manifest(component_manifest),
         painting_bundle=painting_bundle,
         sample_ids=_canonical_sample_ids(sample_ids),
-        release_identity=_freeze_stage2_identity(release_identity),
-        painting_product_identity=_freeze_stage2_identity(painting_product_identity),
+        release_identity=_freeze_assembly_identity(release_identity),
+        painting_product_identity=_freeze_assembly_identity(painting_product_identity),
         runtime_provenance=_freeze_runtime_provenance(runtime_provenance),
     )
-    return validate_t09_component_checkpoint(payload)
+    return validate_painting_checkpoint(payload)
 
 
 def _validate_ragged_diagnostics(
@@ -421,7 +421,7 @@ def _chunks_match_label_bins(chunks, centers, labels):
     ))
 
 
-def validate_t09_component_checkpoint(
+def validate_painting_checkpoint(
         payload,
         *,
         expected_sample_ids=None,
@@ -432,19 +432,19 @@ def validate_t09_component_checkpoint(
 
     if not isinstance(payload, PaintingCheckpoint):
         raise TypeError(
-            "T09 requires a bound typed component checkpoint"
+            "painting requires a bound typed component checkpoint"
         )
-    if payload.schema != T09_COMPONENT_CHECKPOINT_SCHEMA:
-        raise ValueError("unknown T09 component checkpoint schema")
+    if payload.schema != PAINTING_COMPONENT_CHECKPOINT_SCHEMA:
+        raise ValueError("unknown painting component checkpoint schema")
     if not isinstance(payload.release_identity, ScientificIdentity):
-        raise ValueError("T09 component checkpoint lacks release identity")
+        raise ValueError("painting component checkpoint lacks release identity")
     release_identity = payload.release_identity.record()
     if not isinstance(payload.painting_product_identity, ScientificIdentity):
-        raise ValueError("T09 component checkpoint lacks painting-product identity")
+        raise ValueError("painting component checkpoint lacks painting-product identity")
     painting_identity = payload.painting_product_identity.record()
     painting_config = painting_identity["config"]
     if not isinstance(payload.runtime_provenance, RuntimeProvenance):
-        raise ValueError("T09 component checkpoint lacks runtime provenance")
+        raise ValueError("painting component checkpoint lacks runtime provenance")
     payload.runtime_provenance.record()
 
     if not isinstance(payload.sample_ids, tuple):
@@ -458,11 +458,11 @@ def validate_t09_component_checkpoint(
             raise ValueError("checkpoint sample order does not match expected order")
 
     if expected_release_identity is not None:
-        expected_identity = _freeze_stage2_identity(expected_release_identity)
+        expected_identity = _freeze_assembly_identity(expected_release_identity)
         if payload.release_identity != expected_identity:
             raise ValueError("checkpoint release identity mismatch")
     if expected_painting_product_identity is not None:
-        expected_painting = _freeze_stage2_identity(
+        expected_painting = _freeze_assembly_identity(
             expected_painting_product_identity
         )
         if payload.painting_product_identity != expected_painting:
@@ -501,7 +501,7 @@ def validate_t09_component_checkpoint(
             raise ValueError("painting component IDs must be consecutive and ordered")
         if component.painting_model != painting_components.PAINTING_MODEL_RAGGED:
             raise ValueError(
-                "T09 requires the unified open-set ragged painting model"
+                "painting requires the unified open-set ragged painting model"
             )
 
         expected_interval = (
@@ -518,12 +518,12 @@ def validate_t09_component_checkpoint(
                 f"painting component {component_id} founder keys disagree with manifest"
             )
 
-        block_identity = getattr(block, "stage2_component_identity", None)
+        block_identity = getattr(block, "assembly_component_identity", None)
         if not isinstance(block_identity, Mapping):
             raise ValueError(
                 f"phase component {component_id} lacks release identity"
             )
-        if _freeze_stage2_identity(block_identity).record() != release_identity:
+        if _freeze_assembly_identity(block_identity).record() != release_identity:
             raise ValueError(
                 f"phase component {component_id} release identity mismatch"
             )

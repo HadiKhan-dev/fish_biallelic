@@ -331,7 +331,6 @@ class _ParentStateSelection:
     m2_over_first_m1_edge_gains: np.ndarray
     m2_over_second_m1_edge_gains: np.ndarray
     predictive_fold_count: int
-    m1_direction_state_supported: Optional[np.ndarray] = None
 
 
 def _integrated_parent_state_log_evidence(
@@ -840,7 +839,6 @@ def _parent_state_structure_mask(
     edge_exposure_presence_words: Optional[np.ndarray]=None,
     pair_exposure_presence_words: Optional[np.ndarray]=None,
     direction_supported_parents: Optional[np.ndarray]=None,
-    scaffold_descendant_veto: Optional[np.ndarray]=None,
     direction_probability: Optional[np.ndarray]=None,
 ) -> tuple[np.ndarray, ...]:
     """Separate C/X diagnostics, direction-aware state, and identity gates.
@@ -1096,10 +1094,9 @@ def _prepare_parent_state_weighted_contigs(
     edge_exposure_presence_words: Optional[np.ndarray],
     pair_exposure_presence_words: Optional[np.ndarray],
     direction_supported_parents: Optional[np.ndarray]=None,
-    scaffold_prepared: Any=None,
     contig_information_weights: Optional[np.ndarray]=None,
-    scaffold_descendant_veto: Optional[np.ndarray]=None,
     full_counts: Optional[np.ndarray]=None,
+    score_diagnostics=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Prepare likelihood and exposure/C/X/direction state and identity rows."""
     weights = np.asarray(contig_weights, dtype=np.float64)
@@ -1148,7 +1145,6 @@ def _prepare_parent_state_weighted_contigs(
         direction_supported_parents=direction_supported_parents,
         edge_exposure_presence_words=edge_exposure_presence_words,
         pair_exposure_presence_words=pair_exposure_presence_words,
-        scaffold_descendant_veto=scaffold_descendant_veto,
         direction_probability=ancestry_depth_model.edge_probability,
     )
     state_scores, identity_scores = _structure_state_and_identity_aggregates(
@@ -1159,9 +1155,14 @@ def _prepare_parent_state_weighted_contigs(
         selection_compatible,
         identity_eligible,
     )
+    if score_diagnostics is not None:
+        score_diagnostics.update(genetic=aggregate.copy(),
+                                 structural_state=state_scores.copy(),
+                                 structural_identity=identity_scores.copy())
     return pedigree_orientation.adjust_scores(
         state_scores, identity_scores, alternatives, states, full_counts,
         ancestry_depth_model, settings, direction_supported_parents,
+        score_diagnostics=score_diagnostics,
     )
 
 
@@ -1187,7 +1188,6 @@ def _evaluate_parent_state_weighted_contigs(
     pair_exposure_presence_words: Optional[np.ndarray]=None,
     direction_supported_parents: Optional[np.ndarray]=None,
     prepared_aggregates: Optional[tuple[np.ndarray, np.ndarray]]=None,
-    scaffold_prepared: Any=None,
 ) -> _ParentStateSelection:
     """Evaluate the combined method using internal B1 likelihood evidence."""
     if ancestry_depth_model is None:
@@ -1214,7 +1214,6 @@ def _evaluate_parent_state_weighted_contigs(
                 edge_exposure_presence_words,
                 pair_exposure_presence_words,
                 direction_supported_parents,
-                scaffold_prepared,
                 contig_information_weights,
                 full_counts=full_counts,
             )

@@ -1,162 +1,152 @@
 # Founder haplotype reconstruction
 
-Missing-aware reconstruction of founder haplotypes, sample ancestry and
-pedigrees from low-coverage sequencing of experimental crosses. The primary
-applications are cichlid crosses; simulations provide known-truth validation.
+Reconstruct founder haplotypes, sample ancestry and pedigrees from low-coverage
+sequencing of experimental crosses. The pipeline handles missing observations
+from local discovery through final phase and recombination-map estimation.
 
-The pipeline discovers haplotypes in 200-SNP blocks, assembles them into
-chromosome components, paints each sample as a diploid mosaic, infers parentage,
-refines phase using family information, and estimates conditional recombination
-maps. Missing alleles remain unknown unless the relevant model supports a call.
-Disconnected chromosome components are not silently joined into a single phase
-frame.
+The primary real-data applications are cichlid crosses. Known-pedigree
+simulations support validation; the software does not require pedigree truth
+or generation metadata for general reconstruction.
 
-## Running
+## Quick start
 
-Python 3.11 or newer is required. From this checkout, install the package into
-your chosen environment to obtain its dependencies and the `haplotypes` command:
+Python 3.11 or newer is required. Install into your chosen environment:
 
 ```bash
 python -m pip install .
 haplotypes --help
 ```
 
-Alternatively, use `python run.py` directly when the dependencies declared in
-`pyproject.toml` are already installed. Input data and simulation founder
-templates are not bundled; see [input requirements](docs/running.md#inputs).
-On CSD3, the existing project environment is:
+With the declared dependencies already installed, `python run.py` and
+`python -m haplotype_reconstruction` provide the same interface.
+
+```bash
+# General cross: indexed, sorted, biallelic SNP VCF/BCF with FORMAT/AD.
+python run.py reconstruct --vcf cross.bcf --output work/runs/my_cross --contigs chr1 chr2 chr3
+
+# Self-contained synthetic example (no private input data).
+python run.py example --output work/examples/quick
+python run.py simulate --config work/examples/quick/simulation.toml
+
+# Known-pedigree simulation from supplied founder-sequence templates.
+python run.py simulate --config configs/simulation.toml --seed 400
+
+# Dataset-specific sample and breeding-design policies.
+python run.py tropheops --config configs/tropheops.toml
+python run.py astcal --config configs/astcal.toml
+```
+
+Edit the paths in `configs/` for your data. Empirical input datasets and founder
+templates are not bundled; the `example` command generates synthetic ones. General reconstruction requires allele depths; GT-only and
+PL-only input are not supported. See [inputs and commands](docs/running.md)
+and the [general configuration example](configs/reconstruct.toml).
+
+On CSD3, activate the existing project environment:
 
 ```bash
 conda activate /rds/user/ahk39/hpc-work/conda_envs/bio-env
-python run.py --help
 ```
 
-Run substantial work only on allocated compute nodes. The default CPU budget
-is the process's current affinity; `--cores` can set a smaller ceiling. Worker
-pools and numerical thread pools share that budget, rather than multiplying it.
+Run substantial computation only on allocated compute nodes. The default CPU
+ceiling is the process's CPU affinity; `--cores` can reduce it. Process pools
+and numerical threads share that ceiling. Dynamic allocation gives freed
+threads to surviving workers at supported kernel boundaries.
 
-```bash
-# Known-pedigree simulation from frozen founder-sequence templates.
-python run.py simulate --config configs/simulation.toml --seed 400
+## One scientific pipeline
 
-# Real-data workflows: edit the input paths in the selected configuration.
-python run.py tropheops --config configs/tropheops.toml
-python run.py astcal --config configs/astcal.toml
-
-# A supplied cumulative genetic map; other chromosomes retain 5 cM/Mb.
-python run.py simulate --config configs/simulation.toml --seed 401 \
-  --recombination-map work/data/cross.map
-```
-
-Rerun the same command to resume. Use a new output directory when deliberately
-changing inputs or scientific settings. Each run keeps logs, readable tables
-and atomic chromosome/stage checkpoints together under `work/runs/`; large
-runtime data are excluded from Git. See [running and outputs](docs/running.md)
-for the checkpoint layout and [genetic maps](docs/genetic_maps.md) for formats,
-units and interpretation.
-
-## Scientific workflow
-
-| Step | Implementation | Product |
+| Stage | Product | Implementation |
 | --- | --- | --- |
-| Block discovery | `discovery/` | Missing-aware reversible-cavity 200-SNP haplotypes |
-| Local feedback selection | `workflows/block_feedback.py`, `discovery/` | Read-supported selection after each L1/L2 feedback round; balanced rescue by default |
-| L1–L4 assembly | `assembly/` | Supported, component-preserving chromosome haplotypes |
-| Sample painting (T09) | `painting/` | Ragged diploid paths with an explicit unknown state |
-| Pedigree inference (T10) | `pedigree/` | Genome-wide M0/M1/M2 calls, parent identities and ambiguity |
-| Family refinement and phase correction (T11) | `refinement/` | Stable, genotype-preserving final phase |
-| Recombination estimation (T12) | `recombination/` | Posterior rates, crossover intervals and observable exposure |
+| Local discovery | Missing-aware 200-SNP founder panels | `discovery/` |
+| Two feedback rounds | Read-supported local selection after L1, then L1+L2 | `workflows/block_feedback.py` |
+| Final L1–L4 assembly | Refined, component-preserving founder chromosomes | `assembly/` |
+| Sample painting | Diploid sample mosaics with an explicit unknown state | `painting/` |
+| Pedigree inference | Genome-wide M0/M1/M2 calls, parent identities and ambiguity | `pedigree/` |
+| Family refinement and final phase | Genotype-preserving final phase | `refinement/` |
+| Recombination maps | Conditional rates, crossover intervals and observable exposure | `recombination/` |
 
-T11 corrects phase while preserving called genotypes and missingness. It does
-not publish a separate family-imputed allele product or full marginal posterior
-tensors; internal family-supported fills only inform phase polishing.
+All four reconstruction commands share the assembly/painting runner and the
+one-way pedigree → family phase → recombination handoff. Dataset adapters supply
+observations and eligibility; they do not define alternative inference engines.
 
-Assembly defaults to dense learned transitions plus bounded panel search.
-Before final assembly, two checkpointed feedback rounds refine local panels:
-L1 → blocks → selection, then L1+L2 → blocks → selection. The first selected
-panels feed the second context; original candidates remain available throughout.
-Use `--feedback-selection strict` to protect each round's clean feedback calls
-and rescue only private alleles instead of the default balanced trade-off.
-Entirely uncalled feedback rows are now tested for evidence-supported removal
-and refitting after each round; necessary unknown rows remain explicit.
-Linking uses partially called founder panels without filling missing alleles
-merely to connect blocks. Neither change forces a known founder count.
-See [local feedback selection](docs/running.md#local-feedback-selection) and
-[partial-founder assumptions](docs/methods.md#hierarchical-linking).
-Use `--assembly-model structured` for the
-[near-quadratic alternative](docs/founder_scaling.md); this restricts the
-transition model and does not change discovery. Use `--assembly-search broad`
-to retain the optimized broader path/panel search instead of the default
-`bounded` search; this costs more full refits and is not guaranteed to improve
-accuracy. Final assembly also reopens the original local row choices in a
-component-local founder refinement after **each executed L1–L4 level** of
-final assembly, never within the two local feedback rounds. Each complete
-refinement feeds the next hierarchy level. If local search stalls, original
-and refined L1 pieces supply larger proposals, with a genotype-fit guard
-against penalty-only improvements.
-The completed beam/dual search is followed by bounded paired exchanges,
-one-founder deletion/refitting under the existing complexity cost, and
-exact-flank window searches. Paired-interval polishing can repair coordinated
-two-founder errors while preserving every local called/missing allele.
-These passes use genotype evidence, not pedigree, generation labels or a known
-founder count. They are enabled by default and checkpointed separately.
-Use `--founder-refinement off` to disable all final-assembly refinement passes
-for a comparison.
-See [the model and its limits](docs/methods.md#final-founder-path-refinement).
-An earlier N320 replay joined all eight fragmented controls but exposed a
-final-refinement accuracy regression on seed407 chr15. The progressive N80
-validation does not establish that this N320 case is fixed; it remains an
-[explicit limitation requiring revalidation](docs/validation.md#n320-fragmentation-replay),
-not evidence of a uniformly improved release.
-T11 does not feed back into painting or pedigree inference, and the estimated
-T12 map is not automatically fed upstream.
-Shared-family orientation-error evidence is enabled for T12 by default;
-`--no-shared-family-evidence` disables it. T11 releases final phase after five
-consecutive unchanged phase checks (starting after 20 family iterations), or
-actual family convergence. It preserves called genotypes and missingness; it
-does not publish full marginal-posterior tensors. If the 520-iteration solve
-remains unstable, it retries from the scaffold up to twice with half damping
-each time, retaining separate checkpoints; an unstable final attempt still
-produces no release.
+Missing alleles remain unknown unless the relevant model supports a call.
+Disconnected components are not silently joined into a common phase frame.
+Tier B is the primary pedigree output. **M0 means zero observed parents**,
+not necessarily a biological founder. Support tiers and bootstrap fractions
+measure internal stability, not calibrated probabilities of correct parentage.
 
-Pedigree Tier B is the primary supported output. M0 means **zero observed
-parents**, not necessarily a biological founder. Support tiers and bootstrap
-fractions are internal stability measures, not calibrated probabilities of
-biological correctness. [Finite family-direction evidence](docs/pedigree_direction.md)
-replaces hard ancestry-layer gating; ambiguous and missing-parent designs still
-require care. Read [scientific assumptions](docs/methods.md) before
-interpreting parentage or recombination rates.
+Family phase preserves called genotypes and missingness. Internal
+family-supported fills inform phase polishing, but no separate imputed-genotype product or full
+marginal posterior tensors are released. Neither family phase nor the estimated
+recombination map feeds back upstream. Shared-family orientation-error evidence is on by default
+for recombination; `--no-shared-family-evidence` disables it.
 
-The [validation notes](docs/validation.md) distinguish exact implementation
-regressions, short wiring checks and fresh full-genome simulation evaluation.
-[Performance notes](docs/performance.md) separate numerical speedups from
-scientific trade-offs.
+### Deliberate algorithm choices
 
-The latest [fresh end-to-end validation](docs/validation.md#fresh-seed3000-end-to-end-validation)
-uses seed3000, 320 samples and 5× mean depth. All 22 chromosomes contain six long
-founder haplotypes; founder mismatches total 2,581 / 53,740,022 called alleles,
-and metadata-free pedigree inference recovers all 320 configurations exactly.
-This is one successful simulation, not a guarantee across datasets. The
-[single-76-core runtime estimate](docs/performance.md#complete-workflow-timing)
-is approximately 5 hours 10 minutes.
+- Assembly defaults to learned dense transitions and bounded panel search.
+  `--assembly-model structured` selects a restricted near-quadratic model;
+  `--assembly-search broad` expands the panel search. These are different
+  scientific/runtime trade-offs, not obsolete duplicate implementations.
+- Local feedback uses balanced selection after **each** round.
+  `--feedback-selection strict` protects more backbone calls but rescues less
+  missing variation.
+- Founder-path refinement runs after each executed final L1–L4 level.
+  `--founder-refinement off` disables it for controlled comparisons.
+- Inference defaults to 5 cM/Mb. `--recombination-map cross.map` supplies a
+  spatially varying cumulative genetic map; unmapped chromosomes retain the
+  fallback rate. Simulation-generating maps are configured independently.
+
+Read the [methods and assumptions](docs/methods.md), [founder scaling](docs/founder_scaling.md)
+and [genetic-map guide](docs/genetic_maps.md) before choosing a comparison model.
+
+## Outputs and reproducibility
+
+Rerun the same command to resume compatible checkpoints. A run directory
+contains logs, readable tables and atomic chromosome/stage checkpoints.
+Use a new output root when changing upstream inputs or scientific settings;
+never relabel old checkpoints as current.
+
+Pedigree independently versions preparation, genetic scores and decisions.
+Direction/release-policy comparisons can reuse compatible preparation and
+scores. Outputs include call explanations, candidate ambiguity, search-limit
+diagnostics, and founder callability/carrier-support tables.
+See the [output and cache guide](docs/running.md#pedigree-cache-reuse-and-explanations).
+
+Use `evaluate --stages all` for local and chromosome-wide founder accuracy,
+`export` for lossless founder tracks and sample VCF/BCF, and `status` for saved
+progress and exclusive stage timings. See the [reproducibility guide](docs/reproducibility.md)
+for incomplete-pedigree simulations, 5× robustness controls and tested dependency versions.
+
+Validation and timing are described separately:
+
+- [Validation record](docs/validation.md): controls, denominators and known
+  failures, distinguishing short integration checks from full simulations.
+- [Pedigree direction](docs/pedigree_direction.md): finite orientation and
+  family evidence, approximations and limits.
+- [Performance](docs/performance.md): measured timings and scaling trade-offs.
+- [Code map](docs/development.md): module ownership, parallelism and checkpoint
+  boundaries.
+
+Founder reconstruction can be ambiguous when ancestry is unsampled or many
+descendants repeat one ancestral recombinant. Painting errors and structured
+missingness can affect downstream pedigree direction. Successful simulations
+do not establish individual-level trio truth in real crosses or guarantee
+uniform accuracy. See the validation record for the unresolved N320 seed407
+chr15 refinement regression and other specific limitations.
 
 ## Repository layout
 
-The [code map and development guide](docs/development.md) explains module
-responsibilities, the two refinement stages, thread allocation and checkpoints.
+`haplotype_reconstruction/` contains the scientific implementation.
+`configs/` contains editable run examples; `docs/` contains methods and usage.
+`deliverables/` preserves readable AstCal and Tropheops handoffs with their
+original provenance; these are not silently regenerated by a code refactor.
 
-`haplotype_reconstruction/` contains the implementation, organized by scientific
-step. `core/` supplies genotype data structures, VCF/BCF loading, maps,
-checkpointing and CPU allocation. `workflows/` connects the steps for simulation,
-Tropheops and AstCal. `simulation/` contains the generating model and evaluation.
+Large inputs, checkpoints and private experiments live under ignored `work/`
+and `.work/`. The manuscript is private and ignored. No parallel copy of the
+pipeline is shipped as a compatibility implementation.
 
-`configs/` contains readable run examples. `docs/` describes supported behavior
-and validation. `deliverables/` preserves the readable
-[Tropheops](deliverables/tropheops/README.md) and
-[AstCal](deliverables/astcal/README.md) handoffs, including explicit historical
-caveats. Those exports are not claims of real-data trio ground truth.
+## Licence and citation
 
-Development experiments and old scripts are not part of the supported package.
-Existing local history and large datasets are retained outside the public
-source tree, under ignored work storage. Old flat-module APIs and their pickle
-checkpoints are not supported by this package.
+Original project software is [MIT licensed](LICENSE), copyright 2026 Hadi Khan.
+Dependencies and external datasets retain their own terms. Please cite the
+software in scientific work using the metadata in [CITATION.cff](CITATION.cff).
+This citation request is not an additional licence condition.

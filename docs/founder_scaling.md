@@ -3,7 +3,7 @@
 The default is **dense transitions plus bounded panel search**. The optional
 structured transition model with bounded search gives near-quadratic
 founder-count scaling. An optimized broader search is also available. These
-choices affect L1–L4 assembly, independently of Stage 1. The default additional
+choices affect L1–L4 assembly, independently of block discovery. The default additional
 all-founder refinement within final assembly has separate cubic total-work
 terms; the structured option does not make that pass near-quadratic. See
 [final refinement](methods.md#final-founder-path-refinement).
@@ -58,7 +58,7 @@ setting; explicit `panel_search_config=PanelSearchConfig()` selects bounded
 search and `panel_search_config=None` selects broad search regardless of that
 setting. Actual configurations are recorded in checkpoint identities.
 
-Stage 1 remains on its established missing-aware reversible-cavity search.
+Block discovery remains on its established missing-aware reversible-cavity search.
 Its independent experimental option is `--discovery-search batched`
 (`[run].discovery_search`, `HAPLOTYPES_DISCOVERY_SEARCH`; default `standard`).
 The earlier combined discovery/assembly experiment had substantial accuracy
@@ -329,7 +329,7 @@ calibrated-posterior claim.
 
 ## Current 16-score budget: controlled validation
 
-Stage 1 and the painting model stayed fixed. The programme completed all 22
+Block discovery and the painting model stayed fixed. The programme completed all 22
 contigs of seed402, plus dense seed401 chr2/10/16, dense seed400 chr16/22 and structured seed400
 chr16. These are development simulations, not untouched validation seeds.
 
@@ -372,7 +372,7 @@ coverage and reduced mismatches to 679, versus 653 for that reference.
 
 Seed401 chr10 still distinguishes search budgets:
 
-| Budget / search | Founder mismatches | Truth error/missing burden | Raw T09 switches | L1-L4 time |
+| Budget / search | Founder mismatches | Truth error/missing burden | Raw painting switches | L1-L4 time |
 | --- | ---: | ---: | ---: | ---: |
 | Broader reference | 5,975 | 12,012 | 65 | 114.1 s |
 | q16 | 7,600 | 13,637 | 124 | 68.5 s |
@@ -391,16 +391,16 @@ but a whole-genome q32 pedigree has not been tested. The default remains the bro
 evaluated 16. Python experiments can use
 `PanelSearchConfig(full_scores_per_kind=32)` in `AssemblyConfig`.
 
-The later seed403 end-to-end run exercised dense q16 assembly through T11/T12
+The later seed403 end-to-end run exercised dense q16 assembly through family phase/recombination
 with balanced feedback and final founder refinement. The subsequent multiscale
-refinement update changes chr4's founders and has been checked through T09,
-but not yet rerun through T10–T12. The earlier q4 comparisons below remain
+refinement update changes chr4's founders and has been checked through painting,
+but not yet rerun through pedigree–recombination. The earlier q4 comparisons below remain
 historical controls; see [current validation coverage](validation.md).
-Stage 1, per-level assembly, painting and pedigree checkpoints remain separate.
+block discovery, per-level assembly, painting and pedigree checkpoints remain separate.
 
 ## Interpreting the structured alternative
 
-The initial controlled assembly-only comparison froze Stage1 and the painter
+The initial controlled assembly-only comparison froze block discovery and the painter
 on chr16 across seeds400–402. Broader dense search versus bounded structured
 search gave **854 versus 878** closest-founder mismatches across 6,579,146
 called founder cells. Because both the transition model and search changed,

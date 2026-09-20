@@ -3,6 +3,9 @@ from __future__ import annotations
 
 
 import copy
+from contextlib import contextmanager
+from functools import wraps
+import sys
 
 import json
 import os
@@ -58,6 +61,42 @@ class TeeOutput:
 
     def __getattr__(self, name):
         return getattr(self._original, name)
+
+
+@contextmanager
+def run_log(log_path):
+    """Mirror a run's stdout and restore it even on interruption or failure.
+
+    The caller owns the surrounding run directory. Stderr remains on the
+    terminal (including progress bars and native crash diagnostics).
+    """
+    original = sys.stdout
+    stream = TeeOutput(log_path, original)
+    sys.stdout = stream
+    try:
+        yield stream
+    finally:
+        sys.stdout = original
+        stream.flush()
+        stream.close()
+
+
+def logged_workflow(label):
+    """Give each workflow invocation one closed, uniquely named stdout log."""
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            directory = os.environ.get("HAPLOTYPES_LOG_DIR", "work/logs")
+            os.makedirs(directory, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            path = os.path.join(directory, f"{label}_{stamp}_{os.getpid()}.log")
+            from .run_record import record_run
+            output = os.environ.get('HAPLOTYPES_OUTPUT_DIR', os.path.dirname(directory))
+            with run_log(path), record_run(output, label, path):
+                print(f"Logging to: {path}")
+                return function(*args, **kwargs)
+        return wrapped
+    return decorate
 
 
 class CheckpointStore:

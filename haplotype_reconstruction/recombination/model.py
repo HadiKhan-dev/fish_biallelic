@@ -488,7 +488,7 @@ def _genetic_coordinates(positions, chromosome_map, genetic_positions_morgans):
 
 def prepare_shared_data(product, relationships, config, genetic_positions_morgans=None,
                         chromosome_map=None):
-    """Apply the same final-phase gauge and observed-edge rules as Stage 12."""
+    """Apply the same final-phase gauge and observed-edge rules as recombination."""
     config.validated()
     if not product["phase_stable"]:
         raise ValueError("shared map requires released stable final phase")

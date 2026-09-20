@@ -1,5 +1,6 @@
 """Generate experimental-cross pedigrees, inherited haplotypes and sequencing reads."""
 from __future__ import annotations
+from ..core.run_record import timed_stage
 
 
 import random
@@ -374,7 +375,7 @@ def create_offspring(first_pair, second_pair,
     return offspring
 
 
-def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rng=None):
+def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rng=None, read_model=None):
     """
     Vectorized read sampling across ALL individuals at once.
 
@@ -397,6 +398,11 @@ def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rn
 
     hap0 = np.array([ind[0] for ind in individual_list])  # (N, S)
     hap1 = np.array([ind[1] for ind in individual_list])  # (N, S)
+    if read_model is not None and (
+            read_model.depth_cv or read_model.dropout_fraction
+            or read_model.heterozygote_alt_probability != 0.5):
+        from .designs import perturb_read_sampling
+        return perturb_read_sampling(hap0, hap1, read_depth, read_model, rng)
     site_sum = hap0 + hap1  # (N, S) — genotype: 0, 1, or 2
 
     # Sample read depths for all individuals x sites at once
@@ -741,6 +747,7 @@ def _process_contig_for_generation(args):
     return result
 
 
+@timed_stage("simulate_pedigree")
 def simulate_pedigree(founders, site_locs, generation_sizes,
                       recomb_rate=1e-8, mutate_rate=1e-10,
                       output_plot="ground_truth_pedigree.png",
@@ -748,7 +755,7 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
                       num_processes=None, seed=None,
                       recombination_profile=None,
                       return_crossover_events=False,
-                      genetic_maps=None, contig_names=None):
+                      genetic_maps=None, contig_names=None, design=None):
     """
     Simulates a multi-generation pedigree while tracking ANCESTRY.
 
@@ -884,23 +891,50 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
         random.seed(pedigree_seed)
         print(f"Seeded simulation: master={seed}, pedigree_structure={pedigree_seed}")
 
+    # Optional backcrosses use a generated individual and one of its ACTUAL
+    # parents, not an arbitrary older-cohort proxy. The default RNG path stays
+    # unchanged. References in these registries do not copy genotype arrays.
+    from .designs import SimulationDesign
+    design = SimulationDesign() if design is None else design
+    ancestor_pairs = {}
+    hap_registry = [dict(zip(current_parent_ids, parents)) for parents in current_parents_list]
+    ancestry_registry = [dict(zip(current_parent_ids, parents)) for parents in current_ancestries_list]
+
     # 4. Simulation Loop
     for gen_idx, num_offspring in enumerate(generation_sizes):
 
         gen_name = f"F{gen_idx + 1}"
         print(f"Simulating {gen_name}: {num_offspring} individuals...")
 
+        active_backcross = (design.backcross_fraction > 0
+                            and gen_idx+1 >= design.backcross_start_generation)
+        pool_ids = list(current_parent_ids)
+        if active_backcross:
+            for individual in current_parent_ids:
+                for parent in ancestor_pairs[individual]:
+                    if parent not in pool_ids:
+                        pool_ids.append(parent)
+        pool_index = {name: index for index, name in enumerate(pool_ids)}
+        pool_haplotypes = ([[registry[name] for name in pool_ids] for registry in hap_registry]
+                           if active_backcross else current_parents_list)
+        pool_ancestries = ([[registry[name] for name in pool_ids] for registry in ancestry_registry]
+                          if active_backcross else current_ancestries_list)
+
         # A. Determine Pedigree Structure (Shared across contigs)
         offspring_parent_indices = []
         next_gen_ids = []
 
         for i in range(num_offspring):
-            p1_idx, p2_idx = random.sample(range(len(current_parent_ids)), 2)
-
-            parent1_id = current_parent_ids[p1_idx]
-            parent2_id = current_parent_ids[p2_idx]
+            if active_backcross and random.random() < design.backcross_fraction:
+                parent1_id = random.choice(current_parent_ids)
+                parent2_id = random.choice(ancestor_pairs[parent1_id])
+                p1_idx, p2_idx = pool_index[parent1_id], pool_index[parent2_id]
+            else:
+                p1_idx, p2_idx = random.sample(range(len(current_parent_ids)), 2)
+                parent1_id, parent2_id = pool_ids[p1_idx], pool_ids[p2_idx]
             child_id = f"{gen_name}_{i}"
 
+            ancestor_pairs[child_id] = (parent1_id, parent2_id)
             next_gen_ids.append(child_id)
             offspring_parent_indices.append((p1_idx, p2_idx))
 
@@ -920,8 +954,8 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
         worker_args = []
         for c in range(num_contigs):
             contig_data = {
-                'parents': current_parents_list[c],
-                'ancestries': current_ancestries_list[c],
+                'parents': pool_haplotypes[c],
+                'ancestries': pool_ancestries[c],
                 'site_locs': site_locs_list[c],
                 'offspring_parent_indices': offspring_parent_indices,
                 'child_seeds': child_seeds_by_contig[c],
@@ -954,9 +988,14 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
                 _append_crossover_event_metadata(
                     all_crossover_events_by_contig[contig_idx], contig_idx,
                     gen_idx, gen_name, next_gen_ids,
-                    range(len(next_gen_ids)), current_parent_ids,
+                    range(len(next_gen_ids)), pool_ids,
                     offspring_parent_indices, contig_result[3],
                 )
+
+        if design.backcross_fraction:
+            for c in range(num_contigs):
+                hap_registry[c].update(zip(next_gen_ids, next_gen_individuals_list[c]))
+                ancestry_registry[c].update(zip(next_gen_ids, next_gen_ancestries_list[c]))
 
         # Move to next generation
         current_parents_list = next_gen_individuals_list
@@ -1059,6 +1098,7 @@ def convert_truth_to_painting_objects(all_paintings_flat, num_workers=8):
     return painting_components.BlockPainting((g_min, g_max), block_samples)
 
 
+@timed_stage("simulate_reads")
 def _process_single_contig_postprocessing(args):
     """
     Worker: process one contig's post-simulation steps (read sampling,
@@ -1070,7 +1110,10 @@ def _process_single_contig_postprocessing(args):
 
 
     (r_name, offspring_haps, paintings_raw, sites, read_depth,
-     error_rate, snps_per_block, snp_shift, seed) = args
+     error_rate, snps_per_block, snp_shift, seed) = args[:9]
+    from .designs import ReadModel
+    read_model = ReadModel(error_rate=error_rate, **(args[9] if len(args) > 9 else {}))
+    inference_error = core_numerics.core_config.DEFAULT_READ_ERROR_PROBABILITY
 
     # 1. Convert truth paintings to SamplePainting objects
     true_biological_painting = convert_truth_to_painting_objects(paintings_raw)
@@ -1078,7 +1121,7 @@ def _process_single_contig_postprocessing(args):
     # 2. Simulate sequencing reads (vectorized across all individuals)
     reads_rng = np.random.default_rng(seed)
     new_reads_array = read_sample_all_individuals(
-        offspring_haps, read_depth, error_rate=error_rate, rng=reads_rng
+        offspring_haps, read_depth, error_rate=error_rate, rng=reads_rng, read_model=read_model
     )
 
     # 3. Chunk into blocks
@@ -1090,7 +1133,7 @@ def _process_single_contig_postprocessing(args):
         use_snp_count=True,
         snps_per_block=snps_per_block,
         snp_shift=snp_shift,
-        error_rate=error_rate,
+        error_rate=inference_error,
     )
 
     # 4. Convert reads to raw genotype likelihoods.  Population-frequency
@@ -1098,7 +1141,7 @@ def _process_single_contig_postprocessing(args):
     # sample evidence in linkage HMMs counts the cohort information again.
     (simd_site_priors, simd_probabalistic_genotypes) = core_numerics.reads_to_probabilities(
         new_reads_array,
-        read_error_prob=error_rate,
+        read_error_prob=inference_error,
         use_hwe_prior=False,
     )
 

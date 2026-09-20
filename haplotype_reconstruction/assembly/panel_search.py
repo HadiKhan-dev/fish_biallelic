@@ -485,12 +485,17 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             proposals['birth'].append((float(birth[available[0]]), ('birth', (int(available[0]),))))
         start_evaluations = evaluations
         best = None
+        evaluated_bics = []
+        evaluated_descriptions = []
+        evaluated_by_kind = {}
+        boundary_acceptances = []
         scored = set()
         for kind, items in proposals.items():
             # Only q proposals were ever considered, before de-duplication.
             # Stable top-q selection preserves those exact edits and tie order.
-            for gain, description in nsmallest(
-                    config.full_scores_per_kind, items, key=lambda item: (-item[0], item[1])):
+            ranked = nsmallest(config.full_scores_per_kind, items, key=lambda item: (-item[0], item[1]))
+            evaluated_by_kind[kind] = 0
+            for proposal_rank, (gain, description) in enumerate(ranked, 1):
                 trial = _materialize(description, selected, candidates)
                 signature = tuple(sorted(trial))
                 if not trial or len(trial) > capacity or signature in scored or signature == tuple(sorted(selected)):
@@ -499,12 +504,30 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
                 trial_scores = score(trial)
                 trial_ll = float(trial_scores.sum())
                 trial_bic = compute_outer_bic_from_log_likelihood(len(trial), trial_ll, cc)
+                evaluated_by_kind[kind] += 1
+                evaluated_bics.append(float(trial_bic))
+                evaluated_descriptions.append((float(trial_bic), str(description)))
+                if trial_bic < bic - 1e-8 and proposal_rank == config.full_scores_per_kind:
+                    boundary_acceptances.append(kind)
                 if trial_bic < bic - 1e-8 and (best is None or trial_bic < best[0]):
                     best = (trial_bic, trial_ll, trial, description, gain, trial_scores)
+        leading = sorted([(float(bic), "current panel"), *evaluated_descriptions])[:2]
+        gap = leading[1][0] - leading[0][0] if len(leading) > 1 else None
         record = dict(sweep=sweep + 1, panel_size=k, candidate_pool=len(candidates),
             proposals={kind: proposal_counts.get(kind, len(items)) for kind, items in proposals.items()},
             full_scores=evaluations - start_evaluations, bic=float(bic),
-            accepted=None if best is None else str(best[3]))
+            accepted=None if best is None else str(best[3]),
+            full_scores_per_kind=config.full_scores_per_kind,
+            evaluated_by_kind=evaluated_by_kind,
+            truncated_kinds=[kind for kind, items in proposals.items()
+                             if proposal_counts.get(kind, len(items)) > config.full_scores_per_kind],
+            improving_at_budget_boundary=boundary_acceptances,
+            best_alternative_bic=min(evaluated_bics, default=None),
+            leading_evaluated_bic_gap=gap,
+            leading_evaluated_alternatives=leading,
+            close_evaluated_alternatives=bool(gap is not None and gap <= 2.0),
+            diagnostic_close_bic_gap=2.0,
+            scope="this sweep only; proxy-truncated and ungenerated edits are untested")
         if diagnostics is not None:
             diagnostics.append(record)
         if best is None:
@@ -512,5 +535,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         bic, likelihood, selected, _, _, baseline_scores = best
     if diagnostics is not None:
         diagnostics.append(dict(total_full_scores=evaluations, final_panel_size=len(selected),
-            full_score_bound=1 + 13 * config.full_scores_per_kind * config.max_sweeps))
+            full_score_bound=1 + 13 * config.full_scores_per_kind * config.max_sweeps,
+            iteration_budget_reached=bool(sweep + 1 == config.max_sweeps and best is not None)))
     return [(list(path), float(likelihood)) for path in selected]

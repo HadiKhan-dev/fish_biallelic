@@ -12,7 +12,7 @@ import pandas as pd
 from numba import njit, prange
 import haplotype_reconstruction.painting.components as painting_components
 
-def paint_final_phase(t09, positions, phase_map):
+def paint_final_phase(painting_checkpoint, positions, phase_map):
     """Split at actual phase changes, including changes inside an old bin.
 
 Coordinates are half-open, as in the source painting. Original gaps and
@@ -22,7 +22,7 @@ no inferred allele fill is represented as a new founder label.
     positions = np.asarray(positions, dtype=np.int64)
     changes = [positions[1:][row[1:] != row[:-1]] for row in phase_map]
     output = []
-    for component in t09.painting_bundle.components:
+    for component in painting_checkpoint.painting_bundle.components:
         samples = []
         for index, sample in enumerate(component.painting.samples):
             chunks = []
@@ -47,7 +47,7 @@ no inferred allele fill is represented as a new founder label.
     return tuple(output)
 
 
-SCHEMA = "stage11-stable-final-phase-v2"
+SCHEMA = "discovery1-stable-final-phase-v2"
 
 
 @dataclass(frozen=True)
@@ -80,17 +80,17 @@ def _map_reference(positions, source_columns, frozen, offsets, chunks):
     return result
 
 
-def prepare_phase_scaffold(t09, positions):
+def prepare_phase_scaffold(painting_checkpoint, positions):
     """Decode only frozen hard alleles; unknowns are never argmaxed to REF."""
-    t09 = painting_checkpoints.validate_t09_component_checkpoint(t09)
+    painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(painting_checkpoint)
     pos = np.asarray(positions, dtype=np.int64)
-    blocks = core_runtime.validate_phase_component_manifest(t09.component_manifest)
-    reference = np.full((len(t09.sample_ids), len(pos), 2), -1, dtype=np.int8)
+    blocks = core_runtime.validate_phase_component_manifest(painting_checkpoint.component_manifest)
+    reference = np.full((len(painting_checkpoint.sample_ids), len(pos), 2), -1, dtype=np.int8)
     phase_bins = np.full(len(pos), -1, dtype=np.int64)
     component_ids = np.full(len(pos), -1, dtype=np.int32)
     all_edges = []
     offset = 0
-    for index, (block, component) in enumerate(zip(blocks, t09.painting_bundle.components)):
+    for index, (block, component) in enumerate(zip(blocks, painting_checkpoint.painting_bundle.components)):
         source_pos = np.asarray(block.positions, dtype=np.int64)
         frozen = np.asarray(block.missing_aware_inference_discrete_haps)
         if frozen.shape != (len(component.founder_keys), len(source_pos)) or np.any(~np.isin(frozen, (-1, 0, 1))):

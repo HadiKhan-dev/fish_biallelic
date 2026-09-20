@@ -13,7 +13,7 @@ from numba import njit, prange
 from.import evidence as painting_evidence
 
 
-T09_EMISSION_CACHE_MAX_BYTES = 1024 ** 3  # Bounded reusable T10 evidence, per chromosome.
+PAINTING_EMISSION_CACHE_MAX_BYTES = 1024 ** 3  # Bounded reusable pedigree evidence, per chromosome.
 
 
 RAGGED_MIN_WORKING_MEMORY_BYTES = 512 * 1024 * 1024
@@ -837,7 +837,7 @@ def minimum_unordered_switch_counts(label_grid: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class RaggedPaintingDiagnostics:
-    """Compact T10-facing evidence, MAP, and uncertainty seam."""
+    """Compact pedigree-facing evidence, MAP, and uncertainty seam."""
 
     selected_site_indices: np.ndarray
     selected_positions: np.ndarray
@@ -975,7 +975,7 @@ def paint_ragged_component(
         working_memory_bytes: int | None=None,
         minimum_viterbi_public_class_posterior: float=0.90,
         chromosome_map=None,
-        source_emission_cache_bytes: int=T09_EMISSION_CACHE_MAX_BYTES,
+        source_emission_cache_bytes: int=PAINTING_EMISSION_CACHE_MAX_BYTES,
 ) -> RaggedPainting:
     """Paint one component in bounded sample batches with exact recurrences.
 

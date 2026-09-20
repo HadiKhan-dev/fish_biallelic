@@ -9,7 +9,7 @@ import os
 from typing import Any, Mapping, Protocol
 
 
-STAGE2_RELEASE_CHECKPOINT_SCHEMA = "stage2-release-work-checkpoint-v1"
+ASSEMBLY_RELEASE_CHECKPOINT_SCHEMA = "assembly-release-work-checkpoint-v1"
 
 
 class AssemblyCheckpointIO(Protocol):
@@ -27,7 +27,7 @@ class AssemblyCheckpointIO(Protocol):
 
 def _canonical_identity(identity: Mapping[str, Any]) -> str:
     if not isinstance(identity, Mapping) or not identity:
-        raise ValueError("Stage-2 checkpoint identity must be a nonempty mapping")
+        raise ValueError("assembly checkpoint identity must be a nonempty mapping")
     return json.dumps(
         copy.deepcopy(dict(identity)),
         sort_keys=True,
@@ -48,7 +48,7 @@ def _validate_token(value: str, name: str) -> str:
 
 
 @dataclass(frozen=True)
-class Stage2ReleaseWorkCheckpoint:
+class AssemblyWorkCheckpoint:
     """One atomic phase payload bound to an exact release identity."""
 
     schema: str
@@ -62,7 +62,7 @@ class AssemblyCheckpointStore:
 
     The adapter writes into a separate work stage and never creates its done
     marker. Pipeline-level completion remains exclusively the responsibility
-    of the final T09 publisher.
+    of the final painting publisher.
     """
 
     def __init__(self, checkpoint_store, *, work_stage: str, contig: str):
@@ -74,7 +74,7 @@ class AssemblyCheckpointStore:
         self._identity_json: str | None = None
 
     def _artifact(self, phase: str) -> str:
-        return f"{self.contig}.__stage2_release__.{_validate_token(phase, 'phase')}"
+        return f"{self.contig}.__assembly_release__.{_validate_token(phase, 'phase')}"
 
     def bind(self, identity: Mapping[str, Any]) -> None:
         canonical = _canonical_identity(identity)
@@ -91,15 +91,15 @@ class AssemblyCheckpointStore:
         checkpoint = self.checkpoint_store.load_contig(
             self.work_stage, artifact
         )
-        if not isinstance(checkpoint, Stage2ReleaseWorkCheckpoint):
-            raise TypeError("unrecognized Stage-2 release work checkpoint")
-        if checkpoint.schema != STAGE2_RELEASE_CHECKPOINT_SCHEMA:
-            raise ValueError("unknown Stage-2 release checkpoint schema")
+        if not isinstance(checkpoint, AssemblyWorkCheckpoint):
+            raise TypeError("unrecognized assembly release work checkpoint")
+        if checkpoint.schema != ASSEMBLY_RELEASE_CHECKPOINT_SCHEMA:
+            raise ValueError("unknown assembly release checkpoint schema")
         if checkpoint.phase != str(phase):
-            raise ValueError("Stage-2 release checkpoint phase mismatch")
+            raise ValueError("assembly release checkpoint phase mismatch")
         if checkpoint.identity_json != self._identity_json:
             raise RuntimeError(
-                "Stage-2 release checkpoint scientific identity mismatch"
+                "assembly release checkpoint scientific identity mismatch"
             )
         return checkpoint.payload
 
@@ -107,8 +107,8 @@ class AssemblyCheckpointStore:
         if self._identity_json is None:
             raise RuntimeError("checkpoint adapter must be bound before saving")
         artifact = self._artifact(phase)
-        checkpoint = Stage2ReleaseWorkCheckpoint(
-            schema=STAGE2_RELEASE_CHECKPOINT_SCHEMA,
+        checkpoint = AssemblyWorkCheckpoint(
+            schema=ASSEMBLY_RELEASE_CHECKPOINT_SCHEMA,
             phase=str(phase),
             identity_json=self._identity_json,
             payload=payload,

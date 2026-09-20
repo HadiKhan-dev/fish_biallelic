@@ -19,10 +19,10 @@ import haplotype_reconstruction.pedigree.transmission as pedigree_transmission
 _HARD_PAINTED_MODE = "hard_painted"
 
 
-_T09_LOG_FLOOR = -50.0
+_PAINTING_LOG_FLOOR = -50.0
 
 
-_EVIDENCE_SCORE_IDENTITY_SCHEMA = "t10-parent-state-score-identity-v1"
+_EVIDENCE_SCORE_IDENTITY_SCHEMA = "pedigree_result-parent-state-score-identity-v1"
 
 
 _EVIDENCE_SCORE_CODE_VERSION = "component-local-parent-state-score-v1"
@@ -69,7 +69,7 @@ class PreparedChromosome:
 
 @dataclass(frozen=True)
 class ComponentPedigreeChromosomeResult:
-    """Exactly zero or one T10 evidence record for one physical chromosome."""
+    """Exactly zero or one pedigree evidence record for one physical chromosome."""
 
     contig: str
     evidence: pedigree_models.ParentStateEvidence | None
@@ -101,7 +101,7 @@ class ComponentPedigreeChromosomeResult:
 
 
 @dataclass(frozen=True)
-class OmittedT09Chromosome:
+class OmittedPaintingChromosome:
     """A physical chromosome excluded because it contains no evidence."""
 
     contig: str
@@ -119,13 +119,13 @@ class PreparedPedigree:
 
     sample_ids: tuple[str, ...]
     chromosomes: tuple[PreparedChromosome, ...]
-    omitted_chromosomes: tuple[OmittedT09Chromosome, ...]
+    omitted_chromosomes: tuple[OmittedPaintingChromosome, ...]
     source_mode: str = _HARD_PAINTED_MODE
     input_preparation_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
-class ScoredT09ChromosomeEvidence:
+class ScoredChromosomeEvidence:
     """Lean replay evidence for one physical chromosome.
 
     The common trio panel is stored once at run level. Candidate posterior and
@@ -170,15 +170,15 @@ class ScoredT09ChromosomeEvidence:
 
 
 @dataclass(frozen=True)
-class ScoredT09ParentStateEvidence:
+class ScoredParentStateEvidence:
     """All score-stage products needed for decision-policy replay."""
 
     sample_ids: tuple[str, ...]
     contig_names: tuple[str, ...]
-    chromosomes: tuple[ScoredT09ChromosomeEvidence, ...]
+    chromosomes: tuple[ScoredChromosomeEvidence, ...]
     trios: np.ndarray
     parent_screen_scores: np.ndarray
-    omitted_chromosomes: tuple[OmittedT09Chromosome, ...]
+    omitted_chromosomes: tuple[OmittedPaintingChromosome, ...]
     parent_panel_diagnostics: "AdaptiveParentPanelDiagnostics"
     source_mode: str
     score_identity: Mapping[str, Any]
@@ -190,7 +190,7 @@ class ScoredT09ParentStateEvidence:
 
 
 @dataclass(frozen=True)
-class Stage10ChromosomeEvidenceRequest:
+class ChromosomeEvidenceRequest:
     """Identity presented to an optional per-chromosome cache callback."""
 
     contig: str
@@ -218,7 +218,7 @@ class ComponentPedigreeRunResult:
     chromosome_results: tuple[ComponentPedigreeChromosomeResult, ...]
     trios: np.ndarray
     parent_screen_scores: np.ndarray
-    omitted_chromosomes: tuple[OmittedT09Chromosome, ...]
+    omitted_chromosomes: tuple[OmittedPaintingChromosome, ...]
     parent_panel_diagnostics: "AdaptiveParentPanelDiagnostics | None" = None
     execution_diagnostics: "ComponentPedigreeExecutionDiagnostics | None" = None
 
@@ -267,7 +267,7 @@ class AdaptiveParentPanelDiagnostics:
 
 @dataclass(frozen=True)
 class RaggedComponentScoringDiagnostics:
-    """Exact batch phases for one independently scored T09 component."""
+    """Exact batch phases for one independently scored painting component."""
 
     component_index: int
     source_preparation_seconds: float
@@ -492,15 +492,15 @@ def _resolve_source_mode(settings, requested):
     return pedigree_models.RAGGED_QUADRATIC_MODEL
 
 
-def _t09_painting_config(checkpoint: Any) -> dict[str, Any]:
-    """Return the exact scientific T09 painting parameters."""
+def _tpainting_config(checkpoint: Any) -> dict[str, Any]:
+    """Return the exact scientific sample painting parameters."""
 
     try:
         record = checkpoint.painting_product_identity.record()
         config = record["config"]
     except (AttributeError, KeyError, TypeError) as exc:
         raise pedigree_models.PedigreeEvidenceError(
-            "T09 painting identity lacks its scientific config"
+            "sample painting identity lacks its scientific config"
         ) from exc
     required = (
         "recombination_rate",
@@ -511,7 +511,7 @@ def _t09_painting_config(checkpoint: Any) -> dict[str, Any]:
     )
     if not isinstance(config, dict) or any(name not in config for name in required):
         raise pedigree_models.PedigreeEvidenceError(
-            "T09 painting identity lacks exact ragged-HMM parameters"
+            "sample painting identity lacks exact ragged-HMM parameters"
         )
     try:
         values = {
@@ -520,12 +520,12 @@ def _t09_painting_config(checkpoint: Any) -> dict[str, Any]:
             "robustness_epsilon": float(config["robustness_epsilon"]),
             "double_recomb_factor": float(config["double_recomb_factor"]),
             "snps_per_bin": _positive_integer(
-                config["snps_per_bin"], "T09 snps_per_bin"
+                config["snps_per_bin"], "painting snps_per_bin"
             ),
         }
     except (TypeError, ValueError, OverflowError) as exc:
         raise pedigree_models.PedigreeEvidenceError(
-            "T09 painting identity has invalid ragged-HMM parameters"
+            "sample painting identity has invalid ragged-HMM parameters"
         ) from exc
     if (
         any(not math.isfinite(values[name]) or values[name] < 0.0 for name in (
@@ -536,7 +536,7 @@ def _t09_painting_config(checkpoint: Any) -> dict[str, Any]:
         or values["double_recomb_factor"] <= 0.0
     ):
         raise pedigree_models.PedigreeEvidenceError(
-            "T09 painting identity has invalid ragged-HMM parameters"
+            "sample painting identity has invalid ragged-HMM parameters"
         )
     if "genetic_map" in config:
 
@@ -545,7 +545,7 @@ def _t09_painting_config(checkpoint: Any) -> dict[str, Any]:
 
 
 def _array_digest(value: Any) -> str:
-    """Match the Stage-2 release array identity exactly."""
+    """Match the assembly release array identity exactly."""
 
     array = np.asarray(value)
     contiguous = array if array.flags.c_contiguous else np.ascontiguousarray(array)
@@ -578,7 +578,7 @@ def _identity_digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def stage10_evidence_scoring_code_identity(
+def pedigree_evidence_scoring_code_identity(
         digest_overrides: Mapping[str, str] | None=None,
 ) -> dict[str, Any]:
     """Return the code identity for evidence preparation and scoring only.
@@ -612,14 +612,14 @@ def stage10_evidence_scoring_code_identity(
     }
 
 
-def _t09_source_identity(checkpoint: Any) -> dict[str, Any]:
+def _painting_source_identity(checkpoint: Any) -> dict[str, Any]:
     release = checkpoint.release_identity.record()
     painting = checkpoint.painting_product_identity.record()
     return _canonical_identity({
-        "t09_release_identity": release,
-        "t09_painting_product_identity": painting,
+        "assembly_identity": release,
+        "tpainting_product_identity": painting,
         "raw_input_array_sha256": release.get("input_array_sha256"),
-    }, "T09/raw source identity")
+    }, "painting/raw source identity")
 
 
 def _score_config_identity(settings: module_pedigree_config.PedigreeConfig) -> dict[str, Any]:
@@ -705,7 +705,7 @@ def _parent_state_score_identity(
             "trios_sha256": _array_digest(trios),
         },
         "hard_screen_mismatch_penalty": float(mismatch_penalty),
-        "scoring_code_identity": stage10_evidence_scoring_code_identity(),
+        "scoring_code_identity": pedigree_evidence_scoring_code_identity(),
         "external_identity": (
             None if external_identity is None else _canonical_identity(
                 external_identity, "external evidence identity"
@@ -727,7 +727,7 @@ def _validate_release_array_identity(
                 "global_probs", "global_sites", "global_observed_mask"
             }):
         raise pedigree_models.PedigreeEvidenceError(
-            "T09 release lacks the exact three-array input identity"
+            "painting release lacks the exact three-array input identity"
         )
     arrays = {
         "global_probs": genotype_likelihoods,
@@ -738,7 +738,7 @@ def _validate_release_array_identity(
         digest = expected.get(name)
         if not isinstance(digest, str) or _array_digest(value) != digest:
             raise pedigree_models.PedigreeEvidenceError(
-                f"raw {name} does not match the typed T09 release identity"
+                f"raw {name} does not match the typed painting release identity"
             )
 
 
@@ -791,7 +791,7 @@ def _validated_raw_evidence(
         ) from exc
     if observed_ids != expected_ids:
         raise pedigree_models.PedigreeEvidenceError(
-            "raw_sample_ids must exactly match the typed T09 sample order"
+            "raw_sample_ids must exactly match the typed painting sample order"
         )
 
     raw_position_values = np.asarray(raw_positions)
@@ -815,7 +815,7 @@ def _validated_raw_evidence(
     if raw_gl.shape != expected_shape:
         raise pedigree_models.PedigreeEvidenceError(
             "raw_genotype_likelihoods must have shape "
-            "(T09 samples, raw positions, 3)"
+            "(painting samples, raw positions, 3)"
         )
     try:
         # Native float32/64 inputs can be cast row-wise inside the fused pass.
@@ -831,7 +831,7 @@ def _validated_raw_evidence(
     observed = np.asarray(raw_observed_mask)
     if observed.dtype != np.dtype(np.bool_) or observed.shape != expected_shape[:2]:
         raise pedigree_models.PedigreeEvidenceError(
-            "raw_observed_mask must be an exact boolean T09-sample-by-site mask"
+            "raw_observed_mask must be an exact boolean painting-sample-by-site mask"
         )
     normalized, invalid = _normalize_raw_evidence(gl, observed)
     if invalid:
@@ -892,7 +892,7 @@ def _diagnostic_arrays(
         interval = tuple(component.interval)
         if positions[0] < interval[0] or positions[-1] > interval[1]:
             raise pedigree_models.PedigreeEvidenceError(
-                f"{prefix} diagnostic positions lie outside its T09 interval"
+                f"{prefix} diagnostic positions lie outside its painting interval"
             )
 
     n_bins = len(centers)
@@ -999,13 +999,13 @@ def _ragged_state_and_binning(
         edges: np.ndarray,
         named_alleles: np.ndarray,
 ) -> tuple[module_painting_model.RaggedStateSpace, module_painting_model.RaggedBinning]:
-    """Reconstruct the exact frozen T09 state/bin definitions."""
+    """Reconstruct the exact frozen painting state/bin definitions."""
 
     called = named_alleles >= 0
     called_count = np.sum(called, axis=0)
     if np.any(called_count == 0):
         raise pedigree_models.PedigreeEvidenceError(
-            "T09 diagnostic retained a site with no named founder call"
+            "painting diagnostic retained a site with no named founder call"
         )
     frequency = (
         1.0 + np.sum(np.where(called, named_alleles, 0), axis=0)
@@ -1029,7 +1029,7 @@ def _ragged_state_and_binning(
         first = int(np.searchsorted(positions, edges[block]))
         last = int(np.searchsorted(positions, edges[block + 1]))
         if first == last:
-            raise pedigree_models.PedigreeEvidenceError("T09 diagnostic contains an empty HMM bin")
+            raise pedigree_models.PedigreeEvidenceError("painting diagnostic contains an empty HMM bin")
         bins.append(np.arange(first, last, dtype=np.int64))
     if (
         not bins
@@ -1038,7 +1038,7 @@ def _ragged_state_and_binning(
         )
     ):
         raise pedigree_models.PedigreeEvidenceError(
-            "T09 diagnostic bins do not partition selected sites"
+            "painting diagnostic bins do not partition selected sites"
         )
     return state, module_painting_model.RaggedBinning(
         indices=tuple(bins),
@@ -1143,12 +1143,12 @@ def _prepare_component(
     ragged_factors = None
     ragged_anchored_states = None
     if painting_config is None:
-        raise pedigree_models.PedigreeEvidenceError("posterior source mode lacks T09 config")
+        raise pedigree_models.PedigreeEvidenceError("posterior source mode lacks painting config")
     state, binning = _ragged_state_and_binning(
         diagnostic, diagnostic_positions, centers, edges, named_alleles
     )
-    # Structure identity follows whole-component T09 trajectory classes.
-    # Derive anchoring before Stage-10 marker subsampling: a trajectory
+    # Structure identity follows whole-component painting trajectory classes.
+    # Derive anchoring before pedigree marker subsampling: a trajectory
     # called only at an omitted marker remains a represented identity.
     ragged_anchored_states = np.ascontiguousarray(np.concatenate((
         np.any(named_alleles >= 0, axis=1),
@@ -1157,7 +1157,7 @@ def _prepare_component(
     all_raw_indices = _raw_indices_for_positions(
         raw_positions, diagnostic_positions, component_index
     )
-    # Raw evidence identity/sample order and T09 config were checked by the
+    # Raw evidence identity/sample order and painting config were checked by the
     # chromosome entry point. Reuse the exact frozen emission axis when kept
     # by the painter; high-K/memory-limited products compute it here as usual.
     source_emissions = getattr(diagnostic, "source_log_emission_upper", None)
@@ -1166,16 +1166,16 @@ def _prepare_component(
             raw_gl, raw_observed, all_raw_indices, raw_gl.dtype.type(1e-12))
         source_emissions, _ = module_painting_model.calculate_ragged_binned_emissions(
             source_gl, source_observed, state, binning,
-            robustness_epsilon=painting_config["robustness_epsilon"], log_floor=_T09_LOG_FLOOR)
+            robustness_epsilon=painting_config["robustness_epsilon"], log_floor=_PAINTING_LOG_FLOOR)
         del source_gl, source_observed
     else:
         states = state.background_index + 1
         if source_emissions.shape != (raw_gl.shape[0], states * (states + 1) // 2, len(centers)):
-            raise pedigree_models.PedigreeEvidenceError("cached T09 emissions have incompatible axes")
+            raise pedigree_models.PedigreeEvidenceError("cached painting emissions have incompatible axes")
         source_emissions = painting_evidence.expand_symmetric_emissions(source_emissions, states)
         informative_counts = painting_evidence.count_component_information(
             raw_gl, raw_observed, all_raw_indices, raw_gl.dtype.type(1e-12))
-    transition = pedigree_sources.build_t09_hamming_transition(
+    transition = pedigree_sources.build_painting_hamming_transition(
         centers,
         state.background_index + 1,
         recomb_rate=painting_config["recombination_rate"],
@@ -1301,7 +1301,7 @@ def _prepare_component(
     )
 
 
-def prepare_t09_chromosome_components(
+def prepare_painted_chromosome_components(
         checkpoint: Any,
         raw_genotype_likelihoods: Any,
         raw_positions: Any,
@@ -1318,8 +1318,8 @@ def prepare_t09_chromosome_components(
 ) -> PreparedChromosome:
     """Validate and prepare independently rooted component HMM inputs."""
 
-    checkpoint = painting_checkpoints.validate_t09_component_checkpoint(checkpoint)
-    source_identity = _t09_source_identity(checkpoint)
+    checkpoint = painting_checkpoints.validate_painting_checkpoint(checkpoint)
+    source_identity = _painting_source_identity(checkpoint)
     if chromosome_map is not None:
         source_identity = dict(source_identity, selector_genetic_map=chromosome_map.identity())
         recombination_rate = chromosome_map.fallback_rate_per_bp
@@ -1329,7 +1329,7 @@ def prepare_t09_chromosome_components(
     source_mode = str(candidate_source_mode)
 
     painting_config = (
-        _t09_painting_config(checkpoint)
+        _tpainting_config(checkpoint)
     )
     max_snps = _positive_integer(max_snps_per_bin, "max_snps_per_bin")
     information_block_size = _positive_integer(

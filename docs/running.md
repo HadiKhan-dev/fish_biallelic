@@ -24,8 +24,49 @@ full-node utilization or independent chromosome sharding within one run.
 
 ## Inputs
 
-Real workflows accept indexed VCF/BCF files and the corresponding cross-design
-workbook. The workbook supplies sample eligibility/chronology, not individual
+The general `reconstruct` command accepts indexed, sorted, biallelic SNP
+VCF/BCF files with `FORMAT/AD` (REF and ALT read depths), without a workbook.
+GT-only and PL-only files are not currently supported by this entry point.
+Missing AD is unobserved, not reference support. Duplicate positions,
+multiallelic variants and indels must be normalized/filtered before this route;
+it reports unsupported records instead of silently truncating them.
+
+```bash
+haplotypes reconstruct --vcf cross.bcf --output work/runs/my_cross \
+  --contigs chr1 chr2 chr3 --cores 76
+```
+
+Select populated physical contigs explicitly if the header also declares empty
+scaffolds. At least three contigs are required for the current genome-wide
+pedigree model; smaller reconstructions can stop at `block_discovery` or `painting`
+with `--stop-after-stage`. Both discovery and downstream algorithms are the
+same canonical implementations used by the existing workflows. All assembly,
+feedback, CPU-budget and recombination-map options remain available.
+
+Without constraints, all input samples are candidate pedigree members and no
+cohort/sex/generation labels are inferred from names. Optional `--eligibility
+constraints.json` (TOML: `[inputs].eligibility`) accepts:
+
+```json
+{
+  "candidate_parents": {"fish_c": ["fish_a", "fish_b"], "fish_d": []},
+  "excluded_samples": ["outside_pedigree"],
+  "ineligible_children": [],
+  "direction_supported_edges": [["fish_a", "fish_c"]]
+}
+```
+
+Unlisted children retain every non-self candidate. An empty list explicitly
+allows no observed parent. Excluded samples cannot be parents or inferred
+children; `ineligible_children` may still be parents. Explicit direction edges
+are **[parent, child]** and should express independently supported chronology,
+not an assumed true individual parent pair. Candidate restrictions do not by
+themselves assert direction or parentage. These exclusions affect pedigree
+inference, not founder discovery: remove unrelated/outgroup samples from the
+VCF itself if they must not contribute to discovery and painting.
+
+The dataset-specific `astcal` and `tropheops` workflows additionally use their
+corresponding cross-design workbook. The workbook supplies sample eligibility/chronology, not individual
 parentage truth. Check the input paths in `configs/astcal.toml` or
 `configs/tropheops.toml`. Data are intentionally not distributed in Git.
 
@@ -42,7 +83,11 @@ templates contain 8,956,852 markers on 22 cichlid chromosomes (`chr1`–`chr20`,
 `chr22`, `chr23`); the absent `chr21` label is intentional.
 
 Alternatively, `simulate --vcf PATH` derives empirical templates from that
-VCF/BCF using the template-building route. This can be expensive. Supply
+VCF/BCF using the simple empirical template-building linker in
+`simulation/templates.py`. This is the retained naive-linking code: it produces
+simulation input sequences, **not** the reconstructed offspring haplotypes.
+Reconstruction always uses the current shared L1–L4 linker. This template
+construction can be expensive. Supply
 `--templates` to reuse frozen sequence inputs while still regenerating reads,
 discovery, assembly and all downstream inference for each new seed.
 
@@ -52,10 +97,27 @@ biological parents are unsequenced, yielding 20 M0 and 300 M2 true observed-pare
 states. Inference receives neither the generating pedigree nor cohort labels.
 The generating map and inference map are separate settings.
 
+## Stage vocabulary and checkpoint compatibility
+
+All workflows use descriptive stage names. A fresh checkpoint root contains
+`block_discovery/`, the `feedback_*/` contexts/selections,
+`assembly/` for internal assembly/refinement work,
+`painting/`, `pedigree_evidence/`, `pedigree_scores/`, `pedigree/`,
+`family_phase/` and `recombination/`. Simulation additionally creates
+`founder_templates/` and `simulated_reads/`. Dataset names belong to the
+run directory, not to stage identifiers.
+
+This naming refactor also renames internal APIs, serialized classes and
+identity keys. Historical checkpoint trees remain intact but are not accepted
+as the new format. Use a fresh output root; preserve the frozen source with
+older runs when reproducing them. Do not rename folders or edit identity
+sidecars to force compatibility. Curated real-data handoffs retain their
+original filenames and provenance.
+
 ## Simulation stage boundaries and chromosome shards
 
-`simulate --stop-after-stage 01_blocks` stops after block discovery;
-`--stop-after-stage 09_painting` stops after local feedback selection, final
+`simulate --stop-after-stage block_discovery` stops after block discovery;
+`--stop-after-stage painting` stops after local feedback selection, final
 L1–L4 assembly and painting.
 Both retain completed checkpoints. Omit the option on a later invocation to
 resume downstream work.
@@ -71,7 +133,7 @@ on separately allocated nodes against the same run directory:
 
 ```bash
 python run.py simulate --config configs/simulation.toml --seed 400 \
-  --process-contigs chr1 chr2 --stop-after-stage 09_painting
+  --process-contigs chr1 chr2 --stop-after-stage painting
 ```
 
 Specify a stop boundary for shard workers, before genome-wide pedigree/family
@@ -80,8 +142,8 @@ completion. After every shard finishes, run once without shard or stop controls
 to validate/reuse the chromosome outputs and continue genome-wide inference.
 
 The TOML equivalents are `[run].process_contigs = ["chr1", "chr2"]` and
-`[run].stop_after_stage = "09_painting"`. Existing environment controls
-`BHD_SIM_CONTIGS=chr1,chr2` and `BHD_SIM_STOP_AFTER_STAGE=09_painting` also work.
+`[run].stop_after_stage = "painting"`. Existing environment controls
+`BHD_SIM_CONTIGS=chr1,chr2` and `BHD_SIM_STOP_AFTER_STAGE=painting` also work.
 Precedence for these controls is CLI > TOML > environment > no restriction.
 Remove the TOML controls and unset the environment variables when resuming a
 full run; omitting CLI flags alone does not override those fallbacks.
@@ -95,7 +157,7 @@ disable it even when the selected TOML example sets it to true.
 
 ## Local feedback selection
 
-All three reconstruction commands use this sequence by default:
+All reconstruction commands use this sequence by default:
 
 1. Keep the original missing-aware 200-SNP discovery results.
 2. Assemble them through L1 and refit/project that context back to local blocks.
@@ -135,7 +197,7 @@ python run.py simulate --config configs/simulation.toml --seed 400 \
 The flag works for `astcal` and `tropheops` too. TOML uses
 `[run].feedback_selection = "balanced"` or `"strict"`; the environment variable
 is `HAPLOTYPES_FEEDBACK_SELECTION`. Precedence is CLI > TOML > environment >
-balanced. This is local block feedback, **not** a T11 → T10 feedback loop.
+balanced. This is local block feedback, **not** a family phase → pedigree feedback loop.
 
 After both feedback rounds, entirely uncalled rows trigger smaller-panel
 refitting under the existing BIC-like objective. This is automatic in balanced
@@ -160,18 +222,18 @@ local panel metrics, **not** final chromosome or sample phase errors. The
 balanced result is a measured precision/variation trade-off, not a uniform
 accuracy improvement or a guarantee against per-block regression.
 
-This ordering changes feedback, T09 and downstream cache identities, including
+This ordering changes feedback, painting and downstream cache identities, including
 products from the earlier end-only feedback workflow.
 Preserve old runs and use a separate output/checkpoint root; compatible original
 input/discovery stages can still be linked into that root. Do not relabel old
-T09 products. Both feedback rounds and their selection batches are checkpointed.
+painting products. Both feedback rounds and their selection batches are checkpointed.
 Balanced and strict can share the initial raw L1 context/proposals, but have
 separate first-round selections and second-round contexts/proposals/selections.
 Switching modes does not overwrite raw discovery results.
 
 ## Final founder refinement
 
-`--founder-refinement on` is the default for all three reconstruction commands.
+`--founder-refinement on` is the default for all reconstruction commands.
 After each executed L1, L2, L3 and L4 level of **final assembly**, the complete
 refiner reopens original prepared local-row choices inside the current component
 boundaries. Its result feeds the next hierarchy level. Bounded deletion/refitting
@@ -188,7 +250,7 @@ and downstream products change identity.
 TOML uses `[run].founder_refinement = "on"` or `"off"`; the environment variable
 is `HAPLOTYPES_FOUNDER_REFINEMENT`. Precedence is CLI > TOML > environment > on.
 The API exposes `AssemblyConfig.founder_refinement_config`. Its default beam
-budget grows from 64 to at most1024 only when the data-based search-gain rule
+budget grows from 64 to at most 1024 only when the data-based search-gain rule
 warrants it; it is not a confidence cutoff. When this local search stalls, final
 L1 pieces, both original and refined, supply larger proposals at the initial
 beam width. These must improve the primary score, or the partial-data score at
@@ -205,7 +267,7 @@ be expensive on difficult chromosomes. See the measured limits in
 [validation](validation.md#expanded-founder-search-at-n80-and-5x).
 
 Each level saves its `refinement_l1` through `refinement_l4` result beneath
-`09_painting_release_work/`. Independent small components save compact completed
+`assembly/`. Independent small components save compact completed
 paths; long components also retain detailed beams, iterations and proposals.
 A completed component can be reused when a sibling is interrupted. The
 `founder_refinement` aggregate remains the final-product checkpoint.
@@ -218,7 +280,7 @@ component a full 2,000-bin search budget. L3/L4 retain component-specific propos
 resolution. This changes candidate exploration, not full-site acceptance.
 Changed code/configuration is part of assembly and downstream cache identities;
 retain older accepted outputs and
-use a separate run root. Raw reads and original Stage1 discovery need not be
+use a separate run root. Raw reads and original Block discovery need not be
 regenerated. These are assembly checkpoints, not new globally complete stages.
 
 ## Assembly transition models and search breadth
@@ -260,7 +322,7 @@ The two search modes are heuristics with the same full Viterbi/BIC acceptance
 objective; broader search can be slower and is not uniformly more accurate.
 Combining `structured` transitions with `broad` search is allowed, but no longer
 gives the near-quadratic whole-assembly bound. Search breadth changes L1–L4,
-not Stage 1 or downstream models.
+not block discovery or downstream models.
 
 For Python callers, `AssemblyConfig.panel_search_config=PanelSearchConfig(...)`
 selects bounded search. Its controls are `paths_per_endpoint` (default 16),
@@ -280,7 +342,7 @@ Structured transitions are a restricted statistical model, not an exact
 acceleration of arbitrary dense transitions. Read the
 [scaling and accuracy trade-offs](founder_scaling.md).
 
-Assembly selection does **not** change Stage 1. Its established search remains
+Assembly selection does **not** change block discovery. Its established search remains
 the default. The separate `--discovery-search batched` option is experimental;
 its TOML/environment settings are `[run].discovery_search` and
 `HAPLOTYPES_DISCOVERY_SEARCH`, with `standard` as the default. An earlier
@@ -300,20 +362,23 @@ Do not share a checkpoint directory between different seeds or configurations.
 
 | Checkpoint directory | Contents |
 | --- | --- |
-| `00_founder_templates/` | Frozen simulation sequence inputs |
-| `00_simulated_reads/` | Simulated observations, true pedigree, alleles and raw crossover events |
-| `01_blocks/` | Discovered 200-SNP block haplotypes, raw likelihoods/observation masks as applicable |
-| `02_feedback_l1_assembly/`, `02_feedback_l1/` | Initial context-assembly levels and raw local proposals, shared between modes |
-| `02_feedback_<mode>_l1/` | First-round 128-block selection batches and selected panels |
-| `02_feedback_<mode>_l2_assembly/` | Context assembly through L1+L2 from that mode's selected first-round panels |
-| `02_feedback_<mode>_l2/` | Second-round raw proposals, 128-block selection batches and final selected panels; `<mode>` is `balanced` or `strict` |
-| `00_genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
-| `09_painting_release_work/` | Preprocessing, L1–L4 levels, per-level founder-refinement components/searches and final aggregate |
-| `09_painting/` | Typed component-local painting products |
-| `10_pedigree_evidence/` | Prepared/scored chromosome evidence |
-| `10_pedigree/` | Genome-wide inferred pedigree and support tables |
-| `11_phase_correction/` | Final phase products, `CONTIG.iterations.p5.b2` work checkpoints, and compact completion summary |
-| `12_recombination/` | Conditional map products and completion summary |
+| `founder_templates/` | Frozen simulation sequence inputs |
+| `simulated_reads/` | Simulated observations, true pedigree, alleles and raw crossover events |
+| `block_discovery/` | Discovered 200-SNP block haplotypes, raw likelihoods/observation masks as applicable |
+| `feedback_l1_assembly/`, `feedback_l1/` | Initial context-assembly levels and raw local proposals, shared between modes |
+| `feedback_<mode>_l1/` | First-round 128-block selection batches and selected panels |
+| `feedback_<mode>_l2_assembly/` | Context assembly through L1+L2 from that mode's selected first-round panels |
+| `feedback_<mode>_l2/` | Second-round raw proposals, 128-block selection batches and final selected panels; `<mode>` is `balanced` or `strict` |
+| `genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
+| `assembly/` | Preprocessing, L1–L4 levels, per-level founder-refinement components/searches and final aggregate |
+| `painting/` | Typed component-local painting products |
+| `painting/reports/CONTIG/` | Founder callability/carrier support and assembly-search TSVs |
+| `pedigree_evidence/versions/ID/` | Reusable prepared chromosome evidence |
+| `pedigree_scores/versions/ID/` | Compact genetic likelihoods, candidate panel, per-chromosome resume products |
+| `pedigree/versions/ID/` | Versioned pedigree decisions and support tables |
+| `pedigree/_global.p5.b2` | Current published pedigree view consumed downstream |
+| `family_phase/` | Final phase products, `CONTIG.iterations.p5.b2` work checkpoints, and compact completion summary |
+| `recombination/` | Conditional map products and completion summary |
 
 Atomic protocol-5/Blosc checkpoints use `.p5.b2`; completion markers are written
 only after required outputs exist. Inputs, model/configuration and relevant
@@ -323,28 +388,28 @@ changes may invalidate affected stages; do not bypass a mismatch by relabeling
 an old checkpoint as current.
 
 Reconstruction writes compact genotype evidence after validating its inputs.
-T10 and T11 use this derived cache when it matches the source checkpoint files;
+Pedigree and family phase use this derived cache when it matches the source checkpoint files;
 older runs without it continue to read their original raw/block checkpoints.
 The cache does not replace the rich simulation truth or discovery products:
 keep those source files, including linked targets, for validation and resume.
 It uses the same likelihood precision and missing-observation mask, trading an
 additional write and disk space for smaller repeated reads and lower memory.
 
-T11 uses one phase-focused path, with no separate full-posterior or imputed
+Family phase uses one phase-focused path, with no separate full-posterior or imputed
 source stage. Iteration checkpoints retain family messages, the preceding
 polished phase and the consecutive-stability count; large numerical caches are
 rebuilt on restart. A 520-iteration safety limit refuses release if phase has
 not stabilized. Stable phase does not assert marginal-posterior convergence.
 
-T11 preserves published genotype calls and missingness: family-supported fills
+Family phase preserves published genotype calls and missingness: family-supported fills
 may inform polishing internally, but are not released as newly imputed alleles.
 The retired `--impute-missing` flag and TOML `[refinement].impute_missing` key
 are rejected. Remove the TOML key (even if set to `false`); there is no replacement
 switch for publishing the former separate imputed product.
 
-Changes confined to T11 can reuse compatible T09/T10/raw checkpoints in a new
+Changes confined to family phase can reuse compatible painting/pedigree/raw checkpoints in a new
 downstream output root. The local-feedback change described above also changes
-T09 inputs: reuse only compatible original input/discovery stages for that
+painting inputs: reuse only compatible original input/discovery stages for that
 upgrade. Do not overwrite or relabel old scientific products.
 
 When an attempt reuses validated inputs, its checkpoint directories may be
@@ -403,3 +468,98 @@ exhaustive dependency lock or validation of every version permitted by
 | Blosc2 / TBB | 4.5.1 / 2022.3.1 |
 | Matplotlib / NetworkX / seaborn | 3.10.8 / 3.6.1 / 0.13.2 |
 | tqdm / openpyxl / setuptools | 4.67.1 / 3.1.5 / 80.9.0 |
+
+## Pedigree cache reuse and explanations
+
+Pedigree now has three independently identified products:
+
+1. Preparation depends on painting/raw inputs, sample/contig order, binning/source
+   settings, and preparation code—not direction or release thresholds.
+2. Genetic scoring also depends on likelihood settings, actual candidate
+   eligibility and the fixed pair-screen policy. It checkpoints each scored
+   chromosome and a compact aggregate; large source-factor arrays are omitted.
+3. Decisions depend on the score identity, all decision settings, caller
+   chronology and decision code, including bootstrap and graph policy.
+
+Changing direction/family settings or support thresholds through the API
+reuses preparation and scores; changing candidate eligibility reuses
+preparation but rescores. A score-stage change never masquerades as a
+decision-only replay. Ordinary atomic replacement of an upstream checkpoint
+changes its source-file identity. pedigree v5 does not retroactively relabel older
+v4 preparation caches; the first new run prepares them once.
+
+Versioned decisions are retained. The conventional pedigree global file is the
+current published view; a pre-existing different view is archived before
+replacement. Do not run competing global publishers in the same output root.
+Family phase already keys conditioning on the actual Tier-B relationship table, so
+unchanged relationships reuse final phase. If relationships change, family phase
+rejects incompatible existing checkpoints: preserve those results and use a
+separate downstream output/checkpoint root rather than deleting or relabeling
+them. This change does not add an automatic family phase/recombination rerun or feedback loop.
+
+The standard `pedigree/` exports now include:
+
+- `call_explanations.csv`: one row per sample, its release/ambiguity status,
+  candidate sets, state/identity margins, stability and graph intervention.
+- `alternative_explanations.csv`: the local and graph selections plus up to
+  three leading scored identities **within each parent-count state**. Genetic
+  log evidence (after the existing contamination mixture), structural state
+  treatment, direction, reciprocal-family and joint-ancestry contributions
+  are separate. Priors/multiplicity, marginal state evidence and graph utility
+  are also separate: they are not all additive terms of a single posterior.
+- `tier_b_candidate_sets.csv`: primary ambiguity sets, without inventing
+  a second known parent where only a parent-count state is supported.
+- `search_diagnostics.csv`: M2 panel size, omitted parent count, screen ranks,
+  boundary score gap and whether a released parent is at the screen boundary.
+  M1 continues to score every eligible parent.
+
+These are explanations of the fitted composite model, not calibrated
+probabilities, proof of biological direction, or validation against truth.
+
+## Observed-reference consistency
+
+The Tropheops workflow writes `reference_consistency.csv` separately from
+pedigree and known-truth simulation outputs. It compares discovered local
+haplotypes with confident G0 genotype calls, including a best-pair dosage
+comparison at heterozygous reference sites.
+
+The table reports `n_g0_reference_samples`, `references_matched_pair`,
+`references_matched_hom_under_2pct`, `haplotypes_matching_reference` and
+`haplotypes_without_reference_match`, alongside per-reference errors and
+evaluated-site counts. These are compatibility summaries, not counts of true
+founders or demonstrated chimeras. The available references may not represent
+all ancestral sequence, and a matching pair is not necessarily uniquely phased.
+When reference samples enter discovery, the comparison is non-independent.
+
+## Founder support and bounded-search diagnostics
+
+Every completed or resumed painting chromosome writes small reports under
+`checkpoints/painting/reports/CONTIG/`:
+
+- `founder_support.tsv`: called/missing marker alleles per component-local
+  founder, component boundaries, distinct observed carrier samples, and called
+  sites without a released named carrier having positive read depth.
+- `founder_support_windows.tsv`: the same callability/carrier summaries in
+  at most 200-marker windows. Coordinates name the first and last variants,
+  both **1-based inclusive**; these are not BED coordinates.
+- `assembly_search.tsv`: per-level/per-panel sweep budgets, truncated proposal
+  categories, improving proposals at the last scored rank, iteration-cap hits,
+  and the two leading evaluated alternatives with their BIC-like score gap.
+  A gap of at most two score units is labelled close purely for inspection;
+  it is not a release threshold or a calibrated Bayes-factor claim.
+
+Carrier counts require both the public named painting and observed depth.
+A homozygous named carrier counts once per sample/site. Unknown or pooled
+ancestry is not attributed to an arbitrary founder. Missing founder alleles
+remain missing and get no called-allele support. Related carrier samples are
+not independent ancestral lineages; a called allele without a direct named
+carrier is not automatically wrong. No additional masking is applied.
+
+Assembly alternatives describe the **particular hierarchy sweep before
+subsequent founder refinement**, not a posterior over final chromosome paths.
+Both genotype/model and search uncertainty may remain. A small scored gap,
+an accepted boundary proposal or a reached budget is a reason to inspect a
+region, not proof that broader search will improve it. Conversely, a large
+gap among evaluated proposals cannot certify ungenerated or truncated
+alternatives. The reports never automatically expand the search. Existing
+`--assembly-search broad` remains an explicit controlled comparison.

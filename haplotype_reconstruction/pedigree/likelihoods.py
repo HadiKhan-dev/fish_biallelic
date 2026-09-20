@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 
+from dataclasses import replace
 import math
 
 import time
@@ -83,6 +84,39 @@ def _compact_component_gl(component: pedigree_components.PreparedComponentPedigr
     ], axis=1))
 
 
+def _score_balanced_transmission(
+        projected, transition, gl, observed, exponent, trios, **kwargs,
+):
+    """Pool tempered and full-strength forward log scores with equal weight.
+
+    Both views use the same markers and transmission model. Tempering before
+    path marginalization suppresses correlated evidence, but can also conceal
+    contradictions that distinguish an observed relative from a missing parent.
+    The full-strength view retains those contradictions. Their average is a
+    composite score, not two independent data sets or a calibrated posterior.
+
+    Reused M0/M1 screening scores are already pooled. Passing those same arrays
+    to both views preserves them, including reductions for unavailable parents.
+    """
+    tempered = pedigree_transmission.score_projected_ragged_quadratic(
+        projected, transition, gl, observed, exponent, trios, **kwargs,
+    )
+    full = pedigree_transmission.score_projected_ragged_quadratic(
+        projected, transition, gl, observed, np.ones_like(exponent), trios,
+        **kwargs,
+    )
+    changes = {
+        name: 0.5 * (getattr(tempered, name) + getattr(full, name))
+        for name in ("zero_observed", "one_observed", "two_observed")
+    }
+    changes.update({
+        name: getattr(tempered, name) + getattr(full, name)
+        for name in ("scoring_seconds", "m0_scoring_seconds",
+                     "m1_scoring_seconds", "m2_scoring_seconds")
+    })
+    return replace(tempered, **changes)
+
+
 def _projected_m1_screen(
         component: pedigree_components.PreparedComponentPedigree,
         exponent: np.ndarray,
@@ -95,7 +129,7 @@ def _projected_m1_screen(
     observed = component.compact_observed
     if model is None or factors is None or observed is None:
         raise pedigree_models.PedigreeEvidenceError(
-            "projected T09 component lacks compact ragged source factors"
+            "projected painting component lacks compact ragged source factors"
         )
     compact_gl = _compact_component_gl(component)
     source_marginal_started = time.perf_counter()
@@ -114,7 +148,7 @@ def _projected_m1_screen(
             component.cache.switch_probabilities[1:]
         ),
     )
-    batch = pedigree_transmission.score_projected_ragged_quadratic(
+    batch = _score_balanced_transmission(
         projected,
         factors.transition,
         compact_gl,
@@ -154,7 +188,7 @@ def _score_projected_component_with_diagnostics(
     observed = component.compact_observed
     if model is None or factors is None or observed is None:
         raise pedigree_models.PedigreeEvidenceError(
-            "projected T09 component lacks compact ragged source factors"
+            "projected painting component lacks compact ragged source factors"
         )
     compact_gl = _compact_component_gl(component)
     if reuse_screen is None:
@@ -184,7 +218,7 @@ def _score_projected_component_with_diagnostics(
         )
         projected = reuse_screen.projected_model
         reuse_scores = reuse_screen.batch_scores
-    batch = pedigree_transmission.score_projected_ragged_quadratic(
+    batch = _score_balanced_transmission(
         projected,
         factors.transition,
         compact_gl,
@@ -222,7 +256,7 @@ def _score_projected_component_with_diagnostics(
     anchored_states = component.ragged_anchored_states
     if anchored_states is None:
         raise pedigree_models.PedigreeEvidenceError(
-            "projected T09 component lacks its anchored-state identity mask"
+            "projected painting component lacks its anchored-state identity mask"
         )
     required_edges = np.ascontiguousarray(
         eligible_parent_mask | eligible_parent_mask.T
@@ -354,7 +388,7 @@ def _score_prepared_chromosome(
         component.source_mode != prepared.source_mode
         for component in prepared.components
     ):
-        raise pedigree_models.PedigreeEvidenceError("prepared T09 component source modes disagree")
+        raise pedigree_models.PedigreeEvidenceError("prepared painting component source modes disagree")
     if ragged_screen_scores is None:
         reuse_by_component = (None,) * len(prepared.components)
     else:
@@ -517,7 +551,7 @@ def _score_prepared_chromosome(
 
 def _compact_chromosome_evidence(
         result: pedigree_components.ComponentPedigreeChromosomeResult,
-) -> pedigree_components.ScoredT09ChromosomeEvidence:
+) -> pedigree_components.ScoredChromosomeEvidence:
     evidence = result.evidence
     scores = result.state_scores
     if evidence is None or scores is None or result.omitted_reason is not None:
@@ -535,7 +569,7 @@ def _compact_chromosome_evidence(
         raise pedigree_models.PedigreeEvidenceError(
             "scored chromosomes require complete C/X structure evidence"
         )
-    return pedigree_components.ScoredT09ChromosomeEvidence(
+    return pedigree_components.ScoredChromosomeEvidence(
         contig=result.contig,
         zero_parent_log_likelihoods=evidence.zero_parent_log_likelihoods,
         one_parent_log_likelihoods=evidence.one_parent_log_likelihoods,
@@ -578,7 +612,7 @@ def _compact_chromosome_evidence(
 
 
 def _chromosome_result_from_scored(
-        chromosome: pedigree_components.ScoredT09ChromosomeEvidence,
+        chromosome: pedigree_components.ScoredChromosomeEvidence,
         trios: np.ndarray,
 ) -> pedigree_components.ComponentPedigreeChromosomeResult:
     evidence = pedigree_models.ParentStateEvidence(
@@ -655,10 +689,10 @@ def _validate_scored_chromosome(
         contig: str,
         n_samples: int,
         n_trios: int,
-) -> pedigree_components.ScoredT09ChromosomeEvidence:
-    if not isinstance(value, pedigree_components.ScoredT09ChromosomeEvidence):
+) -> pedigree_components.ScoredChromosomeEvidence:
+    if not isinstance(value, pedigree_components.ScoredChromosomeEvidence):
         raise pedigree_models.PedigreeEvidenceError(
-            "chromosome evidence callback must return scored T09 evidence"
+            "chromosome evidence callback must return scored painting evidence"
         )
     if value.contig != contig:
         raise pedigree_models.PedigreeEvidenceError("cached chromosome evidence contig mismatch")
@@ -867,7 +901,7 @@ def _adaptive_trio_panel(
     )
 
 
-def score_prepared_t09_parent_state_evidence(
+def score_prepared_parent_state_evidence(
         prepared: pedigree_components.PreparedPedigree,
         *,
         parent_eligibility: Any=None,
@@ -880,10 +914,10 @@ def score_prepared_t09_parent_state_evidence(
         candidate_source_mode: str | None=None,
         evidence_identity: Mapping[str, Any] | None=None,
         chromosome_evidence_callback: Callable[[
-            pedigree_components.Stage10ChromosomeEvidenceRequest,
-            Callable[[], pedigree_components.ScoredT09ChromosomeEvidence],
-        ], pedigree_components.ScoredT09ChromosomeEvidence] | None=None,
-) -> pedigree_components.ScoredT09ParentStateEvidence:
+            pedigree_components.ChromosomeEvidenceRequest,
+            Callable[[], pedigree_components.ScoredChromosomeEvidence],
+        ], pedigree_components.ScoredChromosomeEvidence] | None=None,
+) -> pedigree_components.ScoredParentStateEvidence:
     """Compute or resume all expensive score-stage evidence.
 
     The callback is invoked once per informative physical chromosome after the
@@ -898,7 +932,7 @@ def score_prepared_t09_parent_state_evidence(
     source_mode = pedigree_components._resolve_source_mode(settings, candidate_source_mode)
 
     if not isinstance(prepared, pedigree_components.PreparedPedigree):
-        raise pedigree_models.PedigreeEvidenceError("prepared must be a PreparedT09PedigreeRun")
+        raise pedigree_models.PedigreeEvidenceError("prepared must be a PreparedPedigreeRun")
     if (
         not isinstance(prepared.sample_ids, tuple)
         or not prepared.sample_ids
@@ -906,7 +940,7 @@ def score_prepared_t09_parent_state_evidence(
         or not isinstance(prepared.chromosomes, tuple)
         or not isinstance(prepared.omitted_chromosomes, tuple)
     ):
-        raise pedigree_models.PedigreeEvidenceError("prepared T09 run has an invalid ordered layout")
+        raise pedigree_models.PedigreeEvidenceError("prepared painting run has an invalid ordered layout")
     names = tuple(value.contig for value in prepared.chromosomes)
     omitted_names = tuple(value.contig for value in prepared.omitted_chromosomes)
     if (
@@ -919,7 +953,7 @@ def score_prepared_t09_parent_state_evidence(
         )
     ):
         raise pedigree_models.PedigreeEvidenceError(
-            "prepared T09 chromosomes have inconsistent names or sample order"
+            "prepared painting chromosomes have inconsistent names or sample order"
         )
     if (
         prepared.markers_per_information_block
@@ -928,14 +962,14 @@ def score_prepared_t09_parent_state_evidence(
         != settings.parent_state_effective_markers_per_information_block
     ):
         raise pedigree_models.PedigreeEvidenceError(
-            "prepared T09 information tempering does not match config"
+            "prepared painting information tempering does not match config"
         )
     if (
         prepared.source_mode != source_mode
         or any(value.source_mode != source_mode for value in prepared.chromosomes)
     ):
         raise pedigree_models.PedigreeEvidenceError(
-            "prepared T09 source mode does not match requested inference mode"
+            "prepared painting source mode does not match requested inference mode"
         )
     if not np.isfinite(mismatch_penalty) or mismatch_penalty >= 0.0:
         raise pedigree_models.PedigreeEvidenceError("mismatch_penalty must be finite and negative")
@@ -1012,6 +1046,7 @@ def score_prepared_t09_parent_state_evidence(
         mismatch_penalty=float(mismatch_penalty),
         external_identity=evidence_identity,
     )
+    score_identity["likelihood_recipe"] = "balanced-tempered-and-full-forward-v1"
     run_digest = pedigree_components._identity_digest(score_identity)
 
     scored_chromosomes = []
@@ -1023,7 +1058,7 @@ def score_prepared_t09_parent_state_evidence(
         def produce(
                 chromosome=chromosome,
                 screen_scores=screen_scores,
-        ) -> pedigree_components.ScoredT09ChromosomeEvidence:
+        ) -> pedigree_components.ScoredChromosomeEvidence:
             nonlocal produced_result
             produced_result = _score_prepared_chromosome(
                 chromosome,
@@ -1040,7 +1075,7 @@ def score_prepared_t09_parent_state_evidence(
             "contig": chromosome.contig,
             "source_identity": getattr(chromosome, "source_identity", None),
         }
-        request = pedigree_components.Stage10ChromosomeEvidenceRequest(
+        request = pedigree_components.ChromosomeEvidenceRequest(
             chromosome.contig,
             score_identity,
             pedigree_components._identity_digest(chromosome_identity),
@@ -1059,7 +1094,7 @@ def score_prepared_t09_parent_state_evidence(
         scored_chromosomes.append(scored_chromosome)
         runtime_results.append(produced_result)
 
-    return pedigree_components.ScoredT09ParentStateEvidence(
+    return pedigree_components.ScoredParentStateEvidence(
         sample_ids=prepared.sample_ids,
         contig_names=names,
         chromosomes=tuple(scored_chromosomes),
@@ -1078,19 +1113,19 @@ def score_prepared_t09_parent_state_evidence(
     )
 
 
-def infer_scored_t09_parent_state_evidence(
-        scored: pedigree_components.ScoredT09ParentStateEvidence,
+def infer_scored_parent_state_evidence(
+        scored: pedigree_components.ScoredParentStateEvidence,
         *,
         parent_eligibility: Any=None,
         config: module_pedigree_config.PedigreeConfig | None=None,
         n_workers: int | None=None,
 ) -> pedigree_components.ComponentPedigreeRunResult:
-    """Run decision policy and bootstraps without T09/raw/scorer reload."""
+    """Run decision policy and bootstraps without painting/raw/scorer reload."""
 
     inference_started = time.perf_counter()
-    if not isinstance(scored, pedigree_components.ScoredT09ParentStateEvidence):
+    if not isinstance(scored, pedigree_components.ScoredParentStateEvidence):
         raise pedigree_models.PedigreeEvidenceError(
-            "scored must be a ScoredT09ParentStateEvidence"
+            "scored must be a ScoredParentStateEvidence"
         )
     settings = (config or module_pedigree_config.PedigreeConfig()).validated()
     score_identity = pedigree_components._canonical_identity(
@@ -1170,6 +1205,9 @@ def infer_scored_t09_parent_state_evidence(
         n_workers=n_workers,
         **scaffold_inputs,
     )
+    from .explanations import parent_search_diagnostics
+    pedigree_result.search_diagnostics = parent_search_diagnostics(
+        scored, parent_eligibility, pedigree_result.tier_b_relationships)
     parent_state_seconds = time.perf_counter() - parent_state_started
 
     replay_seconds = time.perf_counter() - inference_started
@@ -1199,7 +1237,7 @@ def infer_scored_t09_parent_state_evidence(
     )
 
 
-def infer_prepared_t09_component_pedigree(
+def infer_prepared_component_pedigree(
         prepared: pedigree_components.PreparedPedigree,
         *,
         parent_eligibility: Any=None,
@@ -1213,16 +1251,16 @@ def infer_prepared_t09_component_pedigree(
         candidate_source_mode: str | None=None,
         evidence_identity: Mapping[str, Any] | None=None,
         chromosome_evidence_callback: Callable[[
-            pedigree_components.Stage10ChromosomeEvidenceRequest,
-            Callable[[], pedigree_components.ScoredT09ChromosomeEvidence],
-        ], pedigree_components.ScoredT09ChromosomeEvidence] | None=None,
+            pedigree_components.ChromosomeEvidenceRequest,
+            Callable[[], pedigree_components.ScoredChromosomeEvidence],
+        ], pedigree_components.ScoredChromosomeEvidence] | None=None,
 ) -> pedigree_components.ComponentPedigreeRunResult:
     """Score prepared chromosomes, then apply parent-state decision policy."""
 
     settings = (config or module_pedigree_config.PedigreeConfig()).validated()
     source_mode = pedigree_components._resolve_source_mode(settings, candidate_source_mode)
 
-    scored = score_prepared_t09_parent_state_evidence(
+    scored = score_prepared_parent_state_evidence(
         prepared,
         parent_eligibility=parent_eligibility,
         config=settings,
@@ -1235,7 +1273,7 @@ def infer_prepared_t09_component_pedigree(
         evidence_identity=evidence_identity,
         chromosome_evidence_callback=chromosome_evidence_callback,
     )
-    return infer_scored_t09_parent_state_evidence(
+    return infer_scored_parent_state_evidence(
         scored,
         parent_eligibility=parent_eligibility,
         config=settings,

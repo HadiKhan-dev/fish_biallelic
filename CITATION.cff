@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite this repository. A paper citation will be added when available."
+type: software
+license: MIT
+title: "Founder haplotype reconstruction"
+authors:
+  - family-names: Khan
+    given-names: Hadi
+    orcid: "https://orcid.org/0000-0001-6222-2088"
+repository-code: "https://github.com/HadiKhan-dev/fish_biallelic"
+abstract: "Missing-aware founder-haplotype reconstruction, sample painting, pedigree inference, phase refinement and recombination-map estimation for experimental crosses."
+keywords:
+  - haplotype reconstruction
+  - experimental crosses
+  - low-coverage sequencing
+  - pedigree inference

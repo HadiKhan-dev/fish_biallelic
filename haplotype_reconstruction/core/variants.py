@@ -96,7 +96,7 @@ def generate_block_coordinates(vcf_file_path, contig,
 
 
 def generate_snp_count_coordinates(vcf_file_path, contig,
-                                   snps_per_block=200, snp_shift=100):
+                                   snps_per_block=200, snp_shift=100, strict_input=False):
     """
     Generator that calculates coordinates for blocks based on SNP COUNT.
     Scans the VCF to find boundaries such that each block contains 'snps_per_block' variants.
@@ -110,8 +110,13 @@ def generate_snp_count_coordinates(vcf_file_path, contig,
     positions = []
     try:
         for v in vcf(contig):
+            if strict_input and (len(v.ALT) != 1 or len(v.REF) != 1 or len(v.ALT[0]) != 1
+                                 or (positions and v.POS <= positions[-1])):
+                raise ValueError(f"{contig}:{v.POS}: require unique, sorted, biallelic SNPs")
             positions.append(v.POS)
     except Exception:
+        if strict_input:
+            raise
         pass  # Handle empty contigs or read errors gracefully
 
     vcf.close()
@@ -141,7 +146,7 @@ def generate_snp_count_coordinates(vcf_file_path, contig,
 def process_single_block(vcf_path, chrom, start, end,
                                 min_frequency=0.0,
                                 read_error_prob=core_config.DEFAULT_READ_ERROR_PROBABILITY,
-                                min_total_reads=5):
+                                min_total_reads=5, strict_input=False):
     """
     WORKER FUNCTION:
     Opens the VCF, queries the specific region, and returns Numpy arrays.
@@ -184,6 +189,8 @@ def process_single_block(vcf_path, chrom, start, end,
             if ad is None or (ad.shape[1] == 1 and np.all(ad < 0)):
                 n_samples = len(vcf.samples)
                 ad = np.zeros((n_samples, 2), dtype=np.int32)
+            elif strict_input and ad.shape != (len(vcf.samples), 2):
+                raise ValueError(f"{chrom}:{variant.POS}: AD must have REF and ALT depths")
             elif ad.shape[1] > 2:
                 # If multi-allelic, just take Ref and First Alt
                 ad = ad[:,:2]
@@ -191,7 +198,9 @@ def process_single_block(vcf_path, chrom, start, end,
             reads_list.append(ad)
             positions_list.append(variant.POS)
     except Exception:
-        # Gracefully handle cases where region queries might fail
+        if strict_input:
+            raise
+        # Preserve the existing entry points; the general runner reports input errors.
         pass
 
     vcf.close()
@@ -230,7 +239,7 @@ def cleanup_block_reads_list(vcf_file_path, contig,
                                     num_processes=16,
                                     min_frequency=0.0,
                                     read_error_prob=core_config.DEFAULT_READ_ERROR_PROBABILITY,
-                                    min_total_reads=5):
+                                    min_total_reads=5, strict_input=False):
     """
     Multiprocessing driver.
     Returns a GenomicData object containing lists of results.
@@ -246,7 +255,7 @@ def cleanup_block_reads_list(vcf_file_path, contig,
         print(f"Generating coordinates by SNP Count ({snps_per_block} per block)...")
         all_coords = list(generate_snp_count_coordinates(vcf_file_path, contig,
                                                          snps_per_block=snps_per_block,
-                                                         snp_shift=snp_shift))
+                                                         snp_shift=snp_shift, strict_input=strict_input))
     else:
         # Standard physical distance blocking
         all_coords = list(generate_block_coordinates(vcf_file_path, contig,
@@ -263,7 +272,7 @@ def cleanup_block_reads_list(vcf_file_path, contig,
     worker = partial(process_single_block,
                      min_frequency=min_frequency,
                      read_error_prob=read_error_prob,
-                     min_total_reads=min_total_reads)
+                     min_total_reads=min_total_reads, strict_input=strict_input)
 
     with core_parallel.safe_forkserver_pool(num_processes) as pool:
         results = pool.starmap(worker, selected_coords)

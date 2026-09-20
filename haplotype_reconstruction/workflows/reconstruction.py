@@ -1,5 +1,6 @@
 """Connect local feedback, component assembly, painting and evidence caches."""
 from __future__ import annotations
+from ..core.run_record import timed_stage
 from haplotype_reconstruction import PACKAGE_ROOT
 
 import copy
@@ -8,6 +9,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
+from pathlib import Path
 
 from typing import Any, Mapping
 import numpy as np
@@ -16,18 +18,18 @@ import haplotype_reconstruction.painting.components as painting_components
 from haplotype_reconstruction.core import raw_evidence
 from haplotype_reconstruction.workflows import block_feedback
 
-STAGE2_PRODUCTION_SCHEMA = "stage2-production-v4"
+RECONSTRUCTION_SCHEMA = "assembly-production-v4"
 
 
-STAGE2_PRODUCTION_BACKEND = (
-    "feedback-selected-stage1-preprocess-hierarchy-unified-open-set-painting-t09-v4"
+RECONSTRUCTION_BACKEND = (
+    "feedback-selected-discovery-preprocess-hierarchy-unified-open-set-painting-painting_checkpoint-v4"
 )
 
 
-PAINTING_STAGE = "09_painting"
+PAINTING_STAGE = "painting"
 
 
-STAGE2_PAINTING_CODE_FILES = (
+PAINTING_CODE_FILES = (
     'core/numerics.py',
     'core/genetic_map.py',
     'painting/components.py',
@@ -43,7 +45,7 @@ EXACT_OBSERVED_MASK_MODE = "positive_read_depth_v1"
 SUPPORTED_GENOTYPE_EVIDENCE_MODE = "normalized_raw_linear_likelihood_v1"
 
 
-STAGE2_PRODUCTION_CODE_FILES = (
+RECONSTRUCTION_CODE_FILES = (
     'painting/components.py',
     'core/runtime.py',
     'core/raw_evidence.py',
@@ -112,7 +114,7 @@ class ReconstructionConfig:
 
 
 @dataclass(frozen=True)
-class Stage2ContigRunSummary:
+class ReconstructionSummary:
     """Small operational summary; scientific detail remains in the checkpoint."""
 
     contig: str
@@ -156,77 +158,77 @@ def _canonical_sample_ids(sample_ids) -> tuple[str, ...]:
     return result
 
 
-def stage2_inputs_from_stage1(
+def assembly_inputs_from_discovery(
     payload,
     *,
-    expected_stage1_identity,
+    expected_discovery_identity,
     expected_sample_ids,
 ):
-    """Validate one Stage-1 payload and return canonical Stage-2 inputs."""
+    """Validate one block discovery payload and return canonical assembly inputs."""
 
     if not isinstance(payload, Mapping):
-        raise TypeError("Stage-1 payload must be a mapping")
+        raise TypeError("block discovery payload must be a mapping")
     required = (
         "block_results", "global_probs", "global_sites",
         "global_observed_mask", "observed_call_mask_mode",
     )
     missing = [name for name in required if name not in payload]
     if missing:
-        raise KeyError("Stage-1 payload lacks: " + ", ".join(missing))
+        raise KeyError("block discovery payload lacks: " + ", ".join(missing))
 
     expected_identity = _canonical_mapping(
-        expected_stage1_identity, "expected_stage1_identity"
+        expected_discovery_identity, "expected_discovery_identity"
     )
     observed_identity = _canonical_mapping({
-        "backend": payload.get("stage1_backend"),
-        "config": payload.get("stage1_config"),
-    }, "Stage-1 identity")
+        "backend": payload.get("discovery_backend"),
+        "config": payload.get("discovery_config"),
+    }, "block discovery identity")
     if observed_identity != expected_identity:
-        raise RuntimeError("Stage-1 payload identity mismatch")
+        raise RuntimeError("block discovery payload identity mismatch")
 
     blocks = payload["block_results"]
     if not isinstance(blocks, core_haplotypes.BlockResults) or not blocks:
-        raise TypeError("Stage-1 block_results must be a nonempty BlockResults")
+        raise TypeError("block discovery block_results must be a nonempty BlockResults")
     probabilities = np.asarray(payload["global_probs"])
     sites = np.asarray(payload["global_sites"])
     sample_ids = _canonical_sample_ids(expected_sample_ids)
     if probabilities.ndim != 3 or probabilities.shape[2] != 3:
         raise ValueError(
-            "Stage-1 global_probs must have shape (samples, sites, 3)"
+            "block discovery global_probs must have shape (samples, sites, 3)"
         )
     if probabilities.shape[0] != len(sample_ids):
         raise ValueError(
-            "Stage-1 probability sample axis does not match sample IDs"
+            "block discovery probability sample axis does not match sample IDs"
         )
     if sites.shape != (probabilities.shape[1],):
-        raise ValueError("Stage-1 global_sites does not match global_probs")
+        raise ValueError("block discovery global_sites does not match global_probs")
     if payload.get("genotype_evidence_mode") != SUPPORTED_GENOTYPE_EVIDENCE_MODE:
         raise RuntimeError(
-            "Stage-1 payload lacks normalized raw-likelihood provenance"
+            "block discovery payload lacks normalized raw-likelihood provenance"
         )
 
     mask = np.ascontiguousarray(payload["global_observed_mask"], dtype=np.bool_)
     if mask.shape != probabilities.shape[:2]:
         raise ValueError(
-            "Stage-1 global_observed_mask must have shape (samples, sites)"
+            "block discovery global_observed_mask must have shape (samples, sites)"
         )
     mask_mode = payload["observed_call_mask_mode"]
     if mask_mode != EXACT_OBSERVED_MASK_MODE:
-        raise RuntimeError("Stage-1 observation-mask provenance mismatch")
+        raise RuntimeError("block discovery observation-mask provenance mismatch")
 
     return blocks, probabilities, sites, mask, mask_mode
 
 
-def _validate_stage1_global_source(
+def _validate_discovery_global_source(
     checkpoint_store,
     source_stage,
     contigs,
     ordered_ids,
-    stage1_identity,
+    discovery_identity,
     *,
     require_complete,
 ):
-    """Bind cached Stage-1 arrays to persisted sample and contig order."""
+    """Bind cached block discovery arrays to persisted sample and contig order."""
 
     if require_complete and not checkpoint_store.stage_complete(source_stage):
         raise RuntimeError(f"{source_stage} is not marked complete")
@@ -243,12 +245,12 @@ def _validate_stage1_global_source(
         if stored_contigs != contigs:
             raise RuntimeError(f"{source_stage} cached contig order mismatch")
         observed_identity = _canonical_mapping({
-            "backend": payload.get("stage1_backend"),
-            "config": payload.get("stage1_config"),
-        }, "global Stage-1 identity")
+            "backend": payload.get("discovery_backend"),
+            "config": payload.get("discovery_config"),
+        }, "global block discovery identity")
         if observed_identity != _canonical_mapping(
-                stage1_identity, "stage1_identity"):
-            raise RuntimeError(f"{source_stage} global Stage-1 identity mismatch")
+                discovery_identity, "discovery_identity"):
+            raise RuntimeError(f"{source_stage} global block discovery identity mismatch")
         if payload.get("genotype_evidence_mode") != (
                 SUPPORTED_GENOTYPE_EVIDENCE_MODE):
             raise RuntimeError(
@@ -262,15 +264,15 @@ def _production_code_identity() -> dict[str, str]:
     root = PACKAGE_ROOT
     return {
         filename: hashlib.sha256((root / filename).read_bytes()).hexdigest()
-        for filename in STAGE2_PRODUCTION_CODE_FILES
+        for filename in RECONSTRUCTION_CODE_FILES
     }
 
 
-def stage2_painting_code_identity(digest_overrides=None) -> dict[str, str]:
+def assembly_painting_code_identity(digest_overrides=None) -> dict[str, str]:
     """Hash the scientific component-painting implementation closure."""
 
     overrides = {} if digest_overrides is None else dict(digest_overrides)
-    unknown = set(overrides) - set(STAGE2_PAINTING_CODE_FILES)
+    unknown = set(overrides) - set(PAINTING_CODE_FILES)
     if unknown:
         raise ValueError(
             "unknown painting code identity override files: "
@@ -278,7 +280,7 @@ def stage2_painting_code_identity(digest_overrides=None) -> dict[str, str]:
         )
     root = PACKAGE_ROOT
     result = {}
-    for filename in STAGE2_PAINTING_CODE_FILES:
+    for filename in PAINTING_CODE_FILES:
         if filename in overrides:
             value = str(overrides[filename]).lower()
             if (len(value) != 64
@@ -294,7 +296,7 @@ def stage2_painting_code_identity(digest_overrides=None) -> dict[str, str]:
     return result
 
 
-def stage2_painting_product_identity(
+def assembly_painting_product_identity(
         config, *, code_digest_overrides=None, chromosome_map=None) -> dict[str, Any]:
     """Return the scientific painting identity, excluding scheduling knobs."""
 
@@ -337,7 +339,7 @@ def stage2_painting_product_identity(
                 "positive-depth-raw-gl-normalized-exact-neutral-v2"
             ),
         },
-        stage2_painting_code_identity(code_digest_overrides),
+        assembly_painting_code_identity(code_digest_overrides),
     )
 
 
@@ -380,10 +382,10 @@ def _painting_runtime_provenance(
     }
 
 
-def stage2_production_stage_identity(
+def assembly_production_stage_identity(
     config,
     *,
-    stage1_identity,
+    discovery_identity,
     sample_ids,
     contigs,
     source_stage,
@@ -397,9 +399,9 @@ def stage2_production_stage_identity(
     if not isinstance(config, ReconstructionConfig):
         raise TypeError("config must be a ReconstructionConfig")
     return _canonical_mapping({
-        "schema": STAGE2_PRODUCTION_SCHEMA,
-        "backend": STAGE2_PRODUCTION_BACKEND,
-        "stage1_identity": _canonical_mapping(stage1_identity, "stage1_identity"),
+        "schema": RECONSTRUCTION_SCHEMA,
+        "backend": RECONSTRUCTION_BACKEND,
+        "discovery_identity": _canonical_mapping(discovery_identity, "discovery_identity"),
         "ordered_sample_ids": _canonical_sample_ids(sample_ids),
         "ordered_contigs": tuple(str(value) for value in contigs),
         "source_stage": str(source_stage),
@@ -415,18 +417,18 @@ def stage2_production_stage_identity(
                     config.release_config
                 )
             ),
-            "painting_product": stage2_painting_product_identity(config),
+            "painting_product": assembly_painting_product_identity(config),
             **({"genetic_maps": genetic_maps.identity()} if genetic_maps is not None else {}),
         },
         "release_code_identity_sha256": (
-            assembly_pipeline.stage2_release_code_identity()
+            assembly_pipeline.assembly_release_code_identity()
         ),
         "production_code_identity_sha256": _production_code_identity(),
         "downstream_boundary": {
             "component_local_founder_ids": True,
             "component_aware_downstream_supported": True,
         },
-    }, "Stage-2 production identity")
+    }, "assembly production identity")
 
 
 def _painting_kwargs(config, chromosome_map=None):
@@ -451,7 +453,7 @@ def _checkpoint_summary(contig, checkpoint, resumed, mask_mode):
         int(np.sum(component.evidence_eligible_sample_mask))
         for component in bundle.components
     )
-    return Stage2ContigRunSummary(
+    return ReconstructionSummary(
         contig=str(contig),
         resumed=bool(resumed),
         observed_mask_mode=str(mask_mode),
@@ -461,12 +463,13 @@ def _checkpoint_summary(contig, checkpoint, resumed, mask_mode):
     )
 
 
+@timed_stage("reconstruction", "contig")
 def _run_or_resume_one_contig(
     checkpoint_store,
     contig,
     ordered_ids,
     *,
-    stage1_identity,
+    discovery_identity,
     config,
     source_stage,
     probabilities_stage,
@@ -503,7 +506,7 @@ def _run_or_resume_one_contig(
             contig,
             ordered_ids,
             source,
-            stage1_identity=stage1_identity,
+            discovery_identity=discovery_identity,
             config=config,
             target_stage=target_stage,
             painter_factory=painter_factory,
@@ -526,7 +529,7 @@ def _run_or_resume_loaded_contig(
     ordered_ids,
     source,
     *,
-    stage1_identity,
+    discovery_identity,
     config,
     target_stage,
     painter_factory,
@@ -534,9 +537,9 @@ def _run_or_resume_loaded_contig(
     raw_evidence_source=None,
 ):
     blocks, probabilities, sites, observed, mask_mode = (
-        stage2_inputs_from_stage1(
+        assembly_inputs_from_discovery(
             source,
-            expected_stage1_identity=stage1_identity,
+            expected_discovery_identity=discovery_identity,
             expected_sample_ids=ordered_ids,
         )
     )
@@ -548,18 +551,18 @@ def _run_or_resume_loaded_contig(
             blocks, probabilities, sites, observed)
     blocks, feedback_identity = block_feedback.run_block_feedback(
         checkpoint_store, contig, blocks, probabilities, sites, observed, ordered_ids,
-        stage1_identity=stage1_identity, assembly_config=config.release_config,
+        discovery_identity=discovery_identity, assembly_config=config.release_config,
         config=config.feedback_config, chromosome_map=chromosome_map,
         chromosome_evidence=chromosome_evidence)
-    release_stage1_identity = _canonical_mapping(
-        stage1_identity, "stage1_identity"
+    release_discovery_identity = _canonical_mapping(
+        discovery_identity, "discovery_identity"
     )
-    release_stage1_identity["observed_call_mask_mode"] = mask_mode
-    release_stage1_identity["block_feedback"] = feedback_identity
+    release_discovery_identity["observed_call_mask_mode"] = mask_mode
+    release_discovery_identity["block_feedback"] = feedback_identity
     expected_release_identity = (
-        assembly_pipeline.stage2_release_identity_record(
+        assembly_pipeline.assembly_release_identity_record(
             config.release_config,
-            stage1_identity=release_stage1_identity,
+            discovery_identity=release_discovery_identity,
             sample_ids=ordered_ids,
             input_blocks=blocks,
             global_probs=probabilities,
@@ -569,26 +572,29 @@ def _run_or_resume_loaded_contig(
             chromosome_evidence=chromosome_evidence,
         )
     )
-    expected_painting_identity = stage2_painting_product_identity(
+    expected_painting_identity = assembly_painting_product_identity(
         config, chromosome_map=chromosome_map)
     runtime_provenance = _painting_runtime_provenance(
         config, checkpoint_store.nthreads
     )
 
     if checkpoint_store.contig_done(target_stage, contig):
-        checkpoint = painting_checkpoints.validate_t09_component_checkpoint(
+        checkpoint = painting_checkpoints.validate_painting_checkpoint(
             checkpoint_store.load_contig(target_stage, contig),
             expected_sample_ids=ordered_ids,
             expected_release_identity=expected_release_identity,
             expected_painting_product_identity=expected_painting_identity,
         )
+        from ..assembly.support import write_founder_support
+        write_founder_support(checkpoint, sites, observed,
+                              Path(checkpoint_store.root) / target_stage / "reports" / contig)
         return _checkpoint_summary(contig, checkpoint, True, mask_mode)
 
     # Release pools and painting pools never overlap. In particular, no idle
     # painter workers retain memory or process slots during hierarchical work.
     release_checkpoints = assembly_checkpoints.AssemblyCheckpointStore(
         checkpoint_store,
-        work_stage=f"{target_stage}_release_work",
+        work_stage=("assembly" if target_stage == PAINTING_STAGE else f"{target_stage}_assembly"),
         contig=contig,
     )
     with core_parallel.numba_thread_scope(config.release_config.num_processes):
@@ -598,7 +604,7 @@ def _run_or_resume_loaded_contig(
             sites,
             observed,
             ordered_ids,
-            stage1_identity=release_stage1_identity,
+            discovery_identity=release_discovery_identity,
             config=config.release_config,
             release_checkpoints=release_checkpoints,
             chromosome_map=chromosome_map,
@@ -606,7 +612,7 @@ def _run_or_resume_loaded_contig(
         )
     if release.get("identity") != expected_release_identity:
         raise RuntimeError(
-            f"{contig}: Stage-2 release identity changed during execution"
+            f"{contig}: assembly release identity changed during execution"
         )
     components = release.get("components")
     manifest = release.get("component_manifest")
@@ -632,7 +638,7 @@ def _run_or_resume_loaded_contig(
     runtime_provenance = _painting_runtime_provenance(
         config, checkpoint_store.nthreads, painting_bundle
     )
-    checkpoint = painting_checkpoints.build_t09_component_checkpoint(
+    checkpoint = painting_checkpoints.build_painting_checkpoint(
         manifest,
         painting_bundle,
         ordered_ids,
@@ -641,12 +647,15 @@ def _run_or_resume_loaded_contig(
         runtime_provenance,
     )
     checkpoint_store.save_contig(target_stage, contig, checkpoint)
-    checkpoint = painting_checkpoints.validate_t09_component_checkpoint(
+    checkpoint = painting_checkpoints.validate_painting_checkpoint(
         checkpoint_store.load_contig(target_stage, contig),
         expected_sample_ids=ordered_ids,
         expected_release_identity=expected_release_identity,
         expected_painting_product_identity=expected_painting_identity,
     )
+    from ..assembly.support import write_founder_support
+    write_founder_support(checkpoint, sites, observed,
+                          Path(checkpoint_store.root) / target_stage / "reports" / contig)
     return _checkpoint_summary(contig, checkpoint, False, mask_mode)
 
 
@@ -655,9 +664,9 @@ def run_reconstruction(
     contigs,
     sample_ids,
     *,
-    stage1_identity,
+    discovery_identity,
     config,
-    source_stage="T00_founder_templates",
+    source_stage="block_discovery",
     target_stage=PAINTING_STAGE,
     probabilities_stage=None,
     probabilities_key="global_probs",
@@ -666,7 +675,7 @@ def run_reconstruction(
     painter_factory=painting_components.ComponentPainter,
     genetic_maps=None,
 ):
-    """Run the canonical Stage-2 route and atomically checkpoint every contig."""
+    """Run the canonical assembly route and atomically checkpoint every contig."""
 
     if not isinstance(config, ReconstructionConfig):
         raise TypeError("config must be a ReconstructionConfig")
@@ -704,17 +713,17 @@ def run_reconstruction(
             f"({available})"
         )
 
-    _validate_stage1_global_source(
+    _validate_discovery_global_source(
         checkpoint_store,
         source_stage,
         all_contigs,
         ordered_ids,
-        stage1_identity,
+        discovery_identity,
         require_complete=publish_completion,
     )
-    stage_identity = stage2_production_stage_identity(
+    stage_identity = assembly_production_stage_identity(
         config,
-        stage1_identity=stage1_identity,
+        discovery_identity=discovery_identity,
         sample_ids=ordered_ids,
         contigs=all_contigs,
         source_stage=source_stage,
@@ -738,7 +747,7 @@ def run_reconstruction(
             checkpoint_store,
             contig,
             ordered_ids,
-            stage1_identity=stage1_identity,
+            discovery_identity=discovery_identity,
             config=config,
             source_stage=source_stage,
             probabilities_stage=probabilities_stage,

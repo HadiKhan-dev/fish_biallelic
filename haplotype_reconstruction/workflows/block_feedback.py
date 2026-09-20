@@ -5,6 +5,7 @@ Selection follows each round, and its panels seed the next context assembly.
 Final L1–L4 assembly is owned by reconstruction.py and consumes the final
 selected local panels.
 """
+from ..core.run_record import timed_stage
 from dataclasses import asdict, dataclass, field, replace
 import gc
 import hashlib
@@ -57,12 +58,13 @@ def _discovery_config(record):
     return search.ReversibleCavitySearchConfig(**values)
 
 
+@timed_stage("block_feedback", "contig")
 def run_block_feedback(store, contig, originals, gl, sites, observed, sample_ids,
-                       *, stage1_identity, assembly_config, config, chromosome_map=None,
+                       *, discovery_identity, assembly_config, config, chromosome_map=None,
                        chromosome_evidence=None):
     """Return selected local blocks and their mode-specific scientific identity.
 
-Raw Stage-1 files are never replaced. The initial L1 context and raw proposals
+Raw block discovery files are never replaced. The initial L1 context and raw proposals
 are shared between modes. Each round's selection, and the second context and
 raw proposals, are mode-specific because selected L1 panels feed that context.
 Only the outer reconstruction runner publishes genome-wide completion.
@@ -74,8 +76,8 @@ Only the outer reconstruction runner publishes genome-wide completion.
         founder_refinement_config=FounderRefinementConfig(enabled=False))
     identity = scientific_identity(config)
     mode = identity["config"].pop("selection")
-    original_identity = assembly.stage2_release_identity_record(assembly_config,
-        stage1_identity=stage1_identity, sample_ids=sample_ids, input_blocks=originals,
+    original_identity = assembly.assembly_release_identity_record(assembly_config,
+        discovery_identity=discovery_identity, sample_ids=sample_ids, input_blocks=originals,
         global_probs=gl, global_sites=sites, global_observed_mask=observed,
         chromosome_map=chromosome_map, chromosome_evidence=chromosome_evidence)
     latent = hashlib.sha256()
@@ -85,7 +87,7 @@ Only the outer reconstruction runner publishes genome-wide completion.
             latent.update(assembly._array_digest(fitted.haplotypes).encode())
     identity.update(source=original_identity, original_latent_sha256=latent.hexdigest())
     selected_identity = dict(identity, selection=mode, feedback_level=2)
-    final_io = AssemblyCheckpointStore(store, work_stage=f"02_feedback_{mode}_l2", contig=contig)
+    final_io = AssemblyCheckpointStore(store, work_stage=f"feedback_{mode}_l2", contig=contig)
     final_io.bind(selected_identity)
     saved = final_io.load("selected")
     if saved is not None:
@@ -97,11 +99,11 @@ Only the outer reconstruction runner publishes genome-wide completion.
                    rate=assembly_config.recombination_rate * assembly_config.n_generations,
                    max_k=config.maximum_context_founders)
     selection_config = CandidateSelectionConfig(
-        discovery=_discovery_config(stage1_identity["config"]), criterion="bic")
+        discovery=_discovery_config(discovery_identity["config"]), criterion="bic")
     selected_rounds = []
     current = originals
     for level in (1, 2):
-        selection_stage = f"02_feedback_{mode}_l{level}"
+        selection_stage = f"feedback_{mode}_l{level}"
         selection_identity = dict(identity, selection=mode, feedback_level=level)
         selection_io = AssemblyCheckpointStore(store, work_stage=selection_stage, contig=contig)
         selection_io.bind(selection_identity)
@@ -112,7 +114,7 @@ Only the outer reconstruction runner publishes genome-wide completion.
             print(f"[Feedback] {contig}: resumed L{level} {mode} selected panels", flush=True)
             continue
 
-        stage = "02_feedback_l1" if level == 1 else selection_stage
+        stage = "feedback_l1" if level == 1 else selection_stage
         pass_identity = dict(identity, feedback_level=level)
         if level == 2:
             pass_identity["selection"] = mode
@@ -127,7 +129,7 @@ Only the outer reconstruction runner publishes genome-wide completion.
             assembly_io = AssemblyCheckpointStore(store, work_stage=stage + "_assembly", contig=contig)
             with parallel.numba_thread_scope(cpus):
                 context = assembly.assemble_chromosome(current, gl, sites, observed, sample_ids,
-                    stage1_identity=dict(stage1_identity, feedback_pass=pass_identity),
+                    discovery_identity=dict(discovery_identity, feedback_pass=pass_identity),
                     config=replace(assembly_config, max_level=level),
                     release_checkpoints=assembly_io, chromosome_map=chromosome_map,
                     chromosome_evidence=chromosome_evidence)

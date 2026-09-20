@@ -171,7 +171,7 @@ or generation labels. It retains the panel scorer's normalized likelihoods,
 for a change of sample diplotype. Unlike the binned panel scorer, acceptance
 permits sample state changes at every SNP. This is a finer-discretization model
 change, not merely a faster evaluation of the binned model. It is an internal
-assembly fitting HMM, not the homologue-specific T09 painter, a posterior phase
+assembly fitting HMM, not the homologue-specific painting painter, a posterior phase
 confidence, or a recombination-map estimator.
 
 Fixed-painting row edits provide cheap proposals. Conditional beams vary one
@@ -417,12 +417,39 @@ top-20 parent panel keeps candidate-pair evaluation bounded per sample. The
 parent-state model distinguishes zero, one and two observed parents. A missing
 biological parent is not replaced by an unsupported candidate.
 
-T10 uses [finite direction and family evidence](pedigree_direction.md) rather
+The genetic score averages two forward log scores with equal weight:
+`s(H) = 0.5 * log Z_eta(H) + 0.5 * log Z_1(H)`, for each M0/M1/M2
+configuration `H`. Both use the same selected markers, genotype likelihoods,
+painting-derived candidate sources, and transmission transitions. In
+`Z_eta`, the existing child/bin information exponent tempers emissions
+**before** summing over transmission paths; `Z_1` uses full-strength
+emissions. Tempering before path marginalization can suppress the
+contradictions that separate a missing parent from a related observed
+candidate. The second view preserves that information; retaining the first
+view improved robustness in the noisy-read control.
+
+This is a composite score over alternative evidence-weighting assumptions,
+not independent replicated data or an exact calibrated likelihood. The
+equal weight is fixed, not selected per fish or fitted using pedigree truth.
+Both candidate screening and final M0/M1/M2 scoring use the same pool.
+Wholly missing child observations remain neutral; an entirely uninformative
+candidate adds no second-parent evidence. Projected sources and pooled M0/M1
+screen scores are reused, preserving quadratic founder-state scaling.
+The score recipe has its own checkpoint identity: existing preparation can
+be reused, but old genetic scores are not silently treated as the new model.
+
+Pedigree uses [finite direction and family evidence](pedigree_direction.md) rather
 than a mandatory ordering of inferred ancestry layers. Paired chromosome
 junction contrasts give finite, neutral-centred orientation support; four
 synchronous reciprocal-family cavity-message passes compare competing M0/M1/M2
-families while excluding immediate reverse feedback. Both are recomputed during
-bootstrap and leave-one-chromosome-out fits. Exposure requirements, explicit
+families while excluding immediate reverse feedback. A one-way joint-family
+factor also checks reverse two-edge ancestry paths, averaging over uncertain
+parent configurations and counting shared intermediates once. Its top-16
+configuration panel assigns omitted mass neutral compatibility; conditioning on
+both focal parents preserves legitimate backcrosses. Explicit chronology
+exempts that parental side without exempting an uncertain co-parent. All these
+terms are recomputed during bootstrap and leave-one-chromosome-out fits.
+Exposure requirements, explicit
 eligibility, the fixed top-20 pair panel, fixed state priors and release
 thresholds remain unchanged.
 
@@ -444,7 +471,7 @@ receive the generating pedigree or generation labels.
 
 Family refinement conditions on the accepted Tier-B pedigree. Joint meiosis
 messages and conditional phase polishing reconcile relatives while preserving
-called genotypes and missingness. T11 has one phase-focused release policy:
+called genotypes and missingness. Family phase has one phase-focused release policy:
 start phase assessment after 20 family iterations, then require five consecutive
 identical called-phase arrays, or actual family convergence. Each assessment
 restarts the polisher from the current family context, not the preceding polished
@@ -460,8 +487,8 @@ This is a phase point estimate, not a calibrated marginal posterior. Full family
 probability tensors and a separate imputed source product are not produced.
 Family-supported gap fills at the existing 0.98 context threshold can inform
 the polisher internally, but do not become new published allele calls. Root
-gauges and component-local labels retain their existing interpretation. T11
-does not modify T10 or feed evidence upstream.
+gauges and component-local labels retain their existing interpretation. Family phase
+does not modify pedigree or feed evidence upstream.
 
 The numerical implementation retains the likelihoods, priors, error rates,
 damping, root-gauge moves and coupled-branch model. Incoming messages into

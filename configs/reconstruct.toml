@@ -1,0 +1,20 @@
+# General AD-based reconstruction. Paths are relative to the working directory.
+[inputs]
+vcf = "work/data/cross.bcf"
+# contigs = ["chr1", "chr2", "chr3"]
+# Optional named eligibility/chronology constraints, never inferred from IDs.
+# eligibility = "work/data/eligibility.json"
+
+[run]
+output = "work/runs/cross"
+cores = "auto"
+# stop_after_stage = "painting"
+assembly_model = "dense"
+assembly_search = "bounded"
+founder_refinement = "on"
+feedback_selection = "balanced"
+
+[recombination]
+rate_cm_per_mb = 5.0
+shared_family_evidence = true
+# recombination_map = "work/data/cross.map"

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,9 @@ name = "haplotype-reconstruction"
 version = "1.0.0"
 description = "Missing-aware founder-haplotype reconstruction for experimental crosses"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Hadi Khan"}]
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=2.0",
@@ -23,6 +26,9 @@ dependencies = [
   "openpyxl>=3.1",
   "tbb>=2021.13",
 ]
+
+[project.urls]
+Repository = "https://github.com/HadiKhan-dev/fish_biallelic"
 
 [project.scripts]
 haplotypes = "haplotype_reconstruction.cli:main"

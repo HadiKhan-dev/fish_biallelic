@@ -1,0 +1,3 @@
+include LICENSE CITATION.cff run.py requirements-tested.txt
+recursive-include configs *.toml
+recursive-include docs *.md

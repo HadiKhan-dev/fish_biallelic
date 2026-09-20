@@ -60,7 +60,7 @@ njit = core_parallel.original_njit
 
 @dataclass(frozen=True)
 class HammingTransition:
-    """Normalized T09 ordered-diplotype weights for every boundary."""
+    """Normalized painting ordered-diplotype weights for every boundary."""
 
     same: np.ndarray
     one_change: np.ndarray
@@ -174,10 +174,10 @@ def build_ragged_founder_model(
     named_alleles: np.ndarray,
     bin_site_indices: Iterable[np.ndarray] | None=None,
 ) -> RaggedFounderModel:
-    """Build T09 allele priors from unique ``{-1,0,1}`` trajectory classes.
+    """Build painting allele priors from unique ``{-1,0,1}`` trajectory classes.
 
     Beta(1,1) smoothing is applied independently at every site across the
-    unique named classes.  Sites with no named call are rejected because T09
+    unique named classes.  Sites with no named call are rejected because painting
     excludes them before painting: retaining them would create ancestry
     evidence solely from diagonal versus off-diagonal latent structure.
     """
@@ -190,7 +190,7 @@ def build_ragged_founder_model(
     called = alleles >= 0
     n_called = np.sum(called, axis=0)
     if np.any(n_called == 0):
-        raise ValueError("every retained T09 site must have a named founder call")
+        raise ValueError("every retained painting site must have a named founder call")
     alt_called = np.sum(np.where(called, alleles, 0), axis=0)
     frequency = (1.0 + alt_called) / (2.0 + n_called)
     q = np.where(called, alleles, frequency[None,:]).astype(np.float64)
@@ -238,7 +238,7 @@ class RaggedSourceBatchWorkspace:
     candidate_transmitted_alt_probability: np.ndarray
 
 
-def build_t09_hamming_transition(
+def build_painting_hamming_transition(
     bin_centers: np.ndarray,
     n_states: int,
     *,
@@ -248,7 +248,7 @@ def build_t09_hamming_transition(
     double_recomb_factor: float=1.5,
     chromosome_map=None,
 ) -> HammingTransition:
-    """Build T09's normalized non-separable source transition."""
+    """Build painting's normalized non-separable source transition."""
 
     centers = np.asarray(bin_centers, dtype=np.float64)
     if centers.ndim != 1 or len(centers) < 1 or np.any(~np.isfinite(centers)):
@@ -728,9 +728,9 @@ def infer_candidate_source_factors_batch(
     minimum_informative_sites: int=1,
     robustness_epsilon: float=0.01,
 ) -> RaggedSourceBatchFactors:
-    """Infer exact source posterior-chain factors from precomputed T09 emissions.
+    """Infer exact source posterior-chain factors from precomputed painting emissions.
 
-    ``binned_log_emission`` accepts the native T09 layout
+    ``binned_log_emission`` accepts the native painting layout
     ``(candidates, S*S, bins)`` or the explicit layout
     ``(candidates, bins, S, S)``.  The factors retain O(N*B*S**2) numbers.
     Candidate availability is evidence-based and is not inferred from a MAP
@@ -742,7 +742,7 @@ def infer_candidate_source_factors_batch(
     value = np.asarray(binned_log_emission, dtype=np.float64)
     if value.ndim == 3:
         if value.shape[1] != states * states:
-            raise ValueError("T09 emissions must have S*S diplotype rows")
+            raise ValueError("painting emissions must have S*S diplotype rows")
         value = np.transpose(value, (0, 2, 1)).reshape(
             value.shape[0], value.shape[2], states, states
         )

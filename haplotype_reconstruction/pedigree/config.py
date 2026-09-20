@@ -53,12 +53,13 @@ class PedigreeConfig:
     parent_state_minimum_exposed_fraction: float = 0.10
     parent_state_minimum_exposed_contigs: int = 3
     parent_state_minimum_direction_probability: float = 0.01
-    # Finite orientation plus four reciprocal-family cavity-message passes.
+    # Finite orientation, reciprocal messages, and joint short-ancestry paths.
     # "cluster" retains the previous policy for controlled comparisons.
     parent_state_direction_model: str = "continuous_family"
     parent_state_family_message_passes: int = 4
+    # Bounded joint configuration marginalization; zero is a path-only ablation.
+    parent_state_ancestry_path_budget: int = 16
     parent_state_direction_state_policy: str = field(default="strict_gate", init=False)
-    parent_state_scaffold_policy: str = field(default="none", init=False)
     parent_state_candidate_source_mode: str = field(
         default=pedigree_models.RAGGED_QUADRATIC_MODEL, init=False
     )
@@ -109,6 +110,7 @@ class PedigreeConfig:
 
         for integer_name, minimum in (
             ("parent_state_family_message_passes", 1),
+            ("parent_state_ancestry_path_budget", 0),
             ("bootstrap_replicates", 1),
             ("bootstrap_seed", 0),
             ("markers_per_information_block", 1),

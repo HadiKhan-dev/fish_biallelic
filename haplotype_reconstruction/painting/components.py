@@ -1,5 +1,6 @@
 """Component-local sample paintings and released ancestry chunks."""
 from __future__ import annotations
+from ..core.run_record import timed_stage
 
 
 import numpy as np
@@ -198,6 +199,7 @@ class ComponentPainter:
         self.num_processes = int(num_processes)
 
 
+    @timed_stage('painting')
     def paint_components(
             self, components, sample_probs_matrix, sample_sites, *,
             sample_observed_mask, **painting_kwargs):
@@ -205,7 +207,7 @@ class ComponentPainter:
 
         Fixed whole-component trajectory equivalence classes plus BACKGROUND
         are used even for fully called panels: panel exhaustiveness is not a
-        scientific assumption of Stage 2. Published post-cavity calls never
+        scientific assumption of assembly. Published post-cavity calls never
         feed back into the model.
         """
 
@@ -220,7 +222,7 @@ class ComponentPainter:
         component_results = []
         # Bound optional evidence reuse over the entire chromosome bundle,
         # including highly fragmented inputs with many small components.
-        emission_cache_remaining = module_painting_model.T09_EMISSION_CACHE_MAX_BYTES
+        emission_cache_remaining = module_painting_model.PAINTING_EMISSION_CACHE_MAX_BYTES
         if painting_kwargs.get("working_memory_bytes") is not None:
             emission_cache_remaining = min(
                 emission_cache_remaining, int(painting_kwargs["working_memory_bytes"]))

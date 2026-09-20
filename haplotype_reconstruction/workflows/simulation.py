@@ -17,14 +17,10 @@ import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.discovery.blocks as discovery_blocks
 import haplotype_reconstruction.discovery.search as discovery_search
-import haplotype_reconstruction.pedigree.pipeline as pedigree_pipeline
-import haplotype_reconstruction.recombination.model as module_recombination_model
-import haplotype_reconstruction.recombination.pipeline as recombination_pipeline
-import haplotype_reconstruction.refinement.pipeline as refinement_pipeline
-import haplotype_reconstruction.refinement.model as refinement_model
 import haplotype_reconstruction.simulation.pedigree as simulation_pedigree
 import haplotype_reconstruction.simulation.templates as simulation_templates
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
+from .downstream import run_downstream
 
 CHECKPOINT_DIR = os.environ.get(
     "BHD_SIM_CHECKPOINT_DIR",
@@ -61,8 +57,8 @@ if not math.isfinite(SIMULATION_READ_DEPTH) or SIMULATION_READ_DEPTH <= 0.0:
 
 
 _PER_CONTIG_STAGE_NAMES = (
-    "01_blocks",
-    "09_painting",
+    "block_discovery",
+    "painting",
 )
 
 
@@ -102,7 +98,7 @@ def _parse_simulation_contig_shard(raw_value):
 
 
 def _select_simulation_contigs(all_contigs, requested_contigs):
-    """Validate requested names and return them in the Stage-2 manifest order."""
+    """Validate requested names and return them in the simulation manifest order."""
     if requested_contigs is None:
         return list(all_contigs)
     known = set(all_contigs)
@@ -140,11 +136,10 @@ def _finish_simulation_stage_checkpoints(
         checkpoint_store.mark_stage_complete(stage)
 
 
+@core_runtime.logged_workflow("simulation")
 def run():
     """Execute or resume the configured, chromosome-checkpointed workflow."""
     import os
-    import sys
-    from datetime import datetime
 
     # FORCE NUMPY/BLAS TO USE 1 THREAD PER PROCESS
     # (Numba threading is now managed by core/parallel.py — do NOT set
@@ -159,16 +154,7 @@ def run():
     # If the SSH connection drops, the log file preserves all output.
 
 
-    os.makedirs(os.environ.get("HAPLOTYPES_LOG_DIR", "work/logs"), exist_ok=True)
-    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    seed_label = "random" if SIMULATION_SEED is None else str(SIMULATION_SEED)
-    shard_log_suffix = (
-        f"_shard{SIMULATION_SHARD_LOG_ID}" if SIMULATION_SHARD_MODE else ""
-    )
-    log_path = os.path.join(os.environ.get("HAPLOTYPES_LOG_DIR", "work/logs"), f"run_{run_timestamp}.log")
-    sys.stdout = core_runtime.TeeOutput(log_path, sys.stdout)
-    print(f"Logging to: {log_path}")
-    print(f"Run started: {run_timestamp}")
+
     print(
         f"Simulation run: seed={SIMULATION_SEED}, checkpoints={CHECKPOINT_DIR}, "
         f"output={SIMULATION_OUTPUT_DIR}"
@@ -186,21 +172,19 @@ def run():
 
     import numpy as np
     import time
-    import warnings
     import platform
     import gc
     from dataclasses import asdict
 
 
-    stage1_config = discovery_search.ReversibleCavitySearchConfig()
-    stage1_config_record = asdict(stage1_config)
-    stage1_identity_record = {
-        "backend": discovery_blocks.STAGE1_BACKEND,
-        "config": stage1_config_record,
+    discovery_config = discovery_search.ReversibleCavitySearchConfig()
+    discovery_config_record = asdict(discovery_config)
+    discovery_identity_record = {
+        "backend": discovery_blocks.DISCOVERY_BACKEND,
+        "config": discovery_config_record,
     }
 
 
-    from dataclasses import replace
 
 
     rate_maps = core_genetic_map.load_genetic_maps_from_environment()
@@ -263,7 +247,7 @@ def run():
     # On resume, _ensure_key loads ONLY the keys a stage needs from checkpoints,
     # avoiding the monolithic pickle that caused OOM.
     #
-    # Heavy arrays are loaded and released one contig at a time. Stage 2 has
+    # Heavy arrays are loaded and released one contig at a time. assembly has
     # atomic preprocessing, L1-L4, and final component-painting checkpoints.
     #
     # To force a full re-run, remove the exact configured checkpoint directory
@@ -281,17 +265,17 @@ def run():
     load_global = checkpoint_store.load_global
     if SIMULATION_SHARD_MODE:
         missing_shared_stages = [
-            stage for stage in ("00_founder_templates", "00_simulated_reads")
+            stage for stage in ("founder_templates", "simulated_reads")
             if not stage_complete(stage)
         ]
         if missing_shared_stages:
             raise RuntimeError(
                 "BHD_SIM_CONTIGS requires globally completed shared "
-                "Stages 1-2; missing format-qualified completion markers for: "
+                "founder templates and simulated reads; missing format-qualified completion markers for: "
                 f"{missing_shared_stages}"
             )
         print(
-            "[SHARD] Verified globally completed shared Stages 1-2; "
+            "[SHARD] Verified globally completed shared founder templates and simulated reads; "
             "diagnostic validations and per-contig plots are disabled"
         )
 
@@ -311,14 +295,14 @@ def run():
             raise SystemExit(0)
 
 
-    # Source checkpoint for each value needed before the canonical Stage 2.
+    # Source checkpoint for each value needed before the canonical assembly.
     _KEY_SOURCE = {
-        'naive_long_haps': '00_founder_templates',
-        'simulated_reads': '00_simulated_reads',
-        'simd_genomic_data': '00_simulated_reads',
-        'simd_probs': '00_simulated_reads',
-        'simd_priors': '00_simulated_reads',
-        'truth_painting': '00_simulated_reads',
+        'naive_long_haps': 'founder_templates',
+        'simulated_reads': 'simulated_reads',
+        'simd_genomic_data': 'simulated_reads',
+        'simd_probs': 'simulated_reads',
+        'simd_priors': 'simulated_reads',
+        'truth_painting': 'simulated_reads',
     }
 
     def _ensure_key(r_name, key, *additional_keys):
@@ -384,9 +368,9 @@ def run():
     total_start = time.time()
 
     # =========================================================================
-    # STAGE 1: VCF Loading + Haplotype Discovery + Naive Linking
+    # FOUNDER TEMPLATES: empirical sequence construction
     # =========================================================================
-    STAGE_1 = "00_founder_templates"
+    TEMPLATE_STAGE = "founder_templates"
     template_directory = os.environ.get("HAPLOTYPES_TEMPLATES")
     if template_directory:
         template_identity = {
@@ -399,13 +383,13 @@ def run():
         template_identity = {'vcf': str(input_path), 'size': input_path.stat().st_size,
                              'mtime_ns': input_path.stat().st_mtime_ns,
                              'regions': regions_config, 'block_size': block_size, 'shift_size': shift_size}
-    checkpoint_store.bind_stage_identity(STAGE_1, {
-        'discovery': stage1_identity_record, 'inputs': template_identity,
+    checkpoint_store.bind_stage_identity(TEMPLATE_STAGE, {
+        'discovery': discovery_identity_record, 'inputs': template_identity,
     })
-    if template_directory and not stage_complete(STAGE_1):
+    if template_directory and not stage_complete(TEMPLATE_STAGE):
         for region in regions_config:
             contig = region['contig']
-            if contig_done(STAGE_1, contig):
+            if contig_done(TEMPLATE_STAGE, contig):
                 continue
             template_path = Path(template_directory) / f"{contig}.npz"
             with np.load(template_path, allow_pickle=False) as template:
@@ -413,19 +397,19 @@ def run():
                 probabilities = template['allele_probabilities']
             if probabilities.ndim != 3 or probabilities.shape[1:] != (len(positions), 2):
                 raise ValueError(f"{contig}: invalid founder-template axes")
-            save_contig(STAGE_1, contig, {'naive_long_haps': [positions, list(probabilities)],
-                'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-                'stage1_config': stage1_config_record})
-        mark_stage_complete(STAGE_1)
+            save_contig(TEMPLATE_STAGE, contig, {'naive_long_haps': [positions, list(probabilities)],
+                'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+                'discovery_config': discovery_config_record})
+        mark_stage_complete(TEMPLATE_STAGE)
 
-    if stage_complete(STAGE_1):
+    if stage_complete(TEMPLATE_STAGE):
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
         # naive_long_haps loaded on-demand via _ensure_key
     else:
         with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
             for region in regions_config:
                 r_name = region['contig']
-                if contig_done(STAGE_1, r_name):
+                if contig_done(TEMPLATE_STAGE, r_name):
                     print(f"  [RESUME] {r_name} already done")
                     continue
 
@@ -452,7 +436,7 @@ def run():
                     genomic_data,
                     num_processes=n_processes,
                     block_pool=block_pool,
-                    discovery_config=stage1_config,
+                    discovery_config=discovery_config,
                 )
 
                 valid_blocks = [b for b in block_results if len(b.positions) > 0]
@@ -472,10 +456,10 @@ def run():
                 multi_contig_results[region['contig']] = {
                     "naive_long_haps": naive_long_haps
                 }
-                save_contig(STAGE_1, r_name, {
+                save_contig(TEMPLATE_STAGE, r_name, {
                     'naive_long_haps': naive_long_haps,
-                    'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-                    'stage1_config': stage1_config_record,
+                    'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+                    'discovery_config': discovery_config_record,
                 })
                 del genomic_data, block_results, naive_blocks, naive_long_haps
                 gc.collect()
@@ -483,22 +467,27 @@ def run():
         print(f"\nAll regions processed in {time.time() - total_start:.2f}s")
         core_runtime.require_contig_checkpoints(
             checkpoint_store,
-            STAGE_1,
+            TEMPLATE_STAGE,
             [region['contig'] for region in regions_config],
         )
-        mark_stage_complete(STAGE_1)
+        mark_stage_complete(TEMPLATE_STAGE)
 
     # =========================================================================
-    # STAGE 2: Simulation + Post-processing
+    # SIMULATED READS: pedigree, meiosis and observations
     # =========================================================================
-    STAGE_2 = "00_simulated_reads"
+    SIMULATION_STAGE = "simulated_reads"
     generation_sizes = tuple(json.loads(os.environ.get("HAPLOTYPES_GENERATIONS", "[20, 100, 200]")))
+    from ..simulation.designs import SimulationDesign, ReadModel, observed_indices
+    if not generation_sizes or any(size < 2 for size in generation_sizes):
+        raise ValueError("each generated cohort must have at least two individuals")
+    simulation_design = SimulationDesign(**json.loads(os.environ.get("HAPLOTYPES_SIMULATION_DESIGN", "{}")))
+    read_model = ReadModel(**json.loads(os.environ.get("HAPLOTYPES_READ_MODEL", "{}")))
     STRESS_TEST_MUTATIONS = False
     mutate_rate = 1e-5 if STRESS_TEST_MUTATIONS else 1e-10
-    current_stage2_region_keys = [
+    current_simulation_contigs = [
         region['contig'] for region in regions_config
     ]
-    stage2_run_spec = {
+    simulation_run_spec = {
         'ordered_regions': tuple(
             (region['contig'], int(region['start']), int(region['end']))
             for region in regions_config
@@ -511,14 +500,18 @@ def run():
            if simulation_genetic_maps is not None else {}),
         'mutation_rate_per_bp': mutate_rate,
         'read_depth': SIMULATION_READ_DEPTH,
-        'read_error_rate': 0.02,
+        'read_error_rate': read_model.error_rate,
+        **({'observation_design': simulation_design.record()}
+           if simulation_design.record() != SimulationDesign().record() else {}),
+        **({'read_model': read_model.record()}
+           if read_model != ReadModel() else {}),
         'snps_per_block': 200,
         'snp_shift': 200,
-        'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-        'stage1_config': stage1_config_record,
+        'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+        'discovery_config': discovery_config_record,
         'truth_haplotype_completion': 'seeded_unbiased_tie_resolution_v1',
     }
-    STAGE_2_REQUIRED_KEYS = frozenset({
+    SIMULATION_REQUIRED_KEYS = frozenset({
         'truth_pedigree',
         'sample_names',
         'region_keys',
@@ -528,8 +521,8 @@ def run():
         'simulation_state',
     })
 
-    def require_completed_stage2_payload(payload, context):
-        missing_keys = STAGE_2_REQUIRED_KEYS.difference(payload)
+    def require_completed_simulation_payload(payload, context):
+        missing_keys = SIMULATION_REQUIRED_KEYS.difference(payload)
         if missing_keys:
             raise RuntimeError(
                 f"{context} lacks required keys: {sorted(missing_keys)!r}"
@@ -540,7 +533,7 @@ def run():
                 f"{payload['simulation_state']!r}, not 'complete'"
             )
 
-    def require_current_stage2_identity(payload, context):
+    def require_current_simulation_identity(payload, context):
         if payload['requested_simulation_seed'] != SIMULATION_SEED:
             raise RuntimeError(
                 f"{context} was generated for requested seed "
@@ -556,52 +549,52 @@ def run():
                 f"{payload['simulation_seed']!r}, not requested fixed seed "
                 f"{SIMULATION_SEED!r}"
             )
-        if payload['run_spec'] != stage2_run_spec:
+        if payload['run_spec'] != simulation_run_spec:
             raise RuntimeError(
                 f"{context} run specification does not match this run"
             )
-        if list(payload['region_keys']) != current_stage2_region_keys:
+        if list(payload['region_keys']) != current_simulation_contigs:
             raise RuntimeError(
                 f"{context} contig order does not match this run"
             )
 
     # An allocation can end after the complete global payload is durable but
     # before its tiny marker is published. Validate it, then finish atomically.
-    if (not stage_complete(STAGE_2)
-            and checkpoint_store.global_done(STAGE_2)):
-        durable_stage2_payload = load_global(STAGE_2)
-        if 'simulation_state' not in durable_stage2_payload:
+    if (not stage_complete(SIMULATION_STAGE)
+            and checkpoint_store.global_done(SIMULATION_STAGE)):
+        durable_simulation_payload = load_global(SIMULATION_STAGE)
+        if 'simulation_state' not in durable_simulation_payload:
             raise RuntimeError(
-                f"{STAGE_2} global payload lacks simulation_state"
+                f"{SIMULATION_STAGE} global payload lacks simulation_state"
             )
-        durable_state = durable_stage2_payload['simulation_state']
+        durable_state = durable_simulation_payload['simulation_state']
         if durable_state == 'complete':
-            require_completed_stage2_payload(
-                durable_stage2_payload, f"Durable {STAGE_2}"
+            require_completed_simulation_payload(
+                durable_simulation_payload, f"Durable {SIMULATION_STAGE}"
             )
-            require_current_stage2_identity(
-                durable_stage2_payload, f"Durable {STAGE_2}"
+            require_current_simulation_identity(
+                durable_simulation_payload, f"Durable {SIMULATION_STAGE}"
             )
             core_runtime.require_contig_checkpoints(
-                checkpoint_store, STAGE_2,
-                durable_stage2_payload['region_keys'],
+                checkpoint_store, SIMULATION_STAGE,
+                durable_simulation_payload['region_keys'],
             )
-            mark_stage_complete(STAGE_2)
-            print(f"  [RECOVER] Published completion marker for {STAGE_2}")
+            mark_stage_complete(SIMULATION_STAGE)
+            print(f"  [RECOVER] Published completion marker for {SIMULATION_STAGE}")
         elif durable_state != 'in_progress':
             raise RuntimeError(
-                f"{STAGE_2} global payload has invalid simulation_state "
+                f"{SIMULATION_STAGE} global payload has invalid simulation_state "
                 f"{durable_state!r}"
             )
-        del durable_stage2_payload
+        del durable_simulation_payload
 
-    if stage_complete(STAGE_2):
+    if stage_complete(SIMULATION_STAGE):
         print(f"\n[RESUME] Skipping simulation (checkpoint found)")
-        g = load_global(STAGE_2)
-        require_completed_stage2_payload(g, STAGE_2)
-        require_current_stage2_identity(g, STAGE_2)
+        g = load_global(SIMULATION_STAGE)
+        require_completed_simulation_payload(g, SIMULATION_STAGE)
+        require_current_simulation_identity(g, SIMULATION_STAGE)
         core_runtime.require_contig_checkpoints(
-            checkpoint_store, STAGE_2, g['region_keys']
+            checkpoint_store, SIMULATION_STAGE, g['region_keys']
         )
         realized_simulation_seed = g["simulation_seed"]
         requested_simulation_seed = g["requested_simulation_seed"]
@@ -633,47 +626,47 @@ def run():
             region_keys.append(r_name)
 
         # Bind the checkpoint root to one realized seed before simulation or
-        # any per-contig Stage-2 writes. This makes an entropy-seeded run
+        # any per-contig assembly writes. This makes an entropy-seeded run
         # reproducible on restart and prevents old partial contigs from being
         # silently mixed with a newly generated pedigree.
-        if checkpoint_store.global_done(STAGE_2):
-            stage2_provenance = load_global(STAGE_2)
+        if checkpoint_store.global_done(SIMULATION_STAGE):
+            simulation_provenance = load_global(SIMULATION_STAGE)
             partial_required_keys = {
                 'simulation_seed', 'requested_simulation_seed',
                 'region_keys', 'run_spec', 'simulation_state',
             }
-            missing_keys = partial_required_keys.difference(stage2_provenance)
+            missing_keys = partial_required_keys.difference(simulation_provenance)
             if missing_keys:
                 raise RuntimeError(
-                    f"Partial {STAGE_2} checkpoint lacks required keys: "
+                    f"Partial {SIMULATION_STAGE} checkpoint lacks required keys: "
                     f"{sorted(missing_keys)!r}"
                 )
-            if stage2_provenance['simulation_state'] != 'in_progress':
+            if simulation_provenance['simulation_state'] != 'in_progress':
                 raise RuntimeError(
-                    f"Partial {STAGE_2} checkpoint has simulation_state "
-                    f"{stage2_provenance['simulation_state']!r}, not "
+                    f"Partial {SIMULATION_STAGE} checkpoint has simulation_state "
+                    f"{simulation_provenance['simulation_state']!r}, not "
                     "'in_progress'"
                 )
-            require_current_stage2_identity(
-                stage2_provenance, f"Partial {STAGE_2} checkpoint"
+            require_current_simulation_identity(
+                simulation_provenance, f"Partial {SIMULATION_STAGE} checkpoint"
             )
-            realized_simulation_seed = stage2_provenance["simulation_seed"]
+            realized_simulation_seed = simulation_provenance["simulation_seed"]
             requested_simulation_seed = (
-                stage2_provenance["requested_simulation_seed"]
+                simulation_provenance["requested_simulation_seed"]
             )
-            del stage2_provenance
+            del simulation_provenance
             print(
-                f"  [RESUME] {STAGE_2} realized seed "
+                f"  [RESUME] {SIMULATION_STAGE} realized seed "
                 f"{realized_simulation_seed}"
             )
         else:
             partial_contigs = [
                 r_name for r_name in region_keys
-                if contig_done(STAGE_2, r_name)
+                if contig_done(SIMULATION_STAGE, r_name)
             ]
             if partial_contigs:
                 raise RuntimeError(
-                    f"Partial {STAGE_2} contigs lack run provenance "
+                    f"Partial {SIMULATION_STAGE} contigs lack run provenance "
                     f"({partial_contigs}); use a fresh checkpoint directory"
                 )
             realized_simulation_seed = (
@@ -681,19 +674,19 @@ def run():
                 if SIMULATION_SEED is not None
                 else int.from_bytes(os.urandom(8), "little")
             )
-            save_global(STAGE_2, {
+            save_global(SIMULATION_STAGE, {
                 'simulation_seed': realized_simulation_seed,
                 'requested_simulation_seed': SIMULATION_SEED,
                 'region_keys': list(region_keys),
-                'run_spec': stage2_run_spec,
+                'run_spec': simulation_run_spec,
                 'simulation_state': 'in_progress',
             })
-            if not checkpoint_store.global_done(STAGE_2):
+            if not checkpoint_store.global_done(SIMULATION_STAGE):
                 raise OSError(
-                    f"Failed to checkpoint early {STAGE_2} provenance"
+                    f"Failed to checkpoint early {SIMULATION_STAGE} provenance"
                 )
             print(
-                f"  {STAGE_2} realized seed: {realized_simulation_seed}"
+                f"  {SIMULATION_STAGE} realized seed: {realized_simulation_seed}"
             )
 
         # Materialize complete truth without assigning every unknown tie to
@@ -728,16 +721,31 @@ def run():
             founders_list,
             sites_list,
             generation_sizes,
-            recomb_rate=stage2_run_spec['recombination_rate_per_bp'],
-            mutate_rate=stage2_run_spec['mutation_rate_per_bp'],
+            recomb_rate=simulation_run_spec['recombination_rate_per_bp'],
+            mutate_rate=simulation_run_spec['mutation_rate_per_bp'],
             output_plot=None,
             parallel=True,
             num_processes=n_processes,
             seed=realized_simulation_seed,
             genetic_maps=simulation_genetic_maps, contig_names=region_keys,
             return_crossover_events=True,
+            design=simulation_design,
         )
         print(f"Pedigree simulation: {time.time()-t0:.1f}s")
+
+        # Only observed individuals reach discovery, painting or pedigree inference.
+        # Parent names are intentionally retained in truth even when absent from the VCF.
+        observed = observed_indices(truth_pedigree, simulation_design, realized_simulation_seed)
+        generated_pedigree = truth_pedigree
+        truth_pedigree = truth_pedigree.iloc[observed].reset_index(drop=True)
+        if len(observed) != len(generated_pedigree):
+            all_offspring_lists = [[rows[i] for i in observed] for rows in all_offspring_lists]
+            truth_paintings_lists = [[rows[i] for i in observed] for rows in truth_paintings_lists]
+            observed_axis = {name: i for i, name in enumerate(truth_pedigree.Sample)}
+            truth_crossovers = [[dict(event, child_index=observed_axis[event['child']])
+                                 for event in events if event['child'] in observed_axis]
+                                for events in truth_crossovers]
+        print(f"Observed {len(observed)} / {len(generated_pedigree)} generated individuals")
 
         # 3. Save Truth
         try:
@@ -765,12 +773,12 @@ def run():
             + (f" (seed={read_seed})" if read_seed is not None else "")
         )
 
-        stage2_payload_keys = (
+        simulation_payload_keys = (
             'simulated_reads', 'simd_genomic_data', 'simd_probs',
             'simd_priors', 'truth_painting',
         )
         for contig_index, r_name in enumerate(region_keys):
-            if contig_done(STAGE_2, r_name):
+            if contig_done(SIMULATION_STAGE, r_name):
                 print(f"  [RESUME] {r_name} post-processing already done")
             else:
                 result = (
@@ -779,15 +787,16 @@ def run():
                         all_offspring_lists[contig_index],
                         truth_paintings_lists[contig_index],
                         sites_list[contig_index],
-                        stage2_run_spec['read_depth'],
-                        stage2_run_spec['read_error_rate'],
-                        stage2_run_spec['snps_per_block'],
-                        stage2_run_spec['snp_shift'],
+                        simulation_run_spec['read_depth'],
+                        simulation_run_spec['read_error_rate'],
+                        simulation_run_spec['snps_per_block'],
+                        simulation_run_spec['snp_shift'],
                         contig_read_seeds[contig_index],
+                        {key: value for key, value in read_model.record().items() if key != 'error_rate'},
                     ))
                 )
                 payload = {
-                    key: result[key] for key in stage2_payload_keys
+                    key: result[key] for key in simulation_payload_keys
                 }
                 payload['truth_founder_haplotypes'] = tuple(
                     np.asarray(haplotype, dtype=np.int8)
@@ -796,10 +805,10 @@ def run():
                 )
                 payload['truth_alleles'] = np.asarray(all_offspring_lists[contig_index], dtype=np.int8).transpose(0, 2, 1)
                 payload['truth_crossovers'] = truth_crossovers[contig_index]
-                save_contig(STAGE_2, r_name, payload)
-                if not contig_done(STAGE_2, r_name):
+                save_contig(SIMULATION_STAGE, r_name, payload)
+                if not contig_done(SIMULATION_STAGE, r_name):
                     raise OSError(
-                        f"Failed to checkpoint {STAGE_2}/{r_name}"
+                        f"Failed to checkpoint {SIMULATION_STAGE}/{r_name}"
                     )
                 del payload, result
 
@@ -812,7 +821,7 @@ def run():
             gc.collect()
 
         core_runtime.require_contig_checkpoints(
-            checkpoint_store, STAGE_2, region_keys
+            checkpoint_store, SIMULATION_STAGE, region_keys
         )
         print(
             f"Post-processing ({len(region_keys)} contigs, bounded): "
@@ -822,32 +831,33 @@ def run():
         print("\nSimulation, Sequencing, and Chunking complete for all regions.")
         print(f"Total time: {time.time()-start:.1f}s")
 
-        completed_stage2_payload = {
+        completed_simulation_payload = {
             'truth_pedigree': truth_pedigree,
+            'generated_pedigree': generated_pedigree,
             'sample_names': sample_names,
             'region_keys': region_keys,
             'simulation_seed': realized_simulation_seed,
             'requested_simulation_seed': SIMULATION_SEED,
-            'run_spec': stage2_run_spec,
+            'run_spec': simulation_run_spec,
             'simulation_state': 'complete',
         }
-        save_global(STAGE_2, completed_stage2_payload)
-        if not checkpoint_store.global_done(STAGE_2):
-            raise OSError(f"Failed to checkpoint {STAGE_2}/_global")
-        persisted_stage2_payload = load_global(STAGE_2)
-        require_completed_stage2_payload(
-            persisted_stage2_payload, f"Persisted {STAGE_2}"
+        save_global(SIMULATION_STAGE, completed_simulation_payload)
+        if not checkpoint_store.global_done(SIMULATION_STAGE):
+            raise OSError(f"Failed to checkpoint {SIMULATION_STAGE}/_global")
+        persisted_simulation_payload = load_global(SIMULATION_STAGE)
+        require_completed_simulation_payload(
+            persisted_simulation_payload, f"Persisted {SIMULATION_STAGE}"
         )
         for key in (
             'sample_names', 'region_keys', 'simulation_seed',
             'requested_simulation_seed', 'run_spec',
         ):
-            if persisted_stage2_payload[key] != completed_stage2_payload[key]:
+            if persisted_simulation_payload[key] != completed_simulation_payload[key]:
                 raise RuntimeError(
-                    f"Persisted {STAGE_2} changed {key!r} during checkpointing"
+                    f"Persisted {SIMULATION_STAGE} changed {key!r} during checkpointing"
                 )
-        del persisted_stage2_payload, completed_stage2_payload
-        mark_stage_complete(STAGE_2)
+        del persisted_simulation_payload, completed_simulation_payload
+        mark_stage_complete(SIMULATION_STAGE)
         # Free heavy simulation data — all checkpointed, will reload on demand
         for r_name in region_keys:
             for _k in ('simulated_reads', 'simd_genomic_data', 'simd_probs', 'simd_priors', 'truth_painting'):
@@ -861,41 +871,41 @@ def run():
     os.makedirs(output_dir, exist_ok=True)
 
     if 'region_keys' not in dir() or region_keys is None:
-        g = load_global('00_simulated_reads')
+        g = load_global('simulated_reads')
         region_keys = g['region_keys']
         sample_names = g['sample_names']
         truth_pedigree = g['truth_pedigree']
         del g
     all_region_keys = list(region_keys)
     if SIMULATION_SHARD_MODE:
-        if not checkpoint_store.global_done("00_simulated_reads"):
+        if not checkpoint_store.global_done("simulated_reads"):
             raise RuntimeError(
-                "BHD_SIM_CONTIGS requires the global Stage-2 manifest"
+                "BHD_SIM_CONTIGS requires the global simulation manifest"
             )
         core_runtime.require_contig_checkpoints(
-            checkpoint_store, "00_founder_templates", all_region_keys
+            checkpoint_store, "founder_templates", all_region_keys
         )
         core_runtime.require_contig_checkpoints(
-            checkpoint_store, "00_simulated_reads", all_region_keys
+            checkpoint_store, "simulated_reads", all_region_keys
         )
         region_keys = _select_simulation_contigs(
             all_region_keys, SIMULATION_CONTIG_SHARD
         )
         print(
             f"[SHARD] Processing {len(region_keys)} of "
-            f"{len(all_region_keys)} contigs in Stage-2 manifest order: "
+            f"{len(all_region_keys)} contigs in simulation manifest order: "
             f"{', '.join(region_keys)}"
         )
 
 
     # =========================================================================
-    # STAGE 3: Discover Block Haplotypes from Simulated Reads
+    # BLOCK DISCOVERY: simulated observations
     # =========================================================================
-    STAGE_3 = "01_blocks"
+    DISCOVERY_STAGE = "block_discovery"
     checkpoint_store.bind_stage_identity(
-        STAGE_3, stage1_identity_record
+        DISCOVERY_STAGE, discovery_identity_record
     )
-    stage1_source_manifest = {
+    discovery_source_manifest = {
         'sample_ids': sample_names,
         'contigs': all_region_keys,
         'genotype_evidence_mode': (
@@ -904,14 +914,14 @@ def run():
         'observed_call_mask_mode': (
             workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
         ),
-        'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-        'stage1_config': stage1_config_record,
+        'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+        'discovery_config': discovery_config_record,
     }
     checkpoint_store.bind_global_manifest(
-        STAGE_3, stage1_source_manifest
+        DISCOVERY_STAGE, discovery_source_manifest
     )
 
-    if stage_complete(STAGE_3) and not SIMULATION_SHARD_MODE:
+    if stage_complete(DISCOVERY_STAGE) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping block haplotype discovery (checkpoint found)")
     else:
         print(f"\n{'='*60}")
@@ -922,7 +932,7 @@ def run():
 
         with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
             for r_name in region_keys:
-                if contig_done(STAGE_3, r_name):
+                if contig_done(DISCOVERY_STAGE, r_name):
                     print(f"  [RESUME] {r_name} already done")
                     continue
                 print(f"\n  Processing {r_name}...")
@@ -940,7 +950,7 @@ def run():
                     simd_genomic_data,
                     num_processes=n_processes,
                     block_pool=block_pool,
-                    discovery_config=stage1_config,
+                    discovery_config=discovery_config,
                 )
                 disc_time = time.time() - t_chr
 
@@ -952,7 +962,7 @@ def run():
                         simulated_reads
                     )
                 )
-                save_contig(STAGE_3, r_name, {
+                save_contig(DISCOVERY_STAGE, r_name, {
                     'block_results': simd_block_results,
                     'global_sites': global_sites,
                     'global_observed_mask': global_observed_mask,
@@ -962,8 +972,8 @@ def run():
                     'genotype_evidence_mode': (
                         workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
                     ),
-                    'stage1_backend': discovery_blocks.STAGE1_BACKEND,
-                    'stage1_config': stage1_config_record,
+                    'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+                    'discovery_config': discovery_config_record,
                 })
 
                 hap_counts = [len(b.haplotypes) for b in valid_blocks]
@@ -980,14 +990,14 @@ def run():
         print(f"\nBlock haplotype discovery complete in {time.time()-start:.1f}s")
         _prune_key('simd_genomic_data')
         core_runtime.require_contig_checkpoints(
-            checkpoint_store, STAGE_3, region_keys
+            checkpoint_store, DISCOVERY_STAGE, region_keys
         )
-    _finish_per_contig_stage(STAGE_3)
+    _finish_per_contig_stage(DISCOVERY_STAGE)
 
     # =========================================================================
-    # STAGE 2: COMPONENT ASSEMBLY AND PAINTING
+    # ASSEMBLY: COMPONENT ASSEMBLY AND PAINTING
     # =========================================================================
-    stage2_config = workflows_reconstruction.ReconstructionConfig(
+    assembly_config = workflows_reconstruction.ReconstructionConfig(
         release_config=assembly_pipeline.AssemblyConfig(
             num_processes=n_processes,
             maxtasksperchild=WORKER_MAXTASKS,
@@ -998,7 +1008,7 @@ def run():
     )
     print()
     print("=" * 60)
-    print("STAGE 2: DISCOVERED BLOCKS -> COMPONENT T09")
+    print("ASSEMBLY: DISCOVERED BLOCKS -> COMPONENT painting")
     print(f"{'='*60}")
     print(
         "  Sequential contigs; release and painting are non-overlapping "
@@ -1008,11 +1018,11 @@ def run():
         checkpoint_store,
         region_keys,
         sample_names,
-        stage1_identity=stage1_identity_record,
-        config=stage2_config,
+        discovery_identity=discovery_identity_record,
+        config=assembly_config,
         genetic_maps=inference_genetic_maps,
-        source_stage=STAGE_3,
-        probabilities_stage=STAGE_2,
+        source_stage=DISCOVERY_STAGE,
+        probabilities_stage=SIMULATION_STAGE,
         probabilities_key='simd_probs',
         all_contigs=all_region_keys,
         publish_completion=not SIMULATION_SHARD_MODE,
@@ -1029,32 +1039,17 @@ def run():
         )
 
     if SIMULATION_STOP_AFTER_STAGE == workflows_reconstruction.PAINTING_STAGE:
-        print("[STOP] Requested stop after typed component T09.")
+        print("[STOP] Requested stop after typed component painting.")
         raise SystemExit(0)
-    _stage10_summaries, stage10_payload = pedigree_pipeline.run_pedigree(
+    run_downstream(
         checkpoint_store, region_keys, sample_names,
         output_dir=output_dir, n_workers=n_processes,
-        raw_gl_stage=STAGE_2, raw_sites_stage=STAGE_3,
+        raw_gl_stage=SIMULATION_STAGE, raw_sites_stage=DISCOVERY_STAGE,
         raw_gl_key='simd_probs', parent_eligibility=None,
         all_contigs=all_region_keys, publish_global=not SIMULATION_SHARD_MODE,
         genetic_maps=inference_genetic_maps, recombination_rate=inference_recombination_rate,
     )
-    print("STAGE 11: pedigree-conditioned refinement and canonical final phase polishing")
-    refinement_pipeline.run_refinement(
-        checkpoint_store, all_region_keys, sample_names,
-        pedigree_payload=stage10_payload, output_dir=output_dir,
-        raw_gl_stage=STAGE_2, raw_sites_stage=STAGE_3,
-        raw_gl_key='simd_probs', n_workers=n_processes,
-        genetic_maps=inference_genetic_maps,
-        config=refinement_model.FamilyRefinementConfig(recombination_rate=inference_recombination_rate),
-    )
-    recombination_pipeline.run_recombination(
-        checkpoint_store, all_region_keys, sample_names,
-        pedigree_payload=stage10_payload, output_dir=output_dir,
-        n_workers=n_processes,
-        genetic_maps=inference_genetic_maps,
-        config=module_recombination_model.RecombinationMapConfig(recombination_rate=inference_recombination_rate),
-    )
+
 
 
 if __name__ == "__main__":
