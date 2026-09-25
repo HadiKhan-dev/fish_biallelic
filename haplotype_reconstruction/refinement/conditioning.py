@@ -1,4 +1,4 @@
-"""refinement / conditioning for the canonical reconstruction pipeline."""
+"""Align painting, genotype evidence and released family edges for phase refinement."""
 from __future__ import annotations
 from haplotype_reconstruction import PACKAGE_ROOT
 
@@ -132,7 +132,10 @@ def refinement_code_identity():
             for name in files}
 
 def relationship_identity(relationships):
-    frame = relationships.loc[:, ["Sample", "ParentState", "Parent1", "Parent2"]].astype(object)
+    columns = ["Sample", "ParentState", "Parent1", "Parent2"]
+    columns.extend(name for name in ("Parent1Supported", "Parent2Supported")
+                   if name in relationships.columns)
+    frame = relationships.loc[:, columns].astype(object)
     records = frame.where(pd.notna(frame), None).to_dict(orient="records")
     return hashlib.sha256(json.dumps(records, sort_keys=True, allow_nan=False).encode()).hexdigest()
 

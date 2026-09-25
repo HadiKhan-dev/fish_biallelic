@@ -1,8 +1,23 @@
 """Shared scientific constants; stage-specific settings live beside their models."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 
 DEFAULT_READ_ERROR_PROBABILITY = 0.02
+
+
+@dataclass(frozen=True)
+class ReadCalibrationConfig:
+    """Numerical/sampling settings for nested observed-AD model fitting."""
+
+    marker_stride: int = 8
+    maximum_fit_depth: int = 48
+    fold_window_bp: int = 1_000_000
+    initial_parameters: tuple = ((DEFAULT_READ_ERROR_PROBABILITY, 0.5),
+                                (0.01, 0.35), (0.08, 0.65))
+    maximum_iterations: int = 2000
+    likelihood_tolerance_per_observation: float = 1e-10
 
 # Shared linker's block-local quality CTMC, separate from read-error rates.
 # Stationary unreliable-sequence fraction and mean error-tract length in bp.

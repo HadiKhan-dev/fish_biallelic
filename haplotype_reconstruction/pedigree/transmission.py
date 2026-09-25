@@ -14,7 +14,7 @@ import haplotype_reconstruction.core.parallel as core_parallel
 core_parallel.ensure_numba_registry_warmup()
 
 
-from.transmission_projection import (
+from .transmission_projection import (
     _symmetrise_source_marginals,
     _project_transmitted_alt,
     _positive_exclusion_sums,
@@ -25,7 +25,7 @@ from.transmission_projection import (
     _maximum_entropy_bridge_kernel,
 )
 
-from.transmission_scoring import (
+from .transmission_scoring import (
     _site_likelihood,
     _common_emission_products,
     _power_common_products,
@@ -348,6 +348,7 @@ def score_projected_ragged_quadratic(
     mismatch_probability: float=0.01,
     reuse_scores: ProjectedRaggedQuadraticScores | None=None,
     uniform_tolerance: float=1e-12,
+    _shared_inputs: dict | None=None,
 ) -> ProjectedRaggedQuadraticScores:
     """Score projected M0/M1/M2 batches with O(S**2) task workspaces."""
 
@@ -360,16 +361,21 @@ def score_projected_ragged_quadratic(
     ):
         raise ValueError("reuse_scores must be ProjectedRaggedQuadraticScores")
 
-    children_gl = pedigree_sources._normalise_gl(child_genotype_likelihoods, "child GL")
+    # Local to the two balanced-score views: no persistent cache or cross-input
+    # reuse. Both forward recurrences remain independent and unchanged.
+    prepared = {} if _shared_inputs is None else _shared_inputs
+    if "children" not in prepared:
+        children_gl = pedigree_sources._normalise_gl(child_genotype_likelihoods, "child GL")
+        if children_gl.shape[1] != projected.n_sites:
+            raise ValueError("child GL site count disagrees with projection")
+        child_seen = np.asarray(child_observed, dtype=np.bool_)
+        if child_seen.shape != children_gl.shape[:2]:
+            raise ValueError("child observed mask has wrong shape")
+        order = projected.selected_input_order
+        prepared["children"] = (np.ascontiguousarray(children_gl[:, order]),
+                                np.ascontiguousarray(child_seen[:, order]))
+    children_gl, child_seen = prepared["children"]
     children = children_gl.shape[0]
-    if children_gl.shape[1] != projected.n_sites:
-        raise ValueError("child GL site count disagrees with projection")
-    child_seen = np.asarray(child_observed, dtype=np.bool_)
-    if child_seen.shape != children_gl.shape[:2]:
-        raise ValueError("child observed mask has wrong shape")
-    order = projected.selected_input_order
-    children_gl = np.ascontiguousarray(children_gl[:, order])
-    child_seen = np.ascontiguousarray(child_seen[:, order])
     exponent = np.asarray(child_information_exponent, dtype=np.float64)
     if (
         exponent.shape != (children, projected.n_bins)
@@ -426,21 +432,27 @@ def score_projected_ragged_quadratic(
         raise ValueError("trio row violates child/parent eligibility")
     trio_array = np.ascontiguousarray(trio_array)
 
-    null_selector = pedigree_sources._probability_matrix(
-        null_selector_switch_probability,
-        children,
-        projected.n_bins - 1,
-        "null selector switch",
-    )
-    null_diagonal, null_off = _null_transition_coefficients(
-        projected, transition, null_selector
-    )
-    coefficient = pedigree_sources._child_likelihood_coefficients(
-        children_gl, float(mismatch_probability)
-    )
-    observed_site, observed_start, observed_stop = pedigree_sources._compact_observed_sites(
-        child_seen, projected.bin_start, projected.bin_stop
-    )
+    if "coefficients" not in prepared:
+        null_selector = pedigree_sources._probability_matrix(
+            null_selector_switch_probability,
+            children,
+            projected.n_bins - 1,
+            "null selector switch",
+        )
+        null_diagonal, null_off = _null_transition_coefficients(
+            projected, transition, null_selector
+        )
+        coefficient = pedigree_sources._child_likelihood_coefficients(
+            children_gl, float(mismatch_probability)
+        )
+        observed_site, observed_start, observed_stop = pedigree_sources._compact_observed_sites(
+            child_seen, projected.bin_start, projected.bin_stop
+        )
+        prepared["coefficients"] = (null_diagonal, null_off, coefficient,
+                                    observed_site, observed_start, observed_stop)
+    (null_diagonal, null_off, coefficient, observed_site,
+     observed_start, observed_stop) = prepared["coefficients"]
+    fractional_powers = bool(np.any((exponent > 0.) & (exponent < 1.)))
 
     # Keep temporary emission storage bounded even for large founder panels.
     # If a single child's cache cannot fit, use the same quadratic scorer
@@ -490,7 +502,7 @@ def score_projected_ragged_quadratic(
                 if cache_children else None
             )
             common_powered = (_power_common_products(common_products, exponent, child_start)
-                              if common_products is not None else None)
+                              if common_products is not None and fractional_powers else None)
             one[child_start:child_stop] = _score_m1_kernel(
                 *args,
                 projected.available,
@@ -574,7 +586,7 @@ def score_projected_ragged_quadratic(
                 if cache_children else None
             )
             common_powered = (_power_common_products(common_products, exponent, child_start)
-                              if common_products is not None else None)
+                              if common_products is not None and fractional_powers else None)
             two[batch_rows] = _score_m2_kernel(
                 np.ascontiguousarray(trio_array[batch_rows]),
                 *args,
@@ -594,9 +606,9 @@ def score_projected_ragged_quadratic(
             del common_products, common_powered
 
     m2_seconds = time.perf_counter() - m2_started
-    informative = child_seen & (
-        np.ptp(children_gl, axis=2) > float(uniform_tolerance)
-    )
+    if "informative_counts" not in prepared:
+        informative = child_seen & (np.ptp(children_gl, axis=2) > float(uniform_tolerance))
+        prepared["informative_counts"] = np.sum(informative, axis=1, dtype=np.int64)
     states = projected.n_states
     workspace_values = 2 * states * states + 2 * (states + 1)
     complexity = QuadraticComplexityDiagnostic(
@@ -616,7 +628,7 @@ def score_projected_ragged_quadratic(
         candidate_source_informative_site_count=(
             projected.informative_site_count.copy()
         ),
-        child_informative_site_count=np.sum(informative, axis=1, dtype=np.int64),
+        child_informative_site_count=prepared["informative_counts"],
         m2_active_trio_count=int(np.sum(active)),
         m2_reduced_trio_count=int(len(trio_array) - np.sum(active)),
         approximation_name=APPROXIMATION_NAME,

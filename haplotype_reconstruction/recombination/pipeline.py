@@ -1,6 +1,7 @@
-"""recombination / pipeline for the canonical reconstruction pipeline."""
+"""Checkpointed recombination inference and readable conditional-map outputs."""
 from __future__ import annotations
 from ..core.run_record import timed_stage
+from ..core.environment import boolean_setting
 from haplotype_reconstruction import PACKAGE_ROOT
 
 from dataclasses import asdict, replace
@@ -22,12 +23,8 @@ def resolve_shared_family_evidence(value=None):
         if not isinstance(value, bool):
             raise ValueError("shared_family_evidence must be boolean or None")
         return value
-    setting = os.environ.get("BHD_RECOMBINATION_SHARED_FAMILY", "1").strip().lower()
-    if setting in ("1", "true", "yes", "on"):
-        return True
-    if setting in ("0", "false", "no", "off"):
-        return False
-    raise ValueError("BHD_RECOMBINATION_SHARED_FAMILY must be 1/0 or true/false")
+    return boolean_setting(os.environ.get("BHD_RECOMBINATION_SHARED_FAMILY", "1"),
+                           "BHD_RECOMBINATION_SHARED_FAMILY")
 
 
 def _csv(frame, path):
@@ -128,7 +125,7 @@ def run_recombination(checkpoint_store, contigs, sample_ids, *, pedigree_payload
     if not checkpoint_store.stage_complete(refinement_pipeline.FINAL_PHASE_STAGE):
         raise ValueError("Recombination requires the completed canonical final phase stage")
     core_runtime.require_contig_checkpoints(checkpoint_store, refinement_pipeline.FINAL_PHASE_STAGE, contigs)
-    relationships = pedigree_payload["tier_b_relationships"]
+    relationships = pedigree_payload["tier_b_partial_relationships"]
     pedigree_hash = refinement_conditioning.relationship_identity(relationships)
     files = []
     for contig in contigs:

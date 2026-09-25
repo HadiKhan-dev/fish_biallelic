@@ -43,7 +43,7 @@ class StructuredTransitionConfig:
 
 
 def configured_transition():
-    from..core.environment import assembly_transition_model
+    from ..core.environment import assembly_transition_model
     return StructuredTransitionConfig() if assembly_transition_model() == "structured" else None
 
 

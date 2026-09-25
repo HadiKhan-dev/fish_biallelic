@@ -1,5 +1,7 @@
 [run]
 cores = "auto"
+# read_calibration = true # Default: fit the observation model from allele depths.
+# pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
 assembly_model = "dense" # "structured" is near quadratic with bounded search.
 assembly_search = "bounded" # "broad" retains the optimized broader full-refit search.
 founder_refinement = "on" # Final chromosome paths; "off" is a controlled comparison.

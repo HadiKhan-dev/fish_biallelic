@@ -1120,6 +1120,11 @@ def infer_from_parent_state_evidence(
                 if settings.parent_state_direction_model in {"family", "continuous_family"}
                 else 0
             ),
+            "FamilyReconciliation": (
+                "converged_with_frozen_path_factor"
+                if settings.parent_state_direction_model in {"family", "continuous_family"}
+                else "none"
+            ),
             "AncestryPathBudget": (
                 settings.parent_state_ancestry_path_budget
                 if settings.parent_state_direction_model in {"family", "continuous_family"}
@@ -1340,51 +1345,17 @@ def infer_from_parent_state_evidence(
         tier_b_status,
     )
 
-    def partial_frame(
-        exact: pd.DataFrame,
-        tier_states: Mapping[int, int],
-        tier_rows: Mapping[int, Optional[int]],
-        parent_flags: Mapping[int, tuple[bool, bool]],
-        label: str,
-    ) -> pd.DataFrame:
-        partial = exact.copy(deep=True)
-        for child, state in tier_states.items():
-            if tier_rows.get(child) is not None:
-                continue
-            local_row = full_selection.local_rows.get(child)
-            if local_row is None or full_selection.graph_rows.get(child) != local_row:
-                continue
-            flags = parent_flags[child]
-            parent_indices = [
-                int(parent)
-                for parent in alternatives[local_row, 1:]
-                if int(parent) >= 0
-            ]
-            retained = 0
-            for index, parent in enumerate(parent_indices):
-                if index < len(flags) and flags[index]:
-                    partial.at[child, f"Parent{index + 1}"] = samples[parent]
-                    retained += 1
-            if retained:
-                partial.at[child, "InferenceStatus"] = (
-                    f"{label}_partial_parent_support"
-                )
-        return partial
-
-    tier_a_partial_frame = partial_frame(
-        tier_a_frame,
-        tier_a_states,
-        tier_a_rows,
-        tier_a_parent_flags,
-        "tier_a",
-    )
-    tier_b_partial_frame = partial_frame(
-        tier_b_frame,
-        tier_b_states,
-        tier_b_rows,
-        tier_b_parent_flags,
-        "tier_b",
-    )
+    from .release import partial_relationships, add_partial_support
+    tier_a_partial_frame = partial_relationships(
+        tier_a_frame, diagnostics, settings, "tier_a")
+    tier_b_partial_frame = partial_relationships(
+        tier_b_frame, diagnostics, settings, "tier_b")
+    for child, diagnostic in enumerate(diagnostics):
+        for label, frame in (("TierA", tier_a_partial_frame),
+                             ("TierB", tier_b_partial_frame)):
+            for slot in (1, 2):
+                diagnostic[f"{label}Parent{slot}"] = bool(
+                    frame.at[child, f"Parent{slot}Supported"])
 
     candidate_set_rows = []
     for child, sample in enumerate(samples):
@@ -1452,7 +1423,8 @@ def infer_from_parent_state_evidence(
             "ExactConfigurationResolved": exact,
             "InferenceStatus": status,
         })
-    tier_b_candidate_sets = pd.DataFrame(candidate_set_rows)
+    tier_b_candidate_sets = add_partial_support(
+        pd.DataFrame(candidate_set_rows), tier_b_partial_frame)
 
     primary = {
         "tier_a": tier_a_frame,
@@ -1506,6 +1478,15 @@ def infer_from_parent_state_evidence(
     result.complete_relationships = complete_frame
     result.parent_state_calls = pd.DataFrame(state_call_rows)
     result.diagnostics = pd.DataFrame(diagnostics)
+    result.final_family_solve = dict(
+        iterations=int(score_diagnostics.get('final_family_iterations', 0)),
+        residual=float(score_diagnostics.get('final_family_residual', 0.0)),
+        tolerance=settings.parent_state_family_final_tolerance,
+        maximum_iterations=settings.parent_state_family_final_max_iterations,
+        retry_iterations=int(score_diagnostics.get('final_family_retry_iterations', 0)),
+        retry_limit=settings.parent_state_family_retry_iterations,
+        retry_damping=settings.parent_state_family_retry_damping,
+        frozen_path_preparation_passes=settings.parent_state_family_message_passes)
     from .explanations import explain_calls
     result.call_explanations, result.alternative_explanations = explain_calls(
         samples, alternatives, states, by_child, full_counts, scored_counts,
@@ -1586,6 +1567,7 @@ def infer_from_parent_state_evidence(
         result.ancestry_depth_model_parameters = {
             "direction_model": settings.parent_state_direction_model,
             "family_message_passes": settings.parent_state_family_message_passes,
+            "final_family_solve": result.final_family_solve,
             "direction_robustness_mixture": settings.parent_state_contamination_probability,
             "direction_gate": False,
             "ancestry_path_budget": settings.parent_state_ancestry_path_budget,
@@ -1597,6 +1579,11 @@ def infer_from_parent_state_evidence(
                 if settings.parent_state_direction_model in {"family", "continuous_family"}
                 else "none"
             ),
+            "family_reconciliation": (
+                "converged_with_frozen_path_factor"
+                if settings.parent_state_direction_model in {"family", "continuous_family"}
+                else "none"
+            ),
             "ancestry_path_tail": "neutral_omitted_configuration_mass",
             "explicit_direction_policy": "exempt_supported_focal_parental_side",
         }
@@ -1604,11 +1591,14 @@ def infer_from_parent_state_evidence(
             "Paired chromosome junction contrasts provide finite, neutral-centered "
             "orientation support with summary-level callability adjustment. "
             "Family modes marginalize competing M0/M1/M2 configurations using "
-            "bounded synchronous cavity messages that exclude immediate reverse "
+            "synchronous cavity messages that exclude immediate reverse "
             "feedback. With a positive ancestry-path budget, an additional "
-            "one-way joint-family factor averages over uncertain reverse two-edge "
+            "joint-family factor averages over uncertain reverse two-edge "
             "paths, counts shared intermediates once and conditions on both "
-            "focal parents. Omitted configuration mass is neutral. Explicit "
+            "focal parents. Its evidence is frozen while a converged final reciprocal solve "
+            "replaces the earlier reciprocal term using path-adjusted scores; "
+            "the new messages do not recompute the supporting path evidence. "
+            "Omitted configuration mass is neutral. Explicit "
             "caller direction support exempts that parental side, not an "
             "uncertain co-parent. These are composite/loopy approximations, not calibrated "
             "parenthood probabilities. All direction evidence and family messages "
@@ -1656,7 +1646,8 @@ def infer_from_parent_state_evidence(
         "The selected policy is recorded in ancestry_depth_model_parameters. "
         "The finite family model uses summary-level callability adjustment, not "
         "an exact common-interval recount; structured missingness remains a risk. "
-        "Family messages are a bounded loopy approximation and exclude immediate "
+        "Final family messages converge with the short-path evidence frozen; "
+        "they remain a loopy approximation and exclude immediate "
         "reverse feedback, not every longer dependency. Shared genetic/painting "
         "evidence is not independent. Direction and family terms can affect state "
         "calls, identities, graph selection and Tier A/B release. Reconstructed "

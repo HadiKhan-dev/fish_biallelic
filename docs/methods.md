@@ -146,8 +146,9 @@ not regeneration of the underlying simulated reads or discovered blocks.
 ## Final founder-path refinement
 
 After each executed level of final L1–L4 assembly, the hierarchy's current
-components and founder counts initialize the **complete** founder refiner.
-Its refined rows feed the next level. Each pass reopens row choices from the
+components and founder counts initialize the progressive founder refiner.
+Its refined rows feed the next level. A separate bounded count-up pass runs
+once on the final components. Each pass reopens row choices from the
 same original **prepared local panels** within each component. A locally
 supported founder can otherwise be pruned at L2 and remain
 unrecoverable to L3/L4, even when a better chromosome path exists in those local
@@ -167,8 +168,11 @@ count-search budgets are retained.
 
 This pass uses the full cohort's genotype likelihoods, without truth, pedigree
 or generation labels. It retains the panel scorer's normalized likelihoods,
-1% uniform mixture, -2 log-likelihood floor, and length-scaled uniform penalty
-for a change of sample diplotype. Unlike the binned panel scorer, acceptance
+1% uniform mixture and -2 log-likelihood floor. Its uniform cost for a change
+of sample diplotype is **20**, independent of component length, at every
+progressive refinement level and in count-refit/exchange passes. The hierarchy's
+binned panel scorer retains its separate length-scaled penalty; the earlier
+L1/L2 feedback rounds do not run this refiner. Unlike that binned scorer, acceptance
 permits sample state changes at every SNP. This is a finer-discretization model
 change, not merely a faster evaluation of the binned model. It is an internal
 assembly fitting HMM, not the homologue-specific painting painter, a posterior phase
@@ -310,6 +314,16 @@ The following default-on searches address different remaining barriers:
    genotype fit are required. These exchanges preserve the exact local
    multiset of called **and missing** alleles and cannot fill absent sequence.
 
+After the final executed hierarchy level, symmetric count-up/refit is enabled
+by default. It tries a duplicated-incumbent and an unused-local-row start in
+both directions, retains the best canonical proposal, then repairs the whole
+K+1 panel with the same fixed-count primal/dual and paired passes given to the
+incumbent. The same complexity objective decides acceptance. At most two
+additions are tried, stopping at the first rejection. It neither assumes K nor
+invents local alleles. Single-local-block components are left to discovery.
+This is a bounded search, not exhaustive founder-count estimation. Set
+`FounderRefinementConfig(count_max_additions=0)` to disable additions only.
+
 The window width is 100 prepared blocks (or 100 L1 groups for the staggered
 interval grid), with half-window spacing for single-founder windows. These
 are bounded search budgets, not sample-count-specific biological parameters.
@@ -438,20 +452,55 @@ screen scores are reused, preserving quadratic founder-state scaling.
 The score recipe has its own checkpoint identity: existing preparation can
 be reused, but old genetic scores are not silently treated as the new model.
 
+Default pooled predictive calibration (`--pedigree-calibration predictive`;
+disable with `--pedigree-calibration off`) multiplies all M0/M1/M2 chromosome
+log-likelihoods by one positive scale. Whole usable chromosomes, in input order
+modulo four, form four groups.
+Each of the first three groups is predicted by the other two; their summed log
+predictive mixture selects the scale. The fourth group supplies untouched
+diagnostic testing, predicted using all three non-test groups. Existing fixed
+state priors and eligible candidate counts are preserved; cohort prevalence is
+not fitted. A small log-scale grid brackets numerical maxima before continuous
+refinement because this objective need not be unimodal. Search bounds are
+0.001–100; boundary/nonconverged fits or no selection gain retain scale 1, as do
+inputs with fewer than two chromosomes in any group.
+
+This is conditional predictive weighting of a composite model, **not** calibration
+of biological posterior probabilities. The paintings and candidate panel were
+constructed using all chromosomes, and relatives are dependent. Direction,
+reciprocal-family inference and release retain their existing assumptions.
+Bootstrap/LOCO refits condition on this fitted scale, so they do not include its
+estimation uncertainty. The untouched test gain is recorded, never used to tune
+the weight. Full-marker Mendelian exclusion uses the original raw genotype
+likelihoods and recomputes any newly required candidate dyads without this scale.
+
 Pedigree uses [finite direction and family evidence](pedigree_direction.md) rather
 than a mandatory ordering of inferred ancestry layers. Paired chromosome
 junction contrasts give finite, neutral-centred orientation support; four
 synchronous reciprocal-family cavity-message passes compare competing M0/M1/M2
-families while excluding immediate reverse feedback. A one-way joint-family
+families while excluding immediate reverse feedback. A joint-family
 factor also checks reverse two-edge ancestry paths, averaging over uncertain
 parent configurations and counting shared intermediates once. Its top-16
 configuration panel assigns omitted mass neutral compatibility; conditioning on
-both focal parents preserves legitimate backcrosses. Explicit chronology
+both focal parents preserves legitimate backcrosses. Freeze this path evidence,
+then replace the initial reciprocal term with a converged reciprocal
+solve on the path-adjusted scores (maximum log-message change `1e-8`, at most
+128 undamped iterations, then a 4096-iteration damping-0.5 restart if needed;
+the residual is measured before damping and failure of both attempts is reported). The final messages do not recompute the
+supporting path factor. Explicit chronology
 exempts that parental side without exempting an uncertain co-parent. All these
 terms are recomputed during bootstrap and leave-one-chromosome-out fits.
 Exposure requirements, explicit
 eligibility, the fixed top-20 pair panel, fixed state priors and release
-thresholds remain unchanged.
+thresholds remain unchanged for chromosome-resampling release.
+The standard workflow additionally scans full-marker raw genotype likelihoods
+for unresolved/non-exact M0/M1 counts. Mendelian exclusions and already-supported
+outgoing edges must jointly leave exactly the full-data incoming parent set;
+no new edge is introduced. This fixed-observed-genome release is labelled
+separately and preserves original resampling diagnostics. Its error bound
+requires calibrated likelihoods/independent read errors; directional release
+also depends on supported directions being correct. It is not an unconditional
+pedigree-accuracy guarantee. See the direction document for the bound and outputs.
 
 This is a bounded composite/loopy approximation, not exact global pedigree
 marginalization. Callability correction uses chromosome summaries rather than
@@ -469,7 +518,15 @@ receive the generating pedigree or generation labels.
 
 ## Family refinement and recombination
 
-Family refinement conditions on the accepted Tier-B pedigree. Joint meiosis
+Family refinement conditions on explicitly supported Tier-B parent edges.
+The exact configuration table remains the primary pedigree report. Separate
+`tier_b_partial_relationships` rows retain marginally supported edges even
+when M1 versus M2 is unresolved: an edge must meet the existing bootstrap and
+LOCO thresholds in both local and graph views and belong to the full-data
+acyclic graph. The table records support flags and lower/upper observed-parent
+counts; an unresolved co-parent is not guessed. Family refinement and
+recombination use the same partial table, and their relationship checkpoint
+identity includes the support flags. Joint meiosis
 messages and conditional phase polishing reconcile relatives while preserving
 called genotypes and missingness. Family phase has one phase-focused release policy:
 start phase assessment after 20 family iterations, then require five consecutive

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from scipy.optimize import linear_sum_assignment
 from numba import njit, prange
-from.import partial_emissions
+from . import partial_emissions
 
 
 _STACK_BYTES_BUDGET = 4 * 1024 ** 3

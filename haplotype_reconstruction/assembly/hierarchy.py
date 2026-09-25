@@ -30,7 +30,7 @@ def _init_worker_meta(meta_dict, total_cores, active_counter, extra_counter,
     arrays, configures the numba thread pool ceiling to total_cores
     so set_num_threads can scale freely later (starts at 1 — the real
     value is set per phase in _process_single_batch), and wires the
-    active/extra counters used by dynamic_threads.get_dynamic_threads.
+    active/extra counters used by core.parallel.get_dynamic_threads.
 
     With OMP PASSIVE or TBB threading layers, idle threads in an
     oversized pool sleep and consume zero CPU.  Avoid workqueue —
@@ -57,7 +57,7 @@ def _init_worker_meta(meta_dict, total_cores, active_counter, extra_counter,
     global _SHARED_META
     _SHARED_META = meta_dict
     # Wire this worker to the shared dynamic-thread counters; the state and
-    # helpers live in dynamic_threads.  set_dynamic_thread_state resets the
+    # helpers live in core.parallel.  set_dynamic_thread_state resets the
     # per-worker extra-claim flag, so a recycled worker can't inherit a stale
     # claim.
     core_parallel.set_dynamic_thread_state(
@@ -85,17 +85,6 @@ def _attach_shared_array(metadata):
         (SharedMemory handle, numpy array view)
     """
     return core_parallel.attach_shared_array(metadata)
-
-
-def _missing_aware_informative_sample_mask(batch_probs):
-    """Samples with any positive-mass, nonuniform GL cell in this batch."""
-    probabilities = np.asarray(batch_probs)
-    positive_mass = np.sum(probabilities, axis=2) > 0.0
-    nonuniform = (
-        (probabilities[:,:, 0] != probabilities[:,:, 1])
-        | (probabilities[:,:, 1] != probabilities[:,:, 2])
-    )
-    return np.any(positive_mass & nonuniform, axis=1)
 
 
 def _missing_aware_block_indices(block, global_sites, max_sites=None):
@@ -138,13 +127,6 @@ def _informative_samples_at_indices(probabilities, index_sets):
                 result[block, sample] = True
                 break
     return result
-
-
-def _missing_aware_block_informative_sample_mask(
-        block, global_probs, global_sites, max_sites=None):
-    indices = List.empty_list(numba.types.int64[::1])
-    indices.append(_missing_aware_block_indices(block, global_sites, max_sites))
-    return _informative_samples_at_indices(np.asarray(global_probs), indices)[0]
 
 
 def _missing_aware_batch_ranges(
@@ -674,7 +656,7 @@ def _process_single_batch(args):
         # 4. Generate Mesh — DYNAMIC SEQUENTIAL phase.
         # Emissions: ThreadPoolExecutor (pure numpy, fast, no numba).
         # Mesh EM: sequential over gaps with dynamic numba threads;
-        # dynamic_threads.get_dynamic_threads called between each gap (and inside the
+        # core.parallel.get_dynamic_threads called between each gap (and inside the
         # EM loop via dynamic_cores_fn) so this worker scales up as
         # peers finish.
         # =================================================================
@@ -739,7 +721,7 @@ def _process_single_batch(args):
         _t = time.perf_counter()
         search_diagnostics = []
         if panel_search_config is not None:
-            from.panel_search import select_and_resolve
+            from .panel_search import select_and_resolve
             resolved_beam = select_and_resolve(
                 beam_results, fast_mesh, list(original_portion),
                 inference_batch_probs, batch_sites, config=panel_search_config,

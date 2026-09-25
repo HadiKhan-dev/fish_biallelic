@@ -11,11 +11,50 @@ multiply their speedups or add them into a fresh end-to-end runtime. First-use
 compilation, shared-filesystem I/O, founder ambiguity and chromosome length
 matter. Configured threads are not a measure of sustained CPU utilization.
 
+## Observation fitting and count-up screening — 25 September 2026
+
+These are matched cached-input comparisons on one 112-core Sapphire Rapids
+allocation, split into four disjoint 28-core tasks. Native kernels were warm;
+fresh count-search checkpoints were used. They are not complete workflow timings.
+
+| Operation | Previous (s) | Current (s) |
+| --- | ---: | ---: |
+| Fit nested read models, Tropheops histogram (116 samples) | 8.45 | 0.53 |
+| Fit nested read models, Astcal histogram (290 samples) | 19.39 | 1.13 |
+| Final count-up/refit, seed7004 full chr10 | 58.20 | 10.61 |
+| Final count-up/refit, seed7019 full chr7 | 97.02 | 14.46 |
+
+Compiled analytic gradients and EM sufficient statistics replace temporary
+sample/count/genotype tensors without changing the fitted likelihood or
+optimizer settings. Histogram extraction, GL application and downstream
+inference are excluded from these fitting times. Each compared real-data fit
+selected the same model; normalized GL differences were below 3.2e-9, with no
+genotype-argmax changes in the application control.
+
+The count-up screen reuses the optimistic free-block-boundary score to exclude
+only provably losing additions, retaining the incumbent repair. All nine
+matched controls produced identical called panels and selected paths. Eight
+became faster; the remaining seed7010 regional control could not be screened
+and took 48.49 versus 51.75 seconds. Thus this is not a uniform speedup.
+The full-chromosome rows above measure only the final count-up pass, not L1–L4
+assembly or all progressive refinement.
+
+Two further family-message prototypes were not promoted. On the 112-core
+seed7010 continuation, 20 actual iterations took 9.67 seconds unchanged,
+9.71 with fused branch scheduling and 9.36 with a fixed-homozygote shortcut.
+Calls and messages matched, but these small differences did not justify
+additional implementation complexity. Cold compilation is excluded.
+
+Artifacts and frozen pre-change source:
+`.work/pipeline_polish_20260925.6STDyVgq/`.
+See [validation](validation.md#numerical-performance-and-product-checks--25-september-2026)
+for scope and the separate no-training-read correction.
+
 ## Complete workflow timing
 
 ### Fresh seed3000, N320 and 5×
 
-The current implementation completed a fresh 22-chromosome run through recombination on
+The implementation as of that date completed a fresh 22-chromosome run through recombination on
 17 September 2026, using five 76-core Ice Lake allocations and one 66-core
 allocation. Measured multi-node elapsed time was **93.67 minutes**, excluding
 the subsequent truth evaluation. This includes shared initialization,
@@ -80,8 +119,10 @@ fresh-run measurement.
 
 ## Final founder refinement
 
-The complete refiner now runs after each executed level of final L1–L4
-assembly, never in the two local-feedback passes. Small components run
+Progressive refinement runs after each executed level of final L1–L4
+assembly, never in the two local-feedback passes. A separate final count-up/refit
+was added on 24 September; the earlier timing tables below do not include that
+later pass or joint observation calibration. Small components run
 concurrently and share a chromosome-derived early proposal resolution;
 late levels retain component-specific resolution. The implementation shares
 invariant evidence and background scores,

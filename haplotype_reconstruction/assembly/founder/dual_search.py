@@ -12,8 +12,8 @@ It is neither a global assembly certificate nor a biological confidence score.
 import time
 import numpy as np
 from numba import njit, prange, get_num_threads, set_num_threads
-from.import sparse as founder_sparse, dual_short as founder_dual_short
-from.packing import emission_arrays, score_rows, packed_emissions, candidate_alphabet, short_models
+from . import sparse as founder_sparse, dual_short as founder_dual_short
+from .packing import emission_arrays, score_rows, packed_emissions, candidate_alphabet, short_models
 _COORDINATE_THREADS = 8
 
 

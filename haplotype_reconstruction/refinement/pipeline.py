@@ -17,7 +17,7 @@ from haplotype_reconstruction.pedigree import components as pedigree_components
 from haplotype_reconstruction.pedigree import pipeline as pedigree_pipeline
 from haplotype_reconstruction.painting import checkpoints as painting_checkpoints
 from haplotype_reconstruction.workflows.reconstruction import PAINTING_STAGE
-from.import conditioning, model, polish
+from . import conditioning, model, polish
 
 
 FINAL_PHASE_STAGE = "family_phase"
@@ -65,8 +65,12 @@ the preceding polished path is only a comparison, never a warm start.
     def save(messages, phase, stable_count, *, force=False):
         nonlocal last_saved
         if work is not None and (force or time.perf_counter() - last_saved >= checkpoint_min_seconds):
+            # Emissions are recomputed before the next chain/MAP update.
+            # Shallow copies preserve the live solver, cavities and phase checks.
+            saved_messages = replace(messages, branch_clusters=tuple(
+                replace(cluster, emissions=None) for cluster in messages.branch_clusters))
             checkpoints.write(str(work), {
-                "identity": identity, "messages": messages, "phase": phase,
+                "identity": identity, "messages": saved_messages, "phase": phase,
                 "unchanged": stable_count, "checks": tuple(checks),
             }, nthreads=checkpoint_threads)
             last_saved = time.perf_counter()
@@ -254,7 +258,7 @@ phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
     if (tuple(map(str, pedigree_payload["ordered_sample_ids"])) != names or
             tuple(map(str, pedigree_payload["ordered_contigs"])) != contigs):
         raise ValueError("Family phase axes differ from the complete pedigree")
-    relationships = pedigree_payload["tier_b_relationships"]
+    relationships = pedigree_payload["tier_b_partial_relationships"]
     source_files = []
     for source in dict.fromkeys((PAINTING_STAGE, raw_gl_stage, raw_sites_stage)):
         runtime.require_contig_checkpoints(checkpoint_store, source, contigs)

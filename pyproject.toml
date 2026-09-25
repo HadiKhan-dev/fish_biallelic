@@ -21,7 +21,6 @@ dependencies = [
   "blosc2>=4.0",
   "matplotlib>=3.9",
   "networkx>=3.3",
-  "seaborn>=0.13",
   "tqdm>=4.66",
   "openpyxl>=3.1",
   "tbb>=2021.13",

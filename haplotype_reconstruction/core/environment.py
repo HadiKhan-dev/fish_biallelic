@@ -15,6 +15,19 @@ NUMERIC_THREAD_ENV_VARS = (
 )
 
 
+def boolean_setting(value, name):
+    """Parse the same boolean spellings in CLI, TOML and environment adapters."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        setting = value.strip().lower()
+        if setting in ('1', 'true', 'yes', 'on'):
+            return True
+        if setting in ('0', 'false', 'no', 'off'):
+            return False
+    raise ValueError(f'{name} must be boolean (1/0, true/false, yes/no or on/off)')
+
+
 def assembly_transition_model():
     """Assembly choice is independent of discovery; dense is the default."""
     value = os.environ.get("HAPLOTYPES_ASSEMBLY_MODEL", "dense")

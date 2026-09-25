@@ -11,11 +11,11 @@ import math
 import numpy as np
 from numba.typed import List
 
-from..import chimera_scoring
-from.import scoring as founder_scoring, delta as founder_delta
-from..import observations
+from .. import chimera_scoring
+from . import scoring as founder_scoring, delta as founder_delta
+from .. import observations
 from ...core import parallel
-from.evidence import gather_evidence, build_models
+from .evidence import gather_evidence, build_models
 
 
 def resolve_threads(budget):
@@ -40,7 +40,7 @@ class ComponentWorkspace:
             & np.all(observations.founder_inference_panel_from_block_result(b).called, axis=0)
             for b in batch]) if prepared_arrays is None else prepared_arrays[1])
         self.offsets = np.asarray([0, *np.cumsum([len(b.positions) for b in batch])], np.int64)
-        self.penalty = chimera_scoring.compute_penalty(batch)
+        self.penalty = founder_scoring.SWITCH_PENALTY
         self.bin_size = max(minimum_bin_size, chimera_scoring.compute_spb(batch),
                             math.ceil(len(self.positions) / max_bins))
         self.logs = (founder_scoring.prepare_log_evidence(self.evidence, self.complete)
@@ -102,7 +102,7 @@ class ComponentWorkspace:
             return self.predictive_scores[key]
         with parallel.numba_thread_scope(resolve_threads(self.threads)):
             if self.predictive_evidence is None:
-                from.predictive import PredictiveEvidence
+                from .predictive import PredictiveEvidence
                 self.predictive_evidence = PredictiveEvidence(self)
             value = self.predictive_evidence.score(self, panel)
         self.predictive_scores[key] = value
@@ -112,7 +112,7 @@ class ComponentWorkspace:
 
     def primary_preserving_choices(self, panel, branch_cap):
         if self.predictive_evidence is None:
-            from.predictive import PredictiveEvidence
+            from .predictive import PredictiveEvidence
             self.predictive_evidence = PredictiveEvidence(self)
         return self.predictive_evidence.primary_preserving_choices(
             self, panel, branch_cap)

@@ -1,4 +1,4 @@
-"""recombination / model for the canonical reconstruction pipeline."""
+"""Missing-aware meiosis decoding with crossover and phase-artifact states."""
 from __future__ import annotations
 
 
@@ -898,8 +898,8 @@ def fit_shared_orientations(product, relationships, *, config=RecombinationMapCo
     # scaled streaming recurrence on these supported numerical boundaries.
     mixing = config.phase_artifact_rate > 0 and np.all(np.diff(genetic) > 0)
     if candidates and mixing:
-        from.intervals import EdgeIntervalProducts
-        from.orientation_prior import OrientationPriorSums
+        from .intervals import EdgeIntervalProducts
+        from .orientation_prior import OrientationPriorSums
         edge_products = EdgeIntervalProducts(data, candidates, adjacent, config)
         prior_sums = OrientationPriorSums(positions, runs, candidates, shared_config)
         scores = np.empty(len(parents))

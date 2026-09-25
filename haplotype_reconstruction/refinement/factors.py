@@ -125,20 +125,17 @@ def joint_beliefs(base, orientation, phase, parent_log, child_log, node_group,
 
 
 @njit(cache=True)
-def branch_factor(q, selector, intermediate_slot, error):
+def _branch_factor_into(q, selector, intermediate_slot, error, emission, message, alt, chance, down):
     """Five-node factor contracted through two transmitted-allele masses.
 
 No support is discarded. The same 16 selector states and all five outgoing
 four-genotype messages are retained, including hypothetical genotype states.
 """
-    alt = np.empty((3, 2))
     for node in range(3):
         alt[node, 0] = q[node, 2] + q[node, 3]
         alt[node, 1] = q[node, 1] + q[node, 3]
-    emission = np.zeros(16)
-    message = np.zeros((5, 4))
-    chance = np.empty(4)
-    down = np.empty(4)
+    emission[:] = 0.
+    message[:] = 0.
     e = error
     r = 1 - 2 * e
     for state in range(16):
@@ -199,32 +196,56 @@ four-genotype messages are retained, including hypothetical genotype states.
     return emission, message
 
 
+@njit(cache=True)
+def branch_factor(q, selector, intermediate_slot, error):
+    """Standalone factor evaluation; sweeps reuse the same small work buffers."""
+    return _branch_factor_into(q, selector, intermediate_slot, error,
+        np.empty(16), np.empty((5, 4)), np.empty((3, 2)), np.empty(4), np.empty(4))
+
+
 @njit(cache=True, parallel=True)
 def branch_sweep(belief, parent_log, child_log, cavity, nodes, edges, groups, slot, error, damping):
+    """Parallel marker tiles with reusable scratch, preserving node-update order.
+
+    Tiles are computational units only: all sites and selector states remain.
+    Distinct sites never share messages; branch clusters themselves still run
+    sequentially because they can share individual beliefs.
+    """
     sites = belief.shape[1]
     emissions = np.empty((sites, 16), dtype=np.float32)
-    delta = np.zeros(sites)
-    for site in prange(sites):
+    tiles = (sites + 255) // 256
+    delta = np.zeros(tiles)
+    for tile in prange(tiles):
         q = np.empty((5, 4))
-        for node in range(5):
-            message = parent_log[edges[node], site] if node < 3 else child_log[groups[node - 3], site]
-            q[node] = probabilities(belief[nodes[node], site].astype(np.float64) - message)
-        emission, messages = branch_factor(q, cavity[site], slot, error)
-        emissions[site] = emission
-        if damping == 0:
-            continue
-        for node in range(5):
-            if fixed_homozygote(belief[nodes[node], site]):
+        messages = np.empty((5, 4))
+        emission = np.empty(16)
+        alt = np.empty((3, 2))
+        chance = np.empty(4)
+        down = np.empty(4)
+        maximum = 0.
+        for site in range(tile * 256, min(sites, (tile + 1) * 256)):
+            for node in range(5):
+                message = parent_log[edges[node], site] if node < 3 else child_log[groups[node - 3], site]
+                values = cavity4(belief[nodes[node], site], message)
+                for state in range(4):
+                    q[node, state] = values[state]
+            _branch_factor_into(q, cavity[site], slot, error, emission, messages, alt, chance, down)
+            emissions[site] = emission
+            if damping == 0:
                 continue
-            old_log = parent_log[edges[node], site] if node < 3 else child_log[groups[node - 3], site]
-            for genotype in range(4):
-                old = np.exp(old_log[genotype])
-                probability = (1 - damping) * old + damping * messages[node, genotype]
-                value = np.log(max(1e-30, probability))
-                belief[nodes[node], site, genotype] += value - old_log[genotype]
-                old_log[genotype] = value
-                delta[site] = max(delta[site], abs(probability - old))
-            _normalise_log(belief[nodes[node], site])
+            for node in range(5):
+                if fixed_homozygote(belief[nodes[node], site]):
+                    continue
+                old_log = parent_log[edges[node], site] if node < 3 else child_log[groups[node - 3], site]
+                for genotype in range(4):
+                    old = np.exp(old_log[genotype])
+                    probability = (1 - damping) * old + damping * messages[node, genotype]
+                    value = np.log(max(1e-30, probability))
+                    belief[nodes[node], site, genotype] += value - old_log[genotype]
+                    old_log[genotype] = value
+                    maximum = max(maximum, abs(probability - old))
+                _normalise_log(belief[nodes[node], site])
+        delta[tile] = maximum
     return emissions, np.max(delta)
 
 

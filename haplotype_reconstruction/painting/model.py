@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import numba
 from numba import njit, prange
-from.import evidence as painting_evidence
+from . import evidence as painting_evidence
 
 
 PAINTING_EMISSION_CACHE_MAX_BYTES = 1024 ** 3  # Bounded reusable pedigree evidence, per chromosome.

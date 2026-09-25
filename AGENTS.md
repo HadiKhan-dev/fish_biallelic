@@ -273,8 +273,12 @@ joint founder completion, component-preserving L1-L4 hierarchical assembly, and
 component-local sample painting through typed painting checkpoints. Pedigree inference consumes
 those paintings plus raw genotype likelihoods with ragged quadratic scoring,
 finite continuous direction, four reciprocal-family cavity-message passes and
-a one-way joint short-ancestry correction with a bounded top-16 configuration
-panel, a fixed top-20 candidate-pair panel, and Tier B as primary output.
+a joint short-ancestry correction with a bounded top-16 configuration panel,
+followed by a converged final reciprocal solve with the path evidence frozen.
+Full-marker raw-GL Mendelian exclusion can resolve M0/M1 counts conditional on
+already-supported family directions; it introduces no new edges and preserves
+separate bootstrap/LOCO diagnostics. The top-20 candidate-pair panel stays fixed,
+and Tier B is primary output.
 Family phase performs pedigree-conditioned refinement and genotype-preserving final
 phase polishing. Recombination inference consumes final phase for missing-aware, conditional
 recombination maps, with separate posterior-mean rates, called crossover

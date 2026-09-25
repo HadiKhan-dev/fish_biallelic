@@ -8,7 +8,9 @@ the implementation lives and how its parts fit together.
 
 `run.py`, `python -m haplotype_reconstruction`, and the installed `haplotypes`
 command all enter `haplotype_reconstruction/cli.py`. The CLI resolves run
-settings before importing the selected workflow. This ordering matters:
+settings before importing the selected workflow. `build_parser()` describes
+commands; the inference and simulation setup functions keep model settings
+separate from generating parameters. This ordering matters:
 workflow configuration and numerical-library limits are read during import.
 
 The four reconstruction drivers live in `workflows/`: `variants.py` provides
@@ -17,6 +19,9 @@ the general AD-VCF/BCF route, `simulation.py` generates known-pedigree data, and
 All share `reconstruction.py` for local feedback, assembly and painting, then
 `downstream.py` for the one-way pedigree → family phase → recombination handoff.
 Simulation truth is retained for evaluation and never supplied to inference.
+Plotting libraries are loaded only by the optional simulation-pedigree
+plotter; painting types, checkpoint readers and export do not initialize
+graphics or font caches.
 
 `reports.py` holds discovery-search summaries and observed-reference
 consistency reports. Reporting neither selects haplotypes nor establishes
@@ -26,6 +31,7 @@ known-truth simulation validation.
 | Step | Start reading here | Main responsibility |
 | --- | --- | --- |
 | Input and observations | `core/variants.py`, `core/genotypes.py` | Marker blocks, allele depths and genotype likelihoods |
+| Observation calibration | `core/read_calibration.py`, `core/read_model.py` | Fit/compare nested read models; compiled fitting kernels and exact GL lookup live in `read_kernels.py` and `read_likelihoods.py` |
 | Local discovery | `discovery/blocks.py`, `discovery/search.py` | Missing-aware reversible search for 200-SNP panels |
 | Feedback selection | `workflows/block_feedback.py`, `discovery/candidate_selection.py` | Read-supported selection after each L1 and L1+L2 context round |
 | Founder completion | `assembly/completion.py`, `assembly/joint_completion.py` | Evidence-supported local completion and frozen inference panels |
@@ -56,7 +62,7 @@ and execution helpers are grouped in `assembly/founder/`:
 | Modules | Responsibility |
 | --- | --- |
 | `path_search`, `beam`, `dual_search`, `windows` | Conditional path and interval proposals |
-| `exchanges`, `intervals`, `count` | Paired-path moves and founder-count comparisons |
+| `exchanges`, `intervals`, `count`, `count_increase` | Paired-path moves, progressive count reductions and final count-up/refit |
 | `scoring`, `predictive`, `evidence` | Cohort likelihoods, missing-founder evidence and model preparation |
 | `workspace`, `packing`, `background`, `delta` | Reusable arrays and localized score evaluation |
 | `candidates`, `components`, `count_workers` | Bounded concurrent work and straggler thread reallocation |
@@ -84,7 +90,10 @@ and score types remain there, while the numerical work is separated into:
 `inference.py` combines chromosomes and applies the decision procedure.
 `direction.py`, `eligibility.py`, `states.py`, `bootstrap.py` and `graph.py`
 separate chronology/eligibility, parent-count evidence, resampling and acyclic
-graph selection. `results.py` produces the output tables. Generation labels
+graph selection. `calibration.py` learns the conditional predictive evidence
+scale; `exclusion.py` and `exclusion_patterns.py` supply raw-GL Mendelian
+exclusion; `release.py` reconciles released parent-count states without
+introducing new edges. `results.py` produces the output tables. Generation labels
 and real-data candidate eligibility must not be confused with known parentage.
 
 ## Where CPU allocation lives
@@ -106,6 +115,14 @@ memory bandwidth and ordered acceptance steps can still limit utilization.
 Run examples live in `configs/`. `cli.py` resolves command-line, TOML and
 supported environment settings. Stage-owned configuration classes live beside
 their implementation; `core/config.py` contains shared scientific constants.
+`pedigree/config.py` owns both `PedigreeConfig` and its environment adapter;
+`workflows/design.py` only supplies real-cross eligibility and chronology,
+not a second copy of the model defaults. `core/environment.py` supplies the
+shared boolean parser used by the CLI, read calibration and recombination.
+The two cichlid adapters and empirical-template simulation share their
+reference chromosome order in `workflows/__init__.py`; general VCF
+reconstruction takes its contigs from the input header or explicit CLI list.
+
 The [running guide](running.md) distinguishes broad-only assembly controls
 from bounded-search budgets.
 
@@ -126,6 +143,12 @@ with `PYTHONPATH` pointing there; `PYTHONSAFEPATH=1` also prevents the child
 interpreter's current-directory entry from taking precedence. Verify the
 package path in a forkserver worker as well as in the parent: a frozen entry
 script alone does not isolate preloaded worker imports.
+
+For numerical comparisons, copy a kernel module into an isolated source tree
+or use a separate `NUMBA_CACHE_DIR`. Do not import a canonical `@njit(cache=True)`
+source file under a temporary module alias: the generated cache can retain
+that alias and fail to load in ordinary production imports. Experimental source,
+compiled caches and scientific checkpoints are separate kinds of artifact.
 
 ## Making a behavior-preserving cleanup
 

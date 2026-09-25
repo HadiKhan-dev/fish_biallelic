@@ -7,7 +7,7 @@ import hashlib
 import math
 import numpy as np
 
-from.import joint_statistics
+from . import joint_statistics
 
 
 @dataclass(frozen=True)
@@ -239,10 +239,6 @@ def _configurations_for_site(
         for offset, founder in enumerate(unknown):
             configurations[index, founder] = (index >> offset) & 1
     return configurations, np.full(n_configurations, -unknown.size * math.log(2.0)), unknown
-
-
-def _configuration_dosages(configurations: np.ndarray, pairs: np.ndarray) -> np.ndarray:
-    return configurations[:, pairs[:, 0]] + configurations[:, pairs[:, 1]]
 
 
 def _exchangeable_groups(panel: HardFounderPanel) -> tuple[tuple[int, ...], ...]:

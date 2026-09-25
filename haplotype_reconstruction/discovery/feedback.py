@@ -379,8 +379,8 @@ def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromos
 
 def select_worker(task):
     """One local selection, using the same shared GL/mask pool initializer."""
-    from.candidate_selection import select_candidate_panel
-    from.candidate_rescue import CandidateRescueConfig, rescue_candidate_panel, reduce_empty_rows
+    from .candidate_selection import select_candidate_panel
+    from .candidate_rescue import CandidateRescueConfig, rescue_candidate_panel, reduce_empty_rows
     index, indices, latent, proposals, config, selection = task
     parallel.increment_active()
     try:

@@ -8,7 +8,7 @@ floating ties changed downstream founder paths/counts in validation.
 """
 import numpy as np
 from numba import njit, prange
-from.import sparse as founder_sparse
+from . import sparse as founder_sparse
 
 @njit(cache=True, parallel=True, nogil=True)
 def score(
@@ -246,8 +246,8 @@ def chunk(
         order = ordered(scores, upper, ranking, beam_width)
         count = min(beam_width, length)
         if two_flanks:
-            ordinary = ordered(scores, upper, 0, beam_width)
-            tied = ordered(scores, upper, 1, beam_width)
+            ordinary = order if ranking == 0 else ordered(scores, upper, 0, beam_width)
+            tied = order if ranking == 1 else ordered(scores, upper, 1, beam_width)
             for i in range(count):
                 if ordinary[i] != tied[i]:
                     equivalent = False
@@ -407,8 +407,8 @@ def macro_chunk(
                 return (dp, alternate, beams, scores, order, True, equivalent)
         order = ordered(scores, upper, ranking, width)[:width]
         if two_flanks:
-            ordinary = ordered(scores, upper, 0, width)[:width]
-            tied = ordered(scores, upper, 1, width)[:width]
+            ordinary = order if ranking == 0 else ordered(scores, upper, 0, width)[:width]
+            tied = order if ranking == 1 else ordered(scores, upper, 1, width)[:width]
             for i in range(len(order)):
                 if ordinary[i] != tied[i]:
                     equivalent = False

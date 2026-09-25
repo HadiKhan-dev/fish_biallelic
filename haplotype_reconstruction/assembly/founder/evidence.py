@@ -10,8 +10,8 @@ import math
 import numpy as np
 from numba import njit, prange
 from numba.typed import List
-from..import observations, partial_emissions
-from.packing import PreparedModels
+from .. import observations, partial_emissions
+from .packing import PreparedModels
 
 @njit(cache=True, parallel=True, nogil=True)
 def _gather_evidence(neutral, indices):

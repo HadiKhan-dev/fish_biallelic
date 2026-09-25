@@ -11,7 +11,6 @@ cyvcf2==0.32.1
 blosc2==4.5.1
 matplotlib==3.10.8
 networkx==3.6.1
-seaborn==0.13.2
 tqdm==4.67.1
 openpyxl==3.1.5
 tbb==2022.3.1

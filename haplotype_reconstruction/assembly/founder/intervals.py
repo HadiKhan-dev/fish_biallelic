@@ -13,12 +13,12 @@ in founder_exchanges; the complete refinement is not claimed to be quadratic.
 import numpy as np
 import time
 from numba import njit, prange, get_num_threads
-from..import founder_refinement as fr
-from.import scoring as fs
-from.import exchanges as ex
-from..import paths, hierarchy
-from.workspace import component_workspace
-from.packing import emission_arrays, pack_selected, score_rows
+from .. import founder_refinement as fr
+from . import scoring as fs
+from . import exchanges as ex
+from .. import paths, hierarchy
+from .workspace import component_workspace
+from .packing import emission_arrays, pack_selected, score_rows
 from ...core import haplotypes
 
 

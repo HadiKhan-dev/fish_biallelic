@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 import numpy as np
 from numba import njit
 
-from.import cavity, fitting, modes, objectives, search
-from..core import haplotypes, parallel
+from . import cavity, fitting, modes, objectives, search
+from ..core import haplotypes, parallel
 
 
 @dataclass(frozen=True)

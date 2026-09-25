@@ -12,9 +12,9 @@ import time
 import numpy as np
 
 from ...core import parallel
-from.workspace import component_workspace, resolve_threads
-from.candidates import completed_candidates
-from.import scoring as founder_scoring
+from .workspace import component_workspace, resolve_threads
+from .candidates import completed_candidates
+from . import scoring as founder_scoring
 from ...discovery.objectives import compute_outer_bic_from_log_likelihood as bic
 
 

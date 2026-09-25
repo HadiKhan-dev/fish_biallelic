@@ -30,13 +30,15 @@ SETTINGS = (
     "HAPLOTYPES_ASSEMBLY_MODEL", "HAPLOTYPES_ASSEMBLY_SEARCH",
     "HAPLOTYPES_FOUNDER_REFINEMENT", "HAPLOTYPES_DISCOVERY_SEARCH",
     "HAPLOTYPES_FEEDBACK_SELECTION", "HAPLOTYPES_STOP_AFTER_STAGE",
+    "HAPLOTYPES_READ_CALIBRATION",
+    "HAPLOTYPES_PEDIGREE_CALIBRATION",
     "BHD_SIMULATION_SEED", "BHD_SIM_READ_DEPTH", "HAPLOTYPES_GENERATIONS",
     "BHD_SIMULATION_RECOMBINATION_MAP", "BHD_SIMULATION_RECOMBINATION_RATE_CM_PER_MB",
     "HAPLOTYPES_SIMULATION_DESIGN", "HAPLOTYPES_READ_MODEL",
     "BHD_SIM_CONTIGS", "BHD_SIM_STOP_AFTER_STAGE",
 )
 DEPENDENCIES = ("numpy", "numba", "scipy", "pandas", "hdbscan", "cyvcf2",
-                "blosc2", "matplotlib", "networkx", "seaborn", "tqdm", "openpyxl", "tbb")
+                "blosc2", "matplotlib", "networkx", "tqdm", "openpyxl", "tbb")
 
 
 def source_record():

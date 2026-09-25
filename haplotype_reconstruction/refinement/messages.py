@@ -3,12 +3,13 @@
 
 import math
 import numpy as np
-from numba import njit, prange
+from numba import njit, prange, get_num_threads
+from concurrent.futures import ThreadPoolExecutor
 
 
 from dataclasses import dataclass
-from.import factors, selector_chains
-from.phase_chains import binary_map
+from . import factors, selector_chains
+from .phase_chains import binary_map
 
 
 @dataclass
@@ -127,7 +128,7 @@ def best_gauge_flips(phase_path, child_paths, phase_theta, theta, anchor):
     return flip, gain
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def branch_map(emission, theta):
     """Max-product binary-transition butterfly: O(16 log 16) per marker."""
     sites = len(emission)
@@ -263,11 +264,66 @@ def copy_messages(belief, messages, gp, ge, gc, error, damping, reverse, factor_
 
 
 @njit(cache=True, parallel=True)
-def joint_selector_maps(emissions, theta):
-    result = np.empty(emissions.shape[:2], dtype=np.int8)
-    for group in prange(len(emissions)):
+def joint_selector_maps(emissions, theta, groups, result):
+    for job in prange(len(groups)):
+        group = groups[job]
         result[group] = paired_map(emissions[group], theta)
-    return result
+
+
+def _branch_workers(count, bytes_per_job):
+    """Bound independent serial kernels by this call's CPU and RAM budgets."""
+    from ..painting.model import available_process_memory_bytes
+    workers = min(count, get_num_threads())
+    available = available_process_memory_bytes()
+    if available is not None:
+        workers = min(workers, max(1, available // max(1, 2 * bytes_per_job)))
+    return max(1, workers)
+
+
+@njit(cache=True, nogil=True)
+def _update_branch_marginals(cavity, previous, current, groups, damping):
+    """Fuse residual/update/marginals, preserving float32 intermediate stores."""
+    maximum = 0.
+    a, b = groups
+    for site in range(len(previous)):
+        for state in range(16):
+            maximum = max(maximum, abs(cavity[site, state] - previous[site, state]))
+            if damping:
+                previous[site, state] *= previous.dtype.type(1 - damping)
+                previous[site, state] += damping * cavity[site, state]
+        for state in range(4):
+            row = 4 * state
+            current[a, site, state] = (((previous[site, row] + previous[site, row + 1])
+                                        + previous[site, row + 2]) + previous[site, row + 3])
+            current[b, site, state] = (((previous[site, state] + previous[site, state + 4])
+                                        + previous[site, state + 8]) + previous[site, state + 12])
+    return damping * maximum
+
+
+@njit(cache=True, parallel=True)
+def project_branch_marginals(cavity, current, groups):
+    """Refresh four-state marginals after clustering/gauge moves.
+
+    The two reductions retain the ordinary left-to-right four-term sums,
+    including float32 intermediate rounding. Fusing them avoids temporary
+    site-by-four arrays and parallelizes the chromosome-sized projection.
+    """
+    a, b = groups
+    for site in prange(len(cavity)):
+        for state in range(4):
+            row = 4 * state
+            current[a, site, state] = (((cavity[site, row] + cavity[site, row + 1])
+                                       + cavity[site, row + 2]) + cavity[site, row + 3])
+            current[b, site, state] = (((cavity[site, state] + cavity[site, state + 4])
+                                       + cavity[site, state + 8]) + cavity[site, state + 12])
+
+
+def _advance_branch(job, theta, damping, current, delta):
+    cluster, branch_cache = job
+    cavity = (selector_chains.branch_cavity(cluster.emissions, theta)
+              if branch_cache is None else branch_cache.update(cluster.emissions, theta))
+    change = _update_branch_marginals(cavity, cluster.cavity, current, cluster.groups, damping)
+    delta[cluster.groups] = change
 
 
 def chain_messages(emissions, messages, theta, damping, support, cache, dirty_tiles=None):
@@ -276,6 +332,7 @@ def chain_messages(emissions, messages, theta, damping, support, cache, dirty_ti
     keep = unclustered(len(current), clusters)
     _, _, delta = selector_chains.update_incremental_chains(
         emissions, current, damping, keep, support, cache, dirty_tiles)
+    jobs = []
     for cluster in clusters:
         key = tuple(map(int, cluster.groups))
         branch_cache = cache.branches.get(key)
@@ -284,26 +341,55 @@ def chain_messages(emissions, messages, theta, damping, support, cache, dirty_ti
             branch_cache = selector_chains.BranchCache(len(cluster.emissions))
             cache.branches[key] = branch_cache
             cache.branch_bytes += branch_cache.bytes
-        cavity = (selector_chains.branch_cavity(cluster.emissions, theta)
-                  if branch_cache is None else branch_cache.update(cluster.emissions, theta))
-        delta[cluster.groups] = damping * np.max(abs(cavity - cluster.cavity))
-        if damping:
-            cluster.cavity *= 1 - damping
-            cluster.cavity += damping * cavity
-        a, b = cluster.groups
-        joint = cluster.cavity.reshape((-1, 4, 4))
-        current[a], current[b] = joint.sum(axis=2), joint.sum(axis=1)
+        jobs.append((cluster, branch_cache))
+    # Disjoint selector groups own independent caches. Do not parallelize the
+    # copy-factor sweep: that earlier sweep can share individual beliefs.
+    if jobs:
+        workers = _branch_workers(len(jobs), (len(theta) + 1) * 16 * 8 * 2 + 4096)
+        if workers == 1:
+            for job in jobs:
+                _advance_branch(job, theta, damping, current, delta)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_advance_branch, job, theta, damping, current, delta)
+                           for job in jobs]
+                for future in futures:
+                    future.result()
     return delta
 
 
-def selector_maps(emissions, messages, theta):
-    paths = joint_selector_maps(emissions, theta)
-    for cluster in messages.branch_clusters:
-        path = branch_map(cluster.emissions, theta)
-        a, b = cluster.groups
-        paths[a], paths[b] = path >> 2, path & 3
-    return paths
+def _branch_selector_map(cluster, theta, paths):
+    path = branch_map(cluster.emissions, theta)
+    a, b = cluster.groups
+    paths[a], paths[b] = path >> 2, path & 3
 
+
+def selector_maps(emissions, messages, theta, required_groups=None):
+    """Retain joint branch MAPs; unrequested result rows must not be read."""
+    groups = len(emissions)
+    required = np.ones(groups, dtype=np.bool_)
+    if required_groups is not None:
+        required[:] = False
+        required[required_groups] = True
+    ordinary = unclustered(groups, messages.branch_clusters)
+    ordinary = ordinary[required[ordinary]]
+    paths = np.empty(emissions.shape[:2], dtype=np.int8)
+    if len(ordinary):
+        joint_selector_maps(emissions, theta, ordinary, paths)
+    clusters = [cluster for cluster in messages.branch_clusters
+                if np.any(required[cluster.groups])]
+    if clusters:
+        workers = _branch_workers(len(clusters), (len(theta) + 1) * 20 + 4096)
+        if workers == 1:
+            for cluster in clusters:
+                _branch_selector_map(cluster, theta, paths)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_branch_selector_map, cluster, theta, paths)
+                           for cluster in clusters]
+                for future in futures:
+                    future.result()
+    return paths
 
 @njit(cache=True, parallel=True)
 def permute_cluster(cavity, flips, gp, groups):

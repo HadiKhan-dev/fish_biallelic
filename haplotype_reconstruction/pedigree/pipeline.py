@@ -15,6 +15,9 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints
 from . import cache as pedigree_cache
+from . import calibration as pedigree_calibration
+from . import exclusion as pedigree_exclusion
+from .explanations import parent_search_diagnostics
 import haplotype_reconstruction.pedigree.components as pedigree_components
 import haplotype_reconstruction.pedigree.models as pedigree_models
 import haplotype_reconstruction.workflows.design as workflows_design
@@ -32,14 +35,14 @@ PEDIGREE_GLOBAL_SCHEMA = "pedigree_scoring-component-pedigree-result-v5"
 PEDIGREE_GLOBAL_BACKEND = "component-local-parent-state-combined-v4"
 
 
-EVIDENCE_STAGE, PEDIGREE_STAGE = (
-    workflows_design.pedigree_stage_names()
-)
+EVIDENCE_STAGE = "pedigree_evidence"
+PEDIGREE_STAGE = "pedigree"
 
 
 PEDIGREE_INFERENCE_CODE_FILES = (
     'pedigree/pipeline.py',
     'pedigree/cache.py',
+    'pedigree/calibration.py',
     'pedigree/explanations.py',
     'pedigree/components.py',
     'pedigree/likelihoods.py',
@@ -63,7 +66,10 @@ PEDIGREE_INFERENCE_CODE_FILES = (
     'painting/evidence.py',
     'core/genetic_map.py',
     'core/raw_evidence.py',
-    'pedigree/results.py'
+    'pedigree/results.py',
+    'pedigree/release.py',
+    'pedigree/exclusion.py',
+    'pedigree/exclusion_patterns.py'
 )
 
 
@@ -1072,15 +1078,21 @@ def run_global_pedigree_inference(
         checkpoint_store, scoring_identity, prepare, settings, parent_eligibility, preparation_config)
     scoring_elapsed = time.perf_counter() - started
     decision_started = time.perf_counter()
-    result = pedigree_likelihoods.infer_scored_parent_state_evidence(
-        scored, parent_eligibility=parent_eligibility, config=settings, n_workers=n_workers)
-    elapsed = time.perf_counter() - started
+    result, calibration_report, full_marker_release = decide_scored_pedigree(
+        checkpoint_store, scored, settings, parent_eligibility=parent_eligibility,
+        n_workers=n_workers, contigs=ordered_contigs,
+        raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
+        raw_gl_key=raw_gl_key, raw_sites_key=raw_sites_key,
+        raw_observed_mask_key=raw_observed_mask_key)
     pedigree_result = result.pedigree_result
+    elapsed = time.perf_counter() - started
     tables = {
         "scientific_relationships": pedigree_result.relationships,
         "complete_relationships": pedigree_result.complete_relationships,
         "tier_a_relationships": pedigree_result.tier_a_relationships,
         "tier_b_relationships": pedigree_result.tier_b_relationships,
+        "tier_a_partial_relationships": pedigree_result.tier_a_partial_relationships,
+        "tier_b_partial_relationships": pedigree_result.tier_b_partial_relationships,
     }
     for name, frame in tables.items():
         if frame["Sample"].tolist() != list(ordered_ids):
@@ -1126,6 +1138,11 @@ def run_global_pedigree_inference(
         'tier_b_candidate_sets': pedigree_result.tier_b_candidate_sets,
         'parent_state_calls': pedigree_result.parent_state_calls,
         'evidence_summary': pedigree_result.evidence_summary,
+        'exclusion_evidence': pedigree_result.exclusion_evidence,
+        'exclusion_diagnostics': pedigree_result.exclusion_diagnostics,
+        'full_marker_release': full_marker_release,
+        'final_family_solve': pedigree_result.final_family_solve,
+        'evidence_calibration': calibration_report,
         'config': settings,
         "parent_eligibility": parent_eligibility,
         "parent_eligibility_identity": eligibility_identity,
@@ -1170,6 +1187,33 @@ def run_global_pedigree_inference(
     return payload
 
 
+def decide_scored_pedigree(
+        checkpoint_store, scored, settings, *, parent_eligibility=None, n_workers=None,
+        contigs, raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
+        raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask"):
+    """Decide from cached genetic scores, then run fresh raw-marker count release.
+
+    Both ordinary runs and controlled decision replays use this boundary. A
+    replay must retain the score source's sample/contig order and raw evidence.
+    ``contigs`` includes raw chromosomes omitted from painting-based scoring.
+    No fitted evidence scale is applied to the independent exclusion module.
+    """
+    decision_scores, calibration_report = pedigree_calibration.prepare_decision_scores(
+        scored, settings, parent_eligibility)
+    result = pedigree_likelihoods.infer_scored_parent_state_evidence(
+        decision_scores, parent_eligibility=parent_eligibility, config=settings, n_workers=n_workers)
+    pedigree_result = result.pedigree_result
+    full_marker_release = pedigree_exclusion.refine_parent_counts(
+        checkpoint_store, contigs, scored.sample_ids, pedigree_result,
+        parent_eligibility=parent_eligibility, n_workers=n_workers,
+        raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
+        raw_gl_key=raw_gl_key, raw_sites_key=raw_sites_key,
+        raw_observed_mask_key=raw_observed_mask_key)
+    pedigree_result.search_diagnostics = parent_search_diagnostics(
+        scored, parent_eligibility, pedigree_result.tier_b_relationships)
+    return result, calibration_report, full_marker_release
+
+
 def write_pedigree_outputs(payload, output_dir):
     """Publish the primary pedigree, evidence tiers, and supporting diagnostics."""
     output = Path(output_dir) / "pedigree"
@@ -1177,15 +1221,19 @@ def write_pedigree_outputs(payload, output_dir):
     names = (
         "scientific_relationships", "complete_relationships",
         "tier_a_relationships", "tier_b_relationships",
+        "tier_a_partial_relationships", "tier_b_partial_relationships",
         'diagnostics',
         'parent_state_calls', 'evidence_summary',
         'call_explanations', 'alternative_explanations', 'search_diagnostics',
-        'tier_b_candidate_sets',
+        'tier_b_candidate_sets', 'exclusion_evidence', 'exclusion_diagnostics',
     )
     for name in names:
         temporary = output / f".{name}.csv.tmp"
         payload[name].to_csv(temporary, index=False)
         temporary.replace(output / f"{name}.csv")
+    temporary = output / ".evidence_calibration.json.tmp"
+    temporary.write_text(json.dumps(payload["evidence_calibration"], indent=2) + "\n")
+    temporary.replace(output / "evidence_calibration.json")
     return output
 
 
@@ -1198,17 +1246,20 @@ def run_pedigree(
 
     Numerical scoring uses one process with the allocated Numba threads;
     bootstrap uses up to that many single-threaded workers, in a later phase.
+    Full-marker exclusion then uses up to four chromosome workers sharing the
+    same CPU budget; chromosome evidence is checkpointed independently.
     No phase-correction or recombination-map stage is invoked.
     """
     workers = core_runtime.available_cpu_count() if n_workers is None else int(n_workers)
     if not 1 <= workers <= core_runtime.available_cpu_count():
         raise ValueError("pedigree workers must fit the current CPU affinity")
     print(f"PEDIGREE: ragged quadratic, finite family direction, top-20, Tier B; {workers} CPUs")
+    print("Final family messages converge; full-marker M0/M1 release preserves resampling diagnostics.")
     print("Direction is a model assumption; same-depth and missing-parent crosses need caution.")
     with core_parallel.numba_thread_scope(workers):
         summaries, payload = run_or_resume_pedigree(
             checkpoint_store, contigs, sample_ids,
-            pedigree_config=workflows_design.build_current_pedigree_config(),
+            pedigree_config=module_pedigree_config.config_from_environment(),
             preparation_config=EvidenceConfig(
                 recombination_rate=recombination_rate, genetic_maps=genetic_maps),
             parent_eligibility=parent_eligibility, n_workers=workers,

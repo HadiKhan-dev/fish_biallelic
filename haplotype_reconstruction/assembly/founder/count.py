@@ -14,11 +14,11 @@ One deletion round is deliberately bounded; this is not exhaustive count search.
 import time
 import numpy as np
 
-from..import founder_refinement as refiner
-from.import exchanges as founder_exchanges, scoring as founder_scoring
-from..import chimera_scoring, paths, hierarchy
-from.import count_bound as founder_count_bound
-from.workspace import component_workspace, resolve_threads
+from .. import founder_refinement as refiner
+from . import exchanges as founder_exchanges, scoring as founder_scoring
+from .. import chimera_scoring, paths, hierarchy
+from . import count_bound as founder_count_bound
+from .workspace import component_workspace, resolve_threads
 from ...core import haplotypes, parallel
 from ...discovery.objectives import compute_outer_bic_from_log_likelihood as bic
 
@@ -121,7 +121,7 @@ def refine_components(prepared, components, neutral, sites, *, config,
                 continue
             order = np.arange(founders)
             best, best_bic, best_score, best_drop = original, initial_bic, initial_score, None
-            from.import count_workers as founder_count_workers
+            from . import count_workers as founder_count_workers
             found_by_drop, pending = {}, []
             for dropped in order:
                 dropped = int(dropped)

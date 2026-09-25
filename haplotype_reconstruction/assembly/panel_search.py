@@ -15,14 +15,14 @@ import numpy as np
 from numba import njit, prange
 from numba.typed import List
 
-from.import panel_scoring
-from.import chimera_scoring as scoring
-from.import chimera_kernels as kernels
-from.panel_candidates import (
+from . import panel_scoring
+from . import chimera_scoring as scoring
+from . import chimera_kernels as kernels
+from .panel_candidates import (
     continuous_candidate_scores, prepare_candidate_scores, replacement_proposals,
     local_proposals, boundary_proposals,
 )
-from..discovery.objectives import compute_outer_bic_from_log_likelihood
+from ..discovery.objectives import compute_outer_bic_from_log_likelihood
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,7 @@ class PanelSearchConfig:
 
 def configured_panel_search():
     """None selects the optimized broader search in the shared hierarchy."""
-    from..core.environment import assembly_panel_search
+    from ..core.environment import assembly_panel_search
     return PanelSearchConfig() if assembly_panel_search() == "bounded" else None
 
 
@@ -150,26 +150,6 @@ def _exclusion_scores(current):
                         maximum = max(maximum, current[sample, a, b])
             excluded[sample, i] = maximum
     return best, excluded
-
-
-@njit(cache=True, parallel=True)
-def _static_gains(current, cross, diagonal):
-    samples, m, k = cross.shape
-    best, excluded = _exclusion_scores(current)
-    gains = np.zeros((m, k))
-    for candidate in prange(m):
-        for sample in range(samples):
-            winner = np.argmax(cross[sample, candidate])
-            first = cross[sample, candidate, winner]
-            second = -np.inf
-            for partner in range(k):
-                if partner != winner:
-                    second = max(second, cross[sample, candidate, partner])
-            for removed in range(k):
-                retained = second if removed == winner else first
-                score = max(excluded[sample, removed], retained, diagonal[sample, candidate])
-                gains[candidate, removed] += score - best[sample]
-    return gains.T
 
 
 @njit(cache=True, parallel=True)

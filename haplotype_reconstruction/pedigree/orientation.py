@@ -2,8 +2,9 @@
 
 Finite composite-evidence corrections, not independent biological direction
 probabilities. Four synchronous family-message passes exclude immediate reverse
-feedback; a one-way joint-family correction also checks reverse two-edge paths.
-Loopy graphs are approximate, not solved exactly or to convergence.
+feedback. A joint-family correction checks reverse two-edge paths; its evidence
+is then frozen while a final reciprocal solve reconciles the adjusted scores.
+The final reciprocal messages converge; the loopy/global model remains approximate.
 Genetic scoring and final parent-state priors are unchanged.
 """
 from __future__ import annotations
@@ -166,6 +167,47 @@ def _family_avoidance(log_scores, alternatives, states, log_multiplicity, sample
     return previous
 
 
+@njit(cache=True, nogil=True)
+def _converged_family_avoidance(scores, alternatives, states, multiplicity,
+                               samples, maximum, tolerance, damping=1.0):
+    """Same cavity equations, stopped by the undamped fixed-point residual."""
+    previous = np.zeros((samples, samples))
+    residual = np.inf
+    for iteration in range(maximum):
+        adjusted = scores.copy()
+        for row in range(len(alternatives)):
+            child = alternatives[row, 0]
+            for slot in (1, 2):
+                parent = alternatives[row, slot]
+                if parent >= 0:
+                    adjusted[row] += previous[parent, child]
+        odds = _family_log_odds(adjusted, alternatives, states, multiplicity, samples)
+        residual = 0.0
+        for child in range(samples):
+            for parent in range(samples):
+                value = odds[child, parent] - previous[parent, child]
+                value = -max(0.0, value) - np.log1p(np.exp(-abs(value)))
+                residual = max(residual, abs(value - previous[child, parent]))
+                odds[child, parent] = value
+        if residual <= tolerance:
+            return odds, iteration + 1, residual
+        previous = (1.0-damping)*previous + damping*odds
+    return previous, maximum, residual
+
+
+def _family_scores(avoidance, alternatives, eligible, explicit_direction):
+    """Sum incoming reciprocal messages, respecting per-side chronology."""
+    family = np.zeros(len(alternatives))
+    for slot in (1, 2):
+        present = (alternatives[:, slot] >= 0) & eligible
+        c, p = alternatives[present, 0], alternatives[present, slot]
+        values = avoidance[p, c]
+        if explicit_direction is not None:
+            values = np.where(explicit_direction[c, p], 0.0, values)
+        family[present] += values
+    return family
+
+
 def adjust_scores(state_scores, identity_scores, alternatives, states,
                   full_counts, model, settings, explicit_direction=None, *, score_diagnostics=None):
     """Apply finite evidence to both state and identity; exposure remains hard."""
@@ -197,14 +239,8 @@ def adjust_scores(state_scores, identity_scores, alternatives, states,
         avoidance = _family_avoidance(
             identity_scores, alternatives, states, log_multiplicity, samples,
             settings.parent_state_family_message_passes)
-        family = np.zeros(len(alternatives))
-        for slot in (1, 2):
-            present = (alternatives[:, slot] >= 0) & eligible
-            c, p = alternatives[present, 0], alternatives[present, slot]
-            values = avoidance[p, c]
-            if explicit_direction is not None:
-                values = np.where(explicit_direction[c, p], 0.0, values)
-            family[present] += values
+        family = _family_scores(
+            avoidance, alternatives, eligible, explicit_direction)
         if score_diagnostics is not None:
             score_diagnostics["reciprocal_family"] = family.copy()
         state_scores = state_scores + family
@@ -216,10 +252,44 @@ def adjust_scores(state_scores, identity_scores, alternatives, states,
                 identity_scores, alternatives, states, log_multiplicity,
                 avoidance, settings.parent_state_ancestry_path_budget, supported,
             )
-            # One-way evidence: never feed these corrections back into the
-            # reciprocal messages or parent configurations supporting them.
+            # Compute this factor once from the original supporting beliefs.
+            # The final reciprocal solve below must not recompute path evidence.
             if score_diagnostics is not None:
                 score_diagnostics["ancestry_paths"] = paths.copy()
             state_scores = state_scores + paths
             identity_scores = identity_scores + paths
+
+        # Path evidence can change which relatives compete as parents.
+        # Replace the earlier reciprocal term with messages for these
+        # adjusted unary scores; do not add two copies or feed the new
+        # messages back into the path factor.
+        state_scores = state_scores - family
+        identity_scores = identity_scores - family
+        avoidance, iterations, residual = _converged_family_avoidance(
+            identity_scores, alternatives, states, log_multiplicity, samples,
+            settings.parent_state_family_final_max_iterations,
+            settings.parent_state_family_final_tolerance)
+        retry_iterations = 0
+        if residual > settings.parent_state_family_final_tolerance:
+            # Loopy messages can oscillate in a chromosome resample. Restart
+            # the same equations with damping, retaining the undamped residual
+            # criterion. Successful initial solves are untouched.
+            avoidance, retry_iterations, residual = _converged_family_avoidance(
+                identity_scores, alternatives, states, log_multiplicity, samples,
+                settings.parent_state_family_retry_iterations,
+                settings.parent_state_family_final_tolerance,
+                settings.parent_state_family_retry_damping)
+        if residual > settings.parent_state_family_final_tolerance:
+            raise FloatingPointError(
+                f"Final reciprocal family messages did not converge in {iterations} "
+                f"initial + {retry_iterations} damped iterations "
+                f"(undamped log-message residual {residual:g})")
+        family = _family_scores(avoidance, alternatives, eligible, explicit_direction)
+        state_scores = state_scores + family
+        identity_scores = identity_scores + family
+        if score_diagnostics is not None:
+            score_diagnostics["reciprocal_family"] = family.copy()
+            score_diagnostics["final_family_iterations"] = iterations + retry_iterations
+            score_diagnostics["final_family_retry_iterations"] = retry_iterations
+            score_diagnostics["final_family_residual"] = residual
     return state_scores, identity_scores

@@ -8,6 +8,8 @@ vcf = "work/data/cross.bcf"
 [run]
 output = "work/runs/cross"
 cores = "auto"
+# read_calibration = true # Default: fit the observation model from allele depths.
+# pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
 # stop_after_stage = "painting"
 assembly_model = "dense"
 assembly_search = "bounded"

@@ -38,7 +38,7 @@ class BatchedSearchConfig:
 
 
 def configured_search():
-    from..core.environment import batched_discovery_enabled
+    from ..core.environment import batched_discovery_enabled
     return BatchedSearchConfig() if batched_discovery_enabled() else None
 
 
@@ -61,7 +61,7 @@ def _improve_cut(weights, initial, order, sweeps):
 
 def bounded_cuts(weights, config, max_ties):
     """Fixed starts/passes; O(K²), including deterministic degree ordering."""
-    from.import modes
+    from . import modes
     k = len(weights)
     order = np.argsort(-weights.sum(axis=1), kind='stable')
     rng = np.random.default_rng(719)
@@ -78,7 +78,7 @@ def bounded_cuts(weights, config, max_ties):
 
 
 def residual_rows(mode, evidence, reads, settings, growth, residual_workspace):
-    from.import candidates, search
+    from . import candidates, search
     adapter = SimpleNamespace(discrete_haps=mode.haplotypes, pair_assignments=mode.assignments,
         K_final=mode.k, keep_flags=np.ones(mode.n_sites, np.int8),
         precleanup_candidate_discrete_haps=mode.haplotypes, precleanup_candidate_k=mode.k, haplotypes={})
@@ -105,7 +105,7 @@ def residual_rows(mode, evidence, reads, settings, growth, residual_workspace):
 
 
 def run(evidence, reads, seeds, candidate_rows, settings, workspace, growth, residual_workspace):
-    from.import search, modes, cavity
+    from . import search, modes, cavity
     cfg = settings.batched_search_config
     active = growth.active_sample_mask
     n_sites = evidence.shape[1]

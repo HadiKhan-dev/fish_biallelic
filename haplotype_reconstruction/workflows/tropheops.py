@@ -10,12 +10,14 @@ import haplotype_reconstruction.core.genetic_map as core_genetic_map
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.numerics as core_numerics
 import haplotype_reconstruction.core.parallel as core_parallel
+import haplotype_reconstruction.core.read_calibration as read_calibration
 import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.discovery.blocks as discovery_blocks
 import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.workflows.design as workflows_design
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
+from . import CICHLID_AUTOSOMES
 from .downstream import run_downstream
 from .reports import report_discovery, write_reference_comparison
 
@@ -37,7 +39,6 @@ output_dir = os.environ.get("HAPLOTYPES_OUTPUT_DIR", "work/runs/tropheops")
 @core_runtime.logged_workflow("tropheops")
 def run():
     """Execute or resume the configured, chromosome-checkpointed workflow."""
-    import os
 
     # Enable faulthandler FIRST — catches C-level segfaults in numba-compiled
     # code, numpy, BLAS, etc. and prints a Python traceback to stderr before
@@ -54,10 +55,6 @@ def run():
     # =============================================================================
     # INCLUDE_REFERENCE_SAMPLES, _mode_label, CHECKPOINT_DIR and output_dir are defined
     # at module top level. Edit the comparison flag there, not here.
-
-    # =============================================================================
-    # DUAL LOGGING: Console + File
-    # =============================================================================
 
 
     print(f"INCLUDE_REFERENCE_SAMPLES = {INCLUDE_REFERENCE_SAMPLES}  (mode: {_mode_label})")
@@ -77,7 +74,6 @@ def run():
 
     if DISCOVERY_BACKEND != discovery_blocks.DISCOVERY_BACKEND:
         raise RuntimeError("block discovery checkpoint identity mismatch")
-
 
 
     rate_maps = core_genetic_map.load_genetic_maps_from_environment()
@@ -117,20 +113,12 @@ def run():
     # chr23 autosomes, plus chrM and U_scaffolds.  We only run the pipeline on
     # the 22 autosomes (chrM has no recombination; U_scaffolds are short/unplaced
     # and not useful for pedigree-scale linkage).
-    regions_config = configured_regions([
-        {"contig": "chr1"}, {"contig": "chr2"}, {"contig": "chr3"},
-        {"contig": "chr4"}, {"contig": "chr5"}, {"contig": "chr6"},
-        {"contig": "chr7"}, {"contig": "chr8"}, {"contig": "chr9"},
-        {"contig": "chr10"}, {"contig": "chr11"}, {"contig": "chr12"},
-        {"contig": "chr13"}, {"contig": "chr14"}, {"contig": "chr15"},
-        {"contig": "chr16"}, {"contig": "chr17"}, {"contig": "chr18"},
-        {"contig": "chr19"}, {"contig": "chr20"}, {"contig": "chr22"},
-        {"contig": "chr23"},
-    ], template_regions=False)
+    regions_config = configured_regions(
+        [{"contig": contig} for contig in CICHLID_AUTOSOMES])
 
     # CHECKPOINT_DIR and output_dir are defined at module top level (above).
     # =========================================================================
-    # Checkpoint Infrastructure (blosc2 via core/checkpoints — matches pipeline.py)
+    # Checkpoint infrastructure (atomic core/checkpoints records)
     # =========================================================================
     checkpoint_store = core_runtime.CheckpointStore(
         CHECKPOINT_DIR, nthreads=n_processes, global_log_indent="    "
@@ -140,10 +128,7 @@ def run():
     mark_stage_complete = checkpoint_store.mark_stage_complete
     contig_done = checkpoint_store.contig_done
     save_contig = checkpoint_store.save_contig
-    load_contig = checkpoint_store.load_contig
     save_global = checkpoint_store.save_global
-
-
 
 
     region_keys = [r['contig'] for r in regions_config]
@@ -157,7 +142,7 @@ def run():
     #                         (all 116 if INCLUDE_REFERENCE_SAMPLES, else 112 = no G0s)
     #   sample_names_active : VCF sample names the pipeline will see
     #                         (the ordered block discovery and component-painting sample axis)
-    #   g0_sample_names     : the 4 G0 primary_IDs (for post-hoc validation)
+    #   g0_sample_names     : the 4 G0 primary_IDs (for post-hoc reference comparison, not trio truth)
     print(f"\n{'='*60}")
     print("Sample Identification (VCF <-> metafile)")
     print(f"{'='*60}")
@@ -244,10 +229,8 @@ def run():
     DISCOVERY_STAGE = "block_discovery"
     discovery_config = discovery_search.ReversibleCavitySearchConfig()
     discovery_config_record = asdict(discovery_config)
-    discovery_identity_record = {
-        "backend": DISCOVERY_BACKEND,
-        "config": discovery_config_record,
-    }
+    discovery_identity_record = read_calibration.discovery_identity(
+        DISCOVERY_BACKEND, discovery_config)
     checkpoint_store.bind_stage_identity(
         DISCOVERY_STAGE, discovery_identity_record
     )
@@ -337,23 +320,21 @@ def run():
                     )
                 )
 
-                # Downstream linkage models require per-sample genotype
-                # likelihoods, not the empirical HWE posterior used as an
-                # optional regularizer within local haplotype discovery.
-                (site_priors, global_probs) = core_numerics.reads_to_probabilities(
-                    active_reads_full,
-                    use_hwe_prior=False,
-                )
+                # Calibrate only the selected analysis cohort, not excluded rows.
+                global_probs, calibration = read_calibration.prepare_likelihoods(
+                    active_reads_full, global_sites, threads=n_processes)
                 avg_depth = np.mean(np.sum(active_reads_full, axis=-1))
                 print(f"    Sites: {len(global_sites)}, Samples (active): {global_probs.shape[0]}, "
                       f"Depth: {avg_depth:.1f}x")
-                del global_reads_full, active_reads_full, g0_reads, site_priors
+                del global_reads_full, active_reads_full, g0_reads
 
                 t0 = time.time()
                 block_results = discovery_blocks.generate_all_block_haplotypes(
                     genomic_data,
                     num_processes=block_discovery_processes,
                     discovery_config=discovery_config,
+                    genotype_likelihoods_by_block=read_calibration.block_likelihoods(
+                        genomic_data, global_sites, global_probs),
                     total_numba_threads=block_discovery_numba_threads,
                     block_pool=block_pool,
                 )
@@ -371,6 +352,7 @@ def run():
                 # non-independent when G0 rows entered reconstruction above.
                 save_contig(DISCOVERY_STAGE, r_name, {
                     'global_probs': global_probs, 'global_sites': global_sites,
+                    'read_calibration': calibration,
                     'global_observed_mask': global_observed_mask,
                     'observed_call_mask_mode': (
                         workflows_reconstruction.EXACT_OBSERVED_MASK_MODE),
@@ -379,7 +361,7 @@ def run():
                     'block_results': block_results, 'avg_depth': avg_depth,
                     'g0_probs': g0_probs, 'g0_sample_names': g0_sample_names,
                     'active_vcf_indices': active_vcf_indices,
-                    'discovery_backend': DISCOVERY_BACKEND,
+                    'discovery_backend': discovery_identity_record['backend'],
                     'discovery_config': discovery_config_record,
                 })
                 del genomic_data, block_results, global_probs, global_sites
@@ -398,7 +380,7 @@ def run():
             'observed_call_mask_mode': (
                 workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
             ),
-            'discovery_backend': DISCOVERY_BACKEND,
+            'discovery_backend': discovery_identity_record['backend'],
             'discovery_config': discovery_config_record,
         })
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
@@ -463,7 +445,6 @@ def run():
         parent_eligibility=parent_eligibility,
         genetic_maps=inference_genetic_maps, recombination_rate=inference_recombination_rate,
     )
-
 
 
 if __name__ == "__main__":

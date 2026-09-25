@@ -1,4 +1,4 @@
-"""refinement / polish for the canonical reconstruction pipeline."""
+"""Genotype-preserving phase polishing after pedigree-conditioned refinement."""
 from __future__ import annotations
 
 

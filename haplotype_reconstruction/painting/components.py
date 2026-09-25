@@ -11,19 +11,9 @@ from typing import Any, List, Tuple, NamedTuple
 
 
 import haplotype_reconstruction.painting.model as module_painting_model
-from.import evidence as painting_evidence
+from . import evidence as painting_evidence
 
 PAINTING_MODEL_RAGGED = "unified-open-set-public-unknown-v3"
-
-
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    import seaborn as sns
-    import networkx as nx
-    HAS_PLOTTING = True
-except ImportError:
-    HAS_PLOTTING = False
 
 
 np.seterr(divide='ignore', invalid='ignore')

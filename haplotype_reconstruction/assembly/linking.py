@@ -21,10 +21,10 @@ DEFAULT_ROBUSTNESS_EPSILON = 1e-2
 MAX_LINKING_ITERATIONS = 20
 
 
-from.micro_hmm import PreparedBlockScans
-from.macro_hmm import propagate_homologue_priors
-from.edge_counts import homologue_edge_log_counts
-from.import partial_emissions
+from .micro_hmm import PreparedBlockScans
+from .macro_hmm import propagate_homologue_priors
+from .edge_counts import homologue_edge_log_counts
+from . import partial_emissions
 
 
 class TransitionMesh:
@@ -728,7 +728,7 @@ def generate_transition_probability_mesh(
                 dynamic_cores_fn=dynamic_cores_fn, chromosome_map=chromosome_map,
                 prepared_scans=prepared)
         else:
-            from.structured_transitions import fit_gap
+            from .structured_transitions import fit_gap
             results[gap] = fit_gap(precalculated_viterbi_emissions, prepared,
                 [sorted(block.haplotypes) for block in haps_data], gap,
                 max_iterations=max_num_iterations, config=structured_config,

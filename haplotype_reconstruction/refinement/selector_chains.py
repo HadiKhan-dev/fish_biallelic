@@ -12,7 +12,7 @@ import numpy as np
 from numba import njit, prange
 
 
-from.factors import fixed_nodes
+from .factors import fixed_nodes
 
 
 BLOCK_MARKERS = 256
@@ -341,7 +341,7 @@ def mix16_inplace(row, theta):
             row[right] = (1 - theta) * b + theta * a
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def branch_cavity(emission, theta):
     """Same scaled forward/backward, with reused fixed-width scratch."""
     sites = len(emission)
@@ -393,7 +393,7 @@ class BranchCache:
         return self.arrays[4]
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def update_branch(emissions, theta, saved, alpha, predicted, beta, cavity, boundary, valid, stats):
     sites = len(emissions)
     blocks = len(boundary)

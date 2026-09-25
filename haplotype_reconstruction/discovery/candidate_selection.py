@@ -15,8 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
-from.import cavity, fitting, modes, objectives, search
-from..core import haplotypes, parallel
+from . import cavity, fitting, modes, objectives, search
+from ..core import haplotypes, parallel
 
 
 @dataclass(frozen=True)

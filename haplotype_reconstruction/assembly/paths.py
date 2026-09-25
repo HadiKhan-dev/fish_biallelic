@@ -323,7 +323,7 @@ def run_bidirectional_beam_search(haps_data, transition_mesh, beam_width=200,
         if endpoint_quota is None:
             forward_beam = _select_beam_mmr_forward(candidates, beam_width, mmr_lambda)
         else:
-            from.panel_search import endpoint_select
+            from .panel_search import endpoint_select
             forward_beam = endpoint_select(candidates, curr_block, endpoint_quota)
 
     if verbose:

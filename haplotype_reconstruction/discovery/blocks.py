@@ -546,6 +546,8 @@ class CavityBlockDiscoveryResult:
     selected_mode: discovery_modes.FactorizationMode
     diagnostics: CavityDiscoveryDiagnostics
     config: discovery_search.ReversibleCavitySearchConfig
+    # Preserve an explicit observation model through output materialization.
+    raw_genotype_likelihoods_full: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         positions = _readonly(self.positions)
@@ -638,8 +640,12 @@ class CavityBlockDiscoveryResult:
             np.any(observed_kept, axis=1)
         )
 
-        full_probabilities = _raw_genotype_likelihoods(
-            self.reads_count_matrix, self.config.read_error_probability
+        full_probabilities = (
+            _raw_genotype_likelihoods(
+                self.reads_count_matrix, self.config.read_error_probability
+            )
+            if self.raw_genotype_likelihoods_full is None
+            else np.array(self.raw_genotype_likelihoods_full, copy=True)
         )
         wildcard_mass = float(
             np.sum(
@@ -888,13 +894,16 @@ def discover_block_reversible_cavity(
     keep_flags: np.ndarray | None=None,
     *,
     config: discovery_search.ReversibleCavitySearchConfig | None=None,
+    raw_genotype_likelihoods: np.ndarray | None=None,
 ) -> CavityBlockDiscoveryResult:
     """Discover and select one block panel by adaptive reversible search.
 
     The only K ceiling is the finite identifiable state-space ceiling computed
     by :func:`search_reversible_cavity`.  Operational proposal, scoring, and
     expansion budgets are reported as search limitations rather than treated
-    as biological bounds on founder count.
+    as biological bounds on founder count. Optional normalized read likelihoods
+    replace only the observation model, in both search and materialization.
+    Read depths remain authoritative for missing observations.
     """
 
     settings = discovery_search.ReversibleCavitySearchConfig() if config is None else config
@@ -904,11 +913,16 @@ def discover_block_reversible_cavity(
         positions, reads_array, keep_flags
     )
     keep_mask = flags > 0
-    evidence_kept = np.ascontiguousarray(
-        _raw_genotype_likelihoods(
-            reads, settings.read_error_probability
-        )[:, keep_mask,:]
-    )
+    supplied = None
+    if raw_genotype_likelihoods is None:
+        evidence = _raw_genotype_likelihoods(reads, settings.read_error_probability)
+    else:
+        evidence = core_genotypes.validate_normalized_genotype_evidence(
+            raw_genotype_likelihoods, n_samples=len(reads), n_sites=reads.shape[1]
+        ).copy()
+        evidence[np.sum(reads, axis=2) == 0] = 1.0 / 3.0
+        supplied = _readonly(evidence)
+    evidence_kept = np.ascontiguousarray(evidence[:, keep_mask, :])
     depths_kept = np.ascontiguousarray(reads[:, keep_mask,:])
 
     search = discovery_search.search_reversible_cavity(
@@ -1010,6 +1024,7 @@ def discover_block_reversible_cavity(
         reads_count_matrix=reads,
         keep_flags=flags,
         raw_genotype_likelihoods_kept=evidence_kept,
+        raw_genotype_likelihoods_full=supplied,
         mode_support=mode_support,
         selection=selection,
         selected_mode=search.selected_mode,
@@ -1058,6 +1073,7 @@ def _worker_generate_block_direct(args):
             keep_flags,
             discovery_config,
             discard_reads_after,
+            supplied_likelihoods,
         ) = args
         if not _block_has_informative_retained_data(
             positions, reads, keep_flags
@@ -1070,6 +1086,7 @@ def _worker_generate_block_direct(args):
             reads,
             keep_flags=keep_flags,
             config=discovery_config,
+            raw_genotype_likelihoods=supplied_likelihoods,
         )
         result = discovery.to_block_result(block_result_class=core_haplotypes.BlockResult)
         if discard_reads_after:
@@ -1090,12 +1107,14 @@ def generate_all_block_haplotypes(
     total_numba_threads=None,
     block_pool=None,
     discovery_config=None,
+    genotype_likelihoods_by_block=None,
 ):
     """Discover founder haplotypes in every informative input block.
 
     Empty blocks, blocks with no retained sites, and blocks with no reads at
     retained sites are omitted. ``discovery_config`` defaults to the canonical
-    calibrated :class:`ReversibleCavitySearchConfig`.
+    calibrated :class:`ReversibleCavitySearchConfig`. Optional raw likelihood
+    tensors must align with genomic_data in block, sample and marker order.
     """
 
     from tqdm import tqdm
@@ -1123,6 +1142,9 @@ def generate_all_block_haplotypes(
                 "block_pool worker and thread budgets must match this call"
             )
 
+    if (genotype_likelihoods_by_block is not None
+            and len(genotype_likelihoods_by_block) != len(genomic_data)):
+        raise ValueError("likelihood block count must match genomic_data")
     tasks = []
     for index in range(len(genomic_data)):
         positions, reads, keep_flags = genomic_data[index]
@@ -1133,6 +1155,8 @@ def generate_all_block_haplotypes(
             keep_flags,
             config,
             bool(discard_reads_after),
+            (None if genotype_likelihoods_by_block is None
+             else genotype_likelihoods_by_block[index]),
         ))
 
     def collect(pool):

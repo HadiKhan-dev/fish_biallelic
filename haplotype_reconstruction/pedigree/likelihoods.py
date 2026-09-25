@@ -98,12 +98,14 @@ def _score_balanced_transmission(
     Reused M0/M1 screening scores are already pooled. Passing those same arrays
     to both views preserves them, including reductions for unavailable parents.
     """
+    shared_inputs = {}
     tempered = pedigree_transmission.score_projected_ragged_quadratic(
-        projected, transition, gl, observed, exponent, trios, **kwargs,
+        projected, transition, gl, observed, exponent, trios,
+        _shared_inputs=shared_inputs, **kwargs,
     )
     full = pedigree_transmission.score_projected_ragged_quadratic(
         projected, transition, gl, observed, np.ones_like(exponent), trios,
-        **kwargs,
+        _shared_inputs=shared_inputs, **kwargs,
     )
     changes = {
         name: 0.5 * (getattr(tempered, name) + getattr(full, name))

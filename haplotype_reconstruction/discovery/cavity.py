@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from numba import njit, prange
 
-from.cavity_groups import grouped_cavity_predictions
+from .cavity_groups import grouped_cavity_predictions
 
 # Workspace budget, not a statistical parameter. One site is the minimum;
 # larger K therefore needs O(N K²) space, never O(N L K²).

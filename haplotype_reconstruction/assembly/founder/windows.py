@@ -16,12 +16,12 @@ import time
 import numpy as np
 from numba import njit, prange, set_num_threads, get_num_threads
 from numba.typed import List
-from.import path_search as search, sparse as founder_sparse, dual_short as founder_dual_short
-from.import beam_kernels as kernels
-from.beam import workspace, macro_proposals
-from.candidates import completed_candidates
-from.dual_search import canonical_score
-from.packing import emission_arrays, packed_emissions, candidate_alphabet, short_models, reversed_models
+from . import path_search as search, sparse as founder_sparse, dual_short as founder_dual_short
+from . import beam_kernels as kernels
+from .beam import workspace, macro_proposals
+from .candidates import completed_candidates
+from .dual_search import canonical_score
+from .packing import emission_arrays, packed_emissions, candidate_alphabet, short_models, reversed_models
 
 @njit(cache=True, parallel=True, nogil=True)
 def relaxed_suffix(emissions, known, choices, penalty, start, stop, terminal,
@@ -104,6 +104,9 @@ def proposals(
     initial = float(np.max(prefix[-1], axis=1).sum())
     rank = {'incumbent': 0, 'tie': 1, 'upper': 2}[ranking]
     max_choices = int(np.max(np.diff(offsets)))
+    # Only an accepted, contiguous prefix may strengthen worker bounds. Reading
+    # a stale value merely does extra work; no panel or beam state is shared.
+    accepted_bound = [initial]
 
     def task(start, budget):
         stop = min(blocks, start + window)
@@ -120,7 +123,7 @@ def proposals(
             second
         )
         optimistic = float(np.max(prefix[blocks - start] + bound[0], axis=1).sum())
-        if excluded(optimistic, initial):
+        if excluded(optimistic, accepted_bound[0]):
             return dict(start=start, stop=stop, optimistic=optimistic, pruned=True)
         dp, alternate, values, uppers, ancestry, rows = workspace(
             blocks,
@@ -150,7 +153,7 @@ def proposals(
                 bound,
                 True,
                 start,
-                initial,
+                accepted_bound[0],
                 rank,
                 begin,
                 min(stop, begin + 32),
@@ -187,10 +190,17 @@ def proposals(
         return record
     functions = [lambda budget, start=start: task(start, budget) for start in starts]
     size = 8 * len(packed[0]) * (2 * width * (len(first) + max_choices) + (window + 1) * len(first)) + 16 * blocks * width
-    records = {i: r for i, r in completed_candidates(functions, thread_budget or get_num_threads(), size)}
+    def ordered_records():
+        ready = {}
+        following = 0
+        for index, record in completed_candidates(functions, thread_budget or get_num_threads(), size):
+            ready[index] = record
+            while following in ready:
+                yield ready.pop(following)
+                following += 1
+
     best_seen = initial
-    for index in range(len(starts)):
-        record = records[index]
+    for record in ordered_records():
         start, stop = (record['start'], record['stop'])
         if excluded(record['optimistic'], best_seen):
             if statistics is not None:
@@ -210,6 +220,7 @@ def proposals(
             continue
         assert not record['aborted']
         best_seen = max(best_seen, record['score'])
+        accepted_bound[0] = best_seen
         yield (record['path'], record['score'], (start, stop))
 
 

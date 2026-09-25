@@ -78,7 +78,7 @@ def allele_depths_to_raw_genotype_likelihoods(
     threads = 1
     if counts.shape[0] * counts.shape[1] >= _GL_PARALLEL_MIN_CELLS:
         from numba import get_num_threads
-        from.runtime import available_cpu_count
+        from .runtime import available_cpu_count
         # Reuse the caller's active budget, including discovery worker masks.
         # No Numba/BLAS numerical work runs concurrently with this tile pool.
         threads = min(get_num_threads(), available_cpu_count())

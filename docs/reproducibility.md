@@ -120,6 +120,9 @@ python run.py evaluate --output work/reports/local \
 
 `available` (default) reports the latest saved founder product per chromosome,
 plus available downstream products. `all` reports every saved stage.
+The separate `founder_refinement` stage includes the final count-up/refit,
+which can differ from the preceding `assembly_l4` hierarchy snapshot.
+It is available before painting finishes; no hierarchy level is relabelled.
 An unexecuted hierarchy level is not invented when assembly stopped early.
 Explicitly requested products must exist. `--feedback-selection strict`
 selects strict-feedback checkpoints when that was the run configuration.

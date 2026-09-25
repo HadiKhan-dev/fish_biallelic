@@ -9,7 +9,7 @@ import numpy as np
 import haplotype_reconstruction.core.config as core_config
 import haplotype_reconstruction.discovery.cavity as discovery_cavity
 import haplotype_reconstruction.discovery.modes as discovery_modes
-from.batched_search import BatchedSearchConfig, configured_search
+from .batched_search import BatchedSearchConfig, configured_search
 
 _SCORE_TOLERANCE = 1e-9
 
@@ -800,7 +800,7 @@ def search_reversible_cavity(
         likelihood=likelihood,
     )
     if settings.batched_search_config is not None:
-        from.batched_search import run
+        from .batched_search import run
         return run(likelihood, reads, seed_haplotypes, candidate_rows, settings,
                    workspace, growth_inputs, residual_input_workspace)
     data_modes = discovery_modes._initial_complete_modes(

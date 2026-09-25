@@ -13,6 +13,7 @@ import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.parallel as core_parallel
+import haplotype_reconstruction.core.read_calibration as read_calibration
 import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.discovery.blocks as discovery_blocks
@@ -20,6 +21,7 @@ import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.simulation.pedigree as simulation_pedigree
 import haplotype_reconstruction.simulation.templates as simulation_templates
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
+from . import CICHLID_AUTOSOMES
 from .downstream import run_downstream
 
 CHECKPOINT_DIR = os.environ.get(
@@ -139,20 +141,15 @@ def _finish_simulation_stage_checkpoints(
 @core_runtime.logged_workflow("simulation")
 def run():
     """Execute or resume the configured, chromosome-checkpointed workflow."""
-    import os
 
     # FORCE NUMPY/BLAS TO USE 1 THREAD PER PROCESS
     # (Numba threading is now managed by core/parallel.py — do NOT set
     #  NUMBA_NUM_THREADS or NUMBA_THREADING_LAYER here)
     core_environment.force_single_threaded_numeric_libraries()
 
-    # =============================================================================
-    # DUAL LOGGING: Console + File
-    # =============================================================================
     # All print() output goes to both the terminal and a timestamped log file.
     # tqdm progress bars still display on the terminal only (they use stderr).
     # If the SSH connection drops, the log file preserves all output.
-
 
 
     print(
@@ -185,8 +182,6 @@ def run():
     }
 
 
-
-
     rate_maps = core_genetic_map.load_genetic_maps_from_environment()
     inference_recombination_rate = rate_maps.default_rate_cm_per_mb / 1e8
     inference_genetic_maps = rate_maps if rate_maps.maps else None
@@ -200,7 +195,6 @@ def run():
     np.seterr(divide='ignore', invalid="ignore")
 
     if platform.system() != "Windows":
-        #os.nice(15)
         print(f"Main process ({os.getpid()}) niceness set to: {os.nice(0)}")
 
 
@@ -250,8 +244,8 @@ def run():
     # Heavy arrays are loaded and released one contig at a time. assembly has
     # atomic preprocessing, L1-L4, and final component-painting checkpoints.
     #
-    # To force a full re-run, remove the exact configured checkpoint directory
-    # after verifying its resolved path. To resume, keep completed stage files.
+    # Resume with the same settings; use a new output root for a fresh run.
+    # Preserve existing checkpoints and their original scientific identities.
 
     checkpoint_store = core_runtime.CheckpointStore(
         CHECKPOINT_DIR, nthreads=n_processes
@@ -335,30 +329,9 @@ def run():
     )
 
     # Define the regions you want to use for inference.
-    regions_config = configured_regions([
-        {"contig": "chr1", "start": 0, "end": 3000},
-        {"contig": "chr2", "start": 0, "end": 3000},
-        {"contig": "chr3", "start": 0, "end": 3000},
-        {"contig": "chr4", "start": 0, "end": 3000},
-        {"contig": "chr5", "start": 0, "end": 3000},
-        {"contig": "chr6", "start": 0, "end": 3000},
-        {"contig": "chr7", "start": 0, "end": 3000},
-        {"contig": "chr8", "start": 0, "end": 3000},
-        {"contig": "chr9", "start": 0, "end": 3000},
-        {"contig": "chr10", "start": 0, "end": 3000},
-        {"contig": "chr11", "start": 0, "end": 3000},
-        {"contig": "chr12", "start": 0, "end": 3000},
-        {"contig": "chr13", "start": 0, "end": 3000},
-        {"contig": "chr14", "start": 0, "end": 3000},
-        {"contig": "chr15", "start": 0, "end": 3000},
-        {"contig": "chr16", "start": 0, "end": 3000},
-        {"contig": "chr17", "start": 0, "end": 3000},
-        {"contig": "chr18", "start": 0, "end": 3000},
-        {"contig": "chr19", "start": 0, "end": 3000},
-        {"contig": "chr20", "start": 0, "end": 3000},
-        {"contig": "chr22", "start": 0, "end": 3000},
-        {"contig": "chr23", "start": 0, "end": 3000},
-        ], template_regions=True)
+    regions_config = configured_regions(
+        [{"contig": contig, "start": 0, "end": 3000} for contig in CICHLID_AUTOSOMES],
+        template_regions=True)
 
     block_size = 100000
     shift_size = 50000
@@ -444,13 +417,13 @@ def run():
 
                 print(f"  [Discovery] Haplotypes generated in {time.time() - start:.2f}s")
 
-                # 3. Run Naive Linker (to get long templates for simulation)
+                # 3. Construct generating templates, not inferred chromosomes.
                 start = time.time()
                 (naive_blocks, naive_long_haps) = simulation_templates.build_founder_templates(
                     block_results,
                     num_long_haps=6
                 )
-                print(f"  [Naive Linker] Chained {len(naive_long_haps[1])} haps in {time.time() - start:.2f}s")
+                print(f"  [Template construction] Chained {len(naive_long_haps[1])} haps in {time.time() - start:.2f}s")
 
                 # Store only naive_long_haps (genomic_data + block_results are huge, never needed again)
                 multi_contig_results[region['contig']] = {
@@ -597,7 +570,6 @@ def run():
             checkpoint_store, SIMULATION_STAGE, g['region_keys']
         )
         realized_simulation_seed = g["simulation_seed"]
-        requested_simulation_seed = g["requested_simulation_seed"]
         truth_pedigree = g['truth_pedigree']
         sample_names = g['sample_names']
         region_keys = g['region_keys']
@@ -651,9 +623,6 @@ def run():
                 simulation_provenance, f"Partial {SIMULATION_STAGE} checkpoint"
             )
             realized_simulation_seed = simulation_provenance["simulation_seed"]
-            requested_simulation_seed = (
-                simulation_provenance["requested_simulation_seed"]
-            )
             del simulation_provenance
             print(
                 f"  [RESUME] {SIMULATION_STAGE} realized seed "
@@ -901,6 +870,10 @@ def run():
     # =========================================================================
     # BLOCK DISCOVERY: simulated observations
     # =========================================================================
+    # The generating/template identities above deliberately remain independent
+    # of the inference read model. Fit only the observed simulated allele depths.
+    discovery_identity_record = read_calibration.discovery_identity(
+        discovery_blocks.DISCOVERY_BACKEND, discovery_config)
     DISCOVERY_STAGE = "block_discovery"
     checkpoint_store.bind_stage_identity(
         DISCOVERY_STAGE, discovery_identity_record
@@ -914,7 +887,7 @@ def run():
         'observed_call_mask_mode': (
             workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
         ),
-        'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+        'discovery_backend': discovery_identity_record['backend'],
         'discovery_config': discovery_config_record,
     }
     checkpoint_store.bind_global_manifest(
@@ -945,12 +918,16 @@ def run():
                     multi_contig_results[r_name]['naive_long_haps'][0]
                 )
 
+                global_probs, calibration = read_calibration.prepare_likelihoods(
+                    simulated_reads, global_sites, threads=n_processes)
                 t_chr = time.time()
                 simd_block_results = discovery_blocks.generate_all_block_haplotypes(
                     simd_genomic_data,
                     num_processes=n_processes,
                     block_pool=block_pool,
                     discovery_config=discovery_config,
+                    genotype_likelihoods_by_block=read_calibration.block_likelihoods(
+                        simd_genomic_data, global_sites, global_probs),
                 )
                 disc_time = time.time() - t_chr
 
@@ -965,6 +942,8 @@ def run():
                 save_contig(DISCOVERY_STAGE, r_name, {
                     'block_results': simd_block_results,
                     'global_sites': global_sites,
+                    'global_probs': global_probs,
+                    'read_calibration': calibration,
                     'global_observed_mask': global_observed_mask,
                     'observed_call_mask_mode': (
                         workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
@@ -972,7 +951,7 @@ def run():
                     'genotype_evidence_mode': (
                         workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
                     ),
-                    'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+                    'discovery_backend': discovery_identity_record['backend'],
                     'discovery_config': discovery_config_record,
                 })
 
@@ -982,8 +961,10 @@ def run():
                       f"[discovery: {disc_time:.1f}s]")
 
                 # Free this contig's data immediately (don't accumulate across contigs)
+                del global_probs
                 for _k in (
                         'simd_genomic_data', 'simulated_reads', 'naive_long_haps',
+                        'global_probs',
                 ):
                     multi_contig_results[r_name].pop(_k, None)
 
@@ -1022,8 +1003,6 @@ def run():
         config=assembly_config,
         genetic_maps=inference_genetic_maps,
         source_stage=DISCOVERY_STAGE,
-        probabilities_stage=SIMULATION_STAGE,
-        probabilities_key='simd_probs',
         all_contigs=all_region_keys,
         publish_completion=not SIMULATION_SHARD_MODE,
     )
@@ -1044,12 +1023,11 @@ def run():
     run_downstream(
         checkpoint_store, region_keys, sample_names,
         output_dir=output_dir, n_workers=n_processes,
-        raw_gl_stage=SIMULATION_STAGE, raw_sites_stage=DISCOVERY_STAGE,
-        raw_gl_key='simd_probs', parent_eligibility=None,
+        raw_gl_stage=DISCOVERY_STAGE, raw_sites_stage=DISCOVERY_STAGE,
+        parent_eligibility=None,
         all_contigs=all_region_keys, publish_global=not SIMULATION_SHARD_MODE,
         genetic_maps=inference_genetic_maps, recombination_rate=inference_recombination_rate,
     )
-
 
 
 if __name__ == "__main__":

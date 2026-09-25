@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import logsumexp
 from numba import njit
-from.allele_polynomials import shared_sample_likelihoods
+from .allele_polynomials import shared_sample_likelihoods
 import haplotype_reconstruction.assembly.observations as assembly_observations
 
 @dataclass(frozen=True)

@@ -8,7 +8,7 @@ import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
 import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
-import haplotype_reconstruction.core.numerics as core_numerics
+import haplotype_reconstruction.core.read_calibration as read_calibration
 import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.core.variants as core_variants
@@ -16,6 +16,7 @@ import haplotype_reconstruction.discovery.blocks as discovery_blocks
 import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.workflows.design as workflows_design
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
+from . import CICHLID_AUTOSOMES
 from .downstream import run_downstream
 
 CHECKPOINT_DIR = (
@@ -35,15 +36,9 @@ ASAC_METADATA_SHEET = os.environ.get("HAPLOTYPES_METADATA_SHEET", "main_data")
 @core_runtime.logged_workflow("astcal")
 def run():
     """Execute or resume the configured, chromosome-checkpointed workflow."""
-    import os
 
     # FORCE NUMPY/BLAS TO USE 1 THREAD PER PROCESS
     core_environment.force_single_threaded_numeric_libraries()
-
-    # =============================================================================
-    # DUAL LOGGING: Console + File
-    # =============================================================================
-
 
 
     import numpy as np
@@ -59,11 +54,8 @@ def run():
 
     discovery_config = discovery_search.ReversibleCavitySearchConfig()
     discovery_config_record = asdict(discovery_config)
-    discovery_identity_record = {
-        "backend": discovery_blocks.DISCOVERY_BACKEND,
-        "config": discovery_config_record,
-    }
-
+    discovery_identity_record = read_calibration.discovery_identity(
+        discovery_blocks.DISCOVERY_BACKEND, discovery_config)
 
 
     rate_maps = core_genetic_map.load_genetic_maps_from_environment()
@@ -97,16 +89,8 @@ def run():
         "work/data/fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz"
     )
 
-    regions_config = configured_regions([
-        {"contig": "chr1"}, {"contig": "chr2"}, {"contig": "chr3"},
-        {"contig": "chr4"}, {"contig": "chr5"}, {"contig": "chr6"},
-        {"contig": "chr7"}, {"contig": "chr8"}, {"contig": "chr9"},
-        {"contig": "chr10"}, {"contig": "chr11"}, {"contig": "chr12"},
-        {"contig": "chr13"}, {"contig": "chr14"}, {"contig": "chr15"},
-        {"contig": "chr16"}, {"contig": "chr17"}, {"contig": "chr18"},
-        {"contig": "chr19"}, {"contig": "chr20"}, {"contig": "chr22"},
-        {"contig": "chr23"},
-    ], template_regions=False)
+    regions_config = configured_regions(
+        [{"contig": contig} for contig in CICHLID_AUTOSOMES])
 
     output_dir = (
         os.environ.get("HAPLOTYPES_OUTPUT_DIR", "work/runs/astcal")
@@ -123,9 +107,7 @@ def run():
     mark_stage_complete = checkpoint_store.mark_stage_complete
     contig_done = checkpoint_store.contig_done
     save_contig = checkpoint_store.save_contig
-    load_contig = checkpoint_store.load_contig
     save_global = checkpoint_store.save_global
-    load_global = checkpoint_store.load_global
 
     region_keys = [r['contig'] for r in regions_config]
 
@@ -137,7 +119,6 @@ def run():
     print(f"VCF samples: {n_samples}")
     print(f"Regions: {len(region_keys)}")
 
-    total_pipeline_start = time.time()
 
     # =========================================================================
     # STAGE block discovery: VCF Loading + Block Discovery + Global Probabilities
@@ -184,16 +165,13 @@ def run():
                     )
                 )
 
-                # Keep cohort-frequency regularization inside block discovery;
-                # linkage and assembly consume the raw genotype likelihoods.
-                (site_priors, global_probs) = core_numerics.reads_to_probabilities(
-                    global_reads,
-                    use_hwe_prior=False,
-                )
+                # Fit once on observed AD; every stage consumes these same raw GLs.
+                global_probs, calibration = read_calibration.prepare_likelihoods(
+                    global_reads, global_sites, threads=n_processes)
                 avg_depth = np.mean(np.sum(global_reads, axis=-1))
                 print(f"    Sites: {len(global_sites)}, Samples: {global_probs.shape[0]}, "
                       f"Depth: {avg_depth:.1f}x")
-                del global_reads, site_priors
+                del global_reads
 
                 t0 = time.time()
                 block_results = discovery_blocks.generate_all_block_haplotypes(
@@ -201,6 +179,8 @@ def run():
                     num_processes=n_processes,
                     block_pool=block_pool,
                     discovery_config=discovery_config,
+                    genotype_likelihoods_by_block=read_calibration.block_likelihoods(
+                        genomic_data, global_sites, global_probs),
                 )
                 valid_blocks = [b for b in block_results if len(b.positions) > 0]
                 block_results = core_haplotypes.BlockResults(valid_blocks)
@@ -212,6 +192,7 @@ def run():
 
                 save_contig(DISCOVERY_STAGE, r_name, {
                     'global_probs': global_probs,
+                    'read_calibration': calibration,
                     'global_sites': global_sites,
                     'global_observed_mask': global_observed_mask,
                     'observed_call_mask_mode': (
@@ -222,7 +203,7 @@ def run():
                     ),
                     'block_results': block_results,
                     'avg_depth': avg_depth,
-                    'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+                    'discovery_backend': discovery_identity_record['backend'],
                     'discovery_config': discovery_config_record,
                 })
                 del genomic_data, block_results, global_probs, global_sites
@@ -238,7 +219,7 @@ def run():
             'observed_call_mask_mode': (
                 workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
             ),
-            'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
+            'discovery_backend': discovery_identity_record['backend'],
             'discovery_config': discovery_config_record,
         })
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
@@ -297,7 +278,6 @@ def run():
         parent_eligibility=parent_eligibility,
         genetic_maps=inference_genetic_maps, recombination_rate=inference_recombination_rate,
     )
-
 
 
 if __name__ == "__main__":

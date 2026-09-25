@@ -6,6 +6,8 @@ import os
 import runpy
 import tomllib
 
+from .core.environment import boolean_setting
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -19,20 +21,8 @@ def _setting(args, config, section, key, default=None):
     return config.get(section, {}).get(key, default) if value is None else value
 
 
-def _shared_family_setting(value):
-    """Match the map pipeline's boolean spellings without importing its kernels."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        setting = value.strip().lower()
-        if setting in ('1', 'true', 'yes', 'on'):
-            return True
-        if setting in ('0', 'false', 'no', 'off'):
-            return False
-    raise ValueError('shared_family_evidence must be boolean (1/0, true/false, yes/no or on/off)')
-
-
-def main(argv=None):
+def build_parser():
+    """Describe commands without importing workflows or numerical kernels."""
     parser = argparse.ArgumentParser(
         description='Missing-aware haplotype reconstruction for experimental crosses.'
     )
@@ -61,6 +51,10 @@ def main(argv=None):
         command.add_argument('--shared-family-evidence', action=argparse.BooleanOptionalAction, default=None,
                              help='Use shared-family phase-error evidence in map generation; default on.')
         if name != 'recombination':
+            command.add_argument('--read-calibration', action=argparse.BooleanOptionalAction, default=None,
+                                 help='Select shared/sample read error, balance and heterozygote overdispersion from observed AD; default on.')
+            command.add_argument('--pedigree-calibration', choices=('off', 'predictive'),
+                                 help='Learn cross-chromosome pedigree evidence scaling; default predictive. Use off for unscaled evidence.')
             command.add_argument('--assembly-model', choices=('dense', 'structured'),
                                  help='Dense cubic transitions (default) or near-quadratic structured transitions; independent of --assembly-search.')
             command.add_argument('--assembly-search', choices=('bounded', 'broad'),
@@ -88,7 +82,7 @@ def main(argv=None):
             command.add_argument('--backcross-start-generation', type=int, help='First backcross cohort number, default 3.')
             command.add_argument('--observe-generations', type=int, nargs='+', help='Only sequence these cohort numbers, e.g. 4 5 6.')
             command.add_argument('--observed-fraction', type=float, help='Random fraction of eligible individuals sequenced, default 1.')
-            command.add_argument('--generating-error-rate', type=float, help='Sequencing generator error, default 0.02; inference is unchanged.')
+            command.add_argument('--generating-error-rate', type=float, help='Sequencing generator error, default 0.02; inference fits observed reads, not this parameter.')
             command.add_argument('--depth-cv', type=float, help='Between-sample depth coefficient of variation, default 0.')
             command.add_argument('--heterozygote-alt-probability', type=float, help='Generating alternate-read probability in heterozygotes, default 0.5.')
             command.add_argument('--dropout-fraction', type=float, help='Contiguous missing-marker fraction per sample, default 0.')
@@ -123,7 +117,7 @@ def main(argv=None):
     evaluate.add_argument('--checkpoints', help='Checkpoint root; default OUTPUT/checkpoints.')
     evaluate.add_argument('--contigs', nargs='+')
     evaluate.add_argument('--stages', nargs='+', default=['available'],
-                          help='available (latest products), all, or descriptive founder/downstream stages.')
+                          help='available (latest products), all, or named stages, including founder_refinement, painting, pedigree, family_phase and recombination.')
     evaluate.add_argument('--feedback-selection', choices=('balanced', 'strict'), default='balanced')
     export = commands.add_parser('export', help='Export released founder tracks and sample phase.')
     export.add_argument('--output', required=True, help='Existing run directory.')
@@ -144,6 +138,75 @@ def main(argv=None):
     example.add_argument('--length-bp', type=int, default=12_000_000)
     status = commands.add_parser('status', help='Read lightweight run records without loading checkpoints.')
     status.add_argument('--output', required=True)
+    return parser
+
+
+def _configure_inference(args, config, parser):
+    """Apply CLI > TOML > environment > default for shared scientific choices."""
+    if 'founder_scaling' in config.get('run', {}):
+        parser.error('founder_scaling was replaced by independent assembly_model and discovery_search settings')
+    try:
+        calibrate = boolean_setting(
+            _setting(args, config, 'run', 'read_calibration',
+                     os.environ.get('HAPLOTYPES_READ_CALIBRATION', 'on')),
+            'read_calibration')
+    except ValueError as error:
+        parser.error(str(error))
+    os.environ['HAPLOTYPES_READ_CALIBRATION'] = 'on' if calibrate else 'off'
+    # These switches are independent scientific/runtime choices, not historical
+    # pipeline versions. Resolve them uniformly before any workflow imports.
+    for key, choices, default in (
+        ('pedigree_calibration', ('off', 'predictive'), 'predictive'),
+        ('assembly_model', ('dense', 'structured'), 'dense'),
+        ('assembly_search', ('bounded', 'broad'), 'bounded'),
+        ('founder_refinement', ('on', 'off'), 'on'),
+        ('discovery_search', ('standard', 'batched'), 'standard'),
+        ('feedback_selection', ('balanced', 'strict'), 'balanced'),
+    ):
+        variable = 'HAPLOTYPES_' + key.upper()
+        value = _setting(args, config, 'run', key, os.environ.get(variable, default))
+        if value not in choices:
+            parser.error(f'{key} must be {" or ".join(choices)}')
+        os.environ[variable] = value
+
+
+def _configure_simulation(args, config, *, seed, output, checkpoints,
+                          process_contigs, stop_after_stage):
+    """Keep generating parameters separate from inference settings."""
+    if process_contigs is not None:
+        os.environ['BHD_SIM_CONTIGS'] = ','.join(process_contigs)
+    if stop_after_stage is not None:
+        os.environ['BHD_SIM_STOP_AFTER_STAGE'] = stop_after_stage
+    os.environ.update(BHD_SIMULATION_SEED=str(seed), BHD_SIM_READ_DEPTH=str(_setting(args, config, 'simulation', 'depth', 5.0)),
+        BHD_SIM_CHECKPOINT_DIR=str(checkpoints), BHD_SIM_OUTPUT_DIR=str(output),
+        HAPLOTYPES_GENERATIONS=json.dumps(_setting(args, config, 'simulation', 'generations', [20, 100, 200])),
+        BHD_SIMULATION_RECOMBINATION_RATE_CM_PER_MB=str(_setting(args, config, 'simulation', 'generating_rate_cm_per_mb', 5.0)))
+    from .simulation.designs import SimulationDesign, ReadModel
+    design = SimulationDesign(
+        backcross_fraction=_setting(args, config, 'simulation', 'backcross_fraction', 0.0),
+        backcross_start_generation=_setting(args, config, 'simulation', 'backcross_start_generation', 3),
+        observe_generations=tuple(_setting(args, config, 'simulation', 'observe_generations', [])),
+        observed_fraction=_setting(args, config, 'simulation', 'observed_fraction', 1.0))
+    read_model = ReadModel(
+        error_rate=_setting(args, config, 'simulation', 'generating_error_rate', 0.02),
+        depth_cv=_setting(args, config, 'simulation', 'depth_cv', 0.0),
+        heterozygote_alt_probability=_setting(args, config, 'simulation', 'heterozygote_alt_probability', 0.5),
+        dropout_fraction=_setting(args, config, 'simulation', 'dropout_fraction', 0.0))
+    os.environ['HAPLOTYPES_SIMULATION_DESIGN'] = json.dumps(design.record())
+    os.environ['HAPLOTYPES_READ_MODEL'] = json.dumps(read_model.record())
+    templates = _path(_setting(args, config, 'inputs', 'templates'))
+    if templates:
+        os.environ['HAPLOTYPES_TEMPLATES'] = templates
+    generating_map = _path(_setting(args, config, 'simulation', 'generating_map'))
+    if generating_map:
+        os.environ['BHD_SIMULATION_RECOMBINATION_MAP'] = generating_map
+    else:
+        os.environ.pop('BHD_SIMULATION_RECOMBINATION_MAP', None)
+
+
+def main(argv=None):
+    """Resolve settings before importing the selected scientific workflow."""
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == 'example':
         from .simulation.example import create_example
@@ -166,7 +229,7 @@ def main(argv=None):
         os.environ.setdefault('MPLCONFIGDIR', str(PROJECT_ROOT / 'work' / 'cache' / 'matplotlib'))
         if args.cores is not None:
             os.environ['NUMBA_NUM_THREADS'] = str(args.cores)
-        from.simulation.evaluation import evaluate_run
+        from .simulation.evaluation import evaluate_run
         report = evaluate_run(args.output, checkpoints=args.checkpoints, cores=args.cores,
                               stages=args.stages, contigs=args.contigs,
                               feedback_selection=args.feedback_selection)
@@ -187,8 +250,9 @@ def main(argv=None):
     if not 1 <= cores <= len(os.sched_getaffinity(0)):
         parser.error('--cores must fit the current CPU affinity')
     try:
-        shared = _shared_family_setting(_setting(args, config, 'recombination', 'shared_family_evidence',
-                                               os.environ.get('BHD_RECOMBINATION_SHARED_FAMILY', '1')))
+        shared = boolean_setting(_setting(args, config, 'recombination', 'shared_family_evidence',
+                                           os.environ.get('BHD_RECOMBINATION_SHARED_FAMILY', '1')),
+                                  'shared_family_evidence')
     except ValueError as exc:
         parser.error(str(exc))
     if args.command == 'simulate':
@@ -211,62 +275,10 @@ def main(argv=None):
         if stop_after_stage is not None and stop_after_stage not in ('block_discovery', 'painting'):
             parser.error('stop_after_stage must be block_discovery or painting')
     if args.command != 'recombination':
-        if 'founder_scaling' in config.get('run', {}):
-            parser.error(
-                'founder_scaling was replaced by independent assembly_model and discovery_search settings'
-            )
-        assembly_model = _setting(
-            args,
-            config,
-            'run',
-            'assembly_model',
-            os.environ.get('HAPLOTYPES_ASSEMBLY_MODEL', 'dense')
-        )
-        if assembly_model not in ('dense', 'structured'):
-            parser.error('assembly_model must be dense or structured')
-        assembly_search = _setting(
-            args,
-            config,
-            'run',
-            'assembly_search',
-            os.environ.get('HAPLOTYPES_ASSEMBLY_SEARCH', 'bounded')
-        )
-        if assembly_search not in ('bounded', 'broad'):
-            parser.error('assembly_search must be bounded or broad')
-        founder_refinement = _setting(
-            args,
-            config,
-            'run',
-            'founder_refinement',
-            os.environ.get('HAPLOTYPES_FOUNDER_REFINEMENT', 'on')
-        )
-        if founder_refinement not in ('on', 'off'):
-            parser.error('founder_refinement must be on or off')
-        discovery_search = _setting(
-            args,
-            config,
-            'run',
-            'discovery_search',
-            os.environ.get('HAPLOTYPES_DISCOVERY_SEARCH', 'standard')
-        )
-        if discovery_search not in ('standard', 'batched'):
-            parser.error('discovery_search must be standard or batched')
-        feedback_selection = _setting(
-            args,
-            config,
-            'run',
-            'feedback_selection',
-            os.environ.get('HAPLOTYPES_FEEDBACK_SELECTION', 'balanced')
-        )
-        if feedback_selection not in ('balanced', 'strict'):
-            parser.error('feedback_selection must be balanced or strict')
-        os.environ['HAPLOTYPES_ASSEMBLY_MODEL'] = assembly_model
-        os.environ['HAPLOTYPES_ASSEMBLY_SEARCH'] = assembly_search
-        os.environ['HAPLOTYPES_FOUNDER_REFINEMENT'] = founder_refinement
-        os.environ['HAPLOTYPES_DISCOVERY_SEARCH'] = discovery_search
-        os.environ['HAPLOTYPES_FEEDBACK_SELECTION'] = feedback_selection
+        _configure_inference(args, config, parser)
     seed = _setting(args, config, 'simulation', 'seed', 400)
-    default_output=f'work/runs/seed_{seed}' if args.command=='simulate' else f'work/runs/{args.command}'
+    default_output = (f'work/runs/seed_{seed}' if args.command == 'simulate'
+                      else f'work/runs/{args.command}')
     output = Path(_setting(args, config, 'run', 'output', default_output)).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault('MPLCONFIGDIR', str(PROJECT_ROOT / 'work' / 'cache' / 'matplotlib'))
@@ -293,35 +305,9 @@ def main(argv=None):
         if vcf:
             os.environ['HAPLOTYPES_VCF'] = vcf
     if args.command == 'simulate':
-        if process_contigs is not None:
-            os.environ['BHD_SIM_CONTIGS'] = ','.join(process_contigs)
-        if stop_after_stage is not None:
-            os.environ['BHD_SIM_STOP_AFTER_STAGE'] = stop_after_stage
-        os.environ.update(BHD_SIMULATION_SEED=str(seed), BHD_SIM_READ_DEPTH=str(_setting(args, config, 'simulation', 'depth', 5.0)),
-            BHD_SIM_CHECKPOINT_DIR=str(checkpoints), BHD_SIM_OUTPUT_DIR=str(output),
-            HAPLOTYPES_GENERATIONS=json.dumps(_setting(args, config, 'simulation', 'generations', [20, 100, 200])),
-            BHD_SIMULATION_RECOMBINATION_RATE_CM_PER_MB=str(_setting(args, config, 'simulation', 'generating_rate_cm_per_mb', 5.0)))
-        from .simulation.designs import SimulationDesign, ReadModel
-        design = SimulationDesign(
-            backcross_fraction=_setting(args, config, 'simulation', 'backcross_fraction', 0.0),
-            backcross_start_generation=_setting(args, config, 'simulation', 'backcross_start_generation', 3),
-            observe_generations=tuple(_setting(args, config, 'simulation', 'observe_generations', [])),
-            observed_fraction=_setting(args, config, 'simulation', 'observed_fraction', 1.0))
-        read_model = ReadModel(
-            error_rate=_setting(args, config, 'simulation', 'generating_error_rate', 0.02),
-            depth_cv=_setting(args, config, 'simulation', 'depth_cv', 0.0),
-            heterozygote_alt_probability=_setting(args, config, 'simulation', 'heterozygote_alt_probability', 0.5),
-            dropout_fraction=_setting(args, config, 'simulation', 'dropout_fraction', 0.0))
-        os.environ['HAPLOTYPES_SIMULATION_DESIGN'] = json.dumps(design.record())
-        os.environ['HAPLOTYPES_READ_MODEL'] = json.dumps(read_model.record())
-        templates = _path(_setting(args, config, 'inputs', 'templates'))
-        if templates:
-            os.environ['HAPLOTYPES_TEMPLATES'] = templates
-        generating_map = _path(_setting(args, config, 'simulation', 'generating_map'))
-        if generating_map:
-            os.environ['BHD_SIMULATION_RECOMBINATION_MAP'] = generating_map
-        else:
-            os.environ.pop('BHD_SIMULATION_RECOMBINATION_MAP', None)
+        _configure_simulation(
+            args, config, seed=seed, output=output, checkpoints=checkpoints,
+            process_contigs=process_contigs, stop_after_stage=stop_after_stage)
         runpy.run_module('haplotype_reconstruction.workflows.simulation', run_name='__main__')
     elif args.command == 'reconstruct':
         if not vcf:
@@ -342,9 +328,9 @@ def main(argv=None):
         os.environ['HAPLOTYPES_METADATA_SHEET'] = str(_setting(args, config, 'inputs', 'metadata_sheet', 'main_data'))
         runpy.run_module('haplotype_reconstruction.workflows.' + args.command, run_name='__main__')
     else:
-        from.core.genetic_map import load_genetic_maps
-        from.recombination.model import RecombinationMapConfig
-        from.recombination.pipeline import run_from_checkpoints
+        from .core.genetic_map import load_genetic_maps
+        from .recombination.model import RecombinationMapConfig
+        from .recombination.pipeline import run_from_checkpoints
         maps = load_genetic_maps(mapping, rate)
         run_from_checkpoints(checkpoints, output, n_workers=cores,
             config=RecombinationMapConfig(recombination_rate=rate / 1e8),

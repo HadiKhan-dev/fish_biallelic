@@ -37,9 +37,15 @@ python run.py astcal --config configs/astcal.toml
 ```
 
 Edit the paths in `configs/` for your data. Empirical input datasets and founder
-templates are not bundled; the `example` command generates synthetic ones. General reconstruction requires allele depths; GT-only and
-PL-only input are not supported. See [inputs and commands](docs/running.md)
+templates are not bundled; the `example` command generates synthetic ones.
+General reconstruction requires allele depths; GT-only and PL-only input are
+not supported. See [inputs and commands](docs/running.md)
 and the [general configuration example](configs/reconstruct.toml).
+
+The small `example` exercises file formats, stage handoffs and checkpointing.
+Its few short, sparse chromosomes are not a pedigree-accuracy benchmark and
+may leave relationships unresolved. Use the documented whole-genome controls
+to assess biological reconstruction accuracy.
 
 On CSD3, activate the existing project environment:
 
@@ -56,6 +62,7 @@ threads to surviving workers at supported kernel boundaries.
 
 | Stage | Product | Implementation |
 | --- | --- | --- |
+| Observation calibration | Data-fitted read error, sample effects and dispersion | `core/read_calibration.py` |
 | Local discovery | Missing-aware 200-SNP founder panels | `discovery/` |
 | Two feedback rounds | Read-supported local selection after L1, then L1+L2 | `workflows/block_feedback.py` |
 | Final L1–L4 assembly | Refined, component-preserving founder chromosomes | `assembly/` |
@@ -89,8 +96,14 @@ for recombination; `--no-shared-family-evidence` disables it.
 - Local feedback uses balanced selection after **each** round.
   `--feedback-selection strict` protects more backbone calls but rescues less
   missing variation.
-- Founder-path refinement runs after each executed final L1–L4 level.
+- Founder-path refinement runs after each executed final L1–L4 level,
+  followed by bounded count-up/refit on the final components.
   `--founder-refinement off` disables it for controlled comparisons.
+- Read calibration learns supported observation parameters from allele depths;
+  `--no-read-calibration` retains the fixed-error model. See the
+  [calibration model and accepted limitations](docs/read_calibration.md).
+  Pedigree evidence separately learns a cross-chromosome predictive scale;
+  `--pedigree-calibration off` disables that estimator.
 - Inference defaults to 5 cM/Mb. `--recombination-map cross.map` supplies a
   spatially varying cumulative genetic map; unmapped chromosomes retain the
   fallback rate. Simulation-generating maps are configured independently.

@@ -97,6 +97,59 @@ biological parents are unsequenced, yielding 20 M0 and 300 M2 true observed-pare
 states. Inference receives neither the generating pedigree nor cohort labels.
 The generating map and inference map are separate settings.
 
+## Shared inference options
+
+The same options are wired through `simulate`, `reconstruct`, `astcal` and
+`tropheops`. No workflow-specific source edit is needed to select them.
+
+| CLI option | Default | What it controls |
+| --- | --- | --- |
+| `--read-calibration` / `--no-read-calibration` | on | Observed-AD calibration reused from discovery through final phase |
+| `--pedigree-calibration predictive\|off` | predictive | Cross-chromosome pedigree evidence scale |
+| `--assembly-model dense\|structured` | dense | Block-linkage transition model |
+| `--assembly-search bounded\|broad` | bounded | Panel-search breadth, independently of transition model |
+| `--feedback-selection balanced\|strict` | balanced | Local selection after each feedback round |
+| `--founder-refinement on\|off` | on | Progressive final L1–L4 refinement and final count-up/refit |
+| `--discovery-search standard\|batched` | standard | Local search; batched remains experimental |
+| `--shared-family-evidence` / `--no-shared-family-evidence` | on | Shared phase-error evidence in downstream recombination maps |
+
+For these switches, explicit CLI values override TOML, then the supported
+environment settings, then defaults. The first seven TOML keys belong in
+`[run]`; `shared_family_evidence` belongs in `[recombination]`. Boolean settings
+accept `true/false`, `on/off`, `yes/no` and `1/0` strings, or TOML booleans.
+Recombination also exposes its shared-family switch in the standalone command.
+Detailed sections below describe the scientific trade-offs and cache effects.
+
+## Read-model calibration
+
+Calibration is on by default for all reconstruction workflows. It fits read
+error, heterozygote balance and supported overdispersion from observed AD,
+including pooled sample effects, without truth or
+pedigree input, and supplies the same raw likelihoods to every inference stage.
+Use `--no-read-calibration` (TOML: `[run].read_calibration = false`) for a
+fixed-model comparison. Fits, held-out gains and fallback reasons are cached.
+See [Read-model calibration](read_calibration.md) for the model, limitations
+and checkpoint compatibility.
+
+Pedigree evidence calibration is also **on by default**, using pooled predictive
+weighting across chromosomes. Disable it with `--pedigree-calibration off`
+(TOML: `[run].pedigree_calibration = "off"`) for unscaled evidence.
+Direct workflows also accept
+`HAPLOTYPES_PEDIGREE_CALIBRATION=off|predictive`; explicit CLI options override
+TOML, which overrides the environment. This learns one chromosome-evidence
+weight, not parent-count priors, release thresholds or pedigree directions.
+Fewer than eight usable chromosomes, a boundary optimum, optimizer failure or
+no predictive gain retains scale 1. The fit and partition names are exported to
+`pedigree/evidence_calibration.json` beneath the workflow's output directory
+and stored in the pedigree checkpoint. Raw genetic scores remain reusable;
+decision checkpoints distinguish the option and fitted result, preserving prior
+pedigree decisions. Discovery, assembly, painting and genetic scores need not be
+rerun. If the accepted pedigree relationships change, downstream family-phase
+and map checkpoints must be recomputed for those changed inputs. This promotion
+accepts the aggregate improvement and known individual/cohort regressions in
+[Validation](validation.md). See [Methods](methods.md) for the conditional
+interpretation and resampling limits.
+
 ## Stage vocabulary and checkpoint compatibility
 
 All workflows use descriptive stage names. A fresh checkpoint root contains
@@ -466,7 +519,7 @@ exhaustive dependency lock or validation of every version permitted by
 | NumPy / Numba / SciPy | 2.4.0 / 0.64.0 / 1.16.3 |
 | pandas / hdbscan / cyvcf2 | 2.3.3 / 0.8.41 / 0.32.1 |
 | Blosc2 / TBB | 4.5.1 / 2022.3.1 |
-| Matplotlib / NetworkX / seaborn | 3.10.8 / 3.6.1 / 0.13.2 |
+| Matplotlib / NetworkX | 3.10.8 / 3.6.1 |
 | tqdm / openpyxl / setuptools | 4.67.1 / 3.1.5 / 80.9.0 |
 
 ## Pedigree cache reuse and explanations

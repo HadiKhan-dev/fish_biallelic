@@ -7,10 +7,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 import numpy as np
-from.import evidence as refinement_evidence
-from.import messages as refinement_messages
-from.import factors, selector_chains
-from.phase_chains import phase_update as _phase_update, phase_context_view
+from . import evidence as refinement_evidence
+from . import messages as refinement_messages
+from . import factors, selector_chains
+from .phase_chains import phase_update as _phase_update, phase_context_view
 
 
 MODEL_VERSION = "pedigree-phase-focused-v1"
@@ -253,7 +253,8 @@ def refine_family(genotype_likelihoods, observed, reference_alleles, positions, 
         belief = beliefs()
         gauge_changed = False
         if cfg.root_gauge_moves and messages.iteration % cfg.gauge_move_interval == 0:
-            maps = refinement_messages.selector_maps(emissions, messages, theta)
+            maps = refinement_messages.selector_maps(
+                emissions, messages, theta, np.unique(edge_group[roots[parents]]))
             flips, _ = refinement_messages.root_mode_flips(belief, orientation, messages.phase_match, parents, edge_group, slots,
                 roots, anchors, phase_theta, theta, maps, cfg.scaffold_phase_error)
             if np.any(flips):
@@ -286,9 +287,8 @@ def refine_family(genotype_likelihoods, observed, reference_alleles, positions, 
         phase_theta, anchors, parent_counts, cfg.scaffold_phase_error, cfg.phase_call_probability,
         cfg.correct_incomplete_parent_phase)
     for cluster in messages.branch_clusters:
-        joint = cluster.cavity.reshape((-1, 4, 4))
-        a, b = cluster.groups
-        messages.segregation_match[a], messages.segregation_match[b] = joint.sum(axis=2), joint.sum(axis=1)
+        refinement_messages.project_branch_marginals(
+            cluster.cavity, messages.segregation_match, cluster.groups)
     return FamilyPhaseState(context, displayed, inferred, messages, converged)
 
 
@@ -303,7 +303,7 @@ class FamilyPhaseState:
 
 
 def pedigree_edges(relationships, sample_ids):
-    """Read resolved scientific M1/M2 identities without assigning generations."""
+    """Read exact identities or explicitly released marginal parent edges."""
     names = tuple(map(str, sample_ids))
     lookup = {name: index for index, name in enumerate(names)}
     if len(lookup) != len(names):
@@ -313,14 +313,22 @@ def pedigree_edges(relationships, sample_ids):
     parents, children, slots = [], [], []
     for child, (_, row) in enumerate(relationships.iterrows()):
         state = row.get("ParentState")
-        if state not in ("one_observed_parent", "two_observed_parents"):
-            continue
-        present = [(slot, lookup[str(row[column])]) for slot, column in enumerate(("Parent1", "Parent2"))
-                   if str(row.get(column)) in lookup]
-        if state == "two_observed_parents" and len(present) != 2:
-            continue
-        if state == "one_observed_parent" and len(present) != 1:
-            continue
+        if "Parent1Supported" in relationships.columns:
+            # An identified edge need not establish whether the other parent
+            # is sampled. Unreleased candidates never enter family messages.
+            present = [(slot, lookup[str(row[column])])
+                       for slot, column in enumerate(("Parent1", "Parent2"))
+                       if row.get(f"{column}Supported") == True
+                       and str(row.get(column)) in lookup]
+        else:
+            if state not in ("one_observed_parent", "two_observed_parents"):
+                continue
+            present = [(slot, lookup[str(row[column])]) for slot, column in enumerate(("Parent1", "Parent2"))
+                       if str(row.get(column)) in lookup]
+            if state == "two_observed_parents" and len(present) != 2:
+                continue
+            if state == "one_observed_parent" and len(present) != 1:
+                continue
         if len({parent for _, parent in present}) != len(present) or any(parent == child for _, parent in present):
             raise ValueError("invalid self/duplicate parental identity")
         for slot, parent in present:

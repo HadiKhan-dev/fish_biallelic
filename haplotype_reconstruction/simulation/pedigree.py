@@ -13,15 +13,6 @@ from multiprocessing import Pool
 from concurrent.futures import ThreadPoolExecutor
 
 
-try:
-    import networkx as nx
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    HAS_VIS = True
-except ImportError:
-    HAS_VIS = False
-
-
 def materialize_simulation_haplotypes(haps_list, rng):
     """Create complete binary simulation truth without reference-biased ties.
 
@@ -507,10 +498,16 @@ def plot_ground_truth_pedigree(relationships_df, output_file="ground_truth_pedig
     Plots the Ground Truth Pedigree structure.
     Gracefully handles disk quota / IO errors.
     """
-    if not HAS_VIS:
-        print("Visualization libraries not found.")
-        return
     if output_file is None:
+        return
+    # Scientific types and checkpoint readers must not initialize font caches.
+    # Keep visualization imports local to this optional output operation.
+    try:
+        import networkx as nx
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+    except ImportError:
+        print("Visualization libraries not found.")
         return
 
     try:
@@ -1026,7 +1023,7 @@ def simulate_pedigree(founders, site_locs, generation_sizes,
 def convert_truth_to_painting_objects(all_paintings_flat, num_workers=8):
     """
     Converts the raw simulation output (lists of tuples) into
-    SamplePainting/PaintedChunk objects compatible with paint_samples.py.
+    SamplePainting/PaintedChunk truth objects matching the component-painting schema.
 
     Uses ThreadPoolExecutor + binary search for segment lookup.
     """

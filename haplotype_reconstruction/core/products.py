@@ -6,7 +6,8 @@ import numpy as np
 from . import runtime
 
 FOUNDER_STAGES = ("block_discovery", "feedback_l1", "feedback_l2",
-                  "assembly_l1", "assembly_l2", "assembly_l3", "assembly_l4", "painting")
+                  "assembly_l1", "assembly_l2", "assembly_l3", "assembly_l4",
+                  "founder_refinement", "painting")
 
 
 def panel_location(store, contig, stage, feedback_selection="balanced"):
@@ -17,6 +18,11 @@ def panel_location(store, contig, stage, feedback_selection="balanced"):
         level = int(stage[-1])
         options = [(f"feedback_{feedback_selection}_l{level}",
                     f"{contig}.__assembly_release__.selected")]
+    elif stage == "founder_refinement":
+        # Final count-up can change the panel after the last hierarchy-level
+        # snapshot. Expose it separately, without relabelling an earlier level.
+        options = [("assembly", f"{contig}.__assembly_release__.{phase}")
+                   for phase in ("final_count_increase", "founder_refinement")]
     elif stage.startswith("assembly_l"):
         level = int(stage[-1])
         options = [("assembly", f"{contig}.__assembly_release__.{phase}_l{level}")

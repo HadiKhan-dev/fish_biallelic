@@ -12,7 +12,7 @@ import os
 import numba
 
 from ...core import parallel
-from.workspace import resolve_threads
+from .workspace import resolve_threads
 
 
 def completed_candidates(functions, budget, bytes_per_candidate):

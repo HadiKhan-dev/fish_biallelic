@@ -4,7 +4,6 @@ from __future__ import annotations
 from ..core import environment
 environment.force_single_threaded_numeric_libraries()
 
-from dataclasses import asdict
 import gc
 import hashlib
 import json
@@ -15,13 +14,13 @@ import time
 import numpy as np
 from cyvcf2 import VCF
 
-from ..core import haplotypes, numerics, runtime, variants
+from ..core import haplotypes, read_calibration, runtime, variants
 from ..discovery import blocks, search
 from ..assembly.pipeline import AssemblyConfig
 from ..core.genetic_map import load_genetic_maps_from_environment
 from . import reconstruction
 from .downstream import run_downstream
-from .design import build_current_pedigree_config
+from ..pedigree.config import config_from_environment
 from .eligibility import load_constraints
 
 
@@ -58,7 +57,7 @@ def run():
     finally:
         reader.close()
     eligibility = load_constraints(os.environ.get("HAPLOTYPES_ELIGIBILITY"), names)
-    if stop is None and len(contigs) < build_current_pedigree_config().parent_state_minimum_exposed_contigs:
+    if stop is None and len(contigs) < config_from_environment().parent_state_minimum_exposed_contigs:
         raise ValueError("genome-wide pedigree inference requires at least three contigs; "
                          "use --stop-after-stage painting for a smaller reconstruction")
     output.mkdir(parents=True, exist_ok=True)
@@ -67,7 +66,7 @@ def run():
     rate = maps.default_rate_cm_per_mb / 1e8
     genetic_maps = maps if maps.maps else None
     discovery_config = search.ReversibleCavitySearchConfig()
-    identity = dict(backend=blocks.DISCOVERY_BACKEND, config=asdict(discovery_config))
+    identity = read_calibration.discovery_identity(blocks.DISCOVERY_BACKEND, discovery_config)
     stat = path.stat()
     run_identity = dict(schema="general-vcf-ad-v1", vcf=str(path), size=stat.st_size,
                         mtime_ns=stat.st_mtime_ns, sample_ids=names, contigs=contigs,
@@ -90,12 +89,14 @@ def run():
                 if sites is None:
                     raise ValueError(f"{contig}: no usable SNPs")
                 observed = reconstruction.observed_call_mask_from_read_counts(counts)
-                _, probabilities = numerics.reads_to_probabilities(counts, use_hwe_prior=False)
+                probabilities, calibration = read_calibration.prepare_likelihoods(counts, sites, threads=workers)
                 discovered = blocks.generate_all_block_haplotypes(
-                    reads, num_processes=workers, block_pool=pool, discovery_config=discovery_config)
+                    reads, num_processes=workers, block_pool=pool, discovery_config=discovery_config,
+                    genotype_likelihoods_by_block=read_calibration.block_likelihoods(reads, sites, probabilities))
                 discovered = haplotypes.BlockResults([b for b in discovered if len(b.positions)])
                 store.save_contig(source_stage, contig, dict(
                     block_results=discovered, global_sites=sites, global_probs=probabilities,
+                    read_calibration=calibration,
                     global_observed_mask=observed, discovery_backend=identity["backend"],
                     discovery_config=identity["config"],
                     genotype_evidence_mode=reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,

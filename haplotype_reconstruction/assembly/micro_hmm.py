@@ -8,8 +8,8 @@ backward scan is the adjoint of that same operator, not a reversed heuristic.
 import math
 import numpy as np
 from numba import njit, prange
-from.import micro_hmm_log
-from..core import config as core_config
+from . import micro_hmm_log
+from ..core import config as core_config
 
 # Numerical range guards, not confidence thresholds.
 _MIN_SCALED_MASS = 1e-250

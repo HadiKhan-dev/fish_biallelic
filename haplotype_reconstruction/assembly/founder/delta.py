@@ -7,7 +7,7 @@ labels/count and unchanged rows outside the rescored interval.
 import math
 import numpy as np
 from numba import njit, prange
-from.scoring import _unordered_pairs
+from .scoring import _unordered_pairs
 
 
 @njit(cache=True, parallel=True, nogil=True)

@@ -8,7 +8,7 @@ observations; parent flips are a selector-state permutation, not a new model.
 import math
 import numpy as np
 from numba import njit, prange
-from.model import _transition
+from .model import _transition
 
 
 @njit(cache=True)

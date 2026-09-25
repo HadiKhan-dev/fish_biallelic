@@ -9,12 +9,20 @@ founder alleles and unobserved sample calls are not invented or imputed here.
 Symmetric genotype emissions and a uniform penalty for any diplotype change
 allow exact K(K+1)/2 unordered states. This reduction is specific to this
 scoring model, not the pipeline's homologue-specific ancestry HMMs.
+The refinement penalty is length-independent; hierarchy panel selection keeps
+its separate length-scaled cost. Neither cost is an inferred crossover rate.
 """
 from __future__ import annotations
 
 import math
 import numpy as np
 from numba import njit, prange
+
+
+# Shared by refinement workspaces and standalone paired-exchange refits.
+# Growing this cost with component length can prefer a poorer founder phase
+# merely because it saves sample switches; keep the same cost at every level.
+SWITCH_PENALTY = 20.0
 
 
 @njit(inline="always")
@@ -191,7 +199,7 @@ def _count_panel_direct(haplotypes, evidence, complete, penalty, prepared=None):
 
 def _dosage_table(haplotypes):
     """Prepare shared dosages only within the existing workspace RAM allowance."""
-    from.site_kernels import prepare_dosages
+    from .site_kernels import prepare_dosages
     from ...painting.model import available_process_memory_bytes
     founders, sites = haplotypes.shape
     states = founders * (founders + 1) // 2
@@ -204,7 +212,7 @@ def _dosage_table(haplotypes):
 
 def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
     """Canonical scores; share pair dosages without changing the observation model."""
-    from.site_kernels import score_dosages
+    from .site_kernels import score_dosages
     dosages = _dosage_table(haplotypes)
     if dosages is None:
         return _score_panel_direct(haplotypes, evidence, complete, penalty, prepared)
@@ -214,7 +222,7 @@ def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
 
 def paint_panel(haplotypes, evidence, complete, penalty, prepared=None):
     """Canonical full-site traceback with compact switch storage when possible."""
-    from.site_kernels import paint_dosages
+    from .site_kernels import paint_dosages
     founders = len(haplotypes)
     if founders * (founders + 1) // 2 > 64:
         return _paint_panel_direct(haplotypes, evidence, complete, penalty, prepared)
@@ -228,7 +236,7 @@ def paint_panel(haplotypes, evidence, complete, penalty, prepared=None):
 
 def score_and_switch_count(haplotypes, evidence, complete, penalty, prepared=None):
     """Canonical scores and switch counts, with unchanged tie handling."""
-    from.site_kernels import count_switches
+    from .site_kernels import count_switches
     dosages = _dosage_table(haplotypes)
     if dosages is None:
         return _count_panel_direct(haplotypes, evidence, complete, penalty, prepared)

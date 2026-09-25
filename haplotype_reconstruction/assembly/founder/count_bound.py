@@ -13,7 +13,7 @@ This bound may be loose, but must never rule out an improving admissible fit.
 import math
 import numpy as np
 from numba import njit, prange
-from.scoring import _unordered_pairs
+from .scoring import _unordered_pairs
 
 
 @njit(cache=True)

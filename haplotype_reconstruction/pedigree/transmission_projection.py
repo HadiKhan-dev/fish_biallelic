@@ -3,7 +3,7 @@
 import math
 import numpy as np
 from numba import prange
-from..core import parallel
+from ..core import parallel
 
 parallel.ensure_numba_registry_warmup()
 njit = parallel.original_njit

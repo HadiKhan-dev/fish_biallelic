@@ -5,8 +5,8 @@ full-site acceptance remain unchanged. Independent windows are orchestrated by f
 """
 import numpy as np
 from numba import set_num_threads
-from.import path_search as search, sparse as founder_sparse, beam_kernels as kernels
-from.packing import emission_arrays, packed_emissions, candidate_alphabet, short_models
+from . import path_search as search, sparse as founder_sparse, beam_kernels as kernels
+from .packing import emission_arrays, packed_emissions, candidate_alphabet, short_models
 
 def workspace(blocks, samples, states, width, max_choices):
     dp = np.empty((width, samples, states))
@@ -193,7 +193,7 @@ def macro_proposals(
         branch_cap,
         width
     )
-    from.import windows as windows
+    from . import windows as windows
     local = windows.local_choices(emissions, incumbent, branch_cap)
     backward = None if background is None else background.get(True, True)
     forward = None if background is None else background.get(False, False)

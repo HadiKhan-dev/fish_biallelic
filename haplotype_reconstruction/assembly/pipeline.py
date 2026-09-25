@@ -13,15 +13,16 @@ import time
 from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.assembly.completion as assembly_completion
-from.structured_transitions import StructuredTransitionConfig, configured_transition
-from.panel_search import PanelSearchConfig, configured_panel_search
-from.import founder_refinement, evidence as assembly_evidence
+from .structured_transitions import StructuredTransitionConfig, configured_transition
+from .panel_search import PanelSearchConfig, configured_panel_search
+from . import founder_refinement, evidence as assembly_evidence
+from .founder import scoring as founder_scoring
 
 ASSEMBLY_RELEASE_SCHEMA = "assembly-release-v1"
 
 
 ASSEMBLY_RELEASE_BACKEND = (
-    "preprocess-progressive-founder-hierarchy-refinement-v19"
+    "preprocess-progressive-founder-hierarchy-refinement-v21"
 )
 
 
@@ -62,6 +63,7 @@ ASSEMBLY_RELEASE_CODE_IDENTITY_FILES += (
     'assembly/founder/scoring.py', 'assembly/founder/dual_search.py',
     'assembly/founder/exchanges.py', 'assembly/founder/windows.py',
     'assembly/founder/intervals.py',
+    'assembly/founder/count_increase.py',
     'assembly/founder/count.py', 'assembly/founder/count_bound.py', 'assembly/evidence.py',
     'assembly/founder/components.py',
     'assembly/founder/workspace.py', 'assembly/founder/count_workers.py',
@@ -83,7 +85,7 @@ _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
 
 
 def _configured_founder_refinement():
-    from..core.environment import assembly_founder_refinement
+    from ..core.environment import assembly_founder_refinement
     return founder_refinement.FounderRefinementConfig(
         enabled=assembly_founder_refinement())
 
@@ -475,6 +477,7 @@ def assembly_release_identity_record(
             "max_linking_iterations": assembly_linking.MAX_LINKING_ITERATIONS,
             "observed_false_genotype_evidence": "uniform_state_neutral",
             "final_founder_refinement": "full_site_potts_phase_count_staggered_intervals",
+            "final_founder_refinement_switch_penalty": founder_scoring.SWITCH_PENALTY,
         },
     }
     if chromosome_map is not None:
@@ -1032,7 +1035,7 @@ def assemble_chromosome(
                        else release_checkpoints.load(phase))
             started = time.perf_counter()
             if refined is None:
-                from.founder.components import scoped_checkpoints
+                from .founder.components import scoped_checkpoints
                 output, refinement_diagnostics = founder_refinement.refine_components(
                     preprocess_result.prepared_blocks, working, neutral_probs, sites,
                     config=active_refinement_config,
@@ -1069,6 +1072,35 @@ def assemble_chromosome(
         if stopped is not None:
             stop_reason = stopped
             break
+
+    # The tested count-up search acts on final components, not at each level.
+    # It leaves early progressive refinement and feedback assembly unchanged.
+    if config.max_level == 4 and config.founder_refinement_config.enabled:
+        from .founder import count_increase
+        from .founder.components import scoped_checkpoints
+        count_scope = scoped_checkpoints(release_checkpoints, "final_count_increase")
+        count_result = (None if release_checkpoints is None
+                        else release_checkpoints.load("final_count_increase"))
+        if count_result is None:
+            working, count_diagnostics = count_increase.refine_components(
+                preprocess_result.prepared_blocks, working, neutral_probs, sites,
+                config=config.founder_refinement_config, num_threads=config.num_processes,
+                checkpoints=count_scope, cc_scale=config.cc_scale)
+            _assert_position_coverage(working, expected_positions)
+            _validate_persistent_breaks(working, persistent_breaks)
+            _validate_hierarchy_selected_paths(
+                _selected_path_snapshot(preprocess_result.prepared_blocks), working)
+            _freeze_inference_snapshots(working)
+            core_runtime.strip_block_evidence(working)
+            if release_checkpoints is not None:
+                release_checkpoints.save("final_count_increase",
+                    {"blocks": working, "diagnostics": count_diagnostics})
+        else:
+            working = count_result["blocks"]
+            count_diagnostics = count_result["diagnostics"]
+            resumed_phases.append("final_count_increase")
+        refinement_diagnostics = dict(refinement_diagnostics,
+                                      final_count_increase=count_diagnostics)
 
     if refinement_levels:
         refinement_diagnostics = dict(refinement_diagnostics,

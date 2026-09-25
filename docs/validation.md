@@ -10,6 +10,406 @@ and 20/100/200 sample cohorts. The 22 template contigs are chr1–20, chr22 and 
 Seeds400–402 are development data; seed401 was held out specifically when
 choosing the family phase stopping rule, not from all project development.
 
+## Numerical, performance and product checks — 25 September 2026
+
+Two implementation improvements retain the scientific models: fused read-model
+likelihood/gradient and shared-binomial EM kernels, and an optimistic upper-bound
+screen before losing final founder-count additions. Compared with the frozen
+pre-change working tree:
+
+- Analytic likelihoods/gradients matched the NumPy reference within 2.9e-14 and
+  3.6e-15 respectively, including dispersion limits, pooled effects and missing
+  training rows; finite-difference gradient checks also passed.
+- All EM starts on the Tropheops and Astcal observed-AD histograms retained their
+  stopping iterations. Both full nested fits selected the same model. An
+  application fixture included missing observations and read depth 120, beyond
+  both the fitting and lookup caps; there were no genotype-argmax changes.
+- The founder-count relaxation bounded all 1,971 enumerated small panels.
+  Nine cached regional/full-chromosome comparisons retained exactly the same
+  ordered hard calls, selected local-row paths and completed-resume results.
+  The accepted four-to-five-founder addition remained accepted.
+- Four actual-read, 64-block controls (seed7000 chr3, 7004 chr10, 7019 chr7 and
+  7021 chr3) fitted the model on their complete observed chromosome and reran
+  discovery, both feedback rounds and regional final assembly. Every ordered
+  hard call matched at discovery, selected feedback and final assembly.
+  Their final called-error/call totals were respectively 0/76,800, 907/63,946,
+  0/76,798 and 0/76,800 in both arms. These are regional founder results,
+  not whole-chromosome accuracy estimates or sample-phase metrics.
+- The new `founder_refinement` evaluation stage reads the final count-up
+  product, falling back to the final founder-refinement checkpoint. Earlier
+  hierarchy-level metrics retain their original meaning. A typed checkpoint
+  fixture and an actual completed assembly verify that distinction.
+
+There is one separate scientific correction: a sample with no training-fold
+reads now receives the estimated pooled prior mean for error/balance, rather
+than the shared-model initialization. This is the mode of its otherwise
+uninformed normal-prior objective. Two artificial missing-training-row controls
+changed some predictive scores and raw GLs, with no genotype-argmax changes in
+the application fixture; an improvement in every held-out score is not claimed.
+Read-model version v3 invalidates dependent old likelihood checkpoints without
+deleting the saved data.
+
+Family-sweep prototypes passed 36 overlapping-family fixtures and four saved
+chromosome continuation checks; a 20-iteration, 26-branch continuation also
+retained phase calls, factor messages, branch cavities and convergence deltas.
+They were not promoted because the measured warm benefit was small.
+These checks do not constitute a new complete-genome pedigree validation or
+remove the previously documented calibration trade-offs.
+
+All fitting uses observed reads only. Truth is opened for evaluation after
+freezing the panels; ancestry-representation diagnostics use the actual sampled
+truth painting, not an all-present assumption. Accepted source/results remain
+untouched; comparison scripts and intermediate products are in
+`.work/pipeline_polish_20260925.6STDyVgq/`, outside Git.
+
+A fresh public-CLI smoke run (seed92501, N80, three synthetic chromosomes of
+2,400 markers each) completed every stage, all-stage evaluation, BCF/TSV export
+and complete resume on 112 CPUs. Exported founder and sample alleles exactly
+match the checkpoints, including missing calls. This deliberately small example
+released no pedigree edges and left all 80 individuals unresolved; it therefore
+does not validate pedigree recovery or informative recombination estimation.
+The saved-chromosome family checks above supply the nonempty-family coverage.
+The wheel includes all 160 public Python modules and no manuscript, test,
+checkpoint or private-work files.
+
+## Predictive pedigree evidence calibration — 23–24 September 2026
+
+Pooled predictive calibration is the default from 24 September, following
+explicit approval of its aggregate benefit despite the known regressions below.
+Use `--pedigree-calibration off` for the unscaled comparison. The estimator,
+candidate universe, priors and release thresholds are unchanged from the
+validated opt-in implementation; only default selection changed.
+Nine fixed-upstream 22-chromosome decision replays, including fresh full-marker
+Mendelian exclusions, improved exact parent configurations from **2,354/2,400
+to 2,370/2,400**. Seed7010 improved 137→146/160 and seed7019 improved 137→144/160;
+the other seven cohorts retained all 2,080 exact configurations. False edges
+in partial Tier-B outputs fell 4→2, and missing true partial edges fell 29→15.
+The all-M0 control retained 320/320 and fell back to evidence scale 1 because
+there was no predictive calibration gain.
+
+The aggregate improvement is not individual-level dominance: seed7019 gains ten
+exact configurations but loses three previously exact calls to unresolved status
+(F4_13, F5_2 and F10_26). Seed7010 gains nine and loses none. An unresolved call
+is not counted as a wrong exact pedigree, but it is a loss of usable resolution.
+
+Eight selected scales were 0.0167–0.0506, with positive untouched chromosome-test
+gains. Estimation from cached scores took 0.37–1.46 seconds. The canonical pipeline
+reused its genetic cache and reproduced the decision replay, exports and resume.
+This is conditional predictive calibration of existing paintings and candidate
+panels, not calibrated pedigree probabilities or independent validation of the
+entire pipeline. Bootstrap/LOCO conditions on the fitted scale. No L1–L4 or final
+phase rerun was part of this comparison. See [Methods](methods.md) for assumptions.
+
+The promoted estimator pools three training/selection folds while preserving
+a fourth test fold. Its nine full decision releases reproduce the same exact
+configuration and partial-edge totals. Eight selected weights are 0.0150–0.0528;
+the all-root cohort retains scale 1 at a boundary optimum. Release integration
+reproduces all nine private fits exactly; testing-fold score changes do not alter
+the fitted weight, and the disabled path returns the original evidence object.
+
+Eight chromosome partitions per cohort test sensitivity, not confidence limits.
+For seed7021, the fitted range narrows from 0.0141–0.0361 to 0.0186–0.0266.
+Canonical releases at both new endpoints retain 320/320 (the original endpoints
+gave 314–320). New endpoint ranges are 146–146/160 for seed7010 and 144–145/160
+for seed7019. These development results support pooling but do not establish
+well-calibrated posterior confidence. One previously identity-unresolved M1 count
+on seed7019 becomes count-unresolved under the pooled fit.
+
+Six subsequent conditional controls (7006, 7008, 7009, 7011, 7014 and 7023)
+retain all **1,600/1,600** exact configurations and every true partial edge,
+with no false edges, in both modes. They cover a bottleneck, final-generation-only
+sampling, backcross/missing parents, deeper generations, random missing parents
+and ordinary F1–F3 sampling. The pooled estimator was frozen before these tests.
+Both arms reuse the same pre-optimization genetic scores and run current release
+logic with fresh raw-marker exclusions; these are not new end-to-end runs.
+Five fitted scales have positive untouched-test gains; the all-M0 cohort retains
+scale 1 at a boundary optimum. Fits take 1.6–5.7 seconds on the nine-CPU runs.
+Across all fifteen controls, exact configurations are 3,954→3,970/4,000; the
+six additional controls contribute no gains or regressions to that difference.
+
+Completing all 24 available complex-cross conditional controls changes this
+assessment: exact configurations are **6,194→6,206/6,240**, false partial edges
+4→3 and missing true partial edges 29→17. Seed7007 regresses 160→158, reversing
+one parent–offspring edge; seed7018 regresses 160→158 through two abstentions.
+The other seven newly added cohorts retain every exact configuration. Thus the
+net gain is not a uniformly safer pedigree; default promotion explicitly accepts
+this trade-off, rather than claiming improvement for every fish or cohort.
+The fitted scale changes the balance between genetic evidence and the existing
+finite direction/family factors. Better held-out read/likelihood prediction does
+not by itself demonstrate more accurate biological relationship direction.
+
+Subsequent fixed-input chr1 family-phase checks of the original predictive fit
+are mixed. Seed7010 switches improve 162→158 on 8,290,043 common comparisons;
+seed7019 worsens 193→209 on 8,010,397. Component-aligned allele errors improve
+957,677→904,441 and 1,025,103→943,573 respectively, with unchanged genotypes.
+The ordinary 7000/7021 controls are identical. These are four chromosomes, not
+four whole-genome phase validations, and stable calls do not imply convergence
+of every latent message.
+
+The multi-model discovery candidate-bank remains a private experimental study.
+Across 164 local 200-SNP blocks, a balanced candidate-bank rescue added 998 calls
+without adding called mismatches or unmatched inferred rows. A much cheaper
+visited-panel rescue improved retention further but added errors and extra rows
+in rare-founder controls; it was **not promoted**. These local founder metrics
+must not be interpreted as chromosome-assembly or painted-sample phase accuracy.
+
+A subsequent four-region comparison (128 contiguous blocks per region) found
+identical final regional assemblies with and without candidate-bank rescue:
+the ordinary two-round feedback absorbed its initial local gains. One initial
+block gained one wrong call. All four original-read fits selected the nested
+binomial model. Controlled heterogeneous/overdispersed-read comparisons are
+separate; the earlier 164-block result does not establish uniform safety.
+
+The completed seed7019 whole-genome shared-read-calibration comparison also
+shows a downstream trade-off, separate from pedigree evidence calibration.
+On 1,287,925,179 common complete genotypes, genotype errors changed
+2,479,722 → 2,507,900. On 195,669,226 common phase comparisons (correct genotype
+in both arms and common component boundaries), phase switches changed
+4,980 → 5,389. Better read-model predictive likelihood alone therefore does not
+establish improved final genotype or phase accuracy. These fixed-input replays
+are development controls, not an untouched accuracy estimate.
+
+
+### Follow-up parameter and retention experiments — 24 September 2026
+
+Including the deployed direction, contamination and reciprocal-family terms in
+the training-fold predictive mixture did **not** solve the calibration problem.
+Across the same 24 frozen-score cohorts, the private family-consistent fit gives
+6,140/6,240 exact configurations, five false partial edges and 86 missing true
+partial edges. Compare 6,194 / four / 29 with calibration disabled and
+6,206 / three / 17 with pooled predictive calibration. It remains private.
+No truth-derived generation constraints, thresholds or per-seed constants were
+introduced to repair these outcomes.
+
+The joint sample-effect/heterozygote-dispersion model estimates read parameters
+well and improves untouched-window predictive scores. Two full-chromosome,
+5x controlled read-stress comparisons nevertheless show long-path regressions:
+
+| Input / observation arm | Called founder alleles | One-to-one wrong calls | Wrong + missing truth alleles |
+| --- | ---: | ---: | ---: |
+| Seed7004 chr10, shared binomial | 1,796,641 | 85,658 | 91,945 |
+| Seed7004 chr10, joint | 1,799,465 | 89,122 | 92,585 |
+| Seed7004 chr10, joint + candidate bank | 1,799,444 | 89,065 | 92,549 |
+| Seed7019 chr7, shared binomial | 3,267,960 | 401,952 | 417,906 |
+| Seed7019 chr7, joint | 3,271,697 | 423,703 | 435,920 |
+| Seed7019 chr7, joint + candidate bank | 3,271,587 | 422,250 | 434,577 |
+
+All these arms produce six chromosome-length rows in one component. The truth
+panels contain 1,802,928 and 3,283,914 alleles respectively. These are founder
+alleles, not painted sample alleles. Independent 200-marker rematching reduces
+the shared/joint/bank wrong-call counts to 2,439/1,650/1,543 on chr10 and
+42,690/36,812/37,464 on chr7. Such local rematching diagnoses path alignment,
+but is not chromosome-long accuracy or proof of identifiable ancestral phase.
+
+An ablation fitting sample means without dispersion gives 85,962 and 474,541
+long-path errors respectively; the trade-off is not fixed simply by dropping
+dispersion. Joint-model genotype posteriors using training-fitted mixture
+weights improve held-out log loss, Brier loss and genotype error in both cases.
+Those mixture priors are evaluation-only, never injected into inference GLs.
+The joint model also improves held-out AD prediction in both real datasets;
+see [read calibration](read_calibration.md). The joint-capable observation
+selector and symmetric count-up/refit were promoted on 24 September with
+explicit acceptance of the known accuracy/coverage trade-offs. The separate
+candidate bank and family-consistent pedigree calibrator remain private.
+
+A symmetric count-up/refit search using the unchanged founder objective was
+tested on nine regional/full-chromosome controls. It recovers a fifth row on
+one 128-block rare-founder region, reducing wrong-plus-missing truth alleles
+51,200→28,137, but adds 1,623 wrong calls and still rejects the sixth row.
+The other eight controls retain their founder counts; one full chromosome
+changes by two fewer wrong calls. This is not a general retention solution.
+These count-up controls used candidate-bank panels as fixed inputs; promotion
+of the refiner does not also enable multi-model candidate-bank discovery.
+
+The frozen original shared-read-calibration continuation for seed7010 finishes
+21 paired chromosomes: common genotype errors 2,044,125→1,987,077 among
+1,062,583,112 complete genotypes, and switches 3,586→3,379 on 168,787,880 common
+phase comparisons. Reference chr3 exhausts its original phase-stability retries,
+so this is **not** a completed 22-chromosome phase comparison. Its incomplete
+output is not released and no whole-genome completion marker is fabricated.
+
+### Exact Mendelian-exclusion acceleration
+
+Exact per-sample likelihood-pattern encoding avoids recalculating the same
+log-bet values at repeated markers. No likelihood rounding, window, missingness,
+replacement parameter or evidence averaging changes. Samples exceeding the
+bounded pattern catalog use the original direct scorer. Genetic-score caches
+remain reusable; exclusion and decision identities record the new helper.
+
+Twenty-six focused fixtures and four raw-chromosome kernel controls preserve
+all evidence values exactly. Two full 22-chromosome public decision/release
+replays preserve every evidence array and checked pedigree table bit-for-bit,
+including successful chromosome-checkpoint resume.
+
+Matched 36-CPU, four-chromosome-worker runs reduce complete exclusion time from
+85.97 to 64.65 seconds for seed7009 (N320), and 52.40 to 33.18 seconds for
+seed7019 (N160): approximately 25% and 37% less elapsed time. These include raw
+evidence loading and checkpoint writes, but are **not whole-pipeline timings**.
+Dynamic thread reassignment remains enabled. Encoding needs two additional
+bytes per sample/marker; the worst-case pattern lookup is about 49 MiB per
+numerical worker, usually much smaller at 5x.
+
+## Length-independent founder refinement — 23 September 2026
+
+Founder refinement now uses a sample-diplotype switch cost of 20 at every final
+L1–L4 refinement level, instead of increasing the cost with component length.
+The hierarchy's own length-scaled scorer, earlier local feedback, candidate
+budgets, genotype-fit guards and missing-data rules are unchanged. This is an
+approved scientific-model trade-off, not a numerically equivalent optimization
+or an estimate of the biological recombination rate.
+
+The controlled study froze discovery, balanced feedback and prepared local
+panels, then replayed final assembly. It covered 89 distinct seed/chromosome
+pairs, including two ordinary whole-genome controls and difficult crosses;
+these are not 89 independent genomes. Truth was used for evaluation, never
+per-chromosome model selection. Eight unchanged baseline replays reproduced
+the saved called and missing arrays up to founder-row permutation.
+
+| Evaluation set | Baseline founder errors | Refinement-only cost 20 |
+| --- | ---: | ---: |
+| 28 difficult chromosomes | 10,533,687 | 9,533,518 |
+| 22 additional chr16 controls | 2,780,377 | 2,534,290 |
+| Ordinary seed7000, N160, all 22 chromosomes | 17,920 | 15,751 |
+| Ordinary seed7023, N320, all 22 chromosomes | 1,386 | 3 |
+
+Errors are whole-component one-to-one founder allele mismatches, not errors in
+painted children. Matched called alleles change from 156,077,306 to 156,038,588
+on the difficult set and from 48,207,969 to 48,203,312 on the additional controls.
+Errors plus missing alleles also improve: 10,699,123 to 9,737,672 and 2,807,188 to
+2,565,758. Each ordinary genome has about 53.74 million matched founder calls;
+N160 loses three calls and N320 calls are unchanged.
+
+The new rule worsens 8/28 difficult chromosomes and 10/22 additional controls.
+The largest difficult-set regression is seed7022 chr3, 529,520 to 762,795 errors;
+seed7010 chr3 changes from 661,312 to 771,622. Much of the aggregate improvement
+is chromosome-scale orientation: locally rematched errors plus missingness
+improve only about 1.65% on the difficult set.
+
+Both ordinary pedigrees remain exact (160/160 and 320/320), with no extra edges.
+In read-stressed controls, seed7010 changes from 133/160 to 134/160 exact parent
+sets but gains one false edge; seed7019 changes from 138/160 to 137/160 and from
+two to three false edges. Those are real regressions, not floating-point noise.
+These downstream checks used all 22 chromosomes but repainted only the changed
+founder chromosomes; family phase and recombination were not rerun.
+
+On 22 paired chr16 replays, with 56 CPUs per task and two tasks per 112-core
+node, summed assembly time falls from 215.42 to 175.41 minutes (18.6%); the
+median paired reduction is 8.1%. This is neither an end-to-end timing nor a
+76-core benchmark. Changed realized search effort contributes.
+
+Cross-fitted read-model calibration gave about 20% fewer founder errors on
+three read-stressed chromosomes, but did not improve the paired downstream
+pedigrees overall. Cheap before/after-refinement selection gave smaller and
+mixed gains. Neither experiment is included in this default.
+
+Assembly identity backend v20 records the refinement cost explicitly; refinement
+diagnostics use model v13. Older scientific checkpoints must not silently resume
+under the changed model. The assembly code identity can also invalidate feedback
+caches despite unchanged feedback mathematics. Accepted results are preserved.
+The frozen study and detailed results remain in
+`.work/assembly_stagewise_20260923.NrgHtNdQ/`.
+
+### Production promotion checks
+
+The production workspace and standalone exchange fallback match the approved
+prototype's fixed cost. Focused 40/6000-marker fixtures passed missing-allele
+preservation, neutral observations, fallback/workspace parity, real forkserver
+imports and checkpoint roundtrip/identity rejection. Syntax and diff checks pass.
+
+Fresh production replays of seed7000 chr4 and chr5, from the same frozen feedback
+and preparation, exactly match the prototype's called and missing arrays after
+one-to-one row permutation: 4,305,348 founder-allele positions, including 27
+missing values. New checkpoint resume is identical; actual old identities are
+rejected. These checks took 204 and 155 seconds on separate 112-core nodes, with
+resume taking under five seconds each. They confirm promotion parity, not an
+additional independent accuracy gain. Logs and isolated checkpoints are in
+`.work/refinement_default_20260923.6DCz7gAQ/`.
+
+## Converged family decisions and full-marker release — 22 September 2026
+
+The default retains four initial reciprocal passes for the frozen ancestry-path
+factor, then converges the final family messages to maximum log-message change
+`1e-8`. Try 128 undamped iterations, then restart the same equations with damping
+0.5 for up to 4096 iterations if necessary. Residuals are measured before damping;
+smaller steps cannot falsely signal convergence. Failure of both attempts is
+reported, not silently published.
+
+The checkpointed workflow also uses full-marker Mendelian exclusion and already
+supported directions to resolve M0/M1 counts without adding edges. Bootstrap/LOCO
+diagnostics remain separate from that fixed-genome release.
+
+### Corrected worker-level validation
+
+Promotion exposed an important limitation in the earlier private prototype:
+its parent-process monkeypatch did not propagate into forkserver bootstrap
+workers. Full-fit and LOCO solves used convergence, but parallel bootstrap fits
+retained the bounded solver. The prior claim that every prototype bootstrap solve
+converged is withdrawn. Production now runs the same solver in every worker.
+
+Actual-worker validation covers 23 scored datasets, seeds7000–7022, each with
+1,000 chromosome bootstraps and ordinary LOCO/prior checks:
+
+| Dataset group | Exact Tier-B configurations | Supported edges |
+| --- | ---: | --- |
+| 21 non-read-stress datasets | 5,600/5,600 | All true edges, no extras |
+| Seed7021, included above | 320/320 | 460/460 true, no extras |
+| Seed7009, included above | 320/320 | 476/476 true, no extras |
+| Read-stress seed7010 | 133/160 | 261/280 true, no extras |
+| Read-stress seed7019 | 138/160 | 267/280 true, two pre-existing false reverse edges |
+
+The total is 5,871/5,920 exact configurations and 8,315/8,347 true supported
+edges, with two extras. Read-stress cases remain imperfect. Seed7022 was not
+used to develop this fix. These are decision/control replays on frozen
+upstream inputs, not 23 new discovery/assembly simulations.
+
+A real seed7021 bootstrap fit stalled at residual 0.0102 after 128 undamped
+passes; damping 0.5 reached 9.2e-9 in 207 passes. Damping 0.25, 0.5 and 0.75
+independently reached the same fixed point on the captured case. One seed7010
+resample required more than 512 damped passes, motivating the final 4096 ceiling.
+Some already-completed controls used the lower ceiling: all their solves reached
+the same tolerance before it. Raising an unused ceiling does not change any
+iteration or result. No likelihood, pedigree prior or statistical release
+threshold was changed to solve these numerical failures.
+
+### Integration and interpretation
+
+- Fresh pedigree preparation and genetic scoring from existing seed7021/7009
+  paintings exercise the current optimized pipeline, followed by actual-worker
+  inference, full-marker release, exports, supported-edge consumption and resume.
+  Both recover the exact configurations and edges above.
+- From saved genetic scores, decision plus new full-marker scans took about
+  40–42 seconds on 112 CPUs, including 22–24 seconds for the scans. A subsequent
+  decision replay reused all 22 exclusion checkpoints; direct final-result resume
+  also passed. These are not complete pipeline runtimes.
+- Four full-marker workers share the 112-core budget. Logs confirm expansion
+  from 28 threads each through 37/38 and 56 to 112 for the final worker.
+- The analytic dyad kernel matches the validated reference on uncertain/missing
+  observations. Wholly missing and empty marker sets are neutral.
+- Release fixtures cover caller eligibility, graph conflicts, ambiguous
+  direction, incomplete candidate evidence and disagreement with full-data
+  parent count. Disabling exclusion requires no full-marker input files.
+- On all five saved full-marker controls, production release logic matches the
+  prototype given the same input decisions. Downstream edge sets and original
+  bootstrap/LOCO columns are unchanged *by the count-release step*. The corrected
+  bootstrap solver can legitimately change those support values.
+- Across the earlier full-marker scans of 7004, 7009, 7010, 7019 and 7021, no true
+  dyad was falsely excluded among 2,096 evaluation controls. The same exclusion
+  kernel/model is used in production. Truth was used only for evaluation.
+- Package syntax, workflow defaults, output/decision identity coverage and
+  `git diff --check` pass.
+
+The exclusion bound assumes calibrated likelihoods and conditional read-error
+independence. Directional release additionally assumes supported directions are
+correct: it is **not an unconditional 99% pedigree guarantee**. See the
+[method and output interpretation](pedigree_direction.md#fixed-observed-genome-m0m1-release).
+
+This promotion leaves preparation/genetic-score cache identities unchanged.
+Older campaign caches predate separate transmission-performance edits, so the
+two integration runs correctly refreshed those stages. Accepted upstream run
+roots and frozen campaign source were not modified. Artifacts, including failed
+numerical attempts, are in `.work/pedigree_default_20260922.kqu6nMTI/`. The
+preceding prototype report has an explicit worker-validation correction.
+
 ## Release cleanup and descriptive stages — 20 September 2026
 
 The workflow cleanup shares downstream orchestration and reporting, scopes run
@@ -1289,3 +1689,130 @@ round trips. Preparation identities remain unchanged, score identities change,
 and unchanged relationship tables retain their downstream refinement identity.
 These finite controls support the change; they do not establish universal
 identifiability or calibrated pedigree probabilities.
+
+## Final reciprocal reconciliation — 21 September 2026
+
+The default now freezes the joint ancestry-path correction and performs a
+final reciprocal solve on the path-adjusted scores, replacing rather than
+duplicating the earlier reciprocal term. It does not recompute the path
+factor from those final messages. This is a bounded composite-model change;
+genetic scores, candidate panels, priors and release thresholds are unchanged.
+
+The motivating seed7009 control has 320 observed samples, 5x reads, all 22
+chromosomes, pedigrees extending to F10, 50% backcrossing and 20% randomly
+withheld individuals. Later path evidence changed which descendants competed
+as parents, leaving the earlier reciprocal messages inconsistent with the
+final scores. Increasing only the original message-pass count did not fix it.
+
+| Seed7009 quantity | Before reconciliation | Reconciled default |
+| --- | ---: | ---: |
+| Correct local configurations before DAG cleanup | 319/320 | 320/320 |
+| Complete full-data DAG configurations | 320/320 | 320/320 |
+| Exact Tier-B configurations | 316/320 | 318/320 |
+| Exact Tier-A configurations | 315/320 | 316/320 |
+| Correct Tier-B edges / true edges | 474/476 | 475/476 |
+| Extra Tier-B edges | 0 | 0 |
+
+The canonical production API, normal forkserver workers, 1,000 fixed-seed
+chromosome bootstraps and 22 LOCO fits reproduce the serial prototype's
+relationship tables and checked support columns. The family-phase edge reader
+accepts the 475 correct released edges. The two remaining Tier-B abstentions
+are a separate missing-parent/relative ambiguity, not resolved by this change:
+one observed parent remains supported in every resample but M1/M2 count is
+unstable; another fish has unstable M0 support when distinguishing chromosomes
+are omitted.
+
+Full-data production checks cover 38 cached seeds (7,420 sample evaluations),
+all with correct local and graph configurations. The other 37 seeds preserve
+their calls. The prototype also preserved 1,980/1,980 exact Tier-A and Tier-B
+configurations across eight matched 100-bootstrap/22-LOCO controls spanning
+N80/N160/N320, missing individuals, backcrosses and all-M0 cohorts. These are
+cached evidence replays, not 38 new end-to-end simulations.
+
+Production integration additionally preserved all 1,980 exact calls at both
+tiers in those eight controls, using 1,000 bootstraps for seed5001 and 100 for
+the other seven. Full and partial caller-chronology backcross controls each
+retain 40/40 at both tiers with 1,000 bootstraps. Every integration case used
+two normal forkserver workers and passed its checkpoint round trip and
+family-phase edge-consumer checks. These are interface/decision validations,
+not reruns of downstream chromosome phasing.
+
+Focused score fixtures check missing/identity-ineligible rows, partial/full
+chronology, component ablations, unchanged supporting path factors and the
+final diagnostic score decomposition. Preparation/genetic-score identities
+are unchanged by this integration; decision identities change, and family
+phase is bound to the resulting relationship table. Existing campaign results
+are preserved. No whole-genome downstream phase or recombination rerun is
+claimed. The model remains approximate and its support is not a calibrated
+parenthood probability.
+
+## Marginal parent-edge release and fixed-genome exclusion prototype (21 September 2026)
+
+The canonical partial-parent output now separates support for an individual
+edge from support for an exact M0/M1/M2 configuration. It uses the unchanged
+parent-edge bootstrap/LOCO cutoffs in both local and graph views, requires
+agreement with the full-data acyclic graph, and retains count uncertainty.
+Eleven normal API replays preserve the existing exact primary calls. Only
+F9_33 -> F10_29 is newly retained in the seed7009 control, giving family
+conditioning all 476 true edges with no extras, while the exact Tier-B table
+still contains 318/320 configurations.
+
+Both partial tables are checkpointed and exported. Family refinement and
+recombination consume the same explicitly supported-edge table; changing a
+support flag changes the downstream relationship identity. Focused checks
+verify checkpoint/CSV round trips, omission of an unsupported co-parent and
+identical missing-aware family messages to an equivalent one-known-parent
+fixture. These are interface checks, not new full-genome phase evaluations.
+
+A separate, **non-default prototype** resolves the two seed7009 count
+abstentions using raw genotype likelihoods on the fixed observed genome.
+It tests every alternative parent, allows a 1% arbitrary genotype-replacement
+channel, averages pre-specified betting fractions/windows, and applies a
+multiplicity bound using at most two true direct parents per individual.
+It releases M0 only when all sampled alternatives are excluded; M1 additionally
+requires the sole nonexcluded parent to have existing marginal edge support
+and agree with the full-data graph. Chromosome-bootstrap fractions are retained
+unchanged, not reinterpreted as biological probabilities.
+
+This prototype changes seed7009 from 318/320 to 320/320 exact configurations,
+with 476/476 true edges and no extras. Across thirteen 22-chromosome cached
+datasets (3,520 samples, 5,847 true edges), no true parent was excluded and no
+other call changed. Eight seeds were held out from construction:
+7000, 7002, 7006, 7007, 7011, 7012, 7013 and 7014. The read-stress seed7010
+remains 133/160 exact; this method does not repair its separate errors and
+abstentions. Total exact calls in these controls are 3,491 -> 3,493.
+These tests reuse raw-GL/painting checkpoints, not new assembly runs.
+
+The exclusion argument is conditional on calibrated read likelihoods and
+conditional read-error independence; inherited SNP genotypes may be linked.
+Twenty-seven enumerated read/genotype/error-channel checks verify its local
+bound. Correlated mapping errors, data-dependent ascertainment and other
+observation-model violations remain important limitations. Compatibility alone
+does not determine relationship direction. The exact-call certificate is not
+yet integrated as the production default.
+
+## Family branch marginal projection (23 September 2026)
+
+Live sampling of the read-stressed seed7010 family solve found approximately
+20 of 45 wall-clock seconds in the final serial NumPy branch-marginal reductions.
+The replacement fuses the same two four-state reductions in a marker-parallel
+Numba kernel. It retains float32 intermediate rounding; no likelihood, prior,
+damping, iteration limit, phase-release criterion or output schema changes.
+
+Eight constructed multi-generation family fixtures, each with an active branch
+cluster and 30 message iterations, had exactly identical messages, residuals
+and phase outputs. Float32/float64 chromosome-sized 500,000-marker projections
+also matched exactly. On 38 allocated CPUs the reduction-only medians were
+approximately 97x and 78x faster respectively. These are **kernel timings**, not
+whole-phase or pipeline speedups. The oscillating solver can still require many
+iterations; faster projection does not establish convergence or phase accuracy.
+Existing frozen-code comparison runs retain their original implementation.
+
+The coupled five-node factor sweep also reuses small work arrays across
+256-marker computational tiles and uses the existing scalar four-state cavity
+normalization. Every marker and selector state remains; the sequential update
+order between overlapping family branches is unchanged. Both intermediate-parent
+slots matched exactly in 100,000-marker kernel comparisons, and twelve 60-iteration
+multi-generation fixtures retained identical phase decisions. At nine allocated
+CPUs the production kernel took approximately 25% less time (1.33–1.35x speedup).
+This is a kernel result, not a whole-stage timing or a convergence improvement.

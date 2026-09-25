@@ -10,12 +10,6 @@ import numpy as np
 import pandas as pd
 
 
-PEDIGREE_BACKEND = "component_ragged_parent_state_v1"
-
-
-TROPHEOPS_CANDIDATE_SOURCE_MODE = "painting_ragged_projected_quadratic_v1"
-
-
 PARENT_ELIGIBILITY_FORMAT_VERSION = 1
 
 
@@ -109,26 +103,6 @@ def _explicit_direction_supported_parents(
             "direction_supported_parents must be a subset of eligible_parents"
         )
     return np.ascontiguousarray(direction)
-
-
-def build_current_pedigree_config(*, bootstrap_replicates: int=1000):
-    """Return the ragged quadratic / finite family-direction configuration."""
-
-
-    return module_pedigree_config.PedigreeConfig(
-        bootstrap_replicates=bootstrap_replicates,
-        primary_view="tier_b",
-        parent_state_effective_markers_per_information_block=3.0,
-        parent_state_minimum_edge_coverage=0.95,
-        parent_state_minimum_pair_explainability=0.95,
-        parent_state_minimum_edge_exposed_bins=1.0,
-        parent_state_minimum_pair_exposed_bins=1.0,
-        parent_state_minimum_exposed_fraction=0.10,
-        parent_state_minimum_exposed_contigs=3,
-        parent_state_direction_model="continuous_family",
-        parent_state_family_message_passes=4,
-        parent_state_ancestry_path_budget=16,
-    ).validated()
 
 
 def build_tropheops_parent_eligibility(
@@ -454,15 +428,3 @@ def summarize_parent_eligibility(record: dict[str, Any]) -> dict[str, Any]:
         ),
         "assumptions": list(record.get("assumptions", ())),
     }
-
-
-def pedigree_stage_names(backend: str=PEDIGREE_BACKEND) -> tuple[str, str]:
-    """Return evidence preparation and genome-wide inference stages."""
-    if backend != PEDIGREE_BACKEND:
-        raise ValueError(f"unsupported pedigree backend identity {backend!r}")
-    return (
-        "pedigree_evidence",
-        "pedigree",
-    )
-
-import haplotype_reconstruction.pedigree.config as module_pedigree_config

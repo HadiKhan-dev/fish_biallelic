@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import operator
+import os
 
 
 import numpy as np
@@ -38,6 +39,8 @@ class PedigreeConfig:
     tier_b_loco_fraction: float = 0.80
     support_set_coverage: float = 0.95
     primary_view: str = "tier_b"
+    # Learn a conditional predictive weight; uninformative fits retain scale 1.
+    evidence_calibration: str = "predictive"
     # Persisted provenance identities, deliberately excluded from __init__ so
     # callers cannot select the retired unscreened or prototype engines.
     parent_state_algorithm_mode: str = field(
@@ -56,7 +59,16 @@ class PedigreeConfig:
     # Finite orientation, reciprocal messages, and joint short-ancestry paths.
     # "cluster" retains the previous policy for controlled comparisons.
     parent_state_direction_model: str = "continuous_family"
+    # Bounded preparation of the one-way path factor; the final solve converges.
     parent_state_family_message_passes: int = 4
+    parent_state_family_final_max_iterations: int = 128
+    parent_state_family_final_tolerance: float = 1e-8
+    parent_state_family_retry_iterations: int = 4096
+    parent_state_family_retry_damping: float = 0.5
+    # Fixed-observed-genome M0/M1 release; resampling diagnostics stay separate.
+    full_marker_exclusion: bool = True
+    mendelian_exclusion_alpha: float = 0.01
+    mendelian_genotype_replacement_probability: float = 0.01
     # Bounded joint configuration marginalization; zero is a path-only ablation.
     parent_state_ancestry_path_budget: int = 16
     parent_state_direction_state_policy: str = field(default="strict_gate", init=False)
@@ -87,6 +99,8 @@ class PedigreeConfig:
     parent_state_prior_tolerance: float = 1e-10
 
     def validated(self) -> "PedigreeConfig":
+        if self.evidence_calibration not in {"off", "predictive"}:
+            raise pedigree_models.PedigreeEvidenceError("unknown pedigree evidence calibration")
         if self.parent_state_direction_model not in {
             "cluster", "continuous", "family", "continuous_family"
         }:
@@ -110,6 +124,8 @@ class PedigreeConfig:
 
         for integer_name, minimum in (
             ("parent_state_family_message_passes", 1),
+            ("parent_state_family_final_max_iterations", 1),
+            ("parent_state_family_retry_iterations", 1),
             ("parent_state_ancestry_path_budget", 0),
             ("bootstrap_replicates", 1),
             ("bootstrap_seed", 0),
@@ -120,6 +136,16 @@ class PedigreeConfig:
             ("parent_state_prior_max_iterations", 1),
         ):
             require_integer(integer_name, minimum)
+        if not isinstance(self.full_marker_exclusion, bool):
+            raise pedigree_models.PedigreeEvidenceError("full_marker_exclusion must be boolean")
+        for name in ("parent_state_family_final_tolerance", "parent_state_family_retry_damping",
+                     "mendelian_exclusion_alpha"):
+            if not np.isfinite(getattr(self, name)) or not 0 < getattr(self, name) < 1:
+                raise pedigree_models.PedigreeEvidenceError(f"{name} must lie in (0, 1)")
+        if (not np.isfinite(self.mendelian_genotype_replacement_probability)
+                or not 0 <= self.mendelian_genotype_replacement_probability < 1):
+            raise pedigree_models.PedigreeEvidenceError(
+                "mendelian_genotype_replacement_probability must lie in [0, 1)")
         if (
             not np.isfinite(self.maximum_contig_weight_ratio)
             or self.maximum_contig_weight_ratio < 1.0
@@ -273,3 +299,17 @@ class PedigreeConfig:
                 "probability triples summing to one"
             )
         return self
+
+
+def config_from_environment(*, bootstrap_replicates=1000, evidence_calibration=None):
+    """Use the canonical model defaults, with the workflow calibration override.
+
+    Metadata adapters decide eligibility, not model defaults. Keep the latter
+    in PedigreeConfig so CLI and direct workflow calls cannot drift apart.
+    """
+    if evidence_calibration is None:
+        evidence_calibration = os.environ.get("HAPLOTYPES_PEDIGREE_CALIBRATION", "predictive")
+    return PedigreeConfig(
+        bootstrap_replicates=bootstrap_replicates,
+        evidence_calibration=evidence_calibration,
+    ).validated()

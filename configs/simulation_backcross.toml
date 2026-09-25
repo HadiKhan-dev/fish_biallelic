@@ -1,6 +1,8 @@
 # Replace input paths as needed. All inference remains metadata-free.
 [run]
 cores = "auto"
+# read_calibration = true # Default: fit the observation model from allele depths.
+# pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
 output = "work/runs/backcross_seed6202"
 
 [inputs]

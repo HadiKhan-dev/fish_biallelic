@@ -93,7 +93,7 @@ def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
             if prepared is None else prepared)
     dosages = founder_scoring._dosage_table(haps)
     if dosages is not None:
-        from.site_kernels import exchange_messages
+        from .site_kernels import exchange_messages
         forward, backward = exchange_messages(dosages, logs, cuts, float(penalty))
         return exchange_scores(forward, backward, len(haps), float(penalty))
     # The direct kernel avoids a large dosage table when workspace RAM is tight.
@@ -111,10 +111,9 @@ def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
 
 from numba.typed import List
 from ...core import haplotypes
-from..import founder_refinement
-from.import path_search as founder_path_search
-from..import chimera_scoring
-from..import observations, paths, hierarchy
+from .. import founder_refinement
+from . import path_search as founder_path_search
+from .. import observations, paths, hierarchy
 
 
 def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
@@ -157,7 +156,7 @@ def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
                 else np.asarray(b.keep_flags, np.bool_)) & np.all(
                     observations.founder_inference_panel_from_block_result(b).called, axis=0)
                 for b in batch])
-            penalty = chimera_scoring.compute_penalty(batch)
+            penalty = founder_scoring.SWITCH_PENALTY
             logs = founder_scoring.prepare_log_evidence(fitting, complete)
         else:
             fitting, leaves, offsets = workspace.evidence, workspace.leaves, workspace.offsets
