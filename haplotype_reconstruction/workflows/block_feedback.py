@@ -1,4 +1,4 @@
-"""Checkpointed L1 → local selection → L1+L2 → local selection workflow.
+"""Checkpointed initial local fit → L1 feedback → L1+L2 feedback workflow.
 
 Feedback rounds generate competing proposals; they do not add observations.
 Selection follows each round, and its panels seed the next context assembly.
@@ -15,6 +15,7 @@ from haplotype_reconstruction.assembly import pipeline as assembly
 from haplotype_reconstruction.assembly.checkpoints import AssemblyCheckpointStore
 from haplotype_reconstruction.assembly.founder_refinement import FounderRefinementConfig
 from haplotype_reconstruction.core import environment, parallel, runtime
+from haplotype_reconstruction.core.config import PathSelectionConfig
 from haplotype_reconstruction.discovery import feedback, search, cavity
 from haplotype_reconstruction.discovery.candidate_selection import CandidateSelectionConfig
 
@@ -22,13 +23,20 @@ from haplotype_reconstruction.discovery.candidate_selection import CandidateSele
 @dataclass(frozen=True)
 class BlockFeedbackConfig:
     selection: str = field(default_factory=environment.block_feedback_selection)
+    segment_exchange: bool = field(default_factory=environment.block_feedback_segment_exchange)
+    path_search: PathSelectionConfig = field(default_factory=PathSelectionConfig)
     posterior_threshold: float = 0.99
     background_mass: float = 0.01
     maximum_context_founders: int = 10
 
     def __post_init__(self):
-        if self.selection not in ("balanced", "strict"):
-            raise ValueError("feedback selection must be balanced or strict")
+        if self.selection not in ("path", "balanced", "strict"):
+            raise ValueError("feedback selection must be path, balanced or strict")
+        if self.segment_exchange and self.selection != "path":
+            raise ValueError("segment exchange requires path feedback selection")
+        if (self.path_search.max_updates < 1 or self.path_search.rounds < 0
+                or self.path_search.refits_per_kind < 1):
+            raise ValueError("invalid local path search budget")
         if not .5 < self.posterior_threshold < 1:
             raise ValueError("feedback posterior_threshold must lie in (0.5, 1)")
         if not 0 < self.background_mass < 1:
@@ -43,7 +51,9 @@ def scientific_identity(config):
         "workflows/block_feedback.py", "core/haplotypes.py", "core/genotypes.py",
         "core/config.py", "core/parallel.py", "core/genetic_map.py",
         "assembly/allele_polynomials.py")]
-    return dict(schema="local-block-feedback-v2", selection_schedule="after_each_round",
+    return dict(schema="local-block-feedback-v3",
+        selection_schedule=("initial_then_after_each_round" if config.selection == "path"
+                            else "after_each_round"),
         config=asdict(config),
         local_search=asdict(CandidateSelectionConfig(criterion="bic")),
         code={str(path.relative_to(PACKAGE_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -64,11 +74,12 @@ def run_block_feedback(store, contig, originals, gl, sites, observed, sample_ids
                        chromosome_evidence=None):
     """Return selected local blocks and their mode-specific scientific identity.
 
-Raw block discovery files are never replaced. The initial L1 context and raw proposals
-are shared between modes. Each round's selection, and the second context and
-raw proposals, are mode-specific because selected L1 panels feed that context.
-Only the outer reconstruction runner publishes genome-wide completion.
-"""
+    Raw block discovery files are never replaced. Path selection first refits
+    the original panels. The cavity-rescue alternatives share their raw L1
+    context. Each round's selection, and the second context and raw proposals,
+    are mode-specific because selected L1 panels feed that context. Only the
+    outer reconstruction runner publishes genome-wide completion.
+    """
     cpus = min(assembly_config.num_processes, runtime.available_cpu_count())
     # This option affects only final chromosomes. Do not invalidate or refit
     # identical local contexts merely because final refinement was toggled.
@@ -86,6 +97,13 @@ Only the outer reconstruction runner publishes genome-wide completion.
         if fitted is not None:
             latent.update(assembly._array_digest(fitted.haplotypes).encode())
     identity.update(source=original_identity, original_latent_sha256=latent.hexdigest())
+    if mode == "path":
+        # Segment exchange is final-only: toggling it reuses unchanged core rounds.
+        identity["config"].pop("segment_exchange")
+        return _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids,
+            discovery_identity=discovery_identity, assembly_config=assembly_config,
+            config=config, chromosome_map=chromosome_map, chromosome_evidence=chromosome_evidence,
+            identity=identity, cpus=cpus)
     selected_identity = dict(identity, selection=mode, feedback_level=2)
     final_io = AssemblyCheckpointStore(store, work_stage=f"feedback_{mode}_l2", contig=contig)
     final_io.bind(selected_identity)
@@ -153,4 +171,83 @@ Only the outer reconstruction runner publishes genome-wide completion.
                 selection_config, mode, selection_io)
         selection_io.save("selected", dict(blocks=current, diagnostic=diagnostic))
         selected_rounds.append(current)
+    return current, selected_identity
+
+
+def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids, *,
+                       discovery_identity, assembly_config, config, chromosome_map,
+                       chromosome_evidence, identity, cpus):
+    """Keep original latent starts, select initially and after each context round."""
+    import copy
+    from haplotype_reconstruction.discovery import path_blocks
+
+    # Small per-block writes stay single-threaded while numerical workers run.
+    local_store = runtime.CheckpointStore(store.root, nthreads=1)
+    final_stage = "feedback_path_exchange" if config.segment_exchange else "feedback_path_l2"
+    selected_identity = dict(identity, selection="path", feedback_level=2,
+                             segment_exchange=config.segment_exchange)
+    final_io = AssemblyCheckpointStore(local_store, work_stage=final_stage, contig=contig)
+    final_io.bind(selected_identity)
+    saved = final_io.load("selected")
+    if saved is not None:
+        print(f"[Feedback] {contig}: resumed path-selected local panels", flush=True)
+        return saved["blocks"], selected_identity
+
+    selection_config = CandidateSelectionConfig(
+        discovery=_discovery_config(discovery_identity["config"]), criterion="bic")
+    options = dict(threshold=config.posterior_threshold, background_mass=config.background_mass,
+                   rate=assembly_config.recombination_rate * assembly_config.n_generations,
+                   max_k=config.maximum_context_founders)
+    model_options = dict(generations=assembly_config.n_generations,
+        recombination_rate_per_bp=assembly_config.recombination_rate,
+        wildcard_mass=config.background_mass, chromosome_map=chromosome_map)
+    selected_rounds, current = [], originals
+    for level in (0, 1, 2):
+        stage = "feedback_path_initial" if level == 0 else f"feedback_path_l{level}"
+        pass_identity = dict(identity, selection="path", feedback_level=level,
+                             segment_exchange=False)
+        selection_io = AssemblyCheckpointStore(local_store, work_stage=stage, contig=contig)
+        selection_io.bind(pass_identity)
+        saved = selection_io.load("selected")
+        if saved is not None:
+            current = saved["blocks"]
+            selected_rounds.append(current)
+            print(f"[Feedback] {contig}: resumed path selection round {level}", flush=True)
+            continue
+        proposed = None
+        if level:
+            saved_proposals = selection_io.load("proposals")
+            if saved_proposals is None:
+                print(f"[Feedback] {contig}: assembling selected context through L{level}", flush=True)
+                assembly_io = AssemblyCheckpointStore(store,
+                    work_stage=stage + "_assembly", contig=contig)
+                with parallel.numba_thread_scope(cpus):
+                    context = assembly.assemble_chromosome(current, gl, sites, observed, sample_ids,
+                        discovery_identity=dict(discovery_identity, feedback_pass=pass_identity),
+                        config=replace(assembly_config, max_level=level),
+                        release_checkpoints=assembly_io, chromosome_map=chromosome_map,
+                        chromosome_evidence=chromosome_evidence)
+                    proposed, diagnostic = feedback.refine(current, context["components"],
+                        gl, sites, observed, cpus, options, chromosome_map=chromosome_map,
+                        n_generations=assembly_config.n_generations)
+                proposed = feedback.BlockResults([copy.copy(block) for block in proposed])
+                runtime.strip_block_evidence(proposed)
+                saved_proposals = dict(blocks=proposed, diagnostic=diagnostic)
+                selection_io.save("proposals", saved_proposals)
+                del context
+                gc.collect()
+                parallel.malloc_trim()
+            proposed = saved_proposals["blocks"]
+        with parallel.numba_thread_scope(cpus):
+            current, diagnostic = path_blocks.select_blocks(originals,
+                [*selected_rounds, proposed] if level else [], gl, sites, observed, cpus,
+                selection_config, config.path_search, selection_io, **model_options)
+        selection_io.save("selected", dict(blocks=current, diagnostic=diagnostic))
+        selected_rounds.append(current)
+    if config.segment_exchange:
+        with parallel.numba_thread_scope(cpus):
+            current, diagnostic = path_blocks.select_blocks(current, [], gl, sites, observed,
+                cpus, selection_config, config.path_search, final_io,
+                segment_exchange=True, **model_options)
+        final_io.save("selected", dict(blocks=current, diagnostic=diagnostic))
     return current, selected_identity

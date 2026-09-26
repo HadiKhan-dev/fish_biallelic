@@ -386,6 +386,10 @@ def run():
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
         mark_stage_complete(DISCOVERY_STAGE)
 
+    if os.environ.get("HAPLOTYPES_STOP_AFTER_STAGE") == DISCOVERY_STAGE:
+        print("[STOP] Block discovery checkpointed; feedback and assembly not started.")
+        return
+
     write_reference_comparison(
         checkpoint_store, region_keys, output_dir,
         include_reference_samples=INCLUDE_REFERENCE_SAMPLES,

@@ -108,14 +108,15 @@ The same options are wired through `simulate`, `reconstruct`, `astcal` and
 | `--pedigree-calibration predictive\|off` | predictive | Cross-chromosome pedigree evidence scale |
 | `--assembly-model dense\|structured` | dense | Block-linkage transition model |
 | `--assembly-search bounded\|broad` | bounded | Panel-search breadth, independently of transition model |
-| `--feedback-selection balanced\|strict` | balanced | Local selection after each feedback round |
+| `--feedback-selection path\|balanced\|strict` | path | Initial normalized-path selection and selection after both feedback rounds; balanced/strict are explicit alternatives |
+| `--feedback-segment-exchange` / `--no-feedback-segment-exchange` | off | Optional final same-count segment exchange; requires path selection |
 | `--founder-refinement on\|off` | on | Progressive final L1–L4 refinement and final count-up/refit |
 | `--discovery-search standard\|batched` | standard | Local search; batched remains experimental |
 | `--shared-family-evidence` / `--no-shared-family-evidence` | on | Shared phase-error evidence in downstream recombination maps |
 
 For these switches, explicit CLI values override TOML, then the supported
-environment settings, then defaults. The first seven TOML keys belong in
-`[run]`; `shared_family_evidence` belongs in `[recombination]`. Boolean settings
+environment settings, then defaults. These TOML keys belong in `[run]`, except
+`shared_family_evidence`, which belongs in `[recombination]`. Boolean settings
 accept `true/false`, `on/off`, `yes/no` and `1/0` strings, or TOML booleans.
 Recombination also exposes its shared-family switch in the standalone command.
 Detailed sections below describe the scientific trade-offs and cache effects.
@@ -210,79 +211,74 @@ disable it even when the selected TOML example sets it to true.
 
 ## Local feedback selection
 
-All reconstruction commands use this sequence by default:
+All four reconstruction commands default to `--feedback-selection path`:
 
-1. Keep the original missing-aware 200-SNP discovery results.
-2. Assemble them through L1 and refit/project that context back to local blocks.
-3. Select from original and L1-feedback candidates using the original raw
-   likelihoods and observation masks.
-4. Assemble those **selected** panels through L1+L2 and refit back to blocks.
-5. Select again, using original, selected-L1 and fresh L2-feedback candidates.
-6. Run final L1–L4, refine its founder paths against the prepared local panels,
-   and pass the result to the unchanged downstream algorithms.
+1. Preserve the original missing-aware 200-SNP discovery panels.
+2. Fit and select those local panels under the normalized diploid path model,
+   before any context assembly (**initial local fitting**).
+3. Assemble the selected panels through L1, split/refit the context back to
+   200-SNP candidates, and select locally again.
+4. Assemble the latest selected panels through L1+L2, split/refit again, and
+   select locally again using original and feedback-derived candidates.
+5. Optionally perform one same-count segment-exchange pass.
+6. Proceed to final L1–L4 assembly, founder refinement and downstream inference.
 
-Selection always runs after each round; there is no end-only ordering option.
+Steps 3–4 are the two feedback/refinement rounds. There is no additional
+feedback stage after them. Initial fitting is local model fitting, not another
+assembly round. Selection follows **each** feedback round.
 
-The intermediate passes are proposals, not additional observations. Their
-carrier model excludes the current block's emission before refitting its
-alleles. Neither truth nor downstream assembly/painting metrics select panels.
-The configured assembly model/search applies to the context passes as well as
-final assembly. Supplied recombination maps also determine context transitions;
-unmapped chromosomes use the fallback rate, scaled by assembly generations.
+The normalized path model sums over diploid copying paths, includes an explicit
+unknown state, learns founder frequencies and penalizes dictionary complexity.
+BIC/cavity fits construct starts and candidates; the normalized regularized path
+likelihood selects the final panel. A previous better-scoring panel is retained
+under the unchanged observations/objective. Released alleles require conditional
+one-bit support plus directional carrier evidence; these are not full Bayesian
+allele posterior probabilities. Missing calls remain `-1`.
 
-`--feedback-selection balanced` is the default. It starts from the
-cavity-selected feedback-only refit, filters candidates explainable by a single
-join between current backbone haplotypes, requires a positive local BIC gain
-for additions, then performs same-K cavity-selected allele/confidence refinement.
-The final refinement can change or withdraw earlier calls.
+Assembly supplies candidate sequences, not extra reads. The context carrier
+model excludes the focal block's emission before its alleles are refitted.
+Truth and downstream painting/L4 accuracy never select local panels. The same
+calibrated genotype likelihoods and observation masks feed initial fitting,
+both feedback rounds, final assembly and downstream inference. Supplied maps
+and the configured generation multiplier determine path transitions; missing
+maps use the configured fallback rate.
 
-`--feedback-selection strict` instead permits only private-allele rescue,
-requires the same positive BIC gain, rechecks support for added rows, and
-protects the original clean feedback calls. It recovers less missing variation.
-That protection applies to the refitted backbone within each round's rescue,
-not to freezing all first-round calls during the next context/refit.
+The optional final pass exchanges suffixes between two local rows, screens
+all pairs at up to 16 cuts and refits the top eight plus an ordinary warm-start
+control. It retains the original panel if fitting worsens the objective and
+cannot directly change founder count. Enable it with
+`--feedback-segment-exchange`; disable it with
+`--no-feedback-segment-exchange` (the default).
 
-```bash
-python run.py simulate --config configs/simulation.toml --seed 400 \
-  --feedback-selection strict --output work/runs/strict_seed_400
-```
+`--feedback-selection balanced` and `strict` retain the explicit cavity-rescue
+alternatives. They select after L1 and L1+L2 but omit the initial path fit.
+Balanced allows broader local rescue/refinement; strict protects clean backbone
+calls and rescues less variation. Segment exchange requires path selection.
 
-The flag works for `astcal` and `tropheops` too. TOML uses
-`[run].feedback_selection = "balanced"` or `"strict"`; the environment variable
-is `HAPLOTYPES_FEEDBACK_SELECTION`. Precedence is CLI > TOML > environment >
-balanced. This is local block feedback, **not** a family phase → pedigree feedback loop.
+TOML uses `[run].feedback_selection = "path"` and
+`[run].feedback_segment_exchange = false`. Environment equivalents are
+`HAPLOTYPES_FEEDBACK_SELECTION` and `HAPLOTYPES_FEEDBACK_SEGMENT_EXCHANGE`.
+Precedence is CLI > TOML > environment > defaults. These are local block
+operations, **not** family-phase or pedigree feedback.
 
-After both feedback rounds, entirely uncalled rows trigger smaller-panel
-refitting under the existing BIC-like objective. This is automatic in balanced
-and strict modes; strict also preserves surviving backbone calls. It is not
-unconditional deletion: a row can remain unknown if removing it worsens the
-fit. Partially called rows do not trigger this reduction. All four assembly
-levels use partial-founder predictive emissions; explicit unsupported breaks
-remain. No new flag or known founder count is required.
+Exact context-site inference is bounded to ten distinct context haplotypes;
+larger or partially covered contexts retain their local proposals and record a
+skip reason. This is a computational cap on context proposals, not a biological
+founder-count cap. Path selection does not impose K=8 or K=10.
 
-Both modes retain unknown calls. Exact context-site inference is bounded to
-at most ten distinct context haplotypes; larger contexts or contexts that do
-not cover whole original blocks retain their input local proposals, with a
-recorded skip reason. This cap bounds computation, not the biological founder
-count. Local selection itself does not impose that ten-founder cap.
+The optimized full TroMau chr1 prototype took 56.32 minutes on 76 cores for
+initial fitting plus both assembly/selection rounds, or 57.68 minutes with the
+optional segment pass. This excludes raw discovery, calibration estimation and
+final L1–L4/downstream work. In two matched 100-block simulation controls, most
+improvement over raw discovery came from initial fitting; feedback added two
+exact local rows in the stressed control. Rare weak rows can still be lost;
+real-data counts are not independently established founder truth.
 
-In the 9,287-block ordering comparison (six seed/chromosome cases), balanced
-selection after each round gave 135 called-allele errors and 566 truth-to-panel
-errors/missing, versus 183 and 652 when selecting only at the end. The 135
-errors span 10,265,983 called founder alleles: **13.15 errors per million
-called SNP alleles (0.001315%)**, excluding unknown calls. These are
-local panel metrics, **not** final chromosome or sample phase errors. The
-balanced result is a measured precision/variation trade-off, not a uniform
-accuracy improvement or a guarantee against per-block regression.
-
-This ordering changes feedback, painting and downstream cache identities, including
-products from the earlier end-only feedback workflow.
-Preserve old runs and use a separate output/checkpoint root; compatible original
-input/discovery stages can still be linked into that root. Do not relabel old
-painting products. Both feedback rounds and their selection batches are checkpointed.
-Balanced and strict can share the initial raw L1 context/proposals, but have
-separate first-round selections and second-round contexts/proposals/selections.
-Switching modes does not overwrite raw discovery results.
+Raw discovery is never overwritten. Initial fitting, each feedback round and
+optional exchange have separate resumable checkpoints. Toggling final-only
+segment exchange can reuse core rounds. Changed read-model calibration makes
+old likelihood/discovery checkpoints scientifically incompatible: preserve old
+runs and use a new output/checkpoint root; do not relabel old products.
 
 ## Final founder refinement
 
@@ -294,8 +290,9 @@ can reduce the initial founder count under the existing complexity cost.
 The existing early stop for an irreducible hierarchy is retained; unused levels
 do not cause extra refinement passes.
 
-The two L1/L2 context-feedback passes and balanced local selection are unchanged
-and never run this refiner. Use `--founder-refinement off` for a controlled
+Initial local fitting and the two L1/L2 context-feedback passes never run this
+final-assembly refiner, whether selection uses path, balanced or strict.
+Use `--founder-refinement off` for a controlled
 comparison without any final-assembly refinement. Toggling this option within
 one code version reuses local feedback checkpoints; only final assembly/painting
 and downstream products change identity.
@@ -418,10 +415,11 @@ Do not share a checkpoint directory between different seeds or configurations.
 | `founder_templates/` | Frozen simulation sequence inputs |
 | `simulated_reads/` | Simulated observations, true pedigree, alleles and raw crossover events |
 | `block_discovery/` | Discovered 200-SNP block haplotypes, raw likelihoods/observation masks as applicable |
-| `feedback_l1_assembly/`, `feedback_l1/` | Initial context-assembly levels and raw local proposals, shared between modes |
-| `feedback_<mode>_l1/` | First-round 128-block selection batches and selected panels |
-| `feedback_<mode>_l2_assembly/` | Context assembly through L1+L2 from that mode's selected first-round panels |
-| `feedback_<mode>_l2/` | Second-round raw proposals, 128-block selection batches and final selected panels; `<mode>` is `balanced` or `strict` |
+| `feedback_path_initial/` | Initial local path fits, per-block checkpoints and selected panels |
+| `feedback_path_l1_assembly/`, `feedback_path_l1/` | L1 context, local proposals, per-block path fits and selected panels |
+| `feedback_path_l2_assembly/`, `feedback_path_l2/` | L1+L2 context from selected L1 panels, proposals and selected local panels |
+| `feedback_path_exchange/` | Optional final same-count segment proposals and selected panels |
+| `feedback_balanced_*`, `feedback_strict_*`, `feedback_l1*` | Separate checkpoints for explicitly selected cavity-rescue alternatives |
 | `genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
 | `assembly/` | Preprocessing, L1–L4 levels, per-level founder-refinement components/searches and final aggregate |
 | `painting/` | Typed component-local painting products |

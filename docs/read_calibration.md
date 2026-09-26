@@ -7,16 +7,21 @@ Read calibration is enabled by default in `simulate`, `reconstruct`,
 
 ## Model and information used
 
-For each chromosome, observed REF/ALT allele depths select among three nested
-models: shared binomial, pooled sample-specific binomial, and pooled
-sample-specific means with shared heterozygote beta-binomial dispersion.
-Selection does not force overdispersion when the simpler model predicts better.
+For each chromosome, observed REF/ALT allele depths select among shared
+binomial, pooled sample-specific binomial, pooled sample-specific means with
+shared heterozygote beta-binomial dispersion, and an extension adding shared
+homozygote beta-binomial dispersion. The original joint fit and a fairly
+refitted joint null both remain eligible. Selection does not force either
+form of overdispersion when a simpler model predicts better.
 
 For sample s, error e_s and allele-balance b_s give heterozygote ALT probability
-q_s = e_s + (1 - 2e_s)b_s. Homozygotes are binomial with ALT probabilities
-e_s and 1-e_s. The joint model uses a beta-binomial heterozygote with mean q_s
-and fitted chromosome-shared concentration. A larger concentration approaches
-the binomial limit. Error and balance effects on logit scales are pooled using
+q_s = e_s + (1 - 2e_s)b_s. Homozygote ALT means remain symmetric: e_s
+and 1-e_s. In the joint null they are binomial; the extension gives both one
+shared intraclass correlation rho, with concentration (1-rho)/rho. Exactly
+rho=0 recovers binomial homozygotes. The joint models use beta-binomial
+heterozygotes with mean q_s and a separate fitted chromosome-shared
+concentration. A larger concentration approaches the binomial limit.
+Error and balance effects on logit scales are pooled using
 a diagonal empirical-Bayes approximation. Training-data profile curvature
 estimates the pooling strength; the joint fit then estimates sample means,
 genotype-mixture nuisances and shared concentration together. This is not
@@ -24,6 +29,14 @@ exact Bayesian inference or a guarantee of identifiability at low depth.
 A sample with no training-fold reads takes the fitted pooled prior mean for
 its error/balance effects, not the initialization of the shared model. Its
 unidentified genotype mixture remains uniform.
+
+The homozygote extension uses the same training-only empirical-Bayes
+hyperparameters as its joint null, and refits sample error/balance, genotype
+mixture nuisances, and heterozygote concentration in both models. Its fixed
+initial rho values are 0, 0.02 and 0.1; converged starts compete by training
+objective, with the exact converged rho=0 endpoint always included. Fitted
+rho is bounded to [0, 1-1e-6]. These starts and bounds are numerical choices,
+not biological estimates or founder-count targets.
 
 Each sample has an unconstrained three-genotype mixture for fitting and
 predictive scoring. These weights are not HWE frequencies and are **never**
@@ -66,9 +79,10 @@ model and fallback reason. Nuisance mixtures are recorded for reproducibility,
 not used as output genotype priors. The discovery identity distinguishes this
 model from old likelihood checkpoints. Dependent products must be recomputed;
 existing results are not deleted. Use an isolated root for comparisons.
-Version `heldout-joint-read-model-v3` records corrected no-training-read
-pooling and compiled fitting kernels. The likelihoods, optimizer bounds,
-iteration limits, held-out selection and convergence tolerances are unchanged.
+Version `heldout-homozygote-read-model-v4` includes the nested homozygote
+dispersion candidate and its likelihood application. It preserves the earlier
+no-training-read pooling, physical folds, fixed fallback and old candidate
+families. Failed homozygote fits leave converged simpler models eligible.
 
 Simulation templates and read generation retain their independent identities.
 Calibrated likelihoods are stored in `block_discovery`, not substituted into
@@ -90,12 +104,13 @@ early level or feedback round. Existing progressive refinement is unchanged.
 It has separate resumable checkpoints and diagnostics. The API setting
 `FounderRefinementConfig(count_max_additions=0)` disables only additions;
 the existing `--founder-refinement off` disables founder refinement as a whole.
-The separate multi-model discovery candidate-bank experiment is not enabled.
+This assembly-level pass is separate from calibrated local path selection.
 
 ## Evidence and accepted limitations
 
-Representative indexed AD windows in Tropheops (47,565 SNPs, 116 samples) and
-Astcal (59,968 SNPs, 290 samples) selected the joint model. Extraction plus
+Earlier validation on representative indexed AD windows in Tropheops
+(47,565 SNPs, 116 samples) and Astcal (59,968 SNPs, 290 samples) selected
+the joint model. Extraction plus
 fitting took 14.3 and 26.1 seconds on 18 CPUs. These are bounded-window
 timings, not whole-file or pipeline timings, and measure predictive fit,
 not real-data biological accuracy.
@@ -108,11 +123,45 @@ Count-up/refit recovered a fifth row in one candidate-bank regional control,
 reducing wrong-plus-missing alleles 51,200 to 28,137 while adding 1,623 wrong
 calls; it still rejected the sixth row. These are not uniform accuracy gains.
 
-Both changes were promoted on 24 September 2026 with explicit acceptance of
-these trade-offs. Historical comparisons remain preserved. See
+Those earlier changes were promoted on 24 September 2026 with explicit
+acceptance of these trade-offs. Historical comparisons remain preserved. See
 [validation](validation.md) for controls and denominators.
-Site-specific mapping biases, asymmetric homozygote errors, variant
-ascertainment and dependent errors remain limitations. Calibration cannot
+The homozygote extension was subsequently tested with fixed, genome-distributed
+100kb real-data windows, reservoir-capped at 800 SNPs and chromosome-rotated
+folds. Production instead retains the per-contig 1Mb physical folds and stride
+above; real pilot fits are not hardcoded or imported. The fitted model and GL
+application are the same, but sampling and estimated parameters can differ.
+Count comparisons must therefore use matched per-contig calibration and
+reconstruction before claiming reproduction of the frozen-window pilot.
+
+The 26 September production-integration check fitted canonical calibration to
+all cached Tropheops chr1 AD (116 samples, 276,501 markers), selecting the
+homozygote extension with rho=0.2458857435; the frozen-window pilot had
+rho=0.1890711223. All three extension starts converged. Against the refitted
+joint null, predictive log-likelihood improved by 4,397.95 on selection fold 2
+and 4,371.73 on untouched diagnostic fold 3. Calibration plus whole-contig GL
+application took 8.45 seconds on 76 CPUs; loading, comparison and regional
+checkpoint writing brought this bounded check to 16.94 seconds. These are not
+pipeline timings or evidence of real founder accuracy.
+
+Compiled and interpreted integration checks matched the frozen application to
+at most 7.78e-16 absolute GL difference on fixed Tro, Ast and stressed-simulation
+fits. Independent emission/gradient, rho=0 nesting, zero-depth, high-depth,
+sample-order, mixture-exclusion and fold-routing checks passed. Refitting on
+the production sampling design is deliberately not identical: versus frozen
+HOMBB parameters, mean absolute observed-cell GL change was 0.01514 and
+300,503 observed genotype argmax cells changed. These changes are not truth
+errors or an independent predictive comparison. The saved first-100-block
+regional input retains historical discovery starts; it does not establish
+fresh-discovery or final founder-count equivalence. Parameters, scores, input
+identity and timing are recorded under
+`work/runs/real_crosses_20260925_ba0cb40/calibration_promotion_chr1_v1_outputs/report.json`.
+
+Homozygote dispersion can represent correlated read errors, but can also absorb
+systematic mapping or structural variation. Better marginal AD prediction is
+not proof that the absorbed variation is sequencing error. Site-specific
+mapping biases, asymmetric homozygote errors, variant ascertainment and
+dependent errors remain limitations. Calibration cannot
 resolve ancestral phase that descendants do not identify.
 
 Raw AD is required; PL/GL-only inputs do not generally identify the original

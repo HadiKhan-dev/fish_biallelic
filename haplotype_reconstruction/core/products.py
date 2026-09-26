@@ -5,15 +5,21 @@ import numpy as np
 
 from . import runtime
 
-FOUNDER_STAGES = ("block_discovery", "feedback_l1", "feedback_l2",
+FOUNDER_STAGES = ("block_discovery", "feedback_initial", "feedback_l1", "feedback_l2",
+                  "feedback_exchange",
                   "assembly_l1", "assembly_l2", "assembly_l3", "assembly_l4",
                   "founder_refinement", "painting")
 
 
-def panel_location(store, contig, stage, feedback_selection="balanced"):
+def panel_location(store, contig, stage, feedback_selection="path"):
     """Return the existing file location, including the refined hierarchy when present."""
     if stage in ("painting", "block_discovery"):
         options = [(stage, contig)]
+    elif stage in ("feedback_initial", "feedback_exchange"):
+        if feedback_selection != "path":
+            return None
+        directory = "feedback_path_initial" if stage == "feedback_initial" else "feedback_path_exchange"
+        options = [(directory, f"{contig}.__assembly_release__.selected")]
     elif stage.startswith("feedback_l"):
         level = int(stage[-1])
         options = [(f"feedback_{feedback_selection}_l{level}",
@@ -35,7 +41,7 @@ def panel_location(store, contig, stage, feedback_selection="balanced"):
     return None
 
 
-def load_panels(store, contig, stage="painting", *, feedback_selection="balanced"):
+def load_panels(store, contig, stage="painting", *, feedback_selection="path"):
     location = panel_location(store, contig, stage, feedback_selection)
     if location is None:
         raise FileNotFoundError(f"{contig}: no completed {stage} product")

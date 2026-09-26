@@ -71,7 +71,7 @@ def _write_table(destination, filename, rows):
 
 
 def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available",),
-                 contigs=None, feedback_selection="balanced"):
+                 contigs=None, feedback_selection="path"):
     """Evaluate completed contigs/stages, without requiring downstream completion.
 
     available: latest existing founder product per contig, plus available

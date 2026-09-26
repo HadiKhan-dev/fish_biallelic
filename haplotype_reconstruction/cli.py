@@ -52,7 +52,7 @@ def build_parser():
                              help='Use shared-family phase-error evidence in map generation; default on.')
         if name != 'recombination':
             command.add_argument('--read-calibration', action=argparse.BooleanOptionalAction, default=None,
-                                 help='Select shared/sample read error, balance and heterozygote overdispersion from observed AD; default on.')
+                                 help='Select read error, allelic balance and heterozygote/homozygote overdispersion models from observed AD; default on.')
             command.add_argument('--pedigree-calibration', choices=('off', 'predictive'),
                                  help='Learn cross-chromosome pedigree evidence scaling; default predictive. Use off for unscaled evidence.')
             command.add_argument('--assembly-model', choices=('dense', 'structured'),
@@ -63,8 +63,10 @@ def build_parser():
                                  help='Refine original local-row choices after each final L1-L4 assembly level; default on. Excludes the two L1/L2 feedback passes.')
             command.add_argument('--discovery-search', choices=('standard', 'batched'),
                                  help='block discovery search, independent of assembly; default standard. Batched is experimental.')
-            command.add_argument('--feedback-selection', choices=('balanced', 'strict'),
-                                 help='Selection after each L1/L2 feedback round: balanced (default) or protected-backbone strict rescue.')
+            command.add_argument('--feedback-selection', choices=('path', 'balanced', 'strict'),
+                                 help='Normalized path selection before and after L1/L2 feedback (default); balanced/strict are explicit cavity-rescue alternatives.')
+            command.add_argument('--feedback-segment-exchange', action=argparse.BooleanOptionalAction, default=None,
+                                 help='Optional final same-count segment exchange for path feedback; default off.')
             command.add_argument('--contigs', nargs='+', help='Physical contigs to analyze, in input order.')
             command.add_argument(
                 '--vcf',
@@ -106,6 +108,8 @@ def build_parser():
             command.add_argument('--stop-after-stage', choices=('block_discovery', 'painting'),
                                  help='Stop at a checkpoint boundary before genome-wide inference.')
         elif name != 'recombination':
+            command.add_argument('--stop-after-stage', choices=('block_discovery',),
+                                 help='Stop after checkpointed block discovery, before feedback and assembly.')
             command.add_argument('--metadata', help='Cross-design metadata workbook.')
             command.add_argument('--metadata-sheet', help='Workbook sheet, default main_data.')
     evaluate = commands.add_parser(
@@ -118,7 +122,7 @@ def build_parser():
     evaluate.add_argument('--contigs', nargs='+')
     evaluate.add_argument('--stages', nargs='+', default=['available'],
                           help='available (latest products), all, or named stages, including founder_refinement, painting, pedigree, family_phase and recombination.')
-    evaluate.add_argument('--feedback-selection', choices=('balanced', 'strict'), default='balanced')
+    evaluate.add_argument('--feedback-selection', choices=('path', 'balanced', 'strict'), default='path')
     export = commands.add_parser('export', help='Export released founder tracks and sample phase.')
     export.add_argument('--output', required=True, help='Existing run directory.')
     export.add_argument('--destination', required=True, help='New/empty export directory.')
@@ -161,13 +165,22 @@ def _configure_inference(args, config, parser):
         ('assembly_search', ('bounded', 'broad'), 'bounded'),
         ('founder_refinement', ('on', 'off'), 'on'),
         ('discovery_search', ('standard', 'batched'), 'standard'),
-        ('feedback_selection', ('balanced', 'strict'), 'balanced'),
+        ('feedback_selection', ('path', 'balanced', 'strict'), 'path'),
     ):
         variable = 'HAPLOTYPES_' + key.upper()
         value = _setting(args, config, 'run', key, os.environ.get(variable, default))
         if value not in choices:
             parser.error(f'{key} must be {" or ".join(choices)}')
         os.environ[variable] = value
+
+    try:
+        exchange = boolean_setting(_setting(args, config, 'run', 'feedback_segment_exchange',
+            os.environ.get('HAPLOTYPES_FEEDBACK_SEGMENT_EXCHANGE', 'off')), 'feedback_segment_exchange')
+    except ValueError as error:
+        parser.error(str(error))
+    if exchange and os.environ['HAPLOTYPES_FEEDBACK_SELECTION'] != 'path':
+        parser.error('feedback_segment_exchange requires feedback_selection=path')
+    os.environ['HAPLOTYPES_FEEDBACK_SEGMENT_EXCHANGE'] = 'on' if exchange else 'off'
 
 
 def _configure_simulation(args, config, *, seed, output, checkpoints,
@@ -322,6 +335,11 @@ def main(argv=None):
             os.environ['HAPLOTYPES_STOP_AFTER_STAGE'] = stop
         runpy.run_module('haplotype_reconstruction.workflows.variants', run_name='__main__')
     elif args.command in ('astcal', 'tropheops'):
+        stop = _setting(args, config, 'run', 'stop_after_stage')
+        if stop is not None:
+            if stop != 'block_discovery':
+                parser.error('stop_after_stage must be block_discovery for cross workflows')
+            os.environ['HAPLOTYPES_STOP_AFTER_STAGE'] = stop
         metadata = _path(_setting(args, config, 'inputs', 'metadata'))
         if metadata:
             os.environ['HAPLOTYPES_METADATA'] = metadata

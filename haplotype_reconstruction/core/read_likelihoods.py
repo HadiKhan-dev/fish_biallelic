@@ -10,6 +10,16 @@ from numba import njit, prange
 from scipy.special import logsumexp
 
 from .read_model import emission
+from .read_homozygote_model import emission as homozygote_emission
+
+
+def _model_emission(model, parameters, depth, alt):
+    """Apply the fitted homozygote dispersion, using its binomial limit at zero."""
+    rho = float(model.get("homo_rho", 0.))
+    if rho > 0.:
+        return homozygote_emission(parameters, depth, alt,
+            homo_rho=rho, dispersed=model["dispersed"])
+    return emission(parameters, depth, alt, model["dispersed"])[0]
 
 
 @njit(cache=True, parallel=True)
@@ -46,9 +56,8 @@ def raw_likelihoods(counts, model, cap=64):
     d, a = np.tril_indices(cap + 1)
     table = np.empty((len(counts), cap + 1, cap + 1, 3), np.float64)
     for sample in range(len(counts)):
-        kernel, _ = emission(
-            model['parameters'][sample:sample + 1], d, a, model['dispersed'])
-        kernel = kernel[0]
+        kernel = _model_emission(
+            model, model['parameters'][sample:sample + 1], d, a)[0]
         table[sample, d, a] = np.exp(
             kernel - logsumexp(kernel, axis=1, keepdims=True))
         table[sample, 0, 0] = 1 / 3.
@@ -56,9 +65,9 @@ def raw_likelihoods(counts, model, cap=64):
     for sample in range(len(counts)):
         high = depth[sample] > cap
         if np.any(high):
-            kernel, _ = emission(
-                model['parameters'][sample:sample + 1],
-                depth[sample, high], counts[sample, high, 1], model['dispersed'])
+            kernel = _model_emission(
+                model, model['parameters'][sample:sample + 1],
+                depth[sample, high], counts[sample, high, 1])
             output[sample, high] = np.exp(
                 kernel[0] - logsumexp(kernel[0], axis=1, keepdims=True))
     return output

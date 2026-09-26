@@ -19,6 +19,16 @@ class ReadCalibrationConfig:
     maximum_iterations: int = 2000
     likelihood_tolerance_per_observation: float = 1e-10
 
+
+@dataclass(frozen=True)
+class PathSelectionConfig:
+    """Bounded local-panel search; shared by initial and feedback fits."""
+
+    max_updates: int = 20
+    rounds: int = 3
+    refits_per_kind: int = 8
+
+
 # Shared linker's block-local quality CTMC, separate from read-error rates.
 # Stationary unreliable-sequence fraction and mean error-tract length in bp.
 LINKER_ERROR_FRACTION = 0.01

@@ -14,7 +14,8 @@ cores = "auto"
 assembly_model = "dense"
 assembly_search = "bounded"
 founder_refinement = "on"
-feedback_selection = "balanced"
+feedback_selection = "path" # Normalized local path model, with an explicit unknown state.
+# feedback_segment_exchange = false # Optional final same-count segment proposals.
 
 [recombination]
 rate_cm_per_mb = 5.0

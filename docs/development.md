@@ -31,9 +31,12 @@ known-truth simulation validation.
 | Step | Start reading here | Main responsibility |
 | --- | --- | --- |
 | Input and observations | `core/variants.py`, `core/genotypes.py` | Marker blocks, allele depths and genotype likelihoods |
-| Observation calibration | `core/read_calibration.py`, `core/read_model.py` | Fit/compare nested read models; compiled fitting kernels and exact GL lookup live in `read_kernels.py` and `read_likelihoods.py` |
+| Observation calibration | `core/read_calibration.py`, `core/read_model.py`, `core/read_homozygote_model.py` | Fit nested read models, including pooled homozygote overdispersion; kernels and matching GL application live in `read_kernels.py` and `read_likelihoods.py` |
 | Local discovery | `discovery/blocks.py`, `discovery/search.py` | Missing-aware reversible search for 200-SNP panels |
-| Feedback selection | `workflows/block_feedback.py`, `discovery/candidate_selection.py` | Read-supported selection after each L1 and L1+L2 context round |
+| Local path selection | `discovery/path_model.py`, `path_scoring.py`, `path_fitting.py`, `path_selection.py` | Normalized diploid-path objective, prepared scoring, fixed-K fitting and bounded drop/merge/add search |
+| Feedback orchestration | `workflows/block_feedback.py`, `discovery/path_blocks.py` | Initial path selection, L1 and rebuilt L1+L2 feedback, block materialization and checkpointed parallel work |
+| Candidate banks / legacy alternatives | `discovery/candidate_selection.py`, `discovery/candidate_rescue.py` | Partial-row completion and BIC/source-endpoint starts; explicit balanced/strict cavity-rescue alternatives |
+| Optional local segment exchange | `discovery/path_exchange.py` | Fixed-K reciprocal suffix starts, exact all-pairs/cuts screening and protected top-eight plus warm-control refits; off by default |
 | Founder completion | `assembly/completion.py`, `assembly/joint_completion.py` | Evidence-supported local completion and frozen inference panels |
 | L1–L4 assembly | `assembly/pipeline.py`, `assembly/hierarchy.py` | Checkpointed hierarchy, component boundaries and scheduling |
 | Founder-path refinement | `assembly/founder_refinement.py` | Coordinate the refinement passes after each final hierarchy level |
@@ -47,6 +50,17 @@ known-truth simulation validation.
 | Run provenance and timing | `core/run_record.py` | Coordinator records and non-overlapping wall times |
 
 Paths in this table are relative to `haplotype_reconstruction/`.
+
+Local path selection and optional exchange consume the original calibrated GLs;
+assembly panels only propose starts. The path modules contain no workflow paths,
+simulation truth or private-pilot imports. `path_blocks.py` preserves kept-marker
+axes, ALT probabilities, fractional support and spatial MAP unknown counts.
+`PathSelectionConfig` in `core/config.py` owns the shared three-round,
+eight-refits-per-kind, twenty-update budgets. Ordinary search reuses prepared
+observations and exact panel-plus-frequency score/fit results within one block;
+the suffix screen reuses forward/backward messages without assuming equal
+founder frequencies. These are numerical optimizations, not reduced proposal
+sets.
 
 ## Assembly: keep the different problems separate
 

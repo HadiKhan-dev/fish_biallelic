@@ -126,14 +126,24 @@ are eligible, including quite distinct missing founder haplotypes.
     return proposals
 
 
+@dataclass(frozen=True)
+class _BicCandidate:
+    """Admitted BIC mode whose unused cavity diagnostics are deferred."""
+    mode: modes.FactorizationMode
+
+
 def select_candidate_panel(evidence, *, allele_depths=None, observed_mask=None,
-                           original_latent, proposal_panels, config=None):
+                           original_latent, proposal_panels, config=None,
+                           defer_cavity=False):
     """Refit competing local panels under the explicitly configured criterion.
 
 Both assignment-only endpoints (preserving a proposed H) and full allele
 refits compete, using the existing synchronized fitter. Final calls use the
 canonical missing-aware fixed-assignment release rule, not the latent seed.
 Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
+With ``defer_cavity``, BIC search evaluates cavity only for source endpoints and
+final top-eight diagnostics. Fitting, candidate admission, budgets and ranking
+are unchanged; the legacy default evaluates every admitted mode.
     """
     settings = CandidateSelectionConfig() if config is None else config
     base = settings.discovery
@@ -182,7 +192,7 @@ Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
         return (-selection_score(score), score.mode.total_nll, score.mode.k,
                 score.mode.canonical_key)
 
-    def fit_and_score(panels):
+    def fit_and_score(panels, *, require_cavity=False):
         nonlocal budget_bound
         novel = []
         for panel in panels:
@@ -220,9 +230,15 @@ Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
         if len(pending) > room:
             budget_bound = True
             pending = sorted(pending, key=search._mode_order)[:room]
-        for score in search._score_stage(
-                likelihood, pending, score_config, score_workspace, active) if pending else ():
-            scored[score.mode.canonical_key] = score
+        # In BIC bank search, neither ranking nor stopping reads a cavity
+        # score. Count these admitted modes exactly as before for all budgets.
+        if defer_cavity and settings.criterion == "bic" and not require_cavity:
+            for mode in pending:
+                scored[mode.canonical_key] = _BicCandidate(mode)
+        else:
+            for score in search._score_stage(
+                    likelihood, pending, score_config, score_workspace, active) if pending else ():
+                scored[score.mode.canonical_key] = score
         return tuple(scored[mode.canonical_key] for mode in unique
                      if mode.canonical_key in scored)
 
@@ -231,7 +247,7 @@ Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
     source_scores = []
     cavity_source_scores = []
     for panel in starts:
-        values = fit_and_score([panel])
+        values = fit_and_score([panel], require_cavity=True)
         if not values and len(panel):
             key = modes._canonical_haplotype_key(panel)
             values = (scored[key],) if key in scored else ()
@@ -257,6 +273,21 @@ Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
             budget_bound = True
             break
 
+    # Source endpoint scores were evaluated eagerly because they determine
+    # the rescue scaffold. Evaluate final top-eight bank diagnostics now.
+    # Per-mode cavity scores depend only on that mode and evidence, not the
+    # other modes in its scoring batch; represented-K normalization is unused.
+    ordered = sorted(scored.values(), key=rank)
+    deferred = [score.mode for score in ordered[:8]
+                if isinstance(score, _BicCandidate)]
+    for score in search._score_stage(
+            likelihood, deferred, score_config, score_workspace, active) if deferred else ():
+        scored[score.mode.canonical_key] = score
+    selected = scored[selected.mode.canonical_key]
+    ordered = [scored[score.mode.canonical_key] for score in ordered]
+    cavity_evaluated = [score for score in ordered
+                        if not isinstance(score, _BicCandidate)]
+
     def release(score):
         if score is None:
             return None
@@ -274,7 +305,6 @@ Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
     released = release(selected)
     controls = tuple(release(score) for score in source_scores)
     cavity_controls = tuple(release(score) for score in cavity_source_scores)
-    ordered = sorted(scored.values(), key=rank)
     return CandidateSelectionResult(
         selected.mode, released["discrete_haps"], released["q"], released["support"],
         controls, dict(
@@ -285,7 +315,11 @@ Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
             selected_k=selected.mode.k, selected_kind=sorted(mode_kinds[selected.mode.canonical_key]),
             n_active_samples=int(active.sum()), search_budget_bound=budget_bound,
             rounds=rounds, n_cavity_nonconverged=sum(
-                score.diagnostic.n_mean_field_not_converged for score in ordered),
+                score.diagnostic.n_mean_field_not_converged for score in cavity_evaluated),
+            n_cavity_evaluated=len(cavity_evaluated),
+            n_cavity_deferred=len(scored) - len(cavity_evaluated),
+            cavity_diagnostic_scope=("source_endpoints_and_final_top8_bic"
+                                     if defer_cavity and settings.criterion == "bic" else "all_admitted_modes"),
             selected_cavity_nonconverged=selected.diagnostic.n_mean_field_not_converged,
             top_scores=[dict(k=s.mode.k, score=float(selection_score(s)),
                              cavity_score=float(s.log_score), nll=s.mode.total_nll,

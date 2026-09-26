@@ -64,7 +64,7 @@ threads to surviving workers at supported kernel boundaries.
 | --- | --- | --- |
 | Observation calibration | Data-fitted read error, sample effects and dispersion | `core/read_calibration.py` |
 | Local discovery | Missing-aware 200-SNP founder panels | `discovery/` |
-| Two feedback rounds | Read-supported local selection after L1, then L1+L2 | `workflows/block_feedback.py` |
+| Local fitting and two feedback rounds | Normalized path selection initially, after L1 and after L1+L2 | `workflows/block_feedback.py` |
 | Final L1–L4 assembly | Refined, component-preserving founder chromosomes | `assembly/` |
 | Sample painting | Diploid sample mosaics with an explicit unknown state | `painting/` |
 | Pedigree inference | Genome-wide M0/M1/M2 calls, parent identities and ambiguity | `pedigree/` |
@@ -93,13 +93,15 @@ for recombination; `--no-shared-family-evidence` disables it.
   `--assembly-model structured` selects a restricted near-quadratic model;
   `--assembly-search broad` expands the panel search. These are different
   scientific/runtime trade-offs, not obsolete duplicate implementations.
-- Local feedback uses balanced selection after **each** round.
-  `--feedback-selection strict` protects more backbone calls but rescues less
-  missing variation.
+- Local panels use normalized path selection before and after **each** L1/L2
+  feedback round (`--feedback-selection path`). The optional
+  `--feedback-segment-exchange` adds final same-count segment proposals.
+  Balanced/strict cavity-rescue alternatives remain explicit choices.
 - Founder-path refinement runs after each executed final L1–L4 level,
   followed by bounded count-up/refit on the final components.
   `--founder-refinement off` disables it for controlled comparisons.
-- Read calibration learns supported observation parameters from allele depths;
+- Read calibration learns supported observation parameters from allele depths,
+  including a nested homozygote-overdispersion model selected on held-out data;
   `--no-read-calibration` retains the fixed-error model. See the
   [calibration model and accepted limitations](docs/read_calibration.md).
   Pedigree evidence separately learns a cross-chromosome predictive scale;

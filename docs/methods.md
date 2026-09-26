@@ -17,28 +17,82 @@ orientation labels, not paternal/maternal identities for pedigree roots.
 
 ## Local feedback and candidate selection
 
-Before final chromosome assembly, L1 context is projected/refitted back to the
-original 200-SNP blocks and selected locally; the selected panels then supply
-the L1+L2 context for a second refit/selection round. Original candidates remain
-available in both rounds. Context excludes the target block's emission when
-estimating carrier weights. Candidate panels are starts, not extra read evidence.
+The default `path` selector fits a normalized within-block diploid copying
+model, first to the raw discovery starts and then after each of two context
+rounds. The schedule is initial local selection → L1 context/selection →
+rebuilt L1+L2 context/selection → final chromosome assembly. Original latent
+candidates remain available throughout. Context excludes the target block's
+emission when estimating carrier weights. Its projected/refitted panels supply
+candidate starts, never additional observations. The existing context refiner
+can skip components above its ten-founder cap; a completed assembly round does
+not imply every block received a new proposal. Local path selection still runs.
 
-The default balanced selector combines a cavity-ranked feedback backbone with
-BIC-supported candidate additions not explainable by one donor join, followed
-by same-K cavity-ranked refinement. The strict option limits rescue to private
-alleles and protects each round's backbone during that rescue. Both use the
-original likelihoods and observation masks, and release unsupported alleles as
-unknown. These selection scores are not calibrated correctness probabilities;
-novelty filtering is a heuristic, not proof of a distinct biological founder.
-After each feedback selection, an entirely uncalled row triggers a bounded
-smaller-panel comparison. Single-row deletions (and deletion of all empty rows
-when nonempty rows remain) are refitted against the original observed likelihoods
-and accepted only if the existing BIC-like score does not worsen. Assignments,
-site support, probabilities and released calls are rebuilt together. Balanced
-selection permits the usual allele/assignment refit; strict selection additionally
-protects surviving backbone calls. Partially called rows do not trigger deletion,
-and an empty row whose deletion worsens the score remains explicit uncertainty. A final
-single unknown row is not converted into an invalid zero-founder panel.
+All these local fits consume the same sample- and marker-matched calibrated
+genotype likelihoods and observed-read mask as discovery. Missing cells have
+neutral emission one. Default calibration compares nested observation models, including a pooled
+homozygote beta-binomial dispersion around the binomial-homozygote model,
+alongside the existing heterozygote overdispersion, read-error and balance
+parameters. Physical folds 0/1 fit parameters, fold 2 selects the model, and
+fold 3 is diagnostic only; the more complex model is not forced to win. Calibration parameters are fitted from AD, not founder
+count targets or pedigree truth. Production calibration sampling/refitting is
+not asserted identical to private frozen-fit pilot datasets.
+
+For a binary panel H with K rows and L kept markers, each homologue has K founder
+states plus a fixed-mass unknown state. Transitions are normalized:
+`T = (1-r) I + r 1 πᵀ`, where `r = 1-exp(-g ΔM)`. Genetic-map increments are
+used when supplied; otherwise physical distance times the configured rate
+defines ΔM. Founder frequencies are fitted; the unknown prior mass remains
+fixed (default 0.01). Its alleles are independently Bernoulli(1/2) for the two
+copies. Forward inference sums diploid paths, including their normalization,
+rather than choosing a single fixed founder pair per sample. The objective is
+
+`log P(GL | H,f) - log choose(2^L,K) - log K - log(K+1) + mean_k log(K f_k)`.
+
+The last term shrinks fitted frequencies toward uniform, with total MAP
+pseudocount one. This is a regularized best-panel objective, not marginal
+evidence for K or an assumed ancestral founder count. Within-block mosaics need
+not correspond one-to-one with the ancestral haplotypes.
+
+Each local search uses three outer rounds, screens drop/merge/add starts, and
+refits the top eight per move kind for at most twenty fixed-K updates. Ordinary
+search and frequency/allele refits use the same objective. Previous-round
+incumbents are protected against a worse final objective. The existing BIC
+candidate-bank search and cavity-ranked source endpoints supply starts and
+extra candidate rows; their scores do not replace the path objective. Partial
+candidate rows use the existing nearest-latent completion while preserving
+known calls. Completed latent alleles are not automatically released as calls.
+
+Release combines a conditional one-bit probability (other panel alleles and
+fitted parameters held fixed) with fractional posterior-carrier directional
+support. This is not a full allele posterior or calibrated correctness
+probability. Unsupported alleles remain unknown. Stored ALT probability,
+probability of the current panel allele, and directional support are distinct
+quantities. The posterior expected unknown-copy fraction is also separate from
+the maximum observed-marker MAP unknown-copy count used by legacy completion;
+neither invents a constant sample founder pair.
+
+Optional segment exchange is off by default. After both feedback rounds, one
+fixed-K pass swaps reciprocal suffixes at sixteen evenly spaced kept-marker
+cuts for every row pair. Prefix frequencies stay attached to their rows;
+canonicalization moves rows and frequencies together. Duplicate-producing and
+no-op states are excluded. All remaining candidates receive the same normalized
+score; the top eight and an ordinary warm-start control receive twenty-update
+refits, protected by the original incumbent. A 1e-6 objective tie prefers the
+warm control, then screening order. Exact batched screening reuses prefix
+messages and pair-specific backward messages with the correctly permuted
+unequal-frequency prior; the unknown state is not permuted. Neither lower
+founder count nor fewer switches determines acceptance.
+
+The explicit `balanced` and `strict` alternatives retain the earlier
+cavity/BIC rescue workflow rather than being reinterpreted as path modes.
+Balanced combines a cavity-ranked backbone with BIC-supported additions not
+explainable by one donor join, followed by same-K cavity-ranked refinement.
+Strict limits rescue to private alleles and protects surviving backbone calls.
+Their bounded empty-row reduction compares smaller panels under the existing
+BIC-like score and rebuilds assignments/support/calls together; partially called
+rows do not trigger that reduction. Novelty filtering is a heuristic, not proof
+of a distinct biological founder, and a final unknown row is not converted into
+a zero-founder panel.
 
 See [configuration and checkpointing](running.md#local-feedback-selection) and
 [local validation](validation.md#local-feedback-selection).

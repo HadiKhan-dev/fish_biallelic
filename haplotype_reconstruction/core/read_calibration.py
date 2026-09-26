@@ -16,12 +16,12 @@ import numpy as np
 from .config import DEFAULT_READ_ERROR_PROBABILITY, ReadCalibrationConfig
 from .environment import boolean_setting
 from .genotypes import allele_depths_to_raw_genotype_likelihoods
-from . import read_model
+from . import read_model, read_homozygote_model
 from .read_likelihoods import raw_likelihoods
 from .read_kernels import binomial_expectation
 from .run_record import timed_stage
 
-MODEL_VERSION = "heldout-joint-read-model-v3"
+MODEL_VERSION = "heldout-homozygote-read-model-v4"
 
 
 def enabled(value=None):
@@ -35,6 +35,8 @@ def identity():
                 config=asdict(ReadCalibrationConfig()),
                 fallback_error=DEFAULT_READ_ERROR_PROBABILITY,
                 selection="maximum_fold2_prediction_among_converged_nested_models",
+                homozygote_model="shared_symmetric_beta_binomial_rho_nested_v1",
+                homozygote_starts=[0., .02, .1],
                 priors_applied_to_output=False)
 
 
@@ -127,9 +129,21 @@ def select_model(hist, depth, alt, *, threads, config):
         models.update(sample_binomial=sample, sample_joint=joint)
     except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
         report["complex_fit_failure"] = str(error)
-    scores = {name: dict(selection=read_model.score(hist[2], depth, alt, model),
-                         test=read_model.score(hist[3], depth, alt, model))
-              for name, model in models.items()}
+    joint = models.get("sample_joint")
+    if joint is not None and joint["success"]:
+        try:
+            null, extended, optimization = read_homozygote_model.fit_nested(
+                training, depth, alt, joint, threads=threads)
+            models.update(sample_joint_refit=null, homo_beta_binomial=extended)
+            report["homozygote_optimization"] = optimization
+        except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
+            report["homozygote_fit_failure"] = str(error)
+    scores = {}
+    with numba_thread_scope(threads):
+        for name, model in models.items():
+            scorer = (read_homozygote_model.score if "homo_rho" in model else read_model.score)
+            scores[name] = dict(selection=scorer(hist[2], depth, alt, model),
+                                test=scorer(hist[3], depth, alt, model))
     eligible = [name for name, model in models.items()
                 if model["success"] and np.isfinite(scores[name]["selection"])]
     if not eligible:

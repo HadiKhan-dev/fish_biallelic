@@ -53,11 +53,17 @@ def assembly_founder_refinement():
 
 
 def block_feedback_selection():
-    """Balanced local feedback rescue is the default; strict protects calls."""
-    value = os.environ.get("HAPLOTYPES_FEEDBACK_SELECTION", "balanced")
-    if value not in ("balanced", "strict"):
-        raise ValueError("HAPLOTYPES_FEEDBACK_SELECTION must be balanced or strict")
+    """Normalized path selection is the default for local founder panels."""
+    value = os.environ.get("HAPLOTYPES_FEEDBACK_SELECTION", "path")
+    if value not in ("path", "balanced", "strict"):
+        raise ValueError("HAPLOTYPES_FEEDBACK_SELECTION must be path, balanced or strict")
     return value
+
+
+def block_feedback_segment_exchange():
+    """Optional same-count segment proposals after both feedback rounds."""
+    return boolean_setting(os.environ.get("HAPLOTYPES_FEEDBACK_SEGMENT_EXCHANGE", "off"),
+                           "feedback_segment_exchange")
 
 
 def batched_discovery_enabled():

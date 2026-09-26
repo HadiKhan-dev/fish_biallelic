@@ -225,6 +225,10 @@ def run():
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
         mark_stage_complete(DISCOVERY_STAGE)
 
+    if os.environ.get("HAPLOTYPES_STOP_AFTER_STAGE") == DISCOVERY_STAGE:
+        print("[STOP] Block discovery checkpointed; feedback and assembly not started.")
+        return
+
     # =========================================================================
     # ASSEMBLY: COMPONENT ASSEMBLY AND PAINTING
     # =========================================================================

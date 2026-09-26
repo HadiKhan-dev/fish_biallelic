@@ -458,9 +458,15 @@ fixtures and comparison records are in
 
 ## Current acceptance coverage
 
+The normalized path-selection default has bounded integration coverage, not a
+new full-genome end-to-end validation. The table distinguishes that evidence
+from complete runs using balanced selection; see the
+[path-selection checks](#normalized-path-selection-default) for inputs and limits.
+
 | Portion | Completed evidence |
 | --- | --- |
-| Current fresh end-to-end pipeline | Seed3000, N320/5×, all 22 chromosomes from simulation through recombination and truth evaluation; progressive refinement enabled |
+| Normalized path-selection default | Two fixed-calibration 100-block simulation controls and one 100-block real-data check with per-contig calibration; initial/L1/L2 selection, optional exchange and resume checks |
+| Balanced-selection end-to-end control | Seed3000, N320/5×, all 22 chromosomes from simulation through recombination and truth evaluation; progressive refinement enabled, before the path-selection and expanded read-calibration defaults |
 | Block discovery | All 1,647 seed400 chr1 blocks; repeated batches and 76 approximately 2× seed401 missing-data controls |
 | Per-round balanced feedback | 9,287 local blocks in six seed/chromosome cases; full chr12 production parity plus bounded L1–L4/painting and resume checks |
 | Pre-L1 founder completion | 5,484 chr16 blocks across seeds400–402; independent 2×/3×/5× crossfits |
@@ -477,8 +483,9 @@ fixtures and comparison records are in
 | Latest family phase dirty tiles | Two complete seed401 chromosomes; exact final phase/stability fields |
 | Latest recombination indexed trials | All 22 seed401 final-phase maps; variable/zero maps, missingness, overlapping flips and reset controls; later complete seed403 run before multiscale refinement |
 
-A fresh seed3000 run has exercised the current progressive implementation
-from simulation through recombination maps and known-truth evaluation.
+A fresh seed3000 run exercised progressive assembly with balanced local
+selection, from simulation through recombination maps and known-truth
+evaluation. It does not validate the subsequent path-selection and expanded read-calibration defaults.
 The earlier fresh seed403 run exercised simulation through recombination maps
 with the balanced local feedback and final founder refinement. A subsequent
 22-chromosome optimization comparison held its block discovery inputs fixed and reran
@@ -1152,7 +1159,62 @@ enumerated configurations or approximate posterior mass.
 
 ## Local feedback selection
 
-The accepted default selects after **each** context round. The comparison held
+### Normalized path-selection default
+
+The September 2026 path-model integration adds initial local fitting before
+L1 context assembly, then selects again after each L1 and L1+L2 feedback round.
+On fixed calibrated inputs, production reproduced all selected latent panels,
+hard calls, missing masks and spatial unknown-state summaries for two
+100-block controls at the initial, L1, L2 and optional final segment stages.
+
+| Control | Raw called errors | Initial-fit errors | Final feedback errors / calls | Reverse errors/missing: raw → initial → final |
+| --- | ---: | ---: | ---: | ---: |
+| Seed8000 chr1 | 57 | 0 | 0 / 111,600 | 1 → 2 → 2 |
+| Seed7019 chr7, read-stressed | 19 | 18 | 18 / 103,399 | 143 → 105 → 101 |
+
+These are local founder-panel metrics, not painted-sample or chromosome-long
+errors. Truth denominators are 112,000 and 111,200 allele cells respectively.
+Initial fitting supplies most of the measured gain. Feedback adds two exact
+local rows in the stressed case; optional segment exchange changes neither
+control's final truth metrics. Weak rare variation can still be lost. Truth
+is used only after inference for reporting.
+
+The optimized full TroMau chr1 prototype (1,383 blocks) preserves all selected
+panels and calls versus its slower reference: 111.61 → 56.32 minutes for initial
+fitting plus both context/selection rounds on 76 cores. Optional segment exchange
+gives 116.10 → 57.68 minutes. These exclude calibration estimation, raw discovery,
+final L1–L4 and downstream stages. Mean rows per block are
+8.747 raw → 7.183 initial → 7.181 L1 → 7.222 L2. Real founder accuracy is unknown;
+calibrated Astcal chr10 still shows count growth, 10.65 → 11.17 → 12.01.
+
+The production integration checks took 76.23 and 55.99 seconds on separate
+76-core nodes, including optional exchange. Checkpoint-only resumes took
+0.18 and 0.13 seconds under guards prohibiting numerical work or checkpoint
+writes. Exchange on/off reuses unchanged core panels; changed scientific
+parameters reject stale checkpoints. Focused checks cover nonflat genetic maps,
+kept-marker gaps, all-missing samples, fractional support, source preservation,
+CLI defaults across all four workflows and path-only evaluation-stage isolation.
+Minor floating-point fitting-history/trace differences reconverge to identical
+selected outputs; this is not bitwise execution identity.
+
+A further default production run used the first 100 TroMau chr1 blocks with
+calibration re-estimated from the full observed chromosome. Mean local row
+counts were 9.17 raw → 7.37 initial → 7.03 L1 → 7.10 L2; all eleven initially
+entirely uncalled rows were absent from the selected panels. The final panel
+had 139,319 called and 2,562 unknown entries. Runtime was 363.61 seconds on
+76 cores, with a 0.16-second compute-free resume. Segment exchange was off.
+This preserves historical discovery starts and changes fitted likelihoods:
+it is neither fresh discovery nor an independent real-data accuracy test.
+
+These are bounded integration checks, not a new 22-chromosome end-to-end run.
+Frozen prototype likelihoods do not prove identical results after per-contig
+re-estimation of calibration or fresh discovery; see
+[read calibration](read_calibration.md) for that distinction.
+
+### Earlier balanced-selection ordering comparison
+
+The earlier balanced selector compared selection after **each** context round
+against selection only at the end. The comparison held
 the original discovery inputs and local scoring rules fixed, with truth used
 only for evaluation. It covered seed402 chr10/12/16/19 and seed401 chr10/13:
 9,287 blocks in total.

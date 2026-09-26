@@ -6,7 +6,8 @@ assembly_model = "dense" # "structured" is near quadratic with bounded search.
 assembly_search = "bounded" # "broad" retains the optimized broader full-refit search.
 founder_refinement = "on" # Final chromosome paths; "off" is a controlled comparison.
 discovery_search = "standard" # Independent; "batched" remains experimental.
-feedback_selection = "balanced" # "strict" protects clean feedback calls; less variation rescue.
+feedback_selection = "path" # Normalized local path model, with an explicit unknown state.
+# feedback_segment_exchange = false # Optional final same-count segment proposals.
 output = "work/runs/tropheops"
 
 [inputs]
