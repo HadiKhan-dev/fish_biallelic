@@ -293,33 +293,23 @@ def infer_from_parent_state_evidence(
         (n_samples, n_samples), dtype=np.int64
     )
 
-    def accumulate(
-        selection: pedigree_states._ParentStateSelection,
-        configuration_counts: np.ndarray,
-        state_counts: Optional[np.ndarray],
-        parent_counts: np.ndarray,
-        graph: bool,
-    ) -> None:
-        selected_rows = selection.graph_rows if graph else selection.local_rows
-        selected_states = (
-            {
-                child: int(states[row])
-                for child, row in selection.graph_rows.items()
-            }
-            if graph
-            else selection.local_states
-        )
-        if state_counts is not None:
-            for child, state in selected_states.items():
-                state_counts[child, state] += 1
-        for child, row in selected_rows.items():
-            configuration_counts[row] += 1
-            for parent in alternatives[row, 1:]:
-                parent = int(parent)
-                if parent >= 0:
-                    parent_counts[child, parent] += 1
+    loco_local_configuration_counts = np.zeros(
+        n_alternatives, dtype=np.int64
+    )
+    loco_graph_configuration_counts = np.zeros(
+        n_alternatives, dtype=np.int64
+    )
+    loco_local_state_counts = np.zeros(
+        (n_samples, 3), dtype=np.int64
+    )
+    loco_local_parent_counts = np.zeros(
+        (n_samples, n_samples), dtype=np.int64
+    )
+    loco_graph_parent_counts = np.zeros(
+        (n_samples, n_samples), dtype=np.int64
+    )
 
-    bootstrap_worker_count, bootstrap_depth_refits = (
+    bootstrap_worker_count, bootstrap_depth_refits, n_loco = (
         pedigree_bootstrap._run_parent_state_bootstraps(
             contig_log_likelihoods,
             alternatives,
@@ -335,6 +325,11 @@ def infer_from_parent_state_evidence(
             local_state_counts,
             local_parent_counts,
             graph_parent_counts,
+            loco_counts=(
+                loco_local_configuration_counts, loco_graph_configuration_counts,
+                loco_local_state_counts, loco_local_parent_counts,
+                loco_graph_parent_counts,
+            ),
             contig_information_weights=contig_information_weights,
             structure_pair_indices=structure_pair_indices,
             edge_matched_by_contig=edge_matched_by_contig,
@@ -350,49 +345,6 @@ def infer_from_parent_state_evidence(
             depth_component_count=full_depth_model.posterior.shape[1],
         )
     )
-
-    loco_local_configuration_counts = np.zeros(
-        n_alternatives, dtype=np.int64
-    )
-    loco_graph_configuration_counts = np.zeros(
-        n_alternatives, dtype=np.int64
-    )
-    loco_local_state_counts = np.zeros(
-        (n_samples, 3), dtype=np.int64
-    )
-    loco_graph_state_counts = None
-    loco_local_parent_counts = np.zeros(
-        (n_samples, n_samples), dtype=np.int64
-    )
-    loco_graph_parent_counts = np.zeros(
-        (n_samples, n_samples), dtype=np.int64
-    )
-    n_loco = 0
-    if len(contig_names) > 1:
-        for omitted in range(len(contig_names)):
-            loco_weights = full_weights.copy()
-            loco_weights[omitted] = 0.0
-            loco_depth_model = pedigree_orientation.fit_direction(
-                junction_matrix, callable_matrix, structure_total_bins_by_contig,
-                loco_weights, settings,
-                component_count=full_depth_model.posterior.shape[1],
-            )
-            selection = evaluate(loco_weights, depth_model=loco_depth_model)
-            n_loco += 1
-            accumulate(
-                selection,
-                loco_local_configuration_counts,
-                loco_local_state_counts,
-                loco_local_parent_counts,
-                False,
-            )
-            accumulate(
-                selection,
-                loco_graph_configuration_counts,
-                loco_graph_state_counts,
-                loco_graph_parent_counts,
-                True,
-            )
 
     sensitivity_runs = []
     sensitivity_summary_rows = []

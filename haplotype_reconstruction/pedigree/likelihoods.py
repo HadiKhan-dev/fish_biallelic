@@ -9,6 +9,7 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import haplotype_reconstruction.pedigree.models as pedigree_models
+from ..core.chromosome_parallel import current_threads
 
 def _sum_optional(values: list[np.ndarray | None]) -> np.ndarray | None:
     if not values or any(value is None for value in values):
@@ -38,6 +39,7 @@ def _hard_structure_only(
 ]:
     """Reproduce hard-path ancestry structure without likelihood scoring."""
 
+    current_threads()
     cache = component.cache
     founders = np.asarray(cache.founder_alleles, dtype=np.int8).copy()
     marker_counts = np.asarray(
@@ -77,6 +79,7 @@ def _compact_component_gl(component: pedigree_components.PreparedComponentPedigr
         return retained
     # Compatibility for compact prepared runs created before the retained
     # ragged GL field was added.
+    current_threads()
     cache = component.cache
     return np.ascontiguousarray(np.concatenate([
         cache.genotype_likelihoods[:, block,:int(count),:]
@@ -99,10 +102,12 @@ def _score_balanced_transmission(
     to both views preserves them, including reductions for unavailable parents.
     """
     shared_inputs = {}
+    current_threads()
     tempered = pedigree_transmission.score_projected_ragged_quadratic(
         projected, transition, gl, observed, exponent, trios,
         _shared_inputs=shared_inputs, **kwargs,
     )
+    current_threads()
     full = pedigree_transmission.score_projected_ragged_quadratic(
         projected, transition, gl, observed, np.ones_like(exponent), trios,
         _shared_inputs=shared_inputs, **kwargs,
@@ -249,6 +254,7 @@ def _score_projected_component_with_diagnostics(
         )
         two[~valid_trio] = -math.inf
 
+    current_threads()
     hard_structure_started = time.perf_counter()
     hard_structure = _hard_structure_only(
         component, trio_array, eligible_parent_mask
@@ -264,6 +270,7 @@ def _score_projected_component_with_diagnostics(
         eligible_parent_mask | eligible_parent_mask.T
     )
     np.fill_diagonal(required_edges, True)
+    current_threads()
     posterior_structure_started = time.perf_counter()
     expected_structure = pedigree_sources.posterior_expected_structure(
         structure_marginals,
@@ -907,6 +914,7 @@ def score_prepared_parent_state_evidence(
         prepared: pedigree_components.PreparedPedigree,
         *,
         parent_eligibility: Any=None,
+        n_workers: int | None=None,
         config: module_pedigree_config.PedigreeConfig | None=None,
         top_k: int=20,
         adaptive_initial_top_k: int | None=None,
@@ -929,7 +937,6 @@ def score_prepared_parent_state_evidence(
     selection, and bootstrap settings do not enter the score identity.
     """
 
-    scoring_started = time.perf_counter()
     settings = (config or module_pedigree_config.PedigreeConfig()).validated()
     source_mode = pedigree_components._resolve_source_mode(settings, candidate_source_mode)
 
@@ -989,130 +996,15 @@ def score_prepared_parent_state_evidence(
             + (f": {omitted}" if omitted else "")
         )
 
-    eligibility = pedigree_eligibility._resolve_parent_eligibility(
-        parent_eligibility, prepared.sample_ids
-    )
-    pair_scores = []
-    marker_counts = []
-    ragged_screen_scores_by_chromosome = []
-    for chromosome in prepared.chromosomes:
-        component_screens = [
-            _projected_m1_screen(
-                component,
-                exponent,
-                settings,
-                eligibility.eligible_children,
-                eligibility.eligible_parents,
-            )
-            for component, exponent in zip(
-                chromosome.components, chromosome.information_exponents
-            )
-        ]
-        component_pair_scores = [
-            value.one_observed for value in component_screens
-        ]
-        ragged_screen_scores_by_chromosome.append(tuple(component_screens))
-        pair_scores.append(np.sum(np.stack(component_pair_scores), axis=0))
-        marker_counts.append(sum(
-            component.cache.informative_markers
-            for component in chromosome.components
-        ))
-    pair_score_array = np.stack(pair_scores)
-    marker_count_array = np.asarray(marker_counts, dtype=np.float64)
-    parent_screen_scores = pedigree_candidates._robust_parent_screen(
-        pair_score_array,
-        marker_count_array,
-        settings,
-        eligibility,
-    )
-    trios, panel_diagnostics = _adaptive_trio_panel(
-        pair_score_array,
-        marker_count_array,
-        parent_screen_scores,
-        top_k,
-        anchor_k,
-        bool(use_anchor_union),
-        eligibility,
-        settings,
-        adaptive_initial_top_k,
-    )
-    score_identity = pedigree_components._parent_state_score_identity(
-        prepared,
-        settings,
-        eligibility,
-        trios,
-        top_k=top_k,
-        adaptive_initial_top_k=adaptive_initial_top_k,
-        anchor_k=anchor_k,
-        use_anchor_union=bool(use_anchor_union),
-        mismatch_penalty=float(mismatch_penalty),
-        external_identity=evidence_identity,
-    )
-    score_identity["likelihood_recipe"] = "balanced-tempered-and-full-forward-v1"
-    run_digest = pedigree_components._identity_digest(score_identity)
-
-    scored_chromosomes = []
-    runtime_results = []
-    for chromosome, screen_scores in zip(
-            prepared.chromosomes, ragged_screen_scores_by_chromosome):
-        produced_result = None
-
-        def produce(
-                chromosome=chromosome,
-                screen_scores=screen_scores,
-        ) -> pedigree_components.ScoredChromosomeEvidence:
-            nonlocal produced_result
-            produced_result = _score_prepared_chromosome(
-                chromosome,
-                trios,
-                settings,
-                eligibility.eligible_children,
-                eligibility.eligible_parents,
-                ragged_screen_scores=screen_scores,
-            )
-            return _compact_chromosome_evidence(produced_result)
-
-        chromosome_identity = {
-            "run_score_identity_sha256": run_digest,
-            "contig": chromosome.contig,
-            "source_identity": getattr(chromosome, "source_identity", None),
-        }
-        request = pedigree_components.ChromosomeEvidenceRequest(
-            chromosome.contig,
-            score_identity,
-            pedigree_components._identity_digest(chromosome_identity),
-            len(trios),
-        )
-        if chromosome_evidence_callback is None:
-            scored_chromosome = produce()
-        else:
-            scored_chromosome = chromosome_evidence_callback(request, produce)
-        scored_chromosome = _validate_scored_chromosome(
-            scored_chromosome,
-            contig=chromosome.contig,
-            n_samples=len(prepared.sample_ids),
-            n_trios=len(trios),
-        )
-        scored_chromosomes.append(scored_chromosome)
-        runtime_results.append(produced_result)
-
-    return pedigree_components.ScoredParentStateEvidence(
-        sample_ids=prepared.sample_ids,
-        contig_names=names,
-        chromosomes=tuple(scored_chromosomes),
-        trios=trios,
-        parent_screen_scores=parent_screen_scores,
-        omitted_chromosomes=prepared.omitted_chromosomes,
-        parent_panel_diagnostics=panel_diagnostics,
-        source_mode=source_mode,
-        score_identity=score_identity,
-        input_preparation_seconds=float(prepared.input_preparation_seconds),
-        screening_and_scoring_seconds=time.perf_counter() - scoring_started,
-        runtime_chromosome_results=(
-            tuple(runtime_results)
-            if all(value is not None for value in runtime_results) else None
-        ),
-    )
+    from .execution import score_sources
+    scored, _ = score_sources(
+        prepared, prepared.chromosomes, settings=settings,
+        parent_eligibility=parent_eligibility, top_k=top_k,
+        adaptive_initial_top_k=adaptive_initial_top_k, anchor_k=anchor_k,
+        use_anchor_union=use_anchor_union, mismatch_penalty=mismatch_penalty,
+        evidence_identity=evidence_identity, callback=chromosome_evidence_callback,
+        n_workers=n_workers)
+    return scored
 
 
 def infer_scored_parent_state_evidence(
@@ -1265,6 +1157,7 @@ def infer_prepared_component_pedigree(
     scored = score_prepared_parent_state_evidence(
         prepared,
         parent_eligibility=parent_eligibility,
+        n_workers=n_workers,
         config=settings,
         top_k=top_k,
         adaptive_initial_top_k=adaptive_initial_top_k,

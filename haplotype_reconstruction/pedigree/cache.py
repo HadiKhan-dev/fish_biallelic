@@ -6,7 +6,7 @@ are cache identities for trusted pipeline files, not integrity guarantees.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -15,7 +15,8 @@ import os
 
 from haplotype_reconstruction import PACKAGE_ROOT
 from ..core import checkpoints
-from . import components, eligibility, likelihoods
+from ..core import chromosome_parallel as scheduling
+from . import components, eligibility, execution
 
 
 def digest(record):
@@ -60,34 +61,42 @@ def scoring_identity(preparation_identity, settings, parent_eligibility, sample_
                 code=components.pedigree_evidence_scoring_code_identity(),
                 adapter_files={name: hashlib.sha256((PACKAGE_ROOT / name).read_bytes()).hexdigest()
                                for name in ("pedigree/components.py", "pedigree/likelihoods.py",
+                                            "pedigree/execution.py", "core/chromosome_parallel.py",
                                             "pedigree/candidates.py", "pedigree/evidence.py")})
 
 
-def load_or_score(store, identity, prepare, settings, parent_eligibility, panel):
+@dataclass(frozen=True)
+class ChromosomeScoreCache:
+    """Picklable per-chromosome cache; workers never publish global completion."""
+
+    root: str
+    stage: str
+
+    def __call__(self, request, producer):
+        from ..core.runtime import CheckpointStore
+        store = CheckpointStore(self.root, nthreads=scheduling.current_threads())
+        stage = f"{self.stage}/chromosomes/{request.chromosome_score_identity_sha256}"
+        if store.contig_done(stage, request.contig):
+            return store.load_contig(stage, request.contig)
+        value = producer()
+        store.nthreads = scheduling.current_threads()
+        store.save_contig(stage, request.contig, value)
+        return value
+
+
+def load_or_score(store, identity, prepare, settings, parent_eligibility, panel, *, n_workers=None):
     """On replay, neither large sample paintings nor preparation tensors are read."""
     stage = versioned("pedigree_scores", identity)
     store.bind_stage_identity(stage, identity)
     if store.global_done(stage):
         payload = store.load_global(stage)
         return payload["scored"], payload["source_identities"], True
-    prepared, sources = prepare()
-
-    def chromosome_cache(request, producer):
-        chrom_stage = f"{stage}/chromosomes/{request.chromosome_score_identity_sha256}"
-        if store.contig_done(chrom_stage, request.contig):
-            return store.load_contig(chrom_stage, request.contig)
-        value = producer()
-        store.save_contig(chrom_stage, request.contig, value)
-        return value
-
-    scored = likelihoods.score_prepared_parent_state_evidence(
-        prepared, parent_eligibility=parent_eligibility, config=settings,
+    source = prepare()
+    scored, sources = execution.score_sources(
+        source.layout, source.chromosomes, parent_eligibility=parent_eligibility, settings=settings,
         top_k=panel.top_k, anchor_k=panel.anchor_k, use_anchor_union=panel.use_anchor_union,
         mismatch_penalty=panel.mismatch_penalty,
-        candidate_source_mode=settings.parent_state_candidate_source_mode,
-        chromosome_evidence_callback=chromosome_cache)
-    # Runtime scorer tensors are not consumed by decision replay.
-    scored = replace(scored, runtime_chromosome_results=None)
+        callback=ChromosomeScoreCache(store.root, stage), n_workers=n_workers, retain_runtime=False)
     store.save_global(stage, dict(scored=scored, source_identities=sources))
     store.mark_stage_complete(stage)
     return scored, sources, False

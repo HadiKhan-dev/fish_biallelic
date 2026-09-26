@@ -22,7 +22,8 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 
-from ..core import parallel, runtime
+from ..core import runtime
+from ..core import chromosome_parallel as scheduling
 from . import cache, eligibility, exclusion_patterns, release
 
 
@@ -30,9 +31,7 @@ MODEL = "full-marker-mendelian-directed-v1"
 STAGE = "pedigree_exclusion"
 BET_SIZES = np.asarray([1/1024, 1/256, 1/64, 1/16, 1/4, 1.0])
 WINDOW_WIDTHS = (1_000_000, 5_000_000, 20_000_000)
-# Operational limits, not scientific parameters: bound concurrent GL copies
-# and permit thread-budget reassessment between independent candidate batches.
-_MAX_CHROMOSOME_WORKERS = 4
+# Reassess the shared thread budget between independent candidate batches.
 _CANDIDATE_BATCH_SIZE = 256
 
 
@@ -79,58 +78,41 @@ def score_dyads(gl, observed, rows, spans, delta):
     return output
 
 
-def _initialize_workers(cpus, remaining, extras):
-    # Each worker owns a whole chromosome partition. The active count only
-    # decreases, so freed CPUs cannot be reclaimed by newly queued workers.
-    parallel.set_dynamic_thread_state(cpus, remaining, extras)
-
-
-def _score_partition(task):
+def _score_chromosome(contig, state, phase, common):
     from .pipeline import _load_raw_evidence
 
-    root, stage, contigs, samples, rows, source, delta, cpus, pooled = task
-    store = runtime.CheckpointStore(root)
-    summaries = []
-    try:
-        for contig in contigs:
-            started = time.perf_counter()
-            threads = parallel.apply_dynamic_threads() if pooled else cpus
-            store.nthreads = threads
-            gl, positions, observed, gl_payload, sites_payload = _load_raw_evidence(
-                store, contig, **source)
-            if gl.shape != (samples, len(positions), 3) or observed.shape != gl.shape[:2]:
-                raise ValueError(f"{contig}: full-marker evidence axes differ from the pedigree")
-            spans = physical_windows(positions)
-            # Exact catalogs are shared across candidate batches. Samples with
-            # unusually diverse GLs retain the direct scorer, without rounding.
-            with parallel.numba_thread_scope(threads):
-                codes, catalog, counts = exclusion_patterns.encode_patterns(gl, observed)
-            values = np.empty((len(rows), 2))
-            for start in range(0, len(rows), _CANDIDATE_BATCH_SIZE):
-                if pooled:
-                    threads = parallel.apply_dynamic_threads()
-                stop = min(len(rows), start+_CANDIDATE_BATCH_SIZE)
-                batch = rows[start:stop]
-                encoded = (counts[batch[:, 0]] >= 0) & (counts[batch[:, 1]] >= 0)
-                batch_values = values[start:stop]
-                with parallel.numba_thread_scope(threads):
-                    if encoded.any():
-                        batch_values[encoded] = exclusion_patterns.score_patterns(
-                            codes, catalog, counts, batch[encoded], spans, delta, BET_SIZES)
-                    if not encoded.all():
-                        batch_values[~encoded] = score_dyads(
-                            gl, observed, batch[~encoded], spans, delta)
-            summary = dict(contig=contig, markers=len(positions), candidates=len(rows),
-                           seconds=time.perf_counter()-started, final_threads=threads,
-                           pattern_fallback_samples=int(np.count_nonzero(counts < 0)))
-            del gl, positions, observed, gl_payload, sites_payload, codes, catalog, counts
-            store.save_contig(stage, contig, dict(values=values, summary=summary))
-            summaries.append(summary)
-    finally:
-        if pooled:
-            parallel.release_dynamic_extra()
-            parallel.decrement_active()
-    return summaries
+    started = time.perf_counter()
+    store = runtime.CheckpointStore(common['root'], nthreads=scheduling.current_threads())
+    rows, delta = common['rows'], common['delta']
+    gl, positions, observed, gl_payload, sites_payload = _load_raw_evidence(
+        store, contig, **common['source'])
+    if gl.shape != (common['samples'], len(positions), 3) or observed.shape != gl.shape[:2]:
+        raise ValueError(f"{contig}: full-marker evidence axes differ from the pedigree")
+    spans = physical_windows(positions)
+    # Exact catalogs are shared across candidate batches. Samples with
+    # unusually diverse GLs retain the direct scorer, without rounding.
+    scheduling.current_threads()
+    codes, catalog, counts = exclusion_patterns.encode_patterns(gl, observed)
+    values = np.empty((len(rows), 2))
+    for start in range(0, len(rows), _CANDIDATE_BATCH_SIZE):
+        scheduling.current_threads()
+        stop = min(len(rows), start+_CANDIDATE_BATCH_SIZE)
+        batch = rows[start:stop]
+        encoded = (counts[batch[:, 0]] >= 0) & (counts[batch[:, 1]] >= 0)
+        batch_values = values[start:stop]
+        if encoded.any():
+            batch_values[encoded] = exclusion_patterns.score_patterns(
+                codes, catalog, counts, batch[encoded], spans, delta, BET_SIZES)
+        if not encoded.all():
+            scheduling.current_threads()
+            batch_values[~encoded] = score_dyads(gl, observed, batch[~encoded], spans, delta)
+    summary = dict(contig=contig, markers=len(positions), candidates=len(rows),
+                   seconds=time.perf_counter()-started, final_threads=scheduling.current_threads(),
+                   pattern_fallback_samples=int(np.count_nonzero(counts < 0)))
+    del gl, positions, observed, gl_payload, sites_payload, codes, catalog, counts
+    store.nthreads = scheduling.current_threads()
+    store.save_contig(common['stage'], contig, dict(values=values, summary=summary))
+    return None, summary
 
 
 def refine_parent_counts(store, contigs, sample_ids, result, *, parent_eligibility=None,
@@ -175,21 +157,16 @@ def refine_parent_counts(store, contigs, sample_ids, result, *, parent_eligibili
     pending = [c for c in contigs if not store.contig_done(stage, c)]
     started = time.perf_counter()
     if pending:
-        workers = min(_MAX_CHROMOSOME_WORKERS, cpus, len(pending))
-        groups = [pending[i::workers] for i in range(workers)]
-        tasks = [(store.root, stage, group, len(names), rows, source,
-                  settings.mendelian_genotype_replacement_probability, cpus, workers > 1)
-                 for group in groups]
-        print(f"  Full-marker exclusion: {len(rows)} dyads, {len(pending)} chromosomes, "
-              f"{workers} workers sharing {cpus} CPUs", flush=True)
-        if workers == 1:
-            _score_partition(tasks[0])
-        else:
-            remaining = parallel.forkserver_context.Value('i', workers)
-            extras = parallel.forkserver_context.Value('i', 0)
-            with parallel.safe_forkserver_pool(workers, initializer=_initialize_workers,
-                                               initargs=(cpus, remaining, extras)) as pool:
-                list(pool.imap_unordered(_score_partition, tasks, chunksize=1))
+        from ..core.checkpoints import contig_path
+        weights = [Path(contig_path(store.root, raw_gl_stage, contig)).stat().st_size
+                   for contig in pending]
+        common = dict(root=store.root, stage=stage, samples=len(names), rows=rows, source=source,
+                      delta=settings.mendelian_genotype_replacement_probability)
+        with scheduling.ChromosomeExecutor(pending, _score_chromosome,
+                                           n_workers=cpus, weights=weights) as executor:
+            print(f"  Full-marker exclusion: {len(rows)} dyads, {len(pending)} chromosomes, "
+                  f"{executor.worker_count} workers sharing {executor.cpu_budget} CPUs", flush=True)
+            executor.run('exclusion', common)
     payloads = [store.load_contig(stage, contig) for contig in contigs]
     log_e = np.logaddexp.reduce(np.stack([p['values'][:, 0] for p in payloads]), axis=0)-np.log(len(contigs))
     observed = np.sum([p['values'][:, 1] for p in payloads], axis=0).astype(np.int64)

@@ -16,6 +16,8 @@ import haplotype_reconstruction.core.parallel as core_parallel
 
 core_parallel.ensure_numba_registry_warmup()
 
+from ..core import chromosome_parallel as scheduling
+
 
 @dataclass(frozen=True)
 class RaggedFounderModel:
@@ -780,6 +782,7 @@ def infer_candidate_source_factors_batch(
     if not np.allclose(row_mass, 1.0, rtol=2e-13, atol=2e-15):
         raise ValueError("Hamming transition rows must be normalized")
     available = counts >= int(minimum_informative_sites)
+    scheduling.current_threads()
     initial, right, valid = _infer_factor_kernel(
         np.ascontiguousarray(value), *(np.ascontiguousarray(a) for a in arrays),
         np.ascontiguousarray(available),
@@ -886,6 +889,7 @@ def source_posterior_marginals(
     if not np.allclose(row_mass, 1.0, rtol=2e-13, atol=2e-15):
         raise ValueError("factor Hamming transition rows must be normalized")
 
+    scheduling.current_threads()
     posterior, valid = _source_posterior_marginal_kernel(
         np.ascontiguousarray(initial),
         np.ascontiguousarray(right),
@@ -1019,6 +1023,7 @@ def posterior_expected_structure(
     edge_second = np.ascontiguousarray(edge_second, dtype=np.int64)
     diagonal_required = np.ascontiguousarray(np.diag(edges), dtype=np.bool_)
 
+    scheduling.current_threads()
     features = _structure_features(
         posterior,
         state_anchored,
@@ -1029,6 +1034,7 @@ def posterior_expected_structure(
         available,
     )
     both, any_presence, full_presence, pair_mass, joint_any, joint_full = features
+    scheduling.current_threads()
     edge_matched, edge_exposed = _edge_kernel(
         pair_mass,
         pair_first,
@@ -1045,6 +1051,7 @@ def posterior_expected_structure(
         joint_any,
         joint_full,
     )
+    scheduling.current_threads()
     pair_explained, pair_exposed = _pair_kernel(
         pair_mass,
         pair_first,
@@ -1105,6 +1112,7 @@ def _compact_observed_sites_kernel(child_observed, bin_start, bin_stop):
 def _compact_observed_sites(child_observed, bin_start, bin_stop):
     """Flatten observed sites once so state loops contain no missingness branch."""
 
+    scheduling.current_threads()
     return _compact_observed_sites_kernel(
         np.ascontiguousarray(child_observed),
         np.ascontiguousarray(bin_start, dtype=np.int64),

@@ -35,7 +35,7 @@ known-truth simulation validation.
 | Local discovery | `discovery/blocks.py`, `discovery/search.py` | Missing-aware reversible search for 200-SNP panels |
 | Local path selection | `discovery/path_model.py`, `path_scoring.py`, `path_fitting.py`, `path_selection.py` | Normalized diploid-path objective, prepared scoring, fixed-K fitting and bounded drop/merge/add search |
 | Feedback orchestration | `workflows/block_feedback.py`, `discovery/path_blocks.py` | Initial path selection, L1 and rebuilt L1+L2 feedback, block materialization and checkpointed parallel work |
-| Candidate banks / legacy alternatives | `discovery/candidate_selection.py`, `discovery/candidate_rescue.py` | Partial-row completion and BIC/source-endpoint starts; explicit balanced/strict cavity-rescue alternatives |
+| Candidate banks / alternative selectors | `discovery/candidate_selection.py`, `discovery/candidate_rescue.py` | Partial-row completion and BIC/source-endpoint starts; explicit balanced/strict cavity-rescue alternatives |
 | Optional local segment exchange | `discovery/path_exchange.py` | Fixed-K reciprocal suffix starts, exact all-pairs/cuts screening and protected top-eight plus warm-control refits; off by default |
 | Founder completion | `assembly/completion.py`, `assembly/joint_completion.py` | Evidence-supported local completion and frozen inference panels |
 | L1–L4 assembly | `assembly/pipeline.py`, `assembly/hierarchy.py` | Checkpointed hierarchy, component boundaries and scheduling |
@@ -44,7 +44,7 @@ known-truth simulation validation.
 | Pedigree inference | `pedigree/pipeline.py`, `pedigree/inference.py` | Aggregate chromosome evidence and infer observed-parent states and identities |
 | Family phase correction | `refinement/pipeline.py`, `refinement/polish.py` | Pedigree-conditioned, genotype-preserving final phase |
 | Recombination maps | `recombination/pipeline.py`, `recombination/model.py` | Conditional rates, crossover intervals and observable exposure |
-| Truth evaluation | `simulation/evaluation.py`, `simulation/founder_metrics.py`, `simulation/metrics.py` | Founder completeness, sample phase and pedigree metrics, never inference inputs |
+| Truth evaluation | `simulation/evaluation.py`, `simulation/founder_metrics.py`, `simulation/metrics.py`, `simulation/truth.py` | Parallel founder/sample/pedigree metrics and compact cached truth, never inference inputs |
 | Portable simulation controls | `simulation/designs.py`, `simulation/example.py` | Backcrosses, observed-only sampling, read perturbations and generated examples |
 | Interoperable export | `workflows/export.py`, `core/products.py` | Lossless component-local founder tracks and final sample GT/PS |
 | Run provenance and timing | `core/run_record.py` | Coordinator records and non-overlapping wall times |
@@ -101,7 +101,8 @@ and score types remain there, while the numerical work is separated into:
 
 `cache.py` independently versions preparation, genetic scores and decisions;
 `explanations.py` separates score contributions and release/ambiguity summaries.
-`inference.py` combines chromosomes and applies the decision procedure.
+`execution.py` keeps chromosome tensors and reusable projections in persistent
+workers; `inference.py` combines their scores and applies the decision procedure.
 `direction.py`, `eligibility.py`, `states.py`, `bootstrap.py` and `graph.py`
 separate chronology/eligibility, parent-count evidence, resampling and acyclic
 graph selection. `calibration.py` learns the conditional predictive evidence
@@ -117,6 +118,14 @@ and real-data candidate eligibility must not be confused with known parentage.
 and the dynamic worker counter. Its `get_dynamic_threads()` and
 `apply_dynamic_threads()` redistribute the existing core budget as workers
 finish. An already-running kernel cannot absorb new threads mid-call.
+
+`core/chromosome_parallel.py` supplies persistent chromosome workers and bounded
+thread leases for pedigree preparation/scoring, recombination and evaluation.
+Its `current_threads()` lets surviving workers claim released cores at explicit
+numerical boundaries. Genome-wide candidate selection remains a barrier between
+pedigree screening and detailed scoring; parallelism does not change that model.
+Recombination and evaluation limit concurrent decoded chromosomes using
+`core/runtime.py` memory accounting without reducing the shared CPU ceiling.
 
 Assembly scheduling is in `assembly/hierarchy.py`; refinement candidate
 scheduling is in `assembly/founder/candidates.py`. Process count and threads
@@ -141,8 +150,10 @@ The [running guide](running.md) distinguishes broad-only assembly controls
 from bounded-search budgets.
 
 `core/haplotypes.py` owns shared block types. `core/checkpoints.py` implements
-compressed atomic serialization; `core/runtime.py` owns run-stage stores and
-scoped logging. Each workflow restores stdout and closes its log on normal
+compressed atomic serialization with rolling chunk reads and ordered pipelined
+writes; checksums and final atomic publication are retained. `core/runtime.py`
+owns run-stage stores and scoped logging. Each workflow restores stdout and
+closes its log on normal
 return, interruption or failure.
 Assembly and painting add their own typed checkpoint and scientific-identity
 handling. Keep public serialized types at stable module paths when possible.

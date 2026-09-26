@@ -242,11 +242,12 @@ def count_exposed_contigs(
 
 
 def _bootstrap_worker(
-    multiplicities: np.ndarray,
+    task: tuple[bool, np.ndarray],
 ) -> tuple:
-    """Module-scope forkserver callback for one bootstrap chunk."""
-    return _evaluate_bootstrap_chunk(
-        _BOOTSTRAP_SHARED, multiplicities
+    """Evaluate a tagged bootstrap/LOCO chunk with the same shared evidence."""
+    is_loco, multiplicities = task
+    return is_loco, _evaluate_bootstrap_chunk(
+        _BOOTSTRAP_SHARED, multiplicities,
     )
 
 
@@ -398,6 +399,7 @@ def _run_parent_state_bootstraps(
     local_parent_counts: np.ndarray,
     graph_parent_counts: np.ndarray,
     *,
+    loco_counts: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     contig_information_weights: Optional[np.ndarray]=None,
     structure_pair_indices: Optional[np.ndarray]=None,
     edge_matched_by_contig: Optional[np.ndarray]=None,
@@ -409,8 +411,12 @@ def _run_parent_state_bootstraps(
     pair_exposure_presence_words: Optional[np.ndarray]=None,
     direction_supported_parents: Optional[np.ndarray]=None,
     depth_component_count: Optional[int]=None,
-) -> tuple[int, int]:
-    """Run fixed-seed bootstraps serially or in a shared-memory pool."""
+) -> tuple[int, int, int]:
+    """Run bootstrap and LOCO refits within one shared-memory pool lifetime.
+
+    LOCO tasks have deterministic chromosome-omission weights and do not draw
+    from the bootstrap RNG. Their counts and refit denominator stay separate.
+    """
     n_contigs = contig_log_likelihoods.shape[0]
     if contig_information_weights is None:
         information_weights = np.ones(n_contigs, dtype=np.float64)
@@ -461,6 +467,26 @@ def _run_parent_state_bootstraps(
         depth_component_count = full_depth.posterior.shape[1]
     ordinary_shared["depth_component_count"] = int(depth_component_count)
     depth_refits = 0
+    loco_refits = 0
+    bootstrap_counts = (
+        local_configuration_counts, graph_configuration_counts,
+        local_state_counts, local_parent_counts, graph_parent_counts,
+    )
+    chunk_size = max(
+        1,
+        int(math.ceil(
+            settings.bootstrap_replicates / float(worker_count * 4)
+        )),
+    )
+    tasks = [
+        (False, np.ascontiguousarray(multiplicities[start:start + chunk_size]))
+        for start in range(0, settings.bootstrap_replicates, chunk_size)
+    ]
+    if n_contigs > 1:
+        for omitted in range(n_contigs):
+            weights = np.ones((1, n_contigs), dtype=np.float64)
+            weights[0, omitted] = 0.0
+            tasks.append((True, weights))
     if worker_count == 1:
         shared = {
             **ordinary_shared,
@@ -480,18 +506,17 @@ def _run_parent_state_bootstraps(
             "direction_supported_parents": direction_supported_parents,
             "pair_exposure_presence_words": pair_exposure_presence_words,
         }
-        results = (_evaluate_bootstrap_chunk(shared, multiplicities),)
-        for chunk in results:
-            depth_refits += _accumulate_bootstrap_chunk(
-                chunk,
-                alternatives,
-                local_configuration_counts,
-                graph_configuration_counts,
-                local_state_counts,
-                local_parent_counts,
-                graph_parent_counts,
+        for is_loco, weights in tasks:
+            chunk = _evaluate_bootstrap_chunk(shared, weights)
+            refits = _accumulate_bootstrap_chunk(
+                chunk, alternatives,
+                *(loco_counts if is_loco else bootstrap_counts),
             )
-        return worker_count, depth_refits
+            if is_loco:
+                loco_refits += refits
+            else:
+                depth_refits += refits
+        return worker_count, depth_refits, loco_refits
 
     handles = []
     shared = dict(ordinary_shared)
@@ -524,34 +549,23 @@ def _run_parent_state_bootstraps(
             handles.append(handle)
             shared[key] = metadata
 
-    chunk_size = max(
-        1,
-        int(math.ceil(
-            settings.bootstrap_replicates / float(worker_count * 4)
-        )),
-    )
-    tasks = [
-        np.ascontiguousarray(multiplicities[start:start + chunk_size])
-        for start in range(0, settings.bootstrap_replicates, chunk_size)
-    ]
     with core_parallel.shared_memory_cleanup(handles), core_parallel.safe_forkserver_pool(
         worker_count,
         initializer=_init_bootstrap_worker,
         initargs=(shared,),
     ) as pool:
-        for chunk in pool.imap_unordered(
+        for is_loco, chunk in pool.imap_unordered(
             _bootstrap_worker, tasks, chunksize=1
         ):
-            depth_refits += _accumulate_bootstrap_chunk(
-                chunk,
-                alternatives,
-                local_configuration_counts,
-                graph_configuration_counts,
-                local_state_counts,
-                local_parent_counts,
-                graph_parent_counts,
+            refits = _accumulate_bootstrap_chunk(
+                chunk, alternatives,
+                *(loco_counts if is_loco else bootstrap_counts),
             )
-    return worker_count, depth_refits
+            if is_loco:
+                loco_refits += refits
+            else:
+                depth_refits += refits
+    return worker_count, depth_refits, loco_refits
 
 
 def accumulate_bootstrap_counts_into(

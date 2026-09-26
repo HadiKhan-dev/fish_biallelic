@@ -92,8 +92,10 @@ are unchanged for the same seed and resources.
 
 A combined stress control might use `depth_cv = 0.6`,
 `dropout_fraction = 0.1`, `heterozygote_alt_probability = 0.6` and
-`generating_error_rate = 0.04`. Inference still uses its declared 2% read
-error likelihood; generating truth is not handed to it.
+`generating_error_rate = 0.04`. Inference independently fits observation
+parameters from observed allele depths by default; generating parameters and
+truth are not handed to that fit.
+`--no-read-calibration` selects the fixed-error inference model.
 
 Dropout is defined in marker count, not physical base pairs. Each chromosome
 draws a sample-specific tract location and depth factor. Sample depth factors
@@ -126,6 +128,17 @@ It is available before painting finishes; no hierarchy level is relabelled.
 An unexecuted hierarchy level is not invented when assembly stopped early.
 Explicitly requested products must exist. `--feedback-selection strict`
 selects strict-feedback checkpoints when that was the run configuration.
+
+`--cores` is the total evaluation CPU budget, shared across chromosome workers
+and numerical kernels. Memory estimates can limit the number of concurrent
+chromosomes while leaving all requested cores available to active workers.
+
+New simulations write compact, evaluation-only truth checkpoints under
+`evaluation_truth/` alongside the other stages. For older simulations,
+evaluation derives them once under `OUTPUT/evaluation/truth_cache/`, without
+rewriting the source checkpoints. Reusing the same report directory avoids
+reloading unused read/likelihood arrays. The cache is tied to source-file
+identities and sample order; it never supplies inference inputs.
 
 Reports are written under `OUTPUT/evaluation/`:
 

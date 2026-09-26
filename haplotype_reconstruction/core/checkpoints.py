@@ -8,6 +8,9 @@ import struct
 import sys
 import tempfile
 import zlib
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from threading import RLock
 
 import blosc2
 import numpy as np
@@ -56,6 +59,11 @@ _CHUNK_BYTES = 1 << 30
 
 
 _METADATA_SPOOL_BYTES = 64 << 20
+
+
+# Blosc2's GIL-release flag is process-global. Production parallel I/O uses
+# separate processes; serialize overlapping pipeline scopes within a process.
+_PARALLEL_READ_LOCK = RLock()
 
 
 def _buffer_layout(sizes):
@@ -122,11 +130,127 @@ class _ArrayPickler(pickle.Pickler):
             and not obj.dtype.hasobject
             and not (obj.flags.c_contiguous or obj.flags.f_contiguous)
         ):
+            # A previous large materialized copy may still back async chunks.
+            # Drain it before allocating another; small grouped arrays retain
+            # their normal packing behavior and do not force serialization.
+            if obj.nbytes >= _DIRECT_BUFFER_BYTES:
+                writer = getattr(self, "_buffer_writer", None)
+                if writer is not None and writer.pipeline is not None:
+                    writer.pipeline.finish()
             contiguous = np.ascontiguousarray(obj)
             if not obj.flags.writeable:
                 contiguous.flags.writeable = False
             return contiguous.__reduce_ex__(5)
         return NotImplemented
+
+
+
+class _ChunkPipeline:
+    """Rolling CPU/byte credits for checkpoint chunks, not an executor API.
+
+    One caller CPU handles parsing or pickle/packing/ordered writes. Remaining
+    CPUs belong to Blosc tasks. Reservations cover compressed input for reads
+    and raw plus worst-case compressed output for writes. One oversized chunk
+    is allowed only alone; a producer may additionally hold one packing group.
+    """
+    def __init__(self, nthreads, *, ordered):
+        self.cpus = max(1, nthreads - 1)
+        self.free_cpus = self.cpus
+        self.ordered = ordered
+        self.entries = deque()
+        self.queued = deque()
+        self.active = {}
+        self.bytes = 0
+        self.started = False
+        self.pool = None
+        _PARALLEL_READ_LOCK.acquire()
+        try:
+            self.previous_releasegil = blosc2.set_releasegil(True)
+        except BaseException:
+            _PARALLEL_READ_LOCK.release()
+            raise
+
+    def add(self, function, args, weight, consume):
+        while self.entries and self.bytes + weight > _CHUNK_BYTES:
+            self._progress()
+        entry = dict(function=function, args=args, weight=weight, consume=consume,
+                     future=None, done=False)
+        self.entries.append(entry)
+        self.queued.append(entry)
+        self.bytes += weight
+        if self.started:
+            self._retire_ready()
+            self._launch()
+        elif len(self.queued) >= self.cpus or self.bytes >= _CHUNK_BYTES:
+            self.started = True
+            self._launch()
+
+    def _launch(self):
+        count = min(self.free_cpus, len(self.queued))
+        if not count:
+            return
+        if self.pool is None:
+            self.pool = ThreadPoolExecutor(max_workers=self.cpus)
+        floor, remainder = divmod(self.free_cpus, count)
+        for index in range(count):
+            entry = self.queued.popleft()
+            threads = floor + (index < remainder)
+            future = self.pool.submit(entry['function'], *entry['args'], nthreads=threads)
+            entry['future'] = future
+            self.active[future] = (entry, threads)
+            self.free_cpus -= threads
+
+    def _consume(self, entry):
+        entry['consume'](entry['future'].result())
+        self.bytes -= entry['weight']
+
+    def _retire_ready(self):
+        for future in tuple(self.active):
+            if not future.done():
+                continue
+            entry, threads = self.active.pop(future)
+            self.free_cpus += threads
+            # Surface a failed chunk promptly even if ordered writes are still
+            # waiting on an earlier chunk. The temporary file is not published.
+            future.result()
+            entry['done'] = True
+            if not self.ordered:
+                self.entries.remove(entry)
+                self._consume(entry)
+        if self.ordered:
+            while self.entries and self.entries[0]['done']:
+                self._consume(self.entries.popleft())
+
+    def _progress(self):
+        self.started = True
+        self._retire_ready()
+        self._launch()
+        if self.active:
+            wait(tuple(self.active), return_when=FIRST_COMPLETED)
+            self._retire_ready()
+            self._launch()
+
+    def finish(self):
+        while self.entries:
+            self._progress()
+
+    def close(self):
+        try:
+            if self.pool is not None:
+                self.pool.shutdown(wait=True, cancel_futures=True)
+            self.active.clear()
+            self.entries.clear()
+            self.queued.clear()
+        finally:
+            try:
+                blosc2.set_releasegil(self.previous_releasegil)
+            finally:
+                _PARALLEL_READ_LOCK.release()
+
+
+def _compress_checked(raw, nthreads):
+    compressed = _compress(raw, nthreads)
+    return raw.nbytes, compressed, zlib.crc32(compressed)
 
 
 class _BufferWriter:
@@ -136,23 +260,19 @@ class _BufferWriter:
         self.pending = []
         self.pending_bytes = 0
         self.n_buffers = 0
+        self.prefix = bytearray()
+        self.pipeline = None
+        self.owners = {}
 
     def __call__(self, pickle_buffer):
         raw = pickle_buffer.raw()
         nbytes = raw.nbytes
         self.n_buffers += 1
-
         if nbytes >= _DIRECT_BUFFER_BYTES:
             self.flush()
-            try:
-                self._write_group([(raw, raw.readonly)])
-            finally:
-                raw.release()
-                pickle_buffer.release()
+            self._write_group([(raw, raw.readonly, pickle_buffer)])
         else:
-            aligned_start = (
-                self.pending_bytes + _BUFFER_ALIGNMENT - 1
-            ) & -_BUFFER_ALIGNMENT
+            aligned_start = (self.pending_bytes + _BUFFER_ALIGNMENT - 1) & -_BUFFER_ALIGNMENT
             next_bytes = aligned_start + nbytes
             if self.pending and next_bytes > _GROUP_BYTES:
                 self.flush()
@@ -161,57 +281,83 @@ class _BufferWriter:
             self.pending_bytes = next_bytes
         return None
 
+    def _release(self, key):
+        for raw, _readonly, pickle_buffer in self.owners.pop(key, ()):
+            raw.release()
+            pickle_buffer.release()
+
     def flush(self):
         if self.pending:
-            pending = self.pending
-            try:
-                self._write_group(
-                    [(raw, readonly) for raw, readonly, _buffer in pending]
-                )
-            finally:
-                self.pending = []
-                self.pending_bytes = 0
-                for raw, _readonly, pickle_buffer in pending:
-                    raw.release()
-                    pickle_buffer.release()
+            pending, self.pending = self.pending, []
+            self.pending_bytes = 0
+            self._write_group(pending)
+
+    def _chunk(self, raw, release=None):
+        prefix, self.prefix = self.prefix, bytearray()
+
+        def consume(result):
+            raw_size, compressed, checksum = result
+            self.handle.write(prefix)
+            self.handle.write(_CHUNK_DESC.pack(raw_size, len(compressed), checksum))
+            self.handle.write(compressed)
+            raw.release()
+            if release is not None:
+                self._release(release)
+
+        if self.nthreads > 1 and (self.pipeline is not None or raw.nbytes >= _DIRECT_BUFFER_BYTES):
+            if self.pipeline is None:
+                self.pipeline = _ChunkPipeline(self.nthreads, ordered=True)
+            # Blosc output is bounded by raw bytes plus its small frame overhead.
+            self.pipeline.add(_compress_checked, (raw,), 2 * raw.nbytes + blosc2.MAX_OVERHEAD, consume)
+        else:
+            consume(_compress_checked(raw, self.nthreads))
 
     def _write_group(self, buffers):
-        offsets, total = _buffer_layout(
-            raw.nbytes for raw, _readonly in buffers
-        )
-        self.handle.write(_U32.pack(len(buffers)))
-        for raw, readonly in buffers:
-            self.handle.write(_BUFFER_DESC.pack(raw.nbytes, int(readonly)))
-
+        key = id(buffers)
+        self.owners[key] = buffers
+        offsets, total = _buffer_layout(raw.nbytes for raw, _, _ in buffers)
+        self.prefix += _U32.pack(len(buffers))
+        for raw, readonly, _ in buffers:
+            self.prefix += _BUFFER_DESC.pack(raw.nbytes, int(readonly))
         if total == 0:
-            self.handle.write(_U32.pack(0))
+            self.prefix += _U32.pack(0)
+            self._release(key)
             return
-
         if len(buffers) == 1:
             raw = buffers[0][0]
-            n_chunks = (total + _CHUNK_BYTES - 1) // _CHUNK_BYTES
-            self.handle.write(_U32.pack(n_chunks))
+            self.prefix += _U32.pack((total + _CHUNK_BYTES - 1) // _CHUNK_BYTES)
             for start in range(0, total, _CHUNK_BYTES):
-                chunk = raw[start:start + _CHUNK_BYTES]
-                compressed = _compress(chunk, self.nthreads)
-                self.handle.write(
-                    _CHUNK_DESC.pack(
-                        chunk.nbytes, len(compressed), zlib.crc32(compressed)
-                    )
-                )
-                self.handle.write(compressed)
+                stop = min(total, start + _CHUNK_BYTES)
+                self._chunk(raw[start:stop], key if stop == total else None)
             return
-
         packed = bytearray(total)
         destination = memoryview(packed)
-        for (raw, _readonly), offset in zip(buffers, offsets):
+        for (raw, _readonly, _), offset in zip(buffers, offsets):
             destination[offset:offset + raw.nbytes] = raw
-        compressed = _compress(destination, self.nthreads)
-        self.handle.write(_U32.pack(1))
-        self.handle.write(
-            _CHUNK_DESC.pack(total, len(compressed), zlib.crc32(compressed))
-        )
-        self.handle.write(compressed)
+        # The packed copy now owns these bytes; source views are no longer used
+        # by asynchronous compression. Direct buffers retain owners until done.
+        self._release(key)
+        self.prefix += _U32.pack(1)
+        self._chunk(destination)
+
+    def finish(self):
+        self.flush()
+        if self.pipeline is not None:
+            self.pipeline.finish()
+        self.handle.write(self.prefix)
+        self.prefix.clear()
+
+    def close(self):
+        try:
+            if self.pipeline is not None:
+                self.pipeline.close()
+        finally:
+            for key in tuple(self.owners):
+                self._release(key)
+            for raw, _, buffer in self.pending:
+                raw.release()
+                buffer.release()
+            self.pending.clear()
 
 
 def contig_path(ckpt_dir, stage, r_name):
@@ -245,6 +391,9 @@ def _write_metadata(handle, metadata, metadata_size, nthreads):
 
 def write(path, obj, nthreads=1):
     """Write a v2 protocol-5 checkpoint atomically and return its byte size."""
+    nthreads = max(1, int(nthreads))
+    if hasattr(os, 'sched_getaffinity'):
+        nthreads = min(nthreads, len(os.sched_getaffinity(0)))
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -255,25 +404,29 @@ def write(path, obj, nthreads=1):
         ) as metadata, open(tmp, "w+b") as handle:
             handle.write(_HEADER.pack(_MAGIC, 0, 0))
             buffer_writer = _BufferWriter(handle, nthreads)
-            pickler = _ArrayPickler(
-                metadata, protocol=5, buffer_callback=buffer_writer
-            )
-            pickler.dump(obj)
-            metadata_size = metadata.tell()
-            buffer_writer.flush()
-
-            metadata_offset = handle.tell()
-            _write_metadata(
-                handle, metadata, metadata_size, max(1, int(nthreads))
-            )
-            end = handle.tell()
-            handle.seek(0)
-            handle.write(
-                _HEADER.pack(
-                    _MAGIC, metadata_offset, buffer_writer.n_buffers
+            try:
+                pickler = _ArrayPickler(
+                    metadata, protocol=5, buffer_callback=buffer_writer
                 )
-            )
-            handle.seek(end)
+                pickler._buffer_writer = buffer_writer
+                pickler.dump(obj)
+                metadata_size = metadata.tell()
+                buffer_writer.finish()
+
+                metadata_offset = handle.tell()
+                _write_metadata(
+                    handle, metadata, metadata_size, max(1, int(nthreads))
+                )
+                end = handle.tell()
+                handle.seek(0)
+                handle.write(
+                    _HEADER.pack(
+                        _MAGIC, metadata_offset, buffer_writer.n_buffers
+                    )
+                )
+                handle.seek(end)
+            finally:
+                buffer_writer.close()
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -291,11 +444,46 @@ def _read_exact(handle, size, context):
     return data
 
 
-def _read_chunks(handle, raw_total, n_chunks, limit, nthreads, context):
+def _read_chunk_at(fd, payload_offset, compressed_size, checksum, destination,
+                   context, nthreads):
+    """Read/check one independent chunk without changing the parser's offset."""
+    compressed = bytearray(compressed_size)
+    view = memoryview(compressed)
+    offset = 0
+    while offset < compressed_size:
+        count = os.preadv(fd, [view[offset:]], payload_offset + offset)
+        if count == 0:
+            raise ValueError(f"corrupt checkpoint: truncated {context} payload")
+        offset += count
+    if zlib.crc32(compressed) != checksum:
+        raise ValueError(f"corrupt checkpoint: {context} checksum mismatch")
+    _decompress_into(compressed, destination, nthreads, context)
+
+
+class _ChunkReader:
+    """Rolling checked reads into disjoint final buffers, capped at 1 GiB input."""
+    def __init__(self, handle, nthreads):
+        self.fd = handle.fileno()
+        self.pipeline = _ChunkPipeline(nthreads, ordered=False)
+
+    def add(self, payload_offset, compressed_size, checksum, destination, context):
+        self.pipeline.add(
+            _read_chunk_at,
+            (self.fd, payload_offset, compressed_size, checksum, destination, context),
+            compressed_size, lambda _result: None)
+
+    def flush(self):
+        self.pipeline.finish()
+
+    def close(self):
+        self.pipeline.close()
+
+
+def _chunk_layout(handle, raw_total, n_chunks, limit, context):
     if raw_total == 0:
         if n_chunks != 0:
             raise ValueError(f"corrupt checkpoint: nonempty {context} chunk list")
-        return bytearray()
+        return []
     if n_chunks == 0:
         raise ValueError(f"corrupt checkpoint: missing {context} chunks")
 
@@ -318,24 +506,34 @@ def _read_chunks(handle, raw_total, n_chunks, limit, nthreads, context):
     if raw_seen != raw_total:
         raise ValueError(f"corrupt checkpoint: incomplete {context} chunks")
 
+    return chunks
+
+
+def _read_chunks(handle, raw_total, n_chunks, limit, nthreads, context, reader=None):
+    chunks = _chunk_layout(handle, raw_total, n_chunks, limit, context)
+    if not chunks:
+        return bytearray()
+
     backing = _aligned_buffer(raw_total)
     destination = memoryview(backing)
     raw_offset = 0
     for index, (raw_size, compressed_size, checksum, payload_offset) in enumerate(chunks):
-        handle.seek(payload_offset)
-        compressed = _read_exact(
-            handle, compressed_size, f"{context} chunk payload"
-        )
-        if zlib.crc32(compressed) != checksum:
-            raise ValueError(
-                f"corrupt checkpoint: {context} chunk {index} checksum mismatch"
+        target = destination[raw_offset:raw_offset + raw_size]
+        if reader is not None:
+            reader.add(payload_offset, compressed_size, checksum, target,
+                       f"{context} chunk {index}")
+        else:
+            handle.seek(payload_offset)
+            compressed = _read_exact(
+                handle, compressed_size, f"{context} chunk payload"
             )
-        _decompress_into(
-            compressed,
-            destination[raw_offset:raw_offset + raw_size],
-            nthreads,
-            f"{context} chunk {index}",
-        )
+            if zlib.crc32(compressed) != checksum:
+                raise ValueError(
+                    f"corrupt checkpoint: {context} chunk {index} checksum mismatch"
+                )
+            _decompress_into(
+                compressed, target, nthreads, f"{context} chunk {index}",
+            )
         raw_offset += raw_size
     handle.seek(chunks[-1][3] + chunks[-1][1])
     return backing
@@ -384,58 +582,29 @@ def _read_chunks_to_file(
 
 
 def read(path, nthreads=1):
-    """Read a v2 checkpoint, rejecting old formats and malformed frames."""
-    with open(path, "rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        file_size = handle.tell()
-        handle.seek(0)
-        if file_size < _HEADER.size + _U64.size + _U32.size:
-            raise ValueError(f"{path}: corrupt checkpoint (truncated header)")
-        magic, metadata_offset, expected_buffers = _HEADER.unpack(
-            _read_exact(handle, _HEADER.size, "header")
-        )
-        if magic != _MAGIC:
-            raise ValueError(f"{path}: not a v2 {SUFFIX} checkpoint (bad magic)")
-        if not (_HEADER.size <= metadata_offset <= file_size):
-            raise ValueError(f"{path}: corrupt checkpoint (bad metadata offset)")
+    """Read v2 with checked chunks; nthreads is the total loading CPU budget.
 
+    Large files overlap independent chunk reads, CRCs and decompression across
+    buffer groups. Small files and nthreads=1 retain the direct serial path.
+    Metadata keeps its bounded spool and is unpickled only after verification.
+    """
+    with open(path, "rb") as handle:
+        file_size, metadata_offset, expected_buffers = _read_header(handle, path)
+
+        nthreads = max(1, int(nthreads))
+        if hasattr(os, "sched_getaffinity"):
+            nthreads = min(nthreads, len(os.sched_getaffinity(0)))
+        reader = (_ChunkReader(handle, nthreads)
+                  if nthreads > 1 and file_size >= _DIRECT_BUFFER_BYTES else None)
         buffers = []
-        while handle.tell() < metadata_offset:
-            if metadata_offset - handle.tell() < _U32.size:
-                raise ValueError("corrupt checkpoint: truncated buffer group")
-            (n_group_buffers,) = _U32.unpack(
-                _read_exact(handle, _U32.size, "buffer group count")
-            )
-            if n_group_buffers == 0 or n_group_buffers > expected_buffers - len(buffers):
-                raise ValueError("corrupt checkpoint: invalid buffer group count")
-            descriptors = []
-            for _ in range(n_group_buffers):
-                size, readonly = _BUFFER_DESC.unpack(
-                    _read_exact(handle, _BUFFER_DESC.size, "buffer descriptor")
-                )
-                if readonly not in (0, 1):
-                    raise ValueError("corrupt checkpoint: invalid buffer descriptor")
-                descriptors.append((size, bool(readonly)))
-            try:
-                offsets, total = _buffer_layout(
-                    size for size, _readonly in descriptors
-                )
-            except OverflowError as error:
-                raise ValueError(
-                    "corrupt checkpoint: invalid buffer descriptor"
-                ) from error
-            (n_chunks,) = _U32.unpack(
-                _read_exact(handle, _U32.size, "buffer chunk count")
-            )
-            backing = _read_chunks(
-                handle, total, n_chunks, metadata_offset, nthreads, "buffer group"
-            )
-            group_view = memoryview(backing)
-            for (size, readonly), offset in zip(descriptors, offsets):
-                view = group_view[offset:offset + size]
-                buffers.append(view.toreadonly() if readonly else view)
-        if handle.tell() != metadata_offset or len(buffers) != expected_buffers:
-            raise ValueError("corrupt checkpoint: buffer count or boundary mismatch")
+        try:
+            _read_buffer_groups(handle, metadata_offset, expected_buffers,
+                                nthreads, buffers, reader)
+            if reader is not None:
+                reader.flush()
+        finally:
+            if reader is not None:
+                reader.close()
 
         metadata_size, = _U64.unpack(
             _read_exact(handle, _U64.size, "metadata size")
@@ -464,3 +633,93 @@ def read(path, nthreads=1):
                 return pickle.Unpickler(metadata, buffers=buffers).load()
             except (EOFError, pickle.UnpicklingError) as error:
                 raise ValueError("corrupt checkpoint: invalid pickle metadata") from error
+
+
+def _buffer_group_headers(handle, metadata_offset, expected_buffers):
+    """Yield descriptors; the consumer must advance over each chunk list."""
+    buffer_count = 0
+    while handle.tell() < metadata_offset:
+        if metadata_offset - handle.tell() < _U32.size:
+            raise ValueError("corrupt checkpoint: truncated buffer group")
+        (n_group_buffers,) = _U32.unpack(
+            _read_exact(handle, _U32.size, "buffer group count")
+        )
+        if n_group_buffers == 0 or n_group_buffers > expected_buffers - buffer_count:
+            raise ValueError("corrupt checkpoint: invalid buffer group count")
+        descriptors = []
+        for _ in range(n_group_buffers):
+            size, readonly = _BUFFER_DESC.unpack(
+                _read_exact(handle, _BUFFER_DESC.size, "buffer descriptor")
+            )
+            if readonly not in (0, 1):
+                raise ValueError("corrupt checkpoint: invalid buffer descriptor")
+            descriptors.append((size, bool(readonly)))
+        try:
+            offsets, total = _buffer_layout(
+                size for size, _readonly in descriptors
+            )
+        except OverflowError as error:
+            raise ValueError(
+                "corrupt checkpoint: invalid buffer descriptor"
+            ) from error
+        (n_chunks,) = _U32.unpack(
+            _read_exact(handle, _U32.size, "buffer chunk count")
+        )
+        buffer_count += n_group_buffers
+        yield descriptors, offsets, total, n_chunks
+    if handle.tell() != metadata_offset or buffer_count != expected_buffers:
+        raise ValueError("corrupt checkpoint: buffer count or boundary mismatch")
+
+
+def _read_buffer_groups(handle, metadata_offset, expected_buffers, nthreads,
+                        buffers, reader):
+    for descriptors, offsets, total, n_chunks in _buffer_group_headers(
+            handle, metadata_offset, expected_buffers):
+        backing = _read_chunks(
+            handle, total, n_chunks, metadata_offset, nthreads, "buffer group", reader)
+        group_view = memoryview(backing)
+        for (size, readonly), offset in zip(descriptors, offsets):
+            view = group_view[offset:offset + size]
+            buffers.append(view.toreadonly() if readonly else view)
+
+
+def read_size_bytes(path):
+    """Estimate decoded v2 storage bytes without payload reads or checksums.
+
+    Sum padded array-buffer groups and raw pickle metadata. This is NOT peak
+    process memory: compressed working buffers, Python objects and consumers'
+    numerical workspaces are additional. The scan validates frame layout but
+    intentionally does not validate CRCs, Blosc headers or pickle contents.
+    """
+    with open(path, "rb") as handle:
+        file_size, metadata_offset, expected_buffers = _read_header(handle, path)
+        total_bytes = 0
+        for _descriptors, _offsets, total, n_chunks in _buffer_group_headers(
+                handle, metadata_offset, expected_buffers):
+            _chunk_layout(handle, total, n_chunks, metadata_offset, "buffer group")
+            total_bytes += total
+        metadata_size, = _U64.unpack(_read_exact(handle, _U64.size, "metadata size"))
+        n_chunks, = _U32.unpack(_read_exact(handle, _U32.size, "metadata chunk count"))
+        if metadata_size > sys.maxsize:
+            raise ValueError("corrupt checkpoint: metadata is too large")
+        _chunk_layout(handle, metadata_size, n_chunks, file_size, "metadata")
+        if handle.tell() != file_size:
+            raise ValueError("corrupt checkpoint: trailing data")
+        return total_bytes + metadata_size
+
+
+def _read_header(handle, path):
+    handle.seek(0, os.SEEK_END)
+    file_size = handle.tell()
+    handle.seek(0)
+    if file_size < _HEADER.size + _U64.size + _U32.size:
+        raise ValueError(f"{path}: corrupt checkpoint (truncated header)")
+    magic, metadata_offset, expected_buffers = _HEADER.unpack(
+        _read_exact(handle, _HEADER.size, "header")
+    )
+    if magic != _MAGIC:
+        raise ValueError(f"{path}: not a v2 {SUFFIX} checkpoint (bad magic)")
+    if not (_HEADER.size <= metadata_offset <= file_size):
+        raise ValueError(f"{path}: corrupt checkpoint (bad metadata offset)")
+
+    return file_size, metadata_offset, expected_buffers

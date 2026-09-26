@@ -6,7 +6,8 @@ from dataclasses import asdict, dataclass, replace
 import math
 import time
 import numpy as np
-from numba import njit, prange, get_num_threads
+from numba import njit, prange
+from ..core.chromosome_parallel import current_threads
 
 from types import SimpleNamespace
 
@@ -535,6 +536,7 @@ def decode_meioses(calls, displayed_phase, internal_phase, positions, components
     genetic, knots, knot_genetic = _genetic_coordinates(positions, chromosome_map, genetic_positions_morgans)
     if chromosome_map is not None:
         rate = chromosome_map.fallback_rate_per_bp
+    current_threads()
     return _decode_meioses(calls, displayed_phase, internal_phase, positions, components,
         coverage, offsets, parents, children, slots, rate, error, threshold, max_gap, artifact_rate, artifact_mean, bins,
         genetic, knots, knot_genetic)
@@ -587,6 +589,7 @@ def _add_interval(bins, totals, left, right, density):
 
 def _scores(data, orientation, edges, config):
     calls, positions, runs, parents, children, slots, genetic = data
+    current_threads()
     return _score_edges(calls, orientation, positions, runs, parents, children, slots,
         genetic, np.asarray(edges, dtype=np.int64), config.maximum_gap_bp, config.copy_error,
         config.phase_artifact_rate, config.phase_artifact_mean_bp)
@@ -704,6 +707,7 @@ def screen_candidates(data, orientation, config, shared_config):
         adjacent[child].append(edge)
     # The two-state screening posterior uses the input map in Morgans.
     # Full artifact-HMM evidence is evaluated later by the unchanged objective.
+    current_threads()
     proposals = _screen_edge_tracts(
         calls, orientation, positions, runs, parents, children, slots, genetic,
         config.maximum_gap_bp, config.copy_error, shared_config.candidate_support)
@@ -822,8 +826,8 @@ def _candidate_scores(data, orientation, candidates, adjacent, config, epochs,
     prior. Recompute stale work immediately before the original greedy decision.
     """
     offset = 0
-    width = get_num_threads()
     while offset < len(candidates):
+        width = current_threads()
         stop = offset
         jobs, edges, cuts = [], [], [0]
         while stop < len(candidates) and (len(edges) < width or stop == offset):
@@ -900,6 +904,7 @@ def fit_shared_orientations(product, relationships, *, config=RecombinationMapCo
     if candidates and mixing:
         from .intervals import EdgeIntervalProducts
         from .orientation_prior import OrientationPriorSums
+        current_threads()
         edge_products = EdgeIntervalProducts(data, candidates, adjacent, config)
         prior_sums = OrientationPriorSums(positions, runs, candidates, shared_config)
         scores = np.empty(len(parents))
@@ -908,6 +913,7 @@ def fit_shared_orientations(product, relationships, *, config=RecombinationMapCo
         scores[remaining] = _scores(data, orientation, remaining, config)
     else:
         scores = _scores(data, orientation, np.arange(len(parents)), config)
+    current_threads()
     prior = _orientation_priors(orientation, positions, runs,
         shared_config.phase_error_rate, shared_config.phase_error_mean_bp)
     if prior_sums is not None:

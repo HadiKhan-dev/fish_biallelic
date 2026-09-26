@@ -20,6 +20,7 @@ import haplotype_reconstruction.discovery.blocks as discovery_blocks
 import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.simulation.pedigree as simulation_pedigree
 import haplotype_reconstruction.simulation.templates as simulation_templates
+from ..simulation.truth import save_truth
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
 from . import CICHLID_AUTOSOMES
 from .downstream import run_downstream
@@ -779,6 +780,8 @@ def run():
                     raise OSError(
                         f"Failed to checkpoint {SIMULATION_STAGE}/{r_name}"
                     )
+                save_truth(checkpoint_store, r_name, sample_names,
+                           sites_list[contig_index], payload)
                 del payload, result
 
             # Release each contig as soon as its checkpoint is durable.

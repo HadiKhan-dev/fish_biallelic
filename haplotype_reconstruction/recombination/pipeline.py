@@ -2,6 +2,7 @@
 from __future__ import annotations
 from ..core.run_record import timed_stage
 from ..core.environment import boolean_setting
+from ..core.chromosome_parallel import ChromosomeExecutor, current_threads
 from haplotype_reconstruction import PACKAGE_ROOT
 
 from dataclasses import asdict, replace
@@ -101,6 +102,93 @@ def write_chromosome_outputs(result, output):
     temporary.replace(path)
 
 
+def _recombination_chromosome(contig, state, phase_name, common):
+    """Keep one chromosome's numerical arrays and checkpoint writes worker-local."""
+    core_parallel.malloc_trim()
+    store = core_runtime.CheckpointStore(common["checkpoint_root"], nthreads=current_threads())
+    identity, names = common["identity"], common["names"]
+    shared_family_evidence = common["shared_family_evidence"]
+    if store.contig_done(RECOMBINATION_STAGE, contig):
+        result = store.load_contig(RECOMBINATION_STAGE, contig, nthreads=current_threads())
+        if result["identity"] != identity:
+            raise ValueError("Recombination chromosome identity differs")
+    else:
+        phase = store.load_contig(
+            refinement_pipeline.FINAL_PHASE_STAGE, contig, nthreads=current_threads())
+        if (tuple(phase["sample_ids"]) != names or phase["contig"] != contig or
+                phase["identity"]["family"]["pedigree_sha256"] != common["pedigree_hash"]):
+            raise ValueError("final phase and recombination pedigree/axes differ")
+        maps = common["genetic_maps"]
+        chromosome_map = None if maps is None else maps.for_contig(contig)
+        current_threads()
+        if shared_family_evidence:
+            result = module_recombination_model.build_shared_family_map(
+                phase, common["relationships"], config=common["config"],
+                shared_config=common["shared_config"], chromosome_map=chromosome_map)
+        else:
+            result = module_recombination_model.build_missing_aware_map(
+                phase, common["relationships"], config=common["config"],
+                chromosome_map=chromosome_map)
+        result["summary"]["shared_family_evidence"] = shared_family_evidence
+        if shared_family_evidence:
+            diagnostics = result["shared_orientation"]
+            result["summary"].update(
+                shared_orientation_converged=diagnostics["converged_on_screened_candidates"],
+                shared_orientation_corrected_individuals=diagnostics["individuals_with_corrections"],
+                shared_orientation_accepted_moves=len(diagnostics["accepted_moves"]))
+        result["identity"] = identity
+        core_checkpoints.write(
+            core_checkpoints.contig_path(store.root, RECOMBINATION_STAGE, contig),
+            result, nthreads=current_threads())
+        del phase
+    if shared_family_evidence and not result["summary"]["shared_orientation_converged"]:
+        warnings.warn(f"{contig}: shared-family orientation fit reached its sweep limit; "
+                      "map remains conditional on the selected, nonconverged shared paths.",
+                      RuntimeWarning)
+    write_chromosome_outputs(result, Path(common["output"]))
+    summary = result["summary"]
+    print(f"[recombination {contig}] {summary}", flush=True)
+    del result
+    gc.collect()
+    return None, summary
+
+
+def _recombination_resources(store, contigs, workers):
+    """Limit concurrent decoded phases plus their numerical workspaces.
+
+    A sixfold decoded-phase allowance covers retained phase arrays, working
+    allele/gauge/run copies and per-meiosis HMM workspaces; add 2 GiB for
+    compressed reads, Python/JIT and plotting. This is a conservative scheduling
+    estimate, not a guaranteed RSS bound. Retain the existing serial path when
+    even one estimated chromosome exceeds the available-memory allowance.
+    """
+    estimates = []
+    for contig in contigs:
+        resumed = store.contig_done(RECOMBINATION_STAGE, contig)
+        stage = RECOMBINATION_STAGE if resumed else refinement_pipeline.FINAL_PHASE_STAGE
+        decoded = core_checkpoints.read_size_bytes(
+            core_checkpoints.contig_path(store.root, stage, contig))
+        estimates.append(decoded * (2 if resumed else 6) + (2 << 30))
+    available = core_runtime.available_memory_bytes()
+    if not estimates or available is None:
+        return estimates, 1
+    reserve = min(available // 2, max(4 << 30, available // 10))
+    usable = max(0, available - reserve)
+    total = count = 0
+    for estimate in sorted(estimates, reverse=True)[:workers]:
+        if total + estimate > usable:
+            break
+        total += estimate
+        count += 1
+    if not count:
+        print("RECOMBINATION memory estimate exceeds available memory; retaining serial execution", flush=True)
+        return estimates, 1
+    print(f"RECOMBINATION memory budget: {count} chromosome workers; "
+          f"estimated concurrent peak {total / 2**30:.1f} GiB, usable {usable / 2**30:.1f} GiB",
+          flush=True)
+    return estimates, count
+
+
 @timed_stage("recombination")
 def run_recombination(checkpoint_store, contigs, sample_ids, *, pedigree_payload, output_dir,
                         n_workers=None, config=module_recombination_model.RecombinationMapConfig(), genetic_maps=None,
@@ -157,51 +245,16 @@ def run_recombination(checkpoint_store, contigs, sample_ids, *, pedigree_payload
         _csv(pd.DataFrame(saved["summaries"]), output / "summary.csv")
         print("[recombination] Resumed complete missing-aware recombination maps.")
         return saved["summaries"]
-    summaries = []
-    print(f"RECOMBINATION: missing-aware recombination maps; one chromosome, {workers} Numba threads",flush=True)
-    print(f"[recombination] Shared-family orientation evidence: {'on' if shared_family_evidence else 'off'}",flush=True)
-    with core_parallel.numba_thread_scope(workers):
-        for contig in contigs:
-            if checkpoint_store.contig_done(RECOMBINATION_STAGE, contig):
-                result = checkpoint_store.load_contig(RECOMBINATION_STAGE, contig, nthreads=workers)
-                if result["identity"] != identity:
-                    raise ValueError("Recombination chromosome identity differs")
-            else:
-                phase = checkpoint_store.load_contig(
-                    refinement_pipeline.FINAL_PHASE_STAGE,
-                    contig,
-                    nthreads=workers
-                )
-                if (tuple(phase["sample_ids"]) != names or phase["contig"] != contig or
-                        phase["identity"]["family"]["pedigree_sha256"] != pedigree_hash):
-                    raise ValueError("final phase and recombination pedigree/axes differ")
-                chromosome_map = None if genetic_maps is None else genetic_maps.for_contig(contig)
-                if shared_family_evidence:
-                    result = module_recombination_model.build_shared_family_map(phase, relationships, config=config,
-                        shared_config=shared_config, chromosome_map=chromosome_map)
-                else:
-                    result = module_recombination_model.build_missing_aware_map(phase, relationships, config=config,
-                        chromosome_map=chromosome_map)
-                result["summary"]["shared_family_evidence"] = shared_family_evidence
-                if shared_family_evidence:
-                    diagnostics = result["shared_orientation"]
-                    result["summary"].update(
-                        shared_orientation_converged=diagnostics["converged_on_screened_candidates"],
-                        shared_orientation_corrected_individuals=diagnostics["individuals_with_corrections"],
-                        shared_orientation_accepted_moves=len(diagnostics["accepted_moves"]))
-                result["identity"] = identity
-                core_checkpoints.write(core_checkpoints.contig_path(checkpoint_store.root, RECOMBINATION_STAGE, contig),
-                                    result, nthreads=workers)
-                del phase
-            if shared_family_evidence and not result["summary"]["shared_orientation_converged"]:
-                warnings.warn(f"{contig}: shared-family orientation fit reached its sweep limit; "
-                              "map remains conditional on the selected, nonconverged shared paths.",
-                              RuntimeWarning)
-            write_chromosome_outputs(result, output)
-            summaries.append(result["summary"])
-            print(f"[recombination {contig}] {result['summary']}",flush=True)
-            del result
-            gc.collect()
+    print(f"[recombination] Shared-family orientation evidence: {'on' if shared_family_evidence else 'off'}", flush=True)
+    weights, process_limit = _recombination_resources(checkpoint_store, contigs, workers)
+    common = dict(checkpoint_root=checkpoint_store.root, output=str(output),
+                  identity=identity, names=names, pedigree_hash=pedigree_hash,
+                  relationships=relationships, config=config, shared_config=shared_config,
+                  shared_family_evidence=shared_family_evidence, genetic_maps=genetic_maps)
+    with ChromosomeExecutor(contigs, _recombination_chromosome, n_workers=workers,
+                            weights=weights, max_workers=process_limit,
+                            label="RECOMBINATION") as executor:
+        summaries = executor.run("map", common)
     checkpoint_store.save_global(RECOMBINATION_STAGE, {"identity": identity, "summaries": summaries})
     _csv(pd.DataFrame(summaries), output / "summary.csv")
     checkpoint_store.mark_stage_complete(RECOMBINATION_STAGE)

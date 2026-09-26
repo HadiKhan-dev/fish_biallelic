@@ -13,6 +13,7 @@ import haplotype_reconstruction.core.parallel as core_parallel
 
 core_parallel.ensure_numba_registry_warmup()
 
+from ..core import chromosome_parallel as scheduling
 
 from .transmission_projection import (
     _symmetrise_source_marginals,
@@ -200,6 +201,7 @@ def prepare_projected_ragged_quadratic(
         )
         if posterior.shape != (candidates, bins, states, states):
             raise ValueError("precomputed source marginals have wrong shape")
+    scheduling.current_threads()
     if np.any(~_symmetrise_source_marginals(posterior)):
         raise FloatingPointError("source posterior marginal lost all mass")
     selector = pedigree_sources._probability_matrix(
@@ -214,6 +216,7 @@ def prepare_projected_ragged_quadratic(
     two = np.ascontiguousarray(np.asarray(transition.two_changes, dtype=np.float64))
     if any(value.shape != (bins - 1,) for value in (same, one, two)):
         raise ValueError("factor transition boundary count is wrong")
+    scheduling.current_threads()
     (
         diagonal_flow,
         outgoing_change_flow,
@@ -233,6 +236,7 @@ def prepare_projected_ragged_quadratic(
     site_to_bin = np.empty(len(order), dtype=np.int64)
     for block in range(bins):
         site_to_bin[int(bin_start[block]):int(bin_stop[block])] = block
+    scheduling.current_threads()
     transmitted_alt = _project_transmitted_alt(
         candidate_gl,
         observed,
@@ -242,6 +246,7 @@ def prepare_projected_ragged_quadratic(
         int(model.background_index),
         float(factors.robustness_epsilon),
     )
+    scheduling.current_threads()
     (
         stay,
         alpha,
@@ -478,6 +483,7 @@ def score_projected_ragged_quadratic(
     )
     if reuse_scores is None:
         m0_started = time.perf_counter()
+        scheduling.current_threads()
         zero = _score_m0_kernel(
             *args,
             projected.state_alt_probability,
@@ -496,6 +502,7 @@ def score_projected_ragged_quadratic(
         m1_started = time.perf_counter()
         one = np.empty((children, projected.n_candidates), dtype=np.float64)
         for child_start in range(0, children, child_batch_size):
+            scheduling.current_threads()
             child_stop = min(children, child_start + child_batch_size)
             common_products = (
                 _common_emission_products(*common_args, child_start, child_stop)
@@ -503,6 +510,7 @@ def score_projected_ragged_quadratic(
             )
             common_powered = (_power_common_products(common_products, exponent, child_start)
                               if common_products is not None and fractional_powers else None)
+            scheduling.current_threads()
             one[child_start:child_stop] = _score_m1_kernel(
                 *args,
                 projected.available,
@@ -581,12 +589,14 @@ def score_projected_ragged_quadratic(
             ]
             if not len(batch_rows):
                 continue
+            scheduling.current_threads()
             common_products = (
                 _common_emission_products(*common_args, child_start, child_stop)
                 if cache_children else None
             )
             common_powered = (_power_common_products(common_products, exponent, child_start)
                               if common_products is not None and fractional_powers else None)
+            scheduling.current_threads()
             two[batch_rows] = _score_m2_kernel(
                 np.ascontiguousarray(trio_array[batch_rows]),
                 *args,

@@ -29,6 +29,8 @@ _EVIDENCE_SCORE_CODE_VERSION = "component-local-parent-state-score-v1"
 
 
 _EVIDENCE_SCORE_CODE_FILES = (
+    'pedigree/execution.py',
+    'core/chromosome_parallel.py',
     'pedigree/sources.py',
     'pedigree/transmission.py',
     'pedigree/transmission_projection.py',
@@ -669,9 +671,14 @@ def _parent_state_score_identity(
         use_anchor_union: bool,
         mismatch_penalty: float,
         external_identity: Mapping[str, Any] | None,
+        chromosome_sources=None,
+        omitted_chromosomes=None,
 ) -> dict[str, Any]:
+    # File-backed workers return source metadata without transferring tensors.
+    chromosomes = prepared.chromosomes if chromosome_sources is None else chromosome_sources
+    omissions = prepared.omitted_chromosomes if omitted_chromosomes is None else omitted_chromosomes
     sources = []
-    for chromosome in prepared.chromosomes:
+    for chromosome in chromosomes:
         source = getattr(chromosome, "source_identity", None)
         sources.append({
             "contig": chromosome.contig,
@@ -685,10 +692,10 @@ def _parent_state_score_identity(
         "schema": _EVIDENCE_SCORE_IDENTITY_SCHEMA,
         "ordered_sample_ids": prepared.sample_ids,
         "ordered_informative_contigs": tuple(
-            chromosome.contig for chromosome in prepared.chromosomes
+            chromosome.contig for chromosome in chromosomes
         ),
         "omitted_contigs": tuple(
-            value.contig for value in prepared.omitted_chromosomes
+            value.contig for value in omissions
         ),
         "sources": sources,
         "preparation": {
@@ -1160,6 +1167,8 @@ def _prepare_component(
     # Raw evidence identity/sample order and painting config were checked by the
     # chromosome entry point. Reuse the exact frozen emission axis when kept
     # by the painter; high-K/memory-limited products compute it here as usual.
+    from ..core.chromosome_parallel import current_threads
+    current_threads()
     source_emissions = getattr(diagnostic, "source_log_emission_upper", None)
     if source_emissions is None:
         source_gl, source_observed, informative_counts = painting_evidence.gather_component_evidence(
@@ -1317,6 +1326,8 @@ def prepare_painted_chromosome_components(
         chromosome_map=None,
 ) -> PreparedChromosome:
     """Validate and prepare independently rooted component HMM inputs."""
+    from ..core.chromosome_parallel import current_threads
+    current_threads()
 
     checkpoint = painting_checkpoints.validate_painting_checkpoint(checkpoint)
     source_identity = _painting_source_identity(checkpoint)
@@ -1373,6 +1384,7 @@ def prepare_painted_chromosome_components(
             raise pedigree_models.PedigreeEvidenceError(
                 f"component {component_index} lacks ragged diagnostics"
             )
+        current_threads()
         value = _prepare_component(
             diagnostic,
             component_index,
@@ -1406,6 +1418,7 @@ def prepare_painted_chromosome_components(
     concatenated_markers = np.concatenate(
         [item.cache.selected_markers_per_bin for item in prepared]
     )
+    current_threads()
     global_exponent = pedigree_candidates._gl_information_exponent_kernel(
         concatenated_gl,
         concatenated_markers,

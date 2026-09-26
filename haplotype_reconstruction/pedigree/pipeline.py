@@ -14,6 +14,8 @@ import time
 from typing import Any, Mapping, Sequence
 import numpy as np
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints
+from . import execution as pedigree_execution
+from ..core import chromosome_parallel as pedigree_scheduling
 from . import cache as pedigree_cache
 from . import calibration as pedigree_calibration
 from . import exclusion as pedigree_exclusion
@@ -42,6 +44,8 @@ PEDIGREE_STAGE = "pedigree"
 PEDIGREE_INFERENCE_CODE_FILES = (
     'pedigree/pipeline.py',
     'pedigree/cache.py',
+    'pedigree/execution.py',
+    'core/chromosome_parallel.py',
     'pedigree/calibration.py',
     'pedigree/explanations.py',
     'pedigree/components.py',
@@ -743,6 +747,7 @@ def _prepare_one_contig(
         raw_observed_mask_key,
         target_stage,
 ) -> PedigreeContigSummary:
+    checkpoint_store.nthreads = pedigree_scheduling.current_threads()
     painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(
         checkpoint_store.load_contig(painting_stage, contig),
         expected_sample_ids=sample_ids,
@@ -763,6 +768,7 @@ def _prepare_one_contig(
 
     raw_gl = raw_sites = raw_observed = gl_payload = sites_payload = None
     try:
+        checkpoint_store.nthreads = pedigree_scheduling.current_threads()
         raw_gl, raw_sites, raw_observed, gl_payload, sites_payload = (
             _load_raw_evidence(
                 checkpoint_store,
@@ -774,6 +780,7 @@ def _prepare_one_contig(
                 raw_observed_mask_key=raw_observed_mask_key,
             )
         )
+        pedigree_scheduling.current_threads()
         prepared = pedigree_components.prepare_painted_chromosome_components(
             painting_checkpoint,
             raw_gl,
@@ -812,6 +819,7 @@ def _prepare_one_contig(
         # Atomic checkpoint I/O already propagates write failures. Validate
         # this exact object before writing; global inference validates the
         # persisted copy on load, without an immediate duplicate disk read.
+        checkpoint_store.nthreads = pedigree_scheduling.current_threads()
         checkpoint_store.save_contig(target_stage, contig, checkpoint)
     finally:
         del raw_gl, raw_sites, raw_observed, gl_payload, sites_payload, painting_checkpoint
@@ -843,6 +851,7 @@ def prepare_pedigree_contigs(
         all_contigs=None,
         publish_completion=True,
         target_stage=EVIDENCE_STAGE,
+        n_workers=None,
 ) -> tuple[PedigreeContigSummary, ...]:
     """Prepare requested pedigree preparation contigs; shards never publish full completion."""
 
@@ -899,24 +908,21 @@ def prepare_pedigree_contigs(
             raise RuntimeError(
                 f"{target_stage} is marked complete but lacks: {missing}"
             )
-    summaries = tuple(
-        _prepare_one_contig(
-            checkpoint_store,
-            contig,
-            ordered_ids,
-            identity,
-            preparation_config,
-            settings,
-            painting_stage=painting_stage,
-            raw_gl_stage=raw_gl_stage,
-            raw_sites_stage=raw_sites_stage,
-            raw_gl_key=raw_gl_key,
-            raw_sites_key=raw_sites_key,
-            raw_observed_mask_key=raw_observed_mask_key,
-            target_stage=target_stage,
-        )
-        for contig in requested
-    )
+    from ..core.checkpoints import contig_path
+    weights = [Path(contig_path(checkpoint_store.root, raw_gl_stage, contig)).stat().st_size
+               for contig in requested]
+    arguments = dict(sample_ids=ordered_ids, preparation_identity=identity,
+        preparation_config=preparation_config, pedigree_config=settings,
+        painting_stage=painting_stage, raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
+        raw_gl_key=raw_gl_key, raw_sites_key=raw_sites_key,
+        raw_observed_mask_key=raw_observed_mask_key, target_stage=target_stage)
+    with pedigree_scheduling.ChromosomeExecutor(
+            requested, pedigree_execution.prepare_chromosome,
+            n_workers=n_workers, weights=weights) as executor:
+        print(f"  Pedigree preparation: {executor.worker_count} chromosome workers "
+              f"sharing {executor.cpu_budget} CPUs", flush=True)
+        summaries = tuple(executor.run('prepare', dict(root=checkpoint_store.root, arguments=arguments)))
+
     core_runtime.require_contig_checkpoints(
         checkpoint_store, target_stage, requested
     )
@@ -935,57 +941,22 @@ def prepare_pedigree_contigs(
     return summaries
 
 
-def _load_prepared_run(
-        checkpoint_store,
-        contigs,
-        sample_ids,
-        preparation_identity,
-        pedigree_config,
-        preparation_config,
-        *,
-        painting_stage,
-        preparation_stage,
-):
-    chromosomes = []
-    omissions = []
-    source_identities = []
-    for contig in contigs:
-        painting_checkpoint = checkpoint_store.load_contig(painting_stage, contig)
-        prepared_checkpoint = _validate_prepared_checkpoint(
-            checkpoint_store.load_contig(preparation_stage, contig),
-            expected_contig=contig,
-            expected_sample_ids=sample_ids,
-            expected_preparation_identity=preparation_identity,
-            expected_painting=painting_checkpoint,
-        )
-        source_identities.append(_checkpoint_source_identity(prepared_checkpoint))
-        chromosome = prepared_checkpoint.prepared_chromosome
-        if chromosome.components:
-            chromosomes.append(chromosome)
-        else:
-            omissions.append(pedigree_components.OmittedPaintingChromosome(
-                contig,
-                chromosome.component_count,
-                chromosome.omitted_reason or "no_component_evidence",
-            ))
-        del painting_checkpoint, prepared_checkpoint, chromosome
-    return (
-        pedigree_components.PreparedPedigree(
-            recombination_rate=preparation_config.recombination_rate,
-            max_snps_per_bin=preparation_config.max_snps_per_bin,
-            markers_per_information_block=(
-                pedigree_config.markers_per_information_block
-            ),
-            effective_markers_per_information_block=(
-                pedigree_config.parent_state_effective_markers_per_information_block
-            ),
-            sample_ids=sample_ids,
-            chromosomes=tuple(chromosomes),
-            omitted_chromosomes=tuple(omissions),
-            source_mode=pedigree_config.parent_state_candidate_source_mode,
-        ),
-        tuple(source_identities),
-    )
+def _stored_prepared_run(
+        checkpoint_store, contigs, sample_ids, preparation_identity,
+        pedigree_config, preparation_config, *, painting_stage, preparation_stage):
+    """Describe prepared inputs; each chromosome worker loads its own arrays."""
+    layout = pedigree_components.PreparedPedigree(
+        recombination_rate=preparation_config.recombination_rate,
+        max_snps_per_bin=preparation_config.max_snps_per_bin,
+        markers_per_information_block=pedigree_config.markers_per_information_block,
+        effective_markers_per_information_block=(
+            pedigree_config.parent_state_effective_markers_per_information_block),
+        sample_ids=sample_ids, chromosomes=(), omitted_chromosomes=(),
+        source_mode=pedigree_config.parent_state_candidate_source_mode)
+    return pedigree_execution.StoredPedigree(layout, tuple(
+        pedigree_execution.StoredChromosome(checkpoint_store.root, contig, sample_ids,
+            preparation_identity, painting_stage, preparation_stage)
+        for contig in contigs))
 
 
 @timed_stage("pedigree")
@@ -1069,13 +1040,14 @@ def run_global_pedigree_inference(
 
     started = time.perf_counter()
     def prepare():
-        return _load_prepared_run(
+        return _stored_prepared_run(
             checkpoint_store, ordered_contigs, ordered_ids, preparation_identity,
             settings, preparation_config, painting_stage=painting_stage,
             preparation_stage=preparation_stage)
 
     scored, source_identities, scores_resumed = pedigree_cache.load_or_score(
-        checkpoint_store, scoring_identity, prepare, settings, parent_eligibility, preparation_config)
+        checkpoint_store, scoring_identity, prepare, settings, parent_eligibility, preparation_config,
+        n_workers=n_workers)
     scoring_elapsed = time.perf_counter() - started
     decision_started = time.perf_counter()
     result, calibration_report, full_marker_release = decide_scored_pedigree(
@@ -1244,10 +1216,12 @@ def run_pedigree(
         publish_global=True, genetic_maps=None, recombination_rate=5e-8):
     """Canonical entry-point bridge: painting plus raw GL -> Tier-B pedigree.
 
-    Numerical scoring uses one process with the allocated Numba threads;
-    bootstrap uses up to that many single-threaded workers, in a later phase.
-    Full-marker exclusion then uses up to four chromosome workers sharing the
-    same CPU budget; chromosome evidence is checkpointed independently.
+    Preparation, screening and scoring use chromosome-local processes with
+    a dynamically shared Numba thread budget. The genome-wide candidate panel
+    is selected between screening and detailed scoring. Bootstrap/LOCO use
+    the CPU budget for independent resampling fits in a later phase.
+    Full-marker exclusion uses the same chromosome scheduler and CPU budget;
+    chromosome evidence is checkpointed independently.
     No phase-correction or recombination-map stage is invoked.
     """
     workers = core_runtime.available_cpu_count() if n_workers is None else int(n_workers)
@@ -1310,7 +1284,7 @@ def run_or_resume_pedigree(
         raw_sites_key=raw_sites_key,
         raw_observed_mask_key=raw_observed_mask_key,
         all_contigs=all_contigs,
-        publish_completion=publish_global,
+        publish_completion=publish_global, n_workers=n_workers,
     )
     if not publish_global:
         return summaries, None

@@ -114,10 +114,11 @@ def build_parser():
             command.add_argument('--metadata-sheet', help='Workbook sheet, default main_data.')
     evaluate = commands.add_parser(
         'evaluate',
-        help='Evaluate a completed simulated run against cached truth.'
+        help='Evaluate saved simulation products against cached truth.'
     )
-    evaluate.add_argument('--output', required=True, help='Completed simulation run directory.')
-    evaluate.add_argument('--cores', type=int, default=None)
+    evaluate.add_argument('--output', required=True, help='Report directory; defaults to reading checkpoints from OUTPUT/checkpoints.')
+    evaluate.add_argument('--cores', type=int, default=None,
+                          help='Total evaluation process/thread ceiling; default current CPU affinity.')
     evaluate.add_argument('--checkpoints', help='Checkpoint root; default OUTPUT/checkpoints.')
     evaluate.add_argument('--contigs', nargs='+')
     evaluate.add_argument('--stages', nargs='+', default=['available'],

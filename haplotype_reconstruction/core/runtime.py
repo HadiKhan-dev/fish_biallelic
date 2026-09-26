@@ -10,6 +10,7 @@ import sys
 import json
 import os
 import tempfile
+from pathlib import Path
 
 from datetime import datetime
 
@@ -30,6 +31,48 @@ def available_cpu_count():
     except (AttributeError, OSError):
         count = os.cpu_count() or 1
     return max(1, int(count))
+
+
+def available_memory_bytes():
+    """Respect the current nested Slurm cgroup and every enclosing memory cap."""
+    candidates = []
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                candidates.append(int(line.split()[1]) * 1024)
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        entries = Path("/proc/self/cgroup").read_text().splitlines()
+    except OSError:
+        entries = []
+    for entry in entries:
+        _, controllers, relative = entry.split(":", 2)
+        if "memory" in controllers.split(","):
+            root = Path("/sys/fs/cgroup/memory")
+            maximum_name, current_name = "memory.limit_in_bytes", "memory.usage_in_bytes"
+        elif not controllers:
+            root = Path("/sys/fs/cgroup")
+            maximum_name, current_name = "memory.max", "memory.current"
+        else:
+            continue
+        directory = root / relative.lstrip("/")
+        while True:
+            try:
+                maximum = int((directory / maximum_name).read_text().strip())
+                current = int((directory / current_name).read_text().strip())
+                if 0 < maximum < (1 << 60):
+                    candidates.append(max(0, maximum - current))
+            except (OSError, ValueError):
+                pass
+            if directory == root:
+                break
+            directory = directory.parent
+    slurm_mib = os.environ.get("SLURM_MEM_PER_NODE")
+    if slurm_mib and int(slurm_mib) > 0:
+        candidates.append(int(slurm_mib) << 20)
+    return min(candidates) if candidates else None
 
 
 class TeeOutput:

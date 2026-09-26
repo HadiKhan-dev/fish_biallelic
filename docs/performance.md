@@ -461,6 +461,34 @@ All seven result tables matched the accepted reference: 20 M0 roots, 300 exact
 M2 pairs and 600 correct edges with no extras. This is a measured duration,
 not a paired whole-stage speedup or an untouched-seed accuracy claim.
 
+### Chromosome-parallel pedigree scheduling
+
+The default pedigree scheduler prepares chromosomes concurrently, including
+checkpoint loading and validation. Screening and detailed scoring also run in
+persistent chromosome workers: source tensors and M0/M1 projections stay in
+the owning worker across the genome-wide candidate-panel barrier. Only compact
+summaries and final scores return to the coordinator.
+
+The CLI's `--cores` remains the total CPU budget, not a per-chromosome count.
+With 22 tasks and 76 CPUs, 10 workers initially receive four threads and 12
+receive three. Larger chromosomes start first. Finished workers return their
+thread allocation; remaining workers expand at projection, child-batch and
+checkpoint boundaries. An active numerical kernel is not resized mid-call.
+Claims never exceed the total budget, and results/aggregation retain configured
+chromosome order regardless of completion order.
+
+Bootstrap and leave-one-chromosome-out refits share one process pool, with
+separate support counts and unchanged random draws. Full-marker Mendelian
+exclusion uses the same chromosome scheduler rather than a four-worker cap.
+The candidate-panel selection and dependent family-message iterations remain
+genome-wide; this does not turn pedigree inference into independent chromosome
+pedigrees. Custom in-process score callbacks retain a sequential fallback.
+
+This is an execution-only change. Small numerical, missing-data, process-budget
+and checkpoint-resume checks validate it; no new speedup benchmark is claimed.
+The historical timings above predate this scheduler. Shared-filesystem
+bandwidth and indivisible kernels can still limit CPU utilization.
+
 ## family refinement and final phase and phase correction
 
 The phase-focused product begins checking final phase after 20 iterations and
@@ -485,7 +513,7 @@ The latest dirty-tile comparison gave chr16 27.80 ->26.30 s and paired chr3 mean
 stability results. Earlier exact reuse reduced summed 22-chromosome calls from
 586.55 to 542.70 s; those sums exclude external raw reads/final checkpoint writes.
 
-## Recombination conditional recombination maps
+## Conditional recombination maps
 
 Shared-family orientation trials use indexed four-state transfer products,
 lazy parent/child XOR updates, and a separate tree for the asymmetric
@@ -504,6 +532,110 @@ chromosome times fell from 176.59 to 146.43 s: 17.1% less wall time and 20.1%
 less CPU work. Up to four workers shared 112 CPUs. These sums are not a single
 112-thread whole-stage wall time. Orientation moves, called crossover intervals
 and coverage matched; floating map values matched rtol=2e-9, atol=2e-8.
+
+Whole-genome map generation now schedules independent chromosomes with the same
+dynamic CPU leases as pedigree inference and evaluation. Numerical phases
+refresh their thread allocation at safe boundaries. Each worker loads/writes
+its own chromosome; the coordinator publishes ordered summaries and the global
+completion marker only after every chromosome succeeds. A decoded-size estimate
+limits concurrent workers against the enclosing Slurm memory budget.
+
+On all 22 cached seed8001 final-phase products, the 76-core map stage took
+**56.30 s**, versus **201.27 s** recorded in the original run. All scientific
+checkpoint fields matched exactly apart from timing/source fingerprints, and
+all 132 chromosome CSV/PNG files were byte-identical. This is an observed
+comparison, not an alternating cold-cache benchmark. Small controls additionally
+covered partial resume, shared-family evidence on/off, missing data, component
+gaps and flat/input-map stretches.
+
+## Checkpoint loading and final simulation evaluation
+
+The v2 protocol-5/Blosc format and its per-chunk CRC checks are unchanged.
+Large checkpoint reads use a rolling queue across array-buffer groups:
+positioned reads, checksum verification and decompression run concurrently into
+disjoint, aligned final buffers. The supplied thread count is a total budget
+split between the parser/writer and chunk workers' Blosc teams, not multiplied
+by nested pools. Any completed chunk releases CPU credits for queued work;
+there is no full-batch barrier.
+Compressed input in flight is bounded near one original maximum chunk (1 GiB);
+small files and one-thread loads retain the direct path. Blosc's GIL-release
+mode is enabled only within a protected parallel-I/O scope, then restored;
+without it, concurrent decoders serialize in the installed Blosc2 version.
+Checkpoint writes overlap compression and checksumming, while emitting chunks
+in their original order and publishing the file atomically. Pending writer
+workspace is bounded using raw-plus-compressed byte reservations, with a single
+oversized direct chunk allowed alone. Source/final arrays and any required
+contiguous producer copy are separate from that allowance; earlier asynchronous
+work drains before another large non-contiguous copy is made. Small arrays
+retain the packed-group path.
+Metadata still uses the bounded spool, and no object is returned before
+verification completes.
+
+`run.py evaluate --cores N` now evaluates chromosomes concurrently using the
+shared chromosome scheduler in `core/chromosome_parallel.py`. Workers load their
+own checkpoints and return only metric rows; the coordinator retains simulation
+chromosome order and the existing JSON/CSV schemas. New simulations also save a
+compact, evaluation-only truth product. Existing simulations derive it once into the evaluation output's cache, leaving original
+checkpoints unchanged. Subsequent evaluations avoid reading/decompressing the
+large unused read and likelihood arrays. Source-file identities and sample
+order select the appropriate cached truth. No truth product is read by inference.
+
+Founder metrics batch small panels and tile large panels into parallel compiled
+integer counts. Hungarian matching, tie handling, component spans and metric
+definitions are unchanged. Ancestry masks use sparse interval endpoints instead
+of repeatedly updating full spans.
+
+Concurrency is limited by decoded checkpoint sizes and available memory, not
+compressed disk sizes. This matters: the seed8001 serial evaluator peaked near
+50 GiB, and running all 22 decoded source/product pairs together would require
+about 291 GiB before workspaces. A process-count limit does not reduce the CPU
+budget: the active chromosome workers share all requested cores and grow their
+thread leases at numerical and loading boundaries.
+
+Scientific metric definitions, whole-component founder matching, missingness
+handling, stage selection and inference outputs are not changed. The evaluation
+is still downstream-only and never feeds simulation truth into inference.
+
+Before the rolling-I/O, compiled-metric and compact-truth additions, the first
+chromosome-parallel full-density seed8001 evaluation (all 22 chromosomes and all
+saved stages) took **72.67 s** on 76 cores, compared with
+**464.81 s** recorded before these changes. All five JSON/CSV outputs were
+byte-for-byte identical. This is an observed 6.40-fold elapsed-time difference,
+not a controlled cold-cache benchmark or a whole-inference speedup.
+
+That earlier measurement's memory guard selected six processes, initially
+assigned 13/13/13/13/12/12 threads. Tail leases grew through 16/19/25/38 to 76.
+Step-wide CPU accounting averaged 8.04 busy cores: filesystem I/O, memory throughput and remaining serial
+metric work prevent continuous 76-core saturation. The cgroup peak was
+70.54 GiB including page cache, not aggregate process RSS. Independent fixtures
+also checked metadata spooling, alias/layout preservation, corruption rejection,
+GIL-flag restoration, stage selection and missing-product errors.
+
+The completed additions reduced the subsequent full evaluation to **30.87 s**
+on 76 cores, with the same five byte-identical reports. The first evaluation of
+the old simulation took **98.54 s**, including one-time compact-truth extraction
+and writes (688 MiB on disk). This first-use cost must not be hidden behind the
+reuse timing. New simulations create the product while truth is already
+resident; their complete fresh-run timing has not been remeasured.
+
+The cached-truth evaluation selected 13 chromosome workers and grew tail leases
+to 76 threads. Step-wide CPU accounting averaged 13.13 busy cores, and the
+cgroup peak was 85.99 GiB including page cache. These remain I/O/memory-heavy
+workloads, not continuously saturated 76-core computations. Timings are
+observed same-dataset runs, not cold-cache scaling claims.
+
+In a separate old/new/new/old I/O comparison, chr1 discovery loading took
+1.797/1.801 s with the rolling reader, versus 2.203 s for the final warmed
+reference (the initial reference took 3.920 s). Painting checkpoint writing
+showed **no wall-time gain**: 0.503/0.446 s versus 0.441/0.433 s, about 8.5%
+slower on average, despite lower CPU work and RSS. Parallelizing the writer is
+therefore not claimed as a uniform speedup. Both readers recovered identical
+data from every new checkpoint.
+
+Durable local reports and frozen references:
+`work/runs/serial_work_parallel_validation/VALIDATION.md`,
+`work/runs/io_pipeline_validation/INTERPRETATION.md`, and
+`work/runs/recombination_parallel_validation/VALIDATION.md`.
 
 ## Changes deliberately not adopted
 
