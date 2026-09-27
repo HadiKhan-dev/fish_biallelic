@@ -1878,3 +1878,51 @@ slots matched exactly in 100,000-marker kernel comparisons, and twelve 60-iterat
 multi-generation fixtures retained identical phase decisions. At nine allocated
 CPUs the production kernel took approximately 25% less time (1.33–1.35x speedup).
 This is a kernel result, not a whole-stage timing or a convergence improvement.
+
+## Local-refit implementation speedups (27 September 2026)
+
+The normalized local-path fitter now packs exchange-symmetric predicted
+trajectories, shares the common filtered marginal, and fuses backward
+reductions. Conditional flip gains still use positive noncarrier sums.
+Candidate banks reuse identical panel/assignment release calculations and
+omit unused deferred top-bank cavity diagnostics; source-endpoint cavity
+scores remain active. No objective, proposal budget, convergence threshold,
+unknown-state prior or release criterion changes.
+
+Matched controls use the same cached original blocks and feedback proposals,
+with each freshly refitted pass feeding the next. Times below sum initial
+refitting and both local feedback fits, **not L1/L2 context construction or
+L1–L4 assembly**. They include pool startup, dynamic threading and profiling;
+input checkpoint loading and production checkpoint writes are excluded.
+
+| Control | Blocks / CPUs | Before | Optimized | Less elapsed time |
+| --- | ---: | ---: | ---: | ---: |
+| Seed8001 chr1 | 256 / 48 | 67.23 s | 54.23 s | 19.3% |
+| AstCal × AulStu chr6 | 64 / 44 | 739.23 s | 672.10 s | 9.1% |
+| AstCal × TroMau chr1 | 16 / 4 | 304.95 s | 271.79 s | 10.9% |
+
+The simulation's separate passes take 40.72 -> 38.18, 15.03 -> 9.78 and
+11.49 -> 6.27 seconds. These are bounded control timings, not whole-chromosome
+runtime estimates. A cold preliminary baseline was excluded from these claims.
+
+All 336 tested blocks preserve their complete selected panels and called/missing
+allele arrays at all three passes. Maximum objective and frequency differences
+are 3.64e-12 and 6.90e-10 respectively. One AulStu first-feedback move changes
+its near-tied trace label from deletion to merge while reaching the same final
+panel and calls; convergence/budget flags are unchanged. Thus this is not
+bitwise or identical-search-trace equivalence. No downstream assembly or
+pedigree accuracy rerun is claimed.
+
+Eight numerical fixtures cover K=1/2/6/10, one/four threads, unequal frequencies,
+missing samples and nonuniform maps. Additional checks cover sharp and zero
+likelihoods, all-missing observations and concentrated carrier mass. Four
+candidate-selector checks cover BIC/cavity and both deferral settings. The
+simulation comparison uses canonical production calls and normal forkserver
+workers. Uncomputed bank diagnostics are explicitly null, not confidence scores.
+
+At N=320, 200 markers and six founders, the prior trajectory alone falls from
+25,088,000 to 14,336,000 bytes (42.9%); other process memory is not included.
+Existing code-bound checkpoint identities prevent silent reuse of older local
+fits, while original discovery checkpoints remain untouched. Baseline commit:
+6ce419b. Detailed internal scripts, profiles and comparisons are retained under
+`.work/local_refit_speed_20260927.YPUyGPUc/`.

@@ -3,10 +3,11 @@
 Prepare read-only emission/log-ratio tables once, retain predicted priors plus
 filtered marginals after a score, and reuse them in the backward pass. Before
 a frequency update, compute only the necessary frequency statistics. State
-matrices remain full; homologue-exchange symmetry avoids duplicate work without
-changing the model or enabling fastmath.
+trajectories store only the upper triangle; homologue-exchange symmetry avoids
+duplicate storage and work without changing the model or enabling fastmath.
 
-Workspace memory is O(N*L*S**2), where S=K+1 includes the unknown state. The
+Workspace memory is O(N*L*S**2), where S=K+1 includes the unknown state;
+predicted priors use S*(S+1)/2 entries per sample/marker, not S*S. The
 cached trajectories avoid repeated forward/prediction work within a fit.
 One workspace belongs to one fit, not a shared/global cache. Dynamic threads
 remain caller-controlled.
@@ -56,50 +57,28 @@ def _table(gl, observed, emission):
 
 
 @njit(cache=True)
-def _backward_into(future, pi, rate, row, output):
-    """Homologue-symmetric backward prediction for unphased observations."""
-    s = len(pi)
-    total = 0.
-    for a in range(s):
-        value = 0.
-        for b in range(s):
-            value += future[a, b] * pi[b]
-        row[a] = value
-        total += pi[a] * value
-    stay = 1. - rate
-    maximum = 0.
-    for a in range(s):
-        for b in range(a, s):
-            value = (stay * stay * future[a, b]
-                     + stay * rate * (row[a] + row[b]) + rate * rate * total)
-            output[a, b] = value
-            output[b, a] = value
-            maximum = max(maximum, value)
-    if maximum > 0:
-        output /= maximum
-
-@njit(cache=True)
-def _outside_into(matrix, tl, tr, bl, br, output):
-    # Scratch boundaries are zero once per worker; interiors are overwritten.
+def _outside_into(matrix, prefix, suffix, tail, output):
+    # Positive upper-triangle prefix/suffix sums avoid subtracting a nearly
+    # complete carrier mass from the total. Symmetry counts each edge twice.
     s = len(matrix)
-    for a in range(s):
-        left, right = 0., 0.
-        for b in range(s):
-            left += matrix[a, b]
-            tl[a + 1, b + 1] = tl[a, b + 1] + left
-            j = s - 1 - b
-            right += matrix[a, j]
-            tr[a + 1, j] = tr[a, j] + right
+    tail[s] = 0.
     for a in range(s - 1, -1, -1):
-        left, right = 0., 0.
-        for b in range(s):
-            left += matrix[a, b]
-            bl[a, b + 1] = bl[a + 1, b + 1] + left
-            j = s - 1 - b
-            right += matrix[a, j]
-            br[a, j] = br[a + 1, j] + right
+        left = matrix[a, a]
+        for b in range(a + 1, s):
+            prefix[a, b] = left
+            left += 2. * matrix[a, b]
+        prefix[a, s] = left
+        right = 0.
+        suffix[a, s] = 0.
+        for b in range(s - 1, a, -1):
+            right += 2. * matrix[a, b]
+            suffix[a, b] = right
+        tail[a] = tail[a + 1] + left
     for a in range(s):
-        output[a] = tl[a, a] + tr[a, a + 1] + bl[a + 1, a] + br[a + 1, a + 1]
+        value = tail[a + 1]
+        for b in range(a):
+            value += prefix[b, a] + suffix[b, a + 1]
+        output[a] = value
 
 
 @njit(cache=True)
@@ -136,14 +115,20 @@ def _prepare_ratios(emissions, observed):
 
 
 @njit(cache=True, parallel=True)
-def _forward_samples(panel, emissions, pi, rates, priors, rows, cols, workers):
-    """Keep P_t before the marker emission and marginals of filtered F_t."""
+def _forward_samples(panel, emissions, pi, rates, priors, rows, workers):
+    """Cache triangular P_t and the common row/column marginal of F_t.
+
+    Each stored off-diagonal entry represents one ordered state, not their
+    combined mass; normalizers count it twice. The two homologues share priors
+    and unphased emissions, so their messages remain symmetric.
+    """
     n, length, s = len(emissions), emissions.shape[1], len(pi)
     k = s - 1
+    pairs = s * (s + 1) // 2
     likelihoods = np.empty(n)
     for wi in prange(workers):
         worker = np.int64(wi)
-        filtered = np.empty((s, s))
+        filtered = np.empty(pairs)
         for sample in range(worker, n, workers):
             ll = 0.
             for site in range(length):
@@ -151,35 +136,42 @@ def _forward_samples(panel, emissions, pi, rates, priors, rows, cols, workers):
                 scale = 0.
                 rate = rates[site-1] if site else 0.
                 stay = 1. - rate
+                index = 0
                 for a in range(s):
                     ha = panel[a, site] if a < k else 2
                     for b in range(a, s):
                         hb = panel[b, site] if b < k else 2
-                        predicted = (stay * stay * filtered[a, b]
+                        predicted = (stay * stay * filtered[index]
                             + stay * rate * (rows[sample, site-1, a] * pi[b]
                                             + pi[a] * rows[sample, site-1, b])
                             + rate * rate * pi[a] * pi[b]) if site else pi[a] * pi[b]
-                        prior[a, b] = prior[b, a] = predicted
+                        prior[index] = predicted
                         value = predicted * emissions[sample, site, ha, hb]
-                        filtered[a, b] = filtered[b, a] = value
+                        filtered[index] = value
                         scale += value if a == b else 2. * value
+                        index += 1
                 if scale <= 0:
                     ll = -np.inf
                     break
                 ll += np.log(scale)
+                rows[sample, site, :] = 0.
+                index = 0
                 for a in range(s):
-                    marginal = 0.
-                    for b in range(s):
-                        filtered[a, b] /= scale
-                        marginal += filtered[a, b]
-                    rows[sample, site, a] = cols[sample, site, a] = marginal
+                    for b in range(a, s):
+                        value = filtered[index] / scale
+                        filtered[index] = value
+                        rows[sample, site, a] += value
+                        if b != a:
+                            rows[sample, site, b] += value
+                        index += 1
+
             likelihoods[sample] = ll
     return likelihoods
 
 
 @njit(cache=True, parallel=True)
 def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates,
-                      priors, rows, cols, full_statistics, workers):
+                      priors, rows, full_statistics, workers):
     n, length, k = len(emissions), emissions.shape[1], len(panel)
     s = k + 1
     gains = np.zeros((workers, 2, k, length))
@@ -189,7 +181,7 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
     # Both homologues have the same copying prior/transition and genotype
     # emissions are unordered. Thus all messages are symmetric even when the
     # founder frequencies are unequal. Evaluate each unordered cell once;
-    # retain full matrices for the existing sufficient-statistic interface.
+    # retain full scratch matrices for the sufficient-statistic interface.
     for wi in prange(workers):
         worker = np.int64(wi)
         backward = np.empty((s, s))
@@ -198,41 +190,60 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
         posterior = np.empty((s, s))
         future = np.empty((s, s))
         row, previous = np.empty(s), np.empty(s)
+        copies, redraw = np.empty(s), np.empty(s)
         outside = np.empty(s)
-        tl = np.zeros((s+1, s+1))
-        tr = np.zeros((s+1, s+1))
-        bl = np.zeros((s+1, s+1))
-        br = np.zeros((s+1, s+1))
+        prefix = np.empty((s, s+1))
+        suffix = np.empty((s, s+1))
+        tail = np.empty(s+1)
         for sample in range(worker, n, workers):
             backward[:, :] = 1.
             for site in range(length-1, -1, -1):
                 emission = emissions[sample, site]
                 denominator = 0.
+                row[:] = 0.
+                redraw[:] = 0.
+                if site:
+                    rate = rates[site-1]
+                    stay = 1. - rate
+                    for b in range(s):
+                        previous[b] = stay * rows[sample, site-1, b] + rate * pi[b]
+                index = 0
                 for a in range(s):
                     ha = panel[a, site] if a < k else 2
                     for b in range(a, s):
                         hb = panel[b, site] if b < k else 2
-                        weight = priors[sample, site, a, b] * backward[a, b]
+                        weight = priors[sample, site, index] * backward[a, b]
+                        index += 1
                         value = weight * emission[ha, hb]
                         weighted_future = emission[ha, hb] * backward[a, b]
-                        weights[a, b] = weights[b, a] = weight
-                        mass[a, b] = mass[b, a] = value
+                        if full_statistics:
+                            weights[a, b] = weights[b, a] = weight
+                        if full_statistics or site == 0:
+                            mass[a, b] = mass[b, a] = value
                         future[a, b] = future[b, a] = weighted_future
+                        if site:
+                            row[a] += weighted_future * pi[b]
+                            redraw[a] += weighted_future * previous[b]
+                            if b != a:
+                                row[b] += weighted_future * pi[a]
+                                redraw[b] += weighted_future * previous[a]
                         denominator += value if a == b else 2. * value
                 if full_statistics or site == 0:
+                    copies[:] = 0.
                     for a in range(s):
-                        for b in range(s):
-                            posterior[a, b] = mass[a, b] / denominator
+                        for b in range(a, s):
+                            prob = mass[a, b] / denominator
+                            posterior[a, b] = posterior[b, a] = prob
+                            copies[a] += 2. * prob
+                            if b != a:
+                                copies[b] += 2. * prob
                     for a in range(s):
-                        copies = 0.
-                        for b in range(s):
-                            copies += 2. * posterior[a, b]
                         if full_statistics:
-                            occupancy[worker, a, site] += copies
+                            occupancy[worker, a, site] += copies[a]
                         if site == 0:
-                            initial[worker, a] += copies
+                            initial[worker, a] += copies[a]
                 if full_statistics and observed[sample, site]:
-                    _outside_into(mass, tl, tr, bl, br, outside)
+                    _outside_into(mass, prefix, suffix, tail, outside)
                     for a in range(k):
                         ha = panel[a, site]
                         qgain, alt_mass = 0., 0.
@@ -254,16 +265,20 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
                         gains[worker, 1, a, site] += reference._log_ratio(
                             outside[a] + alt_mass, denominator)
                 if site > 0:
-                    rate = rates[site-1]
-                    stay = 1. - rate
-                    for b in range(s):
-                        previous[b] = stay * rows[sample, site-1, b] + rate * pi[b]
+                    total = 0.
                     for a in range(s):
-                        first = 0.
-                        for b in range(s):
-                            first += future[a, b] * previous[b]
-                        destinations[worker, a] += 2. * rate * pi[a] * first / denominator
-                    _backward_into(future, pi, rate, row, backward)
+                        destinations[worker, a] += 2. * rate * pi[a] * redraw[a] / denominator
+                        total += pi[a] * row[a]
+                    maximum = 0.
+                    for a in range(s):
+                        for b in range(a, s):
+                            value = (stay * stay * future[a, b]
+                                     + stay * rate * (row[a] + row[b]) + rate * rate * total)
+                            backward[a, b] = backward[b, a] = value
+                            maximum = max(maximum, value)
+                    if maximum > 0:
+                        backward /= maximum
+
     return gains, occupancy, initial, destinations
 
 
@@ -300,9 +315,8 @@ class _Workspace:
             fitted_prepared = prepare_fit_observations(prepared)
             self.ratios, self.self_ratios = fitted_prepared['fit_ratios'], fitted_prepared['fit_self_ratios']
         n, length, s = len(gl), gl.shape[1], len(panel)+1
-        self.priors = np.empty((n, length, s, s))
+        self.priors = np.empty((n, length, s * (s + 1) // 2))
         self.rows = np.empty((n, length, s))
-        self.cols = np.empty_like(self.rows)
         self.wildcard_mass = wildcard_mass
         self.panel = self.frequencies = self.state_cache = None
         self.state_is_full = False
@@ -314,7 +328,7 @@ class _Workspace:
             return float(self.likelihoods.sum())
         pi = np.r_[(1-self.wildcard_mass) * (frequencies / frequencies.sum()), self.wildcard_mass]
         values = _forward_samples(panel, self.emissions, pi, self.rates,
-            self.priors, self.rows, self.cols, min(len(self.observed), get_num_threads()))
+            self.priors, self.rows, min(len(self.observed), get_num_threads()))
         self.panel, self.frequencies = panel.copy(), frequencies.copy()
         self.pi, self.likelihoods = pi, values
         self.state_cache, self.state_is_full = None, False
@@ -330,7 +344,7 @@ class _Workspace:
             return self.state_cache
         gains, occ, initial, dest = _backward_samples(panel, self.emissions, self.ratios,
             self.self_ratios, self.observed, self.pi, self.rates, self.priors,
-            self.rows, self.cols, full_statistics, min(len(self.observed), get_num_threads()))
+            self.rows, full_statistics, min(len(self.observed), get_num_threads()))
         totals = gains.sum(axis=0)
         self.state_cache = dict(log_likelihood=float(self.likelihoods.sum()),
             sample_log_likelihood=self.likelihoods, state_prior=self.pi,

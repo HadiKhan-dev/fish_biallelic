@@ -141,9 +141,10 @@ Both assignment-only endpoints (preserving a proposed H) and full allele
 refits compete, using the existing synchronized fitter. Final calls use the
 canonical missing-aware fixed-assignment release rule, not the latent seed.
 Scores remain selection-leakage-affected pseudo-scores, not calibrated LOO.
-With ``defer_cavity``, BIC search evaluates cavity only for source endpoints and
-final top-eight diagnostics. Fitting, candidate admission, budgets and ranking
-are unchanged; the legacy default evaluates every admitted mode.
+With ``defer_cavity``, BIC search evaluates cavity only for source endpoints
+that choose the starting panel. Unused bank-diagnostic cavity fields are None,
+not zero or a confidence estimate. Fitting, admission, budgets and ranking are
+unchanged; the ordinary default evaluates every admitted mode.
     """
     settings = CandidateSelectionConfig() if config is None else config
     base = settings.discovery
@@ -273,33 +274,34 @@ are unchanged; the legacy default evaluates every admitted mode.
             budget_bound = True
             break
 
-    # Source endpoint scores were evaluated eagerly because they determine
-    # the rescue scaffold. Evaluate final top-eight bank diagnostics now.
-    # Per-mode cavity scores depend only on that mode and evidence, not the
-    # other modes in its scoring batch; represented-K normalization is unused.
+    # Source endpoints determine the cavity-ranked start and remain fully
+    # scored. BIC-only bank diagnostics do not affect selection or stopping.
+    # With deferral, leave their cavity fields explicitly uncomputed.
     ordered = sorted(scored.values(), key=rank)
-    deferred = [score.mode for score in ordered[:8]
-                if isinstance(score, _BicCandidate)]
-    for score in search._score_stage(
-            likelihood, deferred, score_config, score_workspace, active) if deferred else ():
-        scored[score.mode.canonical_key] = score
-    selected = scored[selected.mode.canonical_key]
-    ordered = [scored[score.mode.canonical_key] for score in ordered]
     cavity_evaluated = [score for score in ordered
                         if not isinstance(score, _BicCandidate)]
+
+    release_cache = {}
 
     def release(score):
         if score is None:
             return None
         mode = score.mode
-        parallel.apply_dynamic_threads()
-        q, support, _, _, calls = haplotypes._materialize_founder_site_pseudo_evidence(
-            likelihood, mode.haplotypes, mode.assignments, observed,
-            base.lambda_wildcard_penalty, base.min_directional_supporters,
-            base.min_hard_call_pseudo_probability)
+        # Several source controls can select the same panel and assignments.
+        # Reuse only the release arrays; each score keeps its own diagnostics.
+        release_key = (mode.canonical_key, mode.assignments.tobytes())
+        if release_key not in release_cache:
+            parallel.apply_dynamic_threads()
+            q, support, _, _, calls = haplotypes._materialize_founder_site_pseudo_evidence(
+                likelihood, mode.haplotypes, mode.assignments, observed,
+                base.lambda_wildcard_penalty, base.min_directional_supporters,
+                base.min_hard_call_pseudo_probability)
+            release_cache[release_key] = q, support, calls
+        q, support, calls = release_cache[release_key]
         return dict(discrete_haps=calls, q=q, support=support,
                     latent_haps=mode.haplotypes, score=float(selection_score(score)),
-                    cavity_score=float(score.log_score), nll=mode.total_nll,
+                    cavity_score=(None if isinstance(score, _BicCandidate)
+                                  else float(score.log_score)), nll=mode.total_nll,
                     assignments=mode.assignments)
 
     released = release(selected)
@@ -311,19 +313,23 @@ are unchanged; the legacy default evaluates every admitted mode.
             bank_size=len(bank), source_sizes=[len(s) for s in starts],
             partial_seed_cells=missing, fitted_starts=len(fitted_starts),
             scored_modes=len(scored), score=float(selection_score(selected)),
-            criterion=settings.criterion, cavity_score=float(selected.log_score),
+            criterion=settings.criterion,
+            cavity_score=(None if isinstance(selected, _BicCandidate)
+                          else float(selected.log_score)),
             selected_k=selected.mode.k, selected_kind=sorted(mode_kinds[selected.mode.canonical_key]),
             n_active_samples=int(active.sum()), search_budget_bound=budget_bound,
             rounds=rounds, n_cavity_nonconverged=sum(
                 score.diagnostic.n_mean_field_not_converged for score in cavity_evaluated),
             n_cavity_evaluated=len(cavity_evaluated),
             n_cavity_deferred=len(scored) - len(cavity_evaluated),
-            cavity_diagnostic_scope=("source_endpoints_and_final_top8_bic"
+            cavity_diagnostic_scope=("source_endpoints_only"
                                      if defer_cavity and settings.criterion == "bic" else "all_admitted_modes"),
-            selected_cavity_nonconverged=selected.diagnostic.n_mean_field_not_converged,
+            selected_cavity_nonconverged=(None if isinstance(selected, _BicCandidate)
+                else selected.diagnostic.n_mean_field_not_converged),
             top_scores=[dict(k=s.mode.k, score=float(selection_score(s)),
-                             cavity_score=float(s.log_score), nll=s.mode.total_nll,
-                             digest=s.mode_digest if hasattr(s, "mode_digest") else s.digest)
+                             cavity_score=(None if isinstance(s, _BicCandidate) else float(s.log_score)),
+                             nll=s.mode.total_nll,
+                             digest=modes._canonicalize_mode(s.mode, s.mode.k).digest)
                         for s in ordered[:8]],
             interpretation=(f"multiple same-K modes; {settings.criterion} selection; "
                             "uncalibrated; no truth/context likelihood")), cavity_controls)

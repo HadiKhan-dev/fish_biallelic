@@ -66,10 +66,19 @@ The local forward/backward implementation exploits exchange symmetry between
 the two homologues, including when founder frequencies are unequal. It still
 sums all ordered-state mass: off-diagonal cells count twice. This is an exact
 property of the current unphased-GL model, not frequency tying or state pruning.
+Predicted trajectories store only the upper triangle, and the two identical
+filtered marginals share one array. Backward reductions are fused; conditional
+flip calculations retain positive noncarrier sums rather than subtracting two
+nearly equal totals. No fastmath, iteration-budget or likelihood change is used.
 Completed searches can be reused across feedback rounds only when the initial
 panel, ordered candidate bank, observations, marker/map coordinates and all
 search/model settings match. Their release calculation is reusable only with
 the same calling thresholds; cached posteriors never become new observations.
+Within one candidate-bank call, identical panels and sample assignments also
+share release calculations. The BIC bank computes cavity scores for its source
+endpoints, where they determine the starting panel, but omits unused top-bank
+cavity diagnostics. Uncomputed fields are `None`, not zero or confidence
+estimates. Explicit cavity selection still scores every admitted mode.
 
 Release combines a conditional one-bit probability (other panel alleles and
 fitted parameters held fixed) with fractional posterior-carrier directional
