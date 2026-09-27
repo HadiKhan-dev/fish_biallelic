@@ -376,9 +376,13 @@ not block discovery or downstream models.
 
 For Python callers, `AssemblyConfig.panel_search_config=PanelSearchConfig(...)`
 selects bounded search. Its controls are `paths_per_endpoint` (default 16),
-`max_sweeps` (20), `full_scores_per_kind` (16), `max_bins` (2000) and
+`max_sweeps` (100), `full_scores_per_kind` (16), `max_bins` (2000) and
 `tensor_budget_mb` (256). These are not one-to-one replacements for broad
-search's controls.
+search's controls. Initial panels from every input anchor compete under the
+same full Viterbi/BIC score. Single and coordinated deletions are proposed
+using conditional reassignment costs, then accepted only after full repainting.
+Search stops early when no tested edit improves the objective; reaching 100
+sweeps is reported as budget-limited, not as convergence.
 
 The `AssemblyConfig` fields `beam_width`, `max_founders`, `top_n_swap`,
 `max_cr_iterations`, `paint_penalty` and `min_hotspot_samples` apply **only to

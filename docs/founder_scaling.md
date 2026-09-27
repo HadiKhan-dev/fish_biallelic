@@ -67,8 +67,10 @@ assembly.
 
 These assembly options do not change the scientific models used by painting,
 pedigree inference, family refinement, phase polishing or map generation. All four assembly levels still share one linker and
-retain the 20-iteration limit, observation masks, source provenance, supported
-component boundaries, and existing dynamic CPU allocation. Downstream stages
+retain the 20-iteration transition-fit limit, observation masks, source provenance,
+supported component boundaries, and existing dynamic CPU allocation. Bounded
+panel selection now allows up to 100 sweeps, compares anchor-based initial
+panels, and fully rescores both single and coordinated pruning proposals. Downstream stages
 can nevertheless change when their input haplotypes change.
 
 ## Algorithm and complexity
@@ -85,7 +87,7 @@ not claims that sample count, chromosome length, iterations, or I/O are free.
 | Default dense macro inference | Arbitrary dense learned transitions; full diploid posterior | O(I N K³) per boundary |
 | Optional structured macro inference | Sparse specific edges plus a shared positive background; full diploid posterior | O(I N K² log K) per boundary |
 | Bounded-search candidate paths | Fixed endpoint quota; archive interior-state paths; no MMR all-selected comparisons | O(K² log K) for fixed B/quota |
-| Bounded panel selection | Conditional, no-switch and candidate/mate-HMM proposal scores; bounded full Viterbi/BIC refits | O(R (N m K² + B K² log K)) for an O(K) candidate pool |
+| Bounded panel selection | Conditional, no-switch and candidate/mate-HMM proposal scores; bounded full Viterbi/BIC refits | O(B N m K² + R (N m K² + B K² log K)) for an O(K) candidate pool |
 | Cavity carrier probabilities | Sum each pair-state mass at its one/two founder endpoints | O(N K²), replacing an O(N K³) dense incidence product |
 | Final all-founder dual escape | Exact shared-background scans; candidate-specific states only contain the focal founder | O(R D N M [K³(s+1) + C K(K+s)]), plus full-site scoring |
 | Count deletion/refit | All K deletions get cheap conditional repairs; only the best repaired panel gets a deep refit | O(J N L (K³+K A)) repairs, one deep search, and O(N L A³) bound |

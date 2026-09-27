@@ -6,7 +6,17 @@ from numba.typed import List
 @njit(cache=True, parallel=True, fastmath=True, nogil=True)
 def score_emissions(emissions, local_indices, penalty, samples):
     k = local_indices.shape[1]
-    pairs = k * k
+    # Unphased emissions and a uniform off-diagonal switch penalty are
+    # exchange-symmetric. Max scores need one copy of each unordered state;
+    # traceback remains unchanged in the separate painting kernel.
+    pairs = k * (k + 1) // 2
+    first = np.empty(pairs, np.int64)
+    second = np.empty(pairs, np.int64)
+    index = 0
+    for a in range(k):
+        for b in range(a, k):
+            first[index], second[index] = a, b
+            index += 1
     result = np.empty(samples, dtype=np.float64)
     for sample in prange(samples):
         scores = np.empty(pairs, dtype=np.float64)
@@ -16,8 +26,8 @@ def score_emissions(emissions, local_indices, penalty, samples):
             for marker in range(values.shape[3]):
                 if not initialized:
                     for pair in range(pairs):
-                        scores[pair] = values[sample, local_indices[block, pair // k],
-                                              local_indices[block, pair % k], marker]
+                        scores[pair] = values[sample, local_indices[block, first[pair]],
+                                              local_indices[block, second[pair]], marker]
                     initialized = True
                     continue
                 best = -np.inf
@@ -26,8 +36,8 @@ def score_emissions(emissions, local_indices, penalty, samples):
                         best = scores[pair]
                 switch_base = best - penalty
                 for pair in range(pairs):
-                    emission = values[sample, local_indices[block, pair // k],
-                                      local_indices[block, pair % k], marker]
+                    emission = values[sample, local_indices[block, first[pair]],
+                                      local_indices[block, second[pair]], marker]
                     stay = scores[pair]
                     if stay > switch_base:
                         scores[pair] = stay + emission

@@ -11,6 +11,35 @@ multiply their speedups or add them into a fresh end-to-end runtime. First-use
 compilation, shared-filesystem I/O, founder ambiguity and chromosome length
 matter. Configured threads are not a measure of sustained CPU utilization.
 
+## Local feedback and assembly — 27 September 2026
+
+A matched seed8001 chr1 comparison (N=320, calibrated 5×, dense/bounded
+assembly, 48 Icelake CPUs) reduced both feedback rounds plus final L1–L4 and
+progressive refinement from **1,071.03 to 628.48 seconds**: **41.3% less wall
+time**. The baseline reused its initial local-fit checkpoint, so this comparison
+excludes that step. Fresh initial fitting took another 225.69 seconds; the
+optimized path from discovered blocks took **854.17 seconds (14m14s)** in total.
+Raw checkpoint loading and subsequent truth evaluation are outside these timers.
+These are individual runs, not a guaranteed speedup or a 76-core measurement.
+
+The optimized reconstruction had identical ordered allele arrays: six
+chromosome-length rows, 1,976,346 called alleles, zero missing and 38 allele
+errors. A saved TroMau chr1 first-L3 control also retained identical paths,
+likelihood and BIC. Focused fixtures covered missing observations, unequal
+founder frequencies, map intervals and thread counts; no new genome-wide
+downstream validation was run.
+
+The implementation reuses exact-input local searches and their release results,
+uses homologue symmetry without discarding probability mass, deduplicates local
+birth scoring and computes hard-call dosage emissions once per sample/site.
+Search budgets, calling rules and the 100-sweep panel-search limit are unchanged.
+The final benchmark step averaged about 38.7 busy cores out of 48, with 37.3 GiB
+peak RSS; I/O, startup and straggler tails prevent continuous full occupancy.
+
+Reference source, focused checks and isolated checkpoints remain locally in
+`work/runs/real_crosses_20260926_10815bb/qc/assembly_speed_20260927/`.
+See [the model and checkpoint rules](methods.md).
+
 ## Observation fitting and count-up screening — 25 September 2026
 
 These are matched cached-input comparisons on one 112-core Sapphire Rapids

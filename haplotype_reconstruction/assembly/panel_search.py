@@ -28,7 +28,7 @@ from ..discovery.objectives import compute_outer_bic_from_log_likelihood
 @dataclass(frozen=True)
 class PanelSearchConfig:
     paths_per_endpoint: int = 16
-    max_sweeps: int = 20
+    max_sweeps: int = 100
     full_scores_per_kind: int = 16
     max_bins: int = 2000
     tensor_budget_mb: int = 256
@@ -349,22 +349,38 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         evaluations += 1
         return evaluate_panel(keys(paths), sub, pen, samples, num_threads=num_threads,
             tensor_budget_mb=config.tensor_budget_mb, per_sample=True)
-    # Cover each discovered state at the most diverse input block. Low-score
-    # paths remain candidates; they do not become released founders by quota.
-    anchor = max(range(blocks), key=lambda b: len(batch_blocks[b].haplotypes))
-    seen = set()
-    selected = []
-    for path in candidates:
-        if path[anchor] not in seen:
-            selected.append(path)
-            seen.add(path[anchor])
-    baseline_scores = score(selected)
-    likelihood = float(baseline_scores.sum())
-    bic = compute_outer_bic_from_log_likelihood(len(selected), likelihood, cc)
+    # Compare anchor-covering starts using the same full acceptance objective.
+    # A diverse input block can still poorly represent variation elsewhere.
+    initialization = []
+    initial_panels = set()
+    selected = None
+    for anchor in range(blocks):
+        seen = set()
+        trial = []
+        for path in candidates:
+            if path[anchor] not in seen:
+                trial.append(path)
+                seen.add(path[anchor])
+        signature = tuple(sorted(trial))
+        if signature in initial_panels:
+            continue
+        initial_panels.add(signature)
+        trial_scores = score(trial)
+        trial_ll = float(trial_scores.sum())
+        trial_bic = compute_outer_bic_from_log_likelihood(len(trial), trial_ll, cc)
+        initialization.append(dict(anchor=anchor, panel_size=len(trial), bic=float(trial_bic)))
+        if selected is None or trial_bic < bic - 1e-8:
+            selected, baseline_scores, likelihood, bic = trial, trial_scores, trial_ll, trial_bic
+            selected_anchor = anchor
     bin_offsets = np.r_[0, np.cumsum([item['n_bins'] for item in sub])]
     candidate_array = np.asarray(candidates, dtype=np.int64)
     candidate_workspace = prepare_candidate_scores(sub, candidate_array)
     static_totals = [item['bin_emissions'].sum(axis=3) for item in sub]
+    # Local birth gains depend on a candidate's row in this block, not its
+    # other chromosome segments. Score each distinct row once and scatter
+    # back in the original candidate order; all ranks remain unchanged.
+    birth_rows = [np.unique(candidate_array[:, b], return_inverse=True)
+                  for b in range(blocks)]
     capacity = len(candidates)
     for sweep in range(config.max_sweeps):
         kernels._resolve_threads(num_threads)
@@ -380,10 +396,12 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             unary, pair = conditional_fields(em['bin_emissions'], painting, local[:, b], k)
             fields.append(unary)
             corrections.append(pair)
-            birth += birth_scores(em['bin_emissions'], painting, local[:, b], candidate_array[:, b], k)
+            unique_rows, inverse = birth_rows[b]
+            birth += birth_scores(
+                em['bin_emissions'], painting, local[:, b], unique_rows, k)[inverse]
         selected_set = set(selected)
         proposals = {
-            kind: [] for kind in ('replace', 'static_replace', 'novel_replace', 'novel_birth', 'local', 'onesided', 'merge', 'splice', 'cycle', 'switch_splice', 'switch_cycle', 'death', 'birth')
+            kind: [] for kind in ('replace', 'static_replace', 'novel_replace', 'novel_birth', 'local', 'onesided', 'merge', 'splice', 'cycle', 'switch_splice', 'switch_cycle', 'death', 'batch_death', 'birth')
         }
         candidate_scores = continuous_candidate_scores(sub, local, candidate_array, pen,
             workspace=candidate_workspace)
@@ -452,8 +470,31 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
                 proposals['cycle'].append((float(gain), ('cycle', boundary, tuple(map(int, permutation)))))
         occupancy = np.bincount((painted // k).ravel(), minlength=k) + np.bincount((painted % k).ravel(), minlength=k)
         if k > 1:
-            for founder in np.argsort(occupancy, kind='stable')[:config.full_scores_per_kind]:
-                proposals['death'].append((-float(occupancy[founder]), ('death', (int(founder),))))
+            # Prefer the cheapest whole-path reassignment under this painting.
+            # Rare paths can be indispensable; common duplicates dispensable.
+            # Homozygous states replace both copies in conditional_fields.
+            # These are proposal ranks, never final deletion acceptance scores.
+            reassignment = np.zeros((k, k))
+            for b in range(blocks):
+                reassignment += fields[b][:, local[:, b]]
+            np.fill_diagonal(reassignment, -np.inf)
+            deletion_gain = np.max(reassignment, axis=1)
+            order = np.argsort(-deletion_gain, kind='stable')
+            for founder in order[:config.full_scores_per_kind]:
+                proposals['death'].append((float(deletion_gain[founder]), ('death', (int(founder),))))
+            # Balance batch births with nested reductions. Joint losses are
+            # NOT additive: both members of a painted pair can disappear.
+            # Every proposed subset is fully repainted below, including unused
+            # paths. No target founder count or occupancy threshold is imposed.
+            sizes = list(range(2, min(k, config.full_scores_per_kind + 2)))
+            if k - 1 > config.full_scores_per_kind + 1:
+                sizes = sorted(set(sizes[:config.full_scores_per_kind // 2] +
+                    np.linspace(2, k - 1, max(1, config.full_scores_per_kind // 2),
+                                dtype=int).tolist() + [k - 1]))
+            for count in sizes:
+                removed = tuple(map(int, order[:count]))
+                gain = float(2 * deletion_gain[order[:count]].sum() + cc * count)
+                proposals['batch_death'].append((gain, ('death', removed)))
             absent = tuple(map(int, np.flatnonzero(occupancy == 0)))
             if absent and len(absent) < k:
                 proposals['death'].append((1., ('death', absent)))
@@ -515,6 +556,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         bic, likelihood, selected, _, _, baseline_scores = best
     if diagnostics is not None:
         diagnostics.append(dict(total_full_scores=evaluations, final_panel_size=len(selected),
-            full_score_bound=1 + 13 * config.full_scores_per_kind * config.max_sweeps,
+            initialization=initialization, selected_initial_anchor=selected_anchor,
+            full_score_bound=blocks + 14 * config.full_scores_per_kind * config.max_sweeps,
             iteration_budget_reached=bool(sweep + 1 == config.max_sweeps and best is not None)))
     return [(list(path), float(likelihood)) for path in selected]

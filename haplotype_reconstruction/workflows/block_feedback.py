@@ -9,10 +9,12 @@ from ..core.run_record import timed_stage
 from dataclasses import asdict, dataclass, field, replace
 import gc
 import hashlib
+import json
 
 from haplotype_reconstruction import PACKAGE_ROOT
 from haplotype_reconstruction.assembly import pipeline as assembly
-from haplotype_reconstruction.assembly.checkpoints import AssemblyCheckpointStore
+from haplotype_reconstruction.assembly.checkpoints import (
+    AssemblyCheckpointStore, AssemblyWorkCheckpoint, ASSEMBLY_RELEASE_CHECKPOINT_SCHEMA)
 from haplotype_reconstruction.assembly.founder_refinement import FounderRefinementConfig
 from haplotype_reconstruction.core import environment, parallel, runtime
 from haplotype_reconstruction.core.config import PathSelectionConfig
@@ -58,6 +60,59 @@ def scientific_identity(config):
         local_search=asdict(CandidateSelectionConfig(criterion="bic")),
         code={str(path.relative_to(PACKAGE_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
               for path in files})
+
+
+
+def _initial_path_identity(record):
+    """Identity of the local fit, excluding later assembly search choices.
+
+    Version this schema when initial-fit orchestration changes mathematically.
+    Numerical/local-model dependencies remain content-tracked. Projecting the
+    older encompassing identity permits reuse of unchanged initial fits and
+    per-block checkpoints without relabelling downstream assembly as current.
+    """
+    if record.get("schema") == "initial-local-path-fit-v1":
+        return record
+    if (record.get("selection") != "path" or record.get("feedback_level") != 0
+            or record.get("segment_exchange") is not False):
+        raise ValueError("Only the initial path fit has assembly-independent identity")
+    source = record["source"]
+    hierarchy = source["config"]["scientific_hierarchy"]
+    return dict(schema="initial-local-path-fit-v1",
+        path_search=record["config"]["path_search"],
+        local_search=record["local_search"],
+        model=dict(generations=hierarchy["n_generations"],
+                   recombination_rate_per_bp=hierarchy["recombination_rate"],
+                   wildcard_mass=record["config"]["background_mass"],
+                   genetic_map=source.get("genetic_map")),
+        discovery_identity=source["discovery_identity"],
+        ordered_sample_ids=source["ordered_sample_ids"],
+        input_block_sha256=source["input_block_sha256"],
+        input_array_sha256=source["input_array_sha256"],
+        original_latent_sha256=record["original_latent_sha256"],
+        code={name: digest for name, digest in record["code"].items()
+              if name != "workflows/block_feedback.py"})
+
+
+class _InitialPathCheckpointStore(AssemblyCheckpointStore):
+    """Read unchanged initial fits across a downstream-only linker update."""
+
+    def bind(self, identity):
+        super().bind(_initial_path_identity(identity))
+
+    def load(self, phase):
+        artifact = self._artifact(phase)
+        if not self.checkpoint_store.contig_done(self.work_stage, artifact):
+            return None
+        saved = self.checkpoint_store.load_contig(self.work_stage, artifact)
+        if (not isinstance(saved, AssemblyWorkCheckpoint)
+                or saved.schema != ASSEMBLY_RELEASE_CHECKPOINT_SCHEMA
+                or saved.phase != phase):
+            raise ValueError("Unrecognized initial-fit work checkpoint")
+        projected = _initial_path_identity(json.loads(saved.identity_json))
+        if projected != json.loads(self._identity_json):
+            raise RuntimeError("Initial-fit scientific identity mismatch")
+        return saved.payload
 
 
 def _discovery_config(record):
@@ -206,7 +261,8 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
         stage = "feedback_path_initial" if level == 0 else f"feedback_path_l{level}"
         pass_identity = dict(identity, selection="path", feedback_level=level,
                              segment_exchange=False)
-        selection_io = AssemblyCheckpointStore(local_store, work_stage=stage, contig=contig)
+        checkpoint_type = _InitialPathCheckpointStore if level == 0 else AssemblyCheckpointStore
+        selection_io = checkpoint_type(local_store, work_stage=stage, contig=contig)
         selection_io.bind(pass_identity)
         saved = selection_io.load("selected")
         if saved is not None:

@@ -3,8 +3,10 @@
 Defaults allow three outer rounds and eight full refits per proposal kind.
 Reuse is keyed by the complete binary panel AND its frequency vector: equal
 alleles with different starts must still compete. Prepared observations and
-memoized fits live only for this one block search.
+memoized fits live within one block search. A completed deterministic search
+can also be reused across feedback rounds when all its inputs match exactly.
 """
+import hashlib
 import numpy as np
 from haplotype_reconstruction.core import parallel
 from . import path_scoring as scoring, path_fitting as fitting
@@ -97,16 +99,43 @@ def proposals(fit, bank):
             yield 'add', p, q
 
 
+def _search_input_key(start, bank, gl, observed, positions, options):
+    """Exact deterministic-search inputs; reuse only within compatible fits.
+
+    Input data are included because a retained fit can cross feedback rounds
+    through a checkpoint. This is a cache key, not a likelihood or confidence
+    test. Candidate order, all search budgets and copying-model settings matter.
+    """
+    digest = hashlib.sha256(b'normalized-local-search-reuse-v1')
+    for array in (start, bank, gl, observed, positions, options.pop('interval_morgans')):
+        if array is None:
+            digest.update(b'None')
+            continue
+        value = np.ascontiguousarray(array)
+        digest.update(str((value.shape, value.dtype.str)).encode())
+        digest.update(memoryview(value).cast('B'))
+    digest.update(repr(sorted(options.items())).encode())
+    return digest.hexdigest()
+
 
 def search_panel(start, bank, gl, observed, positions, *, generations,
                  learn_frequencies, max_updates=20, rounds=3, refits_per_kind=8,
-                 initial_fit=None, bulk=False, prepared=None,
+                 initial_fit=None, bulk=False, prepared=None, previous_search=None,
                  recombination_rate_per_bp=5e-8, interval_morgans=None,
                  wildcard_mass=.01):
     assert not bulk, 'This optimized route preserves the ordinary-neighbour search only'
     model_options = dict(generations=generations,
         recombination_rate_per_bp=recombination_rate_per_bp,
         interval_morgans=interval_morgans, wildcard_mass=wildcard_mass)
+    input_key = (None if initial_fit is not None else _search_input_key(
+        start, bank, gl, observed, positions,
+        dict(model_options, learn_frequencies=learn_frequencies,
+             max_updates=max_updates, rounds=rounds, refits_per_kind=refits_per_kind)))
+    if (input_key is not None and previous_search is not None
+            and previous_search.get('search_input_key') == input_key):
+        return dict(previous_search, computational_work=dict(
+            score_calls=0, score_cache_hits=0, fit_calls=0, fit_cache_hits=0,
+            reused_previous_search=True))
     if prepared is None:
         prepared = scoring.prepare_observations(gl, observed, positions, **model_options)
     prepared = fitting.prepare_fit_observations(prepared)
@@ -168,7 +197,7 @@ def search_panel(start, bank, gl, observed, positions, *, generations,
             break
         fit = best
     return dict(fit, search_trace=trace, search_method='reference_neighbours',
-                computational_work=work)
+                computational_work=work, search_input_key=input_key)
 
 
 def release_and_wildcard(fit, gl, observed, positions, config, generations, *,

@@ -514,71 +514,36 @@ def _viterbi_traceback(tensor, penalty):
 def _compute_bin_emissions_numba(
         block_samples, hap_q, n_haps, n_bins, snps_per_bin, n_sites,
         complete_sites=None):
-    """Binned diploid emissions from jointly complete founder sites.
+    """Hard-call counterpart of the partial-founder emission kernel.
 
-    ``complete_sites`` is candidate-independent: false sites retain their bin
-    geometry but contribute zero to every state. On true sites ``hap_q`` must
-    contain hard calls. The robust observation mixture and ``-2`` log floor
-    match the established one-hot kernel. A state-independent ``log(1/3)``
-    offset is removed, and uniform/absent GL rows are assigned zero directly.
-    Omitting the mask applies the same model to every site.
+    The caller supplies only q=0/1 at retained sites. Three genotype dosage
+    likelihoods therefore cover all pairs; compute their robust/floored logs
+    once per sample/site. Symmetric pair updates retain the exact accumulation
+    order and the original missing/uniform-site neutrality.
     """
-    num_samples = block_samples.shape[0]
-    bin_emissions = np.zeros(
-        (num_samples, n_haps, n_haps, n_bins), dtype=np.float64
-    )
-    uniform_log = math.log(1.0 / 3.0)
-
-    for sample in prange(num_samples):
+    result = np.zeros((len(block_samples), n_haps, n_haps, n_bins), np.float64)
+    center = math.log(1.0 / 3.0)
+    for sample in prange(len(block_samples)):
+        logs = np.empty(3, np.float64)
         for site in range(n_sites):
             if complete_sites is not None and not complete_sites[site]:
                 continue
-            evidence0 = block_samples[sample, site, 0]
-            evidence1 = block_samples[sample, site, 1]
-            evidence2 = block_samples[sample, site, 2]
-            total = evidence0 + evidence1 + evidence2
-            is_uniform = (
-                total <= 0.0
-                or (evidence0 == evidence1 and evidence1 == evidence2)
-            )
-            if not is_uniform:
-                evidence0 /= total
-                evidence1 /= total
-                evidence2 /= total
-
-            bin_index = site // snps_per_bin
+            a, b, c = block_samples[sample, site]
+            total = a + b + c
+            if total <= 0.0 or (a == b and b == c):
+                continue
+            for dosage in range(3):
+                evidence = block_samples[sample, site, dosage] / total
+                robust = evidence * .99 + .01 / 3.0
+                logs[dosage] = max(math.log(max(robust, 1e-300)), -2.0) - center
             for first in range(n_haps):
-                q_first = hap_q[first, site]
-                for second in range(n_haps):
-                    if is_uniform:
-                        log_likelihood = 0.0
-                    else:
-                        q_second = hap_q[second, site]
-                        if first == second:
-                            p0 = 1.0 - q_first
-                            p1 = 0.0
-                            p2 = q_first
-                        else:
-                            p0 = (1.0 - q_first) * (1.0 - q_second)
-                            p1 = (
-                                q_first * (1.0 - q_second)
-                                + (1.0 - q_first) * q_second
-                            )
-                            p2 = q_first * q_second
-                        likelihood = (
-                            evidence0 * p0 + evidence1 * p1 + evidence2 * p2
-                        )
-                        robust = likelihood * 0.99 + 0.01 / 3.0
-                        if robust < 1e-300:
-                            robust = 1e-300
-                        log_likelihood = math.log(robust)
-                        if log_likelihood < -2.0:
-                            log_likelihood = -2.0
-                        log_likelihood -= uniform_log
-                    bin_emissions[
-                        sample, first, second, bin_index
-                    ] += log_likelihood
-    return bin_emissions
+                allele = int(hap_q[first, site])
+                for second in range(first, n_haps):
+                    value = logs[allele + int(hap_q[second, site])]
+                    result[sample, first, second, site // snps_per_bin] += value
+                    if first != second:
+                        result[sample, second, first, site // snps_per_bin] += value
+    return result
 
 
 @njit(parallel=True, fastmath=True)

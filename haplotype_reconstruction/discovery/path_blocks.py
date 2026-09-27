@@ -72,7 +72,8 @@ def worker(task):
             start, bank, bank_diagnostic = path_selection.prepare_candidate_bank(
                 gl, observed, latent, proposals, config, incumbent=incumbent)
             attempted = path_selection.search_panel(start, bank, gl, observed, positions,
-                learn_frequencies=True, prepared=prepared, **search, **model)
+                learn_frequencies=True, prepared=prepared, previous_search=incumbent,
+                **search, **model)
             retained = incumbent is not None and incumbent['objective'] > attempted['objective'] + 1e-6
             fit = incumbent if retained else attempted
             diagnostic = dict(incumbent_retained=bool(retained),
@@ -83,8 +84,25 @@ def worker(task):
             from .path_exchange import exchange_panel
             fit, diagnostic = exchange_panel(incumbent, gl, observed, positions,
                 prepared=prepared, max_updates=search['max_updates'], **model)
-        release, wildcard = path_selection.release_and_wildcard(
-            fit, gl, observed, positions, config.discovery, **model)
+        # Reusing a deterministic search also permits reuse of its release
+        # calculation when the calling rule is unchanged. These cached
+        # posteriors are outputs only, never additional read observations.
+        release_rule = (config.discovery.score_tolerance,
+                        config.discovery.min_hard_call_pseudo_probability,
+                        config.discovery.min_directional_supporters)
+        saved_release = fit.get('release_result')
+        reused_search = (operation == 'select' and
+            diagnostic.get('computational_work', {}).get('reused_previous_search', False))
+        reuse_release = (reused_search and saved_release is not None
+                         and saved_release['rule'] == release_rule)
+        if reuse_release:
+            release, wildcard = saved_release['release'], saved_release['wildcard']
+        else:
+            release, wildcard = path_selection.release_and_wildcard(
+                fit, gl, observed, positions, config.discovery, **model)
+        fit = dict(fit, release_result=dict(
+            rule=release_rule, release=release, wildcard=wildcard))
+        diagnostic['release_reused'] = bool(reuse_release)
         diagnostic.update(k=len(fit['panel']), objective=fit['objective'],
             fixed_k_converged=fit['converged'], update_budget_reached=fit['update_budget_reached'],
             unknown_copy_fraction=release['unknown_copy_mass']/release['total_copy_mass'],

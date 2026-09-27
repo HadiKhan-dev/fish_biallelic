@@ -53,30 +53,28 @@ def _scores(alleles, pi, rates, emissions, workers):
         worker = np.int64(worker_index)
         filtered = np.empty((s, s))
         updated = np.empty((s, s))
-        row, col = np.empty(s), np.empty(s)
+        row = np.empty(s)
         for sample in range(worker, n, workers):
             ll = 0.
             for site in range(length):
                 if site:
                     row[:] = 0.
-                    col[:] = 0.
                     for a in range(s):
                         for b in range(s):
                             row[a] += filtered[a, b]
-                            col[b] += filtered[a, b]
                 rate = rates[site-1] if site else 0.
                 stay = 1. - rate
                 scale = 0.
                 for a in range(s):
                     ha = alleles[site, a]
-                    for b in range(s):
+                    for b in range(a, s):
                         hb = alleles[site, b]
                         prior = (stay * stay * filtered[a, b]
-                            + stay * rate * (row[a] * pi[b] + pi[a] * col[b])
+                            + stay * rate * (row[a] * pi[b] + pi[a] * row[b])
                             + rate * rate * pi[a] * pi[b]) if site else pi[a] * pi[b]
                         value = prior * emissions[sample, site, ha, hb]
-                        updated[a, b] = value
-                        scale += value
+                        updated[a, b] = updated[b, a] = value
+                        scale += value if a == b else 2. * value
                 if scale <= 0:
                     ll = -np.inf
                     break

@@ -4,6 +4,153 @@ Instructions for AI coding agents and orchestrators working in this repository.
 
 Read this file before inspecting, modifying, or executing the project. This is the canonical shared repository guidance across coding tools; tool-specific adapters may import or supplement it but must not contradict it. Follow the current repository code, data documentation, and explicit user instructions when they conflict with assumptions here.
 
+## Standing authorization for HPC allocation management
+
+The user delegates efficient CSD3 allocation management to Codex, Claude, and
+other agents working on authorized project tasks. This is standing approval to
+inspect resources and balances, submit allocations, run work within them, and
+resize, release, cancel, or replace the allocations managed for those tasks.
+Do not ask for approval for each allocation or service-level fallback covered
+below. This includes SL2-CPU spending when the cheaper permitted options are
+unsuitable for the authorized work. It does not authorize unrelated scientific
+work, a full pipeline run that was not requested, or changes to unrelated jobs.
+
+### Protect the allocation hosting Codex
+
+**Never release or cancel the allocation on which Codex or its remote runner
+is running.** Do not shorten its walltime, resize away its host resources, or
+attach an automatic cleanup timer that could terminate it. This prohibition
+applies to every agent, including Claude, and overrides completion cleanup,
+resource-cost optimization, and the two-hour inactivity rule below.
+
+Before releasing an allocation, identify and record the protected hosting job
+using the runner host, Slurm job/cgroup information, and the user's job list.
+An unset `SLURM_JOB_ID` does not prove the runner is outside an allocation.
+If ownership of the runner host is uncertain, leave any potentially hosting
+allocation untouched until it is identified. Its existing scheduler expiry
+still applies; this rule does not authorize extending it or changing the
+runner setup.
+
+### Account and partition selection
+
+- Reuse suitable available resources in an allocation already assigned to the
+  task before requesting more. Coordinate with other tasks sharing it.
+- Prefer suitable available GPU-partition capacity using **SL3-GPU only** over
+  a new CPU-partition allocation. The user wants to use the otherwise wasted
+  GPU allowance, including its allocated host CPUs for CPU work where site
+  rules permit. Do not require a GPU port of the scientific code to consider
+  this option. Never use SL2-GPU or another GPU service level.
+- For CPU partitions, always consider the cheapest permitted service level
+  first: **SL4-CPU -> SL3-CPU -> SL2-CPU**. Use the actual accessible project
+  accounts (normally DURBIN-SL4-CPU, DURBIN-SL3-CPU, DURBIN-SL2-CPU, and
+  DURBIN-SL3-GPU); verify their availability rather than assuming access.
+- Fall back autonomously when limits, balances, queue conditions, memory,
+  runtime, or hardware/software compatibility make the preferred option
+  unsuitable. Record why the cheaper option was skipped. Do not wait
+  indefinitely or submit duplicate live allocations just to try every tier.
+- Optimize useful progress per credit and elapsed time. Avoid unnecessary
+  paid CPU time and idle GPU reservations; SL4 preference is not a reason to
+  choose a window too short to finish or checkpoint useful work.
+
+### Resource selection and aggregate limits
+
+Before submission, inspect the user's existing jobs, `hpcstat` or `sinfo`,
+relevant `scontrol` partition/job/QoS records, and balances such as `mybalance`
+when available. Include memory-driven extra CPU allocations and CPU/GPU ratios
+in the estimate. Idle nodes alone do not prove that a request can start.
+`GrpTRESRunMins` is a shared cores-times-remaining-walltime limit; its displayed
+usage is periodically refreshed. Read current limits rather than hardcoding
+an observed amount of free SL4 capacity or treating it as a personal quota.
+
+- **Never exceed 448 allocated CPUs at once across SL3-CPU and SL2-CPU
+  combined. SL4-CPU allocations do not count toward this cap.** Sum all of
+  this user's SL3/SL2 CPU accounts, allocations, and agent tasks, including
+  manually started jobs, retained idle allocations, and the protected Codex
+  hosting allocation if it uses SL3-CPU or SL2-CPU. This user-imposed cap is
+  aggregate, not a separate allowance for each tier, job, or partition.
+- Include pending SL3/SL2 CPU requests that could start together when checking
+  that cap; coordinate concurrent agents' submissions so they cannot overbook
+  it. Use actual allocated/requested CPU counts, including extra CPUs required
+  for memory. At the cap, reuse assigned capacity or defer new SL3/SL2 CPU
+  allocations; SL4 work may still be requested. Do not cancel unrelated jobs
+  or the protected hosting allocation to make room.
+- **SL4-CPU has no additional user-imposed core-count cap.** Size SL4 workers
+  for useful authorized work independently of the 448-core SL3/SL2 allowance.
+  This does not make SL4 unlimited: obey current Slurm account, association,
+  QoS, partition, resource, and walltime limits, including the shared
+  `GrpTRESRunMins` budget. Verify these live rather than assuming that the
+  absence of a per-user CPU limit guarantees admission. The existing rules
+  for efficient use, allocation ownership, and cleanup still apply to SL4.
+- Host CPUs allocated through GPU partitions are also outside the combined
+  SL3/SL2 CPU cap, but must fit the actual GPU allocation and all current
+  site/account CPU, memory, GPU-count, and runtime limits. Do not infer usable host CPUs
+  from the physical node size or assume every GPU allocation grants a node.
+- **Poll `squeue` no more often than about once every two minutes (120
+  seconds).** This applies to agent-issued checks and monitoring scripts, not
+  just explicit polling loops. Query all relevant jobs together and reuse the
+  timestamped result between checks; do not issue separate polls per job or
+  output format. Coordinate tasks sharing allocations so they can reuse a
+  recent queue snapshot rather than each polling independently.
+- Two minutes is a minimum polling interval, not a requirement to poll that
+  often. Prefer slower or event-driven checks when no scheduling decision is
+  needed. Do not substitute repeated `sacct`, `scontrol`, or other Slurm
+  status calls merely to obtain the same queue state more frequently.
+- Use focused job/accounting/resource checks at useful decision points and
+  batch them where possible. Do not tightly poll Slurm, repeatedly submit
+  probes, or churn queued jobs merely because a resource snapshot changes.
+
+### Allocation reuse and execution
+
+For a long sequence of tests or development runs, obtain one appropriately
+sized, sufficiently long allocation and run the sequence within it instead of
+requesting a fresh allocation for every test. Estimate the whole sequence's
+runtime and memory, allow practical headroom, and use checkpoint/resume when
+needed. Keep process-by-thread use within verified affinity; the existing
+pre-run audit and scientific validation requirements still apply.
+
+Record each managed job's ID, account, resources, purpose, ownership/sharing,
+and expiry so another agent can reuse or release it without guessing. An
+allocation being available does not move the agent's shell there: route work
+explicitly through `srun --jobid=...` or the supported allocated-node session.
+Keep the runner's lifetime separate from worker allocations where the existing
+setup permits. Preserve the allocation hosting Codex under the protection
+rule above; a written handoff is not permission to release it.
+Do not change the runner setup or sandbox merely to acquire resources.
+
+### Release, overload retention, and two-hour inactivity limit
+
+These cleanup and retention rules apply only to worker allocations that do
+not host Codex or its remote runner. The protected hosting allocation must
+never be selected for release or automatic inactivity cleanup.
+
+- Release managed allocations promptly when the authorized work is done, and
+  cancel pending requests that are no longer needed.
+- Exception: retain a useful allocation temporarily if current scheduler
+  evidence shows substantially worse contention and obtaining a replacement
+  soon would be difficult. Record the evidence, expected reuse, cost, job ID,
+  and release deadline. Do not hold resources merely because they were hard
+  to acquire earlier, and reassess retention when work or user input resumes.
+- An idle allocation retained while awaiting the user must be released after
+  **two hours without user input** in the task using it, or at its existing
+  expiry if sooner. If two hours have already elapsed when useful work ends,
+  release it immediately. Agent messages, polling, and automated heartbeats
+  do not reset this clock. Coordinate genuinely shared allocations with their
+  other active tasks rather than terminating someone else's work.
+- This timeout applies to idle retention, not authorized computations still
+  making useful progress. Long tests may continue without user messages;
+  release their resources at completion if the inactivity deadline has passed.
+- Before leaving an idle allocation running, arrange and verify cleanup that
+  survives the agent ending its turn or disconnecting. Use a scheduler-enforced
+  expiry or a durable job-specific timer, not a promise to check later. A
+  reduced Slurm TimeLimit is measured from job start: set total elapsed time
+  plus the allowed remaining retention time, not simply TimeLimit=02:00:00.
+  Do not assume an unprivileged user can extend a running job again afterward.
+- If a durable timer is used, bind it to the recorded managed job and replace
+  or disarm it before resuming useful work; new user input can refresh idle
+  retention only within the existing allocation and site limits. If reliable
+  cleanup cannot be arranged, release the idle allocation before ending the
+  turn. Do not rely on an unattended agent to enforce the deadline.
+
 ## Mission and priority order
 
 This is biologically, mathematically, and computationally demanding scientific
@@ -472,9 +619,11 @@ Do not infer the allocation from physical node size, `/proc/cpuinfo`, or `nproc 
 - Use only allocated resources. Do not reserve dedicated CPUs for the agent,
   operating system, filesystem, or orchestration.
 - Use reviewed `srun` commands where required and reviewed `sbatch` scripts for long or production work.
-- Do not submit, cancel, reprioritize, or modify Slurm jobs without explicit approval.
+- Manage task allocations under the standing authorization above; do not
+  modify unrelated jobs or bypass site scheduling policy.
 - Do not launch the full pipeline unless explicitly requested.
-- Do not run repeated polling loops against Slurm.
+- Avoid tight or repeated polling loops against Slurm; use the bounded
+  allocation-management checks described above.
 
 ### Performance policy
 
@@ -812,9 +961,11 @@ Show or summarize the relevant diff. Do not stage generated data, checkpoints, l
 
 Explain non-trivial commands before running them. Require explicit approval
 before installing or upgrading software, changing Git history, overwriting
-accepted results, modifying the Conda environment, submitting or cancelling
-Slurm jobs, or launching a full pipeline when the current user request has not
-already authorized that action.
+accepted results, modifying the Conda environment, or launching a full pipeline
+when the current user request has not already authorized that action. Slurm
+allocation management within the standing authorization above does not require
+additional approval, including the permitted CPU service-level fallbacks and
+release of managed jobs. Actions on unrelated jobs remain outside that scope.
 
 The user's explicit request to launch a run counts as approval for that
 specified run. Do not ask for duplicate confirmation. Authorization for an

@@ -62,6 +62,15 @@ extra candidate rows; their scores do not replace the path objective. Partial
 candidate rows use the existing nearest-latent completion while preserving
 known calls. Completed latent alleles are not automatically released as calls.
 
+The local forward/backward implementation exploits exchange symmetry between
+the two homologues, including when founder frequencies are unequal. It still
+sums all ordered-state mass: off-diagonal cells count twice. This is an exact
+property of the current unphased-GL model, not frequency tying or state pruning.
+Completed searches can be reused across feedback rounds only when the initial
+panel, ordered candidate bank, observations, marker/map coordinates and all
+search/model settings match. Their release calculation is reusable only with
+the same calling thresholds; cached posteriors never become new observations.
+
 Release combines a conditional one-bit probability (other panel alleles and
 fitted parameters held fixed) with fractional posterior-carrier directional
 support. This is not a full allele posterior or calibrated correctness
@@ -175,6 +184,19 @@ likelihood operators or unconditional time-reversed chain transitions. This is
 the default dense linker at every hierarchy level. Both assembly modes default
 to bounded candidate-panel search, with full Viterbi/BIC scoring before accepting
 a proposal; `--assembly-search broad` retains the optimized broader search.
+
+Bounded panel search compares state-covering initial panels from every input
+anchor under its full penalized objective, rather than assuming the most
+diverse block is the best start. Deletion proposals use whole-path
+reassignment costs under the current painting; both single deletions and
+nested coordinated reductions receive full-panel rescoring. The summed
+conditional costs are screening heuristics, not additive deletion likelihoods
+or safe pruning bounds. Each accepted edit must strictly improve the existing
+Viterbi/BIC objective. No biological founder count is supplied. Up to 100
+sweeps are allowed, with early stopping when no tested edit improves the score.
+The diagnostics distinguish that stopping condition from exhausting the budget;
+neither establishes a global optimum.
+
 The optional [structured model](founder_scaling.md) restricts the
 macro transition to sparse specific edges plus a positive shared background.
 It does not change discovery or the within-block emission model. Dense
@@ -196,6 +218,21 @@ partial-founder predictive emissions, empty-row refitting, unclipped mixture
 emissions and iteration cap. Incompatible assemblies are not
 silently reused; changing the linker requires new assembly/downstream identities,
 not regeneration of the underlying simulated reads or discovered blocks.
+The initial local refit's identity is independent of subsequent assembly
+settings, so its unchanged selected panels and partial block fits can be reused.
+Local implementation hashes and input/model identities must still match:
+assembly-independent identity does not make older local fits compatible with
+changed fitting code. Original discovery checkpoints remain preserved.
+L1/L2 feedback contexts, later selections, and final assembly still require
+new identities when the panel-search algorithm changes.
+
+For bounded-panel score-only Viterbi, exchange-symmetric diplotypes are stored
+once as unordered pairs; the maximum is unchanged and ordered traceback retains
+its original tie choices. Birth proposals score each distinct local row once,
+then restore the original chromosome-candidate order. Fully called binned
+emissions evaluate the three genotype likelihoods once per sample/site and
+reuse them across pairs. Partial-founder emissions retain their existing model.
+These implementation changes do not reduce proposal budgets or alter acceptance.
 
 ## Final founder-path refinement
 

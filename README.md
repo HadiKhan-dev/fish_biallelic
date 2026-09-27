@@ -140,6 +140,11 @@ Validation and timing are described separately:
 - [Performance](docs/performance.md): measured timings and scaling trade-offs.
 - [Code map](docs/development.md): module ownership, parallelism and checkpoint
   boundaries.
+- [Storage utility](tools/README.md): parallel allocated-space measurements for
+  large checkpoint trees, implemented in Python with an optional C accelerator.
+  The latest full-project measurement took 2 minutes 8 seconds for 4.66 million
+  entries on 27 September 2026; see the utility notes for build instructions,
+  validation, and filesystem-cache caveats.
 
 Founder reconstruction can be ambiguous when ancestry is unsampled or many
 descendants repeat one ancestral recombinant. Painting errors and structured

@@ -3,7 +3,8 @@
 Prepare read-only emission/log-ratio tables once, retain predicted priors plus
 filtered marginals after a score, and reuse them in the backward pass. Before
 a frequency update, compute only the necessary frequency statistics. State
-matrices remain ordered/full, without symmetry approximation or fastmath.
+matrices remain full; homologue-exchange symmetry avoids duplicate work without
+changing the model or enabling fastmath.
 
 Workspace memory is O(N*L*S**2), where S=K+1 includes the unknown state. The
 cached trajectories avoid repeated forward/prediction work within a fit.
@@ -55,28 +56,27 @@ def _table(gl, observed, emission):
 
 
 @njit(cache=True)
-def _backward_into(future, pi, rate, row, col, output):
+def _backward_into(future, pi, rate, row, output):
+    """Homologue-symmetric backward prediction for unphased observations."""
     s = len(pi)
-    row[:] = 0.
-    col[:] = 0.
     total = 0.
     for a in range(s):
+        value = 0.
         for b in range(s):
-            value = future[a, b]
-            row[a] += value * pi[b]
-            col[b] += value * pi[a]
-            total += pi[a] * value * pi[b]
+            value += future[a, b] * pi[b]
+        row[a] = value
+        total += pi[a] * value
     stay = 1. - rate
     maximum = 0.
     for a in range(s):
-        for b in range(s):
+        for b in range(a, s):
             value = (stay * stay * future[a, b]
-                     + stay * rate * (row[a] + col[b]) + rate * rate * total)
+                     + stay * rate * (row[a] + row[b]) + rate * rate * total)
             output[a, b] = value
+            output[b, a] = value
             maximum = max(maximum, value)
     if maximum > 0:
         output /= maximum
-
 
 @njit(cache=True)
 def _outside_into(matrix, tl, tr, bl, br, output):
@@ -148,38 +148,31 @@ def _forward_samples(panel, emissions, pi, rates, priors, rows, cols, workers):
             ll = 0.
             for site in range(length):
                 prior = priors[sample, site]
-                if site == 0:
-                    for a in range(s):
-                        for b in range(s):
-                            prior[a, b] = pi[a] * pi[b]
-                else:
-                    rate = rates[site-1]
-                    stay = 1. - rate
-                    for a in range(s):
-                        for b in range(s):
-                            prior[a, b] = (stay * stay * filtered[a, b]
-                                + stay * rate * (rows[sample, site-1, a] * pi[b]
-                                                + pi[a] * cols[sample, site-1, b])
-                                + rate * rate * pi[a] * pi[b])
                 scale = 0.
+                rate = rates[site-1] if site else 0.
+                stay = 1. - rate
                 for a in range(s):
                     ha = panel[a, site] if a < k else 2
-                    for b in range(s):
+                    for b in range(a, s):
                         hb = panel[b, site] if b < k else 2
-                        value = prior[a, b] * emissions[sample, site, ha, hb]
-                        filtered[a, b] = value
-                        scale += value
+                        predicted = (stay * stay * filtered[a, b]
+                            + stay * rate * (rows[sample, site-1, a] * pi[b]
+                                            + pi[a] * rows[sample, site-1, b])
+                            + rate * rate * pi[a] * pi[b]) if site else pi[a] * pi[b]
+                        prior[a, b] = prior[b, a] = predicted
+                        value = predicted * emissions[sample, site, ha, hb]
+                        filtered[a, b] = filtered[b, a] = value
+                        scale += value if a == b else 2. * value
                 if scale <= 0:
                     ll = -np.inf
                     break
                 ll += np.log(scale)
-                filtered /= scale
-                rows[sample, site, :] = 0.
-                cols[sample, site, :] = 0.
                 for a in range(s):
+                    marginal = 0.
                     for b in range(s):
-                        rows[sample, site, a] += filtered[a, b]
-                        cols[sample, site, b] += filtered[a, b]
+                        filtered[a, b] /= scale
+                        marginal += filtered[a, b]
+                    rows[sample, site, a] = cols[sample, site, a] = marginal
             likelihoods[sample] = ll
     return likelihoods
 
@@ -193,6 +186,10 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
     occupancy = np.zeros((workers, s, length))
     initial = np.zeros((workers, s))
     destinations = np.zeros((workers, s))
+    # Both homologues have the same copying prior/transition and genotype
+    # emissions are unordered. Thus all messages are symmetric even when the
+    # founder frequencies are unequal. Evaluate each unordered cell once;
+    # retain full matrices for the existing sufficient-statistic interface.
     for wi in prange(workers):
         worker = np.int64(wi)
         backward = np.empty((s, s))
@@ -200,7 +197,7 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
         mass = np.empty((s, s))
         posterior = np.empty((s, s))
         future = np.empty((s, s))
-        row, col = np.empty(s), np.empty(s)
+        row, previous = np.empty(s), np.empty(s)
         outside = np.empty(s)
         tl = np.zeros((s+1, s+1))
         tr = np.zeros((s+1, s+1))
@@ -213,12 +210,15 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
                 denominator = 0.
                 for a in range(s):
                     ha = panel[a, site] if a < k else 2
-                    for b in range(s):
+                    for b in range(a, s):
                         hb = panel[b, site] if b < k else 2
-                        weights[a, b] = priors[sample, site, a, b] * backward[a, b]
-                        mass[a, b] = weights[a, b] * emission[ha, hb]
-                        future[a, b] = emission[ha, hb] * backward[a, b]
-                        denominator += mass[a, b]
+                        weight = priors[sample, site, a, b] * backward[a, b]
+                        value = weight * emission[ha, hb]
+                        weighted_future = emission[ha, hb] * backward[a, b]
+                        weights[a, b] = weights[b, a] = weight
+                        mass[a, b] = mass[b, a] = value
+                        future[a, b] = future[b, a] = weighted_future
+                        denominator += value if a == b else 2. * value
                 if full_statistics or site == 0:
                     for a in range(s):
                         for b in range(s):
@@ -226,7 +226,7 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
                     for a in range(s):
                         copies = 0.
                         for b in range(s):
-                            copies += posterior[a, b] + posterior[b, a]
+                            copies += 2. * posterior[a, b]
                         if full_statistics:
                             occupancy[worker, a, site] += copies
                         if site == 0:
@@ -243,8 +243,8 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
                                 alternative = emission[1-ha, 1-ha]
                                 delta = self_ratios[sample, site, ha]
                             else:
-                                prob = posterior[a, b] + posterior[b, a]
-                                weight = weights[a, b] + weights[b, a]
+                                prob = 2. * posterior[a, b]
+                                weight = 2. * weights[a, b]
                                 alternative = emission[1-ha, hb]
                                 delta = ratios[sample, site, ha, hb]
                             alt_mass += weight * alternative
@@ -256,13 +256,14 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
                 if site > 0:
                     rate = rates[site-1]
                     stay = 1. - rate
+                    for b in range(s):
+                        previous[b] = stay * rows[sample, site-1, b] + rate * pi[b]
                     for a in range(s):
-                        first, second = 0., 0.
+                        first = 0.
                         for b in range(s):
-                            first += future[a, b] * (stay * cols[sample, site-1, b] + rate * pi[b])
-                            second += future[b, a] * (stay * rows[sample, site-1, b] + rate * pi[b])
-                        destinations[worker, a] += rate * pi[a] * (first+second) / denominator
-                    _backward_into(future, pi, rate, row, col, backward)
+                            first += future[a, b] * previous[b]
+                        destinations[worker, a] += 2. * rate * pi[a] * first / denominator
+                    _backward_into(future, pi, rate, row, backward)
     return gains, occupancy, initial, destinations
 
 
