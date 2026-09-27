@@ -874,7 +874,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           verbose=False,
                           min_boundary_informative_samples=1,
                           chromosome_map=None, structured_transition_config=None,
-                          panel_search_config=None, scoring_probs=None):
+                          panel_search_config=None, scoring_probs=None,
+                          batch_queue_key=None):
     """Performs one level of Hierarchical Assembly.
 
     Memory strategy:
@@ -992,6 +993,36 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             if h.dtype == np.float64:
                 block.haplotypes[k] = h.astype(np.float32)
 
+    def make_worker_args(inner_num_processes):
+        worker_args = []
+
+        for b_idx, (start_i, end_i) in enumerate(batch_ranges):
+            original_blocks_list = list(input_blocks[start_i:end_i])
+            batch_informative_sample_mask = (
+                _missing_aware_batch_informative_sample_mask(
+                    block_informative_masks[start_i:end_i]
+                )
+            )
+
+            worker_args.append((
+                b_idx, start_i, end_i, original_blocks_list,
+                recomb_rate, beam_width, max_founders,
+                max_sites_for_linking, n_generations, recomb_tolerance,
+                top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
+                cc_scale, inner_num_processes, verbose,
+                chromosome_map, structured_transition_config, panel_search_config, batch_informative_sample_mask
+            ))
+        return worker_args
+
+    from ..core import batch_queue
+    if batch_queue.configured() and num_batches > 1:
+        worker_gb = max(min_gb_per_worker, _hmm_batch_memory_gb(
+            input_blocks, batch_ranges, global_probs.shape[0], max_sites_for_linking))
+        results = list(batch_queue.map_batches('hierarchy', make_worker_args(1),
+            (global_probs, global_sites), total_cores, key=batch_queue_key,
+            worker_memory_gb=worker_gb))
+        return _collect_batch_results(results)
+
     # Create POSIX shared memory for the global arrays.
     t0 = time.time()
     shm_probs, probs_meta = _create_shared_array(global_probs, 'global_probs', total_cores)
@@ -1059,24 +1090,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     # =====================================================================
     # Prepare worker arguments
     # =====================================================================
-    worker_args = []
-
-    for b_idx, (start_i, end_i) in enumerate(batch_ranges):
-        original_blocks_list = list(input_blocks[start_i:end_i])
-        batch_informative_sample_mask = (
-            _missing_aware_batch_informative_sample_mask(
-                block_informative_masks[start_i:end_i]
-            )
-        )
-
-        worker_args.append((
-            b_idx, start_i, end_i, original_blocks_list,
-            recomb_rate, beam_width, max_founders,
-            max_sites_for_linking, n_generations, recomb_tolerance,
-            top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
-            cc_scale, inner_num_processes, verbose,
-            chromosome_map, structured_transition_config, panel_search_config, batch_informative_sample_mask
-        ))
+    worker_args = make_worker_args(inner_num_processes)
 
     informative_counts = [int(np.sum(args[-1])) for args in worker_args]
     print(
@@ -1144,6 +1158,10 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         finally:
             _main_guard.__exit__(None, None, None)
 
+    return _collect_batch_results(results)
+
+
+def _collect_batch_results(results):
     # Sort by batch index and collect super blocks
     results = sorted(results, key=lambda x: x['batch_idx'])
 

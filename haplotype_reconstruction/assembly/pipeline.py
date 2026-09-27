@@ -57,6 +57,7 @@ ASSEMBLY_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
 
 
 ASSEMBLY_RELEASE_CODE_IDENTITY_FILES += (
+    'core/batch_queue.py', 'core/batch_tasks.py',
     'assembly/structured_transitions.py', 'assembly/panel_search.py',
     'assembly/panel_scoring.py', 'assembly/panel_candidates.py', 'assembly/partial_emissions.py',
     'assembly/founder_refinement.py', 'assembly/founder/path_search.py',
@@ -919,11 +920,13 @@ def assemble_chromosome(
             started = time.perf_counter()
             if hierarchy_probs is None:
                 hierarchy_probs = assembly_evidence.float32_evidence(neutral_probs)
+            from ..core.batch_queue import checkpoint_key
             output = assembly_hierarchy.run_hierarchical_step(
                 working,
                 neutral_probs,
                 sites,
                 scoring_probs=hierarchy_probs,
+                batch_queue_key=checkpoint_key(release_checkpoints, phase),
                 batch_size=batch_size,
                 recomb_rate=config.recombination_rate,
                 chromosome_map=chromosome_map,

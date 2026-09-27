@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import os
 import json
+import getpass
+import re
+from pathlib import Path
+import socket
+import sys
+import tempfile
+import uuid
 
 
 NUMERIC_THREAD_ENV_VARS = (
@@ -91,3 +98,61 @@ def force_single_threaded_numeric_libraries():
 
     for variable in NUMERIC_THREAD_ENV_VARS:
         os.environ[variable] = "1"
+
+
+def _batch_cache_scope():
+    """Recognize common batch jobs; unknown launchers use an inherited run ID."""
+    schedulers = (
+        ("slurm", "SLURM_JOB_ID", ("SLURM_ARRAY_TASK_ID",)),
+        ("pbs", "PBS_JOBID", ("PBS_ARRAY_INDEX", "PBS_ARRAYID")),
+        ("lsf", "LSB_JOBID", ("LSB_JOBINDEX",)),
+    )
+    if os.environ.get("SGE_ROOT"):
+        schedulers += (("sge", "JOB_ID", ("SGE_TASK_ID",)),)
+    for name, variable, task_variables in schedulers:
+        job = os.environ.get(variable)
+        if job:
+            task = next((os.environ[key] for key in task_variables
+                         if os.environ.get(key)), None)
+            return f"{name}-{job}" + (f"-task-{task}" if task else "")
+    return None
+
+
+def configure_numba_cache():
+    """Isolate native caches by run/job and host, without splitting its workers.
+
+    The automatic path marker distinguishes our inherited setting from a user
+    override. Spawned processes reuse the run ID, but recalculate the path so
+    a remote host or a different batch allocation cannot inherit our old cache.
+    These are disposable compiled kernels, not scientific checkpoints.
+    """
+    explicit = os.environ.get("NUMBA_CACHE_DIR")
+    automatic = os.environ.get("_HAPLOTYPES_NUMBA_CACHE_DIR")
+    if explicit and explicit != automatic:
+        cache = explicit
+    else:
+        run_id = os.environ.get("_HAPLOTYPES_NUMBA_CACHE_RUN")
+        if not run_id:
+            run_id = uuid.uuid4().hex
+            os.environ["_HAPLOTYPES_NUMBA_CACHE_RUN"] = run_id
+        job_id = os.environ.get("SLURM_JOB_ID")
+        scope = _batch_cache_scope() or f"run-{run_id}"
+        user = str(os.getuid()) if hasattr(os, "getuid") else getpass.getuser()
+        # Host/user identifiers are path components, including on non-POSIX OSes.
+        user = re.sub(r"[^A-Za-z0-9_.-]", "_", user)
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{scope}-{socket.gethostname()}")
+        scratch = Path((os.environ.get("SLURM_TMPDIR") if job_id else None)
+                       or tempfile.gettempdir())
+        directory = scratch / f"haplotype-reconstruction-numba-{user}" / name
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        cache = str(directory)
+        os.environ["NUMBA_CACHE_DIR"] = cache
+        os.environ["_HAPLOTYPES_NUMBA_CACHE_DIR"] = cache
+
+    # Library callers and forkserver preloads may import Numba first. Apply
+    # our setting before our numerical modules create cached dispatchers,
+    # without eagerly importing Numba for ordinary CLI/help startup.
+    numba_config = sys.modules.get("numba.core.config")
+    if numba_config is not None:
+        numba_config.reload_config()
+    return cache

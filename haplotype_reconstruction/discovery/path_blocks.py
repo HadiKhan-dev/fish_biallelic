@@ -166,6 +166,14 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
                       positions, latent, proposals, incumbent, config, asdict(search_config), model))
     if not tasks:
         return output, diagnostics
+    from ..core import batch_queue
+    if batch_queue.configured():
+        for index, result in batch_queue.map_batches(
+                'local_fit', tasks, (gl, observed), cpus):
+            block, diagnostic = materialize(originals[index], result), result['diagnostic']
+            output.blocks[index], diagnostics[index] = block, diagnostic
+            checkpoint_io.save(f'block{index:06d}', dict(block=block, diagnostic=diagnostic))
+        return output, diagnostics
     handles, metadata = [], []
     try:
         for array in (gl, observed):

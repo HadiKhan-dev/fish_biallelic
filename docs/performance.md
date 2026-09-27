@@ -11,6 +11,100 @@ multiply their speedups or add them into a fresh end-to-end runtime. First-use
 compilation, shared-filesystem I/O, founder ambiguity and chromosome length
 matter. Configured threads are not a measure of sustained CPU utilization.
 
+## Opt-in cross-node batch scheduling
+
+Use `--batch-queue /shared/run/batches` (or `[run].batch_queue` in TOML) to
+publish independent local-refit and hierarchical assembly batches. Helpers on
+other allocated nodes run:
+
+```bash
+python run.py batch-worker --queue /shared/run/batches --cores 48
+```
+
+Both sides must use the same source snapshot and shared filesystem. The helper
+uses only its verified allocation; it does not request scheduler resources.
+Chromosome coordinators execute queued work too. Each executing node retains
+the existing dynamic process/thread allocation as local tasks finish.
+
+Evidence travels in bounded contiguous genomic slices, not whole chromosomes
+per worker. Scientific batch boundaries, masks, positions, parameters and task
+IDs stay unchanged. Only the chromosome coordinator writes ordinary pipeline
+checkpoints; helpers publish attempt-specific results. Results are gathered in
+genomic order before dependent levels proceed. Claims have renewable leases;
+late results cannot overwrite a reassigned claim. Completed hierarchy bundles
+can resume under the existing scientific checkpoint identity. Local fitting
+retains its ordinary per-block checkpoints.
+
+Without this option, execution stays node-local. Discovery, chromosome-wide
+founder refinement and downstream inference are not distributed by this queue.
+Single-batch hierarchy steps also stay local. Coupled stages and shared-storage
+traffic limit scaling; this is not a promise that every chromosome can use
+arbitrarily many nodes. Helpers exit after a bounded idle interval (120 seconds
+by default). Interrupted coordinator jobs should be confirmed terminal before
+resuming them; expired Slurm coordinators no longer offer new work.
+
+A focused 260-block missing-observation check on two Ice Lake nodes preserved
+all local-fit and hierarchy calls, numerical scores within tolerance, and
+hierarchy resume results. The full N320 seed8003 campaign subsequently
+completed all 22 chromosomes: 1,618 bundles completed, 449 on helpers outside
+their publishing allocation. Scientific results are recorded in
+[validation](validation.md#variable-recombination-map-campaigns--27-september-2026).
+
+| Full-density N320, 5× run | Inference wall time | Allocated 76-core node-hours, including evaluation |
+| --- | ---: | ---: |
+| Seed8002, chromosome shards without batch helpers | 1h51m23s | 6.412 |
+| Seed8003, chromosome shards plus cross-node batch helpers | 2h01m14s | 8.358 |
+
+Seed8003 finished evaluation and map reporting after about 2h02m36s overall.
+The resource total includes worker startup, bounded helper idleness and
+cleanup; it excludes the pre-existing interactive runner and separate
+development validations. It is normalized allocated CPU time, **not** a
+measured runtime on one 76-core node. Coordinator stage timers exclude
+remote work, so they cannot be summed into complete per-stage allocation
+costs. The recorded 0.694 remote execution node-hours are already inside the
+8.358 total and must not be added again.
+
+These are different seeds and allocation schedules, not a controlled
+speedup comparison. The distributed run cost more here; the measurements
+establish working cross-node execution, not a performance win. Both campaigns
+kept their frozen executor, including sequential family-phase orchestration;
+the newer chromosome-parallel family scheduler was validated separately below.
+
+## Native compilation caches
+
+Package startup automatically isolates Numba's compiled-code cache by **run/job
+and hostname**, on both local machines and clusters. Slurm, PBS/Torque, LSF
+and SGE job IDs (including array-task identifiers) allow reuse between commands
+in the same job. Otherwise, each independent invocation creates a run ID
+inherited by its subprocesses. No scheduler-specific wrapper is needed.
+
+Parallel workers on the same host within that run/job reuse compiled kernels.
+The program recognizes its own inherited cache setting and recalculates it on
+startup: another hostname or recognized batch job gets a different path even when the
+parent's environment was forwarded. This does not serialize chromosome work
+or change the scientific model or checkpoints.
+
+The cache lives below `SLURM_TMPDIR` within Slurm when supplied, otherwise
+Python's temporary directory (`TMPDIR` where configured). Even when that
+storage is shared, run/job/host-specific paths separate independent writers.
+No writable source checkout or administrator privileges are required.
+Explicit, nonempty `NUMBA_CACHE_DIR` overrides remain authoritative; users
+choosing a shared override are responsible for its suitability.
+
+The selected path is recorded in run metadata. First use in a new cache requires
+compilation, then workers and subsequent chromosomes reuse it. In particular,
+independent runs without a recognized batch job now compile afresh rather than silently
+sharing a persistent source-tree cache. This is the startup-cost trade-off for
+automatic isolation; an explicit cache path can opt into deliberate reuse.
+
+These disposable files are separate from pipeline checkpoints and do not need
+to be retained to resume scientific work. Scratch cleanup follows the site's
+normal policy; the program does not delete caches that workers may still use.
+Isolation reduces accidental cross-run/node sharing, not every possible
+filesystem, compiler or hardware failure. Within-run sharing still requires
+the filesystem's normal atomic file replacement semantics; see
+[Numba's cache-sharing notes](https://numba.readthedocs.io/en/stable/developer/caching.html#cache-sharing).
+
 ## Local feedback and assembly — 27 September 2026
 
 A matched seed8001 chr1 comparison (N=320, calibrated 5×, dense/bounded
@@ -531,6 +625,35 @@ immediately preceding conditional solve. Factor-produced 32-marker dirty tiles
 restrict selector-block inspections; forward/backward propagation and stopping
 semantics remain intact. Ordinary/branch caches are bounded near 24/4 GiB per
 chromosome. Atomic work checkpoints retain messages, phase and stability history.
+
+Family phase now uses the same node-local chromosome scheduler as pedigree
+scoring. Each worker loads and checkpoints its own chromosome; the parent
+publishes ordered summaries and completion only after all chromosomes succeed.
+The CLI's `--cores` is the **total** CPU budget. Finished workers release their
+threads, and remaining workers grow their leases at family-message iterations,
+phase-polishing colour updates and checkpoint boundaries—not inside a running
+kernel. The pedigree, likelihoods, phase-release criterion and genomic component
+boundaries are unchanged.
+
+A decoded-source-size estimate limits simultaneous workers to available
+memory, since family-message/selector workspaces are substantially larger than
+compressed checkpoints. This does not reduce the shared CPU budget; fewer
+active chromosomes receive more threads. This scheduler is within one
+allocation, not cross-node family inference. Active frozen campaigns keep their
+original source snapshot. The timings below predate this scheduling change.
+
+A focused full-density N320 check on seed8002 chr16 and chr22 used 32 Ice Lake
+SL4 CPUs, initially 16 threads per chromosome; the survivor grew to 32.
+All 489,378,096 called alleles, phase paths, missingness, corrected painting
+chunks and stability/retry results matched the saved sequential products;
+floating diagnostics agreed within 1e-7 relative/1e-8 absolute tolerance.
+Completed-stage resume left chromosome files untouched. The pair took
+137.07 seconds through phase checkpoint publication; the whole validation job
+took 159 seconds, with 53.6 GiB reported peak RSS and about 15.1 average busy
+cores including loading, compilation and comparison. This is not a matched
+speedup benchmark or a whole-genome runtime estimate. Results are recorded
+locally in `.work/family_parallel_20260927.aKsAtGMm/`.
+
 
 Recorded complete phase-focused trials took 18.10–18.71 min for seeds400–402
 on 76 CPUs; a canonical seed401 wrapper run including checkpoints took 19.03 min.

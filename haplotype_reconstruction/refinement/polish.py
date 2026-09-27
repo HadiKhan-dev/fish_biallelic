@@ -8,6 +8,7 @@ from dataclasses import asdict
 import math
 import time
 from numba import njit, prange
+from ..core.chromosome_parallel import current_threads
 
 from haplotype_reconstruction.refinement import evidence as refinement_evidence
 
@@ -510,6 +511,7 @@ def polish_phase(reference, initial_phase, positions, bins, component_ids, paren
         changed = 0
         updates = 0
         for vertices in (colours if sweep % 2 == 0 else colours[::-1]):
+            current_threads()
             vertices = vertices[eligible[vertices]]
             if not len(vertices):
                 continue

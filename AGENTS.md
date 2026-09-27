@@ -99,6 +99,50 @@ an observed amount of free SL4 capacity or treating it as a personal quota.
   batch them where possible. Do not tightly poll Slurm, repeatedly submit
   probes, or churn queued jobs merely because a resource snapshot changes.
 
+### Building useful SL4 capacity incrementally
+
+SL4's shared `GrpTRESRunMins` limit is an outstanding CPU-times-remaining-walltime
+budget, not a fixed personal core quota. A large request can remain blocked
+while smaller commitments start as headroom becomes available. In the
+27 September 2026 real-cross campaign, staggered, mostly 48-CPU/two-hour
+Ice Lake high-memory workers grew to 688 running SL4 CPUs across 14 jobs,
+with another 96 CPUs pending at the 10:12 BST snapshot. This is a historical
+example, not a guaranteed capacity entitlement or a required worker shape.
+
+For substantial authorized work with independent checkpointable units:
+
+- Maintain a bounded queue of genuinely useful SL4 workers, rather than
+  requiring enough instantaneous headroom for the entire desired core count.
+  Size the queue to remaining independent work; do not reserve workers with
+  nothing useful to claim.
+- Choose realistic core-by-walltime commitments. For example, 48 CPUs for
+  two hours initially needs 5,760 CPU-minutes. Shorter requests can admit
+  sooner than whole-node, twelve-hour reservations, provided the useful work
+  can finish or checkpoint within that window. Do not understate runtime
+  merely to gain admission, assume an extension, or bypass scheduler limits.
+- Use a shared, atomic task queue so workers starting at different times
+  claim distinct chromosomes or other independent units. Reuse each worker
+  for further eligible tasks, then exit immediately when none remain.
+  Preserve intermediate checkpoints across normal scheduler expiry.
+- Consider suitable accessible partitions, including Ice Lake high-memory,
+  using current partition rules, memory needs and actual admission evidence.
+  Prior success on one partition is not a guarantee; requested memory must
+  not silently increase allocated CPUs beyond the ledger.
+- Let the scheduler admit queued requests as capacity opens. Reassess at
+  useful task boundaries, respecting the existing minimum 120-second queue
+  polling interval. Do not race submissions, churn jobs, or run repeated
+  admission-only probes when useful queued work can provide the evidence.
+- Bound pending lifetime with a realistic deadline or durable cancellation.
+  A Slurm completion deadline must allow both pending wait and requested
+  runtime. Cancel unused pending workers when the useful backlog disappears.
+- Record every job's account, requested and actual cores/memory, submission,
+  start, expiry/end, task ownership, checkpoint state and release action.
+  Recover an interrupted task claim only after its former writer is confirmed
+  terminal. Track useful task time separately from full allocated CPU-hours.
+- SL4 remains outside the user's combined 448-core SL3/SL2 cap, but all site
+  limits still apply. Use permitted SL3 capacity for the critical path when
+  SL4 admission would delay the task; never disturb the protected runner.
+
 ### Allocation reuse and execution
 
 For a long sequence of tests or development runs, obtain one appropriately
@@ -713,6 +757,18 @@ allocation remains idle:
 Do not preserve an earlier conservative worker count merely because it was
 chosen at launch. Reallocate CPUs dynamically as task availability changes,
 especially during straggler tails.
+
+When supported by the validated execution path, use dependency-ready batches
+rather than whole chromosomes as the indivisible scheduling unit. As workers
+or allocations finish work, let them claim independent batches from unfinished
+chromosomes, while retaining node-local dynamic thread reallocation. Choose
+work by dependencies, remaining cost and resource fit, not hardcoded chromosome
+names or seed-specific exceptions. Preserve scientific batch boundaries,
+stable result ordering, single-writer checkpoint ownership and resource limits.
+This is a general scheduling preference, not a claim that all current stages
+support cross-node batch execution or permission to change a live run to an
+unvalidated executor. Planned implementation boundaries are documented in
+`docs/performance.md`.
 
 Do not create a separate tight polling loop solely for utilization checks.
 Reuse normal command output, worker-pool events, canary decisions, stage

@@ -12,7 +12,10 @@ from pathlib import Path
 import time
 import numpy as np
 
-from haplotype_reconstruction.core import checkpoints, parallel, runtime
+from haplotype_reconstruction.core import checkpoints, parallel, raw_evidence, runtime
+from haplotype_reconstruction.core.chromosome_parallel import (
+    ChromosomeExecutor, current_threads, memory_worker_limit,
+)
 from haplotype_reconstruction.pedigree import components as pedigree_components
 from haplotype_reconstruction.pedigree import pipeline as pedigree_pipeline
 from haplotype_reconstruction.painting import checkpoints as painting_checkpoints
@@ -53,7 +56,8 @@ the preceding polished path is only a comparison, never a warm start.
     unchanged = 0
     checks = []
     if work is not None and work.is_file():
-        saved = checkpoints.read(str(work), nthreads=checkpoint_threads)
+        saved = checkpoints.read(str(work), nthreads=(current_threads()
+                                 if checkpoint_threads is None else checkpoint_threads))
         if saved["identity"] != identity:
             raise ValueError("Family phase iteration checkpoint inputs/configuration differ")
         state, point, unchanged = saved["messages"], saved["phase"], saved["unchanged"]
@@ -72,7 +76,7 @@ the preceding polished path is only a comparison, never a warm start.
             checkpoints.write(str(work), {
                 "identity": identity, "messages": saved_messages, "phase": phase,
                 "unchanged": stable_count, "checks": tuple(checks),
-            }, nthreads=checkpoint_threads)
+            }, nthreads=(current_threads() if checkpoint_threads is None else checkpoint_threads))
             last_saved = time.perf_counter()
 
     def save_initial(messages):
@@ -86,6 +90,7 @@ the preceding polished path is only a comparison, never a warm start.
     # restarting from messages intentionally starts with an empty cache.
     polish_context = polish_initial = None
     while point is None or (not converged and unchanged < config.required_unchanged):
+        current_threads()
         iteration = 0 if state is None else state.iteration
         if point is not None and iteration >= config.max_iterations:
             save(state, point, unchanged, force=True)
@@ -143,7 +148,7 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
                       contig, config=model.FamilyRefinementConfig(), phase_config=None,
                       identity=None, work_path=None, checkpoint_threads=1,
                       checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None):
-    """Produce one independently resumable family phase chromosome from frozen painting/pedigree."""
+    """Refine frozen painting/pedigree; ``checkpoint_threads=None`` uses the live CPU lease."""
     names = tuple(map(str, sample_ids))
     painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(painting_checkpoint, expected_sample_ids=names)
     pedigree_components._validate_release_array_identity(
@@ -235,15 +240,87 @@ def _summary(result, store, elapsed):
     }
 
 
+def _refine_contig(contig, state, phase_name, common):
+    """Own one chromosome's evidence, iteration checkpoints and final product."""
+    parallel.malloc_trim()
+    started = time.perf_counter()
+    store = runtime.CheckpointStore(common["checkpoint_root"], nthreads=current_threads())
+    identity = common["identity"]
+    if store.contig_done(FINAL_PHASE_STAGE, contig):
+        result = store.load_contig(FINAL_PHASE_STAGE, contig, nthreads=current_threads())
+        if result["identity"]["family"]["external"] != identity:
+            raise ValueError("Family phase final chromosome identity differs")
+    else:
+        painting = store.load_contig(PAINTING_STAGE, contig, nthreads=current_threads())
+        store.nthreads = current_threads()
+        gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
+            store, contig, raw_gl_stage=common["raw_gl_stage"],
+            raw_sites_stage=common["raw_sites_stage"], raw_gl_key=common["raw_gl_key"],
+            raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
+        del gl_payload, sites_payload
+        maps = common["genetic_maps"]
+        chromosome_map = None if maps is None else maps.for_contig(contig)
+        current_threads()
+        result = refine_chromosome(
+            painting, gl, pos, observed, common["relationships"], common["names"],
+            contig=contig, config=common["config"], identity=identity,
+            work_path=Path(store.stage_dir(FINAL_PHASE_STAGE)) / f"{contig}.iterations.p5.b2",
+            checkpoint_threads=None, chromosome_map=chromosome_map)
+        checkpoints.write(checkpoints.contig_path(store.root, FINAL_PHASE_STAGE, contig),
+                          result, nthreads=current_threads())
+        del painting, gl, pos, observed
+    summary = _summary(result, store, time.perf_counter() - started)
+    print(f"[family phase {contig}] Stable final phase released; latent converged="
+          f"{result['source_posterior_converged']}; threads={current_threads()}", flush=True)
+    del result
+    gc.collect()
+    parallel.malloc_trim()
+    return None, summary
+
+
+def _refinement_resources(store, contigs, workers, raw_gl_stage, raw_sites_stage):
+    """Bound concurrent chromosome workspaces using decoded source sizes.
+
+    Twelve evidence-sized copies allow for float64 GLs, four-state family
+    messages, selector caches, polishing and I/O; add two painting copies and
+    2 GiB per process for Python/JIT. Prefer the compact evidence used by the
+    downstream loader rather than multiplying unused discovery workspaces.
+    This is a scheduling estimate, not an RSS guarantee. Already completed
+    chromosomes need only a decoded product and read buffers.
+    """
+    estimates = []
+    for contig in contigs:
+        resumed = store.contig_done(FINAL_PHASE_STAGE, contig)
+        if resumed:
+            estimate = 2 * checkpoints.read_size_bytes(
+                checkpoints.contig_path(store.root, FINAL_PHASE_STAGE, contig))
+        else:
+            source_bytes = sum(checkpoints.read_size_bytes(
+                checkpoints.contig_path(store.root, stage, contig))
+                for stage in dict.fromkeys((raw_gl_stage, raw_sites_stage)))
+            evidence_bytes = (checkpoints.read_size_bytes(checkpoints.contig_path(
+                store.root, raw_evidence.STAGE, contig))
+                if store.contig_done(raw_evidence.STAGE, contig) else source_bytes)
+            painting_bytes = checkpoints.read_size_bytes(
+                checkpoints.contig_path(store.root, PAINTING_STAGE, contig))
+            # Also allow loading the original source if the compact cache is
+            # unavailable to the reader; it validates ordinary source changes.
+            estimate = max(source_bytes, 12 * evidence_bytes) + 2 * painting_bytes
+        estimates.append(estimate + (2 << 30))
+    return estimates, memory_worker_limit(
+        estimates, workers, runtime.available_memory_bytes(), label="FAMILY PHASE")
+
+
 @timed_stage("family_phase")
 def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
                    output_dir, raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
                    n_workers=None, config=None, genetic_maps=None):
-    """Run canonical family phase sequentially by chromosome with the full CPU budget.
+    """Run independent chromosomes with a shared, dynamically reassigned CPU budget.
 
-Only final phase is a release product. Work-in-progress messages and consecutive
-phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
-"""
+    Only final phase is a release product. Work-in-progress messages and
+    consecutive phase checks live beside it as *.iterations.p5.b2, never as
+    completed contigs.
+    """
     if pedigree_payload is None:
         print("[family phase] Waiting for the complete genome-wide pedigree; no shard inference.")
         return None
@@ -286,37 +363,16 @@ phase checks live beside it as *.iterations.p5.b2, never as completed contigs.
         conditioning._write_summary_table(output, FINAL_PHASE_STAGE, saved["summaries"])
         print("[family phase] Resumed complete final phase output from its compact summary.")
         return saved["summaries"]
-    summaries = []
-    evidence_store = runtime.CheckpointStore(checkpoint_store.root, nthreads=workers)
-    print(f"[family phase] Stable final phase; one chromosome, {workers} Numba threads.", flush=True)
-    with parallel.numba_thread_scope(workers):
-        for contig in contigs:
-            started = time.perf_counter()
-            if checkpoint_store.contig_done(FINAL_PHASE_STAGE, contig):
-                result = checkpoint_store.load_contig(FINAL_PHASE_STAGE, contig, nthreads=workers)
-                if result["identity"]["family"]["external"] != identity:
-                    raise ValueError("Family phase final chromosome identity differs")
-            else:
-                painting_checkpoint = checkpoint_store.load_contig(PAINTING_STAGE, contig, nthreads=workers)
-                gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
-                    evidence_store, contig, raw_gl_stage=raw_gl_stage,
-                    raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key,
-                    raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
-                del gl_payload, sites_payload
-                chromosome_map = None if genetic_maps is None else genetic_maps.for_contig(contig)
-                result = refine_chromosome(
-                    painting_checkpoint, gl, pos, observed, relationships, names, contig=contig, config=config,
-                    work_path=Path(checkpoint_store.stage_dir(FINAL_PHASE_STAGE)) / f"{contig}.iterations.p5.b2",
-                    identity=identity, checkpoint_threads=workers, chromosome_map=chromosome_map)
-                checkpoints.write(checkpoints.contig_path(checkpoint_store.root, FINAL_PHASE_STAGE, contig),
-                                  result, nthreads=workers)
-                del painting_checkpoint, gl, pos, observed
-            summaries.append(_summary(result, checkpoint_store, time.perf_counter() - started))
-            print(f"[family phase {contig}] Stable final phase released; latent converged="
-                  f"{result['source_posterior_converged']}", flush=True)
-            del result
-            gc.collect()
-            parallel.malloc_trim()
+    weights, process_limit = _refinement_resources(
+        checkpoint_store, contigs, workers, raw_gl_stage, raw_sites_stage)
+    common = dict(checkpoint_root=checkpoint_store.root, identity=identity,
+                  names=names, relationships=relationships, config=config,
+                  raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
+                  raw_gl_key=raw_gl_key, genetic_maps=genetic_maps)
+    with ChromosomeExecutor(contigs, _refine_contig, n_workers=workers,
+                            weights=weights, max_workers=process_limit,
+                            label="FAMILY PHASE") as executor:
+        summaries = executor.run("refine", common)
     runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
     checkpoint_store.save_global(FINAL_PHASE_STAGE, {"identity": identity, "summaries": summaries})
     conditioning._write_summary_table(output, FINAL_PHASE_STAGE, summaries)

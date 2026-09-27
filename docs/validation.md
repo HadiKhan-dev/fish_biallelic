@@ -10,6 +10,56 @@ and 20/100/200 sample cohorts. The 22 template contigs are chr1–20, chr22 and 
 Seeds400–402 are development data; seed401 was held out specifically when
 choosing the family phase stopping rule, not from all project development.
 
+## Variable recombination-map campaigns — 27 September 2026
+
+Seeds 8002 and 8003 both completed the full 22-chromosome, N320, 5× pipeline
+with cohorts of 20/100/200. The generating map had threefold-higher rates in
+the first and last 20% of each chromosome than in its middle 60%:
+8.3333 versus 2.7778 cM/Mb, averaging 5 cM/Mb. Inference used a flat 5 cM/Mb
+prior, **not** the generating map. Truth was opened only for evaluation.
+
+| Final product | Seed8002 | Seed8003 |
+| --- | ---: | ---: |
+| Exact observed-parent configurations | 320/320 | 320/320 |
+| Correct / extra / missing pedigree edges | 600 / 0 / 0 | 600 / 0 / 0 |
+| Chromosomes with six chromosome-length founder rows | 22/22 | 22/22 |
+| Founder allele errors / called alleles | 5,226 / 53,741,106 | 2,959 / 53,740,631 |
+| Uncalled founder alleles | 6 | 481 |
+| Final sample phase switches / eligible comparisons | 1,062 / 490,692,829 | 923 / 493,961,245 |
+| Pooled inferred end-to-middle rate ratio | 2.855 | 2.852 |
+
+Each pedigree has the expected 20 M0 and 300 M2 individuals. Founder errors
+match rows across whole components, not independently at each marker, and
+are distinct from errors in painted/phased samples. Seed8002 has 2,047 errors
+where ancestry was represented and 3,179 where it was absent; seed8003's
+2,959 errors are all in represented ancestry. Representation alone does not
+establish identifiability.
+
+Inferred total map lengths differ from realized truth within observable spans
+by −0.287% and −0.513%, respectively. These are conditional maps: unobserved
+spans and finite-meiosis variability prevent literal equality to the generating
+intensity. The Marey curves recover the broad end-enriched shape without being
+given that shape. This does not establish arbitrary fine-scale map resolution.
+
+Seed8003 used the opt-in cross-node batch queue; seed8002 did not. Different
+seeds and allocation schedules mean these results are **not** an accuracy or
+speedup comparison between executors. A separate matched 260-block, two-node
+control retained local-fit/hierarchy calls and hierarchy resume results.
+
+The subsequent chromosome-parallel family-phase default was tested on cached
+full-density seed8002 chr16/chr22: 489,378,096 called alleles, missingness,
+phase selectors, corrected painting chunks and stopping decisions matched the
+sequential reference. Completed-stage resume preserved chromosome modification
+times. This is a two-chromosome equivalence check, not a new complete-genome
+run with that scheduler.
+
+Results, frozen source and timing ledgers remain under
+`work/runs/seed_8002/` and `work/runs/seed_8003/`; focused executor checks are
+under `.work/cross_node_20260927.Ew9koG/` and
+`.work/family_parallel_20260927.aKsAtGMm/`. These local artifacts are not
+bundled in the source distribution. See [performance](performance.md) for
+allocation accounting and its limitations.
+
 ## Numerical, performance and product checks — 25 September 2026
 
 Two implementation improvements retain the scientific models: fused read-model

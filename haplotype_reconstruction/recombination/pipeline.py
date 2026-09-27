@@ -2,7 +2,9 @@
 from __future__ import annotations
 from ..core.run_record import timed_stage
 from ..core.environment import boolean_setting
-from ..core.chromosome_parallel import ChromosomeExecutor, current_threads
+from ..core.chromosome_parallel import (
+    ChromosomeExecutor, current_threads, memory_worker_limit,
+)
 from haplotype_reconstruction import PACKAGE_ROOT
 
 from dataclasses import asdict, replace
@@ -169,24 +171,8 @@ def _recombination_resources(store, contigs, workers):
         decoded = core_checkpoints.read_size_bytes(
             core_checkpoints.contig_path(store.root, stage, contig))
         estimates.append(decoded * (2 if resumed else 6) + (2 << 30))
-    available = core_runtime.available_memory_bytes()
-    if not estimates or available is None:
-        return estimates, 1
-    reserve = min(available // 2, max(4 << 30, available // 10))
-    usable = max(0, available - reserve)
-    total = count = 0
-    for estimate in sorted(estimates, reverse=True)[:workers]:
-        if total + estimate > usable:
-            break
-        total += estimate
-        count += 1
-    if not count:
-        print("RECOMBINATION memory estimate exceeds available memory; retaining serial execution", flush=True)
-        return estimates, 1
-    print(f"RECOMBINATION memory budget: {count} chromosome workers; "
-          f"estimated concurrent peak {total / 2**30:.1f} GiB, usable {usable / 2**30:.1f} GiB",
-          flush=True)
-    return estimates, count
+    return estimates, memory_worker_limit(
+        estimates, workers, core_runtime.available_memory_bytes(), label="RECOMBINATION")
 
 
 @timed_stage("recombination")

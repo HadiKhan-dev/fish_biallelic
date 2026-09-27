@@ -51,6 +51,7 @@ def build_parser():
         command.add_argument('--shared-family-evidence', action=argparse.BooleanOptionalAction, default=None,
                              help='Use shared-family phase-error evidence in map generation; default on.')
         if name != 'recombination':
+            command.add_argument('--batch-queue', help='Opt-in shared directory for cross-node local-fit and hierarchy batches.')
             command.add_argument('--read-calibration', action=argparse.BooleanOptionalAction, default=None,
                                  help='Select read error, allelic balance and heterozygote/homozygote overdispersion models from observed AD; default on.')
             command.add_argument('--pedigree-calibration', choices=('off', 'predictive'),
@@ -141,6 +142,15 @@ def build_parser():
     example.add_argument('--contigs', type=int, default=3)
     example.add_argument('--sites', type=int, default=1200)
     example.add_argument('--length-bp', type=int, default=12_000_000)
+    helper = commands.add_parser(
+        'batch-worker',
+        help='Help independent batches from a shared queue using this allocation.')
+    helper.add_argument('--queue', required=True, type=Path,
+                        help='Shared directory supplied to the coordinator with --batch-queue.')
+    helper.add_argument('--cores', type=int,
+                        help='Total process/thread ceiling; default current CPU affinity.')
+    helper.add_argument('--idle-seconds', type=int, default=120,
+                        help='Exit after this many seconds without work; default 120.')
     status = commands.add_parser('status', help='Read lightweight run records without loading checkpoints.')
     status.add_argument('--output', required=True)
     return parser
@@ -222,6 +232,15 @@ def main(argv=None):
     """Resolve settings before importing the selected scientific workflow."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == 'batch-worker':
+        available = len(os.sched_getaffinity(0))
+        cores = args.cores if args.cores is not None else available
+        if not 1 <= cores <= available or args.idle_seconds < 1:
+            parser.error('worker cores must fit affinity and idle-seconds must be positive')
+        os.environ['NUMBA_NUM_THREADS'] = str(cores)
+        from .core.batch_queue import worker
+        worker(args.queue.resolve(), cores, args.idle_seconds)
+        return 0
     if args.command == 'example':
         from .simulation.example import create_example
         print(create_example(args.output, seed=args.seed, contigs=args.contigs,
@@ -289,6 +308,12 @@ def main(argv=None):
         if stop_after_stage is not None and stop_after_stage not in ('block_discovery', 'painting'):
             parser.error('stop_after_stage must be block_discovery or painting')
     if args.command != 'recombination':
+        batch_queue = _path(_setting(args, config, 'run', 'batch_queue',
+                                    os.environ.get('HAPLOTYPES_BATCH_QUEUE')))
+        if batch_queue:
+            os.environ['HAPLOTYPES_BATCH_QUEUE'] = batch_queue
+        else:
+            os.environ.pop('HAPLOTYPES_BATCH_QUEUE', None)
         _configure_inference(args, config, parser)
     seed = _setting(args, config, 'simulation', 'seed', 400)
     default_output = (f'work/runs/seed_{seed}' if args.command == 'simulate'

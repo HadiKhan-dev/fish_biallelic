@@ -23,3 +23,12 @@ an automatic cleanup timer. This protection overrides completion cleanup and
 the two-hour idle rule, and applies to Claude's allocation management too.
 Identify the protected hosting job before releasing any worker allocation;
 leave potentially hosting allocations untouched if that identity is unclear.
+
+For large checkpointable CPU campaigns, also follow AGENTS.md's **Building
+useful SL4 capacity incrementally** section. The successful historical pattern
+was a bounded shared task queue served by staggered, mostly 48-CPU/two-hour SL4
+workers, reaching 688 running cores—not one large reservation. Let realistic
+small core-time commitments admit as shared headroom opens; record each job,
+respect polling/deadline rules, and release workers when no useful work remains.
+These figures are examples, not a guaranteed quota. Use SL3 for time-critical
+work when needed, within the combined 448-core SL3/SL2 cap.

@@ -10,7 +10,9 @@ import pandas as pd
 
 from ..core.runtime import CheckpointStore, available_cpu_count, available_memory_bytes
 from ..core.products import FOUNDER_STAGES, load_panels, panel_location
-from ..core.chromosome_parallel import ChromosomeExecutor, current_threads
+from ..core.chromosome_parallel import (
+    ChromosomeExecutor, current_threads, memory_worker_limit,
+)
 from ..core.checkpoints import contig_path, read_size_bytes
 from ..core.parallel import malloc_trim
 from .founder_metrics import evaluate_founders, represented_ancestry
@@ -167,27 +169,8 @@ def _evaluation_resources(store, tasks, requested, feedback_selection, workers,
                 paths.add(contig_path(store.root, stage, contig))
         other = max((read_size_bytes(path) for path in paths), default=0)
         estimates.append((source + other) * 5 // 4 + (2 << 30))
-    if not estimates:
-        return estimates, 1
-    available = available_memory_bytes()
-    if available is None:
-        # With no memory evidence, do not multiply large decoded checkpoints.
-        return estimates, 1
-    reserve = min(available // 2, max(4 << 30, available // 10))
-    usable = max(0, available - reserve)
-    total = count = 0
-    for estimate in sorted(estimates, reverse=True)[:workers]:
-        if total + estimate > usable:
-            break
-        total += estimate
-        count += 1
-    if not count:
-        print("EVALUATION memory estimate exceeds available memory; retaining serial execution", flush=True)
-        return estimates, 1
-    print(f"EVALUATION memory budget: {count} chromosome workers; "
-          f"estimated concurrent peak {total / 2**30:.1f} GiB, "
-          f"usable {usable / 2**30:.1f} GiB", flush=True)
-    return estimates, count
+    return estimates, memory_worker_limit(
+        estimates, workers, available_memory_bytes(), label="EVALUATION")
 
 
 def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available",),

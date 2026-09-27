@@ -19,9 +19,9 @@ the general AD-VCF/BCF route, `simulation.py` generates known-pedigree data, and
 All share `reconstruction.py` for local feedback, assembly and painting, then
 `downstream.py` for the one-way pedigree → family phase → recombination handoff.
 Simulation truth is retained for evaluation and never supplied to inference.
-Plotting libraries are loaded only by the optional simulation-pedigree
-plotter; painting types, checkpoint readers and export do not initialize
-graphics or font caches.
+Plotting libraries are imported at output boundaries (simulation pedigree
+plots and recombination reports); painting types, checkpoint readers and
+export do not initialize graphics or font caches.
 
 `reports.py` holds discovery-search summaries and observed-reference
 consistency reports. Reporting neither selects haplotypes nor establishes
@@ -120,18 +120,51 @@ and the dynamic worker counter. Its `get_dynamic_threads()` and
 finish. An already-running kernel cannot absorb new threads mid-call.
 
 `core/chromosome_parallel.py` supplies persistent chromosome workers and bounded
-thread leases for pedigree preparation/scoring, recombination and evaluation.
+thread leases for pedigree preparation/scoring, family phase, recombination
+and evaluation.
 Its `current_threads()` lets surviving workers claim released cores at explicit
 numerical boundaries. Genome-wide candidate selection remains a barrier between
 pedigree screening and detailed scoring; parallelism does not change that model.
-Recombination and evaluation limit concurrent decoded chromosomes using
-`core/runtime.py` memory accounting without reducing the shared CPU ceiling.
+Family phase, recombination and evaluation supply their decoded workspace
+estimates to `memory_worker_limit()` in that same module. It applies one
+memory-headroom policy using `core/runtime.py` memory accounting, without
+reducing the shared CPU ceiling. Stage-specific array-size estimates stay
+beside the stages that own those arrays.
 
 Assembly scheduling is in `assembly/hierarchy.py`; refinement candidate
 scheduling is in `assembly/founder/candidates.py`. Process count and threads
 per process share one ceiling. Do not add independent thread pools or reorder
 environment-sensitive imports merely to satisfy a style rule. Checkpoint I/O,
 memory bandwidth and ordered acceptance steps can still limit utilization.
+
+### Optional work sharing between allocations
+
+`core/batch_queue.py` owns the shared-filesystem queue, claims, progress and
+result publication. `core/batch_tasks.py` packs bounded evidence slices and
+dispatches the **existing** local-fit or hierarchy callbacks. It is a transport
+adapter, not a second scientific implementation. The CLI's `--batch-queue`
+enables publication; `batch-worker` consumes work on an already allocated
+node. With no queue configured, the ordinary node-local path remains active.
+
+| Boundary | Owner | What crosses it |
+| --- | --- | --- |
+| Independent batches between allocations | `core/batch_queue.py`, `batch_tasks.py` | Bounded evidence slices and task results |
+| Chromosomes within one allocation | `core/chromosome_parallel.py` | Small task descriptors, configuration and summaries |
+| Numerical work within a chromosome/batch | `core/parallel.py` and stage-owned schedulers | Shared arrays and a bounded process/thread budget |
+| Scientific stage completion | Stage coordinator and checkpoint store | Ordered, identity-checked products |
+
+Only a chromosome coordinator publishes its scientific checkpoints; helpers
+publish attempt-specific queue results. Dependent assembly levels still wait
+for their inputs. The queue does not distribute pedigree, family phase,
+recombination or chromosome-coupled founder refinement; their node-local
+parallelism is separate. External allocation launchers are operational tools,
+not required imports of the public package.
+
+Use a shared queue only with identical frozen source on its coordinators and
+helpers. Follow the [running guide](running.md#optional-cross-node-batches)
+for the public commands and restart rules. Queue work records are not a full
+scheduler bill: coordinator timers omit helpers, while helper allocations can
+include idle time. Use scheduler allocated-CPU seconds for total resource cost.
 
 ## Configuration, types and checkpoints
 
@@ -168,6 +201,13 @@ with `PYTHONPATH` pointing there; `PYTHONSAFEPATH=1` also prevents the child
 interpreter's current-directory entry from taking precedence. Verify the
 package path in a forkserver worker as well as in the parent: a frozen entry
 script alone does not isolate preloaded worker imports.
+
+Package startup configures disposable Numba caches in `core/environment.py`
+before numerical imports. Run/job and hostname isolate automatic caches;
+workers in that scope reuse them. An explicit `NUMBA_CACHE_DIR` remains a user
+override. Native caches, batch-transport results and scientific checkpoints
+have different lifetimes: neither a native cache nor a queue directory replaces
+the checkpoint store. See [cache policy](performance.md#native-compilation-caches).
 
 For numerical comparisons, copy a kernel module into an isolated source tree
 or use a separate `NUMBA_CACHE_DIR`. Do not import a canonical `@njit(cache=True)`

@@ -12,7 +12,7 @@ Hardlinked inodes are counted once across the whole scan; sparse files use
 allocated blocks rather than apparent length. Like GNU `du -s -B1`, the total
 is the sum of `st_blocks * 512`.
 
-### Current implementation and latest full scan
+### Current implementation and native-backend validation
 
 The implementation is **Python plus C99**, with no Rust component:
 
@@ -24,7 +24,7 @@ The implementation is **Python plus C99**, with no Rust component:
 - [`test_recursive_du.py`](test_recursive_du.py) checks both backends against
   GNU `du`, including sparse files, hardlinks, symlinks, and partial failures.
 
-The latest full scan finished **27 September 2026 at 12:47:01 UTC** using the
+The native-backend validation scan finished **27 September 2026 at 12:47:01 UTC** using the
 native backend, 128 I/O threads, and 64-entry batches:
 
 | Measurement | Result |
@@ -45,6 +45,17 @@ The timestamped JSON, resource report, progress log, and exit status are saved
 locally under `.work/du-native-20260927/full-scan-124453/` (ignored by Git).
 Reuse that result when sufficient; the size is a live measurement, not a
 persistent quota or an atomic filesystem snapshot.
+
+### Comparison with existing tools
+
+A subsequent [dua/dwalk comparison](disk_usage_comparison.md) used the same
+four-core allocation and reversed the order of the allocated-space tools.
+The best full runs of dua and this utility both took about **99 seconds**;
+cache and filesystem variation prevented a consistent full-tree winner. This
+utility was faster on the unchanged 44,817-entry sample, with identical totals.
+Dua used less memory. Dwalk with four MPI ranks was stopped after ten minutes
+without completing, and its apparent-byte summary has different semantics.
+See the comparison for exact commands, errors, timing order, and limits.
 
 ### Usage
 

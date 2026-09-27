@@ -142,7 +142,7 @@ Validation and timing are described separately:
   boundaries.
 - [Storage utility](tools/README.md): parallel allocated-space measurements for
   large checkpoint trees, implemented in Python with an optional C accelerator.
-  The latest full-project measurement took 2 minutes 8 seconds for 4.66 million
+  A native-backend validation scan took 2 minutes 8 seconds for 4.66 million
   entries on 27 September 2026; see the utility notes for build instructions,
   validation, and filesystem-cache caveats.
 

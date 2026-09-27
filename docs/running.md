@@ -20,7 +20,60 @@ Other numerical work retains the requested budget.
 
 Checkpoint I/O, process startup, ordered panel/beam updates and inter-stage
 dependencies can still leave cores idle. This is not a claim of sustained
-full-node utilization or independent chromosome sharding within one run.
+full-node utilization. Pedigree evidence/scoring, family phase, recombination
+and saved-result evaluation use chromosome-parallel workers within an
+allocation, subject to their memory estimates. Surviving workers take freed
+threads at numerical boundaries; genome-wide pedigree decisions remain barriers.
+
+Package startup isolates compiled Numba caches by run/job and host, while
+workers within that scope share them. No launch-wrapper setting is required.
+Scientific checkpoints remain independent and persistent. See
+[native compilation caches](performance.md#native-compilation-caches) for
+startup costs and the explicit cache override.
+
+## Optional cross-node batches
+
+The ordinary commands need only one allocation. To let other allocated nodes
+help with independent local-refit and L1–L4 hierarchy batches, add a shared
+queue directory:
+
+```bash
+# Coordinator, on its own allocation.
+haplotypes reconstruct --vcf cross.bcf --output work/runs/my_cross \
+  --contigs chr1 chr2 chr3 --cores 76 \
+  --batch-queue /shared/my_cross/batches
+
+# Helper, launched separately inside another allocation.
+haplotypes batch-worker --queue /shared/my_cross/batches --cores 48
+```
+
+The same `--batch-queue` option is available for `simulate`, `astcal` and
+`tropheops`; TOML uses `[run].batch_queue`. An explicit CLI path overrides
+TOML, then `HAPLOTYPES_BATCH_QUEUE`. Omit all three for node-local execution.
+
+Both processes must have the same installed/frozen package source and access
+to the queue directory. Set each `--cores` within that process's actual
+allocation. The package does not submit allocations, reserve extra CPUs or
+move a shell onto another node. Multiple helpers can join the same queue.
+They exit after 120 seconds without work by default
+(`--idle-seconds` changes this), so launch them while batches are available.
+A coordinator also executes work; it is not an idle dispatcher.
+
+Only independent local fitting and hierarchy batches use this transport.
+Discovery, coupled founder refinement and downstream stages do not become
+cross-node jobs by enabling it. Each keeps its existing local scheduling.
+Results retain their task IDs and scientific batch boundaries; only the
+coordinator writes the normal pipeline checkpoints. A single hierarchy batch
+stays local. See [execution ownership](development.md#optional-work-sharing-between-allocations).
+
+Keep the queue and source snapshot while resuming interrupted work. Confirm
+the previous coordinator is terminal before restarting it; do not run two
+owners of the same scientific checkpoint stage. Expired Slurm coordinators
+stop offering work, and expired worker claims can be reclaimed. Completed
+hierarchy bundles can be reused under the exact checkpoint identity.
+For changed source, use a fresh queue: do not relabel old results to force reuse.
+Retained transport files can be removed once the run and any desired resume
+are finished, independently of the scientific checkpoints.
 
 ## Inputs
 

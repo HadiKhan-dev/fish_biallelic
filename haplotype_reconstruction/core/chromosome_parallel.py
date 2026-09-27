@@ -20,6 +20,35 @@ from . import parallel
 _LEASE = None
 
 
+def memory_worker_limit(estimates, workers, available, *, label):
+    """Limit concurrent chromosome workspaces without lowering the CPU ceiling.
+
+    Stages supply decoded peak-byte estimates, including their own numerical
+    copies and per-process overhead. Budget the largest possible concurrent
+    group, retaining 10% headroom (at least 4 GiB, at most half of available
+    memory). Missing memory information or an oversized chromosome retains the
+    one-worker route; this is an estimate, not a guarantee that it fits.
+    """
+    if not estimates or available is None:
+        return 1
+    reserve = min(available // 2, max(4 << 30, available // 10))
+    usable = max(0, available - reserve)
+    total = count = 0
+    for estimate in sorted(estimates, reverse=True)[:workers]:
+        if total + estimate > usable:
+            break
+        total += estimate
+        count += 1
+    if not count:
+        print(f"{label} memory estimate exceeds available memory; "
+              "retaining one chromosome worker", flush=True)
+        return 1
+    print(f"{label} memory budget: {count} chromosome workers; "
+          f"estimated concurrent peak {total / 2**30:.1f} GiB, "
+          f"usable {usable / 2**30:.1f} GiB", flush=True)
+    return count
+
+
 def current_threads():
     """Grow this worker's lease at a numeric boundary; otherwise change nothing.
 

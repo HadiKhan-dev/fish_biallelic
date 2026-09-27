@@ -1,5 +1,6 @@
 [run]
 cores = "auto"
+# batch_queue = "/shared/run/batches" # Optional helpers: haplotypes batch-worker --queue PATH
 # read_calibration = true # Default: fit the observation model from allele depths.
 # pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
 assembly_model = "dense" # "structured" is near quadratic with bounded search.

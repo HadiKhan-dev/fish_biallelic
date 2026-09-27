@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 import numpy as np
+from ..core.chromosome_parallel import current_threads
 from . import evidence as refinement_evidence
 from . import messages as refinement_messages
 from . import factors, selector_chains
@@ -224,6 +225,7 @@ def refine_family(genotype_likelihoods, observed, reference_alleles, positions, 
         workspace.dirty_tiles = np.zeros((len(gc), (sites + 31) // 32), dtype=np.bool_)
     dirty_tiles = workspace.dirty_tiles
     while messages.iteration < cfg.max_iterations and not converged:
+        current_threads()
         damping = cfg.damping
         _, phase_delta, _, _ = _phase_update(belief, orientation, messages.phase_match, phase_theta, anchors,
                                        cfg.scaffold_phase_error, damping, True)
