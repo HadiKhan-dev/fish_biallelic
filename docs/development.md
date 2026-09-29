@@ -75,13 +75,16 @@ and execution helpers are grouped in `assembly/founder/`:
 
 | Modules | Responsibility |
 | --- | --- |
+| `search`, `global_search`, `search_ranking` | Budgeted sparse coordinates, global escapes and bounded proposal ranking |
+| `proxy_primary`, `sparse_primary` | Summed-evidence proxy grids and exact incumbent anchors |
 | `path_search`, `beam`, `dual_search`, `windows` | Conditional path and interval proposals |
+| `queries`, `conditional_messages`, `exchange_bounds`, `exchange_cache` | Reuse identical numerical problems and unchanged flanks; bound and incrementally score suffix queries |
 | `exchanges`, `intervals`, `count`, `count_increase` | Paired-path moves, progressive count reductions and final count-up/refit |
 | `scoring`, `predictive`, `evidence` | Cohort likelihoods, missing-founder evidence and model preparation |
 | `workspace`, `packing`, `background`, `delta` | Reusable arrays and localized score evaluation |
 | `candidates`, `components`, `count_workers` | Bounded concurrent work and straggler thread reallocation |
 | `checkpoints` | Resume records for refinement passes |
-| `beam_kernels`, `dual_short`, `site_kernels`, `sparse`, `count_bound` | Specialized numerical kernels and proposal screening |
+| `beam_kernels`, `beam_wide_kernels`, `dual_short`, `site_kernels`, `sparse`, `count_bound` | Specialized numerical kernels and proposal screening |
 
 These helpers do not use pedigree truth or replace sample painting. Their
 internal sample fits score founder proposals. The separate top-level
@@ -214,6 +217,27 @@ or use a separate `NUMBA_CACHE_DIR`. Do not import a canonical `@njit(cache=True
 source file under a temporary module alias: the generated cache can retain
 that alias and fail to load in ordinary production imports. Experimental source,
 compiled caches and scientific checkpoints are separate kinds of artifact.
+
+## Source control and local artifacts
+
+Keep production modules, CLI/configuration examples, documentation, dependency
+specifications, source tools and their maintained checks in Git. New imported
+helpers belong in the same commit as their callers; do not hide unfinished
+production dependencies with ignore rules. The curated readable real-data
+handoffs under `deliverables/` remain tracked, including their CSV/PED files.
+
+Root `.gitignore` keeps runs and experiment archives (`work/`, `.work/`),
+the private `manuscript/`, the external `claude_lab` symlink, genomic data and
+indexes, NumPy arrays, build/native caches, local environment files and editor
+artifacts outside commits. The native disk-usage binary has a scoped ignore
+in `tools/.gitignore`; its C source and focused tests remain tracked.
+Ignoring a path does not remove an already-tracked file.
+
+Paused scientific prototypes belong in ignored experiment storage, not inside
+the installable Python package: setuptools can package Python files even when
+Git ignores them. Archive them with their original paths and restoration notes
+before removal from the package. Preserve checkpoints, manuscripts and
+accepted results during commit preparation.
 
 ## Making a behavior-preserving cleanup
 

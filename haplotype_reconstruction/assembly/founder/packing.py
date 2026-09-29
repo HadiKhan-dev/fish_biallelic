@@ -217,3 +217,40 @@ def gather_macro(emissions, groups, rows_by_group):
                         output[sample, a, b, offset + site] = value[sample, aa, bb, site]
             offset += value.shape[3]
     return outputs
+
+
+# Blocked copies preserve every value. Each tile owns disjoint output columns
+# and uses the caller's current dynamic Numba budget, not an independent pool.
+@njit(cache=True, parallel=True, nogil=True)
+def transpose_message_columns(source):
+    samples, choices = source.shape
+    out = np.empty((choices, samples), dtype=source.dtype)
+    for tile in prange((choices+31)//32):
+        for sample_tile in range(0, samples, 32):
+            for choice in range(tile*32, min(choices, (tile+1)*32)):
+                for sample in range(sample_tile, min(samples, sample_tile+32)):
+                    out[choice, sample] = source[sample, choice]
+    return out
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def transpose_suffix_columns(source):
+    blocks, samples, states = source.shape
+    out = np.empty((blocks, states, samples), dtype=source.dtype)
+    for block in prange(blocks):
+        for state_tile in range(0, states, 32):
+            for sample_tile in range(0, samples, 32):
+                for state in range(state_tile, min(states, state_tile+32)):
+                    for sample in range(sample_tile, min(samples, sample_tile+32)):
+                        out[block, state, sample] = source[block, sample, state]
+    return out
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def restore_message_columns(source, destination):
+    choices, samples = source.shape
+    for tile in prange((choices+31)//32):
+        for sample_tile in range(0, samples, 32):
+            for choice in range(tile*32, min(choices, (tile+1)*32)):
+                for sample in range(sample_tile, min(samples, sample_tile+32)):
+                    destination[sample, choice] = source[choice, sample]

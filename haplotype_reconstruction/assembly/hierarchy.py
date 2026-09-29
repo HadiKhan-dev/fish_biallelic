@@ -554,7 +554,7 @@ def _process_single_batch(args):
      max_sites_for_linking, n_generations, recomb_tolerance,
      top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
      cc_scale, inner_num_processes, verbose,
-     chromosome_map, structured_transition_config, panel_search_config, precomputed_informative_sample_mask) = args
+     chromosome_map, structured_transition_config, panel_search_config, precomputed_informative_sample_mask, pruning_full_scores) = args
 
     # A reused worker has finished serializing its previous result. Release
     # that batch's dead Python cycles and allocator arenas before attaching.
@@ -743,6 +743,15 @@ def _process_single_batch(args):
                 cc_scale=cc_scale,
                 num_threads=core_parallel.get_dynamic_threads,
             )
+        if pruning_full_scores:
+            from .panel_pruning import prune_selected_panel
+            resolved_beam, pruning_diagnostic = prune_selected_panel(
+                resolved_beam, list(original_portion), inference_batch_probs, batch_sites,
+                max_bins=2000 if panel_search_config is None else panel_search_config.max_bins,
+                full_scores=pruning_full_scores, cc_scale=cc_scale,
+                num_threads=core_parallel.get_dynamic_threads)
+            if pruning_diagnostic is not None:
+                search_diagnostics.append(pruning_diagnostic)
         if _prof:
             _acc('select_and_resolve(CR)', _t)
 
@@ -875,7 +884,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           min_boundary_informative_samples=1,
                           chromosome_map=None, structured_transition_config=None,
                           panel_search_config=None, scoring_probs=None,
-                          batch_queue_key=None):
+                          batch_queue_key=None, pruning_full_scores=0):
     """Performs one level of Hierarchical Assembly.
 
     Memory strategy:
@@ -1010,7 +1019,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                 max_sites_for_linking, n_generations, recomb_tolerance,
                 top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
                 cc_scale, inner_num_processes, verbose,
-                chromosome_map, structured_transition_config, panel_search_config, batch_informative_sample_mask
+                chromosome_map, structured_transition_config, panel_search_config, batch_informative_sample_mask,
+                pruning_full_scores
             ))
         return worker_args
 

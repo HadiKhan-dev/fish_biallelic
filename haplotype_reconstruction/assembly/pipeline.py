@@ -22,7 +22,7 @@ ASSEMBLY_RELEASE_SCHEMA = "assembly-release-v1"
 
 
 ASSEMBLY_RELEASE_BACKEND = (
-    "preprocess-progressive-founder-hierarchy-refinement-v21"
+    "preprocess-progressive-founder-hierarchy-refinement-v22"
 )
 
 
@@ -60,6 +60,7 @@ ASSEMBLY_RELEASE_CODE_IDENTITY_FILES += (
     'core/batch_queue.py', 'core/batch_tasks.py',
     'assembly/structured_transitions.py', 'assembly/panel_search.py',
     'assembly/panel_scoring.py', 'assembly/panel_candidates.py', 'assembly/partial_emissions.py',
+    'assembly/panel_rehousing.py', 'assembly/panel_pruning.py',
     'assembly/founder_refinement.py', 'assembly/founder/path_search.py',
     'assembly/founder/scoring.py', 'assembly/founder/dual_search.py',
     'assembly/founder/exchanges.py', 'assembly/founder/windows.py',
@@ -74,6 +75,16 @@ ASSEMBLY_RELEASE_CODE_IDENTITY_FILES += (
     'assembly/founder/site_kernels.py', 'assembly/founder/dual_short.py',
     'assembly/founder/evidence.py', 'assembly/founder/predictive.py',
     'assembly/founder/beam.py', 'assembly/founder/beam_kernels.py',
+    'assembly/founder/beam_wide_kernels.py',
+    'assembly/founder/proxy_primary.py',
+    'assembly/founder/sparse_primary.py',
+    'assembly/founder/search_ranking.py',
+    'assembly/founder/global_search.py',
+    'assembly/founder/search.py',
+    'assembly/founder/queries.py',
+    'assembly/founder/conditional_messages.py',
+    'assembly/founder/exchange_bounds.py',
+    'assembly/founder/exchange_cache.py',
 )
 
 _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
@@ -107,6 +118,9 @@ class AssemblyConfig:
     max_level: int = 4
     l1_batch_size: int = 10
     higher_level_batch_size: int = 10
+    # Final L1 only: exhaustive small-panel pruning, bounded at large K.
+    # Zero disables this search pass for controlled comparisons.
+    l1_pruning_full_scores: int = 256
     min_boundary_informative_samples: int = 4
     beam_width: int = 200
     max_founders: int = 12
@@ -132,6 +146,10 @@ class AssemblyConfig:
         default_factory=_configured_founder_refinement)
 
     def __post_init__(self) -> None:
+        if (isinstance(self.l1_pruning_full_scores, bool)
+                or int(self.l1_pruning_full_scores) != self.l1_pruning_full_scores
+                or self.l1_pruning_full_scores < 0):
+            raise ValueError("l1_pruning_full_scores must be a nonnegative integer")
         if not isinstance(self.founder_refinement_config, founder_refinement.FounderRefinementConfig):
             raise TypeError("founder_refinement_config must be FounderRefinementConfig")
         if self.panel_search_config is not None and not isinstance(
@@ -476,8 +494,9 @@ def assembly_release_identity_record(
             "linker_fit": "coherent_expected_counts",
             "genotype_emission": "partial_founder_predictive_uniform_mixture",
             "max_linking_iterations": assembly_linking.MAX_LINKING_ITERATIONS,
+            "l1_pruning": "allele_preserving_single_recipient_native_objective",
             "observed_false_genotype_evidence": "uniform_state_neutral",
-            "final_founder_refinement": "full_site_potts_phase_count_staggered_intervals",
+            "final_founder_refinement": "full_site_potts_sparse_global_v14",
             "final_founder_refinement_switch_penalty": founder_scoring.SWITCH_PENALTY,
         },
     }
@@ -949,6 +968,8 @@ def assemble_chromosome(
                 ),
                 structured_transition_config=config.structured_transition_config,
                 panel_search_config=config.panel_search_config,
+                pruning_full_scores=(config.l1_pruning_full_scores
+                    if config.max_level == 4 and level == 1 else 0),
             )
             elapsed_seconds = time.perf_counter() - started
             stored_diagnostic = None

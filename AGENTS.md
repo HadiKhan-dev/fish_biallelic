@@ -54,9 +54,11 @@ runner setup.
 
 ### Resource selection and aggregate limits
 
-Before submission, inspect the user's existing jobs, `hpcstat` or `sinfo`,
-relevant `scontrol` partition/job/QoS records, and balances such as `mybalance`
-when available. Include memory-driven extra CPU allocations and CPU/GPU ratios
+Before planning submissions, inspect the user's existing jobs, `hpcstat` or
+`sinfo`, relevant `scontrol` partition/job/QoS records, and balances such as
+`mybalance` when available. Reuse sufficiently recent shared observations
+across the submission sequence; this is not a checklist to query anew for
+every job. Include memory-driven extra CPU allocations and CPU/GPU ratios
 in the estimate. Idle nodes alone do not prove that a request can start.
 `GrpTRESRunMins` is a shared cores-times-remaining-walltime limit; its displayed
 usage is periodically refreshed. Read current limits rather than hardcoding
@@ -98,6 +100,101 @@ an observed amount of free SL4 capacity or treating it as a personal quota.
 - Use focused job/accounting/resource checks at useful decision points and
   batch them where possible. Do not tightly poll Slurm, repeatedly submit
   probes, or churn queued jobs merely because a resource snapshot changes.
+
+### Slurm traffic across agents and workflows
+
+Manage all scheduler traffic, not just status polling: submissions, job-step
+launches, cancellations, updates, accounting queries and internal client
+retries also create work. Coordinate across this user's tasks and terminals;
+a separate process, node, account or service level does not provide a separate
+per-user controller allowance.
+
+- Aim for roughly **one controller request every two minutes in steady
+  operation across coordinated tasks**, as the user's soft efficiency target.
+  Necessary startup, recovery and cleanup can exceed it temporarily; keep
+  those bursts bounded, record why, and amortize them over useful computation.
+  This is not a hard limit that should prevent required recovery or cleanup.
+  The existing minimum 120-second `squeue` polling interval still applies.
+- A shell command is not one RPC. Allow for submission, step startup and
+  completion traffic together, including daemon work not charged to the user's
+  counters. Reuse allocations and long-lived workers; distribute scientific
+  units through their local/shared task queue without a Slurm call per unit.
+- Check site rate-limit settings at setup or a relevant diagnostic point and
+  reuse that information. CSD3 on 27 September 2026 used a 40-token bucket with
+  eight tokens added every 60 seconds. Treat this as dated site configuration,
+  not a target rate or permission to submit eight jobs per minute. Leave room
+  for queries, job lifecycle and other tasks; do not rely on client backoff as
+  the submission pacer or repeatedly probe the remaining allowance.
+- For normal allocation growth, use **one submission opportunity every five
+  minutes (300 seconds), not ten minutes**, shared across cooperating tasks.
+  Submit only when fresh demand justifies it; an empty backlog does not require
+  a request. Prefer one small, demand-sized **job array** of workers with the
+  same resource profile over one allocation per submission when multiple
+  useful workers are needed. Use separate opportunities for different profiles.
+  Size the array from unmet work and useful existing capacity, with attention
+  to simultaneous startup traffic; each element still creates lifecycle work.
+  The soft RPC target must not be interpreted as one allocation per interval.
+- Before enabling arrays in a coordinator, make its ledger, queue parsing,
+  recovery and cleanup array-aware. Record array/task identities and count all
+  elements that could run, including pending and in-flight elements, when
+  checking resource limits. Preserve task ownership and per-element logs;
+  do not simply add `--array` to a single-job submitter. Site array/job limits
+  still apply, and arrays do not bypass the paid CPU cap or shared QoS limits.
+- Before each new submission, refresh demand from inexpensive workflow state
+  and account for suitable running, pending and in-flight capacity. Bound the
+  number of submissions and elapsed time per cycle; a sleep after an unbounded
+  loop is not pacing. Stop adding workers when existing capacity covers useful
+  demand, and keep status updates and recovery responsive. Do not turn this
+  traffic budget into an arbitrary SL4 core cap.
+- Assign one coordinator to routine campaign queries and cleanup. Share
+  timestamped snapshots and a launch ledger/budget across cooperating tasks;
+  avoid independent per-worker polls or repeated campaign-wide cancellations.
+  Group queries and cancellations where supported. For supported whole-job
+  bulk cancellation, prefer `scancel --ctld` with explicit owned job selectors;
+  a plain list of IDs can still generate per-job RPCs. Preserve server-side
+  state filters (e.g. `--state=PENDING` for pending-only cleanup) and protected
+  runner exclusions. Use filesystem heartbeats and completion records for
+  ordinary progress checks.
+- If calls show backoff or long delays, reduce or pause new allocation growth
+  while useful work continues; do not add rapid retries or replacement queries.
+  Record command start/end, source task, result and job ID locally when useful.
+  Use sparse diagnostics to validate changes, not a new continuous poller.
+  `sdiag` handled-request counts omit some rejected attempts, and reported
+  handling time is not CPU time or measured harm to other users.
+- Keep controller bookkeeping and scheduler-query errors separate from
+  scientific failure signals. Pause new submissions and record the operational
+  error while healthy workers continue; do not broadcast a scientific failure
+  or cancel the campaign merely because the coordinator encounters an exception.
+  Recover affected claims only after confirming their former writers terminal.
+- Reconcile any in-flight submission and its durable job record before replacing
+  a coordinator or retrying an ambiguous submission outcome. Avoid holding a
+  scientific task-claim lock across a blocking Slurm call; preserve atomic
+  capacity reservation and ledger updates when changing lock boundaries.
+  Never cancel the protected Codex hosting allocation to apply these changes.
+
+### SL4 worker size, partition and walltime
+
+Apply the user's partition policy (28 September 2026) to new SL4 CPU workers:
+
+- **Large workers, at roughly half-node scale or larger (including the
+  established 48-CPU profile): use `icelake` or `icelake-himem` with a
+  two-hour walltime.** Choose between those partitions using memory needs and
+  current admission evidence. Use checkpoint/resume for longer investigations;
+  do not default these large workers to Sapphire.
+- **Small workers: prefer `sapphire`.** This preference aims to benefit from
+  Sapphire's higher per-core performance/IPC where useful; it is not a promise
+  of a particular speedup. Request a realistic useful runtime for the work.
+- If Sapphire admission is blocked or unsuitable for a small worker, use
+  `icelake` or `icelake-himem` instead. Base the fallback on shared current
+  queue/limit evidence; do not wait indefinitely, launch admission-only probes,
+  or keep duplicate live requests for the same work.
+- Assess worker size against the actual node profile and requested/allocated
+  CPUs, including memory-driven extra cores. These are worker-shape preferences,
+  not a new aggregate SL4 core cap. Do not assume changing partitions bypasses
+  a shared QoS CPU-minute limit.
+- Preserve healthy running work and checkpoints when changing future requests.
+  Reconcile pending/in-flight replacements, protect the runner, and retain the
+  existing shared submission cadence, array accounting and cleanup rules.
 
 ### Building useful SL4 capacity incrementally
 

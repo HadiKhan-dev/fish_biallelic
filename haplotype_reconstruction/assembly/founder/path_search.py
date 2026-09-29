@@ -39,8 +39,8 @@ def _packed_incumbent_suffix(data, offsets, counts, bins, known, incumbent, pena
 
 
 def _incumbent_suffix(models, known, incumbent, penalty, reverse, first, second):
-    return _packed_incumbent_suffix(*packed_emissions(models),
-        known, incumbent, penalty, reverse, first, second)
+    from .conditional_messages import incumbent_suffix
+    return incumbent_suffix(models, known, incumbent, penalty, reverse, first, second)
 
 
 def conditional_path(submodels, known, incumbent, penalty, *, width=64,

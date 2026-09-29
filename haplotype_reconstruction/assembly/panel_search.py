@@ -23,6 +23,7 @@ from .panel_candidates import (
     local_proposals, boundary_proposals,
 )
 from ..discovery.objectives import compute_outer_bic_from_log_likelihood
+from .panel_rehousing import sequence_class_maps, rehousing_proposals, materialize_rehousing
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,8 @@ class PanelSearchConfig:
     full_scores_per_kind: int = 16
     max_bins: int = 2000
     tensor_budget_mb: int = 256
+    # Experimental until the independent assembly controls pass.
+    rehousing_full_scores: int = 0
 
     def __post_init__(self):
         for value in (
@@ -43,6 +46,10 @@ class PanelSearchConfig:
         ):
             if isinstance(value, bool) or int(value) != value or value < 1:
                 raise ValueError("panel search budgets must be positive integers")
+        if (isinstance(self.rehousing_full_scores, bool)
+                or int(self.rehousing_full_scores) != self.rehousing_full_scores
+                or self.rehousing_full_scores < 0):
+            raise ValueError("rehousing score budget must be a nonnegative integer")
 
 
 def configured_panel_search():
@@ -260,6 +267,8 @@ def _improve_permutation(weights, permutation):
 
 def _materialize(description, selected, candidates):
     kind, *args = description
+    if kind == 'rehouse':
+        return materialize_rehousing(description, selected)
     result = [list(path) for path in selected]
     if kind == 'replace':
         founder, candidate = args
@@ -372,6 +381,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         if selected is None or trial_bic < bic - 1e-8:
             selected, baseline_scores, likelihood, bic = trial, trial_scores, trial_ll, trial_bic
             selected_anchor = anchor
+    local_classes = sequence_class_maps(batch_blocks) if config.rehousing_full_scores else None
     bin_offsets = np.r_[0, np.cumsum([item['n_bins'] for item in sub])]
     candidate_array = np.asarray(candidates, dtype=np.int64)
     candidate_workspace = prepare_candidate_scores(sub, candidate_array)
@@ -479,6 +489,10 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
                 reassignment += fields[b][:, local[:, b]]
             np.fill_diagonal(reassignment, -np.inf)
             deletion_gain = np.max(reassignment, axis=1)
+            if config.rehousing_full_scores:
+                proposals['rehouse'] = rehousing_proposals(
+                    local, local_classes, full_budget=config.rehousing_full_scores,
+                    fields=fields, deletion_gains=deletion_gain)
             order = np.argsort(-deletion_gain, kind='stable')
             for founder in order[:config.full_scores_per_kind]:
                 proposals['death'].append((float(deletion_gain[founder]), ('death', (int(founder),))))
@@ -514,7 +528,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         for kind, items in proposals.items():
             # Only q proposals were ever considered, before de-duplication.
             # Stable top-q selection preserves those exact edits and tie order.
-            ranked = nsmallest(config.full_scores_per_kind, items, key=lambda item: (-item[0], item[1]))
+            budget = config.rehousing_full_scores if kind == 'rehouse' else config.full_scores_per_kind
+            ranked = nsmallest(budget, items, key=lambda item: (-item[0], item[1]))
             evaluated_by_kind[kind] = 0
             for proposal_rank, (gain, description) in enumerate(ranked, 1):
                 trial = _materialize(description, selected, candidates)
@@ -528,7 +543,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
                 evaluated_by_kind[kind] += 1
                 evaluated_bics.append(float(trial_bic))
                 evaluated_descriptions.append((float(trial_bic), str(description)))
-                if trial_bic < bic - 1e-8 and proposal_rank == config.full_scores_per_kind:
+                if trial_bic < bic - 1e-8 and proposal_rank == budget:
                     boundary_acceptances.append(kind)
                 if trial_bic < bic - 1e-8 and (best is None or trial_bic < best[0]):
                     best = (trial_bic, trial_ll, trial, description, gain, trial_scores)
@@ -557,6 +572,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
     if diagnostics is not None:
         diagnostics.append(dict(total_full_scores=evaluations, final_panel_size=len(selected),
             initialization=initialization, selected_initial_anchor=selected_anchor,
-            full_score_bound=blocks + 14 * config.full_scores_per_kind * config.max_sweeps,
+            full_score_bound=blocks + (14 * config.full_scores_per_kind + config.rehousing_full_scores) * config.max_sweeps,
             iteration_budget_reached=bool(sweep + 1 == config.max_sweeps and best is not None)))
     return [(list(path), float(likelihood)) for path in selected]

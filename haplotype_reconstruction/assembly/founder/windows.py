@@ -17,7 +17,7 @@ import numpy as np
 from numba import njit, prange, set_num_threads, get_num_threads
 from numba.typed import List
 from . import path_search as search, sparse as founder_sparse, dual_short as founder_dual_short
-from . import beam_kernels as kernels
+from . import beam_kernels as kernels, beam_wide_kernels as wide
 from .beam import workspace, macro_proposals
 from .candidates import completed_candidates
 from .dual_search import canonical_score
@@ -125,14 +125,14 @@ def proposals(
         optimistic = float(np.max(prefix[blocks - start] + bound[0], axis=1).sum())
         if excluded(optimistic, accepted_bound[0]):
             return dict(start=start, stop=stop, optimistic=optimistic, pruned=True)
-        dp, alternate, values, uppers, ancestry, rows = workspace(
+        dp, alternate, values, uppers, ancestry, rows = wide.workspace(
             blocks,
             len(packed[0]),
             len(first),
             width,
             max_choices
         )
-        dp[0] = prefix[blocks - start]
+        dp[0] = np.ascontiguousarray(prefix[blocks - start].T)
         beams = 1
         aborted = False
         trace_upper = np.full(blocks, np.inf)
@@ -140,7 +140,7 @@ def proposals(
         for begin in range(start, stop, 32):
             if budget is not None:
                 set_num_threads(budget())
-            dp, alternate, beams, scores, order, aborted, equivalent = kernels.chunk(
+            dp, alternate, beams, scores, order, aborted, equivalent = wide.chunk(
                 *packed,
                 known,
                 choices,
@@ -222,7 +222,6 @@ def proposals(
         best_seen = max(best_seen, record['score'])
         accepted_bound[0] = best_seen
         yield (record['path'], record['score'], (start, stop))
-
 
 def solve(submodels, known, incumbent, penalty, *, branch_cap=16, reverse=False,
           width=64, window_blocks=100, ranking="tie", thread_budget=None, background=None):

@@ -97,8 +97,14 @@ for recombination; `--no-shared-family-evidence` disables it.
   feedback round (`--feedback-selection path`). The optional
   `--feedback-segment-exchange` adds final same-count segment proposals.
   Balanced/strict cavity-rescue alternatives remain explicit choices.
+- Final assembly adds allele-preserving L1 path pruning before refinement:
+  a surplus row's unique local pieces can move to one surviving row before
+  its deletion, with every accepted panel checked by the unchanged full score.
+  This does not prescribe a biological founder count or alter feedback rounds.
 - Founder-path refinement runs after each executed final L1–L4 level,
-  followed by bounded count-up/refit on the final components.
+  followed by bounded count-up/refit on the final components. Sparse local
+  sweeps alternate with global escapes; acceptance remains full-site. This
+  trades broader search for runtime, with [documented limitations](docs/methods.md#measured-tradeoff).
   `--founder-refinement off` disables it for controlled comparisons.
 - Read calibration learns supported observation parameters from allele depths,
   including a nested homozygote-overdispersion model selected on held-out data;

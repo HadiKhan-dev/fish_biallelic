@@ -10,7 +10,7 @@ import time
 import numpy as np
 
 from .. import chimera_scoring, founder_refinement as refiner
-from . import count, count_bound, dual_search, exchanges
+from . import count, count_bound, exchanges
 from .checkpoints import FounderCheckpointStore
 from .workspace import component_workspace, resolve_threads
 from ...core import haplotypes, parallel
@@ -41,6 +41,32 @@ def _repair(panel, label, *, workspace, batch, original, neutral, sites,
         raise RuntimeError("count-up fixed-count repair changed count or reduced its objective")
     scope.save("done", dict(panel=rows, score=final, block=result[0]))
     return rows, final, result[0]
+
+
+def _addition_seeds(selected, unused, workspace, config, threads, checkpoints):
+    """Search all four seeds concurrently; retain the original tie ordering.
+
+    The known panel and evidence stay fixed across these independent searches.
+    Reuse the ordinary refiner's memory-limited dynamic thread allocator and
+    immutable background summaries. Checkpoints and canonical full-site scores
+    remain on the caller thread; its mutable workspace is not shared by workers.
+    """
+    requests = [
+        (len(selected), reverse, selected, start,
+         f"start{number}.reverse{int(reverse)}")
+        for number, start in enumerate((selected[0].copy(), unused))
+        for reverse in (False, True)
+    ]
+    from .queries import tagged_models
+    seed_models = tagged_models(workspace.models(), workspace.offsets, None)
+    proposals = refiner._path_proposals(
+        requests, seed_models, workspace.penalty, config, checkpoints,
+        width=config.beam_width, dual=True, window=False, num_threads=threads)
+    candidates = []
+    for _, _, row, _ in proposals:
+        panel = np.vstack((selected, row))
+        candidates.append((workspace.canonical(panel), panel))
+    return candidates
 
 
 def refine_components(prepared, components, neutral, sites, *, config,
@@ -108,19 +134,12 @@ def refine_components(prepared, components, neutral, sites, *, config,
                         scope.save(label, candidate)
                         proposals.append(candidate["diagnostic"])
                         break
-                    models = workspace.models()
                     unused = np.array([
                         next((j for j in range(len(block.haplotypes)) if j not in selected[:, i]),
                              int(selected[0, i])) for i, block in enumerate(batch)], np.int64)
-                    candidates = []
-                    for start in (selected[0].copy(), unused):
-                        for reverse in (False, True):
-                            row, _, _ = dual_search.solve(
-                                models, selected, start, workspace.penalty,
-                                branch_cap=config.branch_cap, reverse=reverse,
-                                sweeps=config.dual_search_sweeps)
-                            panel = np.vstack((selected, row))
-                            candidates.append((workspace.canonical(panel), panel))
+                    candidates = _addition_seeds(
+                        selected, unused, workspace, config, num_threads,
+                        count._ScopedCheckpoints(scope, label + ".seeds"))
                     seed_score, panel = max(candidates, key=lambda item: item[0])
                     panel, found, block = _repair(panel, label + ".repair", **options)
                     gain = 2 * (found-score) - (len(panel)-len(selected)) * cost

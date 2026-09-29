@@ -5,6 +5,9 @@
 # Local publication draft, kept separately from pipeline source control.
 /manuscript/
 
+# External research checkout (also matches a symlink, not just a directory).
+/claude_lab
+
 # Python/build caches.
 __pycache__/
 *.py[cod]
@@ -13,8 +16,11 @@ __pycache__/
 *.egg-info/
 /build/
 /dist/
+/haplotype_reconstruction-*/
 /.venv/
 /.pytest_cache/
+/.ruff_cache/
+/.mypy_cache/
 
 # Large data/checkpoints and transient outputs do not belong in source control.
 *.pkl
@@ -28,6 +34,23 @@ __pycache__/
 *.bam
 *.cram
 *.fastq.gz
+*.fastq
+*.fq
+*.fq.gz
+*.fasta
+*.fasta.gz
+*.fa
+*.fa.gz
+*.tbi
+*.csi
+*.bai
+*.crai
+*.fai
+*.gzi
+*.npy
+*.npz
+*.p5.b2.tmp*
+*.pkl.b2.tmp*
 *.log
 *.png
 *.csv
@@ -42,6 +65,9 @@ __pycache__/
 /.codex/
 /.claude/
 /.vscode/
+/.env
+/.env.*
+!/.env.example
 *.orig
 *.patch-result
 *.rej

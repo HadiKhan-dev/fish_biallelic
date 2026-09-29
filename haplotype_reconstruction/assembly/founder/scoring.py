@@ -160,7 +160,7 @@ def _paint_panel_direct(haplotypes, evidence, complete, penalty, prepared=None):
 
 
 @njit(parallel=True, cache=True, nogil=True)
-def _count_panel_direct(haplotypes, evidence, complete, penalty, prepared=None):
+def _count_panel_direct_all_sites(haplotypes, evidence, complete, penalty, prepared=None):
     """Canonical Viterbi score and switch count without a site traceback.
 
     Carry the count of the chosen predecessor with each state. Strict switch
@@ -222,16 +222,15 @@ def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
 
 def paint_panel(haplotypes, evidence, complete, penalty, prepared=None):
     """Canonical full-site traceback with compact switch storage when possible."""
-    from .site_kernels import paint_dosages
+    from .site_kernels import paint_dosages, paint_dosages_wide
     founders = len(haplotypes)
-    if founders * (founders + 1) // 2 > 64:
-        return _paint_panel_direct(haplotypes, evidence, complete, penalty, prepared)
     dosages = _dosage_table(haplotypes)
     if dosages is None:
         return _paint_panel_direct(haplotypes, evidence, complete, penalty, prepared)
     logs = prepare_log_evidence(evidence, complete) if prepared is None else prepared
     first, second = _unordered_pairs(founders)
-    return paint_dosages(dosages, logs, float(penalty), first, second, founders)
+    kernel = paint_dosages if len(first) <= 64 else paint_dosages_wide
+    return kernel(dosages, logs, float(penalty), first, second, founders)
 
 
 def score_and_switch_count(haplotypes, evidence, complete, penalty, prepared=None):
@@ -285,3 +284,38 @@ def fixed_path_proposals(leaves, offsets, selected, evidence, complete, painting
                 proposed[focal, block] = best
                 gains[focal, block] = unary[focal, best]
     return proposed, gains.sum(axis=1)
+
+@njit(cache=True, parallel=True, nogil=True)
+def _count_informative_direct(haps, evidence, complete, penalty, prepared=None):
+    samples, sites = evidence.shape[:2]
+    first, second = _unordered_pairs(len(haps))
+    likelihood = np.empty(samples)
+    counts = np.empty(samples, np.int64)
+    center = math.log(1. / 3.)
+    for sample in prange(samples):
+        values = np.zeros(len(first))
+        changes = np.zeros(len(first), np.int64)
+        for site in range(sites):
+            p = evidence[sample, site]
+            if not complete[site] or p.sum() <= 0. or (p[0] == p[1] and p[1] == p[2]):
+                continue
+            p0, p1, p2 = _emission_at(evidence, prepared, sample, site)
+            e0, e1, e2 = p0-center, p1-center, p2-center
+            previous = int(np.argmax(values))
+            switched = values[previous] - penalty
+            next_count = changes[previous] + 1
+            for state in range(len(first)):
+                if values[state] < switched:
+                    changes[state] = next_count
+                dosage = haps[first[state], site] + haps[second[state], site]
+                emission = e0 if dosage == 0 else e1 if dosage == 1 else e2
+                values[state] = max(values[state], switched) + emission
+        winner = int(np.argmax(values))
+        likelihood[sample], counts[sample] = values[winner], changes[winner]
+    return likelihood, counts
+
+
+def _count_panel_direct(haps, evidence, complete, penalty, prepared=None):
+    """Count-only neutral-site skip, with the original nonpositive-cost fallback."""
+    kernel = _count_informative_direct if penalty > 0 else _count_panel_direct_all_sites
+    return kernel(haps, evidence, complete, penalty, prepared)

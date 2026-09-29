@@ -7,6 +7,7 @@ import numpy as np
 from numba import set_num_threads
 from . import path_search as search, sparse as founder_sparse, beam_kernels as kernels
 from .packing import emission_arrays, packed_emissions, candidate_alphabet, short_models
+from . import beam_wide_kernels as wide_kernels
 
 def workspace(blocks, samples, states, width, max_choices):
     dp = np.empty((width, samples, states))
@@ -47,7 +48,12 @@ def conditional_path(
     suffix = search._incumbent_suffix(submodels, known, incumbent, float(penalty), reverse, first, second)
     packed = packed_emissions(submodels)
     blocks = len(emissions)
-    dp, alternate, values, uppers, ancestry, rows = workspace(
+    # Conservative measured wide endpoint only; not a universal width/sample
+    # crossover. Other widths, all macro scans and ordinary windows stay original.
+    wide_layout = width == 1024
+    allocate = wide_kernels.workspace if wide_layout else workspace
+    scan = wide_kernels.chunk if wide_layout else kernels.chunk
+    dp, alternate, values, uppers, ancestry, rows = allocate(
         blocks,
         len(packed[0]),
         len(first),
@@ -60,7 +66,7 @@ def conditional_path(
     for start in range(0, blocks, 32):
         if thread_budget is not None:
             set_num_threads(thread_budget())
-        dp, alternate, beams, scores, order, aborted, _ = kernels.chunk(
+        dp, alternate, beams, scores, order, aborted, _ = scan(
             *packed,
             known,
             choices,

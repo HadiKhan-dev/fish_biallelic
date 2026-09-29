@@ -87,7 +87,16 @@ def exchange_scores(forward, backward, founders, penalty):
     return values.sum(axis=0), baseline.sum(axis=0), pair_a, pair_b
 
 
-def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
+def _exchange_scores(forward, backward, founders, penalty, quota):
+    if quota is None:
+        return exchange_scores(forward, backward, founders, penalty)
+    from .exchange_bounds import top_scores
+    values, reference, first, second, _ = top_scores(
+        forward, backward, founders, penalty, quota)
+    return values, reference, first, second
+
+
+def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None, *, quota=None):
     """Use neutral, called-only arrays, matching canonical full-site scoring."""
     logs = (founder_scoring.prepare_log_evidence(evidence, complete)
             if prepared is None else prepared)
@@ -95,7 +104,7 @@ def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
     if dosages is not None:
         from .site_kernels import exchange_messages
         forward, backward = exchange_messages(dosages, logs, cuts, float(penalty))
-        return exchange_scores(forward, backward, len(haps), float(penalty))
+        return _exchange_scores(forward, backward, len(haps), float(penalty), quota)
     # The direct kernel avoids a large dosage table when workspace RAM is tight.
     # Neutral rows in canonical evidence have zero uncentered emission. Here
     # add the centering constant so neutral sites contribute exactly zero.
@@ -106,7 +115,7 @@ def score_exchanges(haps, evidence, complete, cuts, penalty, prepared=None):
     safe_haps = np.where(complete[None,:], haps, 0).astype(np.int8)
     assert np.all(safe_haps >= 0)
     forward, backward = messages(safe_haps, safe_logs, cuts, float(penalty))
-    return exchange_scores(forward, backward, len(haps), float(penalty))
+    return _exchange_scores(forward, backward, len(haps), float(penalty), quota)
 
 
 from numba.typed import List
@@ -126,7 +135,7 @@ def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
     """
     results, diagnostics = [], []
     for number, component in enumerate(components):
-        token = f"founder_paired_exchange.component{number}"
+        token = f"founder_paired_deferred_counts.component{number}"
         cached = founder_refinement._load(checkpoints, token)
         if cached is not None:
             results.append(cached["block"])
@@ -161,6 +170,12 @@ def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
         else:
             fitting, leaves, offsets = workspace.evidence, workspace.leaves, workspace.offsets
             complete, penalty, logs = workspace.complete, workspace.penalty, workspace.logs
+        from .exchange_cache import ExchangeCache
+        cache = getattr(workspace, "_exchange_cache", None)
+        if cache is None:
+            cache = ExchangeCache(score_exchanges)
+            if workspace is not None:
+                workspace._exchange_cache = cache
         def evaluate(panel, paint=False):
             alleles = founder_scoring.selected_alleles(leaves, offsets, panel)
             if paint:
@@ -189,8 +204,8 @@ def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
                     break
                 continue
             alleles = founder_scoring.selected_alleles(leaves, offsets, selected)
-            exact, reference, first, second = score_exchanges(
-                alleles, fitting, complete, offsets[1:-1], penalty, logs)
+            exact, reference, first, second = cache(
+                alleles, fitting, complete, offsets[1:-1], penalty, logs, quota=quota)
             max_deviation = float(np.max(np.abs(reference - current)))
             # Forward/backward and whole-chromosome accumulation have different
             # float64 summation orders. Use a scale-aware diagnostic tolerance;
@@ -215,6 +230,16 @@ def refine_components(prepared, components, neutral, sites, checkpoints=None, *,
                 a, b = int(first[pair]), int(second[pair])
                 trial = selected.copy()
                 trial[[a, b], boundary + 1:] = selected[[b, a], boundary + 1:]
+                if best is not None:
+                    scalar = evaluate(trial)
+                    if scalar <= best[0]:
+                        record["proposals"].append(dict(first=a, second=b,
+                            prepared_boundary=boundary + 1,
+                            site_index=int(indices[offsets[boundary + 1]]),
+                            gain=scalar - current, genotype_fit_gain=None,
+                            switch_delta=None, genotype_fit_guard_passed=None,
+                            screen="canonical_score_cannot_replace_winner"))
+                        continue
                 score, next_switches = evaluate(trial, paint=True)
                 assert abs(score - exact[boundary, pair]) <= score_tolerance
                 emission_gain = score - current + penalty * (next_switches - switches)

@@ -152,12 +152,13 @@ def solve(submodels, known, incumbent, penalty, *, branch_cap=16,
         if upper + margin <= best_score + 1e-7:
             early_bound = upper
             break
-        # Short blocks use sample-wise SIMD within each independent query.
+        # Short-block layout copies use the whole dynamically assigned query
+        # budget; their coordinate arithmetic remains sample-wise SIMD.
         # Generic blocks synchronize per block: bound that small inner team,
         # while suffix scans retain the dynamically assigned query budget.
         team = get_num_threads()
         try:
-            set_num_threads(min(team, _COORDINATE_THREADS))
+            set_num_threads(team if short else min(team, _COORDINATE_THREADS))
             if short:
                 path, after, change = founder_dual_short.coordinate(*coordinate_packed, known, incumbent,
                     choices, offsets, messages, suffix, float(penalty), backwards, first, second)

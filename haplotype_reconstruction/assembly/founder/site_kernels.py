@@ -8,7 +8,8 @@ comparison and first-argmax tie conventions at every site.
 The site-major int8 dosage table costs O(L*K²) bytes and removes repeated
 founder-pair lookup from O(N*L*K²) scans. Callers retain a direct bounded-memory
 kernel when that table is too large. Up to 64 unordered states, one uint64
-encodes traceback switches at a site; wider panels use the direct traceback.
+encodes traceback switches at a site; wider panels use multiple uint64 words
+under the same dosage-table memory admission and direct-kernel fallback.
 """
 import math
 import numpy as np
@@ -76,8 +77,56 @@ def paint_dosages(dosages, logs, penalty, first, second, founders):
                 state = switched_from[site]
     return (answer, likelihood)
 
+@njit(cache=True, parallel=True, nogil=True)
+def paint_dosages_wide(dosages, logs, penalty, first, second, founders):
+    """Exact multiword traceback for panels with more than 64 states.
+
+    Neutral transitions are idempotent under the nonnegative Potts switch
+    cost. Only the first of consecutive neutral sites can clip a state or
+    move its traceback; retain that site's strict switch convention.
+    """
+    samples, sites = logs.shape[:2]
+    states = dosages.shape[1]
+    words = (states + 63) // 64
+    answer = np.empty((samples, sites), np.int32)
+    likelihood = np.empty(samples)
+    center = math.log(1.0 / 3.0)
+    for sample in prange(samples):
+        scores = np.zeros(states)
+        switched_from = np.empty(sites, np.int32)
+        flags = np.empty((sites, words), np.uint64)
+        previous_neutral = True
+        for site in range(sites):
+            p0, p1, p2 = logs[sample, site]
+            neutral = p0 == 0.0 and p1 == 0.0 and p2 == 0.0
+            if neutral and previous_neutral and penalty >= 0.0:
+                # A second neutral transition is idempotent. No score is
+                # below max(scores)-penalty after the first such transition.
+                flags[site, :] = np.uint64(0)
+                continue
+            previous_neutral = neutral
+            previous = int(np.argmax(scores))
+            switched_from[site] = previous
+            switched = scores[previous] - penalty
+            for word in range(words):
+                mask = np.uint64(0)
+                for state in range(word * 64, min(states, (word + 1) * 64)):
+                    if scores[state] < switched:
+                        mask |= np.uint64(1) << np.uint64(state - word * 64)
+                    value = 0.0 if neutral else logs[sample, site, dosages[site, state]] - center
+                    scores[state] = max(scores[state], switched) + value
+                flags[site, word] = mask
+        state = int(np.argmax(scores))
+        likelihood[sample] = scores[state]
+        for site in range(sites - 1, -1, -1):
+            answer[sample, site] = first[state] * founders + second[state]
+            if flags[site, state // 64] & (np.uint64(1) << np.uint64(state % 64)):
+                state = switched_from[site]
+    return answer, likelihood
+
+
 @njit(parallel=True, cache=True, nogil=True)
-def count_switches(dosages, logs, penalty):
+def count_switches_all_sites(dosages, logs, penalty):
     """Canonical Viterbi score and switch count without a site traceback.
 
     Carry the count of the chosen predecessor with each state. Strict switch
@@ -138,3 +187,39 @@ def exchange_messages(dosages, logs, cuts, penalty):
                 backward[sample, cut] = row
                 cut -= 1
     return (forward, backward)
+
+@njit(cache=True, parallel=True, nogil=True)
+def _count_informative_dosages(dosages, logs, penalty):
+    samples, sites = logs.shape[:2]
+    states = dosages.shape[1]
+    likelihood = np.empty(samples)
+    counts = np.empty(samples, np.int64)
+    center = math.log(1. / 3.)
+    for sample in prange(samples):
+        values = np.zeros(states)
+        changes = np.zeros(states, np.int64)
+        for site in range(sites):
+            p0, p1, p2 = logs[sample, site, 0], logs[sample, site, 1], logs[sample, site, 2]
+            if p0 == 0. and p1 == 0. and p2 == 0.:
+                continue
+            previous = int(np.argmax(values))
+            switched = values[previous] - penalty
+            next_count = changes[previous] + 1
+            e0, e1, e2 = p0-center, p1-center, p2-center
+            for state in range(states):
+                if values[state] < switched:
+                    changes[state] = next_count
+                dosage = dosages[site, state]
+                emission = e0 if dosage == 0 else e1 if dosage == 1 else e2
+                values[state] = max(values[state], switched) + emission
+        winner = int(np.argmax(values))
+        likelihood[sample], counts[sample] = values[winner], changes[winner]
+    return likelihood, counts
+
+
+
+
+def count_switches(dosages, logs, penalty):
+    """Neutral clipping is idempotent for positive costs; traceback is untouched."""
+    kernel = _count_informative_dosages if penalty > 0 else count_switches_all_sites
+    return kernel(dosages, logs, penalty)

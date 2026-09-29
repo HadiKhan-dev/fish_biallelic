@@ -4,7 +4,7 @@ Hierarchy supplies the initial founder count and fixed phase-component boundarie
 Final refinement reopens local row choices and compares bounded count reductions
 without inventing alleles, merging components or using pedigree information.
 The sample-level fitting HMM is internal to assembly; it does not replace painting
-painting or publish sample ancestry. Path edits improve the same full-site
+or publish sample ancestry. Path edits improve the same full-site
 cohort objective; count changes compete under the existing complexity penalty.
 """
 from __future__ import annotations
@@ -32,7 +32,8 @@ class FounderRefinementConfig:
     max_iterations: int = 20
     branch_cap: int = 16
     proposal_max_bins: int = 2000
-    proposal_min_sites_per_bin: int = 1
+    # Proposal resolution only; canonical acceptance still uses every site.
+    proposal_min_sites_per_bin: int = 200
     dual_search_sweeps: int = 20
     window_blocks: int = 100
     count_repair_sweeps: int = 3
@@ -41,6 +42,7 @@ class FounderRefinementConfig:
     # Heuristic deep-refit screen in units of the existing per-founder cost.
     # None retains unscreened deep count search; this is not an upper bound.
     count_refit_deficit_multiple: float | None = 8.0
+    # Retained in saved configuration records; tract search now ranks all pairs.
     interval_partners: int = 3
 
     def __post_init__(self):
@@ -131,7 +133,7 @@ def _macro_context(batch, l1_blocks):
     return groups, context
 
 
-def _compute_path_proposal(models, known, incumbent, penalty, config,
+def _solve_path_proposal(models, known, incumbent, penalty, config,
                            width, reverse, dual, window, thread_budget=None, background=None,
                            candidate_choices=None):
     if window:
@@ -156,9 +158,21 @@ def _compute_path_proposal(models, known, incumbent, penalty, config,
     return {"path": path, "score": score, "search_diagnostic": diagnostic}
 
 
+def _compute_path_proposal(models, known, incumbent, penalty, config,
+                           width, reverse, dual, window, thread_budget=None,
+                           background=None, candidate_choices=None):
+    from .founder.queries import compute
+    return compute(models, known, incumbent, penalty, config, width, reverse,
+        dual, window, thread_budget, background, candidate_choices,
+        _solve_path_proposal)
+
+
 def _path_proposals(requests, models, penalty, config, checkpoints, width,
                     dual, window, num_threads, proposal_cache=None, candidate_choices=None):
     from .founder.candidates import completed_candidates
+    if requests and hasattr(models, "_coarse_groups") and candidate_choices is None:
+        from .founder.queries import prepare
+        prepare(models, requests[0][2], requests[0][3], num_threads)
     answers, missing = {}, []
     for index, (_, _, known, incumbent, phase) in enumerate(requests):
         candidate = _load(checkpoints, phase)
@@ -221,219 +235,10 @@ def _path_proposals(requests, models, penalty, config, checkpoints, width,
             for index, request in enumerate(requests)]
 
 
-def _refine_panel(selected, leaves, offsets, evidence, complete, submodels,
-                  penalty, evaluate, config, checkpoints, token, num_threads,
-                  prepared_evidence=None, macro_context=None, *, dual=False, window=False, workspace=None):
-    search_name = "window" if window else ("dual" if dual else "beam")
-
-    def score_proposal(trial, threshold):
-        value = evaluate(trial)
-        # Local flank summation can round differently. Canonicalize every
-        # possible winner (including near ties), not just the final winner.
-        margin = max(1e-6, 1e-10 * max(abs(value), abs(threshold)))
-        if workspace is not None and value + margin >= threshold:
-            value = workspace.canonical(trial)
-        return value
-
-    def better(score, trial, reference_score, reference, primary_margin=1e-6):
-        if score > reference_score + primary_margin:
-            return True
-        # Resolve genuine primary ties, not near ties or small primary losses.
-        # Both panels are evaluated under the same fixed evidence masks.
-        return (workspace is not None and score == reference_score
-                and not np.array_equal(trial, reference)
-                and workspace.predictive(trial) > workspace.predictive(reference) + 1e-6)
-
-    selected = selected.copy()
-    proposal_cache = None if workspace is None else workspace.path_proposals
-    likelihood = evaluate(selected)
-    history = []
-    founders = len(selected)
-    occupancy_tolerance = evidence.dtype.type(1e-10)
-    working_width = config.beam_width
-    for iteration in range(config.max_iterations):
-        phase = f"{token}.iteration{iteration}"
-        cached = _load(checkpoints, phase)
-        if cached is not None:
-            selected, likelihood = cached["selected"], cached["likelihood"]
-            history, working_width = cached["history"], cached["working_width"]
-            if cached["converged"]:
-                break
-            continue
-        if callable(num_threads):
-            # Count-refit workers grow at safe phase boundaries as peers finish.
-            set_num_threads(resolve_threads(num_threads))
-        initial_likelihood = likelihood
-        if workspace is not None:
-            workspace.set_reference(selected)
-        painting = evaluate(selected, paint=True)
-        replacement, gains = founder_scoring.fixed_path_proposals(
-            leaves, offsets, selected, evidence, complete, painting, prepared_evidence)
-        occupancy = founder_scoring.painting_occupancy(
-            painting, evidence, complete, founders, occupancy_tolerance)
-        quota = founders if dual else config.focal_quota
-        order = np.lexsort((np.arange(founders), occupancy, -gains))[:quota]
-        record = {
-            "iteration": iteration, "search": search_name,
-            "conditional_gains": gains.tolist(),
-            "focal_paths": order.tolist(), "width_before": working_width,
-            "proposals": [],
-        }
-        best = None
-        proposals = [("all", replacement)]
-        for founder in order:
-            trial = selected.copy()
-            trial[founder] = replacement[founder]
-            proposals.append((int(founder), trial))
-        for label, trial in proposals:
-            if np.array_equal(trial, selected):
-                continue
-            score = score_proposal(trial, likelihood if best is None else best[0])
-            record["proposals"].append({
-                "kind": "fixed_painting", "focal": label, "gain": score - likelihood})
-            if better(score, trial, likelihood, selected) and (best is None or
-                    better(score, trial, best[0], best[1], primary_margin=0.0)):
-                best = score, trial.copy()
-        # The first beam must see the original assembly, not a warm start
-        # that has already discarded a potentially better search basin.
-        if iteration == 0 or best is None:
-            width = working_width
-            while True:
-                cheaper_score = likelihood if best is None else best[0]
-                requests = []
-                for founder in order:
-                    known = np.ascontiguousarray(np.delete(selected, founder, axis=0))
-                    for reverse in (False, True):
-                        beam_phase = f"{phase}.path{founder}.width{width}.reverse{int(reverse)}"
-                        requests.append((founder, reverse, known, selected[founder], beam_phase))
-                for founder, reverse, proposed_path, predicted in _path_proposals(
-                        requests, submodels, penalty, config, checkpoints, width,
-                        dual, window, num_threads, proposal_cache):
-                    trial = selected.copy()
-                    trial[founder] = proposed_path
-                    checked = score_rows(submodels, trial, penalty)
-                    if abs(checked - predicted) > 1e-5:
-                        raise RuntimeError("conditional founder-path score does not match its full panel")
-                    score = score_proposal(trial, likelihood if best is None else best[0])
-                    record["proposals"].append({
-                        "kind": "conditional_" + search_name,
-                        "focal": int(founder),
-                        "reverse": reverse, "width": width, "gain": score - likelihood,
-                    })
-                    if better(score, trial, likelihood, selected) and (best is None or
-                            better(score, trial, best[0], best[1], primary_margin=0.0)):
-                        best = score, trial
-                improvement = (likelihood if best is None else best[0]) - cheaper_score
-                # A computational budget rule, not a confidence/calling rule.
-                # Dual search has a sweep budget, not a beam width. Repeating
-                # it at a wider nominal beam would return the same candidate.
-                if dual or improvement <= penalty or width >= config.maximum_beam_width:
-                    break
-                width = min(width * 4, config.maximum_beam_width)
-                working_width = max(working_width, width)
-        # Whole L1 pieces can cross a local-row search barrier even when
-        # a much wider 200-SNP beam stalls. They compete under the same
-        # full-site objective, and only reopen original prepared rows.
-        if best is None and macro_context is not None:
-            groups, context_paths = macro_context
-            models, alphabets, macro_selected = founder_path_search.coarsen_submodels(
-                submodels, selected, groups, context_paths)
-            requests = []
-            for founder in order:
-                known = np.ascontiguousarray(np.delete(macro_selected, founder, axis=0))
-                for reverse in (False, True):
-                    macro_phase = (f"{phase}.macro.path{founder}."
-                                   f"width{config.beam_width}.reverse{int(reverse)}")
-                    requests.append((founder, reverse, known, macro_selected[founder], macro_phase))
-            for founder, reverse, proposed_path, predicted in _path_proposals(
-                    requests, models, penalty, config, checkpoints, config.beam_width,
-                    dual, window, num_threads, proposal_cache):
-                trial = selected.copy()
-                trial[founder] = founder_path_search.expand_macro_path(
-                    proposed_path, alphabets, groups)
-                checked = score_rows(submodels, trial, penalty)
-                if abs(checked - predicted) > 1e-5:
-                    raise RuntimeError("macro founder-path score does not match its full panel")
-                score = score_proposal(trial, likelihood if best is None else best[0])
-                if workspace is not None and score > likelihood + 1e-6:
-                    score = workspace.canonical(trial)
-                proposal = {
-                    "kind": "l1_macro_" + search_name,
-                    "focal": int(founder),
-                    "reverse": reverse, "width": config.beam_width,
-                    "groups": len(groups), "gain": score - likelihood,
-                }
-                # A long founder edit must not buy fewer sample switches
-                # by worsening genotype fit. Otherwise a shared descendant
-                # crossover can be absorbed into an artificial founder.
-                # score = centered genotype fit - penalty * switch count.
-                if better(score, trial, likelihood, selected):
-                    alleles = founder_scoring.selected_alleles(leaves, offsets, trial)
-                    _, proposed_switches = founder_scoring.score_and_switch_count(
-                        alleles, evidence, complete, penalty, prepared_evidence)
-                    switch_delta = (int(proposed_switches.sum())
-                        - founder_path_search.count_diplotype_switches(painting))
-                    emission_gain = score - likelihood + penalty * switch_delta
-                    proposal.update(
-                        sample_switch_delta=int(switch_delta),
-                        genotype_fit_gain=float(emission_gain),
-                        genotype_fit_guard_passed=emission_gain >= -1e-6)
-                    if emission_gain >= -1e-6 and (best is None or
-                            better(score, trial, best[0], best[1], primary_margin=0.0)):
-                        best = score, trial
-                record["proposals"].append(proposal)
-            del models, alphabets, macro_selected
-        if best is None and dual and not window and workspace is not None:
-            # The unrestricted partial-evidence optimum can sacrifice primary
-            # evidence elsewhere and be rejected. Reopen only complete-site
-            # equivalent local rows to avoid that search barrier.
-            choices = workspace.primary_preserving_choices(selected, config.branch_cap)
-            requests = []
-            for founder in choices:
-                known = np.ascontiguousarray(np.delete(selected, founder, axis=0))
-                for reverse in (False, True):
-                    restricted_phase = (f"{phase}.primary_preserving.path{founder}."
-                                        f"reverse{int(reverse)}")
-                    requests.append((founder, reverse, known, selected[founder],
-                                     restricted_phase))
-            for founder, reverse, proposed_path, predicted in _path_proposals(
-                    requests, submodels, penalty, config, checkpoints, config.beam_width,
-                    True, False, num_threads, candidate_choices=choices):
-                trial = selected.copy()
-                trial[founder] = proposed_path
-                checked = score_rows(submodels, trial, penalty)
-                if abs(checked - predicted) > 1e-5:
-                    raise RuntimeError("primary-preserving proposal has an inconsistent score")
-                score = workspace.canonical(trial)
-                if score != workspace.canonical(selected):
-                    raise RuntimeError("primary-preserving proposal changed primary evidence")
-                record["proposals"].append({
-                    "kind": "primary_preserving_dual", "focal": int(founder),
-                    "reverse": reverse, "gain": score - likelihood})
-                if better(score, trial, likelihood, selected) and (best is None or
-                        better(score, trial, best[0], best[1], primary_margin=0.0)):
-                    best = score, trial
-        if best is not None and workspace is not None:
-            checked = workspace.canonical(best[1])
-            if abs(checked - best[0]) > max(1e-6, 1e-10 * abs(checked)):
-                raise RuntimeError("localized founder score disagrees with complete panel")
-            best = ((checked, best[1]) if better(
-                checked, best[1], likelihood, selected) else None)
-        if best is not None:
-            if best[0] == likelihood and workspace is not None:
-                record["accepted_predictive_tie_gain"] = (
-                    workspace.predictive(best[1]) - workspace.predictive(selected))
-            likelihood, selected = best
-        record["accepted_gain"] = likelihood - initial_likelihood
-        record["width_after"] = working_width
-        history.append(record)
-        _save(checkpoints, phase, {
-            "selected": selected, "likelihood": likelihood, "history": history,
-            "working_width": working_width, "converged": best is None,
-        })
-        if best is None:
-            break
-    return selected, likelihood, history
+def _refine_panel(*args, **kwargs):
+    """Shared default for ordinary refinement and symmetric count repairs."""
+    from .founder.search import refine_panel
+    return refine_panel(*args, **kwargs)
 
 
 def _select_window_trajectories(ordinary, ordinary_diagnostics,
@@ -483,20 +288,14 @@ def refine_components(prepared_blocks, components, neutral_probs, global_sites, 
 def _refine_serial_components(prepared_blocks, components, neutral_probs, global_sites, *,
                       config=FounderRefinementConfig(), num_threads=1,
                       checkpoints=None, l1_blocks=None, cc_scale=0.5):
-    """Refine paths and bounded count proposals before exact-flank polishing.
+    """Sparse coordinate/global path search, count repair and paired polishing.
 
-    Path passes retain the full-site objective and macro genotype-fit guard.
-    Count proposals reuse the existing complexity cost and data mask; a local
-    optimistic bound skips provably losing reductions. Upstream passes start
-    from their completed predecessor. Two final window trajectories share
-    that same starting panel and compete by their completed full-site score.
-    An upper-bound-ranked polish reopens paths from the selected fit, followed
-    by bounded paired intervals at local and staggered L1 boundary grids.
-    Components and each pass's proposals/iterations have separate checkpoints.
-    Pre-count paired suffix exchanges preserve the local called/missing allele
-    multiset and require full-objective improvement. The extra genotype-fit
-    guard remains for count-reduction refits and bounded interval polishing.
-    No truth or pedigree enters these passes.
+    Each global escape shares the configured iteration budget with local
+    sweeps. Named polishing passes reuse verified local fixed points; every
+    accepted endpoint retains the canonical full-site objective. Count and
+    long-tract moves retain their existing genotype-fit/complexity safeguards.
+    Independent components and inner candidates share dynamic thread budgets.
+    No truth, generation labels or pedigree enters this assembly fit.
     """
     if checkpoints is not None and config.enabled:
         from .founder.checkpoints import FounderCheckpointStore
@@ -557,9 +356,13 @@ def _refine_serial_components(prepared_blocks, components, neutral_probs, global
             interval_windows["components"])
     ]
     return output, {
-        "enabled": True, "model": "full_site_potts_predictive_ties_progressive_v13",
+        "enabled": True, "model": "full_site_potts_sparse_global_v14",
         "switch_penalty": founder_scoring.SWITCH_PENALTY,
         "candidate_rows": "original_prepared_inference_panels",
+        "search_approximation": "budgeted_sparse_coordinates_global_escape",
+        "proposal_ranking": {"sites_per_bin": 200, "full_scores_per_category": 4,
+                             "exhaust_on_category_stall": True},
+        "acceptance": "canonical_full_site_primary_then_exact_tie_predictive",
         "components": diagnostics,
     }
 

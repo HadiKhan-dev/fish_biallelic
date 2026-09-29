@@ -12,6 +12,12 @@ only among its conditional queries. Coordinate messages remain query-local.
 """
 import numpy as np
 from numba import njit, prange
+from .packing import (transpose_message_columns, transpose_suffix_columns,
+                      restore_message_columns)
+
+# Avoid thread-launch costs on L1-sized scratch arrays. This dispatch changes
+# only copy implementation, not numerical values or the scientific model.
+_PARALLEL_COPY_BYTES = 8 * 1024 ** 2
 
 @njit(cache=True, parallel=True, nogil=True)
 def dual_suffix(data, bases, sizes, bins, known, choices, offsets, messages, penalty, reverse, first, second):
@@ -362,8 +368,12 @@ def coordinate(
     first,
     second
 ):
-    weights = np.ascontiguousarray(messages.T)
-    suffix = np.ascontiguousarray(suffixes.transpose(0, 2, 1))
+    parallel_messages = messages.nbytes >= _PARALLEL_COPY_BYTES
+    weights = (transpose_message_columns(messages) if parallel_messages
+               else np.ascontiguousarray(messages.T))
+    suffix = (transpose_suffix_columns(suffixes)
+              if suffixes.nbytes >= _PARALLEL_COPY_BYTES
+              else np.ascontiguousarray(suffixes.transpose(0, 2, 1)))
     result = coordinate_sweep(
         data,
         bases,
@@ -380,5 +390,8 @@ def coordinate(
         first,
         second
     )
-    messages[:] = weights.T
+    if parallel_messages:
+        restore_message_columns(weights, messages)
+    else:
+        messages[:] = weights.T
     return result
