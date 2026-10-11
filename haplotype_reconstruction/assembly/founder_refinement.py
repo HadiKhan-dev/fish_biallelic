@@ -10,17 +10,18 @@ cohort objective; count changes compete under the existing complexity penalty.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
-import time
 import numpy as np
-from numba import set_num_threads
 
-from . import chimera_scoring
-from .founder import dual_search as founder_dual_search, path_search as founder_path_search, scoring as founder_scoring
-from . import hierarchy, panel_search, paths
-from .founder.workspace import component_workspace, resolve_threads
-from .founder.packing import score_rows
-from ..core import haplotypes, parallel
+from .founder import count_criterion as founder_count_criterion
+from . import paths
+
+
+# Count decisions of the converged search (founder/converged_sweep.py) converge the
+# COUNT_RANKED_REFITS top-ranked candidates of a round (deletions ranked by the
+# criterion's margin on their exact unrefitted scores, duplicate seeds by their copy's
+# exact best-response gain) concurrently and decide on the best-F of them (ties: lower
+# candidate index); a round with at most this many candidates converges every one.
+COUNT_RANKED_REFITS = 9
 
 
 @dataclass(frozen=True)
@@ -39,11 +40,56 @@ class FounderRefinementConfig:
     count_repair_sweeps: int = 3
     # Final-component count-up budget; zero disables additions only.
     count_max_additions: int = 2
+    # Count-up acceptance is leave-one-sample-out: an addition must still pay
+    # its complexity cost after removing any single sample's score gain.
+    count_addition_leave_one_sample_out: bool = True
     # Heuristic deep-refit screen in units of the existing per-founder cost.
     # None retains unscreened deep count search; this is not an upper bound.
     count_refit_deficit_multiple: float | None = 8.0
     # Retained in saved configuration records; tract search now ranks all pairs.
     interval_partners: int = 3
+    # Founder-count decisions use the effective-carrier criterion
+    # (founder/count_criterion.py): the per-sample cost is charged only to a
+    # founder's effective carriers, with a leave-one-sample-out margin. Calls whose sample-bootstrap interval of the margin contains zero are
+    # reported as ambiguous; they keep the point decision unless "keep_larger".
+    ambiguous_count_action: str = "point_estimate"
+    count_bootstrap_resamples: int = 2000
+    count_bootstrap_level: float = 0.95
+    # Refinement search (founder/converged_sweep.py): Gauss-Seidel sweeps of exact
+    # window proposals and suffix exchanges until a sweep accepts nothing; every count
+    # decision is made between converged fits: deletions at every level, additions at
+    # the final count step (the last level). The count decisions choose K; the panel
+    # kept at that K is the best-F converged fit computed at K during the count pass;
+    # a count cycle (an accepted addition whose deletion round then accepts a
+    # deletion) keeps the smaller K with its better-F panel and is reported as
+    # ambiguous. Its caps are safety backstops only.
+    # Window proposals solve the binned surrogate ("bin"); "site" (exact full-site
+    # windows) is a validation option of the converged search.
+    window_emission_resolution: str = "bin"
+    # Guard on coarse (L1-span copy) moves of the converged search (environment
+    # override HAPREC_COARSE_MOVE_GUARD). "genotype_fit" is production's: the move must
+    # not lower E = F + penalty x switches. "shared_junction" vetoes only what that guard
+    # exists for: a move that lowers E is still accepted when its F gain exceeds TOL
+    # without credit for any saved switch at a one-way junction shared by two or more
+    # samples (the same founder transition with overlapping evidence intervals: an
+    # inherited crossover an artificial recombinant founder would absorb; see
+    # founder/converged_sweep.py). "none" disables it.
+    coarse_move_guard: str = "shared_junction"
+    # Optional paired-interval exchange family of the converged search (not built).
+    interval_moves: bool = False
+    # Screens before every exact window programme decide only the work spent, never a
+    # proposal: the box bound (the dual at zero multipliers) always runs; window_screen
+    # adds the Lagrangian-dual iterations (screen_sweeps bounds that work).
+    window_screen: bool = False
+    screen_sweeps: int = 200
+    # Safety backstops: reaching sweep_backstop marks a fit non-converged in its
+    # diagnostics, frontier_backstop raises, count_round_backstop bounds K at the
+    # incoming count K_in plus this multiple of K_in (K_in + K_in by default) and is
+    # reported when reached; additions otherwise stop at the criterion (bound or
+    # rejected best seed).
+    sweep_backstop: int = 100
+    frontier_backstop: int = 1_000_000
+    count_round_backstop: int = 1
 
     def __post_init__(self):
         for name in ("beam_width", "maximum_beam_width", "focal_quota",
@@ -61,6 +107,18 @@ class FounderRefinementConfig:
             raise ValueError("count_refit_deficit_multiple must be positive or None")
         if self.maximum_beam_width < self.beam_width:
             raise ValueError("maximum_beam_width must be at least beam_width")
+        founder_count_criterion.check_config(self)
+        choices = dict(window_emission_resolution=("bin", "site"),
+                       coarse_move_guard=("shared_junction", "genotype_fit", "none"))
+        for name, allowed in choices.items():
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"{name} must be one of {', '.join(allowed)}")
+        for name in ("screen_sweeps", "sweep_backstop", "frontier_backstop", "count_round_backstop"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or int(value) != value or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.interval_moves:
+            raise NotImplementedError("the paired-interval family is not built for converged_sweep")
 
 
 class _LeafKeyMap:
@@ -133,332 +191,44 @@ def _macro_context(batch, l1_blocks):
     return groups, context
 
 
-def _solve_path_proposal(models, known, incumbent, penalty, config,
-                           width, reverse, dual, window, thread_budget=None, background=None,
-                           candidate_choices=None):
-    if window:
-        from .founder import windows as founder_windows
-        path, score, diagnostic = founder_windows.solve(
-            models, known, incumbent, penalty, branch_cap=config.branch_cap,
-            reverse=reverse, width=config.beam_width, window_blocks=config.window_blocks,
-            ranking=("upper" if window == "upper" else
-                     "incumbent" if window == "incumbent" else "tie"),
-            thread_budget=thread_budget, background=background)
-    elif dual:
-        path, score, diagnostic = founder_dual_search.solve(
-            models, known, incumbent, penalty, branch_cap=config.branch_cap,
-            reverse=reverse, sweeps=config.dual_search_sweeps,
-            thread_budget=thread_budget, background=background,
-            candidate_choices=candidate_choices)
-    else:
-        path, score = founder_path_search.conditional_path(
-            models, known, incumbent, penalty, width=width,
-            branch_cap=config.branch_cap, reverse=reverse, thread_budget=thread_budget)
-        diagnostic = None
-    return {"path": path, "score": score, "search_diagnostic": diagnostic}
-
-
-def _compute_path_proposal(models, known, incumbent, penalty, config,
-                           width, reverse, dual, window, thread_budget=None,
-                           background=None, candidate_choices=None):
-    from .founder.queries import compute
-    return compute(models, known, incumbent, penalty, config, width, reverse,
-        dual, window, thread_budget, background, candidate_choices,
-        _solve_path_proposal)
-
-
-def _path_proposals(requests, models, penalty, config, checkpoints, width,
-                    dual, window, num_threads, proposal_cache=None, candidate_choices=None):
-    from .founder.candidates import completed_candidates
-    if requests and hasattr(models, "_coarse_groups") and candidate_choices is None:
-        from .founder.queries import prepare
-        prepare(models, requests[0][2], requests[0][3], num_threads)
-    answers, missing = {}, []
-    for index, (_, _, known, incumbent, phase) in enumerate(requests):
-        candidate = _load(checkpoints, phase)
-        signature = (known.shape, known.tobytes(), incumbent.tobytes())
-        if candidate is None and window == "lookahead" and ".macro." not in phase:
-            ordinary_phase = phase.replace("founder_window_lookahead", "founder_window_escape")
-            ordinary = _load(checkpoints, ordinary_phase)
-            if ordinary is None and proposal_cache is not None:
-                ordinary = proposal_cache.get(ordinary_phase)
-            if (ordinary is not None and ordinary.get("input_rows") == signature
-                    and ordinary.get("search_diagnostic", {}).get("equivalent_incumbent_tie", False)):
-                candidate = dict(ordinary, reused_from=ordinary_phase)
-                _save(checkpoints, phase, candidate)
-        if candidate is None:
-            missing.append(index)
-        else:
-            answers[index] = candidate
-
-    shared = None
-    if missing and (dual or window) and any(
-            model['bin_emissions'].shape[3] > 2 for model in models):
-        from .founder.background import SharedBackground
-        focal, _, known, incumbent, _ = requests[0]
-        panel = np.insert(known, focal, incumbent, axis=0)
-        with parallel.numba_thread_scope(resolve_threads(num_threads)):
-            shared = SharedBackground(models, panel)
-
-    def compute(index, thread_budget):
-        _, reverse, known, incumbent, _ = requests[index]
-        return _compute_path_proposal(models, known, incumbent, penalty, config,
-            width, reverse, dual, window, thread_budget,
-            None if shared is None else shared.view(requests[index][0]),
-            None if candidate_choices is None else candidate_choices[requests[index][0]])
-
-    if missing:
-        samples = models[0]["bin_emissions"].shape[0]
-        founders = len(requests[0][2]) + 1
-        states = founders * (founders + 1) // 2
-        branches = min(config.branch_cap, max(m["bin_emissions"].shape[1] for m in models))
-        workspace_bytes = (8 * samples * (
-            3 * (len(models) + 1) * states + len(models) * branches
-            + 2 * width * (states + branches)))
-        # Shared-background scans allocate a t² segment table per active sample.
-        largest_bins = max(m["bin_emissions"].shape[3] for m in models)
-        workspace_bytes += 8 * samples * (largest_bins + 1) ** 2
-        if window:
-            workspace_bytes += sum(m["bin_emissions"].nbytes for m in models)
-        functions = [partial(compute, index) for index in missing]
-        for position, candidate in completed_candidates(functions, num_threads, workspace_bytes):
-            index = missing[position]
-            known, incumbent = requests[index][2:4]
-            candidate["input_rows"] = (known.shape, known.tobytes(), incumbent.tobytes())
-            answers[index] = candidate
-            # Save each finished search immediately, on the controller thread.
-            _save(checkpoints, requests[index][4], candidate)
-            if (proposal_cache is not None and window == "incumbent"
-                    and ".macro." not in requests[index][4]):
-                proposal_cache[requests[index][4]] = candidate
-    return [(request[0], request[1], answers[index]["path"], answers[index]["score"])
-            for index, request in enumerate(requests)]
-
-
-def _refine_panel(*args, **kwargs):
-    """Shared default for ordinary refinement and symmetric count repairs."""
-    from .founder.search import refine_panel
-    return refine_panel(*args, **kwargs)
-
-
-def _select_window_trajectories(ordinary, ordinary_diagnostics,
-                                optimistic, optimistic_diagnostics):
-    """Select by primary score, then partial-founder evidence at exact ties."""
-    results, diagnostics = [], []
-    for left, a, right, b in zip(
-            ordinary, ordinary_diagnostics["components"],
-            optimistic, optimistic_diagnostics["components"]):
-        # Singleton components bypass fitting in both searches.
-        choose_optimistic = (
-            "final_likelihood" in b and
-            (b["final_likelihood"] > a["final_likelihood"] + 1e-6 or (
-                b["final_likelihood"] == a["final_likelihood"]
-                and b["final_predictive_score"] > a["final_predictive_score"] + 1e-6)))
-        selected = b if choose_optimistic else a
-        results.append(right if choose_optimistic else left)
-        diagnostics.append({
-            "component": selected["component"], "changed": selected["changed"],
-            "selected_search": "lookahead" if choose_optimistic else "incumbent",
-            "initial_likelihood": selected.get("initial_likelihood"),
-            "final_likelihood": selected.get("final_likelihood"),
-            "incumbent_search": a, "lookahead_search": b,
-        })
-    return haplotypes.BlockResults(results), {
-        "enabled": True, "search": "two_completed_window_trajectories",
-        "components": diagnostics,
-    }
-
-
 def refine_components(prepared_blocks, components, neutral_probs, global_sites, *,
                       config=FounderRefinementConfig(), num_threads=1,
-                      checkpoints=None, l1_blocks=None, cc_scale=0.5):
-    """Run every refinement pass independently inside each phase component."""
+                      checkpoints=None, l1_blocks=None, cc_scale=0.5,
+                      count_additions=True):
+    """Run the converged refinement independently inside each phase component.
+
+    count_additions: the count pass adds founders only at the final count step
+    (the last level); earlier levels make deletion decisions only.
+    """
     if config.enabled and len(components) > 1:
         from .founder.components import refine_independent_components
         return refine_independent_components(
             prepared_blocks, components, neutral_probs, global_sites,
             config=config, num_threads=num_threads, checkpoints=checkpoints,
-            l1_blocks=l1_blocks, cc_scale=cc_scale)
+            l1_blocks=l1_blocks, cc_scale=cc_scale, count_additions=count_additions)
     return _refine_serial_components(
         prepared_blocks, components, neutral_probs, global_sites,
         config=config, num_threads=num_threads, checkpoints=checkpoints,
-        l1_blocks=l1_blocks, cc_scale=cc_scale)
+        l1_blocks=l1_blocks, cc_scale=cc_scale, count_additions=count_additions)
 
 
 def _refine_serial_components(prepared_blocks, components, neutral_probs, global_sites, *,
                       config=FounderRefinementConfig(), num_threads=1,
-                      checkpoints=None, l1_blocks=None, cc_scale=0.5):
-    """Sparse coordinate/global path search, count repair and paired polishing.
+                      checkpoints=None, l1_blocks=None, cc_scale=0.5,
+                      count_additions=True):
+    """Converged founder refinement and count decisions (founder/converged_sweep.py).
 
-    Each global escape shares the configured iteration budget with local
-    sweeps. Named polishing passes reuse verified local fixed points; every
-    accepted endpoint retains the canonical full-site objective. Count and
-    long-tract moves retain their existing genotype-fit/complexity safeguards.
+    Every accepted endpoint retains the canonical full-site objective.
     Independent components and inner candidates share dynamic thread budgets.
     No truth, generation labels or pedigree enters this assembly fit.
     """
-    if checkpoints is not None and config.enabled:
-        from .founder.checkpoints import FounderCheckpointStore
-        checkpoints = FounderCheckpointStore(checkpoints, prepared_blocks)
-    options = dict(config=config, num_threads=num_threads,
-                   checkpoints=checkpoints, l1_blocks=l1_blocks, workspaces={})
-    refined, first = _refine_components(
-        prepared_blocks, components, neutral_probs, global_sites, **options)
-    if not config.enabled:
-        return refined, first
-    output, second = _refine_components(
-        prepared_blocks, refined, neutral_probs, global_sites, dual=True, **options)
-    from .founder import exchanges as founder_exchanges, count as founder_count
-    with parallel.numba_thread_scope(resolve_threads(num_threads)):
-        output, exchanges = founder_exchanges.refine_components(
-            prepared_blocks, output, neutral_probs, global_sites,
-            founder_count._ScopedCheckpoints(checkpoints, "before_count"),
-            iterations=config.max_iterations, quota=config.branch_cap,
-            preserve_genotype_fit=False, workspaces=options["workspaces"])
-    output, counts = founder_count.refine_components(
-        prepared_blocks, output, neutral_probs, global_sites, cc_scale=cc_scale, **options)
-    # Two bounded search trajectories share the same starting panel. An early
-    # lookahead gain can enter a worse basin, so compare completed full-site
-    # fits rather than dropping the stable-order trajectory greedily.
-    ordinary, ordinary_windows = _refine_components(
-        prepared_blocks, output, neutral_probs, global_sites, dual=True,
-        window="incumbent", **options)
-    optimistic, optimistic_windows = _refine_components(
-        prepared_blocks, output, neutral_probs, global_sites, dual=True,
-        window="lookahead", **options)
-    output, windows = _select_window_trajectories(
-        ordinary, ordinary_windows, optimistic, optimistic_windows)
-    # Feasible-prefix ranking can discard a beneficial tract before its far
-    # flank is reached. An upper-bound-ranked pass explores such alternatives
-    # from the selected completed fit; acceptance remains the exact objective.
-    output, upper_windows = _refine_components(
-        prepared_blocks, output, neutral_probs, global_sites, dual=True,
-        window="upper", **options)
-    # Bounded paired intervals can repair a coordinated two-founder barrier.
-    # Retain exact flank scores and the genotype-fit guard; do not reopen the
-    # unbounded chromosome-wide suffix permutations after local polishing.
-    from .founder import intervals as founder_intervals
-    with parallel.numba_thread_scope(resolve_threads(num_threads)):
-        output, interval_windows = founder_intervals.refine_components(
-            prepared_blocks, output, neutral_probs, global_sites,
-            config=config, checkpoints=checkpoints, l1_blocks=l1_blocks,
-            workspaces=options["workspaces"])
-    diagnostics = [
-        {"component": before["component"],
-         "changed": any(item["changed"] for item in (before, after, exchange, count, local, upper, interval)),
-         "beam_refinement": before, "dual_escape": after,
-         "paired_exchange": exchange, "count_refinement": count,
-         "window_escape": local, "optimistic_window_polish": upper,
-         "paired_interval_polish": interval}
-        for before, after, exchange, count, local, upper, interval in zip(
-            first["components"], second["components"], exchanges["components"],
-            counts["components"], windows["components"], upper_windows["components"],
-            interval_windows["components"])
-    ]
-    return output, {
-        "enabled": True, "model": "full_site_potts_sparse_global_v14",
-        "switch_penalty": founder_scoring.SWITCH_PENALTY,
-        "candidate_rows": "original_prepared_inference_panels",
-        "search_approximation": "budgeted_sparse_coordinates_global_escape",
-        "proposal_ranking": {"sites_per_bin": 200, "full_scores_per_category": 4,
-                             "exhaust_on_category_stall": True},
-        "acceptance": "canonical_full_site_primary_then_exact_tie_predictive",
-        "components": diagnostics,
-    }
-
-
-def _refine_components(prepared_blocks, components, neutral_probs, global_sites, *,
-                       config=FounderRefinementConfig(), num_threads=1,
-                       checkpoints=None, l1_blocks=None, dual=False, window=False,
-                       workspaces=None):
-    """Refine final component paths while preserving their geometry and count.
-
-    ``checkpoints`` is the already-bound assembly checkpoint callback. Every
-    beam, iteration and completed component can be resumed independently.
-    This function must run only for the final release, not the L1/L2 feedback
-    rounds. It never modifies the original prepared panels. The final
-    hierarchy supplies its L1 blocks as larger search moves after a fine-scale
-    stall. These moves must also preserve or improve the cohort's genotype fit
-    under the optimized internal sample paths, not just save switch penalties.
-    """
     if not config.enabled:
         return components, {"enabled": False, "components": []}
-    workspaces = {} if workspaces is None else workspaces
-    prepared = list(prepared_blocks)
-    starts = {int(block.positions[0]): index for index, block in enumerate(prepared)}
-    ends = {int(block.positions[-1]): index + 1 for index, block in enumerate(prepared)}
-    results, diagnostics = [], []
-    with parallel.numba_thread_scope(resolve_threads(num_threads)):
-        for number, component in enumerate(components):
-            phase = ("founder_window_lookahead" if window == "lookahead" else
-                     "founder_window_upper" if window == "upper" else
-                     ("founder_window_escape" if window else
-                      ("founder_dual_escape" if dual else "founder_refinement")))
-            token = f"{phase}.component{number}"
-            cached = _load(checkpoints, token)
-            if cached is not None:
-                results.append(cached["block"])
-                diagnostics.append(cached["diagnostic"])
-                continue
-            started = time.perf_counter()
-            batch = prepared[starts[int(component.positions[0])]:ends[int(component.positions[-1])]]
-            positions = np.concatenate([block.positions for block in batch])
-            if not np.array_equal(positions, component.positions):
-                raise ValueError("founder refinement cannot split or reorder a prepared block")
-            selected = _local_selection(component, batch)
-            if len(batch) < 2 or len(selected) < 2:
-                results.append(component)
-                diagnostics.append({"component": number, "changed": False,
-                                    "reason": "single_block_or_founder", "iterations": []})
-                continue
-            original = selected.copy()
-            workspace = component_workspace(workspaces, batch, neutral_probs,
-                global_sites, config.proposal_max_bins, num_threads,
-                minimum_bin_size=config.proposal_min_sites_per_bin)
-            evidence, leaves, offsets = workspace.evidence, workspace.leaves, workspace.offsets
-            complete, penalty = workspace.complete, workspace.penalty
-            bin_size, submodels = workspace.bin_size, workspace.models()
-            prepared_evidence = workspace.logs
-            evaluate = workspace.evaluate
-
-            initial_likelihood = evaluate(selected)
-            selected, likelihood, history = _refine_panel(
-                selected, leaves, offsets, evidence, complete, submodels, penalty,
-                evaluate, config, checkpoints, token, num_threads, prepared_evidence,
-                _macro_context(batch, l1_blocks), dual=dual, window=window, workspace=workspace)
-            changed = not np.array_equal(selected, original)
-            result = component
-            if changed:
-                reconstructed = paths.reconstruct_haplotypes_from_beam(
-                    [(list(row), likelihood) for row in selected], _LeafKeyMap(batch), batch)
-                result = hierarchy.convert_reconstruction_to_superblock(reconstructed, batch)
-                # Cached prepared leaves predate boundaries introduced by the
-                # hierarchy. The existing component is authoritative for its
-                # unchanged outer phase boundaries, including on resume.
-                for side in ("before", "after"):
-                    for stem in ("missing_aware_break", "missing_aware_break_reason",
-                                 "missing_aware_joint_informative_samples"):
-                        name = f"{stem}_{side}"
-                        default = False if stem == "missing_aware_break" else None
-                        setattr(result, name, getattr(component, name, default))
-            diagnostic = {
-                "component": number, "changed": changed,
-                "founders": len(selected), "original_blocks": len(batch),
-                "changed_local_rows": int(np.count_nonzero(selected != original)),
-                "called_before": int(np.count_nonzero(component.discrete_haps >= 0)),
-                "called_after": int(np.count_nonzero(result.discrete_haps >= 0)),
-                "initial_likelihood": initial_likelihood, "final_likelihood": likelihood,
-                "final_predictive_score": workspace.predictive(selected),
-                "proposal_bin_size": bin_size, "switch_penalty": penalty,
-                "local_score_calls": workspace.local_scores,
-                "iterations": history, "elapsed_seconds": time.perf_counter() - started,
-            }
-            _save(checkpoints, token, {"block": result, "diagnostic": diagnostic})
-            results.append(result)
-            diagnostics.append(diagnostic)
-    return haplotypes.BlockResults(results), {
-        "enabled": True, "model": "fixed_count_full_site_potts_v1",
-        "search": "window" if window else ("dual" if dual else "beam"),
-        "candidate_rows": "original_prepared_inference_panels",
-        "components": diagnostics,
-    }
+    if checkpoints is not None:
+        from .founder.checkpoints import FounderCheckpointStore
+        checkpoints = FounderCheckpointStore(checkpoints, prepared_blocks)
+    from .founder import converged_sweep
+    return converged_sweep.refine_components(
+        prepared_blocks, components, neutral_probs, global_sites, config=config,
+        num_threads=num_threads, checkpoints=checkpoints, l1_blocks=l1_blocks,
+        cc_scale=cc_scale, additions=count_additions)

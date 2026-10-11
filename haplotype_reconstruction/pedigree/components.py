@@ -8,7 +8,7 @@ import json
 import math
 
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 from numba import njit, prange
 import haplotype_reconstruction.pedigree.candidates as pedigree_candidates
@@ -633,6 +633,7 @@ def _score_config_identity(settings: module_pedigree_config.PedigreeConfig) -> d
         "chromosome_contamination",
         "parent_state_candidate_source_mode",
         "parent_state_candidate_source_path_switch_probability",
+        "parent_state_source_gap_support_sites",
         "parent_state_mismatch_probability",
         "parent_state_phase_switch_probability",
         "parent_state_effective_markers_per_information_block",
@@ -726,7 +727,19 @@ def _validate_release_array_identity(
         genotype_likelihoods: np.ndarray,
         positions: np.ndarray,
         observed: np.ndarray,
-) -> None:
+        founder_evidence_excluded: Callable[[], Any] | None=None,
+) -> np.ndarray | None:
+    """Check raw evidence against the release's input-array digests.
+
+    The release hashes the evidence founder construction saw: the raw arrays,
+    or, on a contig where the sample-quality QC flagged samples,
+    ``core.sample_quality.founder_evidence`` of them (flagged rows uniform
+    and unobserved). ``founder_evidence_excluded`` loads the flags block
+    discovery recorded for the contig (None when the QC did not run); it is
+    called only when the raw arrays differ from the release input. Returns
+    the flags that reconcile the digests, or None when the raw arrays match
+    as they are. Callers keep using the raw arrays.
+    """
     release = checkpoint.release_identity.record()
     expected = release.get("input_array_sha256")
     if (not isinstance(expected, dict)
@@ -736,17 +749,31 @@ def _validate_release_array_identity(
         raise pedigree_models.PedigreeEvidenceError(
             "painting release lacks the exact three-array input identity"
         )
-    arrays = {
-        "global_probs": genotype_likelihoods,
-        "global_sites": positions,
-        "global_observed_mask": observed,
-    }
-    for name, value in arrays.items():
-        digest = expected.get(name)
-        if not isinstance(digest, str) or _array_digest(value) != digest:
-            raise pedigree_models.PedigreeEvidenceError(
-                f"raw {name} does not match the typed painting release identity"
-            )
+
+    def mismatch(probabilities, mask):
+        arrays = {
+            "global_probs": probabilities,
+            "global_sites": positions,
+            "global_observed_mask": mask,
+        }
+        for name, value in arrays.items():
+            digest = expected.get(name)
+            if not isinstance(digest, str) or _array_digest(value) != digest:
+                return name
+        return None
+
+    name = mismatch(genotype_likelihoods, observed)
+    excluded = None
+    if name is not None and founder_evidence_excluded is not None:
+        excluded = founder_evidence_excluded()
+        if excluded is not None:
+            name = mismatch(*core_sample_quality.founder_evidence(
+                genotype_likelihoods, observed, excluded))
+    if name is not None:
+        raise pedigree_models.PedigreeEvidenceError(
+            f"raw {name} does not match the typed painting release identity"
+        )
+    return excluded
 
 
 @njit(cache=True, parallel=True, fastmath=False)
@@ -786,6 +813,7 @@ def _validated_raw_evidence(
         raw_positions: Any,
         raw_observed_mask: Any,
         raw_sample_ids: Sequence[Any],
+        founder_evidence_excluded: Callable[[], Any] | None=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     expected_ids = checkpoint.sample_ids
     if isinstance(raw_sample_ids, (str, bytes)):
@@ -850,6 +878,7 @@ def _validated_raw_evidence(
         raw_gl,
         raw_position_values,
         observed,
+        founder_evidence_excluded,
     )
     observed = np.ascontiguousarray(observed, dtype=np.bool_)
     return normalized, positions, observed
@@ -1324,8 +1353,14 @@ def prepare_painted_chromosome_components(
         effective_markers_per_information_block: float=1.0,
         candidate_source_mode: str=pedigree_models.RAGGED_QUADRATIC_MODEL,
         chromosome_map=None,
+        founder_evidence_excluded: Callable[[], Any] | None=None,
 ) -> PreparedChromosome:
-    """Validate and prepare independently rooted component HMM inputs."""
+    """Validate and prepare independently rooted component HMM inputs.
+
+    ``founder_evidence_excluded`` loads the contig's sample-quality flags for
+    the release-identity check only (``_validate_release_array_identity``);
+    every sample's raw evidence is prepared.
+    """
     from ..core.chromosome_parallel import current_threads
     current_threads()
 
@@ -1368,6 +1403,7 @@ def prepare_painted_chromosome_components(
         raw_positions,
         raw_observed_mask,
         raw_sample_ids,
+        founder_evidence_excluded,
     )
 
     prepared = []
@@ -1445,6 +1481,7 @@ def prepare_painted_chromosome_components(
 
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
 import haplotype_reconstruction.core.runtime as core_runtime
+import haplotype_reconstruction.core.sample_quality as core_sample_quality
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints
 import haplotype_reconstruction.painting.components as painting_components
 import haplotype_reconstruction.painting.model as module_painting_model

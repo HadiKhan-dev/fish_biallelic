@@ -16,13 +16,21 @@ from ..core.chromosome_parallel import (
 from ..core.checkpoints import contig_path, read_size_bytes
 from ..core.parallel import malloc_trim
 from .founder_metrics import evaluate_founders, represented_ancestry
-from .metrics import phase_counts
+from .metrics import long_switch_counts, phase_counts
 from .truth import load_truth, truth_location
 
 EVALUATION_STAGES = (*FOUNDER_STAGES, "pedigree", "family_phase", "recombination")
 PHASE_COLUMNS = ("called_alleles", "called_genotypes", "genotype_errors",
                  "eligible_heterozygotes", "phase_comparisons", "phase_switch_errors",
                  "component_aligned_allele_errors")
+# Long-range switches: both adjacent orientation runs hold at least this many
+# correct-genotype heterozygotes (wrong/uncalled ones bridged).
+LONG_SWITCH_RUNS = (5, 20)
+LONG_SWITCH_COLUMNS = tuple(f"long_phase_switches_min{runs}" for runs in LONG_SWITCH_RUNS)
+# Reported-interval map columns, written after every earlier column.
+REPORTED_INTERVAL_COLUMNS = ("reported_intervals_containing_true_crossover",
+                             "reported_interval_hit_rate", "called_interval_median_width_bp",
+                             "reported_interval_median_width_bp")
 
 
 def pedigree_counts(inferred, truth_pedigree, names):
@@ -53,6 +61,11 @@ def pedigree_counts(inferred, truth_pedigree, names):
 def map_counts(mapping, events, names):
     true_observed = unmatched = 0
     expected = exposure = 0.0
+    called = called_hits = reported_hits = 0
+    called_widths, reported_widths = [], []
+    # Bin-honest reported call intervals (recombination.junctions); absent from
+    # maps written before they existed.
+    reported = mapping.get("reported_crossover_intervals")
     for edge, (parent, child) in enumerate(zip(mapping["edge_parent"], mapping["edge_child"])):
         raw = events.get((names[int(parent)], names[int(child)]))
         if raw is None:
@@ -64,10 +77,32 @@ def map_counts(mapping, events, names):
                                  - np.searchsorted(raw, left, side="right"))
         expected += float(mapping["expected_crossovers_by_edge_bin"][edge].sum())
         exposure += float(mapping["exposure_by_edge_bin"][edge].sum())
+        # A called interval (left, right] localizes a true crossover when it contains one.
+        for index, interval in enumerate(mapping["crossover_intervals"][edge]):
+            left, right = interval[:2]
+            called += 1
+            called_hits += int(np.searchsorted(raw, right, side="right")
+                               > np.searchsorted(raw, left, side="right"))
+            called_widths.append(float(right - left))
+            if reported is not None:
+                # Same rule on the reported interval (low, high]: a change placed at a
+                # painting-bin edge can lie anywhere in the bins around that edge.
+                low, high = reported[edge][index]
+                reported_hits += int(np.searchsorted(raw, high, side="right")
+                                     > np.searchsorted(raw, low, side="right"))
+                reported_widths.append(float(high - low))
     return dict(true_crossovers_in_inferred_exposure=true_observed,
                 expected_crossovers_on_correct_edges=expected,
                 correct_edge_exposure_meiosis_bp=exposure,
-                inferred_edges_absent_from_truth=unmatched)
+                inferred_edges_absent_from_truth=unmatched,
+                called_crossovers_on_correct_edges=called,
+                called_intervals_containing_true_crossover=called_hits,
+                called_interval_hit_rate=called_hits/called if called else None,
+                reported_intervals_containing_true_crossover=reported_hits if reported is not None else None,
+                reported_interval_hit_rate=reported_hits/called if reported is not None and called else None,
+                called_interval_median_width_bp=float(np.median(called_widths)) if called_widths else None,
+                reported_interval_median_width_bp=(float(np.median(reported_widths))
+                                                   if reported_widths else None))
 
 
 def _write_table(destination, filename, rows):
@@ -82,7 +117,7 @@ def _evaluate_chromosome(task, state, phase, common):
     contig, founder_stages = task
     started = time.monotonic()
     print(f"EVALUATION {contig}: start; threads={current_threads()}", flush=True)
-    names, requested, feedback_selection = common["names"], common["requested"], common["feedback_selection"]
+    names, requested = common["names"], common["requested"]
     automatic = requested in (("available",), ("all",))
     store = CheckpointStore(common["checkpoint_root"], nthreads=current_threads())
     founders, component_rows, matching_rows, skipped = [], [], [], []
@@ -103,7 +138,7 @@ def _evaluate_chromosome(task, state, phase, common):
         represented = represented_ancestry(source["truth_painting"], positions, len(truth))
         for stage in founder_stages:
             store.nthreads = current_threads()
-            blocks = load_panels(store, contig, stage, feedback_selection=feedback_selection)
+            blocks = load_panels(store, contig, stage)
             current_threads()
             summary, components, matches = evaluate_founders(
                 blocks, positions, truth, represented, contig=contig, stage=stage)
@@ -113,6 +148,8 @@ def _evaluate_chromosome(task, state, phase, common):
             del blocks
         del truth, represented
     row = dict(contig=contig, sites=len(positions))
+    added = {}  # long-range switch columns follow every existing column
+    reported = {}  # then the reported-interval map columns
     if automatic or "family_phase" in requested:
         if store.contig_done("family_phase", contig):
             final = store.load_contig("family_phase", contig, nthreads=current_threads())
@@ -125,6 +162,9 @@ def _evaluate_chromosome(task, state, phase, common):
             values = phase_counts(calls, truth, final["component_ids"])
             row.update(total_alleles=int(calls.size), **dict(zip(PHASE_COLUMNS, map(int, values))))
             row["called_fraction"] = row["called_alleles"]/row["total_alleles"]
+            values = long_switch_counts(calls, truth, final["component_ids"],
+                                        np.asarray(LONG_SWITCH_RUNS, dtype=np.int64))
+            added.update(zip(LONG_SWITCH_COLUMNS, map(int, values)))
             del final, calls, truth
         elif not automatic:
             raise FileNotFoundError(f"{contig}: no completed family phase")
@@ -134,18 +174,22 @@ def _evaluate_chromosome(task, state, phase, common):
         if store.contig_done("recombination", contig):
             events = {(r["parent"], r["child"]): r["crossover_positions_bp"]
                       for r in source["truth_crossovers"]}
-            row.update(map_counts(store.load_contig("recombination", contig, nthreads=current_threads()), events, names))
+            counts = map_counts(store.load_contig("recombination", contig, nthreads=current_threads()),
+                                events, names)
+            reported = {key: counts.pop(key) for key in REPORTED_INTERVAL_COLUMNS}
+            row.update(counts)
         elif not automatic:
             raise FileNotFoundError(f"{contig}: no completed recombination map")
         else:
             skipped.append(f"{contig}/recombination")
+    row.update(added)
+    row.update(reported)
     print(f"EVALUATION {contig}: complete in {time.monotonic() - started:.2f}s; "
           f"threads={current_threads()}", flush=True)
     return None, (row, founders, component_rows, matching_rows, skipped)
 
 
-def _evaluation_resources(store, tasks, requested, feedback_selection, workers,
-                          sample_ids, truth_cache_root):
+def _evaluation_resources(store, tasks, requested, workers, sample_ids, truth_cache_root):
     """Bound concurrent chromosomes using decoded checkpoint sizes, not disk sizes.
 
     Use the compact truth size when present; otherwise allow for the original
@@ -163,7 +207,7 @@ def _evaluation_resources(store, tasks, requested, feedback_selection, workers,
         paths = set() if compact is not None else {
             contig_path(store.root, "founder_templates", contig)}
         for stage in founder_stages:
-            paths.add(contig_path(store.root, *panel_location(store, contig, stage, feedback_selection)))
+            paths.add(contig_path(store.root, *panel_location(store, contig, stage)))
         for stage in ("family_phase", "recombination"):
             if (automatic or stage in requested) and store.contig_done(stage, contig):
                 paths.add(contig_path(store.root, stage, contig))
@@ -174,7 +218,7 @@ def _evaluation_resources(store, tasks, requested, feedback_selection, workers,
 
 
 def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available",),
-                 contigs=None, feedback_selection="path"):
+                 contigs=None):
     """Evaluate completed contigs/stages, without requiring downstream completion.
 
     available: latest existing founder product per contig, plus available
@@ -214,7 +258,7 @@ def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available
     component_rows, matching_rows = [], []
     tasks = []
     for contig in selected:
-        found = [s for s in FOUNDER_STAGES if panel_location(store, contig, s, feedback_selection)]
+        found = [s for s in FOUNDER_STAGES if panel_location(store, contig, s)]
         founder_stages = (found[-1:] if requested == ("available",) else
                           found if requested == ("all",) else
                           [s for s in requested if s in FOUNDER_STAGES])
@@ -230,9 +274,9 @@ def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available
         tasks.append((contig, tuple(founder_stages)))
     truth_cache_root = str(output / "evaluation" / "truth_cache")
     weights, process_limit = _evaluation_resources(
-        store, tasks, requested, feedback_selection, workers, names, truth_cache_root)
+        store, tasks, requested, workers, names, truth_cache_root)
     common = dict(checkpoint_root=store.root, names=names, requested=requested,
-                  feedback_selection=feedback_selection, truth_cache_root=truth_cache_root)
+                  truth_cache_root=truth_cache_root)
     with ChromosomeExecutor(tasks, _evaluate_chromosome, n_workers=workers,
                             weights=weights, label="EVALUATION", max_workers=process_limit) as executor:
         results = executor.run("evaluate", common)
@@ -248,13 +292,22 @@ def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available
                   f"called errors; {summary['truth_to_panel_errors_missing']} truth-to-panel errors/missing",
                   flush=True)
     report["totals"] = {key: sum(row.get(key, 0) for row in report["chromosomes"])
-                        for key in (*PHASE_COLUMNS, "total_alleles")}
+                        for key in (*PHASE_COLUMNS, "total_alleles", *LONG_SWITCH_COLUMNS)}
     report["interpretation"] = (
         "Truth is used only for evaluation. Founder labels match over whole components, "
         "not marker-wise; nearest-row errors and one-to-one completeness are separate. "
         "Represented ancestry means present in a sampled homologue, not independently identifiable. "
         "Phase switches break at gaps/incorrect heterozygotes. Map truth uses correct edges "
         "within inferred observable spans. Unexecuted stages are not evaluated.")
+    report["segment_and_long_range_interpretation"] = (
+        "long_phase_switches_minN bridge uncalled/wrong heterozygotes and count orientation "
+        "changes whose two adjacent runs hold >= N correct heterozygotes. segment_allele_errors "
+        "label founder rows segment-wise (a label switch costs 20 mismatches); "
+        "chimeric_segment_charges = called_allele_errors - segment_allele_errors. "
+        "called_interval_hit_rate is the fraction of called crossover intervals on correct "
+        "edges that contain a true crossover. reported_interval_hit_rate applies the same "
+        "rule to the bin-honest reported intervals (reported_left_bp, reported_right_bp]; "
+        "the median widths (right - left) of both kinds of interval give its context.")
     destination = output/"evaluation"
     destination.mkdir(parents=True, exist_ok=True)
     temporary = destination/"summary.json.tmp"

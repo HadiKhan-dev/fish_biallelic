@@ -149,7 +149,7 @@ def _evaluate_bootstrap_chunk(
     shared: Mapping[str, Any],
     multiplicities: np.ndarray,
 ) -> tuple:
-    """Return per-replicate local/graph selections and direction-refit counts."""
+    """Return per-replicate selections, direction-refit and nonconverged counts."""
     alternatives = shared["alternatives"]
     states = shared["states"]
     contig_log_likelihoods = shared["contig_log_likelihoods"]
@@ -164,6 +164,7 @@ def _evaluate_bootstrap_chunk(
     graph_rows = np.full((n_replicates, n_samples), -1, dtype=np.int64)
     local_states = np.full((n_replicates, n_samples), -1, dtype=np.int8)
     depth_refits = 0
+    nonconverged = 0
 
     def evaluate(
         weights: np.ndarray,
@@ -205,15 +206,21 @@ def _evaluate_bootstrap_chunk(
             multiplicity, settings,
             component_count=shared["depth_component_count"],
         )
-        selection = evaluate(multiplicity, depth_model)
         depth_refits += 1
+        try:
+            selection = evaluate(multiplicity, depth_model)
+        except pedigree_orientation.FamilyMessageNonConvergence:
+            # One resample must not abort the stage. It abstains for every
+            # fish (rows stay -1) and stays in the denominators, lowering support.
+            nonconverged += 1
+            continue
         for child, state in selection.local_states.items():
             local_states[replicate, child] = state
         for child, row in selection.local_rows.items():
             local_rows[replicate, child] = row
         for child, row in selection.graph_rows.items():
             graph_rows[replicate, child] = row
-    return local_rows, graph_rows, local_states, depth_refits
+    return local_rows, graph_rows, local_states, depth_refits, nonconverged
 
 
 def count_exposed_contigs(
@@ -301,9 +308,9 @@ def _accumulate_bootstrap_chunk(
     local_state_counts: np.ndarray,
     local_parent_counts: np.ndarray,
     graph_parent_counts: np.ndarray,
-) -> int:
+) -> tuple[int, int]:
     """Reduce one worker result with order-independent integer additions."""
-    local_rows, graph_rows, local_states, depth_refits = chunk
+    local_rows, graph_rows, local_states, depth_refits, nonconverged = chunk
     accumulate_bootstrap_counts_into(
         local_rows,
         graph_rows,
@@ -317,7 +324,7 @@ def _accumulate_bootstrap_chunk(
         local_parent_counts,
         graph_parent_counts,
     )
-    return int(depth_refits)
+    return int(depth_refits), int(nonconverged)
 
 
 def _validate_bootstrap_selection_inputs(
@@ -411,11 +418,13 @@ def _run_parent_state_bootstraps(
     pair_exposure_presence_words: Optional[np.ndarray]=None,
     direction_supported_parents: Optional[np.ndarray]=None,
     depth_component_count: Optional[int]=None,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int, int]:
     """Run bootstrap and LOCO refits within one shared-memory pool lifetime.
 
     LOCO tasks have deterministic chromosome-omission weights and do not draw
     from the bootstrap RNG. Their counts and refit denominator stay separate.
+    Also returns the bootstrap and LOCO resamples that abstained because their
+    final family solve did not converge.
     """
     n_contigs = contig_log_likelihoods.shape[0]
     if contig_information_weights is None:
@@ -468,6 +477,7 @@ def _run_parent_state_bootstraps(
     ordinary_shared["depth_component_count"] = int(depth_component_count)
     depth_refits = 0
     loco_refits = 0
+    nonconverged = [0, 0]  # bootstrap, LOCO resamples whose family solve failed
     bootstrap_counts = (
         local_configuration_counts, graph_configuration_counts,
         local_state_counts, local_parent_counts, graph_parent_counts,
@@ -508,15 +518,16 @@ def _run_parent_state_bootstraps(
         }
         for is_loco, weights in tasks:
             chunk = _evaluate_bootstrap_chunk(shared, weights)
-            refits = _accumulate_bootstrap_chunk(
+            refits, failed = _accumulate_bootstrap_chunk(
                 chunk, alternatives,
                 *(loco_counts if is_loco else bootstrap_counts),
             )
+            nonconverged[is_loco] += failed
             if is_loco:
                 loco_refits += refits
             else:
                 depth_refits += refits
-        return worker_count, depth_refits, loco_refits
+        return worker_count, depth_refits, loco_refits, *nonconverged
 
     handles = []
     shared = dict(ordinary_shared)
@@ -557,15 +568,16 @@ def _run_parent_state_bootstraps(
         for is_loco, chunk in pool.imap_unordered(
             _bootstrap_worker, tasks, chunksize=1
         ):
-            refits = _accumulate_bootstrap_chunk(
+            refits, failed = _accumulate_bootstrap_chunk(
                 chunk, alternatives,
                 *(loco_counts if is_loco else bootstrap_counts),
             )
+            nonconverged[is_loco] += failed
             if is_loco:
                 loco_refits += refits
             else:
                 depth_refits += refits
-    return worker_count, depth_refits, loco_refits
+    return worker_count, depth_refits, loco_refits, *nonconverged
 
 
 def accumulate_bootstrap_counts_into(

@@ -270,6 +270,34 @@ def _apply_bridge_axis(
 
 
 @njit(cache=True, fastmath=False)
+def _apply_excursion_axis(current, output, probability, axis):
+    """Complete T' = (1-k) T + k U after a bridge mapped current to output."""
+
+    states = current.shape[0]
+    keep = 1.0 - probability
+    if axis == 0:
+        for second in range(states):
+            total = 0.0
+            for source in range(states):
+                total += current[source, second]
+            share = probability * total / states
+            for destination in range(states):
+                output[destination, second] = (
+                    keep * output[destination, second] + share
+                )
+    else:
+        for first in range(states):
+            total = 0.0
+            for source in range(states):
+                total += current[first, source]
+            share = probability * total / states
+            for destination in range(states):
+                output[first, destination] = (
+                    keep * output[first, destination] + share
+                )
+
+
+@njit(cache=True, fastmath=False)
 def _apply_null_axis(current, output, diagonal, off, axis):
     states = current.shape[0]
     coefficient = diagonal - off
@@ -308,6 +336,7 @@ def _score_path(
     bridge_row_arm,
     bridge_column_arm,
     bridge_large_index,
+    bridge_excursion,
     state_alt,
     child_gl,
     child_coefficient,
@@ -356,6 +385,9 @@ def _score_path(
                     0, prefix, suffix,
                     -1 if bridge_branch is None else bridge_branch[first_parent, boundary],
                 )
+                excursion = bridge_excursion[first_parent, boundary]
+                if excursion > 0.0:
+                    _apply_excursion_axis(current, work, excursion, 0)
             else:
                 _apply_null_axis(
                     current,
@@ -378,6 +410,9 @@ def _score_path(
                     1, prefix, suffix,
                     -1 if bridge_branch is None else bridge_branch[second_parent, boundary],
                 )
+                excursion = bridge_excursion[second_parent, boundary]
+                if excursion > 0.0:
+                    _apply_excursion_axis(current, work, excursion, 1)
             else:
                 _apply_null_axis(
                     current,
@@ -480,7 +515,7 @@ def _score_path(
 @njit(cache=True, parallel=True, fastmath=False)
 def _score_m0_kernel(
     pi, candidate_alt, bridge_left, bridge_right, bridge_diagonal, bridge_off,
-    bridge_row_arm, bridge_column_arm, bridge_large_index,
+    bridge_row_arm, bridge_column_arm, bridge_large_index, bridge_excursion,
     state_alt, child_gl, child_coefficient, observed_site, observed_start,
     observed_stop, exponent, null_diagonal, null_off, mismatch, eligible_child,
 ):
@@ -490,7 +525,7 @@ def _score_m0_kernel(
             _score_path(
                 child, 0, 0, 0, pi, candidate_alt, bridge_left, bridge_right,
                 bridge_diagonal, bridge_off, bridge_row_arm, bridge_column_arm,
-                bridge_large_index, state_alt, child_gl,
+                bridge_large_index, bridge_excursion, state_alt, child_gl,
                 child_coefficient, observed_site, observed_start, observed_stop,
                 exponent, null_diagonal, null_off, mismatch,
             )
@@ -503,7 +538,7 @@ def _score_m0_kernel(
 @njit(cache=True, parallel=True, fastmath=False)
 def _score_m1_kernel(
     pi, candidate_alt, bridge_left, bridge_right, bridge_diagonal, bridge_off,
-    bridge_row_arm, bridge_column_arm, bridge_large_index,
+    bridge_row_arm, bridge_column_arm, bridge_large_index, bridge_excursion,
     available, state_alt, child_gl, child_coefficient, observed_site,
     observed_start, observed_stop, exponent, null_diagonal, null_off, mismatch,
     eligible_edge, m0, common_products, child_start, child_stop, bridge_branch=None,
@@ -524,7 +559,8 @@ def _score_m1_kernel(
             output[local_child, parent] = _score_path(
                 child, parent, 0, 1, pi, candidate_alt, bridge_left,
                 bridge_right, bridge_diagonal, bridge_off, bridge_row_arm,
-                bridge_column_arm, bridge_large_index, state_alt, child_gl,
+                bridge_column_arm, bridge_large_index, bridge_excursion,
+                state_alt, child_gl,
                 child_coefficient, observed_site, observed_start, observed_stop,
                 exponent, null_diagonal, null_off, mismatch,
                 common_products, child_start, bridge_branch, common_powered,
@@ -536,6 +572,7 @@ def _score_m1_kernel(
 def _score_m2_kernel(
     trios, pi, candidate_alt, bridge_left, bridge_right, bridge_diagonal,
     bridge_off, bridge_row_arm, bridge_column_arm, bridge_large_index,
+    bridge_excursion,
     state_alt, child_gl, child_coefficient, observed_site,
     observed_start, observed_stop, exponent, null_diagonal, null_off, mismatch,
     common_products, first_cached_child, bridge_branch=None, common_powered=None,
@@ -548,7 +585,8 @@ def _score_m2_kernel(
         output[row] = _score_path(
             child, first, second, 2, pi, candidate_alt, bridge_left,
             bridge_right, bridge_diagonal, bridge_off, bridge_row_arm,
-            bridge_column_arm, bridge_large_index, state_alt, child_gl,
+            bridge_column_arm, bridge_large_index, bridge_excursion,
+            state_alt, child_gl,
             child_coefficient, observed_site, observed_start, observed_stop,
             exponent, null_diagonal, null_off, mismatch,
             common_products, first_cached_child, bridge_branch, common_powered,

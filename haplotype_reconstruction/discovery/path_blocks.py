@@ -23,7 +23,10 @@ def kept(block):
 def materialize(original, result):
     """Release supported alleles without inventing constant sample pairs.
 
-    Directional support is fractional expected independent carriers. Spatial
+    Directional supporters are the favourable samples that more likely than
+    not carry the founder at the site (one of the release rule's two measures;
+    the other, their expected carrier mass, is the release's
+    directional_support). Spatial
     MAP-U counts, used by completion, are distinct from posterior mean U mass.
     """
     release, fit = result['release'], result['fit']
@@ -33,7 +36,7 @@ def materialize(original, result):
     support = np.zeros(calls.shape)
     calls[:, keep] = release['calls']
     probability[:, keep] = fit['allele_probability']
-    support[:, keep] = release['directional_support']
+    support[:, keep] = release['directional_supporters']
     public = np.where(calls >= 0, probability, .5)
     block = BlockResult(original.positions.copy(),
         {i: np.stack((1-public[i], public[i]), axis=-1) for i in range(len(calls))},
@@ -58,7 +61,7 @@ def materialize(original, result):
 
 def worker(task):
     """Picklable callback; shared inputs contain no simulation truth."""
-    operation, index, columns, positions, latent, proposals, incumbent, config, search, model = task
+    index, columns, positions, latent, proposals, incumbent, config, search, model, founders = task
     parallel.increment_active()
     started = time.monotonic()
     try:
@@ -68,31 +71,31 @@ def worker(task):
         parallel.apply_dynamic_threads()
         prepared = path_fitting.prepare_fit_observations(
             path_scoring.prepare_observations(gl, observed, positions, **model))
-        if operation == 'select':
-            start, bank, bank_diagnostic = path_selection.prepare_candidate_bank(
-                gl, observed, latent, proposals, config, incumbent=incumbent)
-            attempted = path_selection.search_panel(start, bank, gl, observed, positions,
-                learn_frequencies=True, prepared=prepared, previous_search=incumbent,
-                **search, **model)
-            retained = incumbent is not None and incumbent['objective'] > attempted['objective'] + 1e-6
-            fit = incumbent if retained else attempted
-            diagnostic = dict(incumbent_retained=bool(retained),
-                candidate_bank=bank_diagnostic, attempted_objective=attempted['objective'],
-                attempted_trace=attempted['search_trace'], trace=fit['search_trace'],
-                computational_work=attempted.get('computational_work'))
-        else:
-            from .path_exchange import exchange_panel
-            fit, diagnostic = exchange_panel(incumbent, gl, observed, positions,
-                prepared=prepared, max_updates=search['max_updates'], **model)
+        start, bank, bank_diagnostic = path_selection.prepare_candidate_bank(
+            gl, observed, latent, proposals, config, incumbent=incumbent)
+        attempted = path_selection.search_panel(start, bank, gl, observed, positions,
+            learn_frequencies=True, prepared=prepared, previous_search=incumbent,
+            incumbent=incumbent, founders=founders, **search, **model)
+        context = None if founders is None else path_selection.ContextFounders(founders)
+        retained = incumbent is not None and (
+            path_selection.selection_objective(incumbent, True, context)
+            > attempted['selection_objective'] + 1e-6)
+        fit = incumbent if retained else attempted
+        diagnostic = dict(incumbent_retained=bool(retained),
+            candidate_bank=bank_diagnostic, attempted_objective=attempted['objective'],
+            attempted_trace=attempted['search_trace'], trace=fit['search_trace'],
+            computational_work=attempted.get('computational_work'),
+            search_start=attempted.get('search_start'),
+            round_backstop=bool(attempted.get('round_backstop', False)))
         # Reusing a deterministic search also permits reuse of its release
         # calculation when the calling rule is unchanged. These cached
         # posteriors are outputs only, never additional read observations.
-        release_rule = (config.discovery.score_tolerance,
+        release_rule = ('carrier_majority_supporters', config.discovery.score_tolerance,
                         config.discovery.min_hard_call_pseudo_probability,
                         config.discovery.min_directional_supporters)
         saved_release = fit.get('release_result')
-        reused_search = (operation == 'select' and
-            diagnostic.get('computational_work', {}).get('reused_previous_search', False))
+        reused_search = diagnostic.get('computational_work', {}).get(
+            'reused_previous_search', False)
         reuse_release = (reused_search and saved_release is not None
                          and saved_release['rule'] == release_rule)
         if reuse_release:
@@ -104,7 +107,10 @@ def worker(task):
             rule=release_rule, release=release, wildcard=wildcard))
         diagnostic['release_reused'] = bool(reuse_release)
         diagnostic.update(k=len(fit['panel']), objective=fit['objective'],
-            fixed_k_converged=fit['converged'], update_budget_reached=fit['update_budget_reached'],
+            selection_objective=path_selection.selection_objective(fit, True, context),
+            context_founders=None if context is None else len(context),
+            free_rows=len(fit['panel']) if context is None else context.free(fit['panel']),
+            fixed_k_converged=fit['converged'], update_backstop=fit['update_backstop_reached'],
             unknown_copy_fraction=release['unknown_copy_mass']/release['total_copy_mass'],
             spatial_map_unknown_mass=wildcard['mass'],
             expected_state_changes=release['expected_state_changes'],
@@ -116,9 +122,23 @@ def worker(task):
         parallel.decrement_active()
 
 
+def backstop_summary(diagnostics):
+    """Count reported backstop hits (target 0) over completed block selections."""
+    counts = dict(blocks=0, round_backstop=0, update_backstop=0, candidate_bank_backstop=0)
+    for diagnostic in diagnostics:
+        if not diagnostic or 'skipped' in diagnostic:
+            continue
+        counts['blocks'] += 1
+        counts['round_backstop'] += bool(diagnostic.get('round_backstop'))
+        counts['update_backstop'] += bool(diagnostic.get('update_backstop'))
+        counts['candidate_bank_backstop'] += bool(
+            diagnostic.get('candidate_bank', {}).get('search_budget_bound'))
+    return counts
+
+
 def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
                   search_config, checkpoint_io, *, generations, recombination_rate_per_bp,
-                  wildcard_mass=.01, chromosome_map=None, segment_exchange=False):
+                  wildcard_mass=.01, chromosome_map=None):
     """One worker per block initially; freed cores join remaining numerical work.
 
     Each completed block is saved by the parent. The caller supplies a
@@ -138,11 +158,9 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
         if np.any(columns >= len(sites)) or not np.array_equal(sites[columns], original.positions):
             raise ValueError('path selection block positions do not match genotype evidence')
         mode = getattr(original, 'cavity_selected_mode', None)
-        incumbent = (getattr(original, 'path_fit', None) if segment_exchange else
-                     getattr(proposal_sets[-2][index], 'path_fit', None)
+        incumbent = (getattr(proposal_sets[-2][index], 'path_fit', None)
                      if len(proposal_sets) >= 2 else None)
-        unavailable = (incumbent is None if segment_exchange else mode is None)
-        if unavailable or not keep.any() or not observed[:, columns[keep]].any():
+        if mode is None or not keep.any() or not observed[:, columns[keep]].any():
             diagnostic = dict(skipped='no_latent_fit_or_observed_kept_sites')
             fallback = copy.copy(original)
             fallback.reads_count_matrix = fallback.probs_array = None
@@ -154,16 +172,23 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
             if not np.array_equal(blocks[index].positions, original.positions):
                 raise ValueError('feedback proposal positions differ from original block')
             proposals.append(np.ascontiguousarray(blocks[index].discrete_haps[:, keep]))
-        latent = None if segment_exchange else mode.haplotypes
-        if latent is not None and latent.shape[1] != int(keep.sum()):
+        latent = mode.haplotypes
+        # This round's context refit (the newest proposal set) names the
+        # founders the multi-block assembly found in this block; blocks no
+        # context component covered, and the initial fit, carry none.
+        founders = (getattr(proposal_sets[-1][index], 'context_founder_rows', None)
+                    if proposal_sets else None)
+        if founders is not None:
+            founders = np.ascontiguousarray(np.asarray(founders)[:, keep])
+        if latent.shape[1] != int(keep.sum()):
             raise ValueError('latent discovery panel does not match kept markers')
         positions = np.ascontiguousarray(original.positions[keep])
         intervals = (None if chromosome_map is None else
                      chromosome_map.interval_morgans(positions[:-1], positions[1:]))
         model = dict(generations=generations, recombination_rate_per_bp=recombination_rate_per_bp,
                      wildcard_mass=wildcard_mass, interval_morgans=intervals)
-        tasks.append(('exchange' if segment_exchange else 'select', index, columns[keep],
-                      positions, latent, proposals, incumbent, config, asdict(search_config), model))
+        tasks.append((index, columns[keep], positions, latent, proposals, incumbent, config,
+                      asdict(search_config), model, founders))
     if not tasks:
         return output, diagnostics
     from ..core import batch_queue
@@ -173,6 +198,7 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
             block, diagnostic = materialize(originals[index], result), result['diagnostic']
             output.blocks[index], diagnostics[index] = block, diagnostic
             checkpoint_io.save(f'block{index:06d}', dict(block=block, diagnostic=diagnostic))
+        print(f'[Path selection] backstop hits {backstop_summary(diagnostics)}', flush=True)
         return output, diagnostics
     handles, metadata = [], []
     try:
@@ -199,4 +225,5 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
                     print(f'[Path selection] completed {done}/{len(tasks)}', flush=True)
     finally:
         parallel.close_shared_memory(handles, unlink=True)
+    print(f'[Path selection] backstop hits {backstop_summary(diagnostics)}', flush=True)
     return output, diagnostics

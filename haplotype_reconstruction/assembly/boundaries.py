@@ -6,7 +6,9 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import logsumexp
 from numba import njit
+from haplotype_reconstruction.core.config import MAX_EXACT_BITS
 from .allele_polynomials import shared_sample_likelihoods
+from . import site_posterior
 import haplotype_reconstruction.assembly.observations as assembly_observations
 
 @dataclass(frozen=True)
@@ -20,7 +22,13 @@ class UnorderedDiplotypePosterior:
 
 @dataclass(frozen=True)
 class SharedLatentSitePosterior:
-    """Exact small-K posterior over shared unresolved founder-site alleles."""
+    """Posterior over shared unresolved founder-site alleles on its support.
+
+    ``assignments`` lists every assignment for at most MAX_EXACT_BITS
+    unresolved founders, otherwise the uncertain-core support (site_posterior);
+    ``shell_weight`` is the ball shell-guard weight per founder (zero unless the
+    support is a Hamming ball).
+    """
 
     unresolved_founders: np.ndarray
     assignments: np.ndarray
@@ -28,10 +36,12 @@ class SharedLatentSitePosterior:
     assignment_probabilities: np.ndarray
     posterior_alt: np.ndarray
     log_posterior_odds: np.ndarray
-    effective_carrier_support: np.ndarray
+    carrier_supporters: np.ndarray
     informative_samples: np.ndarray
     log_marginal_likelihood: float
     finite_joint_mass: bool
+    shell_weight: np.ndarray
+    site_posterior_info: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -40,24 +50,21 @@ class CavityFillRule:
 
     ``minimum_observable_founder_separation`` requires each founder to differ
     observably from every other founder outside the focal bin.
-    ``maximum_enumerated_unresolved_founders`` bounds the exponential exact
-    focal-site sum; sites above it are retained as unknown.
     """
 
     snps_per_bin: int = 10
-    minimum_effective_supporters: float = 2.0
+    minimum_supporters: int = 2
     minimum_posterior_probability: float = 0.85
     uniform_mix: float = 0.01
     tie_tolerance: float = 1e-12
     founder_identifiability_tolerance: float = 1e-12
     minimum_observable_founder_separation: int = 1
-    maximum_enumerated_unresolved_founders: int = 6
 
     def __post_init__(self) -> None:
         if self.snps_per_bin < 1:
             raise ValueError("snps_per_bin must be positive")
-        if self.minimum_effective_supporters < 0.0:
-            raise ValueError("minimum_effective_supporters must be non-negative")
+        if self.minimum_supporters < 0:
+            raise ValueError("minimum_supporters must be non-negative")
         if not 0.5 < self.minimum_posterior_probability <= 1.0:
             raise ValueError(
                 "minimum_posterior_probability must lie in (0.5, 1]"
@@ -79,33 +86,29 @@ class CavityFillRule:
             raise ValueError(
                 "founder_identifiability_tolerance must be non-negative"
             )
-        if (
-            isinstance(self.maximum_enumerated_unresolved_founders, bool)
-            or int(self.maximum_enumerated_unresolved_founders)
-            != self.maximum_enumerated_unresolved_founders
-            or self.maximum_enumerated_unresolved_founders < 0
-        ):
-            raise ValueError(
-                "maximum_enumerated_unresolved_founders must be a "
-                "non-negative integer"
-            )
 
 
 @dataclass(frozen=True)
 class CavityFillResult:
-    """Filled copy plus distinct exchangeability/separation diagnostics."""
+    """Filled copy plus distinct exchangeability/separation/shell-guard diagnostics.
+
+    ``site_posterior_counts`` follows ``site_posterior.SUMMARY_FIELDS``.
+    """
 
     panel: assembly_observations.FounderPanel
     filled: np.ndarray
     posterior_alt: np.ndarray
-    effective_supporters: np.ndarray
+    supporters: np.ndarray
     exchangeable_skipped: np.ndarray
     minimum_observable_separation: np.ndarray
     insufficient_separation_skipped: np.ndarray
-    enumeration_limit_skipped: np.ndarray
+    guard_skipped: np.ndarray
+    multimodal_skipped: np.ndarray
     n_exchangeable_skipped: int
     n_insufficient_separation_skipped: int
-    n_enumeration_limit_skipped: int
+    n_guard_skipped: int
+    n_multimodal_skipped: int
+    site_posterior_counts: tuple
 
 
 def _normalised_evidence(genotype_likelihoods: np.ndarray) -> np.ndarray:
@@ -158,7 +161,7 @@ def _carrier_probabilities(pairs, weights, n_founders):
     return result
 
 
-def exact_shared_latent_site_posterior(
+def shared_latent_site_posterior(
     panel: assembly_observations.FounderPanel,
     site: int,
     genotype_likelihoods: np.ndarray,
@@ -170,7 +173,7 @@ def exact_shared_latent_site_posterior(
     uniform_tolerance: float=1e-12,
     tie_tolerance: float=1e-12,
 ) -> SharedLatentSitePosterior:
-    """Exactly marginalize shared unresolved alleles at one founder site.
+    """Marginalize shared unresolved alleles at one founder site.
 
     For each binary assignment ``a`` to the unresolved founder alleles, each
     sample first marginalizes its leave-bin-out pair-state weights,
@@ -179,9 +182,10 @@ def exact_shared_latent_site_posterior(
 
     The assignment likelihood is then ``prior(a) * product_n L_n(a)``.  Thus
     every founder-site allele is drawn once and shared by every sample, rather
-    than independently re-marginalized in each per-sample emission.  This is an
-    exponential small-K oracle and callers are responsible for applying a
-    conservative enumeration cap.
+    than independently re-marginalized in each per-sample emission.  Up to
+    MAX_EXACT_BITS unresolved founders every assignment is enumerated; above
+    that the uncertain-core support of ``site_posterior`` replaces the
+    enumeration (``_core_site_posterior``).
     """
 
     if isinstance(site, bool) or int(site) != site:
@@ -219,6 +223,10 @@ def exact_shared_latent_site_posterior(
 
     unresolved = np.flatnonzero(~panel.called[:, site])
     n_unresolved = int(unresolved.size)
+    if n_unresolved > MAX_EXACT_BITS:
+        return _core_site_posterior(
+            panel, site, evidence, informative, pairs, weights, unresolved,
+            uniform_mix=uniform_mix, tie_tolerance=tie_tolerance)
     assignment_codes = np.arange(1 << n_unresolved, dtype=np.uint64)
     bit_positions = np.arange(n_unresolved, dtype=np.uint64)
     assignments = (
@@ -259,7 +267,7 @@ def exact_shared_latent_site_posterior(
 
     posterior_alt = panel.q[:, site].copy()
     log_odds = np.full(n_founders, np.nan, dtype=np.float64)
-    effective_support = np.zeros(n_founders, dtype=np.float64)
+    supporters = np.zeros(n_founders, dtype=np.float64)
     carrier_probability = _carrier_probabilities(pairs, weights, n_founders)
     with np.errstate(divide="ignore", invalid="ignore"):
         log_sample = np.log(sample_likelihood)
@@ -286,9 +294,9 @@ def exact_shared_latent_site_posterior(
             ),
             axis=0,
         )
-        effective_support[founder] = float(np.sum(
-            carrier_probability[informative & target_sensitive, founder]
-        ))
+        supporters[founder] = max(float(np.count_nonzero(
+            carrier_probability[informative & target_sensitive, founder] > 0.5
+        )), float(np.sum(carrier_probability[informative & target_sensitive, founder])))
 
     return SharedLatentSitePosterior(
         unresolved_founders=unresolved,
@@ -297,10 +305,84 @@ def exact_shared_latent_site_posterior(
         assignment_probabilities=assignment_probability,
         posterior_alt=posterior_alt,
         log_posterior_odds=log_odds,
-        effective_carrier_support=effective_support,
+        carrier_supporters=supporters,
         informative_samples=informative,
         log_marginal_likelihood=log_marginal,
         finite_joint_mass=finite_joint_mass,
+        shell_weight=np.zeros(n_founders, dtype=np.float64),
+        site_posterior_info=_cube_info(),
+    )
+
+
+def _cube_info():
+    info = np.zeros(site_posterior.INFO_FIELDS, dtype=np.int64)
+    info[site_posterior.INFO_CORE] = -1
+    return info
+
+
+def _core_site_posterior(panel, site, evidence, informative, pairs, weights, unresolved, *,
+                         uniform_mix, tie_tolerance):
+    """``shared_latent_site_posterior`` above MAX_EXACT_BITS unresolved founders.
+
+    The same likelihood and Bernoulli(panel.q) priors over the support of the
+    uncertain-core rule. Carrier support is taken over the informative samples
+    whose likelihood changes with the target allele somewhere on that support:
+    the larger of how many more likely than not carry the target and their
+    summed probability of carrying it.
+    """
+    n_founders = panel.q.shape[0]
+    robust_evidence = (1.0 - uniform_mix) * evidence + uniform_mix / 3.0
+    unresolved_q = panel.q[unresolved, site]
+    with np.errstate(divide="ignore"):
+        log_alt_prior = np.log(unresolved_q)
+        log_ref_prior = np.log1p(-unresolved_q)
+    with np.errstate(invalid="ignore"):
+        prior_log_odds = log_alt_prior - log_ref_prior
+    assignments, shell_flags, log_likelihood, info, sensitive = site_posterior.completion_site(
+        np.ascontiguousarray(robust_evidence), np.ascontiguousarray(informative), weights, pairs,
+        (panel.q[:, site] > 0.5).astype(np.int8), unresolved.astype(np.int64),
+        prior_log_odds, float(tie_tolerance), site_posterior.settings())
+    log_prior = np.sum(
+        np.where(assignments == 1, log_alt_prior, log_ref_prior), axis=1)
+    log_joint = log_prior + log_likelihood
+    log_marginal = float(logsumexp(log_joint))
+    finite_joint_mass = bool(np.isfinite(log_marginal))
+    if finite_joint_mass:
+        assignment_probability = np.exp(log_joint - log_marginal)
+    else:
+        assignment_probability = np.exp(log_prior - float(logsumexp(log_prior)))
+    posterior_alt = panel.q[:, site].copy()
+    log_odds = np.full(n_founders, np.nan, dtype=np.float64)
+    supporters = np.zeros(n_founders, dtype=np.float64)
+    carrier_probability = _carrier_probabilities(pairs, weights, n_founders)
+    for bit, founder in enumerate(unresolved):
+        is_alt = assignments[:, bit] == 1
+        posterior_alt[founder] = float(np.clip(
+            np.sum(assignment_probability[is_alt]), 0.0, 1.0
+        ))
+        if finite_joint_mass:
+            # A certain founder keeps one allele on the whole support.
+            log_alt = float(logsumexp(log_joint[is_alt])) if np.any(is_alt) else -np.inf
+            log_ref = float(logsumexp(log_joint[~is_alt])) if np.any(~is_alt) else -np.inf
+            log_odds[founder] = log_alt - log_ref
+        supporters[founder] = max(float(np.count_nonzero(
+            carrier_probability[informative & sensitive[bit], founder] > 0.5
+        )), float(np.sum(carrier_probability[informative & sensitive[bit], founder])))
+    shell = np.zeros(n_founders, dtype=np.float64)
+    shell[unresolved] = site_posterior.shell_weights(assignment_probability, shell_flags)
+    return SharedLatentSitePosterior(
+        unresolved_founders=unresolved,
+        assignments=assignments,
+        log_joint=log_joint,
+        assignment_probabilities=assignment_probability,
+        posterior_alt=posterior_alt,
+        log_posterior_odds=log_odds,
+        carrier_supporters=supporters,
+        informative_samples=informative,
+        log_marginal_likelihood=log_marginal,
+        finite_joint_mass=finite_joint_mass,
+        shell_weight=shell,
+        site_posterior_info=info,
     )
 
 
@@ -371,11 +453,15 @@ def cavity_fill_unknown_alleles(
     ``O(N*K**2 + N*2**U)``; exact carrier-sensitivity diagnostics retain
     ``O(U*N*2**U)`` worst-case work. Near-zero polynomial values use the
     direct positive mixture to avoid cancellation. Working memory is
-    ``O(N*K**2 + (N+U)*2**U)``. Sites over the unchanged enumeration cap
-    conservatively remain unresolved.
-    Effective carrier support is the sum of leave-bin-out probabilities of
-    carrying the target over focal-informative samples whose likelihood is
-    sensitive to that target allele; it gates release but never scales an LLR.
+    ``O(N*K**2 + (N+U)*2**U)``. Above MAX_EXACT_BITS unresolved founders the
+    uncertain-core support replaces the enumeration (O(N U**3) per site); in
+    its Hamming-ball regime the shell guard withholds releases near the
+    threshold.
+    Carrier support is taken over the focal-informative samples whose
+    likelihood is sensitive to the target allele: the larger of how many have a
+    leave-bin-out probability of carrying the target above 1/2 and the sum of
+    those probabilities. Release needs ``minimum_supporters``; carrier support
+    gates release but never scales an LLR.
 
     A target founder is ineligible when another founder has the same q vector
     on eligible outside-bin inference sites, within
@@ -395,10 +481,14 @@ def cavity_fill_unknown_alleles(
     called = panel.called.copy()
     filled = np.zeros_like(called)
     posterior_alt = panel.q.copy()
-    effective = np.zeros_like(q)
+    supporters = np.zeros_like(q)
     exchangeable_skipped = np.zeros_like(called)
     insufficient_separation_skipped = np.zeros_like(called)
-    enumeration_limit_skipped = np.zeros_like(called)
+    guard_skipped = np.zeros_like(called)
+    multimodal_skipped = np.zeros_like(called)
+    site_info = np.zeros((site_posterior.INFO_FIELDS, n_sites), dtype=np.int64)
+    site_info[site_posterior.INFO_CORE] = -1
+    guard_settings = site_posterior.settings()
     minimum_observable_separation = np.full(q.shape, -1, dtype=np.int64)
 
     n_bins = (n_sites + rule.snps_per_bin - 1) // rule.snps_per_bin
@@ -435,14 +525,8 @@ def cavity_fill_unknown_alleles(
             unresolved = np.flatnonzero(~panel.called[:, site])
             if unresolved.size == 0:
                 continue
-            if (
-                unresolved.size
-                > rule.maximum_enumerated_unresolved_founders
-            ):
-                enumeration_limit_skipped[unresolved, site] = True
-                continue
 
-            joint = exact_shared_latent_site_posterior(
+            joint = shared_latent_site_posterior(
                 panel,
                 site,
                 evidence[:, site,:],
@@ -454,9 +538,8 @@ def cavity_fill_unknown_alleles(
                 tie_tolerance=rule.tie_tolerance,
             )
             posterior_alt[unresolved, site] = joint.posterior_alt[unresolved]
-            effective[unresolved, site] = (
-                joint.effective_carrier_support[unresolved]
-            )
+            supporters[unresolved, site] = joint.carrier_supporters[unresolved]
+            site_info[:, site] = joint.site_posterior_info
             if not joint.finite_joint_mass:
                 continue
 
@@ -474,13 +557,22 @@ def cavity_fill_unknown_alleles(
 
                 probability_alt = joint.posterior_alt[founder]
                 target_log_odds = joint.log_posterior_odds[founder]
-                total_support = joint.effective_carrier_support[founder]
+                site_supporters = joint.carrier_supporters[founder]
                 confidence = max(probability_alt, 1.0 - probability_alt)
                 if (
                     abs(target_log_odds) > rule.tie_tolerance
-                    and total_support >= rule.minimum_effective_supporters
+                    and site_supporters >= rule.minimum_supporters
                     and confidence >= rule.minimum_posterior_probability
                 ):
+                    if joint.site_posterior_info[site_posterior.INFO_MULTIMODAL]:
+                        # Two comparable, unconnected posterior basins: no release.
+                        multimodal_skipped[founder, site] = True
+                        continue
+                    if joint.shell_weight[founder] > 0.0 and site_posterior.guard_withholds(
+                            probability_alt, joint.shell_weight[founder],
+                            rule.minimum_posterior_probability, guard_settings):
+                        guard_skipped[founder, site] = True
+                        continue
                     # A released founder allele is a hard biological call.
                     # Its calibrated marginal remains in posterior_alt; a soft
                     # q here would reintroduce the shared-latent factorization
@@ -500,14 +592,17 @@ def cavity_fill_unknown_alleles(
         panel=filled_panel,
         filled=filled,
         posterior_alt=posterior_alt,
-        effective_supporters=effective,
+        supporters=supporters,
         exchangeable_skipped=exchangeable_skipped,
         minimum_observable_separation=minimum_observable_separation,
         insufficient_separation_skipped=insufficient_separation_skipped,
-        enumeration_limit_skipped=enumeration_limit_skipped,
+        guard_skipped=guard_skipped,
+        multimodal_skipped=multimodal_skipped,
         n_exchangeable_skipped=int(np.sum(exchangeable_skipped)),
         n_insufficient_separation_skipped=int(
             np.sum(insufficient_separation_skipped)
         ),
-        n_enumeration_limit_skipped=int(np.sum(enumeration_limit_skipped)),
+        n_guard_skipped=int(np.sum(guard_skipped)),
+        n_multimodal_skipped=int(np.sum(multimodal_skipped)),
+        site_posterior_counts=site_posterior.summary_counts(site_info),
     )

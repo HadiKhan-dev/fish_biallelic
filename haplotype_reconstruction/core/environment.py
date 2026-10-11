@@ -35,20 +35,43 @@ def boolean_setting(value, name):
     raise ValueError(f'{name} must be boolean (1/0, true/false, yes/no or on/off)')
 
 
-def assembly_transition_model():
-    """Assembly choice is independent of discovery; dense is the default."""
-    value = os.environ.get("HAPLOTYPES_ASSEMBLY_MODEL", "dense")
-    if value not in ("dense", "structured"):
-        raise ValueError("HAPLOTYPES_ASSEMBLY_MODEL must be dense or structured")
-    return value
+# Removed alternatives (one join route, one discovery search, path feedback).
+# Each entry: setting name -> (the single remaining value, why the others went).
+OBSOLETE_SETTINGS = {
+    "assembly_model": ("dense", "the structured transition model was removed; the dense linker is "
+                                "the only assembly transition model"),
+    "assembly_search": ("bounded", "the broad assembly search was removed: it capped panels at 12 "
+                                   "founders"),
+    "discovery_search": ("standard", "the batched discovery search was removed"),
+    "feedback_selection": ("path", "the balanced/strict feedback selections were removed; path "
+                                   "selection is the only feedback selection"),
+    "feedback_segment_exchange": (False, "feedback segment exchange was removed"),
+}
+_WARNED_OBSOLETE = set()
 
 
-def assembly_panel_search():
-    """Panel-search breadth is independent of the assembly transition model."""
-    value = os.environ.get("HAPLOTYPES_ASSEMBLY_SEARCH", "bounded")
-    if value not in ("bounded", "broad"):
-        raise ValueError("HAPLOTYPES_ASSEMBLY_SEARCH must be bounded or broad")
-    return value
+def obsolete_setting(name, value, source):
+    """Accept a removed option only at its remaining value (warn once); reject anything else."""
+    import warnings
+    remaining, reason = OBSOLETE_SETTINGS[name]
+    if isinstance(remaining, bool):
+        accepted = boolean_setting(value, name) is remaining
+    else:
+        accepted = str(value).strip().lower() == remaining
+    if not accepted:
+        raise ValueError(f"{source} {name} = {value!r}: {reason}; delete this setting")
+    if (source, name) not in _WARNED_OBSOLETE:
+        _WARNED_OBSOLETE.add((source, name))
+        warnings.warn(f"{source} {name} is obsolete and ignored ({reason}); delete this setting",
+                      UserWarning, stacklevel=3)
+
+
+def check_obsolete_environment():
+    """Validate removed options still present in the environment (warn once / clear error)."""
+    for name in OBSOLETE_SETTINGS:
+        variable = "HAPLOTYPES_" + name.upper()
+        if variable in os.environ:
+            obsolete_setting(name, os.environ[variable], f"environment variable {variable}:")
 
 
 def assembly_founder_refinement():
@@ -59,26 +82,12 @@ def assembly_founder_refinement():
     return value == "on"
 
 
-def block_feedback_selection():
-    """Normalized path selection is the default for local founder panels."""
-    value = os.environ.get("HAPLOTYPES_FEEDBACK_SELECTION", "path")
-    if value not in ("path", "balanced", "strict"):
-        raise ValueError("HAPLOTYPES_FEEDBACK_SELECTION must be path, balanced or strict")
+def coarse_move_guard():
+    """Coarse-move guard of the converged founder search; "shared_junction" by default."""
+    value = os.environ.get("HAPREC_COARSE_MOVE_GUARD", "shared_junction")
+    if value not in ("shared_junction", "genotype_fit", "none"):
+        raise ValueError("HAPREC_COARSE_MOVE_GUARD must be shared_junction, genotype_fit or none")
     return value
-
-
-def block_feedback_segment_exchange():
-    """Optional same-count segment proposals after both feedback rounds."""
-    return boolean_setting(os.environ.get("HAPLOTYPES_FEEDBACK_SEGMENT_EXCHANGE", "off"),
-                           "feedback_segment_exchange")
-
-
-def batched_discovery_enabled():
-    """The experimental discovery search requires its own explicit choice."""
-    value = os.environ.get("HAPLOTYPES_DISCOVERY_SEARCH", "standard")
-    if value not in ("standard", "batched"):
-        raise ValueError("HAPLOTYPES_DISCOVERY_SEARCH must be standard or batched")
-    return value == "batched"
 
 
 def configured_regions(default, *, template_regions=False):

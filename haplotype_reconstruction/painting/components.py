@@ -20,10 +20,29 @@ np.seterr(divide='ignore', invalid='ignore')
 
 
 class PaintedChunk(NamedTuple):
+    """Half-open released span; labels are component-local founder rows (-1 unknown/pooled).
+
+    ``hap1_members``/``hap2_members`` name each track's candidate founder rows
+    (sorted, component-local): one row for a named track, the pooled rows for
+    POOLED_EQUIVALENCE and LOCAL_ALLELE_EQUIVALENCE tracks, () otherwise. The
+    painter always stores them; ``None`` (4-field truth chunks, old pickles)
+    means "derive from the label".
+    """
+
     start: int
     end: int
     hap1: int
     hap2: int
+    hap1_members: tuple[int, ...] | None = None
+    hap2_members: tuple[int, ...] | None = None
+
+    def members(self, track: int) -> tuple[int, ...]:
+        """Candidate founder rows of one track (sorted component-local IDs); () = unknown or withheld."""
+        stored = self.hap1_members if track == 0 else self.hap2_members
+        if stored is not None:
+            return stored
+        label = self.hap1 if track == 0 else self.hap2
+        return (label,) if label >= 0 else ()
 
 
 class SamplePainting:

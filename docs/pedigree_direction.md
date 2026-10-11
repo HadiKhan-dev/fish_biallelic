@@ -1,6 +1,6 @@
 # Pedigree direction and family evidence
 
-The default pedigree policy is `continuous_family`: finite chromosome-paired
+The default pedigree policy is `continuous_family`: per-chromosome junction-count
 orientation evidence plus four synchronous reciprocal-family cavity-message
 passes, a joint-family check of reverse two-edge ancestry paths, and a final
 converged reciprocal solve with that path evidence frozen. Full-marker
@@ -17,22 +17,64 @@ individuals can occupy the same fitted ancestry layer; a backcross offspring
 need not have more junctions than both parents. The previous layer-order gate
 could therefore remove a strongly supported true pair before identity selection.
 
-The continuous term compares child-minus-parent junction burden across paired
-physical chromosomes. Callability adjusts the counts; an inclusion-exclusion
-bound weights potential common exposure. This is a summary-level approximation,
-not an exact recount on intersecting genomic intervals. It assumes missingness
-is sufficiently representative for that adjustment; structured missingness is
-still a limitation. Absent overlap supplies neutral evidence.
+The continuous term is a count likelihood of the painted minimum junction
+counts `J` (founder-label switches of both homologues), evaluated chromosome by
+chromosome. A homologue that parent `p` transmits copies one of `p`'s two
+homologues at each position, so it carries each of `p`'s painted junctions with
+probability 1/2; the child shows it where the child is callable (fraction `f_c`
+of its haplotype bins, missingness assumed representative). Everything else in
+the child's count — the new crossovers of the two meioses that formed it, the
+junctions transmitted by the other parent, and painting false positives — is a
+non-negative remainder with no assumed distribution. On chromosome `k`:
 
-A robust, neutral-centred log correction is added for each proposed parent:
+`L_k(p -> c)` is proportional to `P(Binomial(J_p, f_c / 2) <= J_c)`, and
+`L_k(c -> p)` to `P(Binomial(J_c, f_p / 2) <= J_p)`.
 
-`log(2 * ((1 - epsilon) * orientation_support + epsilon / 2))`.
+Under the reverse orientation the proposed parent would have to have lost
+junctions that its own "parent" transmits. Equal counts give no evidence; a
+junction-poor parent of a junction-rich child gives strong evidence. With
+probability `epsilon_c` (`parent_state_direction_chromosome_error_probability`,
+default 0.05) one chromosome's comparison is painting failure carrying no
+orientation evidence:
 
-`epsilon` uses the existing parent-state contamination setting (default 0.02).
-Neutral support contributes zero, not an implicit penalty for observing a
-parent. Even strong reverse support has finite weight; it is not an ancestry
-order veto. Caller-supplied chronology overrides this extra orientation term.
-The support is a composite score, not a calibrated parenthood probability.
+`pi_k = (1 - epsilon_c) * L_k(p -> c) / (L_k(p -> c) + L_k(c -> p)) + epsilon_c / 2`,
+
+so each chromosome contributes at most `log(2 / epsilon_c - 1)` (3.7 nats).
+The default is the upper range of gross painted-versus-true junction
+discrepancies (at least 3 junctions on one chromosome in either sample: 0.6-8%
+of pair-chromosomes in the std, stress and real-axis simulations of October
+2026). Chromosomes are independent meioses, so their log odds add:
+`LLR = sum_k logit(pi_k)`, weighted by chromosome multiplicity in bootstrap and
+LOCO fits. Painting failure is not always independent between chromosomes: a
+sample-level junction excess or deficit repeats on every chromosome, which the
+per-chromosome floors cannot bound. In the real 22-chromosome Tropheops run
+(metadata-free replay) one founder-generation sample carried 362 painted
+junctions and another 39, and painted parents carried as many junctions as
+their children on average, so unbounded sums reached -25 to -32 nats against
+the recorded generations. With probability `epsilon` (the parent-state
+contamination setting, default 0.02) the pair's whole comparison is therefore
+painting failure carrying no orientation evidence, and the neutral-centred log
+correction added for each proposed parent is
+
+`log(2 * ((1 - epsilon) * sigmoid(LLR) + epsilon / 2))`.
+
+Neutral evidence contributes zero, not an implicit penalty for observing a
+parent; supported orientation gains at most `log(2 - epsilon)` and a
+contradicted one costs at most `log(epsilon)` (3.9 nats), the bound of the
+earlier contrast term. The count likelihood changes how quickly evidence
+accumulates within that bound, not the bound. It is not an ancestry order veto.
+Caller-supplied chronology overrides this term.
+The expected number of new crossovers is deliberately not imposed: it depends on
+the recombination rate (the inference prior can differ from the generating
+rate, 5 versus 2 cM/Mb in the real-axis simulations), on whether the
+transmitting parent's homologues differ at the crossover, and on painting
+sensitivity; imposing it oriented low-count true edges backwards in those
+simulations. Related individuals of equal junction burden (full sibs, a
+backcross offspring of a deep parent) therefore receive little orientation
+evidence, as they should. The support is a composite score, not a calibrated
+parenthood probability. The earlier paired junction-density contrast is kept
+only to order the acyclic graph search and as the reported parent-role
+probability.
 
 ## Family comparisons without immediate feedback
 
@@ -53,11 +95,14 @@ previously selected pedigree as truth. Subsequent synchronous passes incorporate
 other family comparisons, but remove the incoming reverse message before
 forming the next message. Thus a fish cannot immediately send its own evidence
 back to itself as new support. Four initial passes prepare the path factor;
-the final solve stops at maximum log-message change `1e-8`. Try 128 undamped
-iterations; on nonconvergence, restart the same equations with damping 0.5 for up
+the final solve stops at maximum log-message change `1e-8`. Try 8192 undamped
+iterations (slow monotone modes need thousands; damping would halve their rate);
+on nonconvergence, restart the same equations with damping 0.5 for up
 to 4096 iterations. The residual is measured before damping, so smaller updates
 cannot falsely signal convergence. Successful initial solves are untouched.
-Failure of both attempts is reported as an error, not silently published.
+Failure of both attempts in the full-data fit is reported as an error, not
+silently published. A bootstrap or LOCO resample whose solve fails abstains for
+every fish, which only lowers support, and is counted in `final_family_solve`.
 Convergence of these messages is not exact global pedigree marginalization. Included/excluded configuration masses are retained as
 log odds until the reverse message is removed, so very small probabilities
 are not rounded away before the cavity calculation. The existing acyclic graph selection and graph-conflict
@@ -107,8 +152,9 @@ Eligibility masks remain authoritative and unchanged.
 
 With `A` scored configurations, `A2` two-parent rows, `C` chromosomes and
 `N` samples, the extra direction/family work per resample is
-`O(C*N^2 + (4+T)*(A + N^2) + R*A + R*N^2 + R^2*A2)`, with `T` final
-iterations (at most 128 plus 4096 on numerical retry) and `R=16`.
+`O(C*N^2*m + (4+T)*(A + N^2) + R*A + R*N^2 + R^2*A2)`, with `m` the typical
+per-chromosome junction count (binomial tail sums), `T` final
+iterations (at most 8192 plus 4096 on numerical retry) and `R=16`.
 Storage is `O(A + N^2 + N*R)`. The fixed M2 panel gives `A=O(N^2)` and
 `A2=O(N)`, so this remains quadratic in sample count. No exponential pedigree
 enumeration or higher-order founder-state HMM is introduced.
@@ -157,6 +203,29 @@ The score-only API has no raw markers and therefore does not perform this step;
 normal checkpointed workflows do. Set `full_marker_exclusion=False` in the Python
 configuration for a controlled ablation.
 
+## Orientation of released edges
+
+Chromosome resampling measures stability, not orientation. Two strongly linked
+fish whose junction counts cannot orient them (a parent's transmitted homologue
+with one crossover genome-wide, a child whose painting lost junctions) can be
+released in the wrong direction with support just above the Tier-B cut-offs,
+because each resample picks one of two nearly equal reciprocal configurations.
+A released inferred edge `p -> c` therefore also needs a decisive full-data
+orientation. With every other converged reciprocal message held fixed, the
+pair's anti-reciprocity factor is evaluated exactly: for the cavity inclusion
+log odds `a` (c's configurations naming p) and `b` (p's configurations naming
+c), the joint states `p -> c`, `c -> p` and neither weigh `e^a : e^b : 1`. The
+edge is released only when `a - b >= log((1 - q) / q)`, with `q =
+orientation_release_reversal_probability` (default 0.02, 3.9 nats, the
+contamination floor). Otherwise Tier A/B keep a supported state with status
+`..._parent_state_supported_orientation_unresolved`, and the partial and
+candidate-set views omit the edge, so family phase never conditions on it. The
+complete table keeps the full-data best guess. Caller-supplied chronology is
+exempt, so metadata-supported workflows are unchanged. In the six-chromosome
+real-axis simulation without coin-flip templates (October 2026), the reversed
+edge `F1_6 <- F2_67` had `a - b = 1.2` nats, and every released true edge had at
+least 5.9.
+
 ## Configuration and interpretation
 
 The normal workflow builder selects:
@@ -164,9 +233,11 @@ The normal workflow builder selects:
 ```python
 PedigreeConfig(
     parent_state_direction_model="continuous_family",
+    parent_state_direction_chromosome_error_probability=0.05,
+    orientation_release_reversal_probability=0.02,
     parent_state_family_message_passes=4,
     parent_state_ancestry_path_budget=16,
-    parent_state_family_final_max_iterations=128,
+    parent_state_family_final_max_iterations=8192,
     parent_state_family_final_tolerance=1e-8,
     parent_state_family_retry_iterations=4096,
     parent_state_family_retry_damping=0.5,
@@ -185,7 +256,7 @@ path correction and final reconciliation apply to the `family` and
 the final reciprocal messages still converge.
 These are configuration/API settings, not
 new CLI flags. Existing hard exposure requirements and Tier-A/Tier-B thresholds
-are unchanged.
+are unchanged; the orientation condition above is an additional release check.
 
 Diagnostics record `DirectionModel`, `FamilyMessagePasses` (path preparation),
 `FamilyReconciliation`, `AncestryPathBudget`, and the resampling method. The continuous model reports no fictitious discrete ancestry layer.

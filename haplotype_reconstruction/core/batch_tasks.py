@@ -27,7 +27,7 @@ def bundles(kind, tasks, arrays, worker_memory_gb):
 
     def bounds(task):
         if kind == 'local_fit':
-            return int(task[2][0]), int(task[2][-1]) + 1
+            return int(task[1][0]), int(task[1][-1]) + 1
         blocks = task[3]
         return (
             int(np.searchsorted(other, blocks[0].positions[0])),
@@ -36,7 +36,7 @@ def bundles(kind, tasks, arrays, worker_memory_gb):
 
     def package():
         if kind == 'local_fit':
-            adjusted = [(t[0], t[1], t[2] - left, *t[3:]) for t in group]
+            adjusted = [(t[0], t[1] - left, *t[2:]) for t in group]
             second = np.ascontiguousarray(other[:, left:right])
         else:
             adjusted = list(group)

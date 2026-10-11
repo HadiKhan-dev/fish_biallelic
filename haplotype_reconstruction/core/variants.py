@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 
+import hashlib
+from pathlib import Path
+
 import numpy as np
 
 from cyvcf2 import VCF
@@ -20,11 +23,16 @@ class GenomicData:
         positions (list of np.ndarray): List where each element is the genomic positions for a block.
         keep_flags (list of np.ndarray): List where each element is the boolean mask for useful sites in a block.
         reads (list of np.ndarray): List where each element is the (Samples x Sites x 2) read count matrix.
+        biallelic_snp (list of np.ndarray or None): Per-block record-type flags from the
+            VCF loader; None where sites are biallelic SNPs by construction (simulation).
     """
-    def __init__(self, positions, keep_flags, reads):
+    biallelic_snp = None  # also the value for containers pickled before this field existed
+
+    def __init__(self, positions, keep_flags, reads, biallelic_snp=None):
         self.positions = positions
         self.keep_flags = keep_flags
         self.reads = reads
+        self.biallelic_snp = biallelic_snp
 
     def __len__(self):
         """Returns the number of data blocks loaded."""
@@ -70,6 +78,14 @@ def concatenate_unique_block_reads(genomic_data):
     _, first_indices = np.unique(all_positions, return_index=True)
     first_indices.sort()
     return all_positions[first_indices], all_reads[:, first_indices,:]
+
+
+def input_identity(vcf_file_path):
+    """Resolved input file and loader code, for binding a loading stage's checkpoints."""
+    path = Path(vcf_file_path).resolve()
+    stat = path.stat()
+    return dict(vcf=str(path), size=stat.st_size, mtime_ns=stat.st_mtime_ns,
+                loader_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
 
 
 def generate_block_coordinates(vcf_file_path, contig,
@@ -159,6 +175,7 @@ def process_single_block(vcf_path, chrom, start, end,
     positions_list = []
     early_flags_list = []
     reads_list = []
+    snp_list = []
 
     try:
         # Iterate over the region
@@ -197,6 +214,7 @@ def process_single_block(vcf_path, chrom, start, end,
 
             reads_list.append(ad)
             positions_list.append(variant.POS)
+            snp_list.append(len(variant.REF) == 1 and len(variant.ALT) == 1 and len(variant.ALT[0]) == 1)
     except Exception:
         if strict_input:
             raise
@@ -207,7 +225,7 @@ def process_single_block(vcf_path, chrom, start, end,
 
     # --- If block was empty ---
     if not positions_list:
-        return (np.array([]), np.array([]), np.empty((0, 0, 0)))
+        return (np.array([]), np.array([]), np.empty((0, 0, 0)), np.array([], dtype=bool))
 
     # --- Finalize Numpy Arrays ---
     positions = np.array(positions_list, dtype=np.int64)
@@ -229,7 +247,7 @@ def process_single_block(vcf_path, chrom, start, end,
     late_keep_flags = (total_read_pos >= max(min_total_reads, read_error_prob * num_samples))
     keep_flags = np.bitwise_and(early_keep_flags, late_keep_flags).astype(int)
 
-    return (positions, keep_flags, reads_array)
+    return (positions, keep_flags, reads_array, np.array(snp_list, dtype=bool))
 
 
 def cleanup_block_reads_list(vcf_file_path, contig,
@@ -283,8 +301,10 @@ def cleanup_block_reads_list(vcf_file_path, contig,
     cleaned_pos_list = [r[0] for r in results]
     cleaned_keep_flags = [r[1] for r in results]
     cleaned_reads_arrays = [r[2] for r in results]
+    cleaned_snp_flags = [r[3] for r in results]
 
     # 5. Return the new class container
-    return GenomicData(cleaned_pos_list, cleaned_keep_flags, cleaned_reads_arrays)
+    return GenomicData(cleaned_pos_list, cleaned_keep_flags, cleaned_reads_arrays,
+                       biallelic_snp=cleaned_snp_flags)
 
 import haplotype_reconstruction.core.parallel as core_parallel

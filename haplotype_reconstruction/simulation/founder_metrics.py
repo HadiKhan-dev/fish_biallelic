@@ -3,7 +3,9 @@
 Nearest-founder error counts assess precision of all called reconstructed rows.
 One-to-one matching additionally exposes duplicated/missing founders. Its objective
 counts mismatches AND unknown alleles; a missing row costs the entire component.
-Neither metric rematches founder labels at individual markers.
+Neither metric rematches founder labels at individual markers. A separate
+segment-wise score does (at a fixed switch cost), splitting nearest-founder
+errors into wrong alleles and charges for chimeric row segments.
 """
 from __future__ import annotations
 
@@ -19,6 +21,11 @@ from ..core.chromosome_parallel import current_threads
 # Bound temporary counting storage while exposing long panels to site-level
 # parallelism. Small panels share a single batch launch across components.
 _SITE_TILE = 65536
+
+# Segment-wise row labels: a label switch costs as much as this many allele
+# mismatches, so a row that copies another founder for a segment is charged
+# the switch rather than every differing site of that segment.
+SEGMENT_SWITCH_COST = 20.0
 
 
 @njit(parallel=True, cache=True)
@@ -129,6 +136,73 @@ def _represented_counts(indices, represented):
     return counts
 
 
+@njit(parallel=True, cache=True)
+def _segment_rows(panels, indices, truth, tasks, switch_cost):
+    """Per row, the Viterbi truth-founder path minimising mismatches + cost x switches.
+
+    Returns mismatches and label switches along that path. Ties keep the
+    current label, then the lowest founder index. An infinite cost reproduces
+    the whole-component nearest-founder error count.
+    """
+    result = np.zeros((len(tasks), 2), dtype=np.int64)
+    founders = truth.shape[0]
+    for task in prange(len(tasks)):
+        component, row = tasks[task]
+        calls, index = panels[component], indices[component]
+        sites = calls.shape[1]
+        cost = np.zeros(founders)
+        following = np.empty(founders)
+        back = np.empty((sites, founders), dtype=np.int16)
+        for site in range(sites):
+            best = 0
+            for founder in range(1, founders):
+                if cost[founder] < cost[best]:
+                    best = founder
+            call = calls[row, site]
+            for founder in range(founders):
+                move = cost[best] + switch_cost
+                if move < cost[founder]:
+                    following[founder] = move
+                    back[site, founder] = best
+                else:
+                    following[founder] = cost[founder]
+                    back[site, founder] = founder
+                if call >= 0 and call != truth[founder, index[site]]:
+                    following[founder] += 1.
+            cost[:] = following
+        founder = 0
+        for other in range(1, founders):
+            if cost[other] < cost[founder]:
+                founder = other
+        for site in range(sites - 1, -1, -1):
+            call = calls[row, site]
+            if call >= 0 and call != truth[founder, index[site]]:
+                result[task, 0] += 1
+            previous = back[site, founder]
+            if site > 0 and previous != founder:
+                result[task, 1] += 1
+            founder = previous
+    return result
+
+
+def _segment_panels(panels, indices, truth, switch_cost=SEGMENT_SWITCH_COST):
+    """Segment-wise (mismatches, label switches) summed per component."""
+    if not panels:
+        return np.zeros((0, 2), dtype=np.int64)
+    packed_panels, packed_indices, tasks, owners = List(), List(), [], []
+    for component, (calls, index) in enumerate(zip(panels, indices)):
+        packed_panels.append(np.ascontiguousarray(calls, dtype=np.int8))
+        packed_indices.append(np.ascontiguousarray(index, dtype=np.int64))
+        tasks.extend((component, row) for row in range(len(calls)))
+        owners.extend([component] * len(calls))
+    current_threads()
+    rows = _segment_rows(packed_panels, packed_indices, np.ascontiguousarray(truth, dtype=np.int8),
+                         np.asarray(tasks, dtype=np.int64).reshape(-1, 2), float(switch_cost))
+    totals = np.zeros((len(panels), 2), dtype=np.int64)
+    np.add.at(totals, np.asarray(owners, dtype=np.int64), rows)
+    return totals
+
+
 def _count_panels(panels, indices, truth, represented):
     if not panels:
         return [], [], []
@@ -234,11 +308,18 @@ def evaluate_founders(blocks, positions, truth, represented, *, contig, stage):
         indices.append(index)
         metadata.append((sites, keys))
     counts, missing, rep_counts = _count_panels(panels, indices, truth, represented)
+    segments = _segment_panels(panels, indices, truth)
     for component, (sites, keys) in enumerate(metadata):
         metrics, component_matches = _compare_counts(
             counts[component], missing[component], rep_counts[component], len(sites))
+        # Split nearest-founder errors into wrong alleles under segment-wise
+        # labels and the remainder charged for chimeric row segments.
+        segment_errors, segment_switches = map(int, segments[component])
         rows.append(dict(contig=contig, stage=stage, component=component,
-                         first_position=int(sites[0]), last_position=int(sites[-1]), **metrics))
+                         first_position=int(sites[0]), last_position=int(sites[-1]), **metrics,
+                         segment_allele_errors=segment_errors,
+                         segment_label_switches=segment_switches,
+                         chimeric_segment_charges=metrics["called_allele_errors"] - segment_errors))
         matches.extend(dict(contig=contig, stage=stage, component=component,
                             founder_key=str(keys[match["predicted_row"]]), **match)
                        for match in component_matches)
@@ -267,4 +348,6 @@ def evaluate_founders(blocks, positions, truth, represented, *, contig, stage):
     summary["one_to_one_errors_per_million"] = (
         1e6*summary["one_to_one_called_allele_errors"]/summary["matched_called_alleles"]
         if summary["matched_called_alleles"] else None)
+    for key in ("segment_allele_errors", "segment_label_switches", "chimeric_segment_charges"):
+        summary[key] = sum(row[key] for row in rows)
     return summary, rows, matches

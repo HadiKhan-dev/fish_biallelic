@@ -7,6 +7,7 @@ Records describe completed work and resume overhead, not hypothetical cold runs.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 from datetime import datetime, timezone
 from functools import wraps
 from importlib import metadata
@@ -24,15 +25,13 @@ _ACTIVE = None
 SETTINGS = (
     "BHD_NUM_PROCESSES", "NUMBA_NUM_THREADS", "NUMBA_CACHE_DIR", "HAPLOTYPES_BATCH_QUEUE",
     "BHD_RECOMBINATION_RATE_CM_PER_MB",
-    "BHD_RECOMBINATION_MAP", "BHD_RECOMBINATION_SHARED_FAMILY",
+    "BHD_RECOMBINATION_MAP", "BHD_RECOMBINATION_SHARED_FAMILY", "BHD_RECOMBINATION_ORDER_BREAKPOINTS",
     "HAPLOTYPES_OUTPUT_DIR", "HAPLOTYPES_CHECKPOINT_DIR", "HAPLOTYPES_CONTIGS",
     "HAPLOTYPES_VCF", "HAPLOTYPES_TEMPLATES", "HAPLOTYPES_METADATA",
     "HAPLOTYPES_METADATA_SHEET", "HAPLOTYPES_ELIGIBILITY",
-    "HAPLOTYPES_ASSEMBLY_MODEL", "HAPLOTYPES_ASSEMBLY_SEARCH",
-    "HAPLOTYPES_FOUNDER_REFINEMENT", "HAPLOTYPES_DISCOVERY_SEARCH",
-    "HAPLOTYPES_FEEDBACK_SELECTION", "HAPLOTYPES_STOP_AFTER_STAGE",
-    "HAPLOTYPES_READ_CALIBRATION",
-    "HAPLOTYPES_PEDIGREE_CALIBRATION",
+    "HAPLOTYPES_FOUNDER_REFINEMENT", "HAPLOTYPES_STOP_AFTER_STAGE",
+    "HAPLOTYPES_READ_CALIBRATION", "HAPLOTYPES_SITE_QUALITY_FILTER",
+    "HAPLOTYPES_SAMPLE_QUALITY_FILTER", "HAPLOTYPES_PEDIGREE_CALIBRATION", "HAPLOTYPES_CONTIG_WORKERS",
     "BHD_SIMULATION_SEED", "BHD_SIM_READ_DEPTH", "HAPLOTYPES_GENERATIONS",
     "BHD_SIMULATION_RECOMBINATION_MAP", "BHD_SIMULATION_RECOMBINATION_RATE_CM_PER_MB",
     "HAPLOTYPES_SIMULATION_DESIGN", "HAPLOTYPES_READ_MODEL",
@@ -146,6 +145,40 @@ def record_run(output, label, log):
         record.finish()
     finally:
         _ACTIVE = previous
+
+
+class _WorkerStages(RunRecord):
+    """Stage timer for a worker process; it writes nothing to the run directory."""
+
+    def __init__(self):
+        self.pid, self.start, self.stack = os.getpid(), time.monotonic(), []
+        self.thread = threading.get_ident()
+        self.data = dict(stages=[])
+
+    def publish(self):
+        pass
+
+
+@contextmanager
+def worker_stages():
+    """Collect a worker's timed stages; its coordinator records the returned rows."""
+    global _ACTIVE
+    previous = _ACTIVE
+    record = _WorkerStages()
+    _ACTIVE = record
+    try:
+        yield record.data["stages"]
+    finally:
+        _ACTIVE = previous
+
+
+def record_product(name, contig, summary):
+    """Attach a small JSON-compatible summary of one contig's product to the active record."""
+    record = _ACTIVE
+    if record is None or record.pid != os.getpid() or record.thread != threading.get_ident():
+        return
+    record.data.setdefault("products", {}).setdefault(name, {})[str(contig)] = copy.deepcopy(summary)
+    record.publish()
 
 
 def timed_stage(name, contig_arg=None):

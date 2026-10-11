@@ -20,10 +20,12 @@ Other numerical work retains the requested budget.
 
 Checkpoint I/O, process startup, ordered panel/beam updates and inter-stage
 dependencies can still leave cores idle. This is not a claim of sustained
-full-node utilization. Pedigree evidence/scoring, family phase, recombination
-and saved-result evaluation use chromosome-parallel workers within an
-allocation, subject to their memory estimates. Surviving workers take freed
-threads at numerical boundaries; genome-wide pedigree decisions remain barriers.
+full-node utilization. Contig reconstruction (feedback, assembly, painting),
+pedigree evidence/scoring, family phase, recombination and saved-result
+evaluation use chromosome-parallel workers within an allocation, subject to
+their memory estimates (`--contig-workers`, below, for reconstruction). Surviving
+workers take freed threads at numerical (reconstruction: contig) boundaries;
+genome-wide pedigree decisions remain barriers.
 
 Package startup isolates compiled Numba caches by run/job and host, while
 workers within that scope share them. No launch-wrapper setting is required.
@@ -159,19 +161,16 @@ The same options are wired through `simulate`, `reconstruct`, `astcal` and
 | --- | --- | --- |
 | `--read-calibration` / `--no-read-calibration` | on | Observed-AD calibration reused from discovery through final phase |
 | `--pedigree-calibration predictive\|off` | predictive | Cross-chromosome pedigree evidence scale |
-| `--assembly-model dense\|structured` | dense | Block-linkage transition model |
-| `--assembly-search bounded\|broad` | bounded | Panel-search breadth, independently of transition model |
-| `--feedback-selection path\|balanced\|strict` | path | Initial normalized-path selection and selection after both feedback rounds; balanced/strict are explicit alternatives |
-| `--feedback-segment-exchange` / `--no-feedback-segment-exchange` | off | Optional final same-count segment exchange; requires path selection |
-| `--founder-refinement on\|off` | on | Progressive final L1–L4 refinement and final count-up/refit |
-| `--discovery-search standard\|batched` | standard | Local search; batched remains experimental |
+| `--founder-refinement on\|off` | on | Progressive final L1–L4 refinement with converged founder-count decisions |
+| `--contig-workers auto\|N` | auto | Contigs reconstructed concurrently within `--cores` (feedback, assembly, painting); auto is one per eight cores, memory-limited; 1 is sequential. Execution only |
 | `--shared-family-evidence` / `--no-shared-family-evidence` | on | Shared phase-error evidence in downstream recombination maps |
+| `--order-breakpoints FILE` | none | Reference-order breakpoint TSV for the recombination map (see [Reference-order breakpoints](#reference-order-breakpoints)) |
 
 For these switches, explicit CLI values override TOML, then the supported
 environment settings, then defaults. These TOML keys belong in `[run]`, except
-`shared_family_evidence`, which belongs in `[recombination]`. Boolean settings
+`shared_family_evidence` and `order_breakpoints`, which belong in `[recombination]`. Boolean settings
 accept `true/false`, `on/off`, `yes/no` and `1/0` strings, or TOML booleans.
-Recombination also exposes its shared-family switch in the standalone command.
+Recombination also exposes its shared-family switch and breakpoint file in the standalone command.
 Detailed sections below describe the scientific trade-offs and cache effects.
 
 ## Read-model calibration
@@ -184,6 +183,23 @@ Use `--no-read-calibration` (TOML: `[run].read_calibration = false`) for a
 fixed-model comparison. Fits, held-out gains and fallback reasons are cached.
 See [Read-model calibration](read_calibration.md) for the model, limitations
 and checkpoint compatibility.
+
+The self-calibrated site-quality filter runs before read calibration; it is on
+by default for VCF/BCF input and off for simulations. Override either default
+with `--site-quality-filter` / `--no-site-quality-filter` (TOML:
+`[run].site_quality_filter`, environment `HAPLOTYPES_SITE_QUALITY_FILTER`).
+Its setting is part of the block discovery identity, so filtered and
+unfiltered checkpoints never mix. See [methods](methods.md#site-quality).
+
+The per-sample contamination QC is decided per contig inside the site filter
+and is on by default wherever the filter runs (VCF/BCF input), off for
+simulations; override with `--sample-quality-filter` /
+`--no-sample-quality-filter` (TOML: `[run].sample_quality_filter`, environment
+`HAPLOTYPES_SAMPLE_QUALITY_FILTER`). Flagged samples are listed in the log, in
+`OUTPUT/sample_quality/<contig>.tsv` and in the run record; inherited
+heterozygous segments (reported, never flagged) are in
+`OUTPUT/sample_quality/<contig>.segments.tsv`. The setting is part of the block
+discovery identity. See [methods](methods.md#sample-quality).
 
 Pedigree evidence calibration is also **on by default**, using pooled predictive
 weighting across chromosomes. Disable it with `--pedigree-calibration off`
@@ -210,7 +226,7 @@ All workflows use descriptive stage names. A fresh checkpoint root contains
 `block_discovery/`, the `feedback_*/` contexts/selections,
 `assembly/` for internal assembly/refinement work,
 `painting/`, `pedigree_evidence/`, `pedigree_scores/`, `pedigree/`,
-`family_phase/` and `recombination/`. Simulation additionally creates
+`allele_refit/`, `family_phase/` and `recombination/`. Simulation additionally creates
 `founder_templates/` and `simulated_reads/`. Dataset names belong to the
 run directory, not to stage identifiers.
 
@@ -262,9 +278,53 @@ and surrounding whitespace. Invalid values are rejected rather than enabling
 the feature accidentally. Use `--no-shared-family-evidence` to explicitly
 disable it even when the selected TOML example sets it to true.
 
+## Reference-order breakpoints
+
+Every stage assumes that reference order is meiotic order. Where a misplaced,
+misassembled or inverted reference segment breaks that assumption, about half of
+all meioses change transmitted homologue at the junction, and the map reports
+these real transmission changes as a crossover pile-up. An optional breakpoint
+file tells the recombination stage where reference adjacency is not genetic
+adjacency:
+
+```bash
+python run.py recombination --output work/runs/tropheops_breakpoints \
+  --checkpoints CHECKPOINT_ROOT --order-breakpoints order_breakpoints.tsv
+```
+
+The TOML equivalent is `[recombination].order_breakpoints = "FILE"`; the
+option is accepted by every command that reaches the recombination stage.
+Precedence is CLI > TOML > none, like `--recombination-map`: the CLI sets
+`BHD_RECOMBINATION_ORDER_BREAKPOINTS` from them and clears it otherwise, and the
+run record lists it. Direct Python callers can pass
+`run_recombination(order_breakpoints=FILE)` / `run_from_checkpoints(...)` or set
+that environment variable. There is no default file: a list of breakpoints is
+reference-structure curation, not something the pipeline infers.
+
+The file is tab-separated with a header line `chrom start end reason`;
+`#` lines are comments. Positions are 1-based inclusive bp, and the order
+discontinuity lies somewhere inside `[start, end]` (for example the contig gap
+at the junction). A row whose reason starts with `reversed_segment` declares an
+inverted reference segment instead: both of its ends act as breakpoints and calls
+inside it are flagged `in_reversed_segment` (they stay in reference
+coordinates). The stage widens every interval to the painting bins it overlaps,
+removes those sites from the map axis and splits the component there, so no
+call, exposure or shared-orientation tract crosses a supplied breakpoint. The
+file path and its SHA-256 enter the recombination stage identity, and nothing
+upstream depends on the file. A checkpoint root whose recombination stage was
+made with another file (or none) refuses the new one; map with a different file
+from a checkpoint root holding only the upstream stages (for example linked
+copies), which recomputes recombination alone. The same format serves family phase's protected intervals
+(`BHD_FAMILY_PHASE_PROTECTED_INTERVALS`), which only stop root-frame repairs and
+do not mask anything.
+
+Without a file the recombination stage still reports a truth-free junction
+detector table (`junctions.csv`, see the outputs below); it never masks. Use it
+to find candidate loci for curation, not as a breakpoint list by itself.
+
 ## Local feedback selection
 
-All four reconstruction commands default to `--feedback-selection path`:
+All four reconstruction commands use normalized path selection:
 
 1. Preserve the original missing-aware 200-SNP discovery panels.
 2. Fit and select those local panels under the normalized diploid path model,
@@ -273,8 +333,7 @@ All four reconstruction commands default to `--feedback-selection path`:
    200-SNP candidates, and select locally again.
 4. Assemble the latest selected panels through L1+L2, split/refit again, and
    select locally again using original and feedback-derived candidates.
-5. Optionally perform one same-count segment-exchange pass.
-6. Proceed to final L1–L4 assembly, founder refinement and downstream inference.
+5. Proceed to final L1–L4 assembly, founder refinement and downstream inference.
 
 Steps 3–4 are the two feedback/refinement rounds. There is no additional
 feedback stage after them. Initial fitting is local model fitting, not another
@@ -296,28 +355,29 @@ both feedback rounds, final assembly and downstream inference. Supplied maps
 and the configured generation multiplier determine path transitions; missing
 maps use the configured fallback rate.
 
-The optional final pass exchanges suffixes between two local rows, screens
-all pairs at up to 16 cuts and refits the top eight plus an ordinary warm-start
-control. It retains the original panel if fitting worsens the objective and
-cannot directly change founder count. Enable it with
-`--feedback-segment-exchange`; disable it with
-`--no-feedback-segment-exchange` (the default).
+These are local block operations, **not** family-phase or pedigree feedback.
 
-`--feedback-selection balanced` and `strict` retain the explicit cavity-rescue
-alternatives. They select after L1 and L1+L2 but omit the initial path fit.
-Balanced allows broader local rescue/refinement; strict protects clean backbone
-calls and rescues less variation. Segment exchange requires path selection.
+Removed options. The structured transition model and the broad assembly search
+were removed; the batched discovery search, the balanced/strict feedback
+selections and the feedback segment exchange can no longer be selected. Their
+CLI flags no longer exist. A TOML
+key (`assembly_model`, `assembly_search`, `discovery_search`,
+`feedback_selection`, `feedback_segment_exchange`) or `HAPLOTYPES_*` environment
+variable set to the remaining value (`dense`, `bounded`, `standard`, `path`,
+false) is ignored with one warning; any other value stops the run with a message
+saying what was removed. Delete these settings.
 
-TOML uses `[run].feedback_selection = "path"` and
-`[run].feedback_segment_exchange = false`. Environment equivalents are
-`HAPLOTYPES_FEEDBACK_SELECTION` and `HAPLOTYPES_FEEDBACK_SEGMENT_EXCHANGE`.
-Precedence is CLI > TOML > environment > defaults. These are local block
-operations, **not** family-phase or pedigree feedback.
-
-Exact context-site inference is bounded to ten distinct context haplotypes;
-larger or partially covered contexts retain their local proposals and record a
-skip reason. This is a computational cap on context proposals, not a biological
-founder-count cap. Path selection does not impose K=8 or K=10.
+Context-site inference is exact for at most ten distinct context haplotypes
+and uses the polynomial uncertain-core site posterior above that (see
+`methods.md`), so no context component is skipped for its founder count;
+partially covered contexts retain their local proposals and record a skip
+reason. The per-component feedback diagnostics count sites by method (exact,
+core cube, core ball), core sizes, belief-propagation non-convergence, ascent and
+recentring backstop hits, complement-start optima, multimodal abstentions and
+shell-guard abstentions; the `FEEDBACK site posterior` log line prints their
+totals (the assembly preprocess prints `[Preprocess] site posterior` when any
+site has more than ten unresolved founders). Path selection does not impose K=8
+or K=10.
 
 The optimized full TroMau chr1 prototype took 56.32 minutes on 76 cores for
 initial fitting plus both assembly/selection rounds, or 57.68 minutes with the
@@ -327,9 +387,8 @@ improvement over raw discovery came from initial fitting; feedback added two
 exact local rows in the stressed control. Rare weak rows can still be lost;
 real-data counts are not independently established founder truth.
 
-Raw discovery is never overwritten. Initial fitting, each feedback round and
-optional exchange have separate resumable checkpoints. Toggling final-only
-segment exchange can reuse core rounds. Changed read-model calibration makes
+Raw discovery is never overwritten. Initial fitting and each feedback round
+have separate resumable checkpoints. Changed read-model calibration makes
 old likelihood/discovery checkpoints scientifically incompatible: preserve old
 runs and use a new output/checkpoint root; do not relabel old products.
 
@@ -338,13 +397,17 @@ runs and use a new output/checkpoint root; do not relabel old products.
 `--founder-refinement on` is the default for all reconstruction commands.
 After each executed L1, L2, L3 and L4 level of **final assembly**, the complete
 refiner reopens original prepared local-row choices inside the current component
-boundaries. Its result feeds the next hierarchy level. Bounded deletion/refitting
-can reduce the initial founder count under the existing complexity cost.
+boundaries and fits each component to a converged local optimum of the full-site
+objective. Its result feeds the next hierarchy level. Founder-count decisions
+compare converged fits under the join's effective-carrier rule on the total gain
+and its sequence part (scored exactly, without the join's near-identity
+shortcut): every level can delete rows (rows without a private cell first) and
+the last level can also add them.
 The existing early stop for an irreducible hierarchy is retained; unused levels
 do not cause extra refinement passes.
 
 Initial local fitting and the two L1/L2 context-feedback passes never run this
-final-assembly refiner, whether selection uses path, balanced or strict.
+final-assembly refiner.
 Use `--founder-refinement off` for a controlled
 comparison without any final-assembly refinement. Toggling this option within
 one code version reuses local feedback checkpoints; only final assembly/painting
@@ -352,26 +415,27 @@ and downstream products change identity.
 
 TOML uses `[run].founder_refinement = "on"` or `"off"`; the environment variable
 is `HAPLOTYPES_FOUNDER_REFINEMENT`. Precedence is CLI > TOML > environment > on.
-The API exposes `AssemblyConfig.founder_refinement_config`. Its default beam
-budget grows from 64 to at most 1024 only when the data-based search-gain rule
-warrants it; it is not a confidence cutoff. When this local search stalls, final
-L1 pieces, both original and refined, supply larger proposals at the initial
-beam width. These must improve the primary score, or the partial-data score at
-an exact primary tie, without worsening primary genotype fit. This multiscale
-fallback is
-part of the default refiner; no extra flag is needed. See
+The API exposes `AssemblyConfig.founder_refinement_config`. The search and
+count rules are fixed: converged Gauss-Seidel sweeps of exact window proposals
+and founder-pair suffix exchanges, with final L1 pieces, both original and
+refined, as larger moves; effective-carrier count decisions on the total gain
+and its sequence part between converged fits; the best-F converged panel at the
+decided count; and the smaller count
+with its better-F panel after a count cycle. No option, environment variable or
+TOML key selects another founder search, count criterion or panel rule. See
 [methods](methods.md#final-founder-path-refinement).
 
-The final refinement also compares bounded one-founder deletions after refitting
-under the existing complexity cost, completed exact-flank window searches,
-and paired suffix/interval exchanges. These use no generation labels or known
-founder count; the off flag disables the entire final refiner. Count refits can
-be expensive on difficult chromosomes. See the measured limits in
-[validation](validation.md#expanded-founder-search-at-n80-and-5x).
+Every count decision refits each one-row deletion (and, at the last level, each
+duplicated-row addition seed) to convergence, so a decision costs about K
+converged fits and can be expensive on difficult chromosomes. The decisions use
+no generation labels or known founder count; the off flag disables the entire
+final refiner. Each level prints its fits at the sweep backstop, count
+backstops, count cycles, ambiguous count calls and best-F panel replacements;
+the refinement diagnostics record each decision and replacement.
 
 Each level saves its `refinement_l1` through `refinement_l4` result beneath
 `assembly/`. Independent small components save compact completed
-paths; long components also retain detailed beams, iterations and proposals.
+paths; long components also retain their converged fits.
 A completed component can be reused when a sibling is interrupted. The
 `founder_refinement` aggregate remains the final-product checkpoint.
 
@@ -386,75 +450,47 @@ retain older accepted outputs and
 use a separate run root. Raw reads and original Block discovery need not be
 regenerated. These are assembly checkpoints, not new globally complete stages.
 
-## Assembly transition models and search breadth
+## Assembly search
 
-The default, `--assembly-model dense`, retains arbitrary dense learned
-transitions and defaults to bounded candidate-panel search at every assembly
-level. With bounded search, its dominant founder-count dependence is cubic. For larger founder panels,
-`--assembly-model structured` selects sparse-specific plus positive-background
-transitions, giving near-quadratic scaling for fixed fitting/search budgets.
-Both modes default to bounded search (16 full scores per proposal category)
-and retain the 20-iteration linker limit.
+Every assembly level uses one route: learned dense linker transitions, one
+dense transition mesh per batch, an endpoint-quota beam and the certified
+candidate-panel search, with the 20-iteration linker limit. There is no
+transition-model or search-breadth option and no automatic founder-count
+cutoff.
 
-```bash
-python run.py simulate --config configs/simulation.toml --seed 400 \
-  --assembly-model structured --output work/runs/structured_seed_400
-```
-
-The same option is available for `astcal` and `tropheops`. Set
-`[run].assembly_model = "dense"` or `"structured"` in TOML, or use
-`HAPLOTYPES_ASSEMBLY_MODEL`. Precedence is CLI > TOML > environment > dense.
-There is no automatic founder-count cutoff: the user chooses the model.
-
-Search breadth is a separate choice: `--assembly-search bounded` (default) or
-`--assembly-search broad`. The broader mode retains the optimized diversity
-beam and broader full-refit panel/chimera search, including Numba scoring,
-cached proposal tensors and dynamic CPU allocation. To select the earlier
-broad-search/dense-transition combination explicitly:
-
-```bash
-python run.py simulate --config configs/simulation.toml --seed 400 \
-  --assembly-model dense --assembly-search broad \
-  --output work/runs/broad_seed_400
-```
-
-This works for `astcal` and `tropheops` too. TOML uses
-`[run].assembly_search = "bounded"` or `"broad"`; the environment variable is
-`HAPLOTYPES_ASSEMBLY_SEARCH`. Precedence is CLI > TOML > environment > bounded.
-The two search modes are heuristics with the same full Viterbi/BIC acceptance
-objective; broader search can be slower and is not uniformly more accurate.
-Combining `structured` transitions with `broad` search is allowed, but no longer
-gives the near-quadratic whole-assembly bound. Search breadth changes L1–L4,
-not block discovery or downstream models.
+The panel search starts from the initial panel of largest join likelihood
+among those of every input anchor. Same-count edits are accepted when they
+raise the join likelihood and leave every changed path a private cell (and
+more than 1% of called sites from every other path). Tier 1 is the bounded
+sweep: proposal statistics rank edits and the best improving panel is accepted
+after an exact score. At each tier-1 stall the count step decides one founder
+count change with the effective-carrier rule on the total and sequence parts
+of each sample's gain (deaths: paths without sequence of their own first, then
+the best-F candidate; births: the best accepted pool path; duplicate-seed
+births at certified panels). When the count step is quiescent, tier 2 bounds
+every same-count move of an explicit neighbourhood (replacement by any pool
+path, any one-block row change, suffix copies and exchanges at every
+boundary), scores exactly the moves the bound cannot exclude, and accepts the
+best improving one. Before a panel is reported as certified, the endpoint beam
+is re-run with doubled quotas (32 up to 256 paths per endpoint, times the
+number of panel paths sharing an endpoint) and replacements (likelihood) and
+births (count rule) by the new paths are tested the same way; a move found at a
+level raises the quota to that level, and a panel is certified only when no level
+up to the ladder's top adds one. The top is 256 for every join; a join whose
+256 level accepted a move climbs on to 512 and 1024. Two reported backstops
+(hits counted and printed, target 0): total sweeps <= 100 + 20 x (largest block
+row count), and a move accepted at quota 1024. Per super-block diagnostics record tier-2 passes, survivors, exact scores,
+pool sizes, the `certified`, `backstop_reached`, `ladder_extended` and
+`pool_backstop` flags and every count decision (kind, margins on the total and
+sequence parts, band, ambiguity); each hierarchy level prints their counts.
 
 For Python callers, `AssemblyConfig.panel_search_config=PanelSearchConfig(...)`
-selects bounded search. Its controls are `paths_per_endpoint` (default 16),
-`max_sweeps` (100), `full_scores_per_kind` (16), `max_bins` (2000) and
-`tensor_budget_mb` (256). These are not one-to-one replacements for broad
-search's controls. Initial panels from every input anchor compete under the
-same full Viterbi/BIC score. Single and coordinated deletions are proposed
-using conditional reassignment costs, then accepted only after full repainting.
-Search stops early when no tested edit improves the objective; reaching 100
-sweeps is reported as budget-limited, not as convergence.
+holds `paths_per_endpoint` (default 16, the base endpoint quota),
+`full_scores_per_kind` (16 tier-1 exact scores per proposal kind), `max_bins`
+(2000) and `tensor_budget_mb` (256, the painting's back-pointer memory per sample chunk).
 
-The `AssemblyConfig` fields `beam_width`, `max_founders`, `top_n_swap`,
-`max_cr_iterations`, `paint_penalty` and `min_hotspot_samples` apply **only to
-broad search**, selected by `panel_search_config=None`. Their stored defaults
-are inactive placeholders in bounded mode; changing them in that mode raises
-an error instead of silently doing nothing. In particular, bounded search does
-not use `max_founders` as a fixed founder-count cap. Shared settings such as
-`cc_scale` and the transition model remain applicable to both searches.
-
-Structured transitions are a restricted statistical model, not an exact
-acceleration of arbitrary dense transitions. Read the
-[scaling and accuracy trade-offs](founder_scaling.md).
-
-Assembly selection does **not** change block discovery. Its established search remains
-the default. The separate `--discovery-search batched` option is experimental;
-its TOML/environment settings are `[run].discovery_search` and
-`HAPLOTYPES_DISCOVERY_SEARCH`, with `standard` as the default. An earlier
-combined discovery/assembly experiment had substantial accuracy regressions;
-do not enable batched discovery merely to obtain structured assembly.
+Assembly selection does **not** change block discovery, which keeps its
+established search.
 
 Use a separate output directory when changing scientific settings. Existing
 checkpoint identities include the actual assembly configuration and reject
@@ -475,16 +511,15 @@ Do not share a checkpoint directory between different seeds or configurations.
 | `feedback_path_initial/` | Initial local path fits, per-block checkpoints and selected panels |
 | `feedback_path_l1_assembly/`, `feedback_path_l1/` | L1 context, local proposals, per-block path fits and selected panels |
 | `feedback_path_l2_assembly/`, `feedback_path_l2/` | L1+L2 context from selected L1 panels, proposals and selected local panels |
-| `feedback_path_exchange/` | Optional final same-count segment proposals and selected panels |
-| `feedback_balanced_*`, `feedback_strict_*`, `feedback_l1*` | Separate checkpoints for explicitly selected cavity-rescue alternatives |
 | `genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
 | `assembly/` | Preprocessing, L1–L4 levels, per-level founder-refinement components/searches and final aggregate |
 | `painting/` | Typed component-local painting products |
-| `painting/reports/CONTIG/` | Founder callability/carrier support and assembly-search TSVs |
+| `painting/reports/CONTIG/` | Founder callability/carrier support, per-sample painted switches and assembly-search TSVs |
 | `pedigree_evidence/versions/ID/` | Reusable prepared chromosome evidence |
 | `pedigree_scores/versions/ID/` | Compact genetic likelihoods, candidate panel, per-chromosome resume products |
 | `pedigree/versions/ID/` | Versioned pedigree decisions and support tables |
 | `pedigree/_global.p5.b2` | Current published pedigree view consumed downstream |
+| `allele_refit/` | Post-painting founder allele refit per chromosome (released and family-phase inference alleles) |
 | `family_phase/` | Final phase products, `CONTIG.iterations.p5.b2` work checkpoints, and compact completion summary |
 | `recombination/` | Conditional map products and completion summary |
 
@@ -510,7 +545,7 @@ rebuilt on restart. A 520-iteration safety limit refuses release if phase has
 not stabilized. Stable phase does not assert marginal-posterior convergence.
 
 Family phase preserves published genotype calls and missingness: family-supported fills
-may inform polishing internally, but are not released as newly imputed alleles.
+are neither polishing evidence nor released as newly imputed alleles.
 The retired `--impute-missing` flag and TOML `[refinement].impute_missing` key
 are rejected. Remove the TOML key (even if set to `false`); there is no replacement
 switch for publishing the former separate imputed product.
@@ -529,6 +564,20 @@ automatically disposable merely because its assembly attempt was superseded.
 Readable output directories include `pedigree/`, `phase_correction/`, and
 `recombination_map/`. The latter separates posterior rate curves, called
 crossover intervals, coverage intervals, per-meiosis diagnostics and plots.
+In `<contig>.crossovers.csv`, `left_bp`/`right_bp` are the decoder's flanking
+supported markers; `reported_left_bp`/`reported_right_bp` (inclusive) widen a
+call whose flanks straddle a painting-bin edge to the two bins around that edge,
+the painting's actual resolution (a change inside either bin is placed at the
+edge); `in_reversed_segment` marks calls inside a supplied reversed segment.
+Counts and maps use the calls themselves, not the reported widths.
+`<contig>.junctions.csv` and the genome-wide `junctions.csv` list candidate
+reference-order junction loci (calls of at least three parents chained by
+overlapping reported intervals) with per-parent odd/decidable meiosis counts,
+the mixing and pairing log likelihood ratios, `junction_log_lr`, `flagged`
+(at least ln 100) and an interpretation (`junction`, `parent_frame_flips` or
+`recombination_or_unresolved`); [methods](methods.md#family-refinement-and-recombination)
+describes the model. `summary.csv` adds `junction_loci`, `junction_loci_flagged`,
+`order_breakpoints` and `order_breakpoint_masked_sites`.
 Tables of phase-stability summaries do not replace the detailed allele arrays
 in checkpoints.
 
@@ -547,6 +596,22 @@ missing or incorrect intervening heterozygotes break switch comparisons.
 Component-aligned allele errors allow one arbitrary strand swap per component.
 Map comparisons count true crossovers only on correctly inferred edges within
 the inferred observable exposure; they are not whole-genome sensitivity claims.
+
+Three further views sit beside those columns. `long_phase_switches_min5` and
+`_min20` count orientation changes between runs of correct-genotype true
+heterozygotes, bridging uncalled or wrong ones, when both runs hold at least 5
+or 20 heterozygotes; single-site flips, which dominate `phase_switch_errors`,
+are excluded, and a bad call at the switch point does not hide a switch.
+`segment_allele_errors` relabels each founder row segment-wise (a truth-label
+switch costs 20 mismatches); `chimeric_segment_charges` is the rest of
+`called_allele_errors`, charged because a row follows another founder for a
+segment, and `segment_label_switches` counts those segments.
+`called_interval_hit_rate` is the fraction of called crossover intervals on
+correct edges that contain a true crossover (a localization check).
+`reported_interval_hit_rate` applies the same rule to the reported intervals;
+read it with `called_interval_median_width_bp` and
+`reported_interval_median_width_bp`, since a wider interval contains more by
+construction. These columns follow all earlier ones.
 
 Cold Numba compilation and pool startup can dominate tiny fixtures. Full runs
 use a chromosome-at-a-time data path to bound memory; numerical and process
@@ -647,18 +712,45 @@ Every completed or resumed painting chromosome writes small reports under
 - `founder_support.tsv`: called/missing marker alleles per component-local
   founder, component boundaries, distinct observed carrier samples, and called
   sites without a released named carrier having positive read depth.
+  Pooled candidates are listed separately: `ObservedPooledCandidateSamples`,
+  `MeanObservedPooledCandidates` and
+  `CalledSitesWithoutObservedNamedOrPooledCandidate` count a row wherever it
+  is a candidate of a pooled painted track (rows identical in that bin, named
+  by the chunk's `hap1_members`/`hap2_members`) with positive read depth.
 - `founder_support_windows.tsv`: the same callability/carrier summaries in
   at most 200-marker windows. Coordinates name the first and last variants,
   both **1-based inclusive**; these are not BED coordinates.
 - `assembly_search.tsv`: per-level/per-panel sweep budgets, truncated proposal
   categories, improving proposals at the last scored rank, iteration-cap hits,
-  and the two leading evaluated alternatives with their BIC-like score gap.
-  A gap of at most two score units is labelled close purely for inspection;
-  it is not a release threshold or a calibrated Bayes-factor claim.
+  the two leading evaluated alternatives with their join log-likelihoods,
+  and the join's count decisions (`count_death`, `count_birth`, `count_seed`).
+  These are for inspection; they are not calibrated Bayes-factor claims.
+- `founder_counts.tsv`: one row per component: `FounderRows`, and how firmly
+  that count is determined. `FounderCountAmbiguous` is the final count step's
+  call (the last level's converged count pass, which decides the reported
+  count): true when one of its decisions has a bootstrap band containing zero,
+  when it cycled, or when a restored best-F panel fails its own deletion test;
+  `CountStepDecisions` lists the decisions (kind, founder count, outcome,
+  margin, band). A count cycle (a row added by a search and deleted again) keeps
+  the deletion; it is undecided when that deletion is ambiguous and the cycle
+  began with a decided deletion. `JoinCountCycles`, `JoinUndecidedCycles` and
+  `JoinAmbiguousCountCalls` count the final assembly's joins over the component,
+  `FeedbackJoin*` the block-feedback context assemblies' joins, and
+  `UndecidedCountCycles` all undecided cycles. The log names components with an
+  ambiguous final count or undecided cycles. Diagnostics only; empty values mean
+  the run predates these records.
+- `sample_switches.tsv`: per sample, the painter's biological switch count
+  (minimum homologue changes of the Viterbi path, summed over components),
+  the cohort median over painted samples (not split by generation) and the
+  ratio to it. The log names the three highest samples. A sample far above
+  the median is not explained as a founder mosaic by this panel (for example
+  foreign reads or a missing haplotype), or marks a panel error. It is a
+  diagnostic only; no sample is filtered or down-weighted.
 
 Carrier counts require both the public named painting and observed depth.
 A homozygous named carrier counts once per sample/site. Unknown or pooled
-ancestry is not attributed to an arbitrary founder. Missing founder alleles
+ancestry is not attributed to an arbitrary founder; pooled candidates are
+counted only in the separate pooled-candidate columns (once per sample/site). Missing founder alleles
 remain missing and get no called-allele support. Related carrier samples are
 not independent ancestral lineages; a called allele without a direct named
 carrier is not automatically wrong. No additional masking is applied.
@@ -669,5 +761,4 @@ Both genotype/model and search uncertainty may remain. A small scored gap,
 an accepted boundary proposal or a reached budget is a reason to inspect a
 region, not proof that broader search will improve it. Conversely, a large
 gap among evaluated proposals cannot certify ungenerated or truncated
-alternatives. The reports never automatically expand the search. Existing
-`--assembly-search broad` remains an explicit controlled comparison.
+alternatives. The reports never automatically expand the search.

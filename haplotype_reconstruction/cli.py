@@ -50,25 +50,30 @@ def build_parser():
         command.add_argument('--rate-cm-per-mb', type=float, help='Fallback rate, default 5.0 cM/Mb.')
         command.add_argument('--shared-family-evidence', action=argparse.BooleanOptionalAction, default=None,
                              help='Use shared-family phase-error evidence in map generation; default on.')
+        command.add_argument('--order-breakpoints',
+                             help='Optional reference-order breakpoint TSV (chrom, start, end, reason) '
+                                  'for the recombination map; default none.')
         if name != 'recombination':
             command.add_argument('--batch-queue', help='Opt-in shared directory for cross-node local-fit and hierarchy batches.')
             command.add_argument('--read-calibration', action=argparse.BooleanOptionalAction, default=None,
                                  help='Select read error, allelic balance and heterozygote/homozygote overdispersion models from observed AD; default on.')
+            command.add_argument('--site-quality-filter', action=argparse.BooleanOptionalAction, default=None,
+                                 help='Self-calibrated per-contig site-quality filter before read calibration; '
+                                      'default on for VCF input, off for simulations.')
+            command.add_argument('--sample-quality-filter', action=argparse.BooleanOptionalAction, default=None,
+                                 help='Per-contig library-contamination QC (private low-fraction minor alleles, '
+                                      'robust z over the cohort); flagged samples leave founder construction but '
+                                      'are still painted, phased and scored. Default on for VCF input, off for '
+                                      'simulations.')
             command.add_argument('--pedigree-calibration', choices=('off', 'predictive'),
                                  help='Learn cross-chromosome pedigree evidence scaling; default predictive. Use off for unscaled evidence.')
-            command.add_argument('--assembly-model', choices=('dense', 'structured'),
-                                 help='Dense cubic transitions (default) or near-quadratic structured transitions; independent of --assembly-search.')
-            command.add_argument('--assembly-search', choices=('bounded', 'broad'),
-                                 help='Bounded panel search (default, 16 full scores per category) or the optimized broader search with more full refits.')
             command.add_argument('--founder-refinement', choices=('on', 'off'),
                                  help='Refine original local-row choices after each final L1-L4 assembly level; default on. Excludes the two L1/L2 feedback passes.')
-            command.add_argument('--discovery-search', choices=('standard', 'batched'),
-                                 help='block discovery search, independent of assembly; default standard. Batched is experimental.')
-            command.add_argument('--feedback-selection', choices=('path', 'balanced', 'strict'),
-                                 help='Normalized path selection before and after L1/L2 feedback (default); balanced/strict are explicit cavity-rescue alternatives.')
-            command.add_argument('--feedback-segment-exchange', action=argparse.BooleanOptionalAction, default=None,
-                                 help='Optional final same-count segment exchange for path feedback; default off.')
             command.add_argument('--contigs', nargs='+', help='Physical contigs to analyze, in input order.')
+            command.add_argument('--contig-workers',
+                                 help='Contigs reconstructed concurrently within --cores (feedback, assembly, '
+                                      'painting): auto (default; one per 8 cores, memory-limited) or a count; '
+                                      '1 keeps the sequential route.')
             command.add_argument(
                 '--vcf',
                 help='Input VCF/BCF; optional when simulation templates are supplied.'
@@ -123,8 +128,7 @@ def build_parser():
     evaluate.add_argument('--checkpoints', help='Checkpoint root; default OUTPUT/checkpoints.')
     evaluate.add_argument('--contigs', nargs='+')
     evaluate.add_argument('--stages', nargs='+', default=['available'],
-                          help='available (latest products), all, or named stages, including founder_refinement, painting, pedigree, family_phase and recombination.')
-    evaluate.add_argument('--feedback-selection', choices=('path', 'balanced', 'strict'), default='path')
+                          help='available (latest products), all, or named stages, including founder_refinement, painting, allele_refit, pedigree, family_phase and recombination.')
     export = commands.add_parser('export', help='Export released founder tracks and sample phase.')
     export.add_argument('--output', required=True, help='Existing run directory.')
     export.add_argument('--destination', required=True, help='New/empty export directory.')
@@ -159,7 +163,7 @@ def build_parser():
 def _configure_inference(args, config, parser):
     """Apply CLI > TOML > environment > default for shared scientific choices."""
     if 'founder_scaling' in config.get('run', {}):
-        parser.error('founder_scaling was replaced by independent assembly_model and discovery_search settings')
+        parser.error('founder_scaling was removed; delete this setting')
     try:
         calibrate = boolean_setting(
             _setting(args, config, 'run', 'read_calibration',
@@ -168,30 +172,48 @@ def _configure_inference(args, config, parser):
     except ValueError as error:
         parser.error(str(error))
     os.environ['HAPLOTYPES_READ_CALIBRATION'] = 'on' if calibrate else 'off'
+    # Unset means the workflow's default (core.config); set values override it.
+    site_filter = _setting(args, config, 'run', 'site_quality_filter',
+                           os.environ.get('HAPLOTYPES_SITE_QUALITY_FILTER'))
+    if site_filter is None:
+        os.environ.pop('HAPLOTYPES_SITE_QUALITY_FILTER', None)
+    else:
+        try:
+            os.environ['HAPLOTYPES_SITE_QUALITY_FILTER'] = (
+                'on' if boolean_setting(site_filter, 'site_quality_filter') else 'off')
+        except ValueError as error:
+            parser.error(str(error))
+    sample_filter = _setting(args, config, 'run', 'sample_quality_filter',
+                             os.environ.get('HAPLOTYPES_SAMPLE_QUALITY_FILTER'))
+    if sample_filter is None:
+        os.environ.pop('HAPLOTYPES_SAMPLE_QUALITY_FILTER', None)
+    else:
+        try:
+            os.environ['HAPLOTYPES_SAMPLE_QUALITY_FILTER'] = (
+                'on' if boolean_setting(sample_filter, 'sample_quality_filter') else 'off')
+        except ValueError as error:
+            parser.error(str(error))
     # These switches are independent scientific/runtime choices, not historical
     # pipeline versions. Resolve them uniformly before any workflow imports.
     for key, choices, default in (
         ('pedigree_calibration', ('off', 'predictive'), 'predictive'),
-        ('assembly_model', ('dense', 'structured'), 'dense'),
-        ('assembly_search', ('bounded', 'broad'), 'bounded'),
         ('founder_refinement', ('on', 'off'), 'on'),
-        ('discovery_search', ('standard', 'batched'), 'standard'),
-        ('feedback_selection', ('path', 'balanced', 'strict'), 'path'),
     ):
         variable = 'HAPLOTYPES_' + key.upper()
         value = _setting(args, config, 'run', key, os.environ.get(variable, default))
         if value not in choices:
             parser.error(f'{key} must be {" or ".join(choices)}')
         os.environ[variable] = value
-
+    # Removed alternatives: their remaining value is accepted with one warning,
+    # any other value fails here, before any workflow imports.
+    from .core.environment import OBSOLETE_SETTINGS, check_obsolete_environment, obsolete_setting
     try:
-        exchange = boolean_setting(_setting(args, config, 'run', 'feedback_segment_exchange',
-            os.environ.get('HAPLOTYPES_FEEDBACK_SEGMENT_EXCHANGE', 'off')), 'feedback_segment_exchange')
+        for key in OBSOLETE_SETTINGS:
+            if key in config.get('run', {}):
+                obsolete_setting(key, config['run'][key], '[run]')
+        check_obsolete_environment()
     except ValueError as error:
         parser.error(str(error))
-    if exchange and os.environ['HAPLOTYPES_FEEDBACK_SELECTION'] != 'path':
-        parser.error('feedback_segment_exchange requires feedback_selection=path')
-    os.environ['HAPLOTYPES_FEEDBACK_SEGMENT_EXCHANGE'] = 'on' if exchange else 'off'
 
 
 def _configure_simulation(args, config, *, seed, output, checkpoints,
@@ -215,7 +237,10 @@ def _configure_simulation(args, config, *, seed, output, checkpoints,
         error_rate=_setting(args, config, 'simulation', 'generating_error_rate', 0.02),
         depth_cv=_setting(args, config, 'simulation', 'depth_cv', 0.0),
         heterozygote_alt_probability=_setting(args, config, 'simulation', 'heterozygote_alt_probability', 0.5),
-        dropout_fraction=_setting(args, config, 'simulation', 'dropout_fraction', 0.0))
+        dropout_fraction=_setting(args, config, 'simulation', 'dropout_fraction', 0.0),
+        read_length_bp=_setting(args, config, 'simulation', 'read_length_bp', 0),
+        fragment_mean_bp=_setting(args, config, 'simulation', 'fragment_mean_bp', 375.0),
+        fragment_sd_bp=_setting(args, config, 'simulation', 'fragment_sd_bp', 150.0))
     os.environ['HAPLOTYPES_SIMULATION_DESIGN'] = json.dumps(design.record())
     os.environ['HAPLOTYPES_READ_MODEL'] = json.dumps(read_model.record())
     templates = _path(_setting(args, config, 'inputs', 'templates'))
@@ -264,8 +289,7 @@ def main(argv=None):
             os.environ['NUMBA_NUM_THREADS'] = str(args.cores)
         from .simulation.evaluation import evaluate_run
         report = evaluate_run(args.output, checkpoints=args.checkpoints, cores=args.cores,
-                              stages=args.stages, contigs=args.contigs,
-                              feedback_selection=args.feedback_selection)
+                              stages=args.stages, contigs=args.contigs)
         print(json.dumps(report['pedigree'], indent=2))
         return 0
     config = {}
@@ -315,6 +339,11 @@ def main(argv=None):
         else:
             os.environ.pop('HAPLOTYPES_BATCH_QUEUE', None)
         _configure_inference(args, config, parser)
+        contig_workers = str(_setting(args, config, 'run', 'contig_workers',
+                                      os.environ.get('HAPLOTYPES_CONTIG_WORKERS', 'auto'))).strip().lower()
+        if contig_workers != 'auto' and not (contig_workers.isdigit() and int(contig_workers) >= 1):
+            parser.error("contig_workers must be 'auto' or a positive integer")
+        os.environ['HAPLOTYPES_CONTIG_WORKERS'] = contig_workers
     seed = _setting(args, config, 'simulation', 'seed', 400)
     default_output = (f'work/runs/seed_{seed}' if args.command == 'simulate'
                       else f'work/runs/{args.command}')
@@ -328,6 +357,9 @@ def main(argv=None):
     checkpoints = Path(_setting(args, config, 'run', 'checkpoints', output / 'checkpoints')).expanduser().resolve()
     rate = float(_setting(args, config, 'recombination', 'rate_cm_per_mb', 5.0))
     mapping = _path(_setting(args, config, 'recombination', 'recombination_map'))
+    breakpoints = _path(_setting(args, config, 'recombination', 'order_breakpoints'))
+    if breakpoints and not Path(breakpoints).is_file():
+        parser.error(f'order_breakpoints file not found: {breakpoints}')
     os.environ.update(BHD_NUM_PROCESSES=str(cores), NUMBA_NUM_THREADS=str(cores),
         BHD_RECOMBINATION_RATE_CM_PER_MB=str(rate), BHD_RECOMBINATION_SHARED_FAMILY='1' if shared else '0',
         HAPLOTYPES_OUTPUT_DIR=str(output),
@@ -336,6 +368,10 @@ def main(argv=None):
         os.environ['BHD_RECOMBINATION_MAP'] = mapping
     else:
         os.environ.pop('BHD_RECOMBINATION_MAP', None)
+    if breakpoints:
+        os.environ['BHD_RECOMBINATION_ORDER_BREAKPOINTS'] = breakpoints
+    else:
+        os.environ.pop('BHD_RECOMBINATION_ORDER_BREAKPOINTS', None)
     if args.command != 'recombination':
         contigs = _setting(args, config, 'inputs', 'contigs')
         if contigs:
@@ -378,7 +414,8 @@ def main(argv=None):
         maps = load_genetic_maps(mapping, rate)
         run_from_checkpoints(checkpoints, output, n_workers=cores,
             config=RecombinationMapConfig(recombination_rate=rate / 1e8),
-            genetic_maps=maps if maps.maps else None, shared_family_evidence=shared)
+            genetic_maps=maps if maps.maps else None, shared_family_evidence=shared,
+            order_breakpoints=breakpoints)
     return 0
 
 

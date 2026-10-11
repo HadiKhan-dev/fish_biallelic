@@ -50,6 +50,24 @@ class FamilyRefinementConfig:
     checkpoint_every: int = 5
     branch_cluster_after: int = 80
     branch_cluster_interval: int = 20
+    # Root frames. With one child, a root frame change and that child's
+    # crossover explain the data equally well: single-child roots keep their
+    # scaffold frame inside components, and a gauge move needs at least
+    # ``minimum_gauge_support`` children changing at the boundary (1 = before).
+    fix_single_child_root_frames: bool = True
+    minimum_gauge_support: int = 2
+    # Windowed root frame repair on the final family state (refinement/frames.py):
+    # children vote on a change of a root's frame by their homologue on flanks
+    # beyond a location zone (+-location_bp around the edge, or around a stretch
+    # where the root's own data do not carry its orientation), with flanks
+    # reaching window_bp from the edge.
+    root_frame_repair: bool = True
+    root_frame_window_bp: float = 5e5
+    root_frame_location_bp: float = 2.5e5
+    root_frame_minimum_children: int = 3
+    root_frame_informative_nats: float = 2.
+    root_frame_support_flags: bool = True
+    root_frame_max_rounds: int = 8
 
     def validated(self):
         value = self.phase_retry_count
@@ -64,13 +82,22 @@ class FamilyRefinementConfig:
             "checkpoint_every",
             "gauge_move_interval",
             "branch_cluster_after",
-            "branch_cluster_interval"
+            "branch_cluster_interval",
+            "minimum_gauge_support",
+            "root_frame_minimum_children",
+            "root_frame_max_rounds",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or int(value) != value or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         if not math.isfinite(self.recombination_rate) or self.recombination_rate < 0:
             raise ValueError("recombination_rate must be finite and nonnegative")
+        if not math.isfinite(self.root_frame_window_bp) or self.root_frame_window_bp <= 0:
+            raise ValueError("root_frame_window_bp must be finite and positive")
+        if not 0 <= self.root_frame_location_bp < self.root_frame_window_bp:
+            raise ValueError("root_frame_location_bp must lie in [0, root_frame_window_bp)")
+        if not math.isfinite(self.root_frame_informative_nats) or self.root_frame_informative_nats <= 0:
+            raise ValueError("root_frame_informative_nats must be finite and positive")
         if not math.isfinite(self.tolerance) or self.tolerance <= 0:
             raise ValueError("tolerance must be finite and positive")
         for name in ("phase_switch_probability", "scaffold_phase_error", "transmission_error"):
@@ -137,6 +164,10 @@ class FamilyWorkspace:
     selector_cache: object = None
     factor_support: object = None
     dirty_tiles: object = None
+    # Samples whose phase chain may change frame only at component edges,
+    # and that chain's transition probabilities.
+    frozen_frames: object = None
+    frozen_theta: object = None
 
 
 def prepare_family_workspace(genotype_likelihoods, observed, reference_alleles, positions,
@@ -173,6 +204,10 @@ def prepare_family_workspace(genotype_likelihoods, observed, reference_alleles, 
     phase_theta = np.zeros(max(0, sites - 1), dtype=np.float64)
     phase_theta[bins[1:] != bins[:-1]] = cfg.phase_switch_probability
     phase_theta[components[1:] != components[:-1]] = .5
+    frozen_theta = np.where(components[1:] != components[:-1], .5, 0.)
+    frozen = np.zeros(samples, dtype=np.bool_)
+    if cfg.fix_single_child_root_frames:
+        frozen = roots & (np.bincount(parents, minlength=samples) == 1)
     if chromosome_map is None or not chromosome_map.has_map:
         rate = cfg.recombination_rate if chromosome_map is None else chromosome_map.fallback_rate_per_bp
         theta = -.5 * np.expm1(-2 * rate * np.diff(pos))
@@ -180,7 +215,8 @@ def prepare_family_workspace(genotype_likelihoods, observed, reference_alleles, 
         theta = -.5 * np.expm1(-2 * chromosome_map.interval_morgans(pos[:-1], pos[1:]))
     return FamilyWorkspace(reference, obs, pos, bins, components, base, orientation, reference_orientation,
         anchors, phase_theta, theta, parents, children, slots, offsets, adjacency,
-        gp, ge, gc, node_group, edge_group, parent_counts, roots)
+        gp, ge, gc, node_group, edge_group, parent_counts, roots,
+        frozen_frames=frozen, frozen_theta=frozen_theta)
 
 
 def refine_family(genotype_likelihoods, observed, reference_alleles, positions, phase_bins,
@@ -202,6 +238,7 @@ def refine_family(genotype_likelihoods, observed, reference_alleles, positions, 
     gp, ge, gc = workspace.gp, workspace.ge, workspace.gc
     node_group, edge_group = workspace.node_group, workspace.edge_group
     parent_counts, roots = workspace.parent_counts, workspace.roots
+    frozen, frozen_theta = workspace.frozen_frames, workspace.frozen_theta
     messages = resume or initialise_messages(samples, sites, parents, ge)
     if (messages.parent_log.shape != (len(parents), sites, 4) or
         messages.child_log.shape != (len(gc), sites, 4) or messages.segregation_match.shape != (len(gc), sites, 4)):
@@ -228,7 +265,7 @@ def refine_family(genotype_likelihoods, observed, reference_alleles, positions, 
         current_threads()
         damping = cfg.damping
         _, phase_delta, _, _ = _phase_update(belief, orientation, messages.phase_match, phase_theta, anchors,
-                                       cfg.scaffold_phase_error, damping, True)
+                                       cfg.scaffold_phase_error, damping, True, frozen, frozen_theta)
         belief = beliefs()
         emissions, copy_delta = refinement_messages.copy_messages(belief, messages, gp, ge, gc,
             cfg.transmission_error, damping, messages.iteration % 2 == 1, factor_support, dirty_tiles)
@@ -258,7 +295,8 @@ def refine_family(genotype_likelihoods, observed, reference_alleles, positions, 
             maps = refinement_messages.selector_maps(
                 emissions, messages, theta, np.unique(edge_group[roots[parents]]))
             flips, _ = refinement_messages.root_mode_flips(belief, orientation, messages.phase_match, parents, edge_group, slots,
-                roots, anchors, phase_theta, theta, maps, cfg.scaffold_phase_error)
+                roots, anchors, phase_theta, theta, maps, cfg.scaffold_phase_error,
+                frozen, frozen_theta, cfg.minimum_gauge_support)
             if np.any(flips):
                 refinement_messages.apply_root_flips(flips, messages, parents, gp)
                 if selector_cache is not None:
@@ -287,7 +325,7 @@ def refine_family(genotype_likelihoods, observed, reference_alleles, positions, 
             checkpoint_callback(messages)
     context, displayed, inferred = phase_context_view(belief, reference, reference_orientation, messages.phase_match,
         phase_theta, anchors, parent_counts, cfg.scaffold_phase_error, cfg.phase_call_probability,
-        cfg.correct_incomplete_parent_phase)
+        cfg.correct_incomplete_parent_phase, frozen, frozen_theta)
     for cluster in messages.branch_clusters:
         refinement_messages.project_branch_marginals(
             cluster.cavity, messages.segregation_match, cluster.groups)

@@ -20,8 +20,6 @@ class PreparedModels(list):
         self._pack_lock = Lock()
         self._scores = OrderedDict()
         self._score_bytes = 0
-        self._alphabets = {}
-        self._reversed = None
         self.is_short = all(m["bin_emissions"].shape[3] <= 2 for m in models)
         self.bin_offsets = np.asarray(
             [0, *np.cumsum([m["bin_emissions"].shape[3] for m in models])], np.int64)
@@ -30,59 +28,6 @@ class PreparedModels(list):
 def short_models(models):
     return (models.is_short if isinstance(models, PreparedModels) else
             all(m["bin_emissions"].shape[3] <= 2 for m in models))
-
-
-def _alphabet_template(models, branch_cap):
-    choices, offsets, capped = [], [0], []
-    for block, model in enumerate(models):
-        emission = model["bin_emissions"]
-        local = np.arange(emission.shape[1], dtype=np.int64)
-        if len(local) > branch_cap:
-            rank = emission.max(axis=2).sum(axis=(0, 2))
-            local = np.argsort(-rank, kind="stable")[:branch_cap].astype(np.int64)
-            capped.append(block)
-        choices.extend(local)
-        offsets.append(len(choices))
-    return np.asarray(choices, np.int64), np.asarray(offsets, np.int64), capped
-
-
-def candidate_alphabet(models, incumbent, branch_cap):
-    """Reuse invariant rankings; retain each query's incumbent in capped blocks.
-
-    Uncapped arrays are shared read-only. Capped arrays are copied before their
-    last candidate is replaced, preserving the original stable choice order.
-    """
-    if isinstance(models, PreparedModels):
-        with models._pack_lock:
-            if branch_cap not in models._alphabets:
-                models._alphabets[branch_cap] = _alphabet_template(models, branch_cap)
-            choices, offsets, capped = models._alphabets[branch_cap]
-    else:
-        choices, offsets, capped = _alphabet_template(models, branch_cap)
-    if capped:
-        choices = choices.copy()
-        for block in capped:
-            start, stop = offsets[block:block + 2]
-            if incumbent[block] not in choices[start:stop]:
-                choices[stop - 1] = incumbent[block]
-    return choices, offsets
-
-
-def reversed_models(models):
-    """Share the same immutable reverse-bin view across window queries."""
-    def build():
-        return PreparedModels([
-            dict(model, bin_emissions=np.ascontiguousarray(
-                model["bin_emissions"][:,:,:,::-1]))
-            for model in models[::-1]
-        ])
-
-    if not isinstance(models, PreparedModels):
-        return build()
-    with models._pack_lock:
-        if models._reversed is None:
-            models._reversed = build()
-        return models._reversed
 
 
 def emission_arrays(models):

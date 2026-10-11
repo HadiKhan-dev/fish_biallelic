@@ -14,11 +14,12 @@ import time
 import numpy as np
 from cyvcf2 import VCF
 
-from ..core import haplotypes, read_calibration, runtime, variants
+from ..core import haplotypes, read_calibration, runtime, sample_quality, site_quality, variants
+from ..core.config import SampleQualityConfig, SiteQualityConfig
 from ..discovery import blocks, search
 from ..assembly.pipeline import AssemblyConfig
 from ..core.genetic_map import load_genetic_maps_from_environment
-from . import reconstruction
+from . import contig_parallel, reconstruction
 from .downstream import run_downstream
 from ..pedigree.config import config_from_environment
 from .eligibility import load_constraints
@@ -66,7 +67,11 @@ def run():
     rate = maps.default_rate_cm_per_mb / 1e8
     genetic_maps = maps if maps.maps else None
     discovery_config = search.ReversibleCavitySearchConfig()
-    identity = read_calibration.discovery_identity(blocks.DISCOVERY_BACKEND, discovery_config)
+    site_quality_config = site_quality.configured(SiteQualityConfig())
+    sample_quality_config = sample_quality.configured(SampleQualityConfig())
+    identity = read_calibration.discovery_identity(
+        blocks.DISCOVERY_BACKEND, discovery_config, site_quality.identity(site_quality_config),
+        sample_quality.identity(sample_quality_config, site_quality_config))
     stat = path.stat()
     run_identity = dict(schema="general-vcf-ad-v1", vcf=str(path), size=stat.st_size,
                         mtime_ns=stat.st_mtime_ns, sample_ids=names, contigs=contigs,
@@ -85,22 +90,31 @@ def run():
                 reads = variants.cleanup_block_reads_list(
                     str(path), contig, use_snp_count=True, snps_per_block=200, snp_shift=200,
                     num_processes=workers, strict_input=True)
+                reads, site_record = site_quality.filter_loaded_sites(
+                    reads, contig=contig, config=site_quality_config, threads=workers, snps_per_block=200,
+                    sample_config=sample_quality_config)
+                # Samples flagged by the per-sample QC on this contig (None if off).
+                founder_excluded = sample_quality.contig_flags(
+                    site_record, contig=contig, sample_ids=names, output_dir=output)
                 sites, counts = variants.concatenate_unique_block_reads(reads)
                 if sites is None:
                     raise ValueError(f"{contig}: no usable SNPs")
                 observed = reconstruction.observed_call_mask_from_read_counts(counts)
                 probabilities, calibration = read_calibration.prepare_likelihoods(counts, sites, threads=workers)
+                # Flagged libraries enter discovery without reads (unobserved).
+                reads = sample_quality.exclude_from_discovery(reads, founder_excluded)
                 discovered = blocks.generate_all_block_haplotypes(
                     reads, num_processes=workers, block_pool=pool, discovery_config=discovery_config,
                     genotype_likelihoods_by_block=read_calibration.block_likelihoods(reads, sites, probabilities))
                 discovered = haplotypes.BlockResults([b for b in discovered if len(b.positions)])
                 store.save_contig(source_stage, contig, dict(
                     block_results=discovered, global_sites=sites, global_probs=probabilities,
-                    read_calibration=calibration,
+                    read_calibration=calibration, site_quality=site_record,
                     global_observed_mask=observed, discovery_backend=identity["backend"],
                     discovery_config=identity["config"],
                     genotype_evidence_mode=reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
-                    observed_call_mask_mode=reconstruction.EXACT_OBSERVED_MASK_MODE))
+                    observed_call_mask_mode=reconstruction.EXACT_OBSERVED_MASK_MODE,
+                    **({} if founder_excluded is None else dict(founder_evidence_excluded=founder_excluded))))
                 del reads, counts, probabilities, observed, discovered
                 gc.collect()
         store.save_global(source_stage, dict(
@@ -112,7 +126,7 @@ def run():
         store.mark_stage_complete(source_stage)
     if stop == "block_discovery":
         return
-    reconstruction.run_reconstruction(
+    contig_parallel.run_reconstruction(
         store, contigs, names, discovery_identity=identity, source_stage=source_stage,
         config=reconstruction.ReconstructionConfig(
             release_config=AssemblyConfig(num_processes=workers, recombination_rate=rate),

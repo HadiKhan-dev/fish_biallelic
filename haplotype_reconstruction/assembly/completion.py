@@ -17,6 +17,7 @@ import haplotype_reconstruction.assembly.joint_completion as assembly_joint_comp
 import haplotype_reconstruction.assembly.observations as assembly_observations
 import haplotype_reconstruction.assembly.occupancy as assembly_occupancy
 import haplotype_reconstruction.assembly.partial_links as assembly_partial_links
+import haplotype_reconstruction.assembly.site_posterior as assembly_site_posterior
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 
 ASSEMBLY_PREPROCESS_SCHEMA = "assembly-missing-aware-preprocess-v2"
@@ -29,10 +30,12 @@ ASSEMBLY_PREPROCESS_BACKEND = (
 
 ASSEMBLY_PREPROCESS_SCIENTIFIC_DEPENDENCIES = tuple(sorted((
     'core/haplotypes.py',
+    'core/config.py',
     'assembly/components.py',
     'assembly/joint_completion.py',
     'assembly/joint_statistics.py',
     'assembly/allele_polynomials.py',
+    'assembly/site_posterior.py',
     'assembly/boundaries.py',
     'assembly/observations.py',
     'assembly/partial_links.py',
@@ -51,7 +54,6 @@ def _scientific_dependency_digests() -> dict[str, str]:
 
 def _joint_block_release_config() -> assembly_joint_completion.JointBlockConfig:
     return assembly_joint_completion.JointBlockConfig(
-        max_unresolved_founders=6,
         minimum_call_probability=0.99,
     )
 
@@ -60,7 +62,6 @@ def _whole_bin_cavity_rule() -> assembly_boundaries.CavityFillRule:
     return assembly_boundaries.CavityFillRule(
         snps_per_bin=50,
         minimum_posterior_probability=0.99,
-        maximum_enumerated_unresolved_founders=6,
     )
 
 
@@ -95,8 +96,6 @@ class CompletionConfig:
             raise ValueError("assembly joint-block release probability must be 0.99")
         if self.cavity_fill_rule.minimum_posterior_probability != 0.99:
             raise ValueError("assembly cavity release probability must be 0.99")
-        if self.cavity_fill_rule.maximum_enumerated_unresolved_founders != 6:
-            raise ValueError("assembly cavity unresolved-founder cap must be 6")
         threshold = self.maximum_discovery_wildcard_mass_for_fill_release
         if (
                 isinstance(threshold, bool)
@@ -228,6 +227,8 @@ class CrossFitFoldDiagnostic:
     maximum_iterations: int
     minimum_elbo_increment: float
     released_cell_count: int
+    guard_skipped_cell_count: int
+    site_posterior_counts: tuple
 
 
 @dataclass(frozen=True)
@@ -646,8 +647,30 @@ def _compact_crossfit_block(value: assembly_joint_completion.CrossFitBlock) -> C
                 default=float("nan"),
             ),
             released_cell_count=int(np.sum(fold.released.released)),
+            guard_skipped_cell_count=int(np.sum(fold.released.guard_skipped)),
+            site_posterior_counts=assembly_site_posterior.summary_counts(
+                fold.fit.site_posterior_info),
         ))
     return CompactCrossFitBlock(value.profiles, tuple(diagnostics))
+
+
+def _site_posterior_totals(crossfit_blocks, cavity_fills):
+    """Sum the above-MAX_EXACT_BITS site-posterior counts of every fold and cavity fill."""
+    totals = np.zeros(len(assembly_site_posterior.SUMMARY_FIELDS), dtype=np.int64)
+    guard = 0
+    for value in crossfit_blocks:
+        for fold in value.folds:
+            if isinstance(fold, CrossFitFoldDiagnostic):
+                totals += fold.site_posterior_counts
+                guard += fold.guard_skipped_cell_count
+            else:
+                totals += assembly_site_posterior.summary_counts(fold.fit.site_posterior_info)
+                guard += int(np.sum(fold.released.guard_skipped))
+    for fill in cavity_fills:
+        totals += fill.site_posterior_counts
+        guard += fill.n_guard_skipped
+    return dict(zip(assembly_site_posterior.SUMMARY_FIELDS, map(int, totals)),
+                guard_skipped_cells=int(guard))
 
 
 def _retain_crossfit(value: assembly_joint_completion.CrossFitBlock, diagnostics_mode: str):
@@ -1005,7 +1028,7 @@ def _validate_cavity_fill(
     if not isinstance(fill, assembly_boundaries.CavityFillResult):
         raise TypeError("cavity function must return a CavityFillResult")
     shape = panel.q.shape
-    for name in ("filled", "posterior_alt", "effective_supporters"):
+    for name in ("filled", "posterior_alt", "supporters"):
         if np.asarray(getattr(fill, name)).shape != shape:
             raise ValueError(
                 f"block {block_index} cavity {name} is not panel-aligned"
@@ -1125,8 +1148,8 @@ def _materialize_kept_fills(
     block.cavity_rejected_filled = diagnostic.rejected_fills
     block.cavity_posterior_alt = diagnostic.posterior_alt
     block.cavity_rejected_posterior_alt = diagnostic.rejected_posterior_alt
-    block.cavity_effective_supporters = _readonly(
-        fill.effective_supporters, np.float64
+    block.cavity_supporters = _readonly(
+        fill.supporters, np.float64
     )
     block.genotype_evidence_mode = "assembly_missing_aware_preprocessed"
 
@@ -1233,6 +1256,12 @@ def run_assembly_preprocess(
     for index, (fill, panel, block) in enumerate(
             zip(cavity_fills, raw_panels, blocks)):
         _validate_cavity_fill(fill, panel, block, index)
+    site_totals = _site_posterior_totals(crossfit_blocks, cavity_fills)
+    if any(site_totals.values()):
+        # Sites with more than MAX_EXACT_BITS unresolved founders (none at
+        # today's founder counts), their backstop hits and guard abstentions.
+        print("[Preprocess] site posterior",
+              " ".join(f"{key}={value}" for key, value in site_totals.items()), flush=True)
 
     with core_parallel.numba_thread_scope(requested_workers):
         focal_masks = assembly_occupancy.focal_informative_masks(evidence, observed)

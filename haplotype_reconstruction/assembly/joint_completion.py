@@ -7,7 +7,8 @@ import hashlib
 import math
 import numpy as np
 
-from . import joint_statistics
+from haplotype_reconstruction.core.config import MAX_EXACT_BITS
+from . import joint_statistics, site_posterior
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,6 @@ class HardFounderPanel:
 class JointBlockConfig:
     """Numerical, convergence, and conservative release controls."""
 
-    max_unresolved_founders: int = 6
     max_iterations: int = 100
     minimum_iterations: int = 2
     elbo_absolute_tolerance: float = 1e-8
@@ -62,11 +62,9 @@ class JointBlockConfig:
     initialization_logit_scale: float = 1.0
     deterministic_seed: int = 1729
     minimum_call_probability: float = 0.90
-    minimum_effective_carriers: float = 2.0
+    minimum_carriers: int = 2
 
     def __post_init__(self) -> None:
-        if not 0 <= self.max_unresolved_founders <= 20:
-            raise ValueError("max_unresolved_founders must lie in [0, 20]")
         if self.max_iterations < 1:
             raise ValueError("max_iterations must be positive")
         if not 1 <= self.minimum_iterations <= self.max_iterations:
@@ -85,8 +83,8 @@ class JointBlockConfig:
             raise ValueError("initialization_logit_scale must be non-negative")
         if not 0.5 < self.minimum_call_probability <= 1:
             raise ValueError("minimum_call_probability must lie in (0.5, 1]")
-        if self.minimum_effective_carriers < 0:
-            raise ValueError("minimum_effective_carriers must be non-negative")
+        if self.minimum_carriers < 0:
+            raise ValueError("minimum_carriers must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -108,9 +106,11 @@ class JointBlockFit:
     site_configurations: tuple[np.ndarray | None, ...]
     site_configuration_probabilities: tuple[np.ndarray | None, ...]
     marginal_alt_probability: np.ndarray
-    enumerated_sites: np.ndarray
     unresolved_founders_per_site: np.ndarray
-    effective_carriers: np.ndarray
+    support_radius: np.ndarray
+    shell_weight: np.ndarray
+    site_posterior_info: np.ndarray
+    carriers: np.ndarray
     exchangeable_groups: tuple[tuple[int, ...], ...]
     exchangeable_founders: np.ndarray
     best_start: int
@@ -123,9 +123,10 @@ class ReleasedPanel:
     panel: HardFounderPanel
     released: np.ndarray
     posterior_confidence: np.ndarray
-    effective_carriers: np.ndarray
+    carriers: np.ndarray
     exchangeable_skipped: np.ndarray
-    cap_skipped: np.ndarray
+    guard_skipped: np.ndarray
+    multimodal_skipped: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -226,19 +227,37 @@ def _initial_logit(
 
 
 def _configurations_for_site(
-    panel: HardFounderPanel, site: int, config: JointBlockConfig
-) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray]:
-    unknown = np.flatnonzero(panel.alleles[:, site] < 0)
-    if unknown.size > config.max_unresolved_founders:
-        return None, None, unknown
-    n_configurations = 1 << int(unknown.size)
-    configurations = np.empty((n_configurations, panel.n_founders), dtype=np.int8)
+    panel: HardFounderPanel, site: int, unknown: np.ndarray, pairs: np.ndarray,
+    state_probability: np.ndarray | None, log_emission: np.ndarray, observed: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int, np.ndarray | None, np.ndarray | None]:
+    """Allowed assignments of a site's unresolved alleles, with their uniform prior.
+
+    Up to MAX_EXACT_BITS unresolved founders: every assignment (a cube). Above
+    that, the uncertain-core support of the shared-allele site posterior under
+    the first EM iteration's pair posteriors (``site_posterior.completion_site``):
+    certain founders at the mode and an exact core or a Hamming ball. The set
+    stays fixed for the whole EM, so restricting the variational family keeps
+    the ELBO a lower bound; the prior stays the model's 2**-U per assignment.
+    """
     fixed = panel.alleles[:, site]
-    for index in range(n_configurations):
-        configurations[index] = fixed
-        for offset, founder in enumerate(unknown):
-            configurations[index, founder] = (index >> offset) & 1
-    return configurations, np.full(n_configurations, -unknown.size * math.log(2.0)), unknown
+    log_prior = -unknown.size * math.log(2.0)
+    if unknown.size <= MAX_EXACT_BITS:
+        n_configurations = 1 << int(unknown.size)
+        configurations = np.empty((n_configurations, panel.n_founders), dtype=np.int8)
+        for index in range(n_configurations):
+            configurations[index] = fixed
+            for offset, founder in enumerate(unknown):
+                configurations[index, founder] = (index >> offset) & 1
+        return configurations, np.full(n_configurations, log_prior), 0, None, None
+    evidence = np.ascontiguousarray(np.exp(log_emission[:, site,:]))
+    informative = observed[:, site] & (np.ptp(evidence, axis=1) > 1e-12)
+    rows, shell, _, info, _ = site_posterior.completion_site(
+        evidence, informative, state_probability, pairs, np.ascontiguousarray(fixed),
+        unknown, np.zeros(unknown.size), -1.0, site_posterior.settings())
+    configurations = np.repeat(fixed[None,:], len(rows), axis=0)
+    configurations[:, unknown] = rows
+    return (configurations, np.full(len(rows), log_prior), int(info[site_posterior.INFO_RADIUS]),
+            shell, info)
 
 
 def _exchangeable_groups(panel: HardFounderPanel) -> tuple[tuple[int, ...], ...]:
@@ -324,7 +343,7 @@ def _fit_one_start(
     complete_scores: np.ndarray,
     shared_result=None,
 ) -> tuple[np.ndarray, tuple[np.ndarray | None, ...], StartDiagnostics]:
-    evidence, alleles, offsets, packed_prior = statistics_workspace
+    evidence, alleles, offsets, packed_prior, cube = statistics_workspace
     state_probability = _softmax(complete_scores - math.log(pairs.shape[0]), axis=1)
     initial = [
         _site_initial_probability(
@@ -333,7 +352,7 @@ def _fit_one_start(
     ]
     probability = np.concatenate(initial) if initial else np.empty(0)
     state_scores = evidence @ joint_statistics.dosage_marginals(
-        alleles, pairs, offsets, probability)
+        alleles, pairs, offsets, probability, cube)
     site_probability = _site_probabilities(probability, offsets)
     elbo_history = [_elbo(state_scores, log_priors, site_probability, state_probability)]
     if shared_result is not None:
@@ -364,9 +383,9 @@ def _fit_one_start(
         # the coordinate-update schedule. BLAS remains worker-local/one thread.
         statistics = state_probability.T @ evidence
         probability = joint_statistics.configuration_probabilities(
-            statistics, alleles, pairs, offsets, packed_prior)
+            statistics, alleles, pairs, offsets, packed_prior, cube)
         state_scores = evidence @ joint_statistics.dosage_marginals(
-            alleles, pairs, offsets, probability)
+            alleles, pairs, offsets, probability, cube)
         state_probability = _softmax(
             state_scores - math.log(pairs.shape[0]), axis=1
         )
@@ -409,25 +428,38 @@ def fit_joint_block(
         panel, genotype_evidence, observed, config
     )
     pairs = _unordered_pairs(panel.n_founders)
+    complete_scores, _ = _complete_site_state_scores(panel, log_emission, observed_mask, pairs)
+    first_state = None
     configurations: list[np.ndarray | None] = []
     log_priors: list[np.ndarray | None] = []
     unknown_by_site: list[np.ndarray] = []
     unresolved_count = np.empty(panel.n_sites, dtype=np.int64)
+    support_radius = np.zeros(panel.n_sites, dtype=np.int64)
+    shell_flags: list[np.ndarray | None] = []
+    site_info = np.zeros((site_posterior.INFO_FIELDS, panel.n_sites), dtype=np.int64)
+    site_info[site_posterior.INFO_CORE] = -1
     for site in range(panel.n_sites):
-        site_configurations, log_prior, unknown = _configurations_for_site(
-            panel, site, config
+        unknown = np.flatnonzero(panel.alleles[:, site] < 0)
+        if unknown.size > MAX_EXACT_BITS and first_state is None:
+            # Pair posteriors of the first EM iteration; every start shares them.
+            first_state = _softmax(complete_scores - math.log(pairs.shape[0]), axis=1)
+        site_configurations, log_prior, radius, flags, info = _configurations_for_site(
+            panel, site, unknown, pairs, first_state, log_emission, observed_mask
         )
+        shell_flags.append(flags)
         configurations.append(site_configurations)
         log_priors.append(log_prior)
         unknown_by_site.append(unknown)
         unresolved_count[site] = unknown.size
+        support_radius[site] = radius
+        if info is not None:
+            site_info[:, site] = info
     configuration_tuple = tuple(configurations)
     log_prior_tuple = tuple(log_priors)
     unknown_tuple = tuple(unknown_by_site)
 
     statistics_workspace = joint_statistics.prepare(
-        configuration_tuple, log_prior_tuple, log_emission, panel.n_founders)
-    complete_scores, _ = _complete_site_state_scores(panel, log_emission, observed_mask, pairs)
+        configuration_tuple, log_prior_tuple, log_emission, panel.n_founders, support_radius)
     state_results: list[np.ndarray] = []
     site_results: list[tuple[np.ndarray | None, ...]] = []
     diagnostics: list[StartDiagnostics] = []
@@ -450,24 +482,30 @@ def fit_joint_block(
 
     marginal = np.full(panel.alleles.shape, 0.5, dtype=np.float64)
     marginal[panel.called] = panel.alleles[panel.called]
-    enumerated = np.zeros(panel.n_sites, dtype=np.bool_)
+    shell = np.zeros(panel.alleles.shape, dtype=np.float64)
     for site, (site_configurations, probability, unknown) in enumerate(
         zip(configuration_tuple, best_sites, unknown_tuple)
     ):
         if site_configurations is None or probability is None:
             continue
-        enumerated[site] = True
         for founder in unknown:
             marginal[founder, site] = float(
                 np.sum(probability * site_configurations[:, founder])
             )
+        if support_radius[site]:
+            shell[unknown, site] = site_posterior.shell_weights(probability, shell_flags[site])
 
-    effective_carriers = np.zeros(panel.n_founders, dtype=np.float64)
+    # Carrier support: the larger of the number of samples more likely than not
+    # carrying the founder in this block and their summed carrier probability
+    # (a homozygous pair counts once).
+    carrier_probability = np.zeros((best_state.shape[0], panel.n_founders), dtype=np.float64)
     for state, (first, second) in enumerate(pairs):
         mass = best_state[:, state]
-        effective_carriers[first] += np.sum(mass)
+        carrier_probability[:, first] += mass
         if second != first:
-            effective_carriers[second] += np.sum(mass)
+            carrier_probability[:, second] += mass
+    carriers = np.maximum(np.count_nonzero(carrier_probability > 0.5, axis=0).astype(np.float64),
+                          carrier_probability.sum(axis=0))
     groups = _exchangeable_groups(panel)
     exchangeable = np.zeros(panel.n_founders, dtype=np.bool_)
     for group in groups:
@@ -479,9 +517,11 @@ def fit_joint_block(
         site_configurations=configuration_tuple,
         site_configuration_probabilities=best_sites,
         marginal_alt_probability=marginal,
-        enumerated_sites=enumerated,
         unresolved_founders_per_site=unresolved_count,
-        effective_carriers=effective_carriers,
+        support_radius=support_radius,
+        shell_weight=shell,
+        site_posterior_info=site_info,
+        carriers=carriers,
         exchangeable_groups=groups,
         exchangeable_founders=exchangeable,
         best_start=best,
@@ -501,15 +541,21 @@ def release_joint_calls(
     confidence = np.maximum(
         fit.marginal_alt_probability, 1.0 - fit.marginal_alt_probability
     )
-    cap_skipped = initially_unknown & ~fit.enumerated_sites[None,:]
     exchangeable_skipped = initially_unknown & fit.exchangeable_founders[:, None]
     eligible = (
         initially_unknown
-        & fit.enumerated_sites[None,:]
         & ~exchangeable_skipped
-        & (fit.effective_carriers[:, None] >= config.minimum_effective_carriers)
+        & (fit.carriers[:, None] >= config.minimum_carriers)
         & (confidence >= config.minimum_call_probability)
     )
+    # Above MAX_EXACT_BITS unresolved founders only: multimodal sites release
+    # nothing; in a Hamming-ball support the shell guard withholds near-threshold calls.
+    multimodal = fit.site_posterior_info[site_posterior.INFO_MULTIMODAL] > 0
+    multimodal_skipped = eligible & multimodal[None,:]
+    eligible &= ~multimodal_skipped
+    guard_skipped = eligible & site_posterior.guard_mask(
+        fit.marginal_alt_probability, fit.shell_weight, config.minimum_call_probability)
+    eligible &= ~guard_skipped
     alleles[eligible] = (
         fit.marginal_alt_probability[eligible] > 0.5
     ).astype(np.int8)
@@ -518,9 +564,10 @@ def release_joint_calls(
         panel=HardFounderPanel(fit.panel.positions, fit.panel.keys, alleles),
         released=released,
         posterior_confidence=confidence,
-        effective_carriers=fit.effective_carriers.copy(),
+        carriers=fit.carriers.copy(),
         exchangeable_skipped=exchangeable_skipped,
-        cap_skipped=cap_skipped,
+        guard_skipped=guard_skipped,
+        multimodal_skipped=multimodal_skipped,
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import math
 import numpy as np
+from scipy.special import ndtri
 
 
 @dataclass(frozen=True)
@@ -28,13 +29,24 @@ class SimulationDesign:
         return asdict(self)
 
 
+_FRAGMENT_FIELDS = ("read_length_bp", "fragment_mean_bp", "fragment_sd_bp")
+
+
 @dataclass(frozen=True)
 class ReadModel:
-    """Generator-only perturbations. Inference retains its own 2% read model."""
+    """Generator-only perturbations. Inference retains its own 2% read model.
+
+    ``read_length_bp = 0`` keeps the historical sampler (independent reads at
+    every site). A positive value draws paired-end fragments instead, so sites
+    closer than a fragment share reads (see :func:`fragment_read_sampling`).
+    """
     error_rate: float = 0.02
     depth_cv: float = 0.0
     heterozygote_alt_probability: float = 0.5
     dropout_fraction: float = 0.0
+    read_length_bp: int = 0
+    fragment_mean_bp: float = 375.0
+    fragment_sd_bp: float = 150.0
 
     def __post_init__(self):
         if not 0 < self.error_rate < 0.5:
@@ -45,9 +57,21 @@ class ReadModel:
             raise ValueError("heterozygote_alt_probability must be in (0,1)")
         if not 0 <= self.dropout_fraction < 1:
             raise ValueError("dropout_fraction must be in [0,1)")
+        if int(self.read_length_bp) != self.read_length_bp or self.read_length_bp < 0:
+            raise ValueError("read_length_bp must be a nonnegative integer")
+        if self.read_length_bp:
+            if not (math.isfinite(self.fragment_mean_bp) and self.fragment_mean_bp > 0
+                    and math.isfinite(self.fragment_sd_bp) and self.fragment_sd_bp >= 0):
+                raise ValueError("fragment length mean must be positive and its sd nonnegative")
 
     def record(self):
-        return asdict(self)
+        # Legacy (per-site) records keep their historical keys, so existing
+        # simulation run specifications and checkpoints stay compatible.
+        record = asdict(self)
+        if not self.read_length_bp:
+            for key in _FRAGMENT_FIELDS:
+                record.pop(key)
+        return record
 
 
 def observed_indices(pedigree, design, seed):
@@ -93,4 +117,91 @@ def perturb_read_sampling(hap0, hap1, read_depth, model, rng):
         mask = dosage == genotype
         if np.any(mask):
             alt[mask] = rng.binomial(counts[mask], probability)
+    return np.stack((counts-alt, alt), axis=-1).astype(int, copy=False)
+
+
+def fragment_read_sampling(hap0, hap1, positions, read_depth, model, rng):
+    """Paired-end fragments whose reads are shared by neighbouring sites.
+
+    Per sample, fragment starts form a Poisson process along the contig. A
+    fragment has insert length F ~ Normal(fragment_mean_bp, fragment_sd_bp),
+    truncated to [50 bp, mean + 6 sd]; it comes from one of the sample's two
+    haplotypes with probability 1/2 and is read over read_length_bp at each
+    end (bases of overlapping mates counted once). Every site a fragment
+    covers reports that haplotype's allele, flipped with error_rate. The start
+    rate is depth / E[bases covered per fragment], so every site keeps the
+    legacy Poisson(depth) marginal; only neighbouring sites become dependent.
+    depth_cv and dropout_fraction act as in :func:`perturb_read_sampling`. An
+    allelic bias p = heterozygote_alt_probability != 0.5 is applied per read at
+    heterozygous sites: a read carrying the disfavoured allele reports the
+    other one with probability |2p - 1|, so the per-cell law stays Binomial(n, p).
+    """
+    samples, sites = hap0.shape
+    positions = np.asarray(positions, dtype=np.int64)
+    if positions.shape != (sites,) or np.any(np.diff(positions) < 0):
+        raise ValueError("fragment sampling needs sorted positions aligned with the haplotypes")
+    r = int(model.read_length_bp)
+    mean, sd = float(model.fragment_mean_bp), float(model.fragment_sd_bp)
+    f_min, f_max = 50, int(math.ceil(mean + 6 * sd)) + 1
+    # Expected bases covered per fragment under the exact sampled length law
+    # (normal, rounded, clipped to [f_min, f_max]) evaluated at fixed quantiles.
+    quantiles = (np.arange(100_000) + 0.5) / 100_000
+    lengths = np.clip(np.rint(mean + sd * ndtri(quantiles)), f_min, f_max)
+    covered_per_fragment = float(np.mean(np.minimum(lengths, 2 * r)))
+    factor = np.ones(samples)
+    if model.depth_cv:
+        sigma = np.sqrt(np.log1p(model.depth_cv**2))
+        factor = rng.lognormal(-sigma*sigma/2, sigma, size=samples)
+        factor /= factor.mean()
+    width = int(sites*model.dropout_fraction)
+    lo = int(positions[0]) - f_max
+    span = int(positions[-1]) + 1 - lo
+    counts = np.zeros((samples, sites), dtype=np.int64)
+    alt = np.zeros((samples, sites), dtype=np.int64)
+    haplotypes = (np.asarray(hap0), np.asarray(hap1))
+    for sample in range(samples):
+        rate = read_depth * factor[sample] / (1 - width/sites) / covered_per_fragment
+        n = int(rng.poisson(rate * span))
+        start = lo + rng.integers(0, span, size=n)
+        length = np.clip(np.rint(rng.normal(mean, sd, size=n)), f_min, f_max).astype(np.int64)
+        which = rng.integers(0, 2, size=n)
+        first_end = start + np.minimum(length, r)
+        second_start = np.maximum(start + length - r, first_end)
+        second_end = start + length
+        intervals = (
+            (np.searchsorted(positions, start), np.searchsorted(positions, first_end)),
+            (np.searchsorted(positions, second_start), np.searchsorted(positions, second_end)),
+        )
+        site_parts, hap_parts = [], []
+        for first, stop in intervals:
+            size = stop - first
+            keep = size > 0
+            if not np.any(keep):
+                continue
+            first, size, owner = first[keep], size[keep], which[keep]
+            offsets = np.arange(int(size.sum())) - np.repeat(np.cumsum(size) - size, size)
+            site_parts.append(np.repeat(first, size) + offsets)
+            hap_parts.append(np.repeat(owner, size))
+        if not site_parts:
+            continue
+        site = np.concatenate(site_parts)
+        owner = np.concatenate(hap_parts)
+        allele = np.where(owner == 0, haplotypes[0][sample, site], haplotypes[1][sample, site]).astype(np.int64)
+        het = haplotypes[0][sample, site] != haplotypes[1][sample, site]
+        bias = model.heterozygote_alt_probability - 0.5
+        if bias:
+            favoured = 1 if bias > 0 else 0
+            convert = het & (allele != favoured) & (rng.random(len(site)) < 2 * abs(bias))
+            allele[convert] = favoured
+        # As in the legacy sampler, the error rate acts on homozygous cells;
+        # at a heterozygous cell a symmetric error leaves Binomial(n, p) intact
+        # only for p = 1/2, so it is not applied there.
+        allele ^= (~het) & (rng.random(len(site)) < model.error_rate)
+        counts[sample] = np.bincount(site, minlength=sites)
+        alt[sample] = np.bincount(site, weights=allele, minlength=sites).astype(np.int64)
+    if width:
+        starts = rng.integers(0, sites-width+1, size=samples)
+        for sample, first in enumerate(starts):
+            counts[sample, first:first+width] = 0
+            alt[sample, first:first+width] = 0
     return np.stack((counts-alt, alt), axis=-1).astype(int, copy=False)

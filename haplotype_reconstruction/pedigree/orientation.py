@@ -1,7 +1,10 @@
-"""Finite continuous orientation, reciprocal and short-ancestry family scores.
+"""Junction-count orientation, reciprocal and short-ancestry family scores.
 
-Finite composite-evidence corrections, not independent biological direction
-probabilities. Four synchronous family-message passes exclude immediate reverse
+Orientation is a per-chromosome count likelihood of painted junctions with a
+painting-failure floor, summed over chromosomes and bounded by a pair-level
+painting-failure mixture; the other terms are finite composite-evidence
+corrections, not independent biological direction probabilities. Four
+synchronous family-message passes exclude immediate reverse
 feedback. A joint-family correction checks reverse two-edge paths; its evidence
 is then frozen while a final reciprocal solve reconciles the adjusted scores.
 The final reciprocal messages converge; the loopy/global model remains approximate.
@@ -13,6 +16,13 @@ import numpy as np
 from numba import njit
 from . import direction
 from .ancestry_paths import joint_path_correction
+
+
+class FamilyMessageNonConvergence(FloatingPointError):
+    """The final reciprocal-family solve missed its tolerance.
+
+    The full-data fit raises it; a bootstrap or LOCO resample abstains.
+    """
 
 
 @njit(cache=True, nogil=True)
@@ -54,9 +64,76 @@ def _continuous_probability(junctions, callable_bins, total_bins, multiplicity):
     return result
 
 
+@njit(cache=True, nogil=True)
+def _binomial_log_cdf(trials, success, observed):
+    """log P(Binomial(trials, success) <= observed) for small integer counts."""
+    if observed < 0:
+        return -np.inf
+    if observed >= trials or success <= 0.0:
+        return 0.0
+    log_ratio = math.log(success) - math.log1p(-success)
+    term = trials * math.log1p(-success)
+    total = term
+    for count in range(observed):
+        term += math.log(trials - count) - math.log(count + 1.0) + log_ratio
+        total = max(total, term) + math.log1p(math.exp(-abs(total - term)))
+    return min(0.0, total)
+
+
+@njit(cache=True, nogil=True)
+def _junction_count_log_odds(junctions, callable_bins, total_bins, multiplicity,
+                             error_probability):
+    """Weighted per-chromosome log odds of parent -> child against the reverse.
+
+    ``result[child, parent]``. A transmitted homologue copies one parental
+    homologue at each position, so it carries each painted parental junction
+    with probability 1/2, seen where the child is callable (MAR). New
+    crossovers, co-parent junctions and false junctions form a non-negative
+    remainder with no assumed distribution, so on chromosome k
+    L(p -> c) is proportional to P(Binomial(J_p, f_c/2) <= J_c). With
+    probability ``error_probability`` a chromosome comparison is painting
+    failure carrying no orientation evidence. Chromosomes add independently.
+    """
+    chromosomes, samples = junctions.shape
+    result = np.zeros((samples, samples))
+    keep = 1.0 - error_probability
+    floor = 0.5 * error_probability
+    for chrom in range(chromosomes):
+        if multiplicity[chrom] <= 0 or total_bins[chrom] <= 0:
+            continue
+        for child in range(samples):
+            fc = min(1.0, callable_bins[chrom, child] / (2.0 * total_bins[chrom]))
+            if fc <= 0.0:
+                continue
+            jc = int(junctions[chrom, child])
+            for parent in range(child):
+                fp = min(1.0, callable_bins[chrom, parent] / (2.0 * total_bins[chrom]))
+                if fp <= 0.0:
+                    continue
+                jp = int(junctions[chrom, parent])
+                difference = (_binomial_log_cdf(jp, 0.5 * fc, jc)
+                              - _binomial_log_cdf(jc, 0.5 * fp, jp))
+                if difference == 0.0:
+                    continue
+                scaled = math.exp(-abs(difference))
+                larger = keep / (1.0 + scaled) + floor
+                smaller = keep * scaled / (1.0 + scaled) + floor
+                value = math.log(larger) - math.log(smaller)
+                if difference < 0.0:
+                    value = -value
+                result[child, parent] += multiplicity[chrom] * value
+                result[parent, child] -= multiplicity[chrom] * value
+    return result
+
+
 def fit_direction(junctions, callable_bins, total_bins, weights, settings,
                   *, component_count=None):
-    """Use the selected model in full, bootstrap and LOCO evaluations."""
+    """Use the selected model in full, bootstrap and LOCO evaluations.
+
+    ``edge_probability`` (paired junction-density contrast) only orders the
+    acyclic graph search and is reported; ``edge_log_odds`` is the
+    orientation score evidence.
+    """
     if settings.parent_state_direction_model == "cluster":
         return direction._fit_ancestry_depth_model(
             weights @ junctions, weights @ callable_bins, settings.bootstrap_seed,
@@ -69,10 +146,15 @@ def fit_direction(junctions, callable_bins, total_bins, weights, settings,
     probabilities = _continuous_probability(junctions, callable_bins, total_bins, weights)
     if settings.parent_state_direction_model == "family":
         probabilities[:] = 0.5
+        log_odds = np.zeros_like(probabilities)
+    else:
+        log_odds = _junction_count_log_odds(
+            junctions, callable_bins, total_bins, weights,
+            settings.parent_state_direction_chromosome_error_probability)
     return direction._AncestryDepthModel(
         adjusted, fractions, np.ones((len(counts), 1)),
         np.asarray([np.nan]), np.asarray([np.nan]), np.asarray([1.0]),
-        np.nan, (), probabilities)
+        np.nan, (), probabilities, log_odds)
 
 
 @njit(cache=True, nogil=True)
@@ -208,6 +290,22 @@ def _family_scores(avoidance, alternatives, eligible, explicit_direction):
     return family
 
 
+def _pair_orientation_log_odds(adjusted, alternatives, states, multiplicity, samples, applied):
+    """``[c, p]``: log odds that p is c's parent rather than c p's, given a link.
+
+    ``adjusted`` already carries the applied reciprocal messages, and
+    ``applied[p, c]`` is the one added to c's configurations naming p. The
+    anti-reciprocity factor of one pair is evaluated exactly with every other
+    message held fixed: with cavity inclusion log odds ``a = O[c, p]`` and
+    ``b = O[p, c]``, the pair's joint states p -> c, c -> p and neither weigh
+    ``e^a : e^b : 1``. Infinite where only one orientation is scored;
+    undefined (NaN) where neither is.
+    """
+    cavity = _family_log_odds(adjusted, alternatives, states, multiplicity, samples) - applied.T
+    with np.errstate(invalid="ignore"):
+        return cavity - cavity.T
+
+
 def adjust_scores(state_scores, identity_scores, alternatives, states,
                   full_counts, model, settings, explicit_direction=None, *, score_diagnostics=None):
     """Apply finite evidence to both state and identity; exposure remains hard."""
@@ -221,8 +319,15 @@ def adjust_scores(state_scores, identity_scores, alternatives, states,
     eligible = np.isfinite(identity_scores)
     correction = np.zeros(len(alternatives))
     if settings.parent_state_direction_model != "family":
+        # log(2 * P(parent -> child | one orientation holds)). A sample-level
+        # painting excess or deficit repeats on every chromosome, so the
+        # per-chromosome floors cannot bound it: with probability epsilon the
+        # pair's whole comparison is painting failure carrying no orientation
+        # evidence. Zero for equal support, within [log(epsilon), log(2-epsilon)].
         epsilon = max(settings.parent_state_contamination_probability, np.finfo(float).eps)
-        log_direction = np.log(2.0*((1.0-epsilon)*probability + 0.5*epsilon))
+        log_support = -np.logaddexp(0.0, -model.edge_log_odds)
+        log_direction = math.log(2.0) + np.logaddexp(
+            math.log1p(-epsilon) + log_support, math.log(0.5*epsilon))
         if explicit_direction is not None:
             log_direction = np.where(explicit_direction, 0.0, log_direction)
         for slot in (1, 2):
@@ -280,7 +385,7 @@ def adjust_scores(state_scores, identity_scores, alternatives, states,
                 settings.parent_state_family_final_tolerance,
                 settings.parent_state_family_retry_damping)
         if residual > settings.parent_state_family_final_tolerance:
-            raise FloatingPointError(
+            raise FamilyMessageNonConvergence(
                 f"Final reciprocal family messages did not converge in {iterations} "
                 f"initial + {retry_iterations} damped iterations "
                 f"(undamped log-message residual {residual:g})")
@@ -288,8 +393,17 @@ def adjust_scores(state_scores, identity_scores, alternatives, states,
         state_scores = state_scores + family
         identity_scores = identity_scores + family
         if score_diagnostics is not None:
+            # Full data only: the release step withholds near-tied orientations.
+            applied = (avoidance if explicit_direction is None
+                       else np.where(np.asarray(explicit_direction).T, 0.0, avoidance))
+            score_diagnostics["orientation_log_odds"] = _pair_orientation_log_odds(
+                identity_scores, alternatives, states, log_multiplicity, samples, applied)
             score_diagnostics["reciprocal_family"] = family.copy()
             score_diagnostics["final_family_iterations"] = iterations + retry_iterations
             score_diagnostics["final_family_retry_iterations"] = retry_iterations
             score_diagnostics["final_family_residual"] = residual
+    elif score_diagnostics is not None:
+        score_diagnostics["orientation_log_odds"] = _pair_orientation_log_odds(
+            identity_scores, alternatives, states, -np.log(np.maximum(1, full_counts)),
+            samples, np.zeros((samples, samples)))
     return state_scores, identity_scores

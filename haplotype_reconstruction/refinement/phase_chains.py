@@ -169,13 +169,16 @@ def emission_pair(belief_row, orientation_value, phase_value, phase_error):
 
 
 @njit(cache=True, parallel=True)
-def phase_update(belief_log, orientation, phase, phase_theta, anchors, phase_error, damping, write_messages):
+def phase_update(belief_log, orientation, phase, phase_theta, anchors, phase_error, damping, write_messages,
+                 frozen, frozen_theta):
+    """``frozen`` samples use ``frozen_theta`` (component edges only): no frame change inside a component."""
     samples, sites, _ = belief_log.shape
     probability = np.empty((0, 0) if write_messages else (samples, sites), dtype=np.float32)
     delta = np.zeros(samples, dtype=np.float64)
     paths = np.empty((0, 0) if write_messages else (samples, sites), dtype=np.int8)
     links = np.empty((0, 0) if write_messages else (samples, max(0, sites - 1)), dtype=np.float32)
-    starts, trans = phase_segments(phase_theta, sites)
+    free_starts, free_trans = phase_segments(phase_theta, sites)
+    frozen_starts, frozen_trans = phase_segments(frozen_theta, sites)
     active = np.ones(samples, dtype=np.bool_)
     if write_messages:
         for sample in prange(samples):
@@ -195,6 +198,8 @@ def phase_update(belief_log, orientation, phase, phase_theta, anchors, phase_err
     active_samples = np.flatnonzero(active)
     for index in prange(len(active_samples)):
         sample = active_samples[index]
+        starts, trans = ((frozen_starts, frozen_trans) if frozen[sample]
+                         else (free_starts, free_trans))
         emissions = np.empty((sites, 2))
         for site in range(sites):
             emissions[site, 0], emissions[site, 1] = emission_pair(
@@ -229,16 +234,19 @@ def phase_update(belief_log, orientation, phase, phase_theta, anchors, phase_err
 
 @njit(cache=True, parallel=True)
 def phase_context_view(belief, reference, orientation, phase, phase_theta, anchors, parent_counts,
-                       phase_error, phase_threshold, correct_incomplete):
+                       phase_error, phase_threshold, correct_incomplete, frozen, frozen_theta):
     """Same phase MAP/context as a full family view, with no dense posterior."""
     samples, sites, _ = reference.shape
     context = np.empty_like(reference)
     inferred = np.empty((samples, sites), dtype=np.int8)
     emitted = np.empty_like(inferred)
-    starts, trans = phase_segments(phase_theta, sites)
+    free_starts, free_trans = phase_segments(phase_theta, sites)
+    frozen_starts, frozen_trans = phase_segments(frozen_theta, sites)
     high = np.float32(phase_threshold)
     low = np.float32(1 - phase_threshold)
     for sample in prange(samples):
+        starts, trans = ((frozen_starts, frozen_trans) if frozen[sample]
+                         else (free_starts, free_trans))
         has_frame = False
         for site in range(sites):
             if reference[sample, site, 0] != reference[sample, site, 1]:

@@ -35,7 +35,8 @@ PAINTING_CODE_FILES = (
     'painting/components.py',
     'assembly/observations.py',
     'painting/model.py',
-    'painting/evidence.py'
+    'painting/evidence.py',
+    'painting/label_continuity.py',
 )
 
 
@@ -78,6 +79,14 @@ class ReconstructionConfig:
     paint_ragged_working_memory_gb: float | None = None
     # Predeclared 10% within-model posterior-error budget; validate externally.
     paint_minimum_viterbi_public_class_posterior: float = 0.90
+    # Label-continuous founder rows (painting/label_continuity.py): before
+    # painting, exchange two rows' labels from an assembly link point onwards
+    # when that lowers the painted switches by at least this many and the
+    # samples gaining a switch are at most this fraction of those losing one.
+    # Alleles per site are unchanged; only labels move.
+    paint_label_continuity: bool = True
+    paint_label_continuity_minimum_switch_gain: float = 2.0
+    paint_label_continuity_maximum_loser_ratio: float = 0.1
 
     def __post_init__(self) -> None:
         if not isinstance(self.release_config, assembly_pipeline.AssemblyConfig):
@@ -111,6 +120,15 @@ class ReconstructionConfig:
             raise ValueError(
                 "paint_minimum_viterbi_public_class_posterior must lie in (0.5, 1]"
             )
+        if not isinstance(self.paint_label_continuity, bool):
+            raise TypeError("paint_label_continuity must be boolean")
+        if not (math.isfinite(float(self.paint_label_continuity_minimum_switch_gain))
+                and self.paint_label_continuity_minimum_switch_gain > 0.0):
+            raise ValueError(
+                "paint_label_continuity_minimum_switch_gain must be finite and positive")
+        if not 0.0 <= float(self.paint_label_continuity_maximum_loser_ratio) < 1.0:
+            raise ValueError(
+                "paint_label_continuity_maximum_loser_ratio must lie in [0, 1)")
 
 
 @dataclass(frozen=True)
@@ -330,14 +348,29 @@ def assembly_painting_product_identity(
             "trajectory_equivalence": "selected-site-exact-minus1-0-1-v1",
             "background_equivalent_founder_weight": 1.0,
             "posterior_summary": (
-                "unordered-public-class-forward-backward-v3"
+                "unordered-public-and-local-allele-class-forward-backward-v4"
             ),
             "release_policy": (
-                "whole-bin-viterbi-induced-public-class-posterior-threshold-v2"
+                "staged-public-then-directly-callable-local-allele-class-"
+                "posterior-threshold-v3"
+            ),
+            "local_allele_equivalence": (
+                "per-bin-selected-site-exact-minus1-0-1-anchored-called-v1"
+            ),
+            "viterbi_tie_order": (
+                "allele-parsimonious-suffix-swap-at-equal-score-v1"
+            ),
+            "released_chunk_members": (
+                "ordered-chunks-sorted-candidate-founder-rows-v1"
             ),
             "sample_observation_policy": (
                 "positive-depth-raw-gl-normalized-exact-neutral-v2"
             ),
+            "founder_label_continuity": ({
+                "model": painting_label_continuity.LABEL_CONTINUITY_MODEL,
+                "minimum_switch_gain": config.paint_label_continuity_minimum_switch_gain,
+                "maximum_loser_ratio": config.paint_label_continuity_maximum_loser_ratio,
+            } if config.paint_label_continuity else None),
         },
         assembly_painting_code_identity(code_digest_overrides),
     )
@@ -546,11 +579,16 @@ def _run_or_resume_loaded_contig(
     if raw_evidence_source is not None:
         raw_evidence.save(checkpoint_store, contig, probabilities, sites, observed,
                           source, **raw_evidence_source)
+    # Samples flagged by the sample-quality QC do not inform founder
+    # construction (feedback, assembly, founder refinement); painting and the
+    # raw evidence above keep every sample's full evidence.
+    founder_probabilities, founder_observed = core_sample_quality.founder_evidence(
+        probabilities, observed, source.get("founder_evidence_excluded"))
     with core_parallel.numba_thread_scope(config.release_config.num_processes):
         chromosome_evidence = assembly_pipeline.prepare_chromosome_evidence(
-            blocks, probabilities, sites, observed)
+            blocks, founder_probabilities, sites, founder_observed)
     blocks, feedback_identity = block_feedback.run_block_feedback(
-        checkpoint_store, contig, blocks, probabilities, sites, observed, ordered_ids,
+        checkpoint_store, contig, blocks, founder_probabilities, sites, founder_observed, ordered_ids,
         discovery_identity=discovery_identity, assembly_config=config.release_config,
         config=config.feedback_config, chromosome_map=chromosome_map,
         chromosome_evidence=chromosome_evidence)
@@ -565,9 +603,9 @@ def _run_or_resume_loaded_contig(
             discovery_identity=release_discovery_identity,
             sample_ids=ordered_ids,
             input_blocks=blocks,
-            global_probs=probabilities,
+            global_probs=founder_probabilities,
             global_sites=sites,
-            global_observed_mask=observed,
+            global_observed_mask=founder_observed,
             chromosome_map=chromosome_map,
             chromosome_evidence=chromosome_evidence,
         )
@@ -587,7 +625,8 @@ def _run_or_resume_loaded_contig(
         )
         from ..assembly.support import write_founder_support
         write_founder_support(checkpoint, sites, observed,
-                              Path(checkpoint_store.root) / target_stage / "reports" / contig)
+                              Path(checkpoint_store.root) / target_stage / "reports" / contig,
+                              feedback=_feedback_count_panels(checkpoint_store, contig, target_stage))
         return _checkpoint_summary(contig, checkpoint, True, mask_mode)
 
     # Release pools and painting pools never overlap. In particular, no idle
@@ -600,9 +639,9 @@ def _run_or_resume_loaded_contig(
     with core_parallel.numba_thread_scope(config.release_config.num_processes):
         release = assembly_pipeline.assemble_chromosome(
             blocks,
-            probabilities,
+            founder_probabilities,
             sites,
-            observed,
+            founder_observed,
             ordered_ids,
             discovery_identity=release_discovery_identity,
             config=config.release_config,
@@ -623,7 +662,26 @@ def _run_or_resume_loaded_contig(
         raise RuntimeError(
             f"{contig}: component manifest differs from release output"
         )
-    del release
+    if config.paint_label_continuity:
+        # Painting product, not release: relabel row suffixes the painted
+        # samples read as continuous; the release checkpoints stay unchanged.
+        with core_parallel.numba_thread_scope(config.paint_cores):
+            components, continuity = painting_label_continuity.relabel_components(
+                components, probabilities, sites, observed,
+                painting_kwargs=_painting_kwargs(config, chromosome_map),
+                minimum_switch_gain=config.paint_label_continuity_minimum_switch_gain,
+                maximum_loser_ratio=config.paint_label_continuity_maximum_loser_ratio,
+            )
+        manifest = core_runtime.create_phase_component_manifest(components)
+        moves = sum(len(item["moves"]) for item in continuity if item["accepted"])
+        print(
+            f"  [label continuity] {contig}: {moves} row-suffix relabellings; "
+            "painted switches "
+            f"{sum(item.get('painted_switches_before') or 0 for item in continuity)} -> "
+            f"{sum(item.get('painted_switches_after') or 0 for item in continuity)}",
+            flush=True,
+        )
+    del release, chromosome_evidence, founder_probabilities, founder_observed
     gc.collect()
     core_parallel.malloc_trim()
 
@@ -655,8 +713,29 @@ def _run_or_resume_loaded_contig(
     )
     from ..assembly.support import write_founder_support
     write_founder_support(checkpoint, sites, observed,
-                          Path(checkpoint_store.root) / target_stage / "reports" / contig)
+                          Path(checkpoint_store.root) / target_stage / "reports" / contig,
+                          feedback=_feedback_count_panels(checkpoint_store, contig, target_stage))
     return _checkpoint_summary(contig, checkpoint, False, mask_mode)
+
+
+# Work stages of the block-feedback context assemblies (workflows/block_feedback.py).
+FEEDBACK_ASSEMBLY_STAGES = ("feedback_path_l1_assembly", "feedback_path_l2_assembly")
+
+
+def _feedback_count_panels(checkpoint_store, contig, target_stage):
+    """The feedback assemblies' join search records of one contig, for the painting report
+    founder_counts.tsv (read-only; empty for other targets or absent checkpoints)."""
+    if target_stage != PAINTING_STAGE:
+        return ()
+    panels = []
+    for stage in FEEDBACK_ASSEMBLY_STAGES:
+        for level in range(1, 5):
+            artifact = f"{contig}.__assembly_release__.hierarchy_l{level}"
+            if not checkpoint_store.contig_done(stage, artifact):
+                continue
+            payload = getattr(checkpoint_store.load_contig(stage, artifact), "payload", None) or {}
+            panels.extend((payload.get("diagnostic") or {}).get("panel_search", ()))
+    return panels
 
 
 def run_reconstruction(
@@ -774,4 +853,6 @@ import haplotype_reconstruction.assembly.checkpoints as assembly_checkpoints
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.core.runtime as core_runtime
+import haplotype_reconstruction.core.sample_quality as core_sample_quality
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints
+import haplotype_reconstruction.painting.label_continuity as painting_label_continuity

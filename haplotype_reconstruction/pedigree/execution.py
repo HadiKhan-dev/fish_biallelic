@@ -12,6 +12,7 @@ import time
 
 import numpy as np
 
+from ..core import checkpoints as core_checkpoints
 from ..core import runtime
 from ..core import chromosome_parallel as scheduling
 from . import components, eligibility
@@ -61,6 +62,33 @@ class ScreenSummary:
     pair_scores: np.ndarray | None
     informative_markers: int
     checkpoint_source_identity: str | None
+
+
+def decoded_bytes(root, stage, contig):
+    return core_checkpoints.read_size_bytes(core_checkpoints.contig_path(root, stage, contig))
+
+
+def scoring_memory_estimates(tasks):
+    """Peak bytes per scoring worker: loaded painting, 4 x prepared chromosome, 2 GiB.
+
+    The prepared chromosome holds the O(N B S^2) source factors (right_weight).
+    Screening adds marginals of the same size plus the projection, and M0/M1/M2
+    scoring its workspaces: 3.7 right_weight sizes above a 1.5 GB base in the
+    K = 30 audit benchmark (b7, N 116, chr7 scale). A screened chromosome keeps
+    them until its score phase, so concurrent workers hold them together.
+    """
+    estimates = []
+    for task in tasks:
+        if isinstance(task, StoredChromosome):
+            painting = decoded_bytes(task.root, task.painting_stage, task.contig)
+            prepared = decoded_bytes(task.root, task.preparation_stage, task.contig)
+        else:
+            painting = 0
+            prepared = sum(component.ragged_source_factors.right_weight.nbytes
+                           for component in task.components
+                           if component.ragged_source_factors is not None)
+        estimates.append(painting + 4 * prepared + (2 << 30))
+    return estimates
 
 
 def prepare_chromosome(task, state, phase, common):
@@ -142,8 +170,11 @@ def score_sources(layout, tasks, *, settings, parent_eligibility=None, top_k=20,
     # The in-memory public API must not broadcast all chromosome tensors as
     # common metadata to every worker.
     common['layout'] = replace(layout, chromosomes=())
-    with scheduling.ChromosomeExecutor(tasks, score_chromosome,
-                                       n_workers=n_workers, weights=weights) as executor:
+    process_limit = scheduling.memory_worker_limit(
+        scoring_memory_estimates(tasks), len(tasks), runtime.available_memory_bytes(),
+        label="PEDIGREE SCORING")
+    with scheduling.ChromosomeExecutor(tasks, score_chromosome, n_workers=n_workers,
+                                       weights=weights, max_workers=process_limit) as executor:
         summaries = executor.run('screen', common)
         informative = [value for value in summaries if value.pair_scores is not None]
         if not informative:

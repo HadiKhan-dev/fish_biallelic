@@ -26,7 +26,6 @@ class CavitySelectionConfig:
     mean_field_tolerance: float = 1e-10
     likelihood_floor: float = 1e-300
     max_modes_per_k: int | None = None
-    founder_inference: str = "mean_field"
     apply_unordered_haplotype_set_code: bool = False
 
     def __post_init__(self) -> None:
@@ -48,13 +47,6 @@ class CavitySelectionConfig:
         if not math.isfinite(self.likelihood_floor) \
                 or not 0.0 < self.likelihood_floor < 1.0:
             raise ValueError("likelihood_floor must lie strictly in (0, 1)")
-        if self.founder_inference not in {
-            "mean_field", "anchored_pseudolikelihood"
-        }:
-            raise ValueError(
-                "founder_inference must be mean_field or "
-                "anchored_pseudolikelihood"
-            )
         if not isinstance(self.apply_unordered_haplotype_set_code, bool):
             raise ValueError(
                 "apply_unordered_haplotype_set_code must be boolean"
@@ -70,12 +62,12 @@ class CavitySelectionConfig:
 
 @dataclass(frozen=True)
 class HybridCavitySelectionConfig:
-    """Settings for anchored screening followed by mean-field refinement.
+    """Numerical settings of the regularized mean-field cavity score.
 
-    The hybrid workflow deliberately fixes both the one-mode-per-K cap and
-    the unordered haplotype-set regularizer.  Only numerical cavity settings
-    are exposed here so callers cannot accidentally turn the documented
-    two-stage objective into a different selection procedure.
+    The one-mode-per-K cap and the unordered haplotype-set regularizer are
+    fixed.  Only numerical cavity settings are exposed here so callers cannot
+    accidentally turn the documented objective into a different selection
+    procedure.
     """
 
     state_concentration: float = 0.5
@@ -88,9 +80,9 @@ class HybridCavitySelectionConfig:
     def __post_init__(self) -> None:
         # Reuse the single-stage validation rather than maintaining a second
         # subtly different definition of the same numerical domain.
-        self._stage_config("mean_field")
+        self._stage_config()
 
-    def _stage_config(self, founder_inference: str) -> CavitySelectionConfig:
+    def _stage_config(self) -> CavitySelectionConfig:
         return CavitySelectionConfig(
             state_concentration=self.state_concentration,
             wildcard_prior_mass=self.wildcard_prior_mass,
@@ -99,7 +91,6 @@ class HybridCavitySelectionConfig:
             mean_field_tolerance=self.mean_field_tolerance,
             likelihood_floor=self.likelihood_floor,
             max_modes_per_k=1,
-            founder_inference=founder_inference,
             apply_unordered_haplotype_set_code=True,
         )
 
@@ -159,40 +150,6 @@ class CavityModeDiagnostic:
 
 
 @dataclass(frozen=True)
-class HybridCavityDiagnostic:
-    """Complete audit trail for the two-stage regularized selector."""
-
-    anchored_k_diagnostics: tuple[CavityKDiagnostic, ...]
-    anchored_mode_diagnostics: tuple[CavityModeDiagnostic, ...]
-    anchored_ranked_k: tuple[int, ...]
-    shortlist_rule: str
-    shortlisted_k: tuple[int, ...]
-    refined_k_diagnostics: tuple[CavityKDiagnostic, ...]
-    refined_mode_diagnostics: tuple[CavityModeDiagnostic, ...]
-    refined_ranked_k: tuple[int, ...]
-    final_winner_k: int
-    final_runner_up_k: int | None
-    selected_mode_digest: str
-    boundary_caveat: str
-    calibration_caveat: str
-    full_data_selection_leakage_caveat: str
-
-    @property
-    def anchored_mode_digest_by_k(self) -> Mapping[int, str]:
-        return {
-            diagnostic.k: diagnostic.best_mode_digest
-            for diagnostic in self.anchored_k_diagnostics
-        }
-
-    @property
-    def refined_mode_digest_by_k(self) -> Mapping[int, str]:
-        return {
-            diagnostic.k: diagnostic.best_mode_digest
-            for diagnostic in self.refined_k_diagnostics
-        }
-
-
-@dataclass(frozen=True)
 class CavitySelection:
     """Result of fixed-A leave-one-sample cavity comparison across K."""
 
@@ -216,7 +173,6 @@ class CavitySelection:
     interpretation: str
     n_samples: int
     n_sites: int
-    hybrid_diagnostic: HybridCavityDiagnostic | None = None
 
     @property
     def probability_by_k(self) -> Mapping[int, float]:
@@ -460,14 +416,6 @@ def _build_state_geometry(
         np.ascontiguousarray(value)
         for value in (kind, first, second, base)
     )
-
-
-@njit(cache=True)
-def _stable_sigmoid(logit: float) -> float:
-    if logit >= 0.0:
-        return 1.0 / (1.0 + math.exp(-logit))
-    exponential = math.exp(logit)
-    return exponential / (1.0 + exponential)
 
 
 @njit(cache=True)
@@ -763,200 +711,6 @@ def _score_mode_cavity_kernel(
     )
 
 
-@njit(cache=True)
-def _infer_anchored_cavity_q_kernel(
-    likelihood: np.ndarray,
-    log_likelihood: np.ndarray,
-    haplotypes: np.ndarray,
-    assignments: np.ndarray,
-    likelihood_floor: float,
-) -> tuple[np.ndarray, int, float]:
-    """Founder probabilities from hard-partner conditional pseudolikelihood."""
-
-    n_samples, n_sites, _ = likelihood.shape
-    k = haplotypes.shape[0]
-    wildcard = k
-    total_delta = np.zeros((k, n_sites), dtype=np.float64)
-    founder_support = np.zeros(k, dtype=np.int64)
-    for sample in range(n_samples):
-        a = assignments[sample, 0]
-        b = assignments[sample, 1]
-        if a < wildcard:
-            founder_support[a] += 1
-        if b < wildcard and b != a:
-            founder_support[b] += 1
-        if a == b and a < wildcard:
-            for site in range(n_sites):
-                total_delta[a, site] += (
-                    log_likelihood[sample, site, 2]
-                    - log_likelihood[sample, site, 0]
-                )
-        elif a < b and b < wildcard:
-            for site in range(n_sites):
-                ha = haplotypes[a, site]
-                hb = haplotypes[b, site]
-                total_delta[a, site] += (
-                    log_likelihood[sample, site, hb + 1]
-                    - log_likelihood[sample, site, hb]
-                )
-                total_delta[b, site] += (
-                    log_likelihood[sample, site, ha + 1]
-                    - log_likelihood[sample, site, ha]
-                )
-        elif a < wildcard and b == wildcard:
-            for site in range(n_sites):
-                g0 = likelihood[sample, site, 0]
-                g1 = likelihood[sample, site, 1]
-                g2 = likelihood[sample, site, 2]
-                mix0 = 0.5 * (g0 + g1)
-                mix1 = 0.5 * (g1 + g2)
-                if mix0 < likelihood_floor:
-                    mix0 = likelihood_floor
-                if mix1 < likelihood_floor:
-                    mix1 = likelihood_floor
-                total_delta[a, site] += math.log(mix1) - math.log(mix0)
-
-    q_all = np.empty((n_samples, n_sites, k), dtype=np.float64)
-    zero_support_cavities = 0
-    entropy_sum = 0.0
-    for heldout in range(n_samples):
-        a = assignments[heldout, 0]
-        b = assignments[heldout, 1]
-        for site in range(n_sites):
-            for founder in range(k):
-                remaining_support = founder_support[founder]
-                if founder == a or (founder == b and b != a):
-                    remaining_support -= 1
-                if remaining_support == 0:
-                    q = 0.5
-                    zero_support_cavities += 1
-                else:
-                    delta = total_delta[founder, site]
-                    if a == b and a == founder:
-                        delta -= (
-                            log_likelihood[heldout, site, 2]
-                            - log_likelihood[heldout, site, 0]
-                        )
-                    elif a < b and b < wildcard:
-                        if founder == a:
-                            hb = haplotypes[b, site]
-                            delta -= (
-                                log_likelihood[heldout, site, hb + 1]
-                                - log_likelihood[heldout, site, hb]
-                            )
-                        elif founder == b:
-                            ha = haplotypes[a, site]
-                            delta -= (
-                                log_likelihood[heldout, site, ha + 1]
-                                - log_likelihood[heldout, site, ha]
-                            )
-                    elif a == founder and b == wildcard:
-                        g0 = likelihood[heldout, site, 0]
-                        g1 = likelihood[heldout, site, 1]
-                        g2 = likelihood[heldout, site, 2]
-                        mix0 = 0.5 * (g0 + g1)
-                        mix1 = 0.5 * (g1 + g2)
-                        if mix0 < likelihood_floor:
-                            mix0 = likelihood_floor
-                        if mix1 < likelihood_floor:
-                            mix1 = likelihood_floor
-                        delta -= math.log(mix1) - math.log(mix0)
-                    q = _stable_sigmoid(delta)
-                q_all[heldout, site, founder] = q
-                if q > 0.0 and q < 1.0:
-                    entropy_sum -= q * math.log(q)
-                    entropy_sum -= (1.0 - q) * math.log(1.0 - q)
-    return q_all, zero_support_cavities, entropy_sum
-
-
-@njit(cache=True)
-def _score_given_cavity_q_kernel(
-    likelihood: np.ndarray,
-    q_all: np.ndarray,
-    assignments: np.ndarray,
-    state_kind: np.ndarray,
-    state_first: np.ndarray,
-    state_second: np.ndarray,
-    prior_base: np.ndarray,
-    state_concentration: float,
-    likelihood_floor: float,
-) -> np.ndarray:
-    """Marginalize RR/RW/WW states for supplied cavity founder probabilities."""
-
-    n_samples, n_sites, _ = likelihood.shape
-    k = q_all.shape[2]
-    wildcard = k
-    n_states = state_kind.shape[0]
-    state_lookup = np.empty((k + 1, k + 1), dtype=np.int64)
-    state_lookup[:,:] = -1
-    state_counts = np.zeros(n_states, dtype=np.int64)
-    for state in range(n_states):
-        kind = state_kind[state]
-        if kind == 0:
-            a = state_first[state]
-            b = state_second[state]
-        elif kind == 1:
-            a = state_first[state]
-            b = wildcard
-        else:
-            a = wildcard
-            b = wildcard
-        state_lookup[a, b] = state
-    for sample in range(n_samples):
-        state_counts[state_lookup[
-            assignments[sample, 0], assignments[sample, 1]
-        ]] += 1
-
-    sample_scores = np.empty(n_samples, dtype=np.float64)
-    state_values = np.empty(n_states, dtype=np.float64)
-    for heldout in range(n_samples):
-        held_state = state_lookup[
-            assignments[heldout, 0], assignments[heldout, 1]
-        ]
-        prior_denominator = math.log(n_samples - 1 + state_concentration)
-        for state in range(n_states):
-            count = state_counts[state]
-            if state == held_state:
-                count -= 1
-            state_values[state] = (
-                math.log(count + state_concentration * prior_base[state])
-                - prior_denominator
-            )
-        for site in range(n_sites):
-            g0 = likelihood[heldout, site, 0]
-            g1 = likelihood[heldout, site, 1]
-            g2 = likelihood[heldout, site, 2]
-            for state in range(n_states):
-                kind = state_kind[state]
-                first = state_first[state]
-                second = state_second[state]
-                if kind == 0:
-                    qi = q_all[heldout, site, first]
-                    if first == second:
-                        predictive = (1.0 - qi) * g0 + qi * g2
-                    else:
-                        qj = q_all[heldout, site, second]
-                        p0 = (1.0 - qi) * (1.0 - qj)
-                        p2 = qi * qj
-                        predictive = (
-                            p0 * g0 + (1.0 - p0 - p2) * g1 + p2 * g2
-                        )
-                elif kind == 1:
-                    qi = q_all[heldout, site, first]
-                    predictive = (
-                        0.5 * (1.0 - qi) * g0
-                        + 0.5 * g1
-                        + 0.5 * qi * g2
-                    )
-                else:
-                    predictive = 0.25 * g0 + 0.5 * g1 + 0.25 * g2
-                if predictive < likelihood_floor:
-                    predictive = likelihood_floor
-                state_values[state] += math.log(predictive)
-        sample_scores[heldout] = _logaddexp_values(state_values)
-    return sample_scores
-
-
 def _score_prepared_mode(
     evidence: np.ndarray,
     log_likelihood: np.ndarray,
@@ -969,55 +723,30 @@ def _score_prepared_mode(
     kind, first, second, prior_base = state_geometry
     haplotypes = np.ascontiguousarray(mode.haplotypes, dtype=np.int64)
     assignments = np.ascontiguousarray(mode.assignments, dtype=np.int64)
-    if config.founder_inference == "anchored_pseudolikelihood":
-        q_all, zero_support, entropy = _infer_anchored_cavity_q_kernel(
-            evidence,
-            log_likelihood,
-            haplotypes,
-            assignments,
-            float(config.likelihood_floor),
-        )
-        sample_scores = _score_given_cavity_q_kernel(
-            evidence,
-            q_all,
-            assignments,
-            kind,
-            first,
-            second,
-            prior_base,
-            float(config.state_concentration),
-            float(config.likelihood_floor),
-        )
-        iterations = 0
-        not_converged = 0
-        alternate_wins = 0
-        initialization_spread = 0.0
-    else:
-        values = _score_mode_cavity_kernel(
-            evidence,
-            log_likelihood,
-            rw_log_likelihood,
-            ww_log_emission,
-            haplotypes,
-            assignments,
-            kind,
-            first,
-            second,
-            prior_base,
-            float(config.state_concentration),
-            int(config.mean_field_max_iter),
-            float(config.mean_field_tolerance),
-            float(config.likelihood_floor),
-        )
-        (
-            sample_scores,
-            iterations,
-            not_converged,
-            zero_support,
-            entropy,
-            alternate_wins,
-            initialization_spread,
-        ) = values
+    (
+        sample_scores,
+        iterations,
+        not_converged,
+        zero_support,
+        entropy,
+        alternate_wins,
+        initialization_spread,
+    ) = _score_mode_cavity_kernel(
+        evidence,
+        log_likelihood,
+        rw_log_likelihood,
+        ww_log_emission,
+        haplotypes,
+        assignments,
+        kind,
+        first,
+        second,
+        prior_base,
+        float(config.state_concentration),
+        int(config.mean_field_max_iter),
+        float(config.mean_field_tolerance),
+        float(config.likelihood_floor),
+    )
     total = math.fsum(float(value) for value in sample_scores)
     n_site_fits = evidence.shape[0] * evidence.shape[1]
     mean_iterations = iterations / n_site_fits
@@ -1229,12 +958,6 @@ def select_cavity_predictive_k(
     )
     founder_interpretation = (
         "Founder fields use deterministic mean-field coordinate ascent. "
-        if settings.founder_inference == "mean_field"
-        else (
-            "Founder fields use anchored pseudolikelihood: each distinct-pair "
-            "factor is conditioned on the fitted hard partner allele before "
-            "the held-out contribution is deleted. "
-        )
     )
     regularization_interpretation = (
         "The objective additionally subtracts log C(2^L,K), the ideal code "
@@ -1266,7 +989,7 @@ def select_cavity_predictive_k(
         weights_are_calibrated=False,
         k_prior="telescoping_1_over_k_k_plus_1_applied_once",
         boundary_limited=(map_k == max(k_values)),
-        founder_inference=settings.founder_inference,
+        founder_inference="mean_field",
         apply_unordered_haplotype_set_code=(
             settings.apply_unordered_haplotype_set_code
         ),

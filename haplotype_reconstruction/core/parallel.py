@@ -223,7 +223,7 @@ try:
         'haplotype_reconstruction.discovery.blocks',
         'haplotype_reconstruction.assembly.linking',
         'haplotype_reconstruction.assembly.paths',
-        'haplotype_reconstruction.assembly.chimera_resolution',
+        'haplotype_reconstruction.assembly.panel_search',
         'haplotype_reconstruction.painting.components',
         'haplotype_reconstruction.pedigree.inference',
     ])

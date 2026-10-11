@@ -91,20 +91,17 @@ reads remain reusable.
 
 ## Founder-count refinement
 
-Final assembly now also tries up to two additional founder paths per component,
-stopping at the first rejected addition. The incumbent and count-up proposals
-receive symmetric fixed-count beam/dual and paired repairs. An optimistic
-free-boundary local score can safely rule out an addition before its expensive
-repair; a near-boundary proposal still runs normally. Acceptance uses the
-existing `K * complexity_cost - 2 * full_site_score`, unchanged observation
-mask and existing local alleles. There is no assumed true K or forced sixth row.
-
-This pass runs once after the final executed hierarchy level, not after every
-early level or feedback round. Existing progressive refinement is unchanged.
-It has separate resumable checkpoints and diagnostics. The API setting
-`FounderRefinementConfig(count_max_additions=0)` disables only additions;
-the existing `--founder-refinement off` disables founder refinement as a whole.
-This assembly-level pass is separate from calibrated local path selection.
+Final assembly can also add founder paths at its last executed level: each
+addition round refits every duplicated-row seed of the incumbent to
+convergence and keeps the best only if it passes the effective-carrier count
+criterion against the incumbent, with the unchanged observation mask and
+existing local alleles (see
+[methods](methods.md#founder-count-decisions)). There is no assumed true K or
+forced extra row. Earlier levels and the feedback rounds make no additions.
+`--founder-refinement off` disables founder refinement, including all count
+decisions. This assembly-level pass is separate from calibrated local path
+selection. The measurements below used the earlier budgeted count-up/refit and
+its `K * complexity_cost - 2 * full_site_score` acceptance, since removed.
 
 ## Evidence and accepted limitations
 

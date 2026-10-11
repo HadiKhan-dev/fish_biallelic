@@ -4,7 +4,7 @@ from ..core.run_record import timed_stage
 from haplotype_reconstruction import PACKAGE_ROOT
 
 import copy
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import math
@@ -13,8 +13,7 @@ import time
 from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.assembly.completion as assembly_completion
-from .structured_transitions import StructuredTransitionConfig, configured_transition
-from .panel_search import PanelSearchConfig, configured_panel_search
+from .panel_search import PanelSearchConfig
 from . import founder_refinement, evidence as assembly_evidence
 from .founder import scoring as founder_scoring
 
@@ -39,7 +38,6 @@ ASSEMBLY_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
         'assembly/paths.py',
         'assembly/linking.py',
         'assembly/chimera_kernels.py',
-        'assembly/chimera_resolution.py',
         'assembly/chimera_scoring.py',
         'core/parallel.py',
         'assembly/hierarchy.py',
@@ -51,40 +49,30 @@ ASSEMBLY_RELEASE_CODE_IDENTITY_FILES = tuple(sorted(set(
         'core/runtime.py',
         'core/environment.py',
         'assembly/pipeline.py',
-        'assembly/checkpoints.py'
+        'assembly/checkpoints.py',
+        'assembly/panel_certify.py'
     )
 )))
 
 
 ASSEMBLY_RELEASE_CODE_IDENTITY_FILES += (
     'core/batch_queue.py', 'core/batch_tasks.py',
-    'assembly/structured_transitions.py', 'assembly/panel_search.py',
+    'assembly/panel_search.py',
     'assembly/panel_scoring.py', 'assembly/panel_candidates.py', 'assembly/partial_emissions.py',
-    'assembly/panel_rehousing.py', 'assembly/panel_pruning.py',
-    'assembly/founder_refinement.py', 'assembly/founder/path_search.py',
+    'assembly/panel_count.py',
+    'assembly/founder_refinement.py',
     'assembly/founder/scoring.py', 'assembly/founder/dual_search.py',
-    'assembly/founder/exchanges.py', 'assembly/founder/windows.py',
-    'assembly/founder/intervals.py',
-    'assembly/founder/count_increase.py',
-    'assembly/founder/count.py', 'assembly/founder/count_bound.py', 'assembly/evidence.py',
+    'assembly/founder/count_bound.py', 'assembly/evidence.py',
+    'assembly/founder/count_criterion.py',
     'assembly/founder/components.py',
-    'assembly/founder/workspace.py', 'assembly/founder/count_workers.py',
+    'assembly/founder/workspace.py',
     'assembly/founder/candidates.py', 'assembly/founder/sparse.py',
-    'assembly/founder/background.py', 'assembly/founder/delta.py',
     'assembly/founder/packing.py', 'assembly/founder/checkpoints.py',
     'assembly/founder/site_kernels.py', 'assembly/founder/dual_short.py',
-    'assembly/founder/evidence.py', 'assembly/founder/predictive.py',
-    'assembly/founder/beam.py', 'assembly/founder/beam_kernels.py',
-    'assembly/founder/beam_wide_kernels.py',
-    'assembly/founder/proxy_primary.py',
-    'assembly/founder/sparse_primary.py',
-    'assembly/founder/search_ranking.py',
-    'assembly/founder/global_search.py',
-    'assembly/founder/search.py',
-    'assembly/founder/queries.py',
-    'assembly/founder/conditional_messages.py',
-    'assembly/founder/exchange_bounds.py',
-    'assembly/founder/exchange_cache.py',
+    'assembly/founder/evidence.py',
+    'assembly/founder/converged_sweep.py',
+    'assembly/founder/sweep_kernels.py',
+    'assembly/founder/window_dp.py',
 )
 
 _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
@@ -96,20 +84,36 @@ _RELEASE_RUNTIME_CONFIG_FIELDS = frozenset((
 ))
 
 
+def _founder_count_call(item):
+    """Small record of one component's final count step (its converged count pass)."""
+    decisions = [dict(kind=d["kind"], founders=int(d["founders"]),
+                      accept_larger=bool(d.get("accept_larger")),
+                      skipped_by_bound=bool(d.get("skipped_by_bound")),
+                      margin=None if d.get("margin") is None else float(d["margin"]),
+                      band=None if d.get("band") is None else [float(x) for x in d["band"]],
+                      ambiguous=bool(d.get("ambiguous")))
+                 for d in item.get("decisions", ())]
+    return dict(founders=item.get("founders"), founders_before=item.get("founders_before"),
+                ambiguous=bool(item.get("ambiguous_count")),
+                count_cycle=bool(item.get("count_cycle")),
+                cycle_undecided=bool(item.get("count_cycle_undecided")),
+                decisions=decisions, reason=item.get("reason"))
+
+
 def _configured_founder_refinement():
-    from ..core.environment import assembly_founder_refinement
+    from ..core.environment import assembly_founder_refinement, coarse_move_guard
     return founder_refinement.FounderRefinementConfig(
-        enabled=assembly_founder_refinement())
+        enabled=assembly_founder_refinement(), coarse_move_guard=coarse_move_guard())
 
 
 @dataclass(frozen=True)
 class AssemblyConfig:
-    """Dense transitions and bounded panel search by default; one core ceiling.
+    """Dense transitions and the certified endpoint-beam panel search; one core ceiling.
 
-    Bounded search uses panel_search_config. The broad-only controls
-    beam_width, max_founders, top_n_swap, max_cr_iterations, paint_penalty
-    and min_hotspot_samples must retain their defaults in bounded mode.
-    Set panel_search_config=None to use and customize those broad controls.
+    Every hierarchy level and every block-feedback context assembly uses the
+    same join route: the dense linker mesh, the endpoint beam and the certified
+    panel search configured by panel_search_config, whose founder counts follow
+    the pipeline's effective-carrier rule (panel_count).
     """
 
     preprocess_config: assembly_completion.CompletionConfig = field(
@@ -118,55 +122,34 @@ class AssemblyConfig:
     max_level: int = 4
     l1_batch_size: int = 10
     higher_level_batch_size: int = 10
-    # Final L1 only: exhaustive small-panel pruning, bounded at large K.
-    # Zero disables this search pass for controlled comparisons.
-    l1_pruning_full_scores: int = 256
     min_boundary_informative_samples: int = 4
-    beam_width: int = 200
-    max_founders: int = 12
     max_sites_for_linking: int = 2000
     recombination_rate: float = 5e-8
     n_generations: int = 3
     recombination_tolerance: float = 0.5
-    top_n_swap: int = 20
-    max_cr_iterations: int = 10
-    paint_penalty: float = 10.0
-    min_hotspot_samples: int = 5
     cc_scale: float = 0.5
     num_processes: int = 1
     maxtasksperchild: int | None = None
     min_gb_per_worker: float = 4.0
     preprocess_diagnostics_mode: str = "compact"
     verbose: bool = False
-    structured_transition_config: StructuredTransitionConfig | None = field(
-        default_factory=configured_transition
-    )
-    panel_search_config: PanelSearchConfig | None = field(default_factory=configured_panel_search)
+    panel_search_config: PanelSearchConfig = field(default_factory=PanelSearchConfig)
     founder_refinement_config: founder_refinement.FounderRefinementConfig = field(
         default_factory=_configured_founder_refinement)
 
     def __post_init__(self) -> None:
-        if (isinstance(self.l1_pruning_full_scores, bool)
-                or int(self.l1_pruning_full_scores) != self.l1_pruning_full_scores
-                or self.l1_pruning_full_scores < 0):
-            raise ValueError("l1_pruning_full_scores must be a nonnegative integer")
+        from ..core.environment import check_obsolete_environment
+        check_obsolete_environment()
         if not isinstance(self.founder_refinement_config, founder_refinement.FounderRefinementConfig):
             raise TypeError("founder_refinement_config must be FounderRefinementConfig")
-        if self.panel_search_config is not None and not isinstance(
-            self.panel_search_config,
-            PanelSearchConfig
-        ):
-            raise TypeError("panel_search_config must be PanelSearchConfig or None")
-        if (self.structured_transition_config is not None
-                and not isinstance(self.structured_transition_config, StructuredTransitionConfig)):
-            raise TypeError("structured_transition_config must be StructuredTransitionConfig or None")
+        if not isinstance(self.panel_search_config, PanelSearchConfig):
+            raise TypeError("panel_search_config must be PanelSearchConfig")
         if not isinstance(self.preprocess_config, assembly_completion.CompletionConfig):
             raise TypeError("preprocess_config must be a CompletionConfig")
         for name in (
             "max_level", "l1_batch_size", "higher_level_batch_size",
-            "min_boundary_informative_samples", "beam_width", "max_founders",
-            "max_sites_for_linking", "n_generations", "top_n_swap",
-            "max_cr_iterations", "min_hotspot_samples", "num_processes",
+            "min_boundary_informative_samples",
+            "max_sites_for_linking", "n_generations", "num_processes",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or int(value) != value or value < 1:
@@ -179,7 +162,7 @@ class AssemblyConfig:
                 or self.maxtasksperchild < 1):
             raise ValueError("maxtasksperchild must be None or positive")
         for name in (
-            "recombination_rate", "recombination_tolerance", "paint_penalty",
+            "recombination_rate", "recombination_tolerance",
             "cc_scale", "min_gb_per_worker",
         ):
             value = float(getattr(self, name))
@@ -191,22 +174,6 @@ class AssemblyConfig:
             raise ValueError(
                 "preprocess_diagnostics_mode must be 'full' or 'compact'"
             )
-
-        if self.panel_search_config is not None:
-            broad_only = (
-                "beam_width", "max_founders", "top_n_swap", "max_cr_iterations",
-                "paint_penalty", "min_hotspot_samples",
-            )
-            changed = [
-                item.name for item in fields(self)
-                if item.name in broad_only and getattr(self, item.name) != item.default
-            ]
-            if changed:
-                raise ValueError(
-                    f"Broad-search-only settings changed in bounded mode: {', '.join(changed)}. "
-                    "Use PanelSearchConfig for bounded search, or set "
-                    "panel_search_config=None to select broad search."
-                )
 
 
 def _release_scientific_config(config: AssemblyConfig) -> dict[str, Any]:
@@ -494,9 +461,10 @@ def assembly_release_identity_record(
             "linker_fit": "coherent_expected_counts",
             "genotype_emission": "partial_founder_predictive_uniform_mixture",
             "max_linking_iterations": assembly_linking.MAX_LINKING_ITERATIONS,
-            "l1_pruning": "allele_preserving_single_recipient_native_objective",
+            "join_search": "certified_two_region_bound_pool_saturation_v1",
+            "join_count_rule": "effective_carrier_total_and_sequence_part_births_deaths_v1",
             "observed_false_genotype_evidence": "uniform_state_neutral",
-            "final_founder_refinement": "full_site_potts_sparse_global_v14",
+            "final_founder_refinement": "full_site_potts_converged_sweep_v1",
             "final_founder_refinement_switch_penalty": founder_scoring.SWITCH_PENALTY,
         },
     }
@@ -949,15 +917,9 @@ def assemble_chromosome(
                 batch_size=batch_size,
                 recomb_rate=config.recombination_rate,
                 chromosome_map=chromosome_map,
-                beam_width=config.beam_width,
-                max_founders=config.max_founders,
                 max_sites_for_linking=config.max_sites_for_linking,
                 n_generations=config.n_generations if level > 1 else None,
                 recomb_tolerance=config.recombination_tolerance,
-                top_n_swap=config.top_n_swap,
-                max_cr_iterations=config.max_cr_iterations,
-                paint_penalty=config.paint_penalty,
-                min_hotspot_samples=config.min_hotspot_samples,
                 cc_scale=config.cc_scale,
                 num_processes=config.num_processes,
                 maxtasksperchild=config.maxtasksperchild,
@@ -966,10 +928,7 @@ def assemble_chromosome(
                 min_boundary_informative_samples=(
                     config.min_boundary_informative_samples
                 ),
-                structured_transition_config=config.structured_transition_config,
                 panel_search_config=config.panel_search_config,
-                pruning_full_scores=(config.l1_pruning_full_scores
-                    if config.max_level == 4 and level == 1 else 0),
             )
             elapsed_seconds = time.perf_counter() - started
             stored_diagnostic = None
@@ -1060,15 +1019,35 @@ def assemble_chromosome(
             started = time.perf_counter()
             if refined is None:
                 from .founder.components import scoped_checkpoints
+                # The converged search adds founders only at the last level (the
+                # final count step); earlier levels make deletion decisions only.
                 output, refinement_diagnostics = founder_refinement.refine_components(
                     preprocess_result.prepared_blocks, working, neutral_probs, sites,
                     config=active_refinement_config,
                     num_threads=config.num_processes,
                     checkpoints=scoped_checkpoints(release_checkpoints, phase),
-                    l1_blocks=refinement_context, cc_scale=config.cc_scale)
+                    l1_blocks=refinement_context, cc_scale=config.cc_scale,
+                    count_additions=(stopped is not None or level == config.max_level))
                 refinement_diagnostics = dict(refinement_diagnostics,
                     level=level, elapsed_seconds=time.perf_counter() - started,
                     proposal_min_sites_per_bin=active_refinement_config.proposal_min_sites_per_bin)
+                from .founder.converged_sweep import convergence_summary
+                census = convergence_summary(refinement_diagnostics)
+                refinement_diagnostics = dict(refinement_diagnostics, convergence=census)
+                # Backstop use, count cycles, ambiguous count calls and best-F panel
+                # replacements are never silent.
+                print(f"  [founder refinement L{level}] converged search: {census['fits']} fits, "
+                      f"{census['nonconverged_fits']} at the sweep backstop, max sweeps "
+                      f"{census['max_sweeps']}, max window frontier {census['max_frontier']}, "
+                      f"count backstops {census['count_backstop_hits']}, count cycles "
+                      f"{census['count_cycles']} ({census['count_cycles_undecided']} undecided), "
+                      f"ambiguous count calls "
+                      f"{len(census['ambiguous_count_calls'])}, best-F panel replacements "
+                      f"{census['best_f_replacements']}, weak label junctions "
+                      f"{census['weak_label_junctions']}, deletions without sequence "
+                      f"{census['deletions_without_sequence']}, decided by the sequence part "
+                      f"{census['decided_by_sequence_part']}, kept founders failing the "
+                      f"sequence test {census['hidden_sequence_failures']}", flush=True)
             else:
                 output = refined["blocks"]
                 refinement_diagnostics = refined["diagnostics"]
@@ -1097,25 +1076,23 @@ def assemble_chromosome(
             stop_reason = stopped
             break
 
-    # The tested count-up search acts on final components, not at each level.
+    # The converged search makes its count decisions between converged fits:
+    # deletions at every level, additions only at its last level, which is the
+    # final count step, recorded under the same phase name for product readers.
     # It leaves early progressive refinement and feedback assembly unchanged.
-    if config.max_level == 4 and config.founder_refinement_config.enabled:
-        from .founder import count_increase
-        from .founder.components import scoped_checkpoints
-        count_scope = scoped_checkpoints(release_checkpoints, "final_count_increase")
+    if (config.max_level == 4 and config.founder_refinement_config.enabled
+            and refinement_levels):
         count_result = (None if release_checkpoints is None
                         else release_checkpoints.load("final_count_increase"))
         if count_result is None:
-            working, count_diagnostics = count_increase.refine_components(
-                preprocess_result.prepared_blocks, working, neutral_probs, sites,
-                config=config.founder_refinement_config, num_threads=config.num_processes,
-                checkpoints=count_scope, cc_scale=config.cc_scale)
-            _assert_position_coverage(working, expected_positions)
-            _validate_persistent_breaks(working, persistent_breaks)
-            _validate_hierarchy_selected_paths(
-                _selected_path_snapshot(preprocess_result.prepared_blocks), working)
-            _freeze_inference_snapshots(working)
-            core_runtime.strip_block_evidence(working)
+            count_diagnostics = dict(
+                enabled=True, model="converged_count_pass_of_last_level",
+                level=refinement_levels[-1].get("level"),
+                components=[dict(component=item.get("component"),
+                                 founders=item.get("founders"),
+                                 founders_before=item.get("founders_before"),
+                                 changed=item.get("changed"))
+                            for item in refinement_diagnostics.get("components", [])])
             if release_checkpoints is not None:
                 release_checkpoints.save("final_count_increase",
                     {"blocks": working, "diagnostics": count_diagnostics})
@@ -1137,9 +1114,14 @@ def assemble_chromosome(
             release_checkpoints.save("founder_refinement", {
                 "blocks": working, "diagnostics": refinement_diagnostics})
 
+    final_count_calls = (refinement_levels[-1].get("components", ()) if refinement_levels
+                         else ())
     for component_id, block in enumerate(working):
         block.missing_aware_phase_component_id = component_id
         block.assembly_component_identity = copy.deepcopy(identity)
+        # The final count step's call for this component (founder_counts.tsv).
+        if component_id < len(final_count_calls):
+            block.founder_count_call = _founder_count_call(final_count_calls[component_id])
     # Small score/budget records only; no ancestral sequences or full tensors.
     # Retain every level, since refinement can replace component objects.
     assembly_search_history = tuple({"level": row["level"], "panels": row.get("panel_search", ())}

@@ -2,8 +2,9 @@
 
 The current block's emission is excluded from its carrier weights. Original
 reads then refit its alleles once; assembly proposals are not extra reads.
-Exact shared-bit inference is capped at ten context founders. Larger or
-partially covered contexts retain their input local panels.
+The shared founder-allele site posterior (``assembly.site_posterior``) is exact
+for at most ten context founders and polynomial above, so every context
+component is refitted. Partially covered contexts retain their input panels.
 """
 import atexit
 import copy
@@ -12,7 +13,7 @@ import numpy as np
 from numba import njit, prange, set_num_threads
 from haplotype_reconstruction.core import parallel
 from haplotype_reconstruction.core.haplotypes import BlockResult, BlockResults
-from haplotype_reconstruction.assembly.allele_polynomials import add_dosage_term, quadratic_values
+from haplotype_reconstruction.assembly import site_posterior
 
 @njit(cache=True, parallel=True)
 def emission_grid(h, gl, observed, starts, stops, mix):
@@ -117,68 +118,34 @@ def carrier_weights(log_emission, centers, rate, background_mass):
                 beta /= beta.sum()
     return cavity, posterior
 
-@njit(cache=True)
-def site_refit(gl, observed, weights, background_q):
-    """Exact uniform-prior shared K-bit posterior, background integrated per copy."""
-    n, s, _ = weights.shape
-    k = s - 1
-    count = 1 << k
-    fixed = np.zeros(k, np.int8)
-    bit_index = np.arange(k)
-    log_joint = np.zeros(count)
-    support = np.zeros(k)
-    for sample in range(n):
-        if not observed[sample]:
-            continue
-        total = gl[sample].sum()
-        if total <= 0:
-            continue
-        e = .99 * gl[sample] / total + .01 / 3
-        if np.max(e) - np.min(e) < 1e-12:
-            continue
-        w = weights[sample]
-        unary = np.zeros(k)
-        coupling = np.zeros((k, k))
-        q = background_q
-        constant = w[k, k] * ((1 - q) ** 2 * e[0] + 2 * q * (1 - q) * e[1] + q * q * e[2])
-        for i in range(k):
-            mass = w[i, k] + w[k, i]
-            f0 = (1 - q) * e[0] + q * e[1]
-            f1 = (1 - q) * e[1] + q * e[2]
-            constant += mass * f0
-            unary[i] += mass * (f1 - f0)
-            for j in range(i, k):
-                mass = w[i, j] if i == j else w[i, j] + w[j, i]
-                constant = add_dosage_term(constant, unary, coupling, i, j, fixed, bit_index,
-                                         mass * e[0], mass * e[1], mass * e[2])
-            # Effective independently observed samples carrying i, never two per homozygote.
-            support[i] += w[i,:].sum() + w[:, i].sum() - w[i, i]
-        values = quadratic_values(constant, unary, coupling)
-        for code in range(count):
-            log_joint[code] += np.log(max(values[code], 1e-300))
-    probabilities = np.exp(log_joint - log_joint.max())
-    probabilities /= probabilities.sum()
-    q = np.zeros(k)
-    for code in range(count):
-        for i in range(k):
-            if (code >> i) & 1:
-                q[i] += probabilities[code]
-    for i in range(k):
-        q[i] = min(1.0, max(0.0, q[i]))
-    return q, support, probabilities
-
 @njit(cache=True, parallel=True)
-def refit_sites(result, probabilities, supporters, gl, observed, cavity, background, start, stop, threshold):
+def refit_sites(result, probabilities, supporters, gl, observed, cavity, background, start, stop, threshold,
+                site_info, site_boundary, site_withheld, settings):
     for site in prange(start, stop):
-        q, support, _ = site_refit(gl[:, site], observed[:, site], cavity, background[site])
+        q, support, shell, info, boundary = site_posterior.site_marginals(
+            gl[:, site], observed[:, site], cavity, background[site], settings)
         probabilities[:, site] = q
         supporters[:, site] = support
+        site_info[:, site] = info
+        site_boundary[site] = boundary
+        if info[site_posterior.INFO_MULTIMODAL]:
+            # Two comparable, unconnected posterior basins: release nothing here.
+            site_withheld[site] = 0
+            continue
+        withheld = 0
         for i in range(len(result)):
+            # Carrier support (site_posterior): two samples each more likely than
+            # not carrying founder i, or an expected carrier mass of two.
             if support[i] >= 2:
-                if q[i] >= threshold:
-                    result[i, site] = 1
-                elif 1 - q[i] >= threshold:
-                    result[i, site] = 0
+                if q[i] >= threshold or 1 - q[i] >= threshold:
+                    # Shell guard (ball regime only; shell is zero otherwise).
+                    if site_posterior.guard_withholds(q[i], shell[i], threshold, settings):
+                        withheld += 1
+                    elif q[i] >= threshold:
+                        result[i, site] = 1
+                    else:
+                        result[i, site] = 0
+        site_withheld[site] = withheld
 
 def refit_component(
     h,
@@ -189,8 +156,7 @@ def refit_component(
     centers,
     threshold,
     background_mass,
-    rate,
-    projection_only=False
+    rate
 ):
     parallel.apply_dynamic_threads()
     emission, background = emission_grid(h, gl, observed, starts, stops, .01)
@@ -199,11 +165,16 @@ def refit_component(
     result = h.copy()
     probabilities = np.full(h.shape, .5)
     supporters = np.zeros(h.shape)
-    for b in range(0 if projection_only else len(starts)):
+    site_info = np.zeros((site_posterior.INFO_FIELDS, h.shape[1]), np.int64)
+    site_boundary = np.zeros(h.shape[1])
+    site_withheld = np.zeros(h.shape[1], np.int64)
+    settings = site_posterior.settings()
+    for b in range(len(starts)):
         parallel.apply_dynamic_threads()
         refit_sites(result, probabilities, supporters, gl, observed, cavity[:, b], background,
-                    starts[b], stops[b], threshold)
-    return result, probabilities, supporters, posterior
+                    starts[b], stops[b], threshold, site_info, site_boundary, site_withheld, settings)
+    return (result, probabilities, supporters, posterior,
+            site_posterior.summarize_sites(site_info, site_boundary, site_withheld))
 
 _ARRAYS = None
 _HANDLES = []
@@ -222,14 +193,15 @@ def _worker(task):
     local_gl = np.ascontiguousarray(gl[:, global_indices], dtype=np.float64)
     local_observed = np.ascontiguousarray(observed[:, global_indices])
     started = time.monotonic()
-    result, q, support, post = refit_component(h, local_gl, local_observed, starts, stops, centers,
-                                         options["threshold"], options["background_mass"], options["rate"], options.get("projection_only", False))
+    result, q, support, post, posterior_report = refit_component(
+        h, local_gl, local_observed, starts, stops, centers,
+        options["threshold"], options["background_mass"], options["rate"])
     wildcard = np.empty((len(starts), len(gl)), np.int8)
     for b in range(len(starts)):
         pairs = post[:, b].reshape(len(gl), -1).argmax(axis=1)
         k = len(h)
         wildcard[b] = (pairs // (k + 1) == k).astype(np.int8) + (pairs % (k + 1) == k)
-    return index, result, q, support, wildcard, time.monotonic() - started
+    return index, result, q, support, wildcard, time.monotonic() - started, posterior_report
 
 def worker(task):
     parallel.increment_active()
@@ -273,9 +245,6 @@ def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromos
         representatives = np.sort(representatives)
         h = np.ascontiguousarray(inference[representatives])
         template = np.ascontiguousarray(super_block.discrete_haps[representatives])
-        if len(h) > options["max_k"]:
-            skipped.append((super_index, "enumeration_cap"))
-            continue
         starts = np.r_[0, np.cumsum([len(originals[b].positions) for b in block_ids])[:-1]].astype(np.int64)
         stops = np.r_[starts[1:], len(positions)].astype(np.int64)
         centers = np.array([np.mean(originals[b].positions) for b in block_ids])
@@ -318,7 +287,7 @@ def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromos
             batch_task_count=len(tasks), startup_target=workers, startup_ready=0).items()}
         with parallel.ForkserverPool(workers, initializer=initialize,
                 initargs=(metadata, cpus, active, extra, startup)) as pool:
-            for index, result, q, support, wildcard, seconds in pool.imap_unordered(
+            for index, result, q, support, wildcard, seconds, posterior_report in pool.imap_unordered(
                 worker,
                 tasks,
                 chunksize=1
@@ -331,7 +300,8 @@ def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromos
                 changes = int(((result >= 0) & (template >= 0) & (result != template)).sum())
                 fills = int(((result >= 0) & (template < 0)).sum())
                 diagnostics.append(dict(component=index, founders=len(result), seconds=seconds,
-                                         allele_changes=changes, filled_alleles=fills))
+                                         allele_changes=changes, filled_alleles=fills,
+                                         site_posterior=posterior_report))
                 for b, lo, hi, slots in zip(block_ids, starts, stops, wildcard):
                     panel = result[:, lo:hi]
                     _, unique = np.unique(panel, axis=0, return_index=True)
@@ -343,6 +313,9 @@ def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromos
                          for i, row in enumerate(panel)}, keep_flags=copy.deepcopy(old.keep_flags),
                          genotype_evidence_mode=old.genotype_evidence_mode)
                     block.discrete_haps = panel
+                    # The distinct local sequences of this context's founders:
+                    # path selection codes rows they claim as founder parameters.
+                    block.context_founder_rows = panel.copy()
                     block.n_directional_site_supporters = support[unique, lo:hi].copy()
                     block.feedback_posterior_alt = q[unique, lo:hi].copy()
                     block.founder_alt_pseudo_probability = q[unique, lo:hi].copy()
@@ -370,153 +343,17 @@ def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromos
                         sum(x["allele_changes"] for x in diagnostics),
                         flush=True
                     )
+                if completed == len(tasks):
+                    totals = {key: sum(x["site_posterior"][key] for x in diagnostics) for key in (
+                        "cube_sites", "core_cube_sites", "core_ball_sites", "bp_nonconverged",
+                        "ascent_backstop_hits", "recentre_backstop_hits", "complement_mode_sites",
+                        "multimodal_abstained", "guard_withheld")}
+                    print("FEEDBACK site posterior", " ".join(f"{key}={value}" for key, value in totals.items()),
+                          "max_founders", max(x["founders"] for x in diagnostics), flush=True)
+        # Pool results arrive in completion order; report them by component.
+        diagnostics.sort(key=lambda item: item["component"])
         return output, dict(components=diagnostics, skipped=skipped, options=options,
                            changed_alleles=sum(x["allele_changes"] for x in diagnostics),
                            filled_alleles=sum(x["filled_alleles"] for x in diagnostics))
-    finally:
-        parallel.close_shared_memory(handles, unlink=True)
-
-
-def select_worker(task):
-    """One local selection, using the same shared GL/mask pool initializer."""
-    from .candidate_selection import select_candidate_panel
-    from .candidate_rescue import CandidateRescueConfig, rescue_candidate_panel, reduce_empty_rows
-    index, indices, latent, proposals, config, selection = task
-    parallel.increment_active()
-    try:
-        gl, observed = _ARRAYS
-        evidence = np.ascontiguousarray(gl[:, indices], dtype=np.float64)
-        mask = np.ascontiguousarray(observed[:, indices])
-        competing = select_candidate_panel(evidence, observed_mask=mask,
-            original_latent=latent, proposal_panels=proposals, config=config)
-        # Source endpoints are cavity-ranked even though the competing bank
-        # is BIC-ranked. Reusing their fits avoids a second full bank search.
-        backbone = next(value for value in reversed(competing.cavity_source_results)
-                        if value is not None)
-        result = rescue_candidate_panel(evidence, observed_mask=mask,
-            feedback=backbone, competing=dict(discrete_haps=competing.discrete_haps,
-                latent_haps=competing.selected_mode.haplotypes),
-            config=CandidateRescueConfig(discovery=config.discovery), selection=selection)
-        result = reduce_empty_rows(evidence, mask, result,
-            config=config.discovery, selection=selection)
-        result["diagnostic"]["candidate_selection"] = competing.diagnostic
-        return index, result
-    finally:
-        set_num_threads(1)
-        parallel.release_dynamic_extra()
-        parallel.decrement_active()
-
-
-def materialize_selected_block(original, result, observed):
-    """Release only supported calls, preserving the original marker layout."""
-    keep = (np.ones(len(original.positions), dtype=bool) if original.keep_flags is None
-            else np.asarray(original.keep_flags) > 0)
-    k = len(result["discrete_haps"])
-    calls = np.full((k, len(keep)), -1, dtype=np.int8)
-    q = np.full(calls.shape, .5)
-    support = np.zeros(calls.shape, dtype=np.int64)
-    calls[:, keep] = result["discrete_haps"]
-    q[:, keep] = result["q"]
-    support[:, keep] = result["support"]
-    public_q = np.where(calls >= 0, q, .5)
-    block = BlockResult(original.positions.copy(),
-        {i: np.stack((1 - public_q[i], public_q[i]), axis=-1) for i in range(k)},
-        keep_flags=copy.deepcopy(original.keep_flags),
-        genotype_evidence_mode=original.genotype_evidence_mode)
-    block.discrete_haps = calls
-    block.founder_alt_pseudo_probability = q
-    block.n_directional_site_supporters = support
-    block.founder_allele_pseudo_confidence = np.maximum(q, 1 - q)
-    block.pair_assignments = np.asarray(result["assignments"], dtype=np.int64)
-    depth = np.any(observed[:, keep], axis=1)
-    block.sample_has_observed_kept_depth = depth
-    block.wildcard_slots = np.where(depth, (block.pair_assignments == k).sum(axis=1), 2)
-    block.wildcard_mass = float(block.wildcard_slots[depth].sum() / max(2 * depth.sum(), 1))
-    for name in ("missing_aware_break_before", "missing_aware_break_after"):
-        if hasattr(original, name):
-            setattr(block, name, getattr(original, name))
-    return block
-
-
-def select_blocks(originals, proposals, gl, sites, observed, cpus, config, selection,
-                  checkpoint_io):
-    """Parallel local selection with resumable 128-block checkpoint batches."""
-    output = BlockResults(list(originals))
-    diagnostics = [None] * len(originals)
-    batch_size = 128
-    pending = []
-    batches = {}
-    for start in range(0, len(originals), batch_size):
-        phase = f"batch{start:06d}"
-        saved = checkpoint_io.load(phase)
-        if saved is not None:
-            for index, block, diagnostic in saved:
-                output.blocks[index] = block
-                diagnostics[index] = diagnostic
-            continue
-        batches[start] = []
-        for index in range(start, min(start + batch_size, len(originals))):
-            block = originals[index]
-            keep = (np.ones(len(block.positions), dtype=bool) if block.keep_flags is None
-                    else np.asarray(block.keep_flags) > 0)
-            indices = np.searchsorted(sites, block.positions)
-            if not np.array_equal(sites[indices], block.positions):
-                raise ValueError("feedback block sites are not aligned to the raw evidence")
-            mode = getattr(block, "cavity_selected_mode", None)
-            if mode is None or not keep.any() or not observed[:, indices[keep]].any():
-                diagnostic = dict(skipped="no_fitted_local_mode_or_observed_kept_sites")
-                diagnostics[index] = diagnostic
-                # Strip large raw arrays from a fallback checkpoint without
-                # modifying the original block discovery object.
-                fallback = copy.copy(block)
-                fallback.reads_count_matrix = fallback.probs_array = None
-                output.blocks[index] = fallback
-                batches[start].append((index, fallback, diagnostic))
-                continue
-            panels = []
-            for proposal in proposals:
-                if not np.array_equal(proposal[index].positions, block.positions):
-                    raise ValueError("feedback proposal sites differ from original block")
-                panels.append(np.ascontiguousarray(proposal[index].discrete_haps[:, keep]))
-            pending.append((index, indices[keep], mode.haplotypes, panels, config, selection))
-
-    def save_complete(start):
-        rows = batches[start]
-        if len(rows) == min(batch_size, len(originals) - start):
-            checkpoint_io.save(f"batch{start:06d}", sorted(rows, key=lambda row: row[0]))
-            del batches[start]
-
-    for start in list(batches):
-        save_complete(start)
-    if not pending:
-        return output, diagnostics
-    workers = min(cpus, len(pending))
-    handles = []
-    metadata = []
-    try:
-        for array in (gl, observed):
-            handle, meta = parallel.create_shared_array(array)
-            handles.append(handle)
-            metadata.append(meta)
-        context = parallel.forkserver_context
-        active = context.Value("i", 0)
-        extra = context.Value("i", 0)
-        startup = {name: context.Value("i", value) for name, value in dict(
-            started_counter=0, participant_counter=0, batch_generation=0,
-            batch_task_count=len(pending), startup_target=workers, startup_ready=0).items()}
-        print(f"[Feedback selection] {len(pending)} blocks; {workers} workers, "
-              f"1 initial thread each, dynamic ceiling {cpus}; {selection}", flush=True)
-        with parallel.ForkserverPool(workers, initializer=initialize,
-                initargs=(metadata, cpus, active, extra, startup)) as pool:
-            for index, result in pool.imap_unordered(select_worker, pending, chunksize=1):
-                block = originals[index]
-                indices = np.searchsorted(sites, block.positions)
-                selected = materialize_selected_block(block, result, observed[:, indices])
-                output.blocks[index] = selected
-                diagnostics[index] = result["diagnostic"]
-                start = index // batch_size * batch_size
-                batches[start].append((index, selected, result["diagnostic"]))
-                save_complete(start)
-        return output, diagnostics
     finally:
         parallel.close_shared_memory(handles, unlink=True)

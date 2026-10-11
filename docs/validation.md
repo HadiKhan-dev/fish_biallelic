@@ -10,6 +10,80 @@ and 20/100/200 sample cohorts. The 22 template contigs are chr1–20, chr22 and 
 Seeds400–402 are development data; seed401 was held out specifically when
 choosing the family phase stopping rule, not from all project development.
 
+## Review-campaign defaults against `e993604` — 11 October 2026
+
+The defaults committed on 11 October 2026 combine the changes of a review
+campaign (29 September–11 October 2026) on top of commit `e993604`; the
+[methods](methods.md), [founder scaling](founder_scaling.md),
+[running](running.md) and [performance](performance.md) pages describe them.
+During the campaign each change was compared with the preceding combination,
+not with `e993604`, on six known-truth simulations (N80 standard and stress
+controls, F3 family and F6 advanced-intercross designs, and two real-like
+six-founder designs) and, for plausibility only, on the real Tropheops cross.
+The final combination reproduced its predecessor's accepted results on four
+end-to-end designs (three of the simulations and the real cross): published
+outputs and founder benchmark scorecards were identical, apart from documented
+exact-tie row orders in intermediate panels and new count-diagnostic fields.
+
+A matched end-to-end comparison against `e993604` then used the default
+design (20/100/200 cohorts, 5×, 22 chromosomes, flat 5 cM/Mb generating and
+inference rate) with seeds 10000 and 10001, which no development step had
+used. Both versions simulated the same pedigree for each seed (identical truth
+pedigree files); the read simulator is unchanged for this design. Truth was
+opened only for evaluation.
+
+| Final product | `e993604`, seed10000 | New, seed10000 | `e993604`, seed10001 | New, seed10001 |
+| --- | ---: | ---: | ---: | ---: |
+| Exact observed-parent configurations | 320/320 | 320/320 | 320/320 | 320/320 |
+| Correct / extra / missing pedigree edges | 600 / 0 / 0 | 600 / 0 / 0 | 600 / 0 / 0 | 600 / 0 / 0 |
+| Chromosomes with six chromosome-length founder rows | 22/22 | 22/22 | 22/22 | 22/22 |
+| Founder allele errors / called alleles | 4,152 / 53,740,998 | 135 / 53,740,951 | 2,556 / 53,741,099 | 24 / 53,741,098 |
+| Founder errors per million called alleles | 77.3 | 2.5 | 47.6 | 0.45 |
+| Uncalled founder alleles | 114 | 161 | 13 | 14 |
+| Sample genotype errors per million called genotypes | 200.7 | 167.9 | 193.8 | 166.8 |
+| Final phase switches / eligible comparisons | 1,043 / 500,510,879 | 599 / 500,798,915 | 1,203 / 485,357,350 | 649 / 485,683,172 |
+| Component-aligned allele errors per million | 309.7 | 335.9 | 325.8 | 328.2 |
+
+Founder allele errors were lower on all 44 chromosome comparisons; 28 of the
+44 new founder panels had none. Uncalled founder alleles were equal on 41
+chromosomes, higher on two (seed10000 chr3: 99 to 150; seed10001 chr23: 1 to
+2) and lower on one. Component-aligned allele errors score each sample under
+one strand orientation per phase component, so a switch in the middle of a
+long component costs many alleles. On the chromosomes where that count rose,
+phase switches and genotype errors fell (for example seed10000 chr2: 26 to 20
+switches, 21,088 to 18,426 genotype errors, 42,408 to 85,314 aligned allele
+errors). This was not investigated further.
+
+The campaign's designs record one accepted trade-off: in the F3 family design,
+the two-carrier release rule raised final phase switch errors from 66 to 152
+(3.7 to 8.5 per million comparisons) while genotype errors fell 2.6%; exact
+Tier B configurations fell from 69 to 67 and extra pedigree edges from 3 to 1.
+
+Cost rose. On identical 48-CPU Ice Lake allocations, the chromosome shards and
+the genome-wide final step used 317 CPU-hours for `e993604` (seed10001; 321 for
+seed10000) and 817 CPU-hours for the new defaults (seed10001), 2.6 times as
+much. Reconstruction (block feedback, L1–L4 assembly, founder refinement and
+painting) accounts for the difference: 764 versus 270 CPU-hours. The
+genome-wide pedigree, phase and map step was similar (45 versus 40). One
+uninterrupted run of the new defaults on a single 112-CPU Sapphire Rapids node
+(seed10000, simulation through truth evaluation) took **6 h 31 min**, or 6.51
+node-hours, with mean CPU occupancy 0.84 and peak node memory 253 GiB:
+
+| Phase | Wall time |
+| --- | ---: |
+| Founder templates and read simulation | 7.5 min |
+| Block discovery | 24 min |
+| Reconstruction, three chromosomes at a time | 5 h 36 min |
+| Pedigree evidence, scoring and exclusion | 13 min |
+| Allele refit, family phase and recombination maps | 9 min |
+| Truth evaluation | 1 min |
+
+A single-node timing of `e993604` is not part of this record. Checkpoints
+written by `e993604` are not accepted by this version, whose assembly and
+painting checkpoint formats changed; reproduce older runs with their frozen
+source. Records are kept locally in `claude_lab/review_20260929/` (outside the
+repository).
+
 ## Variable recombination-map campaigns — 27 September 2026
 
 Seeds 8002 and 8003 both completed the full 22-chromosome, N320, 5× pipeline

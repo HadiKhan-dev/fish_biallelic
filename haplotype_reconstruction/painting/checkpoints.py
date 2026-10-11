@@ -9,14 +9,14 @@ from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.painting.components as painting_components
 
-PAINTING_COMPONENT_CHECKPOINT_SCHEMA = "painting_checkpoint-component-painting-checkpoint-v4"
+PAINTING_COMPONENT_CHECKPOINT_SCHEMA = "painting_checkpoint-component-painting-checkpoint-v5"
 
 
 COMPONENT_PAINTING_PRODUCT_SCHEMA = "assembly-component-painting-product-v3"
 
 
 COMPONENT_PAINTING_PRODUCT_BACKEND = (
-    "unified-open-set-frozen-background-component-viterbi-posterior-v3"
+    "unified-open-set-frozen-background-component-viterbi-posterior-local-allele-release-v4"
 )
 
 
@@ -262,6 +262,14 @@ def _validate_ragged_diagnostics(
             or np.any(np.diff(edges) <= 0)
             or np.any((centers < edges[:-1]) | (centers >= edges[1:]))):
         raise ValueError("ragged bin coordinates are invalid")
+    keys = np.asarray(diagnostics.local_allele_class_keys)
+    expected_keys = module_painting_model.build_local_allele_class_keys(
+        alleles,
+        np.searchsorted(positions, edges[:-1], side="left"),
+        np.searchsorted(positions, edges[1:], side="left"),
+    )
+    if keys.shape != expected_keys.shape or not np.array_equal(keys, expected_keys):
+        raise ValueError("ragged local allele-equivalence keys disagree with the named alleles")
     expected_grid = (sample_count, 2, len(centers))
     labels = np.asarray(diagnostics.map_label_grid)
     class_grid = np.asarray(diagnostics.map_state_class_grid)
@@ -297,6 +305,7 @@ def _validate_ragged_diagnostics(
     posterior_names = (
         "posterior_max_class_mass",
         "posterior_viterbi_public_class_mass",
+        "posterior_viterbi_local_class_mass",
         "posterior_class_entropy",
         "posterior_background_mass",
         "posterior_public_unknown_mass",
@@ -336,6 +345,19 @@ def _validate_ragged_diagnostics(
         raise ValueError("ragged Viterbi public posterior exceeds public maximum")
     if np.any(background_mass[eligible] > unknown_mass[eligible] + tolerance):
         raise ValueError("ragged BACKGROUND mass exceeds public UNKNOWN mass")
+    qa = np.asarray(diagnostics.posterior_viterbi_local_class_mass)
+    if np.any(qa[eligible] < qv[eligible] - tolerance):
+        raise ValueError("ragged local allele-class posterior is below the public one")
+    support = np.asarray(diagnostics.viterbi_direct_support)
+    if (support.shape != expected_grid or support.dtype != np.bool_
+            or np.any(support[~eligible])
+            or np.any(support & (viterbi_grid == background_index))):
+        raise ValueError("ragged direct-support grid is invalid")
+    reordered = module_painting_model.allele_parsimonious_track_order(
+        np.ascontiguousarray(viterbi_grid, dtype=np.int32),
+        np.ascontiguousarray(keys, dtype=np.int32), background_index)
+    if not np.array_equal(reordered, viterbi_grid):
+        raise ValueError("ragged Viterbi track order is not allele-parsimonious at ties")
     status_type = module_painting_model.PaintingTrackStatus
     class_status = np.full(len(classes) + 1, int(status_type.BACKGROUND),
                            dtype=np.uint8)
@@ -353,7 +375,17 @@ def _validate_ragged_diagnostics(
     expected_status = class_status[state_indices]
     expected_labels = class_labels[state_indices]
     expected_classes = viterbi_grid.copy()
-    low = np.broadcast_to((qv < threshold)[:, None,:], expected_grid)
+    # Staged release: public classes at qV >= tau, otherwise directly
+    # supported local allele classes at qA >= tau, otherwise abstention.
+    stage_one = qv >= threshold
+    bins = np.arange(len(centers))[None, None, :]
+    multi = module_painting_model.multi_member_local_states(keys)[bins, state_indices]
+    stage_two = (~stage_one) & (qa >= threshold) & ~np.any(multi & ~support, axis=1)
+    local = stage_two[:, None, :] & multi
+    expected_status[local] = int(status_type.LOCAL_ALLELE_EQUIVALENCE)
+    expected_labels[local] = -1
+    expected_classes[local] = keys[bins, state_indices][local]
+    low = np.broadcast_to(~(stage_one | stage_two)[:, None,:], expected_grid)
     expected_status[low] = int(status_type.LOW_POSTERIOR_ABSTENTION)
     expected_labels[low] = -1
     expected_classes[low] = -1
@@ -367,11 +399,14 @@ def _validate_ragged_diagnostics(
     if not np.array_equal(labels, expected_labels):
         raise ValueError("ragged released labels disagree with class semantics")
     source_status = (
-        (statuses == int(module_painting_model.PaintingTrackStatus.SINGLETON_NAMED))
-        | (statuses == int(module_painting_model.PaintingTrackStatus.POOLED_EQUIVALENCE))
+        (statuses == int(status_type.SINGLETON_NAMED))
+        | (statuses == int(status_type.POOLED_EQUIVALENCE))
+        | (statuses == int(status_type.LOCAL_ALLELE_EQUIVALENCE))
     )
     if np.any(direct & ~source_status):
         raise ValueError("ragged direct callability requires represented ancestry")
+    if not np.array_equal(direct, support & (class_grid >= 0)):
+        raise ValueError("ragged direct callability disagrees with the direct-support grid")
 
     for name in ("biological_switch_counts", "structural_handoff_counts"):
         value = np.asarray(getattr(diagnostics, name))
@@ -388,12 +423,13 @@ def _validate_ragged_diagnostics(
         raise ValueError("ragged HMM batch exceeds the sample count")
 
 
-def _chunks_match_label_bins(chunks, centers, labels):
+def _chunks_match_label_bins(chunks, centers, labels, member_ids, member_sets):
     """Check half-open chunk coverage in O(C log M + M), without a C-by-M scan.
 
     Difference arrays count covering intervals and sum their one-based IDs.
     Exactly one covering interval makes that sum its unique owner. This also
     preserves overlap/gap detection and does not require chunks to be sorted.
+    Each bin's owner must carry the bin's ordered labels and member sets.
     """
     if not len(centers):
         return True
@@ -415,10 +451,17 @@ def _chunks_match_label_bins(chunks, centers, labels):
     selected = np.cumsum(owner[:-1]) - 1
     hap1 = np.asarray([chunk.hap1 for chunk in chunks])[selected]
     hap2 = np.asarray([chunk.hap2 for chunk in chunks])[selected]
-    return bool(np.all(
-        ((hap1 == labels[0]) & (hap2 == labels[1]))
-        | ((hap1 == labels[1]) & (hap2 == labels[0]))
-    ))
+    if not (np.array_equal(hap1, labels[0]) and np.array_equal(hap2, labels[1])):
+        return False
+    index = {members: position for position, members in enumerate(member_sets)}
+    for track, field in enumerate(("hap1_members", "hap2_members")):
+        stored = [getattr(chunk, field, None) for chunk in chunks]
+        if any(not isinstance(members, tuple) for members in stored):
+            return False
+        ids = np.asarray([index.get(members, -1) for members in stored], dtype=np.int64)
+        if not np.array_equal(ids[selected], member_ids[track]):
+            return False
+    return True
 
 
 def validate_painting_checkpoint(
@@ -546,6 +589,7 @@ def validate_painting_checkpoint(
             )
 
         samples = getattr(component.painting, "samples", None)
+        member_ids = member_sets = None
         if samples is None or len(samples) != len(sample_ids):
             raise ValueError(
                 f"painting component {component_id} sample count mismatch"
@@ -557,6 +601,13 @@ def validate_painting_checkpoint(
                 )
             chunks = tuple(getattr(sample, "chunks", ()))
             diagnostics = component.ragged_diagnostics
+            if diagnostics is not None and member_ids is None:
+                member_ids, member_sets = module_painting_model.released_track_members(
+                    np.asarray(diagnostics.track_status_grid),
+                    np.asarray(diagnostics.map_state_class_grid),
+                    np.asarray(diagnostics.local_allele_class_keys),
+                    diagnostics.equivalence_classes,
+                )
             if diagnostics is not None:
                 if not eligible[sample_index]:
                     if chunks:
@@ -568,7 +619,8 @@ def validate_painting_checkpoint(
                     centers = np.asarray(diagnostics.bin_centers)
                     expected_grid = np.asarray(diagnostics.map_label_grid)
                     if not _chunks_match_label_bins(
-                            chunks, centers, expected_grid[sample_index]):
+                            chunks, centers, expected_grid[sample_index],
+                            member_ids[sample_index], member_sets):
                         raise ValueError(
                             f"painting component {component_id} chunks disagree "
                             "with released label bins"

@@ -65,6 +65,9 @@ class ProjectedRaggedQuadraticModel:
     bridge_large_index: np.ndarray  # -1 unless one-large/star
     bridge_operator_pivot: np.ndarray  # bounded-factor operator pivot
     bridge_same_state_joint_mass: np.ndarray  # candidates, boundaries, S
+    # Weight k of the uniform selector kernel mixed into each bridge at
+    # scoring time, T' = (1-k) T + k U; zero where the parent has support.
+    bridge_excursion_probability: np.ndarray  # candidates, boundaries
     state_alt_probability: np.ndarray  # S, selected sites (bin-major)
     selected_input_order: np.ndarray
     bin_start: np.ndarray
@@ -105,6 +108,7 @@ class ProjectedRaggedQuadraticModel:
             self.bridge_large_index,
             self.bridge_operator_pivot,
             self.bridge_same_state_joint_mass,
+            self.bridge_excursion_probability,
             self.state_alt_probability,
             self.selected_input_order,
             self.bin_start,
@@ -164,8 +168,14 @@ def prepare_projected_ragged_quadratic(
     candidate_selector_switch_probability=0.01,
     sinkhorn_tolerance: float=2e-13,
     sinkhorn_max_iterations: int=128,
+    source_gap_support_sites: int=1,
 ) -> ProjectedRaggedQuadraticModel:
-    """Prepare the transmitted-marginal approximation from exact factors."""
+    """Prepare the transmitted-marginal approximation from exact factors.
+
+    ``source_gap_support_sites`` is PedigreeConfig's
+    ``parent_state_source_gap_support_sites``: the weight of the uniform
+    selector kernel mixed into each bridge at scoring time.
+    """
 
     started = time.perf_counter()
     candidates = factors.n_candidates
@@ -210,6 +220,21 @@ def prepare_projected_ragged_quadratic(
         bins - 1,
         "candidate selector switch",
     )
+    # A parent bin without informative markers carries only the painter's
+    # interpolation, whose switch penalty is not a probability. Such bridges
+    # take the meiotic switch probability k as a uniform excursion weight,
+    # scaled by 1 - min(1, n/N) for the smaller adjacent informative count n.
+    support = int(source_gap_support_sites)
+    if support < 0:
+        raise ValueError("source_gap_support_sites must be nonnegative")
+    excursion = np.zeros((candidates, bins - 1), dtype=np.float64)
+    if support > 0 and bins > 1:
+        informative = observed & (np.ptp(candidate_gl, axis=2) > 1e-12)
+        cumulative = np.zeros((candidates, len(order) + 1), dtype=np.int64)
+        np.cumsum(informative, axis=1, out=cumulative[:, 1:])
+        per_bin = cumulative[:, bin_stop] - cumulative[:, bin_start]
+        adjacent = np.minimum(per_bin[:, :-1], per_bin[:, 1:])
+        excursion = selector * (1.0 - np.minimum(1.0, adjacent / support))
     transition = factors.transition
     same = np.ascontiguousarray(np.asarray(transition.same, dtype=np.float64))
     one = np.ascontiguousarray(np.asarray(transition.one_change, dtype=np.float64))
@@ -285,6 +310,7 @@ def prepare_projected_ragged_quadratic(
         bridge_large_index=np.ascontiguousarray(large_index),
         bridge_operator_pivot=np.ascontiguousarray(operator_pivot),
         bridge_same_state_joint_mass=np.ascontiguousarray(diagonal_flow),
+        bridge_excursion_probability=np.ascontiguousarray(excursion),
         transition=transition,
         state_alt_probability=state_alt,
         selected_input_order=np.ascontiguousarray(order),
@@ -480,6 +506,7 @@ def score_projected_ragged_quadratic(
         projected.bridge_row_arm,
         projected.bridge_column_arm,
         projected.bridge_operator_pivot,
+        projected.bridge_excursion_probability,
     )
     if reuse_scores is None:
         m0_started = time.perf_counter()

@@ -1,77 +1,75 @@
-"""Bounded-refit assembly search using exact fixed-painting edit statistics.
+"""Certified panel search: same-count moves under the join likelihood, counts by the count rule.
 
-Conditional gains generate proposals, not reoptimized likelihoods. Every
-accepted panel is checked by the existing full Viterbi/BIC objective. Compared
-with the optional broader search, this heuristic can miss beneficial repainting moves.
-With an O(K) input candidate pool and fixed batch width, each sweep has
-O(N*m*K**2 + K**2*B*log(K)) work and a bounded number of full scores.
+Tier 1 is the bounded sweep: conditional fixed-painting gains generate same-count
+proposals and the best improving panel is accepted after an exact score (a proposal
+replacing one path is scored only on the samples its two-region bound leaves open,
+panel_certify.replacement_scores; elsewhere its value is V(P minus f) exactly). At every
+tier-1 stall the count step (panel_count, the pipeline's effective-carrier rule on
+the total gain and its sequence part) decides one death (after deleting every path
+without sequence of its own) or else one birth. Once the count step is quiescent, tier 2
+bounds every same-count move of an explicit K-scaled neighbourhood (panel_certify)
+and scores the survivors exactly (one-path moves only on the samples their bound
+leaves open); an improving move returns the search to tier 1. A same-count move must
+leave every changed path a private cell. A pool-saturation step re-runs the endpoint
+beam with doubled quotas before a panel is certified (up to 256 paths per endpoint,
+up to 1024 for a join whose 256 rung accepted a move). Each sweep has
+O(N*m*K**2 + K**2*B*log(K)) work (candidate scores only where a block-restart bound
+leaves a candidate's novelty open); a tier-2 pass O(N*m*K*(|C| + K**2)) (structural
+moves share forward prefixes and backward suffixes, panel_certify.structural_bounds); a
+count step O(N*m*K*|C|) plus sparse exact scores.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from heapq import nsmallest
 import math
+import time
+import numba
 import numpy as np
 from numba import njit, prange
 from numba.typed import List
 
+from . import panel_certify
+from . import panel_count
+from .founder import count_criterion
 from . import panel_scoring
 from . import chimera_scoring as scoring
 from . import chimera_kernels as kernels
 from .panel_candidates import (
-    continuous_candidate_scores, prepare_candidate_scores, replacement_proposals,
+    candidate_novelty, prepare_candidate_scores, replacement_proposals,
     local_proposals, boundary_proposals,
 )
-from ..discovery.objectives import compute_outer_bic_from_log_likelihood
-from .panel_rehousing import sequence_class_maps, rehousing_proposals, materialize_rehousing
+
+
+# Reported backstops, never expected to bind: total sweeps (tier-1 sweeps plus
+# accepted tier-2 moves) <= base + per_row * max_b K_b, and the pool-saturation
+# ladder. Every join doubles the endpoint quota up to POOL_QUOTA_DOUBLINGS times
+# (16 * 2**4 = 256 paths per endpoint); a join whose 256 rung accepted a move climbs
+# on, up to POOL_EXTENDED_DOUBLINGS (16 * 2**6 = 1024). A panel is certified only when
+# no rung up to its ladder top adds a move; a move accepted at 1024 is the reported
+# pool backstop.
+SWEEP_BACKSTOP_BASE = 100
+SWEEP_BACKSTOP_PER_ROW = 20
+POOL_QUOTA_DOUBLINGS = 4
+POOL_EXTENDED_DOUBLINGS = 6
 
 
 @dataclass(frozen=True)
 class PanelSearchConfig:
     paths_per_endpoint: int = 16
-    max_sweeps: int = 100
     full_scores_per_kind: int = 16
     max_bins: int = 2000
     tensor_budget_mb: int = 256
-    # Experimental until the independent assembly controls pass.
-    rehousing_full_scores: int = 0
 
     def __post_init__(self):
         for value in (
             self.paths_per_endpoint,
-            self.max_sweeps,
             self.full_scores_per_kind,
             self.max_bins,
             self.tensor_budget_mb
         ):
             if isinstance(value, bool) or int(value) != value or value < 1:
                 raise ValueError("panel search budgets must be positive integers")
-        if (isinstance(self.rehousing_full_scores, bool)
-                or int(self.rehousing_full_scores) != self.rehousing_full_scores
-                or self.rehousing_full_scores < 0):
-            raise ValueError("rehousing score budget must be a nonnegative integer")
-
-
-def configured_panel_search():
-    """None selects the optimized broader search in the shared hierarchy."""
-    from ..core.environment import assembly_panel_search
-    return PanelSearchConfig() if assembly_panel_search() == "bounded" else None
-
-
-def endpoint_select(candidates, block, quota):
-    """O(M log M) selection, retaining up to quota paths per endpoint state."""
-    kept = []
-    seen = set()
-    counts = {}
-    for candidate in sorted(candidates, key=lambda x: (-float(x[1]), tuple(x[0]))):
-        signature = tuple(candidate[0])
-        endpoint = signature[block]
-        if signature in seen or counts.get(endpoint, 0) >= quota:
-            continue
-        seen.add(signature)
-        counts[endpoint] = counts.get(endpoint, 0) + 1
-        kept.append(candidate)
-    return kept
 
 
 @njit(cache=True, parallel=True)
@@ -104,26 +102,6 @@ def conditional_fields(emission, painted, local_paths, panel_size):
                     # unordered pair is symmetrized after the parallel pass.
                     pair[first, second] += 2 * current - np.float64(emission[sample, a, a, site]) - np.float64(emission[sample, b, b, site])
     return unary, pair + pair.T
-
-
-@njit(cache=True, parallel=True)
-def birth_scores(emission, painted, local_paths, candidate_paths, panel_size):
-    """Optimistic local residual gain, used only to screen birth proposals."""
-    samples, _, _, bins = emission.shape
-    result = np.zeros(len(candidate_paths))
-    for candidate in prange(len(candidate_paths)):
-        h = candidate_paths[candidate]
-        gain = 0.
-        for sample in range(samples):
-            for site in range(bins):
-                state = painted[sample, site]
-                a, b = local_paths[state // panel_size], local_paths[state % panel_size]
-                current = np.float64(emission[sample, a, b, site])
-                alternative = max(np.float64(emission[sample, h, b, site]),
-                    np.float64(emission[sample, a, h, site]), np.float64(emission[sample, h, h, site]))
-                gain += max(0., alternative - current)
-        result[candidate] = gain
-    return result
 
 
 @njit(cache=True)
@@ -160,35 +138,53 @@ def _exclusion_scores(current):
 
 
 @njit(cache=True, parallel=True)
-def _stream_static_gains(totals, local, candidates, best, excluded):
-    """Accumulate blocks before mate maxima; retain only a K-vector per task."""
+def _stream_static_gains(totals, local, candidates, order, common, best, excluded, chunks):
+    """Accumulate blocks before mate maxima; retain only a K-vector per task.
+
+    Candidates are visited in sorted order (order, common = leading blocks shared with the
+    previous one) in contiguous chunks, one task each: the block sums of a shared prefix are
+    reused, accumulated in block order as before; per candidate the samples are summed in order.
+    """
     samples, k = excluded.shape
+    blocks = len(totals)
     gains = np.zeros((len(candidates), k))
-    for candidate in prange(len(candidates)):
-        cross = np.empty(k)
+    count = len(order)
+    for chunk in prange(chunks):
+        lo = (count * chunk) // chunks
+        hi = (count * (chunk + 1)) // chunks
+        if lo >= hi:
+            continue
+        cross = np.empty((blocks + 1, k))
+        diagonal = np.empty(blocks + 1)
         for sample in range(samples):
-            cross[:] = 0.
-            diagonal = 0.
-            for block in range(len(totals)):
-                total = totals[block]
-                c = candidates[candidate, block]
-                diagonal += np.float64(total[sample, c, c])
+            for position in range(lo, hi):
+                candidate = order[position]
+                shared = 0 if position == lo else min(common[position], blocks)
+                if shared == 0:
+                    cross[0, :] = 0.
+                    diagonal[0] = 0.
+                for block in range(shared, blocks):
+                    total = totals[block]
+                    c = candidates[candidate, block]
+                    diagonal[block + 1] = diagonal[block] + np.float64(total[sample, c, c])
+                    for partner in range(k):
+                        cross[block + 1, partner] = (cross[block, partner]
+                                                     + np.float64(total[sample, c, local[partner, block]]))
+                row = cross[blocks]
+                winner = np.argmax(row)
+                first = row[winner]
+                second = -np.inf
                 for partner in range(k):
-                    cross[partner] += np.float64(total[sample, c, local[partner, block]])
-            winner = np.argmax(cross)
-            first = cross[winner]
-            second = -np.inf
-            for partner in range(k):
-                if partner != winner:
-                    second = max(second, cross[partner])
-            for removed in range(k):
-                retained = second if removed == winner else first
-                score = max(excluded[sample, removed], retained, diagonal)
-                gains[candidate, removed] += score - best[sample]
+                    if partner != winner:
+                        second = max(second, row[partner])
+                for removed in range(k):
+                    retained = second if removed == winner else first
+                    score = max(excluded[sample, removed], retained, diagonal[blocks])
+                    gains[candidate, removed] += score - best[sample]
     return gains.T
 
 
-def static_replacement_gains(sub, local, candidates, *, totals=None):
+def static_replacement_gains(sub, local, candidates, *, totals=None, workspace=None):
     """Exact all-replacement gains in the *no-switch* proposal objective.
 
     This allows pair reassignment, unlike fixed-painting deltas. Only two
@@ -196,7 +192,9 @@ def static_replacement_gains(sub, local, candidates, *, totals=None):
     second-best candidate partners handle all removed founders in O(K*M).
     No-switch scores screen proposals, not the final recombining model.
     The N*M*K candidate/mate tensor is streamed in native code, preserving
-    float64 block accumulation and the sample-reduction order.
+    float64 block accumulation and the sample-reduction order; candidates
+    sharing a prefix (workspace: prepare_candidate_scores' sorted order) share
+    its block sums.
     """
     if totals is None:
         totals = [item['bin_emissions'].sum(axis=3) for item in sub]
@@ -209,7 +207,11 @@ def static_replacement_gains(sub, local, candidates, *, totals=None):
         current += total[:, a[:, None], a[None,:]]
         arrays.append(total)
     best, excluded = _exclusion_scores(current)
-    return _stream_static_gains(arrays, local, candidates, best, excluded)
+    if workspace is None:
+        workspace = prepare_candidate_scores(sub, candidates)
+    _, order, common = workspace
+    chunks = max(1, min(len(order), 4 * max(1, numba.get_num_threads())))
+    return _stream_static_gains(arrays, local, candidates, order, common, best, excluded, chunks)
 
 
 def _cycle_permutation(preference):
@@ -266,9 +268,8 @@ def _improve_permutation(weights, permutation):
 
 
 def _materialize(description, selected, candidates):
+    """Panel after a same-count move (paths keep their slots)."""
     kind, *args = description
-    if kind == 'rehouse':
-        return materialize_rehousing(description, selected)
     result = [list(path) for path in selected]
     if kind == 'replace':
         founder, candidate = args
@@ -279,10 +280,6 @@ def _materialize(description, selected, candidates):
     elif kind == 'onesided':
         first, second, boundary = args
         result[first][boundary:] = selected[second][boundary:]
-    elif kind == 'merge':
-        first, second, boundary = args
-        result[first][boundary:] = selected[second][boundary:]
-        result.pop(second)
     elif kind == 'splice':
         first, second, boundary = args
         result[first][boundary:], result[second][boundary:] = result[second][boundary:], result[first][boundary:]
@@ -290,48 +287,127 @@ def _materialize(description, selected, candidates):
         boundary, permutation = args
         for first, second in enumerate(permutation):
             result[first][boundary:] = selected[second][boundary:]
-    elif kind == 'death':
-        remove = set(args[0])
-        result = [path for index, path in enumerate(result) if index not in remove]
-    elif kind == 'birth':
-        result.extend(list(candidates[index]) for index in args[0])
     else:
         raise ValueError(kind)
-    return list(dict.fromkeys(tuple(path) for path in result))
+    return [tuple(path) for path in result]
+
+
+def _admissible(old, new, geometry, exempt=frozenset()):
+    """A same-count move keeps k distinct paths, and every changed path owns sequence.
+
+    A changed path must keep a private cell and stay farther than the near-identity
+    tolerance from every other path; otherwise it would be a pure mosaic or a
+    near-duplicate (q = 0), which the count rule deletes, so the move would turn a
+    justified path into a deletion the count rule never decided. ``exempt`` slots (a seed
+    and its copy during their refit) may duplicate each other or lack novelty; their
+    panel is settled by the count rule afterwards.
+    """
+    if len(new) != len(old):
+        return False
+    checked = [i for i, (a, b) in enumerate(zip(old, new)) if a != b and i not in exempt]
+    if not exempt and len(set(new)) != len(new):
+        return False
+    if not checked:
+        return True
+    private = panel_count.private_mask(np.asarray(new, dtype=np.int64))
+    for i in checked:
+        if not private[i].any():
+            return False
+        others = [path for j, path in enumerate(new) if j != i]
+        if new[i] in others or geometry.near_identical(new[i], others):
+            return False
+    return True
+
+
+def search_summary(records_per_block):
+    """Per-level counts from the panel-search diagnostics of super-blocks."""
+    summary = dict(searched=0, certified=0, changed=0, tier2_accepted=0,
+                   saturation_accepted=0, tier2_passes=0, backstop_reached=0,
+                   pool_backstop=0, extended_ladders=0, largest_pool=0, births=0, deaths=0,
+                   pure_mosaic_deaths=0,
+                   ambiguous=0, frozen=0, cycles_undecided=0, most_decisions=0, start_rows=0,
+                   final_rows=0,
+                   seed_births=0, seed_swaps=0, seed_refits=0, ladder_births=0,
+                   trap_blocks=0, failing_final=0)
+    for records in records_per_block:
+        for record in records or ():
+            if 'certified' in record:
+                summary['searched'] += 1
+                summary['certified'] += bool(record['certified'])
+                accepted = record['tier2_accepted'] + record['saturation_accepted']
+                summary['changed'] += accepted > 0
+                summary['tier2_accepted'] += record['tier2_accepted']
+                summary['saturation_accepted'] += record['saturation_accepted']
+                summary['tier2_passes'] += record['tier2_passes']
+                summary['backstop_reached'] += bool(record['backstop_reached'])
+                summary['pool_backstop'] += bool(record['pool_backstop'])
+                # Records written before the targeted ladder (e.g. passthrough blocks of a level
+                # replayed from older checkpoints) never extended it.
+                summary['extended_ladders'] += bool(record.get('ladder_extended', False))
+                summary['largest_pool'] = max(summary['largest_pool'],
+                                              record['pool_sizes']['largest'])
+                count = record['count']
+                summary['births'] += count['births']
+                summary['deaths'] += count['deaths']
+                summary['pure_mosaic_deaths'] += count['pure_mosaic_deaths']
+                summary['ambiguous'] += count['ambiguous']
+                summary['frozen'] += bool(count['births_frozen'])
+                # Records written before T28 carry no cycle classification.
+                summary['cycles_undecided'] += count.get('cycles_undecided', 0)
+                summary['most_decisions'] = max(summary['most_decisions'], count['decisions'])
+                summary['start_rows'] += count['start_size']
+                summary['final_rows'] += record['final_panel_size']
+                for key in ('seed_births', 'seed_swaps', 'seed_refits', 'ladder_births'):
+                    summary[key] += count[key]
+                summary['trap_blocks'] += count['trap_indicators'] > 0
+                summary['failing_final'] += count['final_paths_failing_death_test'] or 0
+    return summary
 
 
 def evaluate_panel(paths, sub, penalty, samples, *, paint=False, per_sample=False,
                    tensor_budget_mb=256, num_threads=None):
-    """Same objective/traceback; score directly or bound traceback tensors.
+    """Same objective/traceback; score directly or paint (Viterbi traceback).
 
-    Samples factor independently. Scores stream existing block emissions;
-    traceback retains bounded sample chunks. Neither path prunes states or
-    changes an individual's dynamic program or the final sample reduction.
+    Samples factor independently. Scores stream existing block emissions; the
+    painting runs over unordered path pairs (panel_scoring.paint_emissions) in
+    sample chunks whose back pointers (int32, bins x pairs per sample) fit in
+    tensor_budget_mb. Neither path prunes states or changes an individual's
+    dynamic program or the final sample reduction.
     """
+    kernels._resolve_threads(num_threads)
     if not paint:
-        kernels._resolve_threads(num_threads)
         result = panel_scoring.score_panel(paths, sub, penalty, samples)
         return result if per_sample else float(result.sum())
+    arrays, indices = panel_scoring.panel_indices(paths, sub)
     bins = sum(item['n_bins'] for item in sub)
-    bytes_per_sample = max(1, len(paths) ** 2 * bins * 8)
+    bytes_per_sample = max(1, len(paths) * (len(paths) + 1) // 2 * bins * 4)
     chunk = max(1, min(samples, int(tensor_budget_mb * 1024 ** 2) // bytes_per_sample))
     result = np.empty((samples, bins), dtype=np.int32)
     for start in range(0, samples, chunk):
         stop = min(samples, start + chunk)
         kernels._resolve_threads(num_threads)
-        tensor = scoring._build_tensor_from_paths(paths, sub, samples,
-            sample_range=(start, stop), parallel_build=True)
-        result[start:stop] = kernels._viterbi_traceback(tensor, float(penalty))
-        del tensor
+        result[start:stop] = panel_scoring.paint_emissions(arrays, indices, float(penalty),
+                                                           start, stop)
     return result
 
 def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, global_sites,
-        *, config=PanelSearchConfig(), cc_scale=.5, num_threads=None, diagnostics=None):
-    """Scale the candidate search without changing the full acceptance score.
+        *, beam_runner, config=PanelSearchConfig(), cc_scale=.5, num_threads=None,
+        diagnostics=None):
+    """Certified same-count search under the join likelihood plus the pipeline's count rule.
 
-    Intermediate panels are bounded by the O(K) candidate-pool size rather
-    than a fixed founder count. Search iteration and exact-score counts are
-    explicit; no exhaustive refinement fallback is hidden in this route.
+    beam_runner(quota, overrides) re-runs the batch's endpoint beam with a base
+    quota and per-endpoint quotas. Same-count moves are accepted when they raise
+    the join likelihood and leave every changed path a private cell: tier 1 (the
+    bounded sweep) runs until it finds none; tier 2 then bounds every replace,
+    local, onesided and splice move of N(P, C) and scores the survivors exactly.
+    The count step (panel_count) runs at every tier-1 stall: paths without sequence of
+    their own are deleted, else one death or one birth is decided by the
+    effective-carrier rule on the total gain and its sequence part; tier 2 runs only
+    when it is quiescent. At a panel certified for both, the beam is re-run with the quota
+    doubled and replacements (same-count) and births (count rule) by the new paths
+    are tested the same way, up to quota 256, or up to 1024 once a move was accepted
+    at the 256 rung. The panel size follows from the count rule; the pool,
+    not a cap, bounds it. A reported backstop never decides a normal result.
     """
     samples = global_probs.shape[0]
     blocks = len(batch_blocks)
@@ -358,8 +434,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         evaluations += 1
         return evaluate_panel(keys(paths), sub, pen, samples, num_threads=num_threads,
             tensor_budget_mb=config.tensor_budget_mb, per_sample=True)
-    # Compare anchor-covering starts using the same full acceptance objective.
-    # A diverse input block can still poorly represent variation elsewhere.
+    # Start: the anchor-covering panel of largest likelihood. It only seeds the
+    # search; the count rule decides the panel size.
     initialization = []
     initial_panels = set()
     selected = None
@@ -376,89 +452,257 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         initial_panels.add(signature)
         trial_scores = score(trial)
         trial_ll = float(trial_scores.sum())
-        trial_bic = compute_outer_bic_from_log_likelihood(len(trial), trial_ll, cc)
-        initialization.append(dict(anchor=anchor, panel_size=len(trial), bic=float(trial_bic)))
-        if selected is None or trial_bic < bic - 1e-8:
-            selected, baseline_scores, likelihood, bic = trial, trial_scores, trial_ll, trial_bic
+        initialization.append(dict(anchor=anchor, panel_size=len(trial), likelihood=trial_ll))
+        if selected is None or trial_ll > likelihood + 1e-8:
+            selected, baseline_scores, likelihood = list(trial), trial_scores, trial_ll
             selected_anchor = anchor
-    local_classes = sequence_class_maps(batch_blocks) if config.rehousing_full_scores else None
+    start_size = len(selected)
     bin_offsets = np.r_[0, np.cumsum([item['n_bins'] for item in sub])]
-    candidate_array = np.asarray(candidates, dtype=np.int64)
-    candidate_workspace = prepare_candidate_scores(sub, candidate_array)
     static_totals = [item['bin_emissions'].sum(axis=3) for item in sub]
-    # Local birth gains depend on a candidate's row in this block, not its
-    # other chromosome segments. Score each distinct row once and scatter
-    # back in the original candidate order; all ranks remain unchanged.
-    birth_rows = [np.unique(candidate_array[:, b], return_inverse=True)
-                  for b in range(blocks)]
-    capacity = len(candidates)
-    for sweep in range(config.max_sweeps):
+    original_pool = candidates
+    original_set = set(original_pool)
+
+    def set_pool(pool):
+        """Tier-1 workspaces of the current candidate pool."""
+        nonlocal candidates, candidate_array, candidate_workspace, capacity
+        candidates = pool
+        candidate_array = np.asarray(candidates, dtype=np.int64)
+        candidate_workspace = prepare_candidate_scores(sub, candidate_array)
+        capacity = len(candidates)
+    candidate_array = candidate_workspace = capacity = None
+    set_pool(original_pool)
+    beam_cache = {}
+    beam_seconds = [0.0]
+
+    def extension_pool(quota, panel):
+        """C0 plus the beam with base quota and the panel's row multiplicity."""
+        counts = {}
+        for path in panel:
+            for block, row in enumerate(path):
+                counts[(block, row)] = counts.get((block, row), 0) + 1
+        overrides = {endpoint: quota * count for endpoint, count in counts.items()
+                     if count >= 2}
+        if quota == config.paths_per_endpoint and not overrides:
+            return original_pool
+        key = (quota, tuple(sorted(overrides.items())))
+        if key not in beam_cache:
+            if len(beam_cache) >= 4:
+                beam_cache.clear()
+            started = time.perf_counter()
+            paths = dict.fromkeys(tuple(path) for path, _ in beam_runner(quota, overrides))
+            beam_cache[key] = original_pool + [path for path in paths if path not in original_set]
+            beam_seconds[0] += time.perf_counter() - started
+        return beam_cache[key]
+
+    emissions = panel_certify.emission_list(sub)
+    total_bins = int(bin_offsets[-1])
+    block_offsets = np.ascontiguousarray(bin_offsets[:-1], dtype=np.int64)
+    block_sizes = [len(item['hap_keys']) for item in sub]
+    dense_to_local = [np.asarray([item['key_to_local_idx'][key]
+                                  for key in fast_mesh.reverse_mappings[b]], dtype=np.int64)
+                      for b, item in enumerate(sub)]
+
+    def to_local(paths):
+        paths = np.asarray(paths, dtype=np.int64).reshape(-1, blocks)
+        return np.stack([dense_to_local[b][paths[:, b]] for b in range(blocks)], axis=1)
+
+    def exact(trial):
+        trial_scores = score(trial)
+        trial_ll = float(trial_scores.sum())
+        return -2.0 * trial_ll, (trial_ll, trial_scores)
+
+    forwards_cache = {}
+
+    def panel_forwards(panel):
+        """Exclusion forwards of a panel (row order matters), kept for the last few panels: a
+        sweep, its stall, tier 2 and the saturation ladder often share one panel."""
+        key = tuple(map(tuple, panel))
+        found = forwards_cache.get(key)
+        if found is None:
+            kernels._resolve_threads(num_threads)
+            found = panel_certify.PanelForwards(emissions, to_local(np.asarray(panel)), pen,
+                                                total_bins)
+            if len(forwards_cache) >= 3:
+                forwards_cache.pop(next(iter(forwards_cache)))
+            forwards_cache[key] = found
+        return found
+
+    def certify(panel, pool, pool_offset, structural, pool_capacity, panel_ll=None, slots=None):
+        """Bound every same-count move of N(P, pool) (or only replacements by pool paths).
+
+        slots: a seed refit; only moves changing these rows, which are exempt from the
+        novelty rule of same-count moves."""
+        started = time.perf_counter()
+        panel_ll = likelihood if panel_ll is None else panel_ll
+        rows = np.asarray(panel, dtype=np.int64)
+        moves = panel_certify.Moves(rows, pool_capacity)
+        added = moves.add_pool(np.asarray(pool, dtype=np.int64).reshape(-1, blocks),
+                               pool_offset)
+        if structural:
+            moves.add_structural(block_sizes, slots)
+        moves.finish()
+        forwards = panel_forwards(panel)
         kernels._resolve_threads(num_threads)
-        k = len(selected)
-        painted = evaluate_panel(keys(selected), sub, pen, samples, paint=True,
+        bounds, sample_bounds = panel_certify.lower_bounds(moves, forwards, panel_ll, to_local,
+                                                           block_offsets)
+        # A seed refit moves the seed and its copy freely (no novelty rule for any path while the
+        # copies separate); its panel is settled by the count rule afterwards.
+        exempt = frozenset() if slots is None else frozenset(range(len(panel)))
+        if slots is not None:
+            replacing = moves.kind == panel_certify.REPLACE
+            bounds[replacing & ~np.isin(moves.first_removed, list(slots))] = np.inf
+        combined = candidates if not pool_offset else candidates + list(pool)
+        cache = {}
+        sparse = dict(scores=0, samples=0)
+
+        def exact_move(trial, move):
+            # A survivor replacing one path is scored exactly per sample where its bound exceeds
+            # V_n(P minus f) (one_path_move_scores); other moves by the full score.
+            if not cache:
+                cache['removal'] = forwards.removal_scores()
+                cache['local_new'] = np.ascontiguousarray(to_local(moves.new_paths))
+            kernels._resolve_threads(num_threads)
+            found = panel_certify.one_path_move_scores(
+                forwards, moves, cache['local_new'], cache['removal'], move, to_local(trial),
+                panel_count.score_samples, sample_bounds.get(move))
+            if found is None:
+                return exact(trial)
+            values, scored_samples = found
+            sparse['scores'] += 1
+            sparse['samples'] += scored_samples
+            trial_ll = float(values.sum())
+            return -2.0 * trial_ll, (trial_ll, values)
+
+        best_move, survivors, exact_scores = panel_certify.best_improvement(
+            bounds, moves.canonical,
+            lambda move: _materialize(moves.description(move), panel, combined),
+            exact_move, -2.0 * panel_ll, signature=lambda trial: tuple(sorted(trial)),
+            admissible=lambda trial: _admissible(panel, trial, geometry, exempt))
+        record = dict(panel_size=len(panel), pool=len(combined), pool_paths_tested=added,
+            neighbourhood=moves.counts(), moves=len(moves), survivors=int(survivors),
+            exact_scores=int(exact_scores), sparse_exact_scores=sparse['scores'],
+            sparse_exact_samples=sparse['samples'],
+            recomputed_exclusions_per_sample=float(forwards.recomputed_per_sample),
+            accepted=None if best_move is None else str(moves.description(best_move[2])),
+            accepted_likelihood_change=None if best_move is None else -0.5 * float(best_move[0]),
+            seconds=time.perf_counter() - started)
+        return best_move, record, forwards
+
+    geometry = panel_count.RowGeometry(batch_blocks)
+    counter = panel_count.CountStep(emissions=emissions, total_bins=total_bins,
+                                    offsets=block_offsets, penalty=pen,
+                                    cost=cc, samples=samples, geometry=geometry, to_local=to_local,
+                                    score=score)
+    sweep_forwards = None    # (panel, exclusion forwards, removal scores) of the last sweep's panel
+    born = set()             # paths added by births here, followed through same-count moves
+    births_frozen = False
+    # Panel size at the start and after every count change, and the changes that deleted a
+    # path without sequence of its own (count_criterion.pre_cycle_count; diagnostics only).
+    sizes = [start_size]
+    cleanup_steps = set()
+    count = dict(decisions=0, births=0, pool_births=0, seed_births=0, seed_swaps=0, deaths=0,
+                 pure_mosaic_deaths=0, ambiguous=0, births_frozen=False, start_size=start_size,
+                 cycles=0, cycles_undecided=0,
+                 trap_indicators=0, seed_refits=0, ladder_births=0, final_paths_failing_death_test=None,
+                 seconds=0.0, seed_seconds=0.0)
+    from .founder_refinement import COUNT_RANKED_REFITS as SEED_REFITS
+
+    def apply_same_count(new_panel, new_scores):
+        nonlocal selected, baseline_scores, likelihood
+        for old_path, new_path in zip(selected, new_panel):
+            if old_path in born and old_path != new_path:
+                born.discard(old_path)
+                born.add(new_path)
+        selected = list(new_panel)
+        baseline_scores = new_scores
+        likelihood = float(new_scores.sum())
+
+    def improves(new_ll, old_ll):
+        # The join score is -2 LL; t = max(1e-8, 1e-9 (1 + 2|LL|)) as in panel_certify.
+        return 2.0 * (new_ll - old_ll) > max(1e-8, 1e-9 * (1.0 + 2.0 * abs(old_ll)))
+
+    def tier1_sweep(panel, panel_scores, panel_ll):
+        """One bounded sweep at ``panel``: the best improving admissible move among the top
+        proposals of every same-count kind."""
+        nonlocal sweep_forwards
+        k = len(panel)
+        started = time.perf_counter()
+        sparse_scores = 0
+
+        def proposal_scores(trial):
+            # A proposal that replaces one path is scored exactly per sample where its two-region
+            # bound exceeds V_n(P minus f) (panel_certify.replacement_scores); others in full.
+            nonlocal sparse_scores, sweep_forwards
+            changed = [i for i, (old, new) in enumerate(zip(panel, trial)) if old != new]
+            if len(changed) != 1:
+                return score(trial)
+            if sweep_forwards is None or sweep_forwards[0] != tuple(panel):
+                forwards = panel_forwards(panel)
+                sweep_forwards = (tuple(panel), forwards, forwards.removal_scores())
+            kernels._resolve_threads(num_threads)
+            values, _ = panel_certify.replacement_scores(
+                sweep_forwards[1], sweep_forwards[2], changed[0], to_local([trial[changed[0]]])[0],
+                to_local(trial), panel_count.score_samples)
+            sparse_scores += 1
+            return values
+
+        kernels._resolve_threads(num_threads)
+        painted = evaluate_panel(keys(panel), sub, pen, samples, paint=True,
             num_threads=num_threads, tensor_budget_mb=config.tensor_budget_mb)
-        local = np.asarray(selected, dtype=np.int64)
+        local = np.asarray(panel, dtype=np.int64)
         fields = []
         corrections = []
-        birth = np.zeros(len(candidates))
         for b, em in enumerate(sub):
             painting = np.ascontiguousarray(painted[:, bin_offsets[b]:bin_offsets[b + 1]])
             unary, pair = conditional_fields(em['bin_emissions'], painting, local[:, b], k)
             fields.append(unary)
             corrections.append(pair)
-            unique_rows, inverse = birth_rows[b]
-            birth += birth_scores(
-                em['bin_emissions'], painting, local[:, b], unique_rows, k)[inverse]
-        selected_set = set(selected)
-        proposals = {
-            kind: [] for kind in ('replace', 'static_replace', 'novel_replace', 'novel_birth', 'local', 'onesided', 'merge', 'splice', 'cycle', 'switch_splice', 'switch_cycle', 'death', 'batch_death', 'birth')
-        }
-        candidate_scores = continuous_candidate_scores(sub, local, candidate_array, pen,
-            workspace=candidate_workspace)
-        novelty = np.maximum(candidate_scores - baseline_scores[:, None], 0.).sum(axis=0)
+        panel_set = set(panel)
+        proposals = {kind: [] for kind in same_count_kinds}
+        eligible = np.asarray([c for c, path in enumerate(candidates)
+                             if path not in panel_set], dtype=np.int64)
+        proposal_counts = {}
+        eligible_mask = np.zeros(len(candidates), dtype=bool)
+        eligible_mask[eligible] = True
+        novelty, novelty_scored = candidate_novelty(local, candidate_array, pen, panel_scores,
+                                                    eligible_mask, workspace=candidate_workspace)
         novel = [c for c in np.argsort(-novelty, kind='stable')
-               if candidates[c] not in selected_set and novelty[c] > 0]
+               if candidates[c] not in panel_set and novelty[c] > 0]
         for c in novel[:config.full_scores_per_kind]:
-            proposals['novel_birth'].append((float(novelty[c]), ('birth', (int(c),))))
             similarity = np.mean(local == candidate_array[c], axis=1)
             for founder in np.argsort(-similarity, kind='stable')[:2]:
                 proposals['novel_replace'].append((float(novelty[c] * (.5 + similarity[founder])),
                     ('replace', int(founder), int(c))))
-        eligible = np.asarray([c for c, path in enumerate(candidates)
-                             if path not in selected_set], dtype=np.int64)
-        static_gains = static_replacement_gains(sub, local, candidate_array, totals=static_totals)
-        proposals['static_replace'] = replacement_proposals(
-            static_gains, eligible, config.full_scores_per_kind)
+        static_gains = static_replacement_gains(sub, local, candidate_array, totals=static_totals,
+                                                workspace=candidate_workspace)
         gains = np.zeros((k, len(candidates)))
         for b in range(blocks):
             gains += fields[b][:, candidate_array[:, b]]
+        proposals['static_replace'] = replacement_proposals(
+            static_gains, eligible, config.full_scores_per_kind)
         proposals['replace'] = replacement_proposals(
             gains, eligible, config.full_scores_per_kind)
-        # Report all screened edits, though only the same top-q descriptions
-        # are materialized. Ranking remains before cross-kind de-duplication.
-        proposal_counts = {'replace': k * len(eligible), 'static_replace': k * len(eligible)}
+        proposal_counts['replace'] = proposal_counts['static_replace'] = k * len(eligible)
         proposals['local'], proposal_counts['local'] = local_proposals(
             fields, local, config.full_scores_per_kind)
-        for kind in ('onesided', 'merge'):
-            proposal_counts[kind] = (blocks - 1) * k * (k - 1)
-        for kind in ('splice', 'switch_splice'):
-            proposal_counts[kind] = (blocks - 1) * k * (k - 1) // 2
+        proposal_counts['onesided'] = (blocks - 1) * k * (k - 1)
+        proposal_counts['splice'] = (blocks - 1) * k * (k - 1) // 2
+        proposal_counts['switch_splice'] = proposal_counts['splice']
         # A lower-penalty painting reveals coordinated apparent switches.
-        # It generates proposals only; acceptance still uses the same pen/BIC.
-        exploratory = evaluate_panel(keys(selected), sub, min(pen, 10.), samples, paint=True,
+        # It generates proposals only; acceptance uses the join score at pen.
+        exploratory = evaluate_panel(keys(panel), sub, min(pen, 10.), samples, paint=True,
             num_threads=num_threads, tensor_budget_mb=config.tensor_budget_mb)
         preference = np.zeros((k, k))
         pair_gain = np.zeros((k, k))
         for boundary in range(blocks - 1, 0, -1):
             preference += fields[boundary][:, local[:, boundary]]
             pair_gain += corrections[boundary]
-            edits = boundary_proposals(preference, boundary,
-                config.full_scores_per_kind, 'onesided')
-            proposals['onesided'].extend(edits)
-            # The deleted row is repainted in the full merge acceptance.
-            proposals['merge'].extend((gain, ('merge', *description[1:]))
-                                     for gain, description in edits)
-            votes = scoring._step5_build_W_at_boundary(exploratory, int(bin_offsets[boundary]), k)
+            proposals['onesided'].extend(boundary_proposals(preference, boundary,
+                config.full_scores_per_kind, 'onesided'))
+            delta = preference + preference.T + pair_gain
+            proposals['splice'].extend(boundary_proposals(
+                delta, boundary, config.full_scores_per_kind, 'splice'))
+            votes = scoring.boundary_vote_matrix(exploratory, int(bin_offsets[boundary]), k)
             switch_gain = votes + votes.T - np.diag(votes)[:, None] - np.diag(votes)[None,:]
             proposals['switch_splice'].extend(boundary_proposals(
                 switch_gain, boundary, config.full_scores_per_kind, 'splice'))
@@ -466,9 +710,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             if np.any(permutation != np.arange(k)):
                 gain = float(votes[np.arange(k), permutation].sum() - np.trace(votes))
                 proposals['switch_cycle'].append((gain, ('cycle', boundary, tuple(map(int, permutation)))))
-            delta = preference + preference.T + pair_gain
-            proposals['splice'].extend(boundary_proposals(
-                delta, boundary, config.full_scores_per_kind, 'splice'))
             permutation = _cycle_permutation(preference)
             if np.any(permutation != np.arange(k)):
                 new = local.copy()
@@ -478,100 +719,338 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
                     gain += fixed_paint_delta(sub[b]['bin_emissions'],
                         painted[:, bin_offsets[b]:bin_offsets[b + 1]], local[:, b], new[:, b], k)
                 proposals['cycle'].append((float(gain), ('cycle', boundary, tuple(map(int, permutation)))))
-        occupancy = np.bincount((painted // k).ravel(), minlength=k) + np.bincount((painted % k).ravel(), minlength=k)
-        if k > 1:
-            # Prefer the cheapest whole-path reassignment under this painting.
-            # Rare paths can be indispensable; common duplicates dispensable.
-            # Homozygous states replace both copies in conditional_fields.
-            # These are proposal ranks, never final deletion acceptance scores.
-            reassignment = np.zeros((k, k))
-            for b in range(blocks):
-                reassignment += fields[b][:, local[:, b]]
-            np.fill_diagonal(reassignment, -np.inf)
-            deletion_gain = np.max(reassignment, axis=1)
-            if config.rehousing_full_scores:
-                proposals['rehouse'] = rehousing_proposals(
-                    local, local_classes, full_budget=config.rehousing_full_scores,
-                    fields=fields, deletion_gains=deletion_gain)
-            order = np.argsort(-deletion_gain, kind='stable')
-            for founder in order[:config.full_scores_per_kind]:
-                proposals['death'].append((float(deletion_gain[founder]), ('death', (int(founder),))))
-            # Balance batch births with nested reductions. Joint losses are
-            # NOT additive: both members of a painted pair can disappear.
-            # Every proposed subset is fully repainted below, including unused
-            # paths. No target founder count or occupancy threshold is imposed.
-            sizes = list(range(2, min(k, config.full_scores_per_kind + 2)))
-            if k - 1 > config.full_scores_per_kind + 1:
-                sizes = sorted(set(sizes[:config.full_scores_per_kind // 2] +
-                    np.linspace(2, k - 1, max(1, config.full_scores_per_kind // 2),
-                                dtype=int).tolist() + [k - 1]))
-            for count in sizes:
-                removed = tuple(map(int, order[:count]))
-                gain = float(2 * deletion_gain[order[:count]].sum() + cc * count)
-                proposals['batch_death'].append((gain, ('death', removed)))
-            absent = tuple(map(int, np.flatnonzero(occupancy == 0)))
-            if absent and len(absent) < k:
-                proposals['death'].append((1., ('death', absent)))
-        available = [index for index in np.argsort(-birth, kind='stable')
-                   if candidates[index] not in selected_set and birth[index] > 0]
-        if k < capacity and available:
-            batch = tuple(map(int, available[:min(k, capacity - k)]))
-            proposals['birth'].append((float(sum(birth[list(batch)])), ('birth', batch)))
-            proposals['birth'].append((float(birth[available[0]]), ('birth', (int(available[0]),))))
         start_evaluations = evaluations
         best = None
-        evaluated_bics = []
-        evaluated_descriptions = []
+        evaluated = []
         evaluated_by_kind = {}
+        inadmissible = 0
         boundary_acceptances = []
         scored = set()
+        current_signature = tuple(sorted(panel))
         for kind, items in proposals.items():
             # Only q proposals were ever considered, before de-duplication.
             # Stable top-q selection preserves those exact edits and tie order.
-            budget = config.rehousing_full_scores if kind == 'rehouse' else config.full_scores_per_kind
+            budget = config.full_scores_per_kind
             ranked = nsmallest(budget, items, key=lambda item: (-item[0], item[1]))
             evaluated_by_kind[kind] = 0
             for proposal_rank, (gain, description) in enumerate(ranked, 1):
-                trial = _materialize(description, selected, candidates)
+                trial = _materialize(description, panel, candidates)
                 signature = tuple(sorted(trial))
-                if not trial or len(trial) > capacity or signature in scored or signature == tuple(sorted(selected)):
+                if signature in scored or signature == current_signature:
                     continue
                 scored.add(signature)
-                trial_scores = score(trial)
+                if not _admissible(panel, trial, geometry):
+                    inadmissible += 1
+                    continue
+                trial_scores = proposal_scores(trial)
                 trial_ll = float(trial_scores.sum())
-                trial_bic = compute_outer_bic_from_log_likelihood(len(trial), trial_ll, cc)
                 evaluated_by_kind[kind] += 1
-                evaluated_bics.append(float(trial_bic))
-                evaluated_descriptions.append((float(trial_bic), str(description)))
-                if trial_bic < bic - 1e-8 and proposal_rank == budget:
+                evaluated.append((float(trial_ll), str(description)))
+                improving = improves(trial_ll, panel_ll)
+                if improving and proposal_rank == budget:
                     boundary_acceptances.append(kind)
-                if trial_bic < bic - 1e-8 and (best is None or trial_bic < best[0]):
-                    best = (trial_bic, trial_ll, trial, description, gain, trial_scores)
-        leading = sorted([(float(bic), "current panel"), *evaluated_descriptions])[:2]
-        gap = leading[1][0] - leading[0][0] if len(leading) > 1 else None
-        record = dict(sweep=sweep + 1, panel_size=k, candidate_pool=len(candidates),
+                if improving and (best is None or trial_ll > best[0]):
+                    best = (trial_ll, trial, description, gain, trial_scores)
+        leading = sorted([(float(panel_ll), "current panel"), *evaluated], reverse=True)[:2]
+        record = dict(panel_size=k, candidate_pool=len(candidates),
             proposals={kind: proposal_counts.get(kind, len(items)) for kind, items in proposals.items()},
-            full_scores=evaluations - start_evaluations, bic=float(bic),
-            accepted=None if best is None else str(best[3]),
+            full_scores=evaluations - start_evaluations, sparse_scores=sparse_scores,
+            novelty_scored=novelty_scored, likelihood=float(panel_ll),
+            accepted=None if best is None else str(best[2]),
             full_scores_per_kind=config.full_scores_per_kind,
-            evaluated_by_kind=evaluated_by_kind,
+            evaluated_by_kind=evaluated_by_kind, inadmissible=inadmissible,
             truncated_kinds=[kind for kind, items in proposals.items()
                              if proposal_counts.get(kind, len(items)) > config.full_scores_per_kind],
             improving_at_budget_boundary=boundary_acceptances,
-            best_alternative_bic=min(evaluated_bics, default=None),
-            leading_evaluated_bic_gap=gap,
             leading_evaluated_alternatives=leading,
-            close_evaluated_alternatives=bool(gap is not None and gap <= 2.0),
-            diagnostic_close_bic_gap=2.0,
-            scope="this sweep only; proxy-truncated and ungenerated edits are untested")
+            scope="this sweep only; proxy-truncated and ungenerated edits are untested",
+            seconds=time.perf_counter() - started)
+        return best, record
+
+    def refit_seed(panel, panel_scores, panel_ll, slots):
+        """The duplicate-seed refit: certified best-improvement over the same-count moves that
+        change the seed or its copy (both exempt from the novelty rule meanwhile)."""
+        moves = []
+        for _ in range(sweep_backstop):
+            best_move, record, _ = certify(panel, candidates, 0, True, len(candidates) + 1,
+                                           panel_ll=panel_ll, slots=slots)
+            moves.append(dict(accepted=record['accepted'], survivors=record['survivors'],
+                              exact=record['exact_scores'],
+                              change=record['accepted_likelihood_change']))
+            if best_move is None:
+                break
+            panel, panel_ll, panel_scores = list(best_move[3]), best_move[4][0], best_move[4][1]
+        return panel, panel_scores, panel_ll, moves
+
+    def deaths(forwards):
+        """Deaths by the count rule; True if any path died.
+
+        Paths without sequence of their own are deleted unconditionally, one after another
+        without re-certifying in between (largest V(P minus f) first); otherwise the best-F
+        candidate (largest V(P minus f)) is decided by the rule, and a deletion returns the
+        search to tier 1 (the next death is decided at the re-optimized panel). Deleting a
+        path that a birth here added closes a count cycle and freezes births; the deletion
+        stands. It is recorded as undecided when it is ambiguous (its bootstrap band contains
+        zero) and the cycle began with a decided deletion (count_criterion.pre_cycle_count;
+        deleting a path without sequence of its own is not a decision)."""
+        nonlocal selected, baseline_scores, likelihood, births_frozen
+        changed = False
+        while True:
+            outcome = counter.deletion(selected, forwards, baseline_scores)
+            if outcome is None:
+                break
+            record, rest, values = outcome
+            removed = selected[record['founder']]
+            record['tagged'] = bool(removed in born)
+            if rest is not None and record['tagged']:
+                count['cycles'] += 1
+                if not record['pure_mosaic']:
+                    origin = count_criterion.pre_cycle_count(sizes, len(selected), cleanup_steps)
+                    record['cycle_start_size'] = origin
+                    if origin >= len(selected) and record['ambiguous']:
+                        record['cycle_undecided'] = True
+                        count['cycles_undecided'] += 1
+            if diagnostics is not None:
+                diagnostics.append(dict(stage='count_death', **record))
+            if rest is None:
+                break
+            if removed in born:
+                births_frozen = True       # count cycle: no further births here
+                born.discard(removed)
+            count['decisions'] += 1
+            count['deaths'] += 1
+            count['pure_mosaic_deaths'] += record['pure_mosaic']
+            count['ambiguous'] += record['ambiguous']
+            selected, baseline_scores, likelihood = rest, values, float(values.sum())
+            sizes.append(len(selected))
+            if record['pure_mosaic']:
+                cleanup_steps.add(len(sizes) - 1)
+            changed = True
+            if not record['pure_mosaic']:
+                break
+            forwards = panel_forwards(selected)
+        return changed
+
+    def count_step(forwards, pool=None, seeds=False):
+        started = time.perf_counter()
+        try:
+            return _count_step(forwards, pool, seeds)
+        finally:
+            count['seconds'] += time.perf_counter() - started
+
+    def _count_step(forwards, pool=None, seeds=False):
+        """One count decision; True if the panel changed. pool None: deaths, then births from the
+        current pool, then (seeds=True, at a certified panel) duplicate-seed births; otherwise
+        births by the given (saturation) paths only."""
+        nonlocal selected, baseline_scores, likelihood, births_frozen
+        if pool is None:
+            if deaths(forwards):
+                return True
+            pool_paths = candidates
+        else:
+            pool_paths = pool
+        if births_frozen:
+            return False
+        record, larger_panel, values = counter.birth(selected, pool_paths, forwards, baseline_scores)
+        count['trap_indicators'] = max(count['trap_indicators'], record['trap_indicators'])
+        best = None if larger_panel is None else (float(values.sum()), larger_panel, values, record, 'pool')
+        if seeds and best is None and counter.indicators:
+            # Duplicate-seed births (T15's addition generator): pure-mosaic pool births that pass
+            # the rule on their total gain mark a panel path covering a founder's sequence (the
+            # chimera trap). Copy the main coverer of the strongest ones, refit the two copies,
+            # and keep the refit panel if it survives its own death test and LL rises.
+            if len(selected) <= SEED_REFITS:
+                chosen = list(range(len(selected)))      # T15: every seed when k <= r
+            else:
+                strongest = []
+                for _, path in counter.indicators[:3 * SEED_REFITS]:
+                    gain = counter.total_gain(selected, path, forwards, baseline_scores)
+                    if gain is not None:
+                        strongest.append((-gain, path))
+                strongest.sort(key=lambda item: item[0])
+                chosen = []
+                for _, path in strongest:
+                    seed = panel_count.main_coverer(selected, path)
+                    if seed not in chosen:
+                        chosen.append(seed)
+                    if len(chosen) >= SEED_REFITS:
+                        break
+            seed_started = time.perf_counter()
+            for seed in chosen:
+                seeded = selected + [selected[seed]]
+                refit, refit_scores, refit_ll, used = refit_seed(
+                    seeded, baseline_scores, likelihood, frozenset((seed, len(selected))))
+                settled, settled_scores, settle_record, survives = counter.settle(refit, refit_scores)
+                count['seed_refits'] += 1
+                settled_ll = float(settled_scores.sum())
+                seed_record = dict(kind='seed_birth', seed=seed, refit_passes=len(used), refit=used,
+                                   settled_size=len(settled), survives=bool(survives),
+                                   likelihood_change=settled_ll - likelihood, settle=settle_record)
+                if diagnostics is not None:
+                    diagnostics.append(dict(stage='count_seed', **seed_record))
+                if (survives and len(settled) >= len(selected) and improves(settled_ll, likelihood)
+                        and (best is None or settled_ll > best[0])):
+                    best = (settled_ll, settled, settled_scores, seed_record, 'seed')
+            count['seed_seconds'] += time.perf_counter() - seed_started
+        if diagnostics is not None:
+            diagnostics.append(dict(stage='count_birth', **record))
+        if best is None:
+            return False
+        new_ll, new_panel, new_scores, new_record, source = best
+        old = set(selected)
+        if len(new_panel) > len(selected):
+            count['decisions'] += 1
+            count['births'] += 1
+            count['seed_births' if source == 'seed' else 'pool_births'] += 1
+            count['ambiguous'] += bool(new_record.get('ambiguous'))
+            born.update(path for path in new_panel if path not in old)
+        else:
+            count['seed_swaps'] += 1
+        selected, baseline_scores, likelihood = list(new_panel), new_scores, new_ll
+        if len(selected) != sizes[-1]:
+            sizes.append(len(selected))
+        return True
+
+    def final_census(forwards):
+        """Diagnostics only: final paths that would fail their own death test."""
+        failing = 0
+        k = len(selected)
+        if k < 2:
+            return 0
+        removal = forwards.removal_scores()
+        for founder in range(k):
+            rest = [path for i, path in enumerate(selected) if i != founder]
+            cover = panel_count.covered_rows(np.asarray(rest, dtype=np.int64))
+            if not panel_count.has_novelty(selected[founder], rest, cover, geometry):
+                failing += 1
+                continue
+            shadow_founder, lost = panel_count.shadow_path(selected[founder], cover, geometry)
+            shadow_panel = list(selected)
+            shadow_panel[founder] = shadow_founder
+            decision = count_criterion.decide_with_sequence(
+                baseline_scores, removal[:, founder], score(shadow_panel), cc, kind='deletion',
+                config=panel_count.count_config(), seed_key=('join_census', founder))
+            failing += not decision.accept_larger
+        return failing
+
+    same_count_kinds = ('replace', 'static_replace', 'novel_replace', 'local', 'onesided', 'splice',
+                        'cycle', 'switch_splice', 'switch_cycle')
+    sweep_backstop = SWEEP_BACKSTOP_BASE + SWEEP_BACKSTOP_PER_ROW * max(block_sizes)
+    quota = config.paths_per_endpoint
+    ladder_top = config.paths_per_endpoint * 2 ** POOL_QUOTA_DOUBLINGS
+    quota_backstop = config.paths_per_endpoint * 2 ** POOL_EXTENDED_DOUBLINGS
+    sweeps = phase_sweeps = tier1_sweeps = tier2_passes = tier2_accepted = 0
+    saturation_steps = saturation_accepted = 0
+    certified = backstop_reached = pool_backstop = False
+    largest_pool = len(candidates)
+    final_forwards = None
+    while True:
+        if phase_sweeps >= sweep_backstop:
+            backstop_reached = True
+            print(f"  [panel search] sweep backstop {sweep_backstop} reached "
+                  f"(panel {len(selected)}, pool {len(candidates)}): not certified", flush=True)
+            break
+        best, record = tier1_sweep(selected, baseline_scores, likelihood)
+        record.update(sweep=tier1_sweeps + 1)
         if diagnostics is not None:
             diagnostics.append(record)
-        if best is None:
+        tier1_sweeps += 1
+        sweeps += 1
+        phase_sweeps += 1
+        if best is not None:
+            apply_same_count(best[1], best[4])
+            continue
+        # A tier-1 stall: count decisions first (re-certification only once they are quiescent).
+        stall_forwards = panel_forwards(selected)
+        if count_step(stall_forwards):
+            phase_sweeps = 0
+            continue
+        # Tier 2 at the stall, on C0 plus the beam with the panel's multiplicity.
+        pool_before = len(candidates)
+        beam_before = beam_seconds[0]
+        pool = extension_pool(quota, selected)
+        if pool is not candidates:
+            set_pool(pool)
+            largest_pool = max(largest_pool, len(candidates))
+            # The pool grew: births by its new paths are count moves of this stall too.
+            if count_step(stall_forwards):
+                phase_sweeps = 0
+                continue
+        tier2_passes += 1
+        best_move, record, forwards = certify(selected, candidates, 0, True, capacity)
+        record.update(tier=2, tier2_pass=tier2_passes, quota=quota, pool_before=pool_before,
+                      beam_seconds=beam_seconds[0] - beam_before)
+        if diagnostics is not None:
+            diagnostics.append(record)
+        if best_move is not None:
+            tier2_accepted += 1
+            sweeps += 1
+            phase_sweeps += 1
+            apply_same_count(best_move[3], best_move[4][1])
+            continue
+        # Same-count certified and count-quiescent: duplicate-seed births (the chimera trap).
+        if count_step(forwards, seeds=True):
+            phase_sweeps = 0
+            continue
+        # Pool saturation: certify only when no doubled quota up to the ladder top adds an
+        # improving replacement or accepted birth. The top is 256 for every join; once a
+        # move was accepted at the 256 rung (the quota reached it) the ladder climbs on to
+        # the backstop.
+        if quota >= ladder_top:
+            ladder_top = quota_backstop
+        if 2 * quota > ladder_top:
+            pool_backstop = True
+            print(f"  [panel search] pool backstop: a move was accepted at quota "
+                  f"{quota} = backstop (panel {len(selected)}): not certified", flush=True)
+            final_forwards = forwards
             break
-        bic, likelihood, selected, _, _, baseline_scores = best
+        checked = set(candidates)
+        level = quota
+        accepted = False
+        while not accepted and 2 * level <= ladder_top:
+            level *= 2
+            saturation_steps += 1
+            beam_before = beam_seconds[0]
+            doubled = [path for path in extension_pool(level, selected) if path not in checked]
+            best_move, record, level_forwards = certify(selected, doubled, len(candidates), False,
+                                                        len(candidates) + len(doubled))
+            checked.update(doubled)
+            record.update(stage='pool_saturation', quota=quota, tested_quota=level,
+                          new_paths=len(doubled), beam_seconds=beam_seconds[0] - beam_before)
+            if diagnostics is not None:
+                diagnostics.append(record)
+            if best_move is not None:
+                apply_same_count(best_move[3], best_move[4][1])
+                accepted = True
+            elif doubled and count_step(level_forwards, pool=doubled):
+                count['ladder_births'] += 1
+                accepted = True
+        if not accepted:
+            certified = True
+            final_forwards = forwards
+            break
+        saturation_accepted += 1
+        sweeps += 1
+        phase_sweeps = 0
+        quota = level
+        set_pool(extension_pool(quota, selected))
+        largest_pool = max(largest_pool, len(candidates))
+    count['births_frozen'] = births_frozen
+    if final_forwards is not None and diagnostics is not None:
+        count['final_paths_failing_death_test'] = final_census(final_forwards)
     if diagnostics is not None:
         diagnostics.append(dict(total_full_scores=evaluations, final_panel_size=len(selected),
-            initialization=initialization, selected_initial_anchor=selected_anchor,
-            full_score_bound=blocks + (14 * config.full_scores_per_kind + config.rehousing_full_scores) * config.max_sweeps,
-            iteration_budget_reached=bool(sweep + 1 == config.max_sweeps and best is not None)))
+            final_likelihood=float(likelihood), initialization=initialization,
+            selected_initial_anchor=selected_anchor, sweeps=sweeps, tier1_sweeps=tier1_sweeps,
+            sweep_backstop=sweep_backstop, tier2_passes=tier2_passes,
+            tier2_accepted=tier2_accepted, saturation_steps=saturation_steps,
+            saturation_accepted=saturation_accepted, quota=quota, ladder_top=ladder_top,
+            ladder_extended=ladder_top == quota_backstop, quota_backstop=quota_backstop,
+            beam_seconds=beam_seconds[0], count=dict(count),
+            count_exact_scores=counter.exact_scores,
+            count_exact_sample_scores=counter.exact_sample_scores,
+            pool_sizes=dict(original=len(original_pool), final=len(candidates),
+                            largest=largest_pool),
+            certified=certified, backstop_reached=backstop_reached,
+            pool_backstop=pool_backstop))
     return [(list(path), float(likelihood)) for path in selected]

@@ -81,30 +81,39 @@ Tier B is the primary pedigree output. **M0 means zero observed parents**,
 not necessarily a biological founder. Support tiers and bootstrap fractions
 measure internal stability, not calibrated probabilities of correct parentage.
 
-Family phase preserves called genotypes and missingness. Internal
-family-supported fills inform phase polishing, but no separate imputed-genotype product or full
+Family phase preserves called genotypes and missingness. Phase polishing scores
+called scaffold alleles only; no separate imputed-genotype product or full
 marginal posterior tensors are released. Neither family phase nor the estimated
 recombination map feeds back upstream. Shared-family orientation-error evidence is on by default
 for recombination; `--no-shared-family-evidence` disables it.
 
 ### Deliberate algorithm choices
 
-- Assembly defaults to learned dense transitions and bounded panel search.
-  `--assembly-model structured` selects a restricted near-quadratic model;
-  `--assembly-search broad` expands the panel search. These are different
-  scientific/runtime trade-offs, not obsolete duplicate implementations.
+- Assembly has one join route at every level and in the feedback context
+  assemblies: learned dense transitions, the endpoint beam and the bounded
+  panel search. The former structured transition model and broad search were
+  removed (old settings at their defaults are ignored with a warning).
 - Local panels use normalized path selection before and after **each** L1/L2
-  feedback round (`--feedback-selection path`). The optional
-  `--feedback-segment-exchange` adds final same-count segment proposals.
-  Balanced/strict cavity-rescue alternatives remain explicit choices.
-- Final assembly adds allele-preserving L1 path pruning before refinement:
-  a surplus row's unique local pieces can move to one surviving row before
-  its deletion, with every accepted panel checked by the unchanged full score.
-  This does not prescribe a biological founder count or alter feedback rounds.
-- Founder-path refinement runs after each executed final L1–L4 level,
-  followed by bounded count-up/refit on the final components. Sparse local
-  sweeps alternate with global escapes; acceptance remains full-site. This
-  trades broader search for runtime, with [documented limitations](docs/methods.md#measured-tradeoff).
+  feedback round; this is the only feedback selection.
+- Feedback context refits and the missing-allele completion share one site
+  posterior over shared founder alleles: exact for at most ten free founders,
+  a polynomial uncertain-core approximation above (no founder-count cap). See
+  the [local feedback model](docs/methods.md#local-feedback-and-candidate-selection).
+- The join decides founder counts with the pipeline's effective-carrier rule
+  (at every level and in the feedback context assemblies): a single birth or
+  death must pass the test on each sample's total gain and on its sequence
+  part, so switch savings alone never justify a path, and a path without a
+  private cell or within 1% of another path over the span is deleted. Same-count
+  moves are judged by the join likelihood. See the
+  [panel search](docs/methods.md#hierarchical-assembly). No biological founder
+  count is supplied.
+- Founder-path refinement runs after each executed final L1–L4 level: converged
+  Gauss-Seidel window and suffix-exchange sweeps with full-site acceptance, and
+  founder-count decisions between converged fits by the same rule as the join
+  (total gain and its sequence part, the sequence part from an exact shadow
+  without the join's 1% near-identity shortcut; founders without a private cell
+  are deleted first; additions only at the last level), keeping the best-F
+  converged panel at the decided count. See the [model and limitations](docs/methods.md#final-founder-path-refinement).
   `--founder-refinement off` disables it for controlled comparisons.
 - Read calibration learns supported observation parameters from allele depths,
   including a nested homozygote-overdispersion model selected on held-out data;

@@ -15,6 +15,117 @@ state. A sole discovered haplotype does not force every sample to be homozygous
 for it. Phase is local to supported components, and H1/H2 names are arbitrary
 orientation labels, not paternal/maternal identities for pedigree roots.
 
+Painting release. The painter publishes, per sample and bin, the most specific
+statement whose posterior reaches 0.9 (`minimum_viterbi_public_class_posterior`).
+First the unordered pair of founder classes of the Viterbi state (qV), as
+before. Where two kept founder rows are identical over a bin's selected sites
+(same {-1,0,1} calls), the reads cannot separate them and the founder label is
+not identified; then the unordered pair of per-bin allele-equivalence classes
+(qA, the summed posterior of their member rows) is released if qA >= 0.9 and
+the sample has an observed, non-uniform read at a site of the bin where the
+pooled class is called. Such a track has status `LOCAL_ALLELE_EQUIVALENCE`,
+label -1 and known alleles; its chunk names the candidate rows
+(`hap1_members`/`hap2_members`, sorted component-local rows; one row for a
+named track, none for a withheld one) and chunks split where a member set
+changes. Without reads in the bin the pair is withheld, as is everything below
+0.9. Where the two track orders of the decoded path have equal HMM score, the
+order with fewer allele-visible changes is kept (a change between identical
+rows is invisible). The HMM, its threshold and every statement released by the
+label rule are unchanged; a label change between identical rows inside a
+pooled run is not placed at any bin.
+
+## Site quality
+
+On VCF/BCF input, each contig's loaded records pass a self-calibrated filter
+before read calibration and discovery (`core/site_quality.py`). It uses only
+allele depths and record type, never labels, benchmarks or truth. A record is
+removed when it is not a biallelic SNP (r0); its total depth lies outside the
+clean core of the contig's total-depth histogram (r1); its per-sample depths
+are more heterogeneous than the clean core allows given the site's own depth
+(r2); a negative-binomial artefact class explains its wrong-allele reads in
+homozygous-looking samples better than the Poisson clean core (r3); a
+beta-binomial artefact class explains its heterozygote allele balance better
+than the binomial clean core (r4); or it has fewer than two expected carriers
+of a non-major genotype (r5, informativeness rather than quality). A clean
+core is the histogram mode with widths from its half-maximum crossings; its
+window is where the core's local posterior is at least one half. A mixture
+whose artefact class does not separate from the clean core removes nothing.
+Genotypes are classified under a fixed read model (error 0.01, balance 0.5);
+the clean-core rates are then fitted. Kept sites are re-blocked 200 at a time,
+exactly as the loader blocks an input restricted to them. The filter's
+parameters and per-rule counts are in the discovery checkpoint and run record.
+
+The filter is off by default for simulations. Depth rules r1/r2 cannot tell
+benign sample-specific missingness (the stress control's dropout tracts) from
+mapping artefacts; when the read error rate is several times the 1%
+classification error (stress control: 4%), homozygotes with error reads are
+classified heterozygous and r4 separates spuriously; r5 removes
+founder-monomorphic simulated sites. Evaluation compares final phase with truth
+on the full simulated site axis.
+
+## Sample quality
+
+Inside the site filter, each contig also checks every analysed sample for
+library contamination (`core/sample_quality.py`). Foreign DNA at read fraction
+alpha < 1/2 shows alleles that no other sample carries, on every contig, at a
+minor-read fraction near alpha (foreign homozygote) or alpha/2 (foreign
+heterozygote). A sample's own heterozygous allele that no other sample carries
+(an inherited segment absent from the sequenced founders, or a founder segment
+no sequenced descendant received) shows the heterozygote balance instead,
+about one half. Only the first is flagged.
+
+At biallelic SNPs that pass r0-r4 above (whole analysed cohort), the
+cohort-minor allele is ALT when the cohort's ALT reads do not exceed its REF
+reads. A sample's private cells are those where it alone has a read of that
+allele; private cells of one sample less than 1 kb apart can share sequenced
+fragments and count as one event. The minor reads of each private cell are
+modelled as a mixture of a heterozygous allele (fraction h, the contig's r4
+clean heterozygote balance, or 1 - h for a REF minor allele) and one
+low-fraction allele (fraction fitted per sample in (0, h/2], h/2 being the
+largest fraction of a foreign heterozygous allele while foreign DNA is under
+half the library), both binomial and truncated at one read; the low-fraction
+events are that component's event-weighted posterior mass at the sample's
+maximum-likelihood fit. The statistic is the square root (the
+variance-stabilising scale of event counts) of low-fraction events per
+observed cell, and a sample is flagged on the contig when its robust z against
+the cohort (median and 1.4826 x MAD on that contig, the spread no smaller than
+the statistic's Poisson counting noise, 0.5 / sqrt(observed cells)) exceeds 5.
+No labels, pedigree, benchmark or absolute rate enter; cohorts under 20
+samples flag nothing. The decision is per contig, so a contig's result
+does not depend on which other contigs a run includes. On real TroMau data
+(22 autosomes) one library is flagged on every contig (z 20-41, fitted low
+fraction 0.19-0.25); no other library exceeds z 4 on any contig, and none
+would be flagged by the same statistic pooled over the 22 contigs.
+
+Heterozygous near-private alleles (the sample and at most one partner carry
+them) never flag a sample. They are reported per contig in
+`<output>/sample_quality/<contig>.segments.tsv`: cells whose reads favour the
+heterozygous fraction over h/2 are grouped per (sample, partner) into fragment
+events and into regions of events less than 1 Mb apart; regions with at least
+three such events are listed for unflagged samples with the region's cell
+count and the sample's and partner's minor-read fractions (on TroMau, samples
+without such segments never chain more than two events). On TroMau these are 1-10
+Mb segments shared by pairs of relatives or private to one sample, including
+a G0 segment carried by a single F1. They explain added founder rows and pedigree
+misfits; they are not evidence of contamination.
+
+On the contig where it is flagged, a sample's reads are excluded from founder
+construction: block discovery sees it without reads, and feedback, assembly
+and founder refinement see its cells as unobserved (uniform and unobserved,
+like zero-depth cells), as does the founder allele refit after painting; r5
+counts carriers among unflagged samples only. Read calibration, painting, the
+pedigree, family phase and recombination keep every sample's full evidence, so
+flagged samples are still painted, phased and scored. The assembly release
+identity hashes the founder evidence, so the stages that check their raw
+evidence against it (pedigree, allele refit, family phase) apply the recorded
+flags for that check. Per-sample statistics, z and flags are in
+`<output>/sample_quality/<contig>.tsv`, the run record and the block discovery
+checkpoint (`site_quality["sample_quality"]`, `founder_evidence_excluded`).
+Contamination shared by several libraries from one source is not private and
+is seen only in part, and DNA from another analysed sample brings no private
+alleles, so contamination within the cohort is not detected. The QC runs only
+where the site filter is applied, so it is off in simulations by default.
+
 ## Local feedback and candidate selection
 
 The default `path` selector fits a normalized within-block diploid copying
@@ -23,9 +134,42 @@ rounds. The schedule is initial local selection → L1 context/selection →
 rebuilt L1+L2 context/selection → final chromosome assembly. Original latent
 candidates remain available throughout. Context excludes the target block's
 emission when estimating carrier weights. Its projected/refitted panels supply
-candidate starts, never additional observations. The existing context refiner
-can skip components above its ten-founder cap; a completed assembly round does
-not imply every block received a new proposal. Local path selection still runs.
+candidate starts, never additional observations. Every completely covered
+context component is refitted; partially covered contexts keep their input
+panels, so a completed assembly round does not imply every block received a new
+proposal. Local path selection still runs.
+
+The refit's site posterior over the K shared context-founder alleles is
+p(b) ∝ ∏_n Q_n(b), where each informative sample contributes a positive
+quadratic Q_n (its cavity pair weights times its genotype evidence, the unknown
+state's alleles integrated per copy). For K ≤ 10 every one of the 2^K
+configurations is enumerated. Above that (`assembly/site_posterior.py`), the
+posterior mode is found by loopy belief propagation over the sample factors and
+single/pair-flip ascent, started from the propagation's thresholded beliefs and
+from their full allele complement; the better optimum is kept. When the two
+starts end in different optima within 20 nats of each other, the posterior has
+two comparable basins that no single or pair flip connects, the local
+certainty argument below does not hold, and the site releases nothing
+("multimodal" abstention). This happens where most carriers look heterozygous,
+for example at paralogous sites: the posterior is then nearly invariant under
+complementing every founder allele, or frustrated like a maximum cut. The
+founder-allele model is misspecified there and the exact enumeration is itself
+unreliable (on constructed paralog-like sites 35-49% of its releases contradict
+the simulated founders); the abstention removes most, not all, releases at such
+sites when the two starts happen to agree. Otherwise founders whose single
+flip and every pair flip cost more than 20 nats stay at the mode, and the
+remaining core is enumerated exactly when it has at most ten founders,
+otherwise over the recentred Hamming ball of the largest radius with at most
+1,024 configurations but at least 3 (up to 4,526 configurations for a
+30-founder core). In that ball, a release is withheld when the marginal lies
+within three times the weight of the outermost-shell configurations that flip
+the founder of the 0.99 threshold.
+Exact marginals of this model are #P-hard in general, so above ten founders the
+marginals are exact only over the enumerated support; the work is O(N K³) per
+site. The same rule, including the multimodal abstention, replaces the 2^U
+enumeration of the assembly completion (joint completion and whole-bin cavity
+fill) above ten unresolved founders at a site; the joint completion's EM keeps
+the selected support fixed, so its ELBO remains a lower bound.
 
 All these local fits consume the same sample- and marker-matched calibrated
 genotype likelihoods and observed-read mask as discovery. Missing cells have
@@ -46,21 +190,42 @@ fixed (default 0.01). Its alleles are independently Bernoulli(1/2) for the two
 copies. Forward inference sums diploid paths, including their normalization,
 rather than choosing a single fixed founder pair per sample. The objective is
 
-`log P(GL | H,f) - log choose(2^L,K) - log K - log(K+1) + mean_k log(K f_k)`.
+`log P(GL | H,f) - log choose(2^L,U) - log K - log(K+1) + mean_k log(K f_k)`.
 
 The last term shrinks fitted frequencies toward uniform, with total MAP
-pseudocount one. This is a regularized best-panel objective, not marginal
-evidence for K or an assumed ancestral founder count. Within-block mosaics need
-not correspond one-to-one with the ancestral haplotypes.
+pseudocount one. U counts the rows coded as new arbitrary haplotypes. In the
+initial fit U = K. In the feedback rounds the assembled context names its
+founders in the block (each founder's cavity-weighted refit, the feedback
+proposal); a founder's local sequence in H is the row nearest its proposal on
+the proposal's called sites, and a row some founder claims is a parameter of a
+founder whose existence the multi-block assembly decided, not a new haplotype:
+U counts only the unclaimed rows (zero code when U = 0). Rows beyond the
+context's founders (local recombinants, noise rows) keep the full code; blocks
+no context component covers keep U = K. The fixed-K fit is unaffected (its
+dictionary term is constant). This is a regularized best-panel objective, not
+marginal evidence for K or an assumed ancestral founder count. Within-block
+mosaics need not correspond one-to-one with the ancestral haplotypes.
 
-Each local search uses three outer rounds, screens drop/merge/add starts, and
-refits the top eight per move kind for at most twenty fixed-K updates. Ordinary
-search and frequency/allele refits use the same objective. Previous-round
+Each local search runs rounds until the best refit no longer improves. A round
+screens every drop and add start by its exact forward score and every merge
+start by an EM lower bound: the merged panel is the drop panel of either row
+with the other row replaced by the consensus, so the drop panel's posterior
+gives LL(drop) + the replaced row's complete-data flip gains at the changed
+sites + the expected-copy frequency term, and the larger of the two bounds
+ranks the merge. The top eight starts per move kind are refitted to a
+conditional fixed point. The limits 10 + 2K rounds and 20 + 4K fixed-K updates
+are reported backstops, as are the candidate-bank limits (256 + 16K scores,
+128 + 8K starts per round, 8 + K/2 rounds). Ordinary search and
+frequency/allele refits use the same objective. Previous-round
 incumbents are protected against a worse final objective. The existing BIC
 candidate-bank search and cavity-ranked source endpoints supply starts and
 extra candidate rows; their scores do not replace the path objective. Partial
 candidate rows use the existing nearest-latent completion while preserving
 known calls. Completed latent alleles are not automatically released as calls.
+At L1 and L2 the context start is fitted first; when the previous-round
+incumbent has a higher objective, the search refits and explores from the
+incumbent instead, so it does not climb back to it. Otherwise the search is
+unchanged. A reused search returns the previous result, as before.
 
 The local forward/backward implementation exploits exchange symmetry between
 the two homologues, including when founder frequencies are unequal. It still
@@ -81,36 +246,27 @@ cavity diagnostics. Uncomputed fields are `None`, not zero or confidence
 estimates. Explicit cavity selection still scores every admitted mode.
 
 Release combines a conditional one-bit probability (other panel alleles and
-fitted parameters held fixed) with fractional posterior-carrier directional
-support. This is not a full allele posterior or calibrated correctness
-probability. Unsupported alleles remain unknown. Stored ALT probability,
-probability of the current panel allele, and directional support are distinct
-quantities. The posterior expected unknown-copy fraction is also separate from
-the maximum observed-marker MAP unknown-copy count used by legacy completion;
-neither invents a constant sample founder pair.
+fitted parameters held fixed) with carrier support among the samples whose own
+evidence favours the allele: at least two of them each more likely than not
+(posterior carrier probability above 1/2) carry the founder at the site, or
+their expected carrier mass is at least two. This is not a full allele
+posterior or calibrated correctness probability. Unsupported alleles remain
+unknown. Stored ALT probability, probability of the current panel allele, the
+supporter count and the expected carrier mass are distinct quantities. Every
+founder-allele release uses the same carrier support over its own sample set:
+the feedback refit (q >= 0.99), the joint completion's cross-fitted release and
+the whole-bin cavity fill (each q >= 0.99). The mass alone sits just below two
+for a founder with exactly two near-certain carriers, so it in effect required
+three; the count alone withholds diffusely supported sites that the mass
+releases (on one simulation that withholding flipped a fragile chromosome-level
+join into a chimera), so release needs either. The posterior expected
+unknown-copy fraction is also separate from the maximum observed-marker MAP
+unknown-copy count used by legacy completion; neither invents a constant
+sample founder pair.
 
-Optional segment exchange is off by default. After both feedback rounds, one
-fixed-K pass swaps reciprocal suffixes at sixteen evenly spaced kept-marker
-cuts for every row pair. Prefix frequencies stay attached to their rows;
-canonicalization moves rows and frequencies together. Duplicate-producing and
-no-op states are excluded. All remaining candidates receive the same normalized
-score; the top eight and an ordinary warm-start control receive twenty-update
-refits, protected by the original incumbent. A 1e-6 objective tie prefers the
-warm control, then screening order. Exact batched screening reuses prefix
-messages and pair-specific backward messages with the correctly permuted
-unequal-frequency prior; the unknown state is not permuted. Neither lower
-founder count nor fewer switches determines acceptance.
-
-The explicit `balanced` and `strict` alternatives retain the earlier
-cavity/BIC rescue workflow rather than being reinterpreted as path modes.
-Balanced combines a cavity-ranked backbone with BIC-supported additions not
-explainable by one donor join, followed by same-K cavity-ranked refinement.
-Strict limits rescue to private alleles and protects surviving backbone calls.
-Their bounded empty-row reduction compares smaller panels under the existing
-BIC-like score and rebuilds assignments/support/calls together; partially called
-rows do not trigger that reduction. Novelty filtering is a heuristic, not proof
-of a distinct biological founder, and a final unknown row is not converted into
-a zero-founder panel.
+Path selection is the only feedback selection. The former balanced/strict
+cavity/BIC rescue selections and the optional segment exchange can no longer be
+selected.
 
 See [configuration and checkpointing](running.md#local-feedback-selection) and
 [local validation](validation.md#local-feedback-selection).
@@ -190,28 +346,41 @@ Pseudocounts, the probability floor, uniform robustness and forward parameter
 damping regularize the fitted transitions. Reverse summaries for mesh/path
 selection are column-normalizations of the same regularized edge evidence, not
 likelihood operators or unconditional time-reversed chain transitions. This is
-the default dense linker at every hierarchy level. Both assembly modes default
-to bounded candidate-panel search, with full Viterbi/BIC scoring before accepting
-a proposal; `--assembly-search broad` retains the optimized broader search.
+the dense linker at every hierarchy level. Assembly uses a certified
+candidate-panel search under the join likelihood (per sample, the best sequence
+of unordered panel-path pairs over binned emissions, minus a uniform penalty per
+state change).
 
-Bounded panel search compares state-covering initial panels from every input
-anchor under its full penalized objective, rather than assuming the most
-diverse block is the best start. Deletion proposals use whole-path
-reassignment costs under the current painting; both single deletions and
-nested coordinated reductions receive full-panel rescoring. The summed
-conditional costs are screening heuristics, not additive deletion likelihoods
-or safe pruning bounds. Each accepted edit must strictly improve the existing
-Viterbi/BIC objective. No biological founder count is supplied. Up to 100
-sweeps are allowed, with early stopping when no tested edit improves the score.
-The diagnostics distinguish that stopping condition from exhausting the budget;
-neither establishes a global optimum.
+The search starts from the state-covering initial panel of largest likelihood
+among those of every input anchor. Same-count edits (replacements, one-block
+row changes, suffix copies and exchanges, cycles) are accepted when they
+strictly improve the likelihood and leave every changed path a private cell
+and more than 1% of called sites away from every other path. At each stall the
+count step decides one founder-count change with the pipeline's
+effective-carrier rule (as founder refinement, cost c per founder charged to
+the effective carriers, leave-one-sample-out check, bootstrap band), applied to
+the per-sample total gain and to its sequence part: the gain left when the
+decided path's private cells are replaced by the smaller panel's nearest rows.
+Switch savings alone therefore never justify a path; a path that is a block
+mosaic of the other paths, or near-identical to one over the span, is deleted.
+Deleting a path that a birth of the same join added is a count cycle: the rule,
+called against different panels, has both added and deleted that row. The
+deletion stands and births then stop. A cycle is recorded as undecided when its
+closing deletion is ambiguous (bootstrap band containing zero) and it began with
+a decided deletion (not with the birth, and not with the cleanup deletion of a
+path without sequence of its own); such calls are published in
+`founder_counts.tsv`.
+A founder that is a pure block mosaic of other founders within one batch is not
+carried by that batch (no pedigree information is used); later levels and
+founder refinement can re-split it. Founder refinement decides its counts with
+the same rule, with the sequence part always scored exactly (no near-identity
+shortcut). No biological founder count is supplied. A tier-2 pass
+certifies every same-count move of an explicit neighbourhood once the count
+step is quiescent; certification is relative to that neighbourhood and the
+endpoint-beam pool, not a global optimum.
 
-The optional [structured model](founder_scaling.md) restricts the
-macro transition to sparse specific edges plus a positive shared background.
-It does not change discovery or the within-block emission model. Dense
-propagation is cubic in founder count; structured propagation is near quadratic
-with bounded search and fixed fitting budgets. Broad search adds further
-rescoring costs. Numerically guarded matrix multiplication
+Dense propagation is cubic in founder count (see
+[founder scaling](founder_scaling.md)). Numerically guarded matrix multiplication
 accelerates larger dense contractions without restricting their parameters.
 
 Coherence here refers to each independently fitted gap/residue chain. Combining
@@ -247,180 +416,153 @@ These implementation changes do not reduce proposal budgets or alter acceptance.
 
 After each executed level of **final** L1–L4 assembly, the hierarchy's current
 components initialize the founder refiner; its output feeds the next level.
-A separate bounded count-up pass runs once on the final components. Neither
-pass runs in the L1/L2 local-feedback contexts. Original prepared local rows,
+It never runs in the L1/L2 local-feedback contexts. Original prepared local rows,
 their allele values and evidence masks stay fixed. Refinement changes their
-chromosome-wide arrangement and may reduce count; the final count-up pass may
-add rows. No target founder count, pedigree or simulation truth is supplied.
+chromosome-wide arrangement and decides the founder count: earlier levels may
+only delete rows, and the last level (the final count step) may also add rows.
+No target founder count, pedigree or simulation truth is supplied. This is the
+only refinement behaviour: no option selects another search, count criterion,
+panel rule or count-cycle rule.
 
-### Sparse search with full-site acceptance
+### Objective
 
-The default alternates inexpensive local coordinates with global conditional
-escapes. This is a **bounded search approximation**, not mathematical equivalence
-to the earlier broader optimizer. It can reach a different local optimum.
-
-A local epoch first paints the incumbent on full evidence. Each sample then
-gets a sparse grid containing its own inferred switches and every local-block
-edge. Within each cell, all usable SNP likelihoods are summed, not sampled.
-The incumbent path remains feasible with its full score. Other panels have a
-restricted-path score: a **lower bound**, never an upper bound for rejecting
-unsearched candidates. Viterbi updates alternate with founder-row coordinates;
-blocks are independent and parallel, while founders update sequentially inside
-a block. Ties retain the incumbent, including unobserved rows.
-
-An epoch's changed endpoint is checked on full evidence. It must improve the
-canonical primary score or improve the secondary score at an **exact** primary
-tie. Full repainting can reveal further improvements and re-anchor another
-epoch. Only verified local fixed points are reused; budget exhaustion is not
-declared convergence. Local sweeps and global escapes share the existing
-20-iteration allowance, including across checkpoint resume.
-
-The global step considers every founder in both directions, using the existing
-dual solver and original local candidate rows. On a stall, original and refined
-L1 paths supply larger moves. Those decode back to prepared rows, retaining
-sample-HMM bins and all observations. The dual relaxation may use sample-specific
-choices internally, but only a single cohort-shared path can be proposed.
-
-Fixed-painting and conditional categories rank proposals using 200-SNP primary
-bins. They initially check four full proposals in original order, then exhaust
-a category if it fails to replace its entering winner. Simultaneous conditional
-row proposals compete with the individual proposals; their gains are **not**
-assumed additive. This four-proposal refinement budget is distinct from the
-hierarchy linker's 16-proposal budget. Skipping the remainder after an improvement
-can miss a better candidate.
-
-The predictive proposal HMM retains its 2,000-bin target, with a default minimum
-of 200 SNPs per bin. Original local boundaries can make the bin count exceed
-2,000. L1/L2 additionally share a chromosome-derived minimum. Count-up seeds use
-approximately 2,000-SNP fragments, retaining all internal sample-HMM bins.
-These are different controls: SNPs per bin, target number of bins, and SNPs per
-founder fragment. They do not limit the full-site acceptance calculation.
-
-The primary acceptance HMM retains normalized genotype likelihoods, the 1%
-uniform mixture, -2 log-likelihood floor, and a cost of **20** per sample
-diplotype change at every level. It allows changes at every SNP. This internal
+The canonical objective F is the full-site cohort score of
+`assembly/founder/scoring.py` over panels of original prepared local rows.
+The acceptance HMM retains normalized genotype likelihoods, the 1% uniform
+mixture, -2 log-likelihood floor, and a cost of **20** per sample diplotype
+change at every level. It allows changes at every SNP. This internal
 unordered-diplotype assembly model is not the downstream homologue painter,
 a phase posterior, a genealogy model, or a recombination-map estimate.
 Its mask is fixed across the original candidate rows, so a path cannot improve
 its score by hiding difficult markers.
 
-Larger macro edits retain the genotype-fit guard. For `Q = E - 20*S`, with E
-the centered genotype-emission sum and S the internal sample switch count, a
-macro move must pass full-score acceptance without reducing E beyond numerical
-tolerance. This restriction can withhold a true move and is not a confidence
-threshold or a proof of biological correctness.
+### Converged fixed-count fits
 
-### Partial evidence at primary ties
+A fixed-K fit repeats Gauss-Seidel sweeps until a sweep accepts nothing
+(`assembly/founder/converged_sweep.py`). Each sweep computes exact forward and
+backward messages of the panel and, from the panel at the start of the sweep,
+proposals: for every founder and every 8-block window (stride 4) the exact
+maximiser of the binned window problem and, where an L1 context exists, the
+same over windows of four consecutive L1 spans (stride 2), offering the
+founders' current span tuples plus the original and refined L1 paths. One exact
+pass in block order, alternating direction between sweeps, then applies at every
+junction the best founder-pair suffix exchange while its exact gain exceeds a
+small tolerance, and re-scores the proposals anchored there exactly against the
+current panel, best first. The canonical F is recomputed and must equal the
+start score plus the accepted gains.
 
-The primary mask retains markers called in every original inference row.
-Consequently, two different local rows can have identical primary emissions
-while differing at well-observed partial-founder markers. Keeping whichever
-panel arrived first can discard real evidence. Fixed-count beam, dual and
-window proposals therefore use a lexicographic rule: primary score first,
-then full-site partial-founder predictive score only when primary scores are
-exactly equal. Near ties and small primary losses do not qualify.
+Every fixed-K fit runs this search twice from the same start, concurrently: once
+with its first pass forward and once with its first pass reversed (both then
+alternate). Both are deterministic local searches; the fit keeps the one with
+the higher exact F (exact ties: forward-first), so at a fixed start it never
+ends below the forward-first search, and both results are reported
+(`best_of_two` in the fit records). This applies to level start fits and to
+every count-decision refit.
 
-The secondary score uses the same seven genotype distributions, shared-unknown
-source-row identities, 1% mixture and likelihood floor as the proposal model.
-It permits sample-state changes at every SNP. Its mask is fixed from the original
-prepared inputs: keep flags plus at least one called founder. All-founder-unknown
-sites and unobserved sample evidence remain neutral. This is the existing
-per-observation predictive approximation, not joint latent-allele integration,
-a calibrated phase posterior, or new allele imputation. Count comparisons and
-the primary genotype-fit guard are unchanged.
+A converged fit is a certified local optimum of F under this move set: every
+proposal of its last sweep was computed against the final panel and every move
+was scored exactly against it. F is non-convex; no global optimum is claimed.
+Window proposals optimize a binned surrogate (bins of at least 200 SNPs,
+targeting 2,000 bins per component; L1/L2 share a chromosome-derived minimum),
+so the certificate is relative to them; acceptance always uses individual SNPs.
+A fit reaching the 100-sweep backstop is marked non-converged in its
+diagnostics, never silently.
 
-An unrestricted partial-data optimum can trade away primary fit elsewhere
-and consequently be rejected. When the ordinary dual/macro search stalls,
-a bounded extra dual search groups local rows by their **identical alleles at
-every primary-scored marker**. Each focal path may explore only its incumbent's
-equivalence class, with the same branch cap and sweep budget. Every decoded
-path must preserve the canonical primary score exactly and improve the full-site
-secondary score to be accepted. This reuses the existing solver and does not
-enumerate all local edits with a whole-chromosome refit for each.
+Coarse (L1-span) moves pass a guard. A long founder edit can raise F by letting
+several samples drop the switch of a crossover they share, turning the founder
+into an artificial recombinant. The default `shared_junction` guard refuses a
+move that lowers the genotype fit E = F + 20 x switches only when its F gain
+does not exceed the tolerance once every saved switch at a one-way junction
+shared by two or more samples is uncredited. This can withhold a true move and is
+not a confidence threshold or a proof of biological correctness.
 
+### Founder-count decisions
 
-### Counts, paired edits and implementation
+Count decisions compare converged fits one row apart, at most r = 9 converged
+refits per decision (`COUNT_RANKED_REFITS`). The candidates of a deletion round
+are the rows without a private cell (every block row is used by another row;
+their sequence part is zero, so the rule deletes whichever is decided) when there
+are any, as in the join, and otherwise every row. A deletion round refits every candidate's single-row
+deletion of the incumbent to convergence when there are at most r candidates;
+otherwise the deletions are first scored exactly without refitting (per-sample
+canonical scores) and ranked by the criterion's point margin on those scores
+(below: the smaller of m and its leave-one-sample-out version, on the total
+gain), and the r top-ranked are refitted. The criterion then decides between the best-F refit
+(exact ties: the lower row) and the incumbent; a rejection ends the deletions
+(backward elimination with refit). An addition round (final count step only)
+refits every duplicated-row seed, or, above r rows, the r seeds whose copy gains
+most from its exact best responses on all 8-block windows (one copy-only pass of
+exact gains), and decides on the best-F of them. The refits of a round run
+concurrently, each with its share of the threads. With more than r candidates the
+ranking chooses which are refitted, so it can miss a deletion or addition that only
+a refit of another candidate would show. An optimistic bound may skip a round
+only when it proves the decision for every candidate; a deletion round only when
+every row has a private cell, where the per-sample bound on any panel with one
+row fewer also bounds every shadow panel (below). An accepted addition is
+followed by one deletion round from the larger panel, which must reject;
+otherwise the call is a count cycle. Deletions stop at two rows, and additions
+when the bound excludes them, the best seed is rejected, or the count reaches
+twice the incoming count (a reported backstop).
 
-The remaining passes use the same canonical objective:
+Each decision uses the effective-carrier criterion
+(`assembly/founder/count_criterion.py`). With per-sample score differences d_s
+between the larger and the smaller panel, the per-founder cost c of
+`chimera_scoring.compute_cc` and S samples, the larger panel is kept or added
+only if m = sum_s d_s / c - n_eff / (2S) > 0 and the same margin with the sample
+of largest d_s removed is also positive; n_eff is the participation ratio of the
+positive d_s. The cost is thus charged only to a founder's effective carriers,
+and no single sample can decide a row. As in the join, the test must pass on the
+per-sample total gain d_s and on its sequence part q_s = F_s(X+) - F_s(X+^sigma):
+the shadow X+^sigma replaces every cell of the larger panel that a reference
+panel does not use by the reference's nearest row at that block (Hamming over
+called sites); the reference is the larger panel without the decided row for a
+deletion, and the incumbent for an addition (whose refit may have moved any row).
+A larger panel holding a row without a private cell has q = 0, so switch savings
+alone never justify a row. Unlike the join, refinement takes no near-identity
+shortcut: a row within 1% of another over the component keeps the evidence of its
+differing cells, because the last level is final and a merged pair could not be
+re-split later. A sample bootstrap of the smaller of the two
+margins (2,000 resamples, 95% interval) marks calls whose interval contains zero
+as ambiguous; they keep the point decision. A deletion round that keeps the
+incumbent reports the other rows whose sequence part fails the test
+(diagnostics only: only the decided row is tested, as in the join).
 
-- Paired suffix exchanges preserve every marker's called/missing allele
-  multiset. Exact flanking messages and valid incidence bounds find a bounded
-  shortlist. The pre-count phase-only pass requires full-objective improvement;
-  exchanges within count repairs also retain the genotype-fit veto.
-- Every eligible single-founder deletion receives up to three sparse repair
-  sweeps. The original deletion and repaired endpoint compete on full data;
-  intermediate full-score optima can be missed. Full BIC
-  (`K * complexity_cost - 2 * score`) ranks the repaired deletions, and only
-  the best receives deep sparse/global repair. The existing optimistic count
-  bound and heuristic eight-complexity-cost deep-refit screen remain.
-  `count_refit_deficit_multiple=None` disables that heuristic screen.
-- Named post-count polishing passes use sparse coordinate epochs and reuse
-  verified fixed points. They no longer launch repeated full window-search
-  trajectories simply because their historical checkpoint labels differ.
-- Paired tracts are proposed by relabelling the incumbent sample paths inside
-  an interval. Emissions and internal switches remain unchanged, so the two
-  endpoint gains give a feasible lower bound. All founder pairs compete on
-  local and staggered L1 boundary grids; at most `branch_cap` proposals reach
-  exact local/full checks. Both full-score and genotype-fit improvement rules
-  apply. This shortlist can miss an interval requiring a different painting;
-  it is not safe pruning of the whole interval space. The historical
-  `interval_partners` configuration field is retained in saved records but no
-  longer limits the pair set.
-- Final count-up starts from a duplicated incumbent and an unused-local-row
-  path, in both directions. Fragment proposals retain every original emission
-  bin, then expand to original local rows. Incumbent and K+1 panels get the
-  same fixed-count sparse/global repair. At most two additions are attempted,
-  stopping on rejection. `count_max_additions=0` disables additions only.
+The count decisions choose K. The panel kept at that K is the best-F converged
+fit computed at K during the count pass; it differs from the last panel only when
+the pass returned to a K it had held with a better panel. A count cycle is
+resolved to the smaller K (the deletion round stands) with the better-F of its
+two K panels, and is reported as ambiguous; it is undecided, as in the join,
+when the deletion round's call is ambiguous and the pass reached K by a decided
+deletion from K + 1. When a best-F panel replaces the last
+one, the diagnostics record the replacement and the restored panel's adjacent-K
+comparisons: its recorded decisions and its criterion margin,
+leave-one-sample-out margin and bootstrap band against the best-F fits computed
+at K-1 and K+1. The call is flagged ambiguous when the restored panel fails its
+own deletion test. Best-F is a two-stage policy (the count decisions choose K,
+the fixed-K objective chooses the panel), so a restored panel can fail that
+test, as on one simulated F3 sib-family chromosome.
 
-Immutable emission totals, identical conditional problems and permuted flank
-messages are reused within their owning workspaces. Short edits reuse exact
-unchanged flanks; suffix changes update messages outward until exact coalescence.
-Potential winners receive canonical verification. Losing candidates do not
-need diagnostic switch counts once they cannot replace a guard-passing winner.
-For positive switch cost, score/count-only kernels skip neutral transitions
-whose clipping is idempotent. Full traceback retains its breakpoint semantics.
-Site-major dosage tables and multiword traceback masks avoid repeated
-founder-pair lookups, with the direct memory-limited fallback retained.
+### Implementation and limitations
 
-Independent components, deletion starts and conditional queries share the
-verified CPU budget. Reusable worker slots, rather than every queued task,
-reserve threads; surviving slots grow at kernel boundaries. Memory constraints
-can limit concurrency. Completion order never sets scientific selection order.
+Independent components of a level run in worker processes, each with its share
+of the verified CPU budget (re-read at every sweep, so the level's last
+components take over the cores of finished ones); window programmes and an
+addition round's seed responses run concurrently inside a component, and the
+acceptance pass uses the component's threads for its per-sample kernels and
+evaluates chunks of junctions at once until something is accepted. Completion
+order never sets scientific selection order, and results
+do not depend on the thread count. Each final hierarchy level has a separate checkpoint namespace with
+per-fit records, so an interrupted level resumes from its completed fits. Source
+identities include every numerical module of the refiner.
+`--founder-refinement off` disables refinement and count decisions.
 
-Each final hierarchy level has a separate checkpoint namespace. Large
-components retain inner checkpoints; small ones save compact completed paths.
-New source identities include every numerical/search module, so an old final
-product cannot silently bypass the new algorithm. Existing files are not
-deleted. Changes to code identities may also invalidate feedback caches even
-though this promotion does not change feedback mathematics.
-The same default serves simulation, AstCal and Tropheops through the ordinary
-CLI; `--founder-refinement off` disables refinement and count-up.
-
-### Measured tradeoff
-
-On the saved AulStu chr3 workload (290 samples, 1,505,847 markers), all eight
-L3 components, resulting L4 refinement and final count-up used **0.943 equivalent
-76-core node-hours**, versus approximately 8.91 historically. This is allocated
-CPU time normalized by 76 cores, summed over measured stages with verified
-identical predecessor outputs—not a measured single-node wall time. Loading,
-evaluation and unchanged hierarchical assembly are excluded.
-
-The final real panel retained 14 rows, with 20,275,253 called alleles versus
-20,263,613 historically. Its primary score was lower by 723,921.546 and its
-predictive score by 876,183.894. Globally matched rows differed at 4,374,924 of
-19,926,272 jointly called alleles: a substantial path/linkage change, not a
-measured biological error rate. Historical real-data paths are not ground truth.
-
-Two intact full-L4 simulation controls were unchanged: 309 errors among
-9,035,082 called alleles and 84 among 1,976,346. Three omitted-founder controls
-were mixed: matched errors changed by -14,612, +6,460 and +2,956 (aggregate
-152,538 to 147,342 among 2,611,428 matched calls). Two still had an unmatched
-extra row. This does not establish uniform accuracy preservation.
-The default was selected with these runtime/search tradeoffs explicitly accepted.
-
-Absent local alleles, unsampled ancestry, weak founder representation and
-long-range mislinking remain limitations. More likelihood or more called
-alleles does not by itself establish improved biological reconstruction.
+On the simulation benchmarks of 5–6 October 2026, K equalled the identifiable
+truth on 61 of 64 chromosomes (two splits of near-identical founders and one
+founder that was never assembled). The criterion can miss rare founders carried
+by two to five samples. Absent local alleles, unsampled ancestry, weak founder
+representation, founders missing from the discovery candidates and long-range
+mislinking remain limitations. More likelihood or more called alleles does not
+by itself establish improved biological reconstruction.
 See [scaling and work bounds](founder_scaling.md#final-founder-refinement-explicit-work-and-parallelism).
 
 ## Pedigree
@@ -453,18 +595,35 @@ screen scores are reused, preserving quadratic founder-state scaling.
 The score recipe has its own checkpoint identity: existing preparation can
 be reused, but old genetic scores are not silently treated as the new model.
 
+A candidate parent's transmitted-state chain follows its painting posterior,
+whose switch penalty is a painter's regularizer, not a probability. Where the
+parent has no informative selected markers, that chain is interpolation only.
+Each parent bridge is therefore mixed with the uniform selector kernel,
+`T' = (1-k) T + k U`, where `k` is the boundary's meiotic switch probability
+scaled by `1 - min(1, n/N)`; `n` is the smaller informative-marker count of the
+parent's two adjacent bins. The default `N=1` acts only next to data-free
+parent bins, and `N=3` gives a graded form
+(`parent_state_source_gap_support_sites`; `0` restores the unmixed chain).
+M0 is unaffected, and data-supported parent bins keep their bridge unchanged.
+
 Default pooled predictive calibration (`--pedigree-calibration predictive`;
 disable with `--pedigree-calibration off`) multiplies all M0/M1/M2 chromosome
 log-likelihoods by one positive scale. Whole usable chromosomes, in input order
 modulo four, form four groups.
 Each of the first three groups is predicted by the other two; their summed log
 predictive mixture selects the scale. The fourth group supplies untouched
-diagnostic testing, predicted using all three non-test groups. Existing fixed
+diagnostic testing, predicted using all three non-test groups. The objective
+omits M1/M2 rows whose proposed parent `p` is reciprocal-dominant on the
+fitting chromosomes: `M1(p | c) - M0(p) >= M1(c | p) - M0(c)` for child `c`.
+The genetic score cannot order such parent/offspring reversals; direction and
+reciprocal-family inference settle them, and decisions still see every row.
+Existing fixed
 state priors and eligible candidate counts are preserved; cohort prevalence is
 not fitted. A small log-scale grid brackets numerical maxima before continuous
 refinement because this objective need not be unimodal. Search bounds are
-0.001–100; boundary/nonconverged fits or no selection gain retain scale 1, as do
-inputs with fewer than two chromosomes in any group.
+0.001–100; boundary/nonconverged fits, no selection gain or a fitted scale above 1
+(the weight only tempers, never sharpens) retain scale 1, as do inputs with fewer
+than two chromosomes in any group.
 
 This is conditional predictive weighting of a composite model, **not** calibration
 of biological posterior probabilities. The paintings and candidate panel were
@@ -476,8 +635,13 @@ the weight. Full-marker Mendelian exclusion uses the original raw genotype
 likelihoods and recomputes any newly required candidate dyads without this scale.
 
 Pedigree uses [finite direction and family evidence](pedigree_direction.md) rather
-than a mandatory ordering of inferred ancestry layers. Paired chromosome
-junction contrasts give finite, neutral-centred orientation support; four
+than a mandatory ordering of inferred ancestry layers. A per-chromosome count
+likelihood of painted junctions (a transmitted homologue carries each parental
+junction with probability 1/2; everything else is a non-negative remainder; a
+5% per-chromosome painting-failure floor) gives orientation log odds that add
+over chromosomes; a 2% pair-level painting-failure mixture (sample-level
+junction excess repeats on every chromosome) bounds the neutral-centred
+correction at 3.9 nats against an edge; four
 synchronous reciprocal-family cavity-message passes compare competing M0/M1/M2
 families while excluding immediate reverse feedback. A joint-family
 factor also checks reverse two-edge ancestry paths, averaging over uncertain
@@ -486,14 +650,19 @@ configuration panel assigns omitted mass neutral compatibility; conditioning on
 both focal parents preserves legitimate backcrosses. Freeze this path evidence,
 then replace the initial reciprocal term with a converged reciprocal
 solve on the path-adjusted scores (maximum log-message change `1e-8`, at most
-128 undamped iterations, then a 4096-iteration damping-0.5 restart if needed;
-the residual is measured before damping and failure of both attempts is reported). The final messages do not recompute the
+8192 undamped iterations, then a 4096-iteration damping-0.5 restart if needed;
+the residual is measured before damping; failure of both attempts is an error in
+the full-data fit, while a failed bootstrap/LOCO resample abstains and is counted). The final messages do not recompute the
 supporting path factor. Explicit chronology
 exempts that parental side without exempting an uncertain co-parent. All these
 terms are recomputed during bootstrap and leave-one-chromosome-out fits.
 Exposure requirements, explicit
 eligibility, the fixed top-20 pair panel, fixed state priors and release
-thresholds remain unchanged for chromosome-resampling release.
+thresholds remain unchanged for chromosome-resampling release. A released
+inferred edge additionally needs a decisive full-data orientation: the exact
+reciprocal comparison of the pair, with all other converged messages fixed,
+must give the reverse orientation at most 2% (3.9 nats); near-tied
+orientations stay unreleased, and caller chronology is exempt.
 The standard workflow additionally scans full-marker raw genotype likelihoods
 for unresolved/non-exact M0/M1 counts. Mendelian exclusions and already-supported
 outgoing edges must jointly leave exactly the full-data incoming parent set;
@@ -517,9 +686,56 @@ G0/species labels do not establish parentage; sequenced outside-pedigree species
 references are excluded from parent candidates. Simulation inference does not
 receive the generating pedigree or generation labels.
 
+## Founder allele refit after painting
+
+Assembly never re-calls an allele: a chromosome row copies the alleles of the
+block-local rows on its path. Where block-level model selection merged founders
+that differ at a few sites, the row of the founder without its own local row
+carries the other founder's alleles there, for all of its carriers. After
+painting, the `allele_refit` stage performs one conditional M-step given the
+fixed painting and the same normalized genotype likelihoods. At each site, a
+row's allele is scored over the samples painted as carrying it (both tracks
+named, positive depth, and not flagged by the sample-quality QC on that
+contig, as in founder construction) with the painter's robust observation model,
+`log((1 - eps) * P(reads | dosage) + eps / 3)` with `eps = 0.01`, holding each
+sample's other painted allele at its current value. Each site is updated by
+coordinate ascent (three sweeps) over single-row flips and joint two-row flips.
+A move is accepted only if its gain is at least
+`AlleleRefitConfig.minimum_gain_nats` (default 5 nats, a fixed prior against
+change). The two-row moves correct allele swaps between two rows: a swap keeps
+the genotype of every sample painted with that pair, so it produces phase
+errors, and a single flip loses likelihood on those samples. On the simulations
+below, the result equals an exact
+search over all allele vectors at each site, except at a few dozen of 14 million
+cells. Unknown alleles are never filled; completion fills are refit under the
+same rule. Only both-named painted pairs are used: pooled tracks (identical
+rows, `LOCAL_ALLELE_EQUIVALENCE` or whole-component pools) carry no
+row-specific evidence and are skipped with their partner, as abstentions are. Row paths, founder counts and the painting are unchanged.
+
+Each component keeps two matrices. Released alleles feed evaluation (the
+`allele_refit` founder row) and export; inference alleles are the same values
+restricted to the frozen assembly snapshot's called cells, and family phase
+decodes its scaffold from them. The painter and pedigree evidence still use the
+frozen snapshot, so painting keeps its no-feedback rule and pedigree results do
+not depend on the refit. No repaint/refit iteration is run; in a reviewed
+one-chromosome experiment, a repaint and second refit added little.
+
+On the std_n80 and stress_n80 simulations (baseline products, 5 nats), founder
+allele errors fell from 32,466 to 16,052 (16,460 fixed, 46 broken) and from 21,871
+to 6,710 (15,207 fixed, 46 broken). In the family-phase scaffold, genotype errors
+fell by 79% and 59%, and phase switch errors fell from 1,082 to 116 and from 2,937
+to 88. Most remaining errors are filler rows of locally rare founders
+whose carriers are painted on another row, so no carrier evidence reaches them.
+On real data the refit follows the reads, including at artefactual sites
+(paralogues, excess heterozygosity); no site-quality mask is applied here.
+
 ## Family refinement and recombination
 
 Family refinement conditions on explicitly supported Tier-B parent edges.
+Its scaffold takes a named track's alleles from the (refit) row and a pooled
+track's alleles from its chunk members: their common allele where every member
+is called and they agree, unknown otherwise. Final-phase paintings carry the
+member sets, flipped with the labels.
 The exact configuration table remains the primary pedigree report. Separate
 `tier_b_partial_relationships` rows retain marginally supported edges even
 when M1 versus M2 is unresolved: an edge must meet the existing bootstrap and
@@ -532,19 +748,81 @@ messages and conditional phase polishing reconcile relatives while preserving
 called genotypes and missingness. Family phase has one phase-focused release policy:
 start phase assessment after 20 family iterations, then require five consecutive
 identical called-phase arrays, or actual family convergence. Each assessment
-restarts the polisher from the current family context, not the preceding polished
-path. If phase remains unstable at 520 iterations, retain that attempt and
-restart from the scaffold with half damping, at most twice (0.5, then 0.25,
-then 0.125 by default). Tolerance scales with damping so the undamped residual
-criterion is unchanged. Successful ordinary solves are unaffected. Each attempt
+restarts the polisher from the painting-scaffold phase, not from the preceding
+polished path. Samples with fewer than two observed parents are held in that
+(displayed) orientation during polishing; their released internal frame, which
+recombination decodes, remains the family MAP. If phase remains unstable at 520
+iterations, retain that attempt and restart from the scaffold with half
+damping, at most twice (0.5, then 0.25, then 0.125 by default). Tolerance
+scales with damping so the undamped residual criterion is unchanged. Successful ordinary solves are unaffected. Each attempt
 has a separate checkpoint; final summaries record attempted and final damping,
 and total solver iterations. Set `FamilyRefinementConfig.phase_retry_count=0`
 to disable retries. If every attempt remains unstable, no final phase is released.
 
+Root frames. A pedigree root's scaffold frame (the track order of its painting)
+is the frame of its displayed phase and of the polish of its two-parent
+children. With one child, a frame change of the root and a crossover of that
+child explain the data equally well, so a root with one child keeps its
+scaffold frame inside each component (its family phase chain changes frame
+only at component edges), and a single-boundary root gauge move needs at least
+two children changing at the boundary (`minimum_gauge_support`). After the
+release, frames of roots with at least three children are repaired once on the
+final family state (`refinement/frames.py`). For a bin edge, each child's joint
+selector chain (the family model's emissions) is re-decoded with the root's
+homologues relabelled from the edge on. A child supports a frame change there
+if relabelling at the edge (at a flagged edge: anywhere in the flagged stretch)
+raises its max-path score by at least `root_frame_informative_nats` and its
+flanks do not deny a change; it opposes if its homologue is the same on both
+flanks of a location zone (+-`root_frame_location_bp` around the edge, or around
+the flagged stretch) whose own evidence is left out, the flanks reaching
+`root_frame_window_bp` from the edge. Short tracts inside the zone therefore do
+not count, and children whose own change lies a little away from the edge are
+neutral. Flagged edges are those where the root's own data do not carry the
+orientation (painting ties, abstained or heterozygote-free bins); their
+scaffold-error prior is 0. Where the root's family MAP frame agrees with its
+scaffold over the window, both are relabelled from the edge to the end of the
+component when at least three children support it and none opposes
+(all-or-none, as a frame error moves every child), the prior plus the
+children's score changes at the edge is positive, no other parent with at
+least three children of its own is mixed in the two bins next to the edge (a
+reference-order junction switches children binomially), the zone does not reach
+a component end, and the edge lies outside supplied protected intervals
+(breakpoint TSV `chrom, start, end, reason`, the recombination order-breakpoint
+format; argument `protected_intervals` or `BHD_FAMILY_PHASE_PROTECTED_INTERVALS`;
+rows whose reason starts with `reversed_segment` are not breakpoints). At a frame
+change the family solve made against the scaffold, the same votes decide:
+unanimous support for undoing it reverts the internal (decoder) frame, and
+unanimous opposition copies it into the scaffold. Scaffold changes enter
+before a final polish, so the displayed phase, the polished children and the
+recombination decoder share one root frame there; frames are released in the
+painting's coordinates, and the product lists every decision
+(`root_frame_repairs`). A child with one observed parent releases its family
+MAP frame, and where it is heterozygous at the parent's heterozygous sites
+its meiosis observations follow that frame, which belief propagation aligned
+with the root's (possibly wrong) homologue labels. So when a root's internal
+frame changes, each such child's frame is changed with it inside every run of
+these sites (bounded by sites where the child is homozygous, which are data)
+that contains the change: the child's observations keep the family solve's
+pattern relative to its homozygous sites on both sides; where the change
+reverses the parity between those sides, the run's own switch nearest to it is
+dropped, or, when the run has none, the switch at the change is kept, as the
+data require one (`child_frames` records follow, cancel and keep). Children
+with children of their own are recorded, not changed.
+`FamilyRefinementConfig(root_frame_repair=False,
+fix_single_child_root_frames=False, minimum_gauge_support=1)` restores the
+earlier behaviour bit for bit. A real scaffold frame error of a single-child
+root now becomes one false crossover call; the two cannot be told apart.
+
 This is a phase point estimate, not a calibrated marginal posterior. Full family
 probability tensors and a separate imputed source product are not produced.
-Family-supported gap fills at the existing 0.98 context threshold can inform
-the polisher internally, but do not become new published allele calls. Root
+The polisher scores copy consistency on called scaffold alleles only, so with
+default settings the called phase does not depend on the family messages.
+Family gap fills (0.98 context threshold) are not copy evidence: where a parent
+has no reads they are imputed from its children's current phase and would
+confirm that phase, including family-MAP switch errors. They never become
+published allele calls. `PhasePolishConfig.polish_from_scaffold=False` restores
+the earlier polish (gap fills as copy evidence, every sample from the family
+MAP). Root
 gauges and component-local labels retain their existing interpretation. Family phase
 does not modify pedigree or feed evidence upstream.
 
@@ -570,8 +848,64 @@ orientation-error tracts. Shared-family evidence can favor one parental phase
 error over coincident apparent crossovers in several children. This is a
 conditional model comparison, not proof: synchronized true crossovers can be
 confounded with a shared error. The input phase product is not overwritten.
+Candidate tracts are screened per meiosis from supported alternating origin
+runs: a run between two opposite runs, or the run between an individual's run
+boundary (chromosome end, component change, painting-coverage gap or oversized
+marker gap) and its nearest supported switch. Tracts longer than
+`maximum_candidate_bp` are not proposed; the same objective scores every one.
 
 Maps report posterior expected crossover counts, called interval-censored
 events and observable meiosis-bp exposure separately. Rates in weakly observed
 regions can remain prior-sensitive; no exposure is not a measured zero rate.
 Neither family inference nor the estimated map feeds back into earlier stages.
+
+Final calls inside a long run without reads are imputed from the painting, not
+observed. A sample's run of at least `RecombinationMapConfig.read_free_tract_sites`
+(default 1000) consecutive zero-depth sites, taken from the observation source's
+positive-read-depth mask, is therefore removed from that sample's coverage for
+the shared-orientation fit and the per-meiosis decoder, like a painting gap:
+its meioses, as parent or child, have no observation, exposure or called
+crossover inside or across it. Shorter zero-depth runs remain observations; 0
+disables the rule.
+
+Reference-order junctions. The map assumes reference order is meiotic order.
+Where a reference segment is misplaced or inverted, a meiosis changes
+transmitted homologue at the junction whenever it has an odd number of true
+crossovers between the two loci the reference joins: with probability
+1/2(1 - e^-2d) for loci d Morgans apart, so about half of all meioses for
+unlinked sides. These are real transmission changes in reference coordinates,
+not crossovers at that position. Three outputs address them
+(`recombination/junctions.py`):
+
+- Reported call intervals. Painting and phase are rigid inside a painting bin,
+  so a change inside a bin is placed at one of its edges. A call whose flanking
+  supported markers straddle a bin edge is reported with the two bins around
+  that edge (`reported_left_bp`, `reported_right_bp`); calls, counts and the map
+  are unchanged.
+- A truth-free junction detector that reports and never masks. Calls of at
+  least three parents chained by overlapping reported intervals form a
+  candidate locus. For each meiosis decidable across the locus, y is the parity
+  of its calls there, modelled as y = s XOR f: s ~ Bernoulli(q) is a real change
+  of transmitted homologue and f (prior 1/2, one per parent, shared by its
+  children) a frame flip of that parent. Ordinary recombination, hotspots
+  included, bounds q by a ceiling: a point hotspot (5%) combined with the
+  background map parity across the locus. The mixing statistic is the profile
+  log likelihood ratio of free q against q at most that ceiling, so all-or-none
+  parents (frame errors) and hotspot-like single calls give no evidence. The two
+  ends of a displaced or inverted segment switch in the same meioses; the pairing
+  statistic compares one locus predicted from another (up to a discordance
+  probability of 0.5-25%) with independent switching, takes the weaker
+  direction and subtracts log(number of locus pairs on the chromosome). A locus
+  is flagged when the larger statistic reaches ln 100. Likelihood ratios are
+  conditional on the calls (no reads), assume independent meioses given the
+  parents' flips, and are not calibrated posterior odds; power is limited by the
+  number of informative meioses and by q itself (junctions joining loci a few
+  cM apart look like hotspots).
+- Optional order breakpoints (running guide, Reference-order breakpoints). At a
+  supplied interval the sites of the overlapping painting bins leave the map axis
+  and the component is split, so the two sides are treated as unlinked: no call,
+  exposure or shared-orientation tract crosses, at the cost of those bins'
+  exposure. A supplied breakpoint also hides any genuine structural polymorphism
+  there, and decoding a segment on its own can expose junctions inside it. The
+  upstream stages do not use the file; their panels, paintings and frames still
+  assume reference order across it.

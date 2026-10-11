@@ -33,10 +33,10 @@ known-truth simulation validation.
 | Input and observations | `core/variants.py`, `core/genotypes.py` | Marker blocks, allele depths and genotype likelihoods |
 | Observation calibration | `core/read_calibration.py`, `core/read_model.py`, `core/read_homozygote_model.py` | Fit nested read models, including pooled homozygote overdispersion; kernels and matching GL application live in `read_kernels.py` and `read_likelihoods.py` |
 | Local discovery | `discovery/blocks.py`, `discovery/search.py` | Missing-aware reversible search for 200-SNP panels |
-| Local path selection | `discovery/path_model.py`, `path_scoring.py`, `path_fitting.py`, `path_selection.py` | Normalized diploid-path objective, prepared scoring, fixed-K fitting and bounded drop/merge/add search |
+| Local path selection | `discovery/path_model.py`, `path_scoring.py`, `path_fitting.py`, `path_selection.py` | Normalized diploid-path objective, prepared scoring, fixed-K fitting and drop/merge/add search to convergence |
 | Feedback orchestration | `workflows/block_feedback.py`, `discovery/path_blocks.py` | Initial path selection, L1 and rebuilt L1+L2 feedback, block materialization and checkpointed parallel work |
-| Candidate banks / alternative selectors | `discovery/candidate_selection.py`, `discovery/candidate_rescue.py` | Partial-row completion and BIC/source-endpoint starts; explicit balanced/strict cavity-rescue alternatives |
-| Optional local segment exchange | `discovery/path_exchange.py` | Fixed-K reciprocal suffix starts, exact all-pairs/cuts screening and protected top-eight plus warm-control refits; off by default |
+| Candidate banks | `discovery/candidate_selection.py` | Partial-row completion and BIC/source-endpoint starts |
+| Context refit and completion site posterior | `discovery/feedback.py`, `assembly/site_posterior.py` | Cavity carrier weights; shared founder-allele site posterior (exact for ≤ 10 bits, uncertain core above) |
 | Founder completion | `assembly/completion.py`, `assembly/joint_completion.py` | Evidence-supported local completion and frozen inference panels |
 | L1–L4 assembly | `assembly/pipeline.py`, `assembly/hierarchy.py` | Checkpointed hierarchy, component boundaries and scheduling |
 | Founder-path refinement | `assembly/founder_refinement.py` | Coordinate the refinement passes after each final hierarchy level |
@@ -51,40 +51,53 @@ known-truth simulation validation.
 
 Paths in this table are relative to `haplotype_reconstruction/`.
 
-Local path selection and optional exchange consume the original calibrated GLs;
-assembly panels only propose starts. The path modules contain no workflow paths,
+Local path selection consumes the original calibrated GLs; assembly panels
+only propose starts. The path modules contain no workflow paths,
 simulation truth or private-pilot imports. `path_blocks.py` preserves kept-marker
 axes, ALT probabilities, fractional support and spatial MAP unknown counts.
-`PathSelectionConfig` in `core/config.py` owns the shared three-round,
-eight-refits-per-kind, twenty-update budgets. Ordinary search reuses prepared
-observations and exact panel-plus-frequency score/fit results within one block;
-the suffix screen reuses forward/backward messages without assuming equal
-founder frequencies. These are numerical optimizations, not reduced proposal
-sets.
+`PathSelectionConfig` in `core/config.py` owns the eight refits per proposal
+kind and the reported backstops (rounds 10 + 2K, fixed-K updates 20 + 4K);
+rounds and fits stop naturally. Drops and adds are screened by exact forward
+scores, merges by the larger of two EM lower bounds from the drop panels'
+forward-backward statistics (O(N L K^3) per round). Ordinary search reuses
+prepared observations and exact panel-plus-frequency score/fit results within
+one block. Discovery (`discovery/search.py`) likewise stops when the incumbent's
+generated neighbourhood is exhausted; its expansion (32 + 8 K_rep) and exact-
+score (96 + 12 K_rep) limits are reported backstops.
 
 ## Assembly: keep the different problems separate
 
 The linker and founder refiner solve different problems. `linking.py`,
 `micro_hmm.py`, `macro_hmm.py` and `edge_counts.py` estimate linkage between
 blocks. `paths.py` constructs paths and reconstructs their alleles.
-`panel_search.py` owns bounded candidate selection; `chimera_resolution.py`
-owns the optional broader search. Both use the declared scoring objective.
+`paths.py` runs the endpoint beam and `panel_search.py` owns the bounded
+panel selection; this is the single join route at every level.
 
 `founder_refinement.py` is the coordinator for the next layer. Its numerical
 and execution helpers are grouped in `assembly/founder/`:
 
 | Modules | Responsibility |
 | --- | --- |
-| `search`, `global_search`, `search_ranking` | Budgeted sparse coordinates, global escapes and bounded proposal ranking |
-| `proxy_primary`, `sparse_primary` | Summed-evidence proxy grids and exact incumbent anchors |
-| `path_search`, `beam`, `dual_search`, `windows` | Conditional path and interval proposals |
-| `queries`, `conditional_messages`, `exchange_bounds`, `exchange_cache` | Reuse identical numerical problems and unchanged flanks; bound and incrementally score suffix queries |
-| `exchanges`, `intervals`, `count`, `count_increase` | Paired-path moves, progressive count reductions and final count-up/refit |
-| `scoring`, `predictive`, `evidence` | Cohort likelihoods, missing-founder evidence and model preparation |
-| `workspace`, `packing`, `background`, `delta` | Reusable arrays and localized score evaluation |
-| `candidates`, `components`, `count_workers` | Bounded concurrent work and straggler thread reallocation |
-| `checkpoints` | Resume records for refinement passes |
-| `beam_kernels`, `beam_wide_kernels`, `dual_short`, `site_kernels`, `sparse`, `count_bound` | Specialized numerical kernels and proposal screening |
+| `converged_sweep`, `sweep_kernels` | Converged fixed-K fits (Gauss-Seidel window/suffix-exchange sweeps), count passes, best-F panel, reconstruction of refined panels and their diagnostics |
+| `window_dp`, `dual_search`, `dual_short`, `sparse` | Exact binned window programmes (shared-background frontier programme, box screen, lexicographic ties) and their dual/suffix kernels |
+| `count_criterion`, `count_bound` | Effective-carrier count decisions and optimistic count bounds |
+| `scoring`, `evidence`, `site_kernels` | Cohort likelihoods and model preparation |
+| `workspace`, `packing` | Reusable arrays, packed emissions and cached panel scores |
+| `candidates`, `components` | Level components in worker processes, bounded concurrent work and straggler thread reallocation |
+| `checkpoints` | Resume records |
+
+The budgeted refiner is deleted: its modules (`search`, `global_search`,
+`search_ranking`, `proxy_primary`, `sparse_primary`, `path_search`, `beam`,
+`beam_kernels`, `beam_wide_kernels`, `windows`, `queries`,
+`conditional_messages`, `background`, `predictive`, `delta`), the path-proposal
+helpers of `founder_refinement.py` and of the remaining modules, the old
+deep-deletion count module (`count`) and its guarded exchange pass
+(`exchanges`, `exchange_bounds`, `exchange_cache`, `count_workers`). The
+converged sweep (exact window programmes, all-pair suffix exchanges and its
+count pass) replaces them. `FounderRefinementConfig` still carries the removed
+refiner's budget fields (`beam_width`, `branch_cap`, `window_blocks` and
+others): the assembly configuration records and identities include them, and
+only their validation reads them.
 
 These helpers do not use pedigree truth or replace sample painting. Their
 internal sample fits score founder proposals. The separate top-level
@@ -128,8 +141,9 @@ and evaluation.
 Its `current_threads()` lets surviving workers claim released cores at explicit
 numerical boundaries. Genome-wide candidate selection remains a barrier between
 pedigree screening and detailed scoring; parallelism does not change that model.
-Family phase, recombination and evaluation supply their decoded workspace
-estimates to `memory_worker_limit()` in that same module. It applies one
+Pedigree preparation and scoring, family phase, recombination and evaluation
+supply their decoded workspace estimates to `memory_worker_limit()` in that
+same module. It applies one
 memory-headroom policy using `core/runtime.py` memory accounting, without
 reducing the shared CPU ceiling. Stage-specific array-size estimates stay
 beside the stages that own those arrays.

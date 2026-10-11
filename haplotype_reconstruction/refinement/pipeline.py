@@ -8,6 +8,7 @@ from ..core.run_record import timed_stage
 
 from dataclasses import asdict, replace
 import gc
+import os
 from pathlib import Path
 import time
 import numpy as np
@@ -18,14 +19,16 @@ from haplotype_reconstruction.core.chromosome_parallel import (
 )
 from haplotype_reconstruction.pedigree import components as pedigree_components
 from haplotype_reconstruction.pedigree import pipeline as pedigree_pipeline
+from haplotype_reconstruction.painting import allele_refit as painting_allele_refit
 from haplotype_reconstruction.painting import checkpoints as painting_checkpoints
 from haplotype_reconstruction.workflows.reconstruction import PAINTING_STAGE
-from . import conditioning, model, polish
+from . import conditioning, frames, model, polish
 
 
 FINAL_PHASE_STAGE = "family_phase"
 CANONICAL_PHASE_CONFIG = polish.PhasePolishConfig(
-    copy_error=.01, adaptive_window_sites=100, minimum_biological_gain=0.)
+    copy_error=.01, adaptive_window_sites=100, minimum_biological_gain=0.,
+    polish_from_scaffold=True)
 
 
 class PhaseStabilityError(RuntimeError):
@@ -38,12 +41,19 @@ class PhaseStabilityError(RuntimeError):
 
 def _fit_phase(gl, observed, scaffold, positions, relationships, names, *,
                config, phase_config, identity, work_path=None, checkpoint_threads=1,
-               checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None):
+               checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None,
+               frame_inputs=None):
     """Resume family messages and the actual consecutive called-phase checks.
 
 The prepared workspace survives one-iteration continuations but is rebuilt on
-restart. Each polisher starts independently from the current family context;
-the preceding polished path is only a comparison, never a warm start.
+restart. Each polisher starts independently from the current family context
+(with ``polish_from_scaffold``, from the scaffold); the preceding polished
+path is only a comparison, never a warm start.
+
+After the stable release, root frames are repaired once on the final family
+state (refinement/frames.py) and the polish is rerun on the repaired scaffold.
+This step is a deterministic function of the final messages, so a resumed
+stage repeats it exactly. It needs the scaffold polish, which it edits.
 """
     if config.max_iterations < config.minimum_iterations:
         raise ValueError("maximum family iterations must cover the initial phase window")
@@ -84,7 +94,7 @@ the preceding polished path is only a comparison, never a warm start.
         # iteration could become inconsistent with these checkpointed messages.
         save(messages, None, 0)
 
-    workspace = None
+    workspace = family = None
     # Only the immediately preceding independent solve is reusable. Fixed
     # chromosome axes, pedigree, map and configuration belong to this call;
     # restarting from messages intentionally starts with an empty cache.
@@ -140,19 +150,54 @@ the preceding polished path is only a comparison, never a warm start.
               f"changed_alleles={changed} unchanged_checks={unchanged}", flush=True)
         if progress_callback is not None:
             progress_callback(item)
-        del family, following
-    return point, tuple(checks), converged
+        del following
+    repair = None
+    if frame_inputs is not None and config.root_frame_repair and phase_config.polish_from_scaffold:
+        if workspace is None:
+            workspace = model.prepare_family_workspace(
+                gl, observed, scaffold.reference_alleles, positions, scaffold.phase_bins,
+                scaffold.component_ids, relationships, names, config=config,
+                chromosome_map=chromosome_map)
+        if family is None:
+            # Resumed after the release: rebuild the final family view, no iteration.
+            family = model.refine_family(
+                gl, observed, scaffold.reference_alleles, positions, scaffold.phase_bins,
+                scaffold.component_ids, relationships, names,
+                config=replace(config, max_iterations=state.iteration), resume=state,
+                workspace=workspace, chromosome_map=chromosome_map)
+        repair = frames.repair_root_frames(workspace, state, family.inferred_phase_map, config,
+                                           **frame_inputs)
+        if repair["display"] is not None:
+            point = frames.finish_repaired_phase(
+                scaffold.reference_alleles, family, repair, positions, scaffold.phase_bins,
+                scaffold.component_ids, workspace.parents, workspace.children, workspace.slots,
+                phase_config=phase_config, chromosome_map=chromosome_map,
+                finish=polish.finish_family_phase)
+        print(f"  [family phase] root frame repair: moves={len(repair['moves'])} "
+              f"reverts={len(repair['reverts'])} transfers={len(repair['transfers'])} "
+              f"rejected={repair['rejected']}", flush=True)
+    return point, tuple(checks), converged, repair
 
 
 def refine_chromosome(painting_checkpoint, gl, positions, observed, relationships, sample_ids, *,
                       contig, config=model.FamilyRefinementConfig(), phase_config=None,
                       identity=None, work_path=None, checkpoint_threads=1,
-                      checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None):
-    """Refine frozen painting/pedigree; ``checkpoint_threads=None`` uses the live CPU lease."""
+                      checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None,
+                      refit_panel=None, founder_evidence_excluded=None, protected_intervals=None):
+    """Refine frozen painting/pedigree; ``checkpoint_threads=None`` uses the live CPU lease.
+
+    ``refit_panel`` (the allele refit of this painting) supplies the scaffold
+    founder alleles; without it the frozen assembly snapshot is decoded.
+    ``founder_evidence_excluded`` loads the contig's sample-quality flags for
+    the release-identity check only; every sample's evidence is decoded.
+    ``protected_intervals`` (closed bp intervals, shape (n, 2)) are reference
+    order breakpoints where no root frame repair is made.
+    """
     names = tuple(map(str, sample_ids))
     painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(painting_checkpoint, expected_sample_ids=names)
     pedigree_components._validate_release_array_identity(
-        painting_checkpoint, np.asarray(gl), np.asarray(positions), np.asarray(observed))
+        painting_checkpoint, np.asarray(gl), np.asarray(positions), np.asarray(observed),
+        founder_evidence_excluded)
     if chromosome_map is not None:
         if chromosome_map.contig != str(contig):
             raise ValueError("Family phase chromosome map name differs from input contig")
@@ -160,18 +205,31 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
     config = config.validated()
     phase_config = replace(phase_config or CANONICAL_PHASE_CONFIG,
                            recombination_rate=config.recombination_rate)
+    protected = (None if protected_intervals is None
+                 else np.asarray(protected_intervals, dtype=np.int64).reshape((-1, 2)))
     family_identity = {
         "model": model.MODEL_VERSION, "config": asdict(config), "sample_ids": names,
         "contig": str(contig), "assembly": painting_checkpoint.release_identity.record(),
         "tpainting": painting_checkpoint.painting_product_identity.record(),
         "pedigree_sha256": conditioning.relationship_identity(relationships),
         "recombination_map": None if chromosome_map is None else chromosome_map.identity(),
+        "allele_refit": None if refit_panel is None else refit_panel.identity,
+        "protected_intervals": None if protected is None else protected.tolist(),
         "external": identity,
     }
     product_identity = {"schema": conditioning.SCHEMA, "family": family_identity,
                         "phase_config": asdict(phase_config),
                         "code": conditioning.refinement_code_identity()}
-    scaffold = conditioning.prepare_phase_scaffold(painting_checkpoint, positions)
+    scaffold = conditioning.prepare_phase_scaffold(painting_checkpoint, positions, refit_panel)
+    frame_inputs = None
+    if config.root_frame_repair:
+        edge_parents = model.pedigree_edges(relationships, names)[0]
+        counts = np.bincount(edge_parents, minlength=len(names))
+        frame_inputs = {
+            "tie_boundaries": frames.painting_tie_boundaries(
+                painting_checkpoint, positions,
+                np.flatnonzero(counts >= config.root_frame_minimum_children)),
+            "protected": protected}
     attempts = []
     for retry in range(config.phase_retry_count + 1):
         # Restart only after a genuine stability failure. Scale tolerance with
@@ -189,11 +247,12 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
                   "tolerance": attempt_config.tolerance,
                   "checkpoint": None if attempt_path is None else str(attempt_path)}
         try:
-            phase, checks, converged = _fit_phase(
+            phase, checks, converged, repair = _fit_phase(
                 gl, observed, scaffold, positions, relationships, names, config=attempt_config,
                 phase_config=phase_config, identity=product_identity, work_path=attempt_path,
                 checkpoint_threads=checkpoint_threads, checkpoint_min_seconds=checkpoint_min_seconds,
-                progress_callback=progress_callback, chromosome_map=chromosome_map)
+                progress_callback=progress_callback, chromosome_map=chromosome_map,
+                frame_inputs=frame_inputs)
         except PhaseStabilityError as error:
             record.update(phase_stable=False, iterations=error.checks[-1]["iteration"])
             attempts.append(record)
@@ -212,6 +271,10 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
         "corrected_component_paintings": conditioning.paint_final_phase(painting_checkpoint, positions, phase.phase_map),
         "phase_stable": True, "phase_stability_checks": checks,
         "phase_solver_attempts": attempts,
+        "root_frame_repairs": None if repair is None else {
+            key: repair.get(key, []) for key in
+            ("moves", "reverts", "transfers", "child_frames", "rejected", "guard_details",
+             "flagged_edges")},
         "source_posterior_converged": converged,
         "posterior_and_recombination_products_included": False,
         "confidence_policy": "conditional phase point path; no marginal posterior probabilities are published or transferred",
@@ -221,6 +284,7 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
 def _summary(result, store, elapsed):
     phase = result["phase"].summary
     checks = result["phase_stability_checks"]
+    repairs = result.get("root_frame_repairs") or {}
     return {
         "contig": result["contig"], "samples": len(result["sample_ids"]),
         "sites": len(result["positions"]), "phase_stable": result["phase_stable"],
@@ -237,6 +301,9 @@ def _summary(result, store, elapsed):
         "confidence_policy": result["confidence_policy"], "elapsed_seconds": elapsed,
         "final_checkpoint": str(Path(checkpoints.contig_path(
             store.root, FINAL_PHASE_STAGE, result["contig"])).resolve()),
+        "root_frame_moves": len(repairs.get("moves", ())),
+        "root_frame_reverts": len(repairs.get("reverts", ())),
+        "root_frame_transfers": len(repairs.get("transfers", ())),
     }
 
 
@@ -252,23 +319,30 @@ def _refine_contig(contig, state, phase_name, common):
             raise ValueError("Family phase final chromosome identity differs")
     else:
         painting = store.load_contig(PAINTING_STAGE, contig, nthreads=current_threads())
+        refit = store.load_contig(painting_allele_refit.ALLELE_REFIT_STAGE, contig,
+                                  nthreads=current_threads())
         store.nthreads = current_threads()
         gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
             store, contig, raw_gl_stage=common["raw_gl_stage"],
             raw_sites_stage=common["raw_sites_stage"], raw_gl_key=common["raw_gl_key"],
             raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
+        flags = pedigree_pipeline._founder_evidence_flags(
+            store, contig, sites_payload, raw_sites_stage=common["raw_sites_stage"])
         del gl_payload, sites_payload
         maps = common["genetic_maps"]
         chromosome_map = None if maps is None else maps.for_contig(contig)
+        protected = common["protected_intervals"]
         current_threads()
         result = refine_chromosome(
             painting, gl, pos, observed, common["relationships"], common["names"],
             contig=contig, config=common["config"], identity=identity,
             work_path=Path(store.stage_dir(FINAL_PHASE_STAGE)) / f"{contig}.iterations.p5.b2",
-            checkpoint_threads=None, chromosome_map=chromosome_map)
+            checkpoint_threads=None, chromosome_map=chromosome_map, refit_panel=refit,
+            founder_evidence_excluded=flags,
+            protected_intervals=None if protected is None else protected.get(contig, ()))
         checkpoints.write(checkpoints.contig_path(store.root, FINAL_PHASE_STAGE, contig),
                           result, nthreads=current_threads())
-        del painting, gl, pos, observed
+        del painting, refit, gl, pos, observed
     summary = _summary(result, store, time.perf_counter() - started)
     print(f"[family phase {contig}] Stable final phase released; latent converged="
           f"{result['source_posterior_converged']}; threads={current_threads()}", flush=True)
@@ -314,16 +388,20 @@ def _refinement_resources(store, contigs, workers, raw_gl_stage, raw_sites_stage
 @timed_stage("family_phase")
 def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
                    output_dir, raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
-                   n_workers=None, config=None, genetic_maps=None):
+                   n_workers=None, config=None, genetic_maps=None, protected_intervals=None):
     """Run independent chromosomes with a shared, dynamically reassigned CPU budget.
 
     Only final phase is a release product. Work-in-progress messages and
     consecutive phase checks live beside it as *.iterations.p5.b2, never as
-    completed contigs.
+    completed contigs. ``protected_intervals`` ({contig: (n, 2) bp intervals},
+    or a breakpoint TSV path in BHD_FAMILY_PHASE_PROTECTED_INTERVALS) blocks
+    root frame repairs at reference-order breakpoints; default none.
     """
     if pedigree_payload is None:
         print("[family phase] Waiting for the complete genome-wide pedigree; no shard inference.")
         return None
+    if protected_intervals is None and os.environ.get(frames.PROTECTED_INTERVALS_ENV):
+        protected_intervals = frames.read_protected_intervals(os.environ[frames.PROTECTED_INTERVALS_ENV])
     config = (config or model.FamilyRefinementConfig()).validated()
     if genetic_maps is not None:
         config = replace(config, recombination_rate=genetic_maps.default_rate_cm_per_mb / 1e8).validated()
@@ -337,7 +415,8 @@ def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
         raise ValueError("Family phase axes differ from the complete pedigree")
     relationships = pedigree_payload["tier_b_partial_relationships"]
     source_files = []
-    for source in dict.fromkeys((PAINTING_STAGE, raw_gl_stage, raw_sites_stage)):
+    for source in dict.fromkeys((PAINTING_STAGE, painting_allele_refit.ALLELE_REFIT_STAGE,
+                                 raw_gl_stage, raw_sites_stage)):
         runtime.require_contig_checkpoints(checkpoint_store, source, contigs)
         for contig in contigs:
             path = Path(checkpoints.contig_path(checkpoint_store.root, source, contig)).resolve()
@@ -351,6 +430,9 @@ def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
         "code": conditioning.refinement_code_identity(),
         "raw_gl_key": raw_gl_key,
         "recombination_maps": None if genetic_maps is None else {c: genetic_maps.identity(c) for c in contigs},
+        "protected_intervals": None if protected_intervals is None else {
+            c: np.asarray(protected_intervals.get(c, ()), dtype=np.int64).reshape((-1, 2)).tolist()
+            for c in contigs},
     }
     checkpoint_store.bind_stage_identity(FINAL_PHASE_STAGE, identity)
     output = Path(output_dir) / "phase_correction"
@@ -368,7 +450,8 @@ def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
     common = dict(checkpoint_root=checkpoint_store.root, identity=identity,
                   names=names, relationships=relationships, config=config,
                   raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-                  raw_gl_key=raw_gl_key, genetic_maps=genetic_maps)
+                  raw_gl_key=raw_gl_key, genetic_maps=genetic_maps,
+                  protected_intervals=protected_intervals)
     with ChromosomeExecutor(contigs, _refine_contig, n_workers=workers,
                             weights=weights, max_workers=process_limit,
                             label="FAMILY PHASE") as executor:

@@ -419,7 +419,7 @@ def convert_reconstruction_to_superblock(
         # parallel gather (bit-identical to global_probs[:, indices, :]); the
         # numpy advanced-index version is single-threaded and copies the whole
         # (N, n_super, 3) probs -- ~5.4 GB / ~10-20s at L4 -- inside the batch
-        # worker.  See chimera_resolution._gather_samples_numba.
+        # worker.  See chimera_kernels._gather_samples_numba.
         super_probs = assembly_chimera_kernels._gather_samples_numba(global_probs, indices)
     else:
         probs_list = []
@@ -550,11 +550,10 @@ def _process_single_batch(args):
     Returns dict with 'batch_idx', 'super_block', and 'status'.
     """
     (b_idx, start_i, end_i, original_blocks_list,
-     recomb_rate, beam_width, max_founders,
+     recomb_rate,
      max_sites_for_linking, n_generations, recomb_tolerance,
-     top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
      cc_scale, inner_num_processes, verbose,
-     chromosome_map, structured_transition_config, panel_search_config, precomputed_informative_sample_mask, pruning_full_scores) = args
+     chromosome_map, panel_search_config, precomputed_informative_sample_mask) = args
 
     # A reused worker has finished serializing its previous result. Release
     # that batch's dead Python cycles and allocator arenas before attaching.
@@ -674,14 +673,12 @@ def _process_single_batch(args):
             _acc('mesh_emissions', _t)
         _t = time.perf_counter()
         mesh = assembly_linking.generate_transition_probability_mesh(
-            None, None, portion_proxy,
+            portion_proxy,
             recomb_rate=recomb_rate,
             precalculated_viterbi_emissions=viterbi_emissions,
-            num_processes=1,
             dynamic_cores_fn=core_parallel.get_dynamic_threads,
             chromosome_map=chromosome_map,
             max_gap=beam_max_gap,
-            structured_config=structured_transition_config,
         )
         if _prof:
             _acc('mesh_transition', _t)
@@ -693,10 +690,16 @@ def _process_single_batch(args):
         # =================================================================
         core_parallel.apply_dynamic_threads()
         _t = time.perf_counter()
-        beam_results = assembly_paths.run_full_mesh_beam_search(
-            portion_proxy, mesh, beam_width=beam_width,
+        # One dense mesh per batch, shared by the beam and the panel search.
+        fast_mesh = assembly_paths.FastMesh(portion_proxy, mesh)
+
+        # Free mesh — fast_mesh has what it needs.
+        del mesh
+        core_parallel.malloc_trim()
+
+        beam_results = assembly_paths.run_endpoint_beam(
+            fast_mesh, endpoint_quota=panel_search_config.paths_per_endpoint,
             max_gap=beam_max_gap, verbose=verbose,
-            endpoint_quota=None if panel_search_config is None else panel_search_config.paths_per_endpoint,
         )
         if _prof:
             _acc('beam_search', _t)
@@ -708,50 +711,26 @@ def _process_single_batch(args):
                 'status': 'beam_search_failed'
             }
 
-        fast_mesh = assembly_paths.FastMesh(portion_proxy, mesh)
-
-        # Free mesh — fast_mesh has what it needs.
-        del mesh
-        core_parallel.malloc_trim()
-
         # =================================================================
         # 6. Selection + Swap + CR — NUMBA-ONLY phase.
         # =================================================================
         core_parallel.apply_dynamic_threads()
         _t = time.perf_counter()
         search_diagnostics = []
-        if panel_search_config is not None:
-            from .panel_search import select_and_resolve
-            resolved_beam = select_and_resolve(
-                beam_results, fast_mesh, list(original_portion),
-                inference_batch_probs, batch_sites, config=panel_search_config,
-                cc_scale=cc_scale, num_threads=core_parallel.get_dynamic_threads,
-                diagnostics=search_diagnostics,
-            )
-        else:
-            resolved_beam = assembly_chimera_resolution.select_and_resolve(
-                beam_results=beam_results,
-                fast_mesh=fast_mesh,
-                batch_blocks=list(original_portion),
-                global_probs=inference_batch_probs,
-                global_sites=batch_sites,
-                max_founders=max_founders,
-                top_n_swap=top_n_swap,
-                max_cr_iterations=max_cr_iterations,
-                paint_penalty=paint_penalty,
-                min_hotspot_samples=min_hotspot_samples,
-                cc_scale=cc_scale,
-                num_threads=core_parallel.get_dynamic_threads,
-            )
-        if pruning_full_scores:
-            from .panel_pruning import prune_selected_panel
-            resolved_beam, pruning_diagnostic = prune_selected_panel(
-                resolved_beam, list(original_portion), inference_batch_probs, batch_sites,
-                max_bins=2000 if panel_search_config is None else panel_search_config.max_bins,
-                full_scores=pruning_full_scores, cc_scale=cc_scale,
-                num_threads=core_parallel.get_dynamic_threads)
-            if pruning_diagnostic is not None:
-                search_diagnostics.append(pruning_diagnostic)
+        from .panel_search import select_and_resolve
+
+        def beam_runner(quota, overrides):
+            # Pool extension and saturation re-runs of this batch's beam.
+            return assembly_paths.run_endpoint_beam(
+                fast_mesh, endpoint_quota=quota, endpoint_quota_overrides=overrides,
+                max_gap=beam_max_gap, verbose=False)
+        resolved_beam = select_and_resolve(
+            beam_results, fast_mesh, list(original_portion),
+            inference_batch_probs, batch_sites, beam_runner=beam_runner,
+            config=panel_search_config,
+            cc_scale=cc_scale, num_threads=core_parallel.get_dynamic_threads,
+            diagnostics=search_diagnostics,
+        )
         if _prof:
             _acc('select_and_resolve(CR)', _t)
 
@@ -829,29 +808,59 @@ def _process_single_batch(args):
         core_parallel.close_shared_memory([shm_probs, shm_sites])
 
 
-def _hmm_batch_memory_gb(input_blocks, batch_ranges, n_samples, max_sites):
-    """Budget retained scan arrays plus one full log-tensor workspace.
+def _hmm_batch_memory_gb(input_blocks, batch_ranges, n_samples, max_sites,
+                         global_sites, panel_search_config=None):
+    """Budget the arrays one batch holds, in GB, for the largest batch.
 
-    Production stores up to seven float32 log emissions and seven float64 weights
-    per sample/site, plus uint8 dosage indices. Reserve one dense fallback
-    workspace as well. Proxy size is bounded by the cap, including after
-    missing-aware marker selection; counting all samples is conservative.
-    This supplements, rather than replaces, the configured minimum covering
-    the rest of the batch machinery.
+    The batch keeps two float32 genotype-probability slices over its site span
+    (all samples, then informative samples). Linker scans keep seven float32
+    log emissions and seven float64 weights per sample and proxy site, plus
+    uint8 pair lookups per proxy site. Panel search keeps float64 binned
+    sub-emissions (S, K_b, K_b, m_b), with m_b = ceil(sites_b / spb) binned as
+    select_and_resolve bins them, their static per-block totals (S, K_b, K_b),
+    an int32 painting (S, sum m_b) and painting back pointers bounded by
+    tensor_budget_mb. The certified search adds its exclusion forwards
+    (S, sum m_b) per excluded row (at most K + 1), one chunk of per-sample
+    bounds and, at the pool backstop (quota 16 * 2**6 at every endpoint, which
+    a join whose 256 rung accepted a move can reach), the move arrays and beam
+    lists of O(B q K^2) entries. Counting all samples and holding these together
+    is conservative; the configured per-worker minimum covers the rest of the
+    batch machinery.
     """
+    from .panel_certify import _MOVES_PER_CHUNK
+    from .panel_search import POOL_EXTENDED_DOUBLINGS
+    from .panel_search import PanelSearchConfig
+    config = PanelSearchConfig() if panel_search_config is None else panel_search_config
     maximum_bytes = 0
     for start, stop in batch_ranges:
         if stop - start < 2:
             continue
-        batch_bytes = 0
-        for block in input_blocks[start:stop]:
-            sites = len(block.positions)
+        batch = input_blocks[start:stop]
+        site_counts = [len(block.positions) for block in batch]
+        spb = max(assembly_chimera_scoring.compute_spb(batch),
+                  math.ceil(sum(site_counts) / config.max_bins))
+        first = min(int(block.positions[0]) for block in batch)
+        last = max(int(block.positions[-1]) for block in batch)
+        span = int(np.searchsorted(global_sites, last)
+                   - np.searchsorted(global_sites, first)) + 1
+        batch_bytes = config.tensor_budget_mb * 1024 ** 2 + 2 * 12 * n_samples * span
+        total_bins = 0
+        for block, sites in zip(batch, site_counts):
             proxy_sites = min(sites, max_sites)
             haps = len(block.haplotypes)
             ordered = haps * haps
             folded = haps * (haps + 1) // 2
-            batch_bytes += (n_samples * proxy_sites * (7 * 12 + 4 * ordered)
-                            + proxy_sites * (ordered + folded))
+            bins = math.ceil(sites / spb)
+            total_bins += bins
+            batch_bytes += (n_samples * proxy_sites * 7 * 12
+                            + proxy_sites * (ordered + folded)
+                            + 8 * n_samples * ordered * (bins + 1)
+                            + 4 * n_samples * bins)
+        rows = max(len(block.haplotypes) for block in batch)
+        quota = config.paths_per_endpoint * 2 ** POOL_EXTENDED_DOUBLINGS
+        batch_bytes += (8 * n_samples * total_bins * (rows + 2)
+                        + 8 * n_samples * _MOVES_PER_CHUNK
+                        + 200 * len(batch) * quota * rows * rows)
         maximum_bytes = max(maximum_bytes, batch_bytes)
     return maximum_bytes / (1024 ** 3)
 
@@ -860,20 +869,12 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           batch_size=10,
                           # Linking Parameters
                           recomb_rate=5e-8,
-                          # Search Parameters
-                          beam_width=200,
-                          # Selection Parameters
-                          max_founders=12,
                           # Memory Safety
                           max_sites_for_linking=2000,
                           # Max Gap Parameters
                           n_generations=None,
                           recomb_tolerance=0.5,
-                          # Chimera Resolution Parameters
-                          top_n_swap=20,
-                          max_cr_iterations=10,
-                          paint_penalty=10.0,
-                          min_hotspot_samples=5,
+                          # Panel selection cost scale
                           cc_scale=0.5,
                           # Parallelization
                           num_processes=16,
@@ -882,9 +883,9 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           # Output control
                           verbose=False,
                           min_boundary_informative_samples=1,
-                          chromosome_map=None, structured_transition_config=None,
+                          chromosome_map=None,
                           panel_search_config=None, scoring_probs=None,
-                          batch_queue_key=None, pruning_full_scores=0):
+                          batch_queue_key=None):
     """Performs one level of Hierarchical Assembly.
 
     Memory strategy:
@@ -898,8 +899,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         accumulated memory (Python doesn't return freed pages to OS).
       - global_probs downcast to float32 (halves shared memory + all
         downstream tensors).
-      - Worker count auto-capped based on available RAM /
-        min_gb_per_worker.
+      - Worker count auto-capped based on available RAM / the per-worker
+        budget (batch estimate, at least min_gb_per_worker).
 
     Dynamic thread reallocation: shared counter tracks active workers;
     between major phases each worker recalculates
@@ -915,11 +916,10 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
       maxtasksperchild: Recycle workers after this many batches.  Set
           to 1 to prevent memory accumulation from glibc malloc
           fragmentation.
-      min_gb_per_worker: GB of RAM to budget per concurrent worker.
-          Used to auto-cap worker count: max_workers = available_ram
-          / min_gb_per_worker.  Increase if blocks have many
-          haplotypes (>15); decrease if RAM is tight but blocks are
-          small.
+      min_gb_per_worker: Minimum GB of RAM to budget per concurrent
+          worker.  The budget is the larger of this and the largest
+          batch's estimated arrays (_hmm_batch_memory_gb), and
+          max_workers = available_ram / budget.
       min_boundary_informative_samples: Require this many samples informative
           in both adjacent frozen inference panels.
 
@@ -1015,19 +1015,18 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
 
             worker_args.append((
                 b_idx, start_i, end_i, original_blocks_list,
-                recomb_rate, beam_width, max_founders,
+                recomb_rate,
                 max_sites_for_linking, n_generations, recomb_tolerance,
-                top_n_swap, max_cr_iterations, paint_penalty, min_hotspot_samples,
                 cc_scale, inner_num_processes, verbose,
-                chromosome_map, structured_transition_config, panel_search_config, batch_informative_sample_mask,
-                pruning_full_scores
+                chromosome_map, panel_search_config, batch_informative_sample_mask,
             ))
         return worker_args
 
     from ..core import batch_queue
     if batch_queue.configured() and num_batches > 1:
         worker_gb = max(min_gb_per_worker, _hmm_batch_memory_gb(
-            input_blocks, batch_ranges, global_probs.shape[0], max_sites_for_linking))
+            input_blocks, batch_ranges, global_probs.shape[0], max_sites_for_linking,
+            global_sites, panel_search_config))
         results = list(batch_queue.map_batches('hierarchy', make_worker_args(1),
             (global_probs, global_sites), total_cores, key=batch_queue_key,
             worker_memory_gb=worker_gb))
@@ -1050,7 +1049,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     # memory creation so it already accounts for parent + loaded data
     # + shared segments.
     worker_gb = max(min_gb_per_worker, _hmm_batch_memory_gb(
-        input_blocks, batch_ranges, global_probs.shape[0], max_sites_for_linking))
+        input_blocks, batch_ranges, global_probs.shape[0], max_sites_for_linking,
+        global_sites, panel_search_config))
     max_by_ram = num_processes  # fallback: no capping
     try:
         with open('/proc/meminfo') as _f:
@@ -1202,11 +1202,29 @@ def _collect_batch_results(results):
     print(f"Hierarchical Step Complete. Produced {len(output_super_blocks)} Super-Blocks.")
     print(f"  Success: {success_count}, Passthrough: {passthrough_count}, "
           f"Unresolved: {unresolved_count}, Failed: {failed_count}")
+    from .panel_search import search_summary
+    summary = search_summary(
+        getattr(block, 'panel_search_diagnostics', ()) for block in output_super_blocks)
+    if summary['searched']:
+        print("  Panel search: {searched} searched, {certified} certified, {changed} changed "
+              "by tier 2 or pool saturation ({tier2_accepted} tier-2 and {saturation_accepted} "
+              "saturation moves), {tier2_passes} tier-2 passes, sweep backstop hits "
+              "{backstop_reached}, saturation ladders extended beyond 256 {extended_ladders}, "
+              "pool backstop hits {pool_backstop}, largest pool "
+              "{largest_pool}".format(**summary))
+        print("  Join count rule: rows {start_rows} at the start -> {final_rows}; {births} births, "
+              "{deaths} deaths ({pure_mosaic_deaths} without a private cell), {ambiguous} "
+              "ambiguous calls, births frozen by a count cycle in {frozen} super-blocks ({cycles_undecided} "
+              "undecided cycles), at most "
+              "{most_decisions} decisions in one super-block; duplicate seeds: {seed_refits} refits, "
+              "{seed_births} births, {seed_swaps} swaps; {ladder_births} saturation births; "
+              "{trap_blocks} super-blocks with chimera-trap indicators; {failing_final} final paths "
+              "fail their own death test".format(**summary))
 
     return core_haplotypes.BlockResults(output_super_blocks)
 
 import haplotype_reconstruction.assembly.chimera_kernels as assembly_chimera_kernels
-import haplotype_reconstruction.assembly.chimera_resolution as assembly_chimera_resolution
+import haplotype_reconstruction.assembly.chimera_scoring as assembly_chimera_scoring
 import haplotype_reconstruction.assembly.linking as assembly_linking
 import haplotype_reconstruction.assembly.observations as assembly_observations
 import haplotype_reconstruction.assembly.paths as assembly_paths

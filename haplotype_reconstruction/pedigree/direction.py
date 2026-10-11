@@ -27,6 +27,9 @@ class _AncestryDepthModel:
     selected_bic: float
     tested_bics: tuple[float, ...]
     edge_probability: Optional[np.ndarray] = None
+    # Continuous models: [child, parent] junction-count log odds of parent ->
+    # child against child -> parent (orientation scores only).
+    edge_log_odds: Optional[np.ndarray] = None
 
 
 _DEFAULT_MAX_ITER = 500

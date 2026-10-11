@@ -24,7 +24,8 @@ class BranchCluster:
 
 @njit(cache=True, parallel=True)
 def root_mode_flips(belief, orientation, phase, parents, edge_group, edge_slot,
-                    roots, anchors, phase_theta, theta, joint_maps, phase_error):
+                    roots, anchors, phase_theta, theta, joint_maps, phase_error,
+                    frozen, frozen_theta, minimum_support):
     samples, sites, _ = belief.shape
     flips = np.zeros((samples, sites), dtype=np.int8)
     gains = np.zeros(samples)
@@ -56,7 +57,8 @@ def root_mode_flips(belief, orientation, phase, parents, edge_group, edge_slot,
                 opposite = 3 - matching
                 emissions[site, 0] = .5 * (q[0] + q[3]) + (1 - phase_error) * q[matching] + phase_error * q[opposite]
                 emissions[site, 1] = .5 * (q[0] + q[3]) + phase_error * q[matching] + (1 - phase_error) * q[opposite]
-        path = binary_map(emissions, phase_theta, anchors[root])
+        root_theta = frozen_theta if frozen[root] else phase_theta
+        path = binary_map(emissions, root_theta, anchors[root])
         child_paths = np.empty((len(outgoing), sites), dtype=np.int8)
         for row in range(len(outgoing)):
             edge = outgoing[row]
@@ -64,7 +66,8 @@ def root_mode_flips(belief, orientation, phase, parents, edge_group, edge_slot,
             shift = 1 - edge_slot[edge]
             for site in range(sites):
                 child_paths[row, site] = (joint_maps[group, site] >> shift) & 1
-        local, gain = best_gauge_flips(path, child_paths, phase_theta, theta, anchors[root])
+        local, gain = best_gauge_flips(path, child_paths, root_theta, theta, anchors[root],
+                                       minimum_support)
         flips[root] = local
         gains[root] = gain
     return flips, gains
@@ -102,7 +105,13 @@ def apply_joint_root_flips(flips, phase, parent_log, joint, parents, group_paren
 
 
 @njit(cache=True)
-def best_gauge_flips(phase_path, child_paths, phase_theta, theta, anchor):
+def best_gauge_flips(phase_path, child_paths, phase_theta, theta, anchor, minimum_support=1):
+    """Single-boundary joint root/children gauge moves.
+
+    A move needs ``minimum_support`` children whose selector changes at the
+    boundary: with one child, a root frame change and that child's crossover
+    explain the data equally well, so one child edge never moves a root frame.
+    """
     n = len(phase_path)
     flip = np.zeros(n, dtype=np.int8)
     gain = 0.
@@ -115,10 +124,13 @@ def best_gauge_flips(phase_path, child_paths, phase_theta, theta, anchor):
         phase_odds = math.log(phase_theta[i] / (1 - phase_theta[i]))
         improvement = (-1. if phase_changed else 1.) * phase_odds
         meiosis_odds = math.log(theta[i] / (1 - theta[i]))
+        supporting = 0
         for child in range(len(child_paths)):
             changed = child_paths[child, i] != child_paths[child, i + 1]
+            if changed:
+                supporting += 1
             improvement += (-1. if changed else 1.) * meiosis_odds
-        move = improvement > 1e-6
+        move = improvement > 1e-6 and supporting >= minimum_support
         flip[i + 1] = flip[i] ^ int(move)
         if move:
             gain += improvement

@@ -364,6 +364,28 @@ def _load_raw_evidence(
         raise
 
 
+def _founder_evidence_flags(checkpoint_store, contig, sites_payload, *, raw_sites_stage):
+    """Loader of the contig's sample-quality flags for the release-identity check.
+
+    Block discovery stores them as ``founder_evidence_excluded`` when the QC
+    ran (core/sample_quality.py); see
+    ``pedigree_components._validate_release_array_identity``. A raw sites
+    payload from ``_load_raw_evidence`` answers directly; the compact
+    raw-evidence cache does not carry the flags, so its loader reads the raw
+    sites stage, and only if the check needs them.
+    """
+
+    def copied(payload):
+        flags = payload.get("founder_evidence_excluded")
+        # A small copy, so the payload's decoded buffers can be released.
+        return None if flags is None else np.array(flags, dtype=np.bool_)
+
+    if sites_payload.get("schema") != raw_evidence.SCHEMA:
+        flags = copied(sites_payload)
+        return lambda: flags
+    return lambda: copied(checkpoint_store.load_contig(raw_sites_stage, contig))
+
+
 def _validate_ragged_component(
         component: pedigree_components.PreparedComponentPedigree,
         sample_count: int,
@@ -801,6 +823,9 @@ def _prepare_one_contig(
             candidate_source_mode=(
                 pedigree_config.parent_state_candidate_source_mode
             ),
+            founder_evidence_excluded=_founder_evidence_flags(
+                checkpoint_store, contig, sites_payload,
+                raw_sites_stage=raw_sites_stage),
         )
         checkpoint = PedigreeEvidenceCheckpoint(
             schema=PEDIGREE_PREPARATION_SCHEMA,
@@ -831,6 +856,51 @@ def _prepare_one_contig(
         contig, False, prepared.component_count, len(prepared.components),
         prepared.omitted_reason,
     )
+
+
+def _painted_state_bytes(root, painting_stage, contig, n_samples):
+    """Upper bound of the 8 N B S^2 bytes of one painted chromosome, or None.
+
+    Reads the painting stage's founder-support report: per component, its
+    founders (S <= founders + BACKGROUND) and markers (B <= markers / bin + 1).
+    """
+    path = Path(root) / painting_stage / "reports" / contig / "founder_support.tsv"
+    try:
+        header, *rows = path.read_text().splitlines()
+    except OSError:
+        return None
+    columns = header.split("\t")
+    component_column, marker_column = columns.index("Component"), columns.index("MarkerCount")
+    founders, markers = {}, {}
+    for row in rows:
+        fields = row.split("\t")
+        founders[fields[component_column]] = founders.get(fields[component_column], 0) + 1
+        markers[fields[component_column]] = int(fields[marker_column])
+    bin_markers = workflows_reconstruction.ReconstructionConfig().paint_snps_per_bin
+    return sum(8 * n_samples * (markers[key] // bin_markers + 1) * (count + 1) ** 2
+               for key, count in founders.items())
+
+
+def preparation_memory_estimates(root, contigs, painting_stage, raw_stages, n_samples):
+    """Peak bytes per preparation worker: raw evidence, painting, 3 x 8 N B S^2, 2 GiB.
+
+    A worker decodes its raw evidence and painting, then builds the source
+    emissions and factors (N B S^2 doubles each) with working space of about
+    one more such array: 2.6-2.9 of them above the inputs at K = 30, N = 116
+    and 500 (chr7 scale, production kernels). Without the painting's
+    founder-support report, each is bounded by twice the decoded painting, which
+    holds while the painting caches its symmetric emissions (at most 1 GiB per
+    chromosome).
+    """
+    estimates = []
+    for contig in contigs:
+        raw = sum(pedigree_execution.decoded_bytes(root, stage, contig)
+                  for stage in dict.fromkeys(raw_stages))
+        painting = pedigree_execution.decoded_bytes(root, painting_stage, contig)
+        states = _painted_state_bytes(root, painting_stage, contig, n_samples)
+        states = 2 * painting if states is None else states
+        estimates.append(raw * 5 // 4 + painting + 3 * states + (2 << 30))
+    return estimates
 
 
 @timed_stage("pedigree_evidence")
@@ -911,6 +981,10 @@ def prepare_pedigree_contigs(
     from ..core.checkpoints import contig_path
     weights = [Path(contig_path(checkpoint_store.root, raw_gl_stage, contig)).stat().st_size
                for contig in requested]
+    process_limit = pedigree_scheduling.memory_worker_limit(
+        preparation_memory_estimates(checkpoint_store.root, requested, painting_stage,
+                                     (raw_gl_stage, raw_sites_stage), len(ordered_ids)),
+        len(requested), core_runtime.available_memory_bytes(), label="PEDIGREE PREPARATION")
     arguments = dict(sample_ids=ordered_ids, preparation_identity=identity,
         preparation_config=preparation_config, pedigree_config=settings,
         painting_stage=painting_stage, raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
@@ -918,7 +992,7 @@ def prepare_pedigree_contigs(
         raw_observed_mask_key=raw_observed_mask_key, target_stage=target_stage)
     with pedigree_scheduling.ChromosomeExecutor(
             requested, pedigree_execution.prepare_chromosome,
-            n_workers=n_workers, weights=weights) as executor:
+            n_workers=n_workers, weights=weights, max_workers=process_limit) as executor:
         print(f"  Pedigree preparation: {executor.worker_count} chromosome workers "
               f"sharing {executor.cpu_budget} CPUs", flush=True)
         summaries = tuple(executor.run('prepare', dict(root=checkpoint_store.root, arguments=arguments)))

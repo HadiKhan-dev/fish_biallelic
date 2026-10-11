@@ -401,6 +401,7 @@ def _maximum_entropy_bridge_kernel(
     residuals = np.zeros((candidates, boundaries), dtype=np.float64)
     valid = np.ones((candidates, boundaries), dtype=np.bool_)
     epsilon = np.finfo(np.float64).eps
+    smallest_normal = np.finfo(np.float64).tiny
     feasibility_tolerance = 64.0 * epsilon
 
     for task in prange(candidates * boundaries):
@@ -408,6 +409,7 @@ def _maximum_entropy_bridge_kernel(
         boundary = task % boundaries
         row = np.empty(states, dtype=np.float64)
         column = np.empty(states, dtype=np.float64)
+        row_mass = np.empty(states, dtype=np.float64)
         row_total = 0.0
         column_total = 0.0
         for state in range(states):
@@ -423,8 +425,16 @@ def _maximum_entropy_bridge_kernel(
             column[state] = max(0.0, column[state])
             row_total += row[state]
             column_total += column[state]
+            # A row's outgoing flows sum to its source mass algebraically. A
+            # subnormal mass keeps too few significant bits for flow/mass
+            # ratios to sum to one, so such a row is normalized by its own
+            # retained outgoing flow; absolute marginals change below 1e-307.
+            row_mass[state] = (
+                source_mass if source_mass >= smallest_normal
+                else diagonal_mass + row[state]
+            )
             stay[candidate, boundary, state] = (
-                diagonal_mass / source_mass if source_mass > 0.0 else 1.0
+                diagonal_mass / row_mass[state] if row_mass[state] > 0.0 else 1.0
             )
 
         # The totals are identical algebraically. Retain every positive row
@@ -494,7 +504,7 @@ def _maximum_entropy_bridge_kernel(
             # this support; a positive complementary gap is never a star.
             branch[candidate, boundary] = 3
             large_index[candidate, boundary] = hall_index
-            source_mass = pi[candidate, boundary, hall_index]
+            source_mass = row_mass[hall_index]
             operator_pivot[candidate, boundary] = hall_index
             beta[candidate, boundary, hall_index] = 1.0
             for state in range(states):
@@ -504,9 +514,16 @@ def _maximum_entropy_bridge_kernel(
                     residual_total * b[state] / source_mass
                     if source_mass > 0.0 else 0.0
                 )
-                state_mass = pi[candidate, boundary, state]
+                state_mass = row_mass[state]
+                # R*a reconstructs this row's outgoing flow; for a subnormal
+                # source row use that flow directly, as its normalizer does.
+                off_mass = (
+                    residual_total * a[state]
+                    if pi[candidate, boundary, state] >= smallest_normal
+                    else row[state]
+                )
                 alpha[candidate, boundary, state] = (
-                    residual_total * a[state] / state_mass
+                    off_mass / state_mass
                     if state_mass > 0.0 else 0.0
                 )
         else:
@@ -601,7 +618,7 @@ def _maximum_entropy_bridge_kernel(
             beta[candidate, boundary] /= pivot_value
 
             for source in range(states):
-                source_mass = pi[candidate, boundary, source]
+                source_mass = row_mass[source]
                 off_fraction = (
                     row[source] / source_mass if source_mass > 0.0 else 0.0
                 )
@@ -647,7 +664,7 @@ def _maximum_entropy_bridge_kernel(
         maximum_residual = 0.0
         for source in range(states):
             source_mass = pi[candidate, boundary, source]
-            if source_mass == 0.0:
+            if row_mass[source] == 0.0:
                 stay[candidate, boundary, source] = 1.0
                 alpha[candidate, boundary, source] = 0.0
                 column_arm[candidate, boundary, source] = 0.0
@@ -669,7 +686,7 @@ def _maximum_entropy_bridge_kernel(
                         row_probability += column_arm[
                             candidate, boundary, source
                         ]
-            if source_mass > 0.0:
+            if row_mass[source] > 0.0:
                 maximum_residual = max(
                     maximum_residual, abs(row_probability - 1.0)
                 )

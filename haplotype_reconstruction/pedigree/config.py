@@ -37,6 +37,13 @@ class PedigreeConfig:
     tier_b_pair_bootstrap: float = 0.70
     tier_b_parent_bootstrap: float = 0.70
     tier_b_loco_fraction: float = 0.80
+    # A released (Tier A/B or partial) inferred edge also needs its full-data
+    # reciprocal comparison to give the reverse orientation at most this
+    # probability (orientation log odds >= log(0.98/0.02) = 3.9 nats). Pairs
+    # whose junction counts and genetics cannot orient them stay unreleased
+    # instead of passing a near-tie on to family phase. Caller chronology is
+    # exempt.
+    orientation_release_reversal_probability: float = 0.02
     support_set_coverage: float = 0.95
     primary_view: str = "tier_b"
     # Learn a conditional predictive weight; uninformative fits retain scale 1.
@@ -59,9 +66,19 @@ class PedigreeConfig:
     # Finite orientation, reciprocal messages, and joint short-ancestry paths.
     # "cluster" retains the previous policy for controlled comparisons.
     parent_state_direction_model: str = "continuous_family"
+    # Probability that one chromosome's painted junction-count comparison of a
+    # pair is dominated by painting failure and carries no orientation
+    # evidence; bounds each chromosome's orientation log odds by
+    # log(2/e - 1) (3.7 nats). Gross painted-vs-true junction discrepancies
+    # (>= 3 on a chromosome in either sample) affected 0.6-8% of pair-
+    # chromosomes in the std, stress and real-axis simulations (Oct 2026).
+    parent_state_direction_chromosome_error_probability: float = 0.05
     # Bounded preparation of the one-way path factor; the final solve converges.
     parent_state_family_message_passes: int = 4
-    parent_state_family_final_max_iterations: int = 128
+    # Slow monotone modes converge undamped (a std_n80 six-chromosome resample
+    # at scale 1 needed 4,489 iterations) and damping halves their rate; the
+    # damped retry is kept for genuine oscillation.
+    parent_state_family_final_max_iterations: int = 8192
     parent_state_family_final_tolerance: float = 1e-8
     parent_state_family_retry_iterations: int = 4096
     parent_state_family_retry_damping: float = 0.5
@@ -77,6 +94,14 @@ class PedigreeConfig:
     )
     parent_state_cx_veto_policy: str = field(default="source_default", init=False)
     parent_state_candidate_source_path_switch_probability: float | None = None
+    # Candidate-parent transmitted chains mix each bridge with the uniform
+    # selector kernel at the boundary's meiotic switch probability, weighted by
+    # 1 - min(1, n/N), where n is the smaller informative selected-marker count
+    # of the parent's two adjacent bins. The painter's switch penalty then no
+    # longer acts as certainty where the parent has no data. N=1 acts only next
+    # to data-free parent bins; N=3 is the graded form; N=0 keeps the
+    # painter-interpolated chain unchanged.
+    parent_state_source_gap_support_sites: int = 1
     dag_local_search_passes: int = 3
     parent_state_mismatch_probability: float = 0.01
     parent_state_phase_switch_probability: float = 0.01
@@ -127,6 +152,7 @@ class PedigreeConfig:
             ("parent_state_family_final_max_iterations", 1),
             ("parent_state_family_retry_iterations", 1),
             ("parent_state_ancestry_path_budget", 0),
+            ("parent_state_source_gap_support_sites", 0),
             ("bootstrap_replicates", 1),
             ("bootstrap_seed", 0),
             ("markers_per_information_block", 1),
@@ -139,7 +165,9 @@ class PedigreeConfig:
         if not isinstance(self.full_marker_exclusion, bool):
             raise pedigree_models.PedigreeEvidenceError("full_marker_exclusion must be boolean")
         for name in ("parent_state_family_final_tolerance", "parent_state_family_retry_damping",
-                     "mendelian_exclusion_alpha"):
+                     "mendelian_exclusion_alpha",
+                     "parent_state_direction_chromosome_error_probability",
+                     "orientation_release_reversal_probability"):
             if not np.isfinite(getattr(self, name)) or not 0 < getattr(self, name) < 1:
                 raise pedigree_models.PedigreeEvidenceError(f"{name} must lie in (0, 1)")
         if (not np.isfinite(self.mendelian_genotype_replacement_probability)

@@ -269,16 +269,3 @@ class PreparedBlockScans:
         if priors is None:
             self.fixed_scores[direction] = result
         return result
-
-
-def scan_distance_aware_forward(tensor, positions, rate, definitions, priors, haps,
-                                genetic_distances=None, **model_options):
-    return PreparedBlockScans(
-        tensor, positions, rate, definitions, haps, genetic_distances, **model_options).scan(priors)
-
-
-def scan_distance_aware_backward(tensor, positions, rate, definitions, priors, haps,
-                                 genetic_distances=None, **model_options):
-    return PreparedBlockScans(
-        tensor, positions, rate, definitions, haps, genetic_distances, **model_options).scan(
-            priors, backward=True)

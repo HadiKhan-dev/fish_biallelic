@@ -312,11 +312,6 @@ def report_discovery(valid_blocks):
         not bool(selection.all_mean_field_converged)
         for selection in cavity_selections
     )
-    shortlist_sizes = np.asarray([
-        len(selection.hybrid_diagnostic.shortlisted_k)
-        for selection in cavity_selections
-        if selection.hybrid_diagnostic is not None
-    ], dtype=np.int64)
     uncertainty_reason_counts = {}
     for diagnostic in cavity_diagnostics:
         for reason in diagnostic['uncertainty_reasons']:
@@ -331,17 +326,6 @@ def report_discovery(valid_blocks):
                 np.min(score_margins),
                 np.median(score_margins),
                 np.max(score_margins),
-            )
-        )
-    )
-    shortlist_size_summary = (
-        "unavailable"
-        if len(shortlist_sizes) == 0
-        else "min/median/max=" + "/".join(
-            f"{value:.0f}" for value in (
-                np.min(shortlist_sizes),
-                np.median(shortlist_sizes),
-                np.max(shortlist_sizes),
             )
         )
     )
@@ -368,8 +352,7 @@ def report_discovery(valid_blocks):
     )
     print(
         "    [Cavity audit] winner/runner-up log-score margin "
-        f"{score_margin_summary}; hybrid shortlist size "
-        f"{shortlist_size_summary}"
+        f"{score_margin_summary}"
     )
     print(
         "    [Cavity audit] mode-cap blocks="

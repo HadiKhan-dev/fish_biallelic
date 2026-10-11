@@ -5,7 +5,7 @@ Sample-contiguous workspaces expose independent SIMD lanes without changing
 the generic recurrence's evaluation order or adding per-block thread barriers.
 Keep its prefix/segment arithmetic and message-update parentheses: equivalent
 algebraic simplification changed tie-sensitive paths in chromosome controls. No fast-math
-flags are used. Generic multi-bin searches live in founder_dual_search.
+flags are used. Generic multi-bin kernels live in dual_search.
 
 Packed transposes belong to the immutable PreparedModels owner and are shared
 only among its conditional queries. Coordinate messages remain query-local.
@@ -90,90 +90,13 @@ def dual_suffix(data, bases, sizes, bins, known, choices, offsets, messages, pen
             normalizer = np.max(result[step, sample])
             result[step, sample] -= normalizer
             scales[sample] += normalizer
-    return (result, scales.sum())
+    # The total in sample order by one thread: scales.sum() here would be a parallel
+    # reduction whose association depends on the Numba team size.
+    total = 0.0
+    for sample in range(samples):
+        total += scales[sample]
+    return (result, total)
 
-
-@njit(cache=True, parallel=True, nogil=True)
-def window_suffix(
-    data,
-    bases,
-    sizes,
-    bins,
-    known,
-    choices,
-    offsets,
-    penalty,
-    start,
-    stop,
-    terminal,
-    first,
-    second
-):
-    blocks, samples, states = (stop - start, len(data), len(first))
-    focal = len(known)
-    affected = np.flatnonzero(second == focal)
-    result = np.zeros((blocks + 1, samples, states))
-    result[-1] = terminal
-    for sample in prange(samples):
-        bg = np.empty(states)
-        aff = np.empty(len(affected))
-        values = np.empty(len(affected))
-        for step in range(blocks - 1, -1, -1):
-            block = start + step
-            base, size, width = (bases[block], sizes[block], bins[block])
-            s0, s1 = (width - 1, 0)
-            begin, end = (offsets[block], offsets[block + 1])
-            bgmax, bgstay, bgemax = (-np.inf, -np.inf, -np.inf)
-            for state in range(states):
-                if second[state] == focal:
-                    continue
-                index = base + (known[first[state], block] * size + known[second[state], block]) * width
-                bg[state] = result[step + 1, sample, state] + data[sample, index + s0]
-                bgmax = max(bgmax, bg[state])
-                if width == 2:
-                    e = data[sample, index + s1]
-                    bgstay = max(bgstay, bg[state] + e)
-                    bgemax = max(bgemax, e)
-            aff[:] = -np.inf
-            weightmax, entrymax = (-np.inf, -np.inf)
-            for local in range(begin, end):
-                choice, weight = (choices[local], 0.0)
-                weightmax = max(weightmax, weight)
-                highest = bgmax
-                for a in range(len(affected)):
-                    state = affected[a]
-                    mate = choice if first[state] == focal else known[first[state], block]
-                    index = base + (mate * size + choice) * width
-                    value = result[step + 1, sample, state] + data[sample, index + s0]
-                    values[a] = value
-                    highest = max(highest, value)
-                if width == 1:
-                    for a in range(len(affected)):
-                        aff[a] = max(aff[a], values[a] + weight)
-                else:
-                    entry = highest - penalty
-                    entrymax = max(entrymax, entry + weight)
-                    for a in range(len(affected)):
-                        state = affected[a]
-                        mate = choice if first[state] == focal else known[first[state], block]
-                        index = base + (mate * size + choice) * width
-                        value = max(values[a], entry) + data[sample, index + s1] + weight
-                        aff[a] = max(aff[a], value)
-            top = bgmax + weightmax if width == 1 else max(bgstay + weightmax, bgemax + entrymax)
-            for a in range(len(affected)):
-                top = max(top, aff[a])
-            entry = top - penalty
-            for state in range(states):
-                if second[state] == focal:
-                    continue
-                value = bg[state] + weightmax
-                if width == 2:
-                    index = base + (known[first[state], block] * size + known[second[state], block]) * width
-                    value = max(value, entrymax) + data[sample, index + s1]
-                result[step, sample, state] = max(value, entry)
-            for a in range(len(affected)):
-                result[step, sample, affected[a]] = max(aff[a], entry)
-    return result
 
 def pack_coordinate(models, packed):
     if not hasattr(models, '_pack_lock'):

@@ -31,6 +31,9 @@ class PaintingTrackStatus(IntEnum):
     POOLED_EQUIVALENCE = 3
     BACKGROUND = 4
     UNANCHORED_TRAJECTORY = 5
+    # Founder label ambiguous among rows identical over the bin's selected
+    # sites; the alleles there are known and the sample's reads observe them.
+    LOCAL_ALLELE_EQUIVALENCE = 6
 
 
 def available_process_memory_bytes() -> int | None:
@@ -318,6 +321,83 @@ def build_ragged_bins(
     edges[-1] = int(positions[-1]) + 1
     sizes = np.asarray([len(index) for index in bins], dtype=np.int64)
     return RaggedBinning(tuple(bins), centers, edges, sizes)
+
+
+@njit(cache=True, parallel=True)
+def _local_allele_class_keys_kernel(named_alleles, bin_starts, bin_stops):
+    n_classes, n_sites = named_alleles.shape
+    n_bins = len(bin_starts)
+    keys = np.empty((n_bins, n_classes + 1), dtype=np.int32)
+    anchored = np.zeros(n_classes, dtype=np.bool_)
+    for class_index in range(n_classes):
+        for site in range(n_sites):
+            if named_alleles[class_index, site] >= 0:
+                anchored[class_index] = True
+                break
+    for bin_index in prange(n_bins):
+        start = bin_starts[bin_index]
+        stop = bin_stops[bin_index]
+        poolable = np.zeros(n_classes, dtype=np.bool_)
+        for class_index in range(n_classes):
+            if anchored[class_index]:
+                for site in range(start, stop):
+                    if named_alleles[class_index, site] >= 0:
+                        poolable[class_index] = True
+                        break
+        # Partition refinement: a new group is the first-seen pair of
+        # (previous group, allele + 1), so groups are exact {-1,0,1} vectors.
+        group = np.zeros(n_classes, dtype=np.int64)
+        table = np.empty(3 * n_classes, dtype=np.int64)
+        for site in range(start, stop):
+            table[:] = -1
+            next_group = 0
+            for class_index in range(n_classes):
+                if not poolable[class_index]:
+                    continue
+                slot = group[class_index] * 3 + named_alleles[class_index, site] + 1
+                if table[slot] < 0:
+                    table[slot] = next_group
+                    next_group += 1
+                group[class_index] = table[slot]
+        smallest = np.full(n_classes + 1, -1, dtype=np.int64)
+        for class_index in range(n_classes):
+            if poolable[class_index] and smallest[group[class_index]] < 0:
+                smallest[group[class_index]] = class_index
+        for class_index in range(n_classes):
+            if not anchored[class_index]:
+                keys[bin_index, class_index] = n_classes
+            elif poolable[class_index]:
+                keys[bin_index, class_index] = smallest[group[class_index]]
+            else:
+                keys[bin_index, class_index] = class_index
+        keys[bin_index, n_classes] = n_classes
+    return keys
+
+
+def build_local_allele_class_keys(
+        named_alleles: np.ndarray,
+        bin_starts: np.ndarray,
+        bin_stops: np.ndarray,
+) -> np.ndarray:
+    """Per-bin allele-equivalence keys of the HMM states, (bins, classes + 1).
+
+    A class is poolable in a bin if it is anchored (called somewhere in the
+    component) and called at one of the bin's selected sites. Poolable classes
+    with identical {-1,0,1} vectors over the bin share the key of their
+    smallest class; other anchored classes key to themselves, unanchored
+    classes and BACKGROUND to the public UNKNOWN index (= classes). Two
+    classes are identical in a bin iff they share a key below that index.
+    Exact partition refinement, O(classes) per site.
+    """
+
+    named = np.ascontiguousarray(named_alleles, dtype=np.int8)
+    starts = np.ascontiguousarray(bin_starts, dtype=np.int64)
+    stops = np.ascontiguousarray(bin_stops, dtype=np.int64)
+    if (named.ndim != 2 or starts.ndim != 1 or starts.shape != stops.shape
+            or np.any(starts < 0) or np.any(stops < starts)
+            or np.any(stops > named.shape[1])):
+        raise ValueError("local allele classes need class-by-site alleles and bin site ranges")
+    return _local_allele_class_keys_kernel(named, starts, stops)
 
 
 def _state_definitions(n_states: int) -> np.ndarray:
@@ -616,17 +696,88 @@ def viterbi_label_grid(
     return result
 
 
+@njit(cache=True)
+def _allele_visible_track_change(previous, current, bin_index, local_state_ids, n_classes):
+    """1 if a track change previous -> current changes the track's alleles."""
+
+    if previous == current:
+        return 0
+    if previous >= n_classes or current >= n_classes:
+        return 1
+    for shared_bin in (bin_index - 1, bin_index):
+        key = local_state_ids[shared_bin, previous]
+        if key < n_classes and key == local_state_ids[shared_bin, current]:
+            return 0
+    return 1
+
+
+@njit(cache=True, parallel=True)
+def allele_parsimonious_track_order(viterbi_state_grid, local_state_ids, n_classes):
+    """Choose, among equal-score Viterbi paths, the track order with fewer allele changes.
+
+    Emissions are symmetric in track order and the Hamming transition is
+    invariant to swapping both tracks, so swapping the whole path suffix after
+    boundary t-1|t changes the score only through that transition: when the
+    ordered and swapped continuations change equally many tracks, both are
+    exact Viterbi paths. At such ties the suffix is swapped iff the swapped
+    order has strictly fewer allele-visible track changes (a change between
+    rows sharing a local key < n_classes in bin t-1 or t is invisible).
+    Unordered states, and hence every posterior summary, are unchanged. O(N B).
+    """
+
+    n_samples, _, n_bins = viterbi_state_grid.shape
+    result = np.empty_like(viterbi_state_grid)
+    for sample in prange(n_samples):
+        if n_bins == 0:
+            continue
+        swapped = False
+        result[sample, 0, 0] = viterbi_state_grid[sample, 0, 0]
+        result[sample, 1, 0] = viterbi_state_grid[sample, 1, 0]
+        for bin_index in range(1, n_bins):
+            first_before = result[sample, 0, bin_index - 1]
+            second_before = result[sample, 1, bin_index - 1]
+            first = viterbi_state_grid[sample, 0, bin_index]
+            second = viterbi_state_grid[sample, 1, bin_index]
+            if swapped:
+                first, second = second, first
+            direct_changes = int(first_before != first) + int(second_before != second)
+            crossed_changes = int(first_before != second) + int(second_before != first)
+            if direct_changes == crossed_changes:
+                direct_visible = (
+                    _allele_visible_track_change(
+                        first_before, first, bin_index, local_state_ids, n_classes)
+                    + _allele_visible_track_change(
+                        second_before, second, bin_index, local_state_ids, n_classes)
+                )
+                crossed_visible = (
+                    _allele_visible_track_change(
+                        first_before, second, bin_index, local_state_ids, n_classes)
+                    + _allele_visible_track_change(
+                        second_before, first, bin_index, local_state_ids, n_classes)
+                )
+                if crossed_visible < direct_visible:
+                    swapped = not swapped
+                    first, second = second, first
+            result[sample, 0, bin_index] = first
+            result[sample, 1, bin_index] = second
+    return result
+
+
 @njit(cache=True, parallel=True, fastmath=False)
 def posterior_class_summaries(
         emissions, centers, n_states, recomb_rate, switch_penalty_per_snp,
         snps_per_bin, double_recomb_factor, viterbi_state_grid,
-        public_state_ids, genetic_distances=None):
+        public_state_ids, local_state_ids, genetic_distances=None):
     """Exact O(B*S²) scaled forward-backward unordered-class summaries.
 
     The Hamming-category transition contraction uses the same-cell value,
     row/column sums excluding that cell, and the complementary submatrix sum.
     Forward messages are normalized at every bin and backward messages reuse
     those scales. Only one sample's B*S² forward table is live per worker.
+    The sixth output is the unordered pair mass of the Viterbi state's
+    per-bin local allele-equivalence keys (``local_state_ids[bin, state]``),
+    accumulated in the same loop; it coarsens the public pair, so it is at
+    least the public Viterbi mass.
     """
 
     n_samples, n_diplotypes, n_bins = emissions.shape
@@ -635,6 +786,7 @@ def posterior_class_summaries(
     background_mass = np.zeros((n_samples, n_bins), dtype=np.float64)
     public_unknown_mass = np.zeros((n_samples, n_bins), dtype=np.float64)
     viterbi_public_class_mass = np.zeros((n_samples, n_bins), dtype=np.float64)
+    viterbi_local_class_mass = np.zeros((n_samples, n_bins), dtype=np.float64)
     log_n_minus_one = math.log(float(n_states - 1)) if n_states > 1 else 0.0
     for sample in prange(n_samples):
         forward = np.zeros((n_bins, n_states, n_states), dtype=np.float64)
@@ -714,9 +866,11 @@ def posterior_class_summaries(
                     posterior_total += forward[bin_index, row, column] * backward[row, column]
             background = n_states - 1
             public_mass = np.zeros(n_diplotypes, dtype=np.float64)
+            local_mass = np.zeros(n_diplotypes, dtype=np.float64)
             bg_mass = 0.0
             for first in range(n_states):
                 public_first = public_state_ids[first]
+                local_first = local_state_ids[bin_index, first]
                 for second in range(n_states):
                     public_second = public_state_ids[second]
                     lower = min(public_first, public_second)
@@ -726,6 +880,11 @@ def posterior_class_summaries(
                         * backward[first, second] / posterior_total
                     )
                     public_mass[lower * n_states + upper] += mass
+                    local_second = local_state_ids[bin_index, second]
+                    local_mass[
+                        min(local_first, local_second) * n_states
+                        + max(local_first, local_second)
+                    ] += mass
                     if first == background or second == background:
                         bg_mass += mass
             entropy = 0.0
@@ -748,6 +907,16 @@ def posterior_class_summaries(
             lower = min(query_first, query_second)
             upper = max(query_first, query_second)
             query_mass = public_mass[lower * n_states + upper]
+            local_query_first = local_state_ids[
+                bin_index, viterbi_state_grid[sample, 0, bin_index]
+            ]
+            local_query_second = local_state_ids[
+                bin_index, viterbi_state_grid[sample, 1, bin_index]
+            ]
+            local_query_mass = local_mass[
+                min(local_query_first, local_query_second) * n_states
+                + max(local_query_first, local_query_second)
+            ]
             maximum_class_mass[sample, bin_index] = min(1.0, max(0.0, largest))
             class_entropy[sample, bin_index] = max(0.0, entropy)
             background_mass[sample, bin_index] = min(1.0, max(0.0, bg_mass))
@@ -756,6 +925,9 @@ def posterior_class_summaries(
             )
             viterbi_public_class_mass[sample, bin_index] = min(
                 1.0, max(0.0, query_mass)
+            )
+            viterbi_local_class_mass[sample, bin_index] = min(
+                1.0, max(0.0, local_query_mass)
             )
 
             if bin_index == 0:
@@ -815,6 +987,7 @@ def posterior_class_summaries(
     return (
         maximum_class_mass, class_entropy, background_mass,
         public_unknown_mass, viterbi_public_class_mass,
+        viterbi_local_class_mass,
     )
 
 
@@ -862,6 +1035,13 @@ class RaggedPaintingDiagnostics:
     hmm_working_memory_budget_bytes: int
     hmm_estimated_bytes_per_sample: int
     minimum_viterbi_public_class_posterior: float
+    # Per-bin allele-equivalence keys of the states, bins x (classes + 1).
+    local_allele_class_keys: np.ndarray
+    # qA: unordered local-key pair posterior of the Viterbi state; NaN if ineligible.
+    posterior_viterbi_local_class_mass: np.ndarray
+    # Observed, non-uniform GL at a selected site of the bin where the track's
+    # (gauge-fixed Viterbi) class is called; released or not.
+    viterbi_direct_support: np.ndarray
     # Upper triangle, including the diagonal: samples x S*(S+1)/2 x bins.
     # Diploid emissions are exactly symmetric; transitions remain ordered.
     source_log_emission_upper: np.ndarray | None = None
@@ -887,26 +1067,58 @@ def ragged_public_state_ids(state_space: RaggedStateSpace) -> np.ndarray:
     return result
 
 
+def multi_member_local_states(local_allele_class_keys: np.ndarray) -> np.ndarray:
+    """(bins, states) bool: the state's local allele class holds >= 2 HMM classes."""
+
+    keys = np.asarray(local_allele_class_keys)
+    n_bins, n_states = keys.shape
+    n_classes = n_states - 1
+    rows = np.broadcast_to(np.arange(n_bins)[:, None], (n_bins, n_classes))
+    pooled = keys[:, :n_classes] < n_classes
+    sizes = np.zeros((n_bins, n_states), dtype=np.int64)
+    np.add.at(sizes, (rows[pooled], keys[:, :n_classes][pooled]), 1)
+    result = np.zeros((n_bins, n_states), dtype=np.bool_)
+    result[:, :n_classes] = pooled & (np.take_along_axis(
+        sizes, np.minimum(keys[:, :n_classes], n_classes).astype(np.intp), axis=1) >= 2)
+    return result
+
+
 def release_ragged_states(
         state_space: RaggedStateSpace,
         viterbi_state_class_grid: np.ndarray,
         evidence_eligible_sample_mask: np.ndarray,
         posterior_viterbi_public_class_mass: np.ndarray,
         minimum_viterbi_public_class_posterior: float,
+        posterior_viterbi_local_class_mass: np.ndarray,
+        local_allele_class_keys: np.ndarray,
+        viterbi_direct_support: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Release qV-qualified classes, singleton labels, and typed statuses."""
+    """Staged release: public classes at qV >= tau, else directly callable local classes at qA >= tau.
+
+    Stage 1 (qV >= tau) is the public-class release. Otherwise, if qA >= tau
+    and every track whose state has a multi-member local allele class in the
+    bin is directly supported there, such tracks are released as
+    LOCAL_ALLELE_EQUIVALENCE (label -1, class = local key) and any other track
+    keeps its stage-1 status, label and class. Otherwise both tracks abstain.
+    """
 
     internal_grid = np.asarray(viterbi_state_class_grid)
     eligible = np.asarray(evidence_eligible_sample_mask, dtype=np.bool_)
     qv = np.asarray(posterior_viterbi_public_class_mass, dtype=np.float64)
+    qa = np.asarray(posterior_viterbi_local_class_mass, dtype=np.float64)
+    keys = np.asarray(local_allele_class_keys)
+    support = np.asarray(viterbi_direct_support, dtype=np.bool_)
     threshold = float(minimum_viterbi_public_class_posterior)
     if (internal_grid.ndim != 3 or internal_grid.shape[1] != 2
             or eligible.shape != (internal_grid.shape[0],)
-            or qv.shape != (internal_grid.shape[0], internal_grid.shape[2])):
+            or qv.shape != (internal_grid.shape[0], internal_grid.shape[2])
+            or qa.shape != qv.shape or support.shape != internal_grid.shape
+            or keys.shape != (internal_grid.shape[2], state_space.background_index + 1)):
         raise ValueError("ragged release arrays are not sample/track/bin aligned")
     if (np.any((internal_grid < 0)
                | (internal_grid > state_space.background_index))
             or np.any(~np.isfinite(qv[eligible]))
+            or np.any(~np.isfinite(qa[eligible]))
             or not math.isfinite(threshold) or not 0.5 < threshold <= 1.0):
         raise ValueError("ragged release inputs are invalid")
 
@@ -930,7 +1142,15 @@ def release_ragged_states(
         else:
             status_by_class[class_index] = int(PaintingTrackStatus.SINGLETON_NAMED)
     status_grid = status_by_class[internal_grid]
-    low = np.broadcast_to((qv < threshold)[:, None,:], internal_grid.shape)
+    stage_one = qv >= threshold
+    bins = np.arange(internal_grid.shape[2])[None, None, :]
+    multi = multi_member_local_states(keys)[bins, internal_grid]
+    stage_two = (~stage_one) & (qa >= threshold) & ~np.any(multi & ~support, axis=1)
+    local = stage_two[:, None, :] & multi
+    class_grid[local] = keys[bins, internal_grid][local]
+    label_grid[local] = -1
+    status_grid[local] = int(PaintingTrackStatus.LOCAL_ALLELE_EQUIVALENCE)
+    low = np.broadcast_to(~(stage_one | stage_two)[:, None,:], internal_grid.shape)
     class_grid[low] = -1
     label_grid[low] = -1
     status_grid[low] = int(PaintingTrackStatus.LOW_POSTERIOR_ABSTENTION)
@@ -940,22 +1160,74 @@ def release_ragged_states(
     return label_grid, class_grid, status_grid
 
 
-def _released_chunks(labels, classes, statuses, edges):
-    """Coalesce unordered release keys, keeping each run's first ordered pair."""
+def released_track_members(
+        status_grid: np.ndarray,
+        class_grid: np.ndarray,
+        local_allele_class_keys: np.ndarray,
+        equivalence_classes: tuple[tuple[int, ...], ...],
+) -> tuple[np.ndarray, tuple[tuple[int, ...], ...]]:
+    """Candidate founder rows of every released track and bin.
+
+    Returns (samples, 2, bins) int32 ids into interned sorted row tuples; id 0
+    is the empty set. SINGLETON_NAMED and POOLED_EQUIVALENCE name the rows of
+    their class; LOCAL_ALLELE_EQUIVALENCE names the rows of every class whose
+    key in that bin is the released class; other statuses name none.
+    """
+
+    statuses = np.asarray(status_grid)
+    classes = np.asarray(class_grid)
+    keys = np.asarray(local_allele_class_keys)
+    n_classes = len(equivalence_classes)
+    sets: list[tuple[int, ...]] = [()]
+    index: dict[tuple[int, ...], int] = {(): 0}
+
+    def intern(rows):
+        rows = tuple(sorted(int(row) for row in rows))
+        found = index.get(rows)
+        if found is None:
+            found = index[rows] = len(sets)
+            sets.append(rows)
+        return found
+
+    ids = np.zeros(statuses.shape, dtype=np.int32)
+    whole = np.asarray(
+        [intern(members) for members in equivalence_classes] + [0], dtype=np.int32)
+    named = (
+        (statuses == int(PaintingTrackStatus.SINGLETON_NAMED))
+        | (statuses == int(PaintingTrackStatus.POOLED_EQUIVALENCE))
+    )
+    ids[named] = whole[classes[named]]
+    local = statuses == int(PaintingTrackStatus.LOCAL_ALLELE_EQUIVALENCE)
+    if np.any(local):
+        # One member set per distinct (bin, key): O(N B + B C) overall.
+        bins = np.broadcast_to(np.arange(statuses.shape[2]), statuses.shape)[local]
+        codes, inverse = np.unique(
+            bins.astype(np.int64) * (n_classes + 1) + classes[local], return_inverse=True)
+        code_ids = np.empty(len(codes), dtype=np.int32)
+        for position, code in enumerate(codes):
+            bin_index, key = divmod(int(code), n_classes + 1)
+            code_ids[position] = intern(
+                row for class_index in np.flatnonzero(keys[bin_index, :n_classes] == key)
+                for row in equivalence_classes[class_index])
+        ids[local] = code_ids[inverse.reshape(-1)]
+    return ids, tuple(sets)
+
+
+def _released_chunks(labels, classes, statuses, members, member_sets, edges):
+    """Coalesce bins whose ordered (label, class, status, members) agree on both tracks."""
     bins = labels.shape[1]
     if not bins:
         return []
     changed = np.zeros(bins, dtype=np.bool_)
     changed[0] = True
-    for grid in (labels, classes, statuses):
-        first = np.minimum(grid[0], grid[1])
-        second = np.maximum(grid[0], grid[1])
-        changed[1:] |= (first[1:] != first[:-1]) | (second[1:] != second[:-1])
+    for grid in (labels, classes, statuses, members):
+        changed[1:] |= (grid[0, 1:] != grid[0, :-1]) | (grid[1, 1:] != grid[1, :-1])
     starts = np.flatnonzero(changed)
     stops = np.r_[starts[1:], bins]
     return [painting_components.PaintedChunk(
         int(edges[start]), int(edges[stop]),
-        int(labels[0, start]), int(labels[1, start]))
+        int(labels[0, start]), int(labels[1, start]),
+        member_sets[members[0, start]], member_sets[members[1, start]])
         for start, stop in zip(starts, stops)]
 
 
@@ -1058,12 +1330,18 @@ def paint_ragged_component(
         working_memory_budget,
     )
     public_state_ids = ragged_public_state_ids(state_space)
+    starts = np.asarray([indices[0] for indices in binning.indices], dtype=np.int64)
+    stops = np.asarray([indices[-1] + 1 for indices in binning.indices], dtype=np.int64)
+    named_alleles = np.full(state_space.called.shape, -1, dtype=np.int8)
+    named_alleles[state_space.called] = state_space.q[state_space.called].astype(np.int8)
+    local_state_ids = build_local_allele_class_keys(named_alleles, starts, stops)
     internal_batches = []
     posterior_max_batches = []
     posterior_entropy_batches = []
     posterior_background_batches = []
     posterior_public_unknown_batches = []
     posterior_viterbi_public_batches = []
+    posterior_viterbi_local_batches = []
     genetic_distances = None
     if chromosome_map is not None:
         recomb_rate = chromosome_map.fallback_rate_per_bp
@@ -1083,17 +1361,21 @@ def paint_ragged_component(
         if source_log_emission_upper is not None:
             painting_evidence.store_symmetric_emissions(
                 emissions, source_log_emission_upper, batch_start, n_states)
-        viterbi_grid = viterbi_label_grid(
-            emissions, binning.centers, n_states, recomb_rate,
-            switch_penalty_per_snp, snps_per_bin, double_recomb_factor, genetic_distances,
+        viterbi_grid = allele_parsimonious_track_order(
+            viterbi_label_grid(
+                emissions, binning.centers, n_states, recomb_rate,
+                switch_penalty_per_snp, snps_per_bin, double_recomb_factor, genetic_distances,
+            ),
+            local_state_ids, state_space.background_index,
         )
         (
             posterior_max, posterior_entropy, posterior_background,
             posterior_public_unknown, posterior_viterbi_public,
+            posterior_viterbi_local,
         ) = posterior_class_summaries(
             emissions, binning.centers, n_states, recomb_rate,
             switch_penalty_per_snp, snps_per_bin, double_recomb_factor,
-            viterbi_grid, public_state_ids, genetic_distances,
+            viterbi_grid, public_state_ids, local_state_ids, genetic_distances,
         )
         internal_batches.append(viterbi_grid)
         posterior_max_batches.append(posterior_max)
@@ -1101,6 +1383,7 @@ def paint_ragged_component(
         posterior_background_batches.append(posterior_background)
         posterior_public_unknown_batches.append(posterior_public_unknown)
         posterior_viterbi_public_batches.append(posterior_viterbi_public)
+        posterior_viterbi_local_batches.append(posterior_viterbi_local)
     internal_grid = np.concatenate(internal_batches, axis=0)
     posterior_max = np.concatenate(posterior_max_batches, axis=0)
     posterior_entropy = np.concatenate(posterior_entropy_batches, axis=0)
@@ -1111,31 +1394,9 @@ def paint_ragged_component(
     posterior_viterbi_public = np.concatenate(
         posterior_viterbi_public_batches, axis=0
     )
-
-    map_grid, class_grid, status_grid = release_ragged_states(
-        state_space,
-        internal_grid,
-        eligible,
-        posterior_viterbi_public,
-        minimum_viterbi_public_class_posterior,
+    posterior_viterbi_local = np.concatenate(
+        posterior_viterbi_local_batches, axis=0
     )
-    samples = []
-    for sample_index in range(evidence.shape[0]):
-        if not eligible[sample_index]:
-            samples.append(painting_components.SamplePainting(sample_index, []))
-            continue
-        chunks = _released_chunks(
-            map_grid[sample_index], class_grid[sample_index],
-            status_grid[sample_index], binning.edges)
-        samples.append(painting_components.SamplePainting(sample_index, chunks))
-    painting = painting_components.BlockPainting(
-        (int(state_space.positions[0]), int(state_space.positions[-1])), samples
-    )
-    posterior_max[~eligible] = np.nan
-    posterior_entropy[~eligible] = np.nan
-    posterior_background[~eligible] = np.nan
-    posterior_public_unknown[~eligible] = np.nan
-    posterior_viterbi_public[~eligible] = np.nan
     if evidence.dtype in (np.dtype("float32"), np.dtype("float64")):
         # NumPy's raw-array arithmetic uses this dtype (unlike the float64
         # normalized eligibility calculation); retain that threshold rounding.
@@ -1145,15 +1406,47 @@ def paint_ragged_component(
         totals = np.sum(evidence, axis=2)
         spread = np.max(evidence, axis=2) - np.min(evidence, axis=2)
         nonuniform = (totals > 0.0) & (spread > 16.0 * np.finfo(np.float64).eps * totals)
-    starts = np.asarray([indices[0] for indices in binning.indices], dtype=np.int64)
-    stops = np.asarray([indices[-1] + 1 for indices in binning.indices], dtype=np.int64)
-    direct = painting_evidence.direct_callability(
-        internal_grid, class_grid, state_space.called, observed, nonuniform,
+    # Direct support of each (gauge-fixed) Viterbi track, before the release.
+    support = painting_evidence.direct_callability(
+        internal_grid, np.zeros(internal_grid.shape, dtype=np.int32),
+        state_space.called, observed, nonuniform,
         starts, stops, state_space.background_index)
+    support[~eligible] = False
+
+    map_grid, class_grid, status_grid = release_ragged_states(
+        state_space,
+        internal_grid,
+        eligible,
+        posterior_viterbi_public,
+        minimum_viterbi_public_class_posterior,
+        posterior_viterbi_local,
+        local_state_ids,
+        support,
+    )
+    member_ids, member_sets = released_track_members(
+        status_grid, class_grid, local_state_ids, state_space.equivalence_classes)
+    samples = []
+    for sample_index in range(evidence.shape[0]):
+        if not eligible[sample_index]:
+            samples.append(painting_components.SamplePainting(sample_index, []))
+            continue
+        chunks = _released_chunks(
+            map_grid[sample_index], class_grid[sample_index],
+            status_grid[sample_index], member_ids[sample_index], member_sets,
+            binning.edges)
+        samples.append(painting_components.SamplePainting(sample_index, chunks))
+    painting = painting_components.BlockPainting(
+        (int(state_space.positions[0]), int(state_space.positions[-1])), samples
+    )
+    posterior_max[~eligible] = np.nan
+    posterior_entropy[~eligible] = np.nan
+    posterior_background[~eligible] = np.nan
+    posterior_public_unknown[~eligible] = np.nan
+    posterior_viterbi_public[~eligible] = np.nan
+    posterior_viterbi_local[~eligible] = np.nan
+    direct = support & (class_grid >= 0)
     biological = minimum_unordered_switch_counts(internal_grid)
     biological[~eligible] = 0
-    named_alleles = np.full(state_space.called.shape, -1, dtype=np.int8)
-    named_alleles[state_space.called] = state_space.q[state_space.called].astype(np.int8)
     diagnostics = RaggedPaintingDiagnostics(
         selected_site_indices=state_space.site_indices.copy(),
         selected_positions=state_space.positions.copy(),
@@ -1178,6 +1471,9 @@ def paint_ragged_component(
         hmm_working_memory_budget_bytes=working_memory_budget,
         hmm_estimated_bytes_per_sample=estimated_bytes_per_sample,
         minimum_viterbi_public_class_posterior=minimum_viterbi_public_class_posterior,
+        local_allele_class_keys=local_state_ids,
+        posterior_viterbi_local_class_mass=posterior_viterbi_local,
+        viterbi_direct_support=support,
         source_log_emission_upper=source_log_emission_upper,
     )
     return RaggedPainting(painting, state_space, binning, eligible, diagnostics)

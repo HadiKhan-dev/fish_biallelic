@@ -40,10 +40,22 @@ def identity():
                 priors_applied_to_output=False)
 
 
-def discovery_identity(backend, discovery_config):
-    """Bind discovery and all its consumers to the same observation settings."""
+def discovery_identity(backend, discovery_config, site_quality=None, sample_quality=None):
+    """Bind discovery and all its consumers to the same observation settings.
+
+    site_quality is the applied site filter's identity (None when off), so a
+    filtered site set never resumes from unfiltered checkpoints or vice versa;
+    sample_quality (None when off) carries the flagged sample set likewise.
+    """
     key = hashlib.sha256(json.dumps(identity(), sort_keys=True).encode()).hexdigest()[:16]
-    return dict(backend=f"{backend}+read-model-{key}", config=asdict(discovery_config))
+    backend = f"{backend}+read-model-{key}"
+    if site_quality is not None:
+        site_key = hashlib.sha256(json.dumps(site_quality, sort_keys=True).encode()).hexdigest()[:16]
+        backend = f"{backend}+site-quality-{site_key}"
+    if sample_quality is not None:
+        sample_key = hashlib.sha256(json.dumps(sample_quality, sort_keys=True).encode()).hexdigest()[:16]
+        backend = f"{backend}+sample-quality-{sample_key}"
+    return dict(backend=backend, config=asdict(discovery_config))
 
 
 def histograms(reads, positions, config):

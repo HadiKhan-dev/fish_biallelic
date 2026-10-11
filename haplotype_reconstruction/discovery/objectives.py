@@ -51,26 +51,14 @@ def canonicalize_binary_panel(haplotypes, assignments):
     return canonical_haplotypes, canonical_assignments, order, inverse, canonical_key
 
 
-def compute_founder_complexity_cost(
-    cc_scale,
-    n_samples,
-    n_sites,
-    use_log_bic=False,
-    n_blocks=1,
-):
+def compute_founder_complexity_cost(cc_scale, n_samples, n_sites, n_blocks=1):
     """Return the outer per-founder complexity cost.
 
-    The default linear convention is
-    ``cc_scale * (n_sites / 200) * n_samples * n_blocks``.  The optional
-    historical log convention is preserved exactly for a single block and
-    extended linearly over explicitly combined independent blocks.
+    The linear convention is ``cc_scale * (n_sites / 200) * n_samples *
+    n_blocks``, extended linearly over explicitly combined independent blocks.
     """
 
-    site_growth = n_sites / 200.0
-    if use_log_bic:
-        log_n = math.log(max(n_samples * n_sites, 2))
-        return cc_scale * log_n * site_growth * n_blocks
-    return cc_scale * site_growth * n_samples * n_blocks
+    return cc_scale * (n_sites / 200.0) * n_samples * n_blocks
 
 
 def soft_cluster_seed_haplotypes(
@@ -560,48 +548,3 @@ def pooled_alt_to_hap(pooled_alt):
         (L,) int64 founder hap in {0, 1}.
     """
     return (pooled_alt > 0.5).astype(np.int64)
-
-
-@njit(parallel=True, fastmath=True)
-def viterbi_score_selection(ll_tensor, penalty):
-    """
-    Calculates the BEST Viterbi path score for each sample given a set of active pairs.
-    """
-    n_samples, K, n_sites = ll_tensor.shape
-    best_scores = np.empty(n_samples, dtype=np.float64)
-
-    for s in prange(n_samples):
-        # Buffer for current scores (faster than allocation in loop)
-        current_scores = np.empty(K, dtype=np.float64)
-        for k in range(K):
-            current_scores[k] = ll_tensor[s, k, 0]
-
-        for i in range(1, n_sites):
-            # 1. Find best previous score globally
-            best_prev = -np.inf
-            for k in range(K):
-                if current_scores[k] > best_prev:
-                    best_prev = current_scores[k]
-
-            # The baseline score if we switch INTO a state
-            switch_base = best_prev - penalty
-
-            # 2. Update states
-            for k in range(K):
-                emission = ll_tensor[s, k, i]
-                stay = current_scores[k]
-
-                # Max(Stay, Switch)
-                if stay > switch_base:
-                    current_scores[k] = stay + emission
-                else:
-                    current_scores[k] = switch_base + emission
-
-        # Final max
-        final_max = -np.inf
-        for k in range(K):
-            if current_scores[k] > final_max:
-                final_max = current_scores[k]
-        best_scores[s] = final_max
-
-    return best_scores

@@ -1,77 +1,52 @@
-# Founder scaling and assembly models
+# Founder scaling and assembly
 
-The default is **dense transitions plus bounded panel search**. The optional
-structured transition model with bounded search gives near-quadratic
-founder-count scaling. An optimized broader search is also available. These
-choices affect L1–L4 assembly, independently of block discovery. The default additional
-all-founder refinement within final assembly has separate cubic total-work
-terms; the structured option does not make that pass near-quadratic. See
+Assembly has **one route** at every level (L1-L4): dense learned linker
+transitions, one dense transition mesh per batch, an endpoint-quota beam over
+that mesh, and certified panel search: same-count moves by the join likelihood,
+founder counts by the pipeline's effective-carrier rule. There is
+no alternative transition model, search breadth or automatic K cutoff. The
+additional all-founder refinement within final assembly has separate total-work
+terms, some above cubic (below). See
 [final refinement](methods.md#final-founder-path-refinement).
 
 The default uses **16 full proposal scores per category**, after the initial
 four-score budget caused serious localized reconstruction losses. The wider
 budget passed a 22-chromosome assembly/painting comparison, six additional
 controls and a perfect metadata-free pedigree check. It remains a heuristic
-search: some local outcomes differ from the broader reference, and a 32-score
-pilot shows a further accuracy opportunity. See the current results below.
+search: some local outcomes differed from the former broader search, and a
+32-score pilot shows a further accuracy opportunity. See the results below.
 
-## Choosing an assembly model
+## Removed assembly options
 
-```bash
-# Default: unrestricted dense transition matrices, bounded panel search.
-python run.py simulate --config configs/simulation.toml --seed 400 \
-  --assembly-model dense --output work/runs/dense_seed_400
+The structured transition model, the broad assembly search (diversity beam,
+founder cap 12, chimera resolution) and panel rehousing were removed; the
+batched discovery search can no longer be selected. Their CLI flags no longer
+exist; obsolete TOML keys and
+`HAPLOTYPES_*` variables are accepted only at the remaining value, with a
+warning (see [running](running.md)). `AssemblyConfig` has no transition-model
+or search-mode fields; `panel_search_config` holds the base endpoint quota and the tier-1 budgets.
+Checkpoint identities record the configuration actually used.
 
-# Optional: restricted sparse-specific plus positive-background transitions.
-python run.py simulate --config configs/simulation.toml --seed 400 \
-  --assembly-model structured --output work/runs/structured_seed_400
-```
+Block discovery remains on its established missing-aware reversible-cavity
+search. Painting, pedigree inference, family refinement, phase polishing and
+map generation do not depend on assembly settings, though their outputs change
+when their input haplotypes change. All four assembly levels share one linker
+and retain the 20-iteration transition-fit limit, observation masks, source
+provenance, supported component boundaries and dynamic CPU allocation. Panel
+selection compares anchor-based initial panels, runs the bounded tier-1 sweep and,
+at every stall, the tier-2 certification and pool-saturation steps; its sweep
+backstop (100 + 20 max_b K_b) is reported, never expected to bind.
 
-The same flag works for `astcal` and `tropheops`. TOML uses
-`[run].assembly_model = "dense"` or `"structured"`; the environment variable is
-`HAPLOTYPES_ASSEMBLY_MODEL`. Precedence is CLI > TOML > environment > dense.
-There is no automatic K cutoff. Both transition models default to
-`--assembly-search bounded` and retain the same full Viterbi/BIC acceptance
-objective and linker fitting limits.
-
-Use `--assembly-search broad` for the optimized broader diversity-beam and
-full-refit panel/chimera search. For the earlier dense/broad combination:
-
-```bash
-python run.py simulate --config configs/simulation.toml --seed 400 \
-  --assembly-model dense --assembly-search broad \
-  --output work/runs/broad_seed_400
-```
-
-Search precedence is CLI > `[run].assembly_search` >
-`HAPLOTYPES_ASSEMBLY_SEARCH` > `bounded`. Broad search retains Numba kernels,
-cached swap templates, chunked scoring and dynamic thread allocation; it
-does not reinstate unoptimized historical code. It retains the diversity beam
-(width 200), founder cap 12, top-20 swap candidates and at most 10 chimera
-resolution iterations. It is broader, not exhaustive or guaranteed to improve
-allele accuracy.
-
-Python callers can pass `AssemblyConfig(structured_transition_config=None)`
-for dense transitions or an explicit `StructuredTransitionConfig()` for the
-structured model. The panel-search default follows the search environment
-setting; explicit `panel_search_config=PanelSearchConfig()` selects bounded
-search and `panel_search_config=None` selects broad search regardless of that
-setting. Actual configurations are recorded in checkpoint identities.
-
-Block discovery remains on its established missing-aware reversible-cavity search.
-Its independent experimental option is `--discovery-search batched`
-(`[run].discovery_search`, `HAPLOTYPES_DISCOVERY_SEARCH`; default `standard`).
-The earlier combined discovery/assembly experiment had substantial accuracy
-regressions. It is **not** necessary to change discovery to use structured
-assembly.
-
-These assembly options do not change the scientific models used by painting,
-pedigree inference, family refinement, phase polishing or map generation. All four assembly levels still share one linker and
-retain the 20-iteration transition-fit limit, observation masks, source provenance,
-supported component boundaries, and existing dynamic CPU allocation. Bounded
-panel selection now allows up to 100 sweeps, compares anchor-based initial
-panels, and fully rescores both single and coordinated pruning proposals. Downstream stages
-can nevertheless change when their input haplotypes change.
+Worker counts per assembly level come from available memory divided by a
+per-worker budget: the larger of `min_gb_per_worker` (4 GB) and the largest
+batch's estimated arrays (two float32 genotype-probability slices over the
+batch's site span, linker scans, binned sub-emissions and their static totals,
+the int32 painting and its back pointers bounded by `tensor_budget_mb`, plus the
+certified search's exclusion forwards, one chunk of per-sample bounds and the
+move and beam lists of the quota-1024 saturation step that a join whose 256
+rung accepted a move can reach). In all
+current simulations and the real cross (K <= 9, N <= 120) the 4 GB floor sets
+the budget.
 
 ## Algorithm and complexity
 
@@ -83,24 +58,17 @@ not claims that sample count, chromosome length, iterations, or I/O are free.
 
 | Component | Approach | Founder-count dependence |
 | --- | --- | --- |
-| Optional batched discovery | Batch births/pruning, residual replacements, fixed-start gauge moves; same fixed-K fitter and mean-field cavity score | O(R I N L K²), plus candidate generation/clustering costs |
-| Default dense macro inference | Arbitrary dense learned transitions; full diploid posterior | O(I N K³) per boundary |
-| Optional structured macro inference | Sparse specific edges plus a shared positive background; full diploid posterior | O(I N K² log K) per boundary |
-| Bounded-search candidate paths | Fixed endpoint quota; archive interior-state paths; no MMR all-selected comparisons | O(K² log K) for fixed B/quota |
-| Bounded panel selection | Conditional, no-switch and candidate/mate-HMM proposal scores; bounded full Viterbi/BIC refits | O(B N m K² + R (N m K² + B K² log K)) for an O(K) candidate pool |
-| Final-L1 allele-preserving pruning | Direct drops and single-recipient local-piece moves; at most Q=256 full scores per count-down round | O(K² L + B K³ + Q N m K³), plus O(N m K² H) if local dictionaries have H rows; cubic when H=O(K) |
+| Macro inference (linker) | Arbitrary dense learned transitions; full diploid posterior | O(I N K³) per boundary |
+| Candidate paths | One dense mesh per batch; fixed endpoint quota; archive interior-state paths | O(K² log K) for fixed B/quota |
+| Panel selection, tier 1 | Conditional, no-switch and candidate/mate-HMM proposal scores; bounded full Viterbi refits of same-count moves | O(B N m K² + R (N m K² + B K² log K)) for an O(K) candidate pool |
+| Panel selection, tier 2 (when the count step is quiescent) | Tie-aware exclusion forwards; two-region bound on every same-count move of the neighbourhood; exact scores of survivors; quota-doubling saturation of the pool up to 256 (1024 after a move accepted at 256) | O(N m K (\|C\| + B K²)) per pass, \|C\| = O(q B K) pool paths |
+| Join count step (at each tier-1 stall) | Deaths exact from the exclusion forwards; pool births bounded by the two-region kernel, exact (sparse) for survivors; effective-carrier test on the total gain and its sequence part; duplicate-seed births at certified panels | O(N m K \|C\|) per step plus sparse exact scores; at most k0 + 2 sum_b K_b + 2 decisions per super-block |
 | Cavity carrier probabilities | Sum each pair-state mass at its one/two founder endpoints | O(N K²), replacing an O(N K³) dense incidence product |
-| Refinement global escape | Budgeted sparse coordinates plus conditional dual search; shared background | O(R D N M [K³(s+1) + C K(K+s)]), plus full-site scoring |
-| Count deletion/refit | Sparse repairs for all K deletions, full endpoint choice; one deep refit | Cubic for A=O(K), plus O(N L A³) bound |
-| Post-count polishing | Sparse coordinate epochs and verified fixed-point reuse | O(S K²) per sparse painting plus full endpoints |
-| Paired suffix/tract search | Exact bounded suffix queries; feasible-tract shortlist with full acceptance | Suffix worst case O(N B (K³ + K² log K)); tract shortlist O(N B K² + B H K²) |
+| Refinement sweep (fixed K) | Exact messages; window proposals scored exactly; all-junction founder-pair suffix exchanges (sorted scan) | Per sweep O(N L K²) messages, O(B N K³) suffix exchanges, window programmes and proposal scoring (below) |
+| Count decision | Rows without a private cell first; the r = 9 top-ranked one-row deletions (or duplicated-row seeds) refitted to convergence concurrently, all of them when K <= 9; effective-carrier criterion on the total gain and its sequence part | At most 9 converged fits per decision; criterion O(N L K²) incl. one shadow-panel score; novelty O(K² L) |
 
-The near-quadratic/cubic hierarchy comparisons assume bounded search and exclude
-the later all-founder final refinement. Its per-focal diploid-state update is
-quadratic, but sweeping all K founders adds another factor of K.
-Broad search restores additional full rescoring and coordinated suffix
-proposals, including the historical quartic-style search costs. Selecting
-structured transitions alone does not bound that broader search quadratically.
+The hierarchy bounds exclude the later all-founder final refinement, whose
+costs are listed below.
 
 The carrier-probability change is mathematically equivalent and also applies
 to the standard profile. Homozygotes contribute once to carrier probability.
@@ -110,141 +78,115 @@ These are bounded-search algorithms, not polynomial-time guarantees of globally
 optimal founder discovery or panel selection. Raising search budgets adds their
 cost explicitly. Discovery clustering can remain quadratic in its candidate or
 sample cloud; pedigree retains its separate sample-count costs. Missing-allele
-joint enumeration still has a 2^U factor, with U capped at six unresolved
-founders per site in the supported completion route. It does not become cheap
-if that cap is allowed to grow with K.
+completion enumerates all 2^U assignments only for U ≤ 10 unresolved founders
+at a site; above that, the uncertain-core site posterior (`assembly/site_posterior.py`)
+keeps it polynomial, O(N U³) per site, with no U cap. Block feedback's context
+refit uses the same rule over its K context founders (no ten-founder cap).
 
-### Final-L1 allele-preserving pruning
+### Join founder counts
 
-After selecting final assembly's L1 panels, `assembly/panel_pruning.py` adds
-single-recipient moves: retain a deleted row's unique local sequence pieces
-by moving them to one survivor whose displaced pieces remain represented.
-Direct deletions must retain every represented called allele. Unknown alleles
-do not count as evidence. Every accepted panel strictly improves the existing
-full Viterbi/complexity score. These are search constraints, not evidence that
-each row represents an original biological founder, and not a target row count.
-
-The default scores at most 256 raw proposal descriptions per count-down round.
-This exhausts the original matched real/simulation controls (K at most 15/7).
-Larger candidate sets are ranked by fixed-painting edit gains before full
-rescoring; these are heuristics, not safe bounds. Truncation and evaluated
-counts are saved. At most K-1 accepted reductions keep total work cubic for
-fixed budget and H=O(K), where H is local dictionary size. Row multiplicity
-and deterministic proposal order are retained. The pass runs only at L1 of
-final assembly (`max_level=4`), not in either feedback round or at L2–L4.
-`AssemblyConfig(l1_pruning_full_scores=0)` disables it for controlled comparisons;
-the value is recorded in the scientific checkpoint identity.
+The join (`assembly/panel_count.py`) decides its panel size with the pipeline's
+effective-carrier rule (`count_criterion.decide_with_sequence`): a count move
+compares a larger panel X+ with X- = X+ minus one path f (a death of f or a birth
+of f), and X+ is kept iff the test passes on the per-sample total gain
+d_s = V_s(X+) - V_s(X-) and on its sequence part q_s = V_s(X+) - V_s(X+^sigma),
+where X+^sigma replaces f's cells that X- lacks by the nearest rows X- uses
+(Hamming over called sites). A path without a private cell, or within 1% of
+another panel path over the span (near-identical = identical), has q = 0: it is
+never added, deleted first, and no same-count move may produce one. Count moves
+are single deaths (paths without sequence first, then the best-F candidate) and
+single pool births (the largest total gain among the births the rule accepts);
+duplicate-seed births split a chimera that covers another founder's cells.
+Merges, batch moves and final-L1 pruning are gone: each would introduce a
+recombinant of the larger panel. Founder refinement decides its counts with the
+same rule (`assembly/founder/converged_sweep.py`): the shadow of a deletion
+replaces the decided row's private cells, that of an addition every cell the
+refit added that the incumbent lacks; refinement scores the shadow exactly and
+takes no near-identity shortcut (its last level is final, so no later level could
+re-split a merged pair). Each super-block makes at most
+k0 + 2 sum_b K_b + 2 decisions.
 
 ### Final founder refinement: explicit work and parallelism
 
-The default is budgeted sparse-coordinate/global search after each executed
-level of final assembly, plus separate final count-up. This does not change
-the L1/L2 feedback rounds or the dense/structured hierarchy linker.
-See the [model and accepted tradeoffs](methods.md#final-founder-path-refinement).
+Final founder refinement runs the converged search after each executed level of
+final assembly; its count pass adds rows only at the last level. This does not
+change the L1/L2 feedback rounds or the hierarchy linker.
+See the [model](methods.md#final-founder-path-refinement).
 
-Let K be working founder count, A the largest local/macro candidate alphabet,
-N samples, L markers and B prepared blocks. M counts predictive proposal bins,
-s is the largest bins-per-block, and S counts sample-specific anchor cells
-summed over samples. S is generally much smaller than N*L, but has that worst
-case. R<=20 is the shared local/global iteration allowance, D<=20 dual sweeps,
-C=min(A,16), J=3 deletion sweeps, Q=16 tract checks, H=100 bounded interval span
-(in local blocks or original L1 groups). They are work factors, not free
-biological constants.
+Let K be the working founder count, Q = K(K+1)/2 unordered pair states, N
+samples, L markers and B prepared blocks; F is a window-programme frontier, R the
+local rows per block offered for one founder and b the bins per window unit.
+They are work factors, not biological constants.
 
 | Work unit | Numerical work |
 | --- | --- |
-| Fixed evidence tables | O(N L A²) |
-| One full primary score, count or painting | O(N L K²) |
-| Anchored sparse painting | O(S K²) |
-| Fixed-painting local coordinate sweep | O(S (K+A)); blocks parallel, founders sequential inside a block |
-| Rebuild anchored emissions | O(N L A²) worst case; unchanged unsplit cells reuse totals |
-| One all-founder global dual round | O(N M K² s + D N M [K³ + C K(K+s)]), plus canonical checks |
-| All K cheap deletion endpoints | O(J N B K³ + N L K³) for one 200-SNP ranking bin per local block |
-| Optimistic count bound | O(N L A³) worst case |
-| Suffix message preparation | O(N L K²) |
-| Bounded suffix queries | O(N B K² log K) preparation; at most O(N B K³) exact queries |
-| Feasible tract shortlist | O(N B K² + B H K²), plus sorting and at most Q full/local checks |
-| Exact local edit over ell markers | O(N ell K²), after O(N L K²) unchanged-flank preparation |
+| One full score, count or painting (Potts transitions are O(Q) per site) | O(N L K²) |
+| Forward/backward messages, once per sweep | O(N L K²) |
+| Exact scoring of one proposal on its l markers | O(N l K) for samples whose leading pair state avoids the moved founder, O(l K²) for each other sample |
+| All-junction founder-pair suffix exchanges, per sweep (sorted scan) | O(B N (K² log K + K³)) |
+| Window programmes for all founders, per sweep (shared background) | O(B N (b² K³ + b K² F R)), plus frontier dominance tests |
+| Shared-junction guard tracebacks, per guarded coarse candidate | O(width x affected samples x K²) |
+| One count decision | min(9, K) converged refits run concurrently, plus, when K > 9, the ranking: K unrefitted deletion scores O(N L K³), or K seeds' window best responses and copy-only passes O(B N b K² F R + N L K³) |
 
-All K deletion starts receive cheap repair; only the best gets deep search.
-Count-up uses the same repair for incumbent and K+1, capped at two additions.
-Full category checking initially uses four ranked proposals but exhausts a
-stalled category, so the worst-case all-founder full-scoring term remains
-O(N L K³). Four here is a refinement budget, **not** the hierarchy's 16 scores.
+The number of sweeps per fit is data-dependent (100 is a reported backstop).
+Suffix-exchange gains use a sorted scan of the junction terms (the states a
+transposition leaves unchanged are read from the per-sample order), with the same
+values as the direct scan. Window programmes carry, per partial path, only the K
+pair states containing the focal founder and one switch floor per bin; the other
+states are shared by all children of a parent. Dominance tests whose outcome is
+not clear of the tolerance by a float margin, and kept paths, use the full
+messages. A screen before every programme (the window's relaxation bound, every
+sample choosing the focal rows freely) skips windows whose incumbent it already
+certifies. Canonical ties run a restricted programme only for a row ordered
+before the optimum's whose relaxation bound can still reach it; when several such
+rows remain, one programme over all of them first checks whether any can. A
+programme whose frontier passes 256 paths restarts with its pruning bound raised
+to the value of a 16-wide beam of the same programme (a feasible value, so the
+optimum and the canonical answer are unchanged). Scoring a proposal in the
+acceptance pass advances only the pair states of the moved founder for every
+sample whose current leading state avoids that founder and is not overtaken: the
+other states then follow the current panel's forward chain exactly; the remaining
+samples use every state. A count round refits at most nine candidates (every
+candidate when K <= 9), concurrently, so a count step that moves K by d costs at
+most 9 (d + 1) refits. Every fit (start fit or refit) is the better of two
+concurrent searches, forward-first and reverse-first: twice the work per fit,
+the same exponent in K.
 
-With A=O(K), fixed bin/beam/iteration budgets and fixed hierarchy depth, total
-founder-count work remains cubic (up to sorting factors). It is not globally
-quadratic, and neither the L dependence nor the block t² background term
-disappears. Sparse coordinates improve constants and typical site dependence;
-dense/global escape and count work still matter.
+Window proposals use bins of at least 200 SNPs, targeting 2,000 bins per
+component; L1/L2 share a chromosome-derived minimum. Acceptance always uses
+individual SNPs.
 
-Three different resolutions must not be confused:
-
-- Ranking tables use 200 SNPs per bin.
-- The predictive proposal HMM targets 2,000 bins, with at least 200 SNPs per
-  bin. Keeping local boundaries can exceed the target.
-- Count-up seed catalogues group about 2,000 SNPs into a founder fragment,
-  while preserving all internal sample-HMM emission bins.
-
-Primary acceptance always uses individual SNPs. Anchored grids retain all
-incumbent switches and sum likelihoods; other panels get a lower bound, not
-a safe exclusion bound. Feasible tract shortlisting and finite candidate
-budgets can change the result. The exact optimizations—immutable table reuse,
-cached identical queries, incremental messages, deferred losing counts and
-neutral score/count contraction—do not change the intended objective.
-
-Memory is dominated by full evidence O(N L), prepared emissions O(N M A²),
-anchored tables O(S A²), and optional flanks O(N B K²). Dosage arrays add
-O(L K²). Memory admission can select direct equivalent kernels or reduce
-concurrent workers. Checkpoints store original-row paths and non-derived
-metadata, not repeated chromosome arrays.
-
-Independent components and candidate tasks run concurrently with private mutable
-state and shared immutable evidence. The allocator reserves reusable worker
-slots while a queue exists; completed slots redistribute their threads to
-stragglers at safe numerical boundaries. Running kernels cannot resize mid-call.
-Scientific selection retains the original candidate order.
-
-For the documented AulStu chr3 refinement-only workload, measured contributions
-were 0.307 L3 + 0.330 L4 + 0.305 final count-up = **0.943 equivalent 76-core
-node-hours**. The stage timings exclude loading/evaluation/hierarchy and do not
-predict identical wall time on another CPU generation or dataset. The
-[methods record](methods.md#measured-tradeoff) reports substantial real-path
-changes and mixed omitted-founder recovery alongside intact controls.
-
-### Structured boundaries are a model change
-
-For a rectangular K-left by K-right boundary,
-
-`T = S + u qᵀ`, with `sum(q)=1` and `sum_j S_ij + u_i = 1`.
-
-S has at most max(2, ceil(log2 K-right)) selected entries per row, bounded by
-K-right. Specific edges are screened using independent carrier-profile
-associations. The shared background gives every destination positive mass;
-states are not hard-pruned and the diploid posterior is not factorized.
-
-Both forward propagation and its true adjoint exploit this structure. Expected
-specific-edge counts and background source/destination counts are exact for
-this restricted model. Ordinary and extreme-value log-domain kernels have the
-same near-quadratic bound; neither falls back to a cubic contraction.
-
-The restricted parameterization and its latent-mixture regularization are
-**not equivalent to arbitrary dense learned transitions**. Specific-edge support
-is fixed within a fit; a genuinely complex boundary may not be represented as
-well. Backward mesh summaries are reverse conditionals derived from the
-regularized joint mass, not the adjoint likelihood operator.
+Independent components run in forkserver worker processes with private evidence
+slices and workspaces; each worker's Numba threads are the budget divided by the
+active workers, re-read at every sweep, so stragglers take over freed cores.
+Inside a component, window programmes (one nogil kernel per window), a fit's two
+searches, a round's refits and an addition round's seeds run concurrently, each
+with its share of the budget among the work still running. The acceptance pass
+is compiled (successive nogil calls); its per-sample and per-candidate kernels
+use the search's current share, re-read before every call, and evaluate the
+first look of a chunk of junctions at once (chunks double while nothing is
+accepted; an acceptance discards the rest). Running kernels cannot resize mid-call.
+Scientific selection retains the original candidate order; no decision depends
+on the thread count.
 
 ### Bounded-search changes are approximations
 
-The bounded-search path pool retains up to 16 paths per endpoint and archives intermediate
+The path pool retains up to 16 paths per endpoint and archives intermediate
 backward refinements. Its size grows linearly with K for fixed batch width,
-rather than applying a fixed total founder/path cap.
+rather than applying a fixed total founder/path cap. At each stall the pool is
+re-generated with the quota multiplied by the number of panel paths sharing an
+endpoint, and the saturation step doubles the quota (up to 256, and on to 1024
+for a join whose 256 rung accepted a move) before a panel is certified.
+Certification is relative to this generator: paths the beam never
+proposes, three-way boundary cycles and multi-founder births lie outside the
+certified neighbourhood (tier 1 still proposes the latter two).
 
 Proposal scores include exact fixed-painting changes, a no-switch pair
 reassignment score, and a small HMM fixing one novel candidate copy while its
 mate recombines among current paths. They only rank proposals. Every accepted
-panel must improve the existing full Viterbi/BIC objective. Coordinated splices,
-cycle permutations, and batch births/deaths are included; the permutation
+same-count panel must improve the join likelihood and leave every changed path
+sequence of its own. Coordinated splices and cycle permutations are included
+(counts change only through the count step); the permutation
 proposal uses quadratic greedy/swap passes, not a cubic assignment solver.
 
 There are at most 20 search sweeps and 16 full refits per proposal category.
@@ -328,32 +270,18 @@ but not yet rerun through pedigree–recombination. The earlier q4 comparisons b
 historical controls; see [current validation coverage](validation.md).
 block discovery, per-level assembly, painting and pedigree checkpoints remain separate.
 
-## Interpreting the structured alternative
+## Removed structured model: historical comparison
 
-The initial controlled assembly-only comparison froze block discovery and the painter
-on chr16 across seeds400–402. Broader dense search versus bounded structured
-search gave **854 versus 878** closest-founder mismatches across 6,579,146
-called founder cells. Because both the transition model and search changed,
-this does not isolate the effect of the structured parameterization.
-
-At that earlier budget, full q4 dense and structured seed400 assemblies were
-also compared across all 22 chromosomes. Founder mismatches were 6,305 versus
-5,911, but matched painting switches were 2,445 versus 2,465 on the same
-488,135,746 eligible comparisons. L1–L4 chromosome times summed to 31.3 versus
-70.0 minutes. Both metadata-free pedigrees recovered 320/320 configurations.
-These are q4 results, not a completed all-chromosome q16 structured comparison,
-and do not establish uniform accuracy or runtime superiority.
-
-The initial combined discovery-and-assembly experiment had substantially worse
-phase accuracy. It is not a reason to reject the isolated assembly option, but
-it is why the separate batched discovery search remains experimental. Sparse
-transitions do not require choosing that discovery search.
-
-At low K, dense kernels and their simpler bookkeeping can be faster. In a
-later fixed-search four-block K=128 comparison, optimized dense and structured
-calls took 42.47 and 60.40 seconds respectively. Near-quadratic scaling is an
-option for large working panels, not a guaranteed speedup at every K.
-There is no automatic model switch.
+Before its removal, the optional structured transition model (sparse specific
+edges plus a positive background) was compared with dense transitions. At the
+earlier q4 budget, all-22-chromosome seed400 assemblies gave 6,305 (dense)
+versus 5,911 (structured) founder mismatches, 2,445 versus 2,465 matched
+painting switches on 488,135,746 eligible comparisons, and 31.3 versus 70.0
+minutes of L1-L4 time; both metadata-free pedigrees recovered 320/320
+configurations. In a four-block K=128 comparison, dense and structured calls
+took 42.47 and 60.40 seconds. These results did not establish an accuracy or
+runtime advantage that justified a second model, and the combined
+batched-discovery experiment had substantially worse phase accuracy.
 
 ## Evaluation criteria
 

@@ -18,6 +18,11 @@ import math
 from . import path_model as reference
 from .objectives import log_binary_haplotype_set_count
 
+# Samples per parallel E-step batch (memory bound only: sums are sequential in
+# sample order for any width) and elements per combine tile (work split only).
+_E_STEP_SAMPLE_BATCH = 256
+_COMBINE_TILE = 4096
+
 
 def canonical(panel, frequencies=None):
     """Sort exact binary rows and sum their frequency mass when deduplicating."""
@@ -29,13 +34,19 @@ def canonical(panel, frequencies=None):
     return unique, mass / mass.sum()
 
 
-def regularizer(panel, frequencies, learn_frequencies):
+def regularizer(panel, frequencies, learn_frequencies, free=None, claimed_code=0.):
     """Dictionary-size penalty plus uniform-centered frequency shrinkage.
 
+    The dictionary term codes the ``free`` rows (default: all K) as new
+    arbitrary binary haplotypes, log C(2^L, free). A row that is a context
+    founder's local sequence is coded by reference to that founder plus its
+    edits, ``claimed_code`` nats in total (path_selection.ContextFounders).
     This is a regularized best-panel objective, not a Bayesian posterior over K.
     """
     k, length = panel.shape
-    value = -float(log_binary_haplotype_set_count(length, k)) - math.log(k) - math.log(k + 1)
+    free = k if free is None else int(free)
+    dictionary = float(log_binary_haplotype_set_count(length, free)) if free else 0.
+    value = -dictionary - float(claimed_code) - math.log(k) - math.log(k + 1)
     if learn_frequencies:
         # Explicit shrinkage penalty centered to zero at uniform. Its MAP
         # extra counts total one; avoid a dimension-dependent density reward.
@@ -171,31 +182,53 @@ def _forward_samples(panel, emissions, pi, rates, priors, rows, workers):
 
 @njit(cache=True, parallel=True)
 def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates,
-                      priors, rows, full_statistics, workers):
+                      priors, rows, full_statistics, batch):
+    """Sufficient statistics summed over samples in ascending sample order.
+
+    Samples run in parallel batches of at most ``batch``; each writes its own
+    statistics row, and every output element then adds the rows of the batch
+    one by one in sample order. Every sum is therefore the same sequential
+    chain over samples 0..N-1 for any thread count or batch width.
+    """
     n, length, k = len(emissions), emissions.shape[1], len(panel)
     s = k + 1
-    gains = np.zeros((workers, 2, k, length))
-    occupancy = np.zeros((workers, s, length))
-    initial = np.zeros((workers, s))
-    destinations = np.zeros((workers, s))
+    gains = np.zeros((2, k, length))
+    occupancy = np.zeros((s, length))
+    initial = np.zeros(s)
+    destinations = np.zeros(s)
+    width = max(1, min(batch, n))
+    sample_gains = np.empty((width if full_statistics else 0, 2, k, length))
+    sample_occupancy = np.empty((width if full_statistics else 0, s, length))
+    sample_initial = np.empty((width, s))
+    sample_destinations = np.empty((width, s))
+    gain_size, occupancy_size = 2 * k * length, s * length
     # Both homologues have the same copying prior/transition and genotype
     # emissions are unordered. Thus all messages are symmetric even when the
     # founder frequencies are unequal. Evaluate each unordered cell once;
     # retain full scratch matrices for the sufficient-statistic interface.
-    for wi in prange(workers):
-        worker = np.int64(wi)
-        backward = np.empty((s, s))
-        weights = np.empty((s, s))
-        mass = np.empty((s, s))
-        posterior = np.empty((s, s))
-        future = np.empty((s, s))
-        row, previous = np.empty(s), np.empty(s)
-        copies, redraw = np.empty(s), np.empty(s)
-        outside = np.empty(s)
-        prefix = np.empty((s, s+1))
-        suffix = np.empty((s, s+1))
-        tail = np.empty(s+1)
-        for sample in range(worker, n, workers):
+    for start in range(0, n, width):
+        count = min(width, n - start)
+        for slot_index in prange(count):
+            row_slot = np.int64(slot_index)
+            sample = start + row_slot
+            backward = np.empty((s, s))
+            weights = np.empty((s, s))
+            mass = np.empty((s, s))
+            posterior = np.empty((s, s))
+            future = np.empty((s, s))
+            row, previous = np.empty(s), np.empty(s)
+            copies, redraw = np.empty(s), np.empty(s)
+            outside = np.empty(s)
+            prefix = np.empty((s, s+1))
+            suffix = np.empty((s, s+1))
+            tail = np.empty(s+1)
+            if full_statistics:
+                sample_gains[row_slot] = 0.
+            sample_initial[row_slot] = 0.
+            sample_destinations[row_slot] = 0.
+            # Defined before the site loop so they are private to the sample;
+            # every use at site > 0 follows the assignment for that site.
+            rate, stay = 0., 1.
             backward[:, :] = 1.
             for site in range(length-1, -1, -1):
                 emission = emissions[sample, site]
@@ -239,9 +272,9 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
                                 copies[b] += 2. * prob
                     for a in range(s):
                         if full_statistics:
-                            occupancy[worker, a, site] += copies[a]
+                            sample_occupancy[row_slot, a, site] = copies[a]
                         if site == 0:
-                            initial[worker, a] += copies[a]
+                            sample_initial[row_slot, a] = copies[a]
                 if full_statistics and observed[sample, site]:
                     _outside_into(mass, prefix, suffix, tail, outside)
                     for a in range(k):
@@ -261,13 +294,13 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
                             alt_mass += weight * alternative
                             if prob > 0:
                                 qgain += prob * delta
-                        gains[worker, 0, a, site] += qgain
-                        gains[worker, 1, a, site] += reference._log_ratio(
+                        sample_gains[row_slot, 0, a, site] = qgain
+                        sample_gains[row_slot, 1, a, site] = reference._log_ratio(
                             outside[a] + alt_mass, denominator)
                 if site > 0:
                     total = 0.
                     for a in range(s):
-                        destinations[worker, a] += 2. * rate * pi[a] * redraw[a] / denominator
+                        sample_destinations[row_slot, a] += 2. * rate * pi[a] * redraw[a] / denominator
                         total += pi[a] * row[a]
                     maximum = 0.
                     for a in range(s):
@@ -278,6 +311,29 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
                             maximum = max(maximum, value)
                     if maximum > 0:
                         backward /= maximum
+        # Fixed-order combine: each element adds this batch's rows in sample
+        # order; tiles only distribute elements, never change an addition.
+        if full_statistics:
+            gain_rows = sample_gains.reshape((width, gain_size))
+            gain_total = gains.reshape(gain_size)
+            for gain_tile in prange((gain_size + _COMBINE_TILE - 1) // _COMBINE_TILE):
+                low = np.int64(gain_tile) * _COMBINE_TILE
+                high = min(gain_size, low + _COMBINE_TILE)
+                for gain_row in range(count):
+                    for element in range(low, high):
+                        gain_total[element] += gain_rows[gain_row, element]
+            occupancy_rows = sample_occupancy.reshape((width, occupancy_size))
+            occupancy_total = occupancy.reshape(occupancy_size)
+            for occupancy_tile in prange((occupancy_size + _COMBINE_TILE - 1) // _COMBINE_TILE):
+                low_cell = np.int64(occupancy_tile) * _COMBINE_TILE
+                high_cell = min(occupancy_size, low_cell + _COMBINE_TILE)
+                for occupancy_row in range(count):
+                    for cell in range(low_cell, high_cell):
+                        occupancy_total[cell] += occupancy_rows[occupancy_row, cell]
+        for sample_row in range(count):
+            for a in range(s):
+                initial[a] += sample_initial[sample_row, a]
+                destinations[a] += sample_destinations[sample_row, a]
 
     return gains, occupancy, initial, destinations
 
@@ -344,13 +400,12 @@ class _Workspace:
             return self.state_cache
         gains, occ, initial, dest = _backward_samples(panel, self.emissions, self.ratios,
             self.self_ratios, self.observed, self.pi, self.rates, self.priors,
-            self.rows, full_statistics, min(len(self.observed), get_num_threads()))
-        totals = gains.sum(axis=0)
+            self.rows, full_statistics, _E_STEP_SAMPLE_BATCH)
         self.state_cache = dict(log_likelihood=float(self.likelihoods.sum()),
             sample_log_likelihood=self.likelihoods, state_prior=self.pi,
-            redraw_probabilities=self.rates, flip_gains=totals[0],
-            conditional_flip_gains=totals[1], occupancy=occ.sum(axis=0),
-            initial_copy_counts=initial.sum(axis=0), redraw_destination_counts=dest.sum(axis=0))
+            redraw_probabilities=self.rates, flip_gains=gains[0],
+            conditional_flip_gains=gains[1], occupancy=occ,
+            initial_copy_counts=initial, redraw_destination_counts=dest)
         self.state_is_full = full_statistics
         return self.state_cache
 
@@ -367,9 +422,10 @@ def fit_e_step(panel, gl, positions, observed_mask, *, generations=3.,
 
 
 def fit_fixed(panel, gl, observed, positions, *, generations, learn_frequencies,
-              frequencies=None, max_updates=20, tolerance=1e-6, prepared=None,
-              recombination_rate_per_bp=5e-8, wildcard_mass=.01,
-              interval_morgans=None):
+              frequencies=None, update_backstop_base=20, update_backstop_per_founder=4,
+              update_backstop_per_site=2,
+              tolerance=1e-6, prepared=None, recombination_rate_per_bp=5e-8,
+              wildcard_mass=.01, interval_morgans=None):
     """Fit binary rows and optional copying frequencies without changing K.
 
     Input GL has shape (samples, markers, 3), normalized at observed cells;
@@ -382,9 +438,12 @@ def fit_fixed(panel, gl, observed, positions, *, generations, learn_frequencies,
 
     Each update performs frequency EM, then one founder's positive complete-
     emission gains, or one exact conditional flip at a GEM stationary point.
-    A row collision is deferred to outer selection. Budgets, tolerances and
-    conditional release-probability semantics are preserved. Callers control
-    dynamic Numba allocation; one fit owns O(N*L*(K+1)**2) trajectory storage.
+    The fit stops at a conditional fixed point; a row collision is deferred to
+    outer selection. ``update_backstop_base + update_backstop_per_founder * K
+    + update_backstop_per_site * L`` updates are a reported backstop
+    (termination "update_backstop"). Callers
+    control dynamic Numba allocation; one fit owns O(N*L*(K+1)**2) trajectory
+    storage.
     """
     from scipy.special import expit
     from haplotype_reconstruction.core import parallel
@@ -401,9 +460,10 @@ def fit_fixed(panel, gl, observed, positions, *, generations, learn_frequencies,
     objective = score + regularizer(panel, frequencies, learn_frequencies)
     converged = False
     frequency_history = []
-    budget_reached = False
-    termination = 'update_budget'
-    for iteration in range(max_updates):
+    backstop_reached = False
+    termination = 'update_backstop'
+    for iteration in range(update_backstop_base + update_backstop_per_founder * len(panel)
+                           + update_backstop_per_site * panel.shape[1]):
         parallel.apply_dynamic_threads()
         state = workspace.state(panel, frequencies, full_statistics=not learn_frequencies)
         frequency_gain = 0.
@@ -448,7 +508,7 @@ def fit_fixed(panel, gl, observed, positions, *, generations, learn_frequencies,
                             flips=int(changed.sum()), gain=float(trial_objective-objective)))
         panel, score, objective = trial, trial_score, trial_objective
     else:
-        budget_reached = True
+        backstop_reached = True
     final_state = workspace.state(panel, frequencies)
     current_p = expit(-final_state['conditional_flip_gains'])
     allele_p = np.where(panel == 1, current_p, 1-current_p)
@@ -456,4 +516,4 @@ def fit_fixed(panel, gl, observed, positions, *, generations, learn_frequencies,
                 occupancy=final_state['occupancy'][:-1], log_likelihood=float(score),
                 objective=float(objective), history=history, converged=converged,
                 frequency_history=frequency_history,
-                update_budget_reached=budget_reached, termination=termination)
+                update_backstop_reached=backstop_reached, termination=termination)

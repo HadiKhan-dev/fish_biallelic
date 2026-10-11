@@ -13,8 +13,13 @@ import numpy as np
 import pandas as pd
 
 
-def partial_relationships(exact, diagnostics, settings, tier):
-    """Keep edge-level stability separate from count/configuration stability."""
+def partial_relationships(exact, diagnostics, settings, tier, orientation_resolved=None):
+    """Keep edge-level stability separate from count/configuration stability.
+
+    ``orientation_resolved[child][slot - 1]`` is False for a local parent whose
+    full-data orientation is a near-tie; such an edge is never released (status
+    ``<tier>_marginal_parent_orientation_unresolved`` when no other edge is).
+    """
     partial = exact.copy(deep=True)
     bootstrap_cutoff = getattr(settings, f"{tier}_parent_bootstrap")
     loco_cutoff = getattr(settings, f"{tier}_loco_fraction")
@@ -33,7 +38,7 @@ def partial_relationships(exact, diagnostics, settings, tier):
         if (diagnostic["GraphConflict"] or diagnostic["GraphTieConflict"]
                 or diagnostic["InformativeContigCount"] < settings.minimum_informative_contigs):
             continue
-        retained = 0
+        retained = withheld = 0
         for slot in (1, 2):
             parent = diagnostic[f"LocalParent{slot}"]
             if parent is None or parent != diagnostic[f"CompleteParent{slot}"]:
@@ -47,6 +52,9 @@ def partial_relationships(exact, diagnostics, settings, tier):
             if (np.all(np.isfinite(support))
                     and np.all(support >= (bootstrap_cutoff, loco_cutoff,
                                            bootstrap_cutoff, loco_cutoff))):
+                if orientation_resolved is not None and not orientation_resolved[child][slot - 1]:
+                    withheld += 1
+                    continue
                 partial.at[child, f"Parent{slot}"] = parent
                 partial.at[child, f"Parent{slot}Supported"] = True
                 retained += 1
@@ -54,6 +62,8 @@ def partial_relationships(exact, diagnostics, settings, tier):
             partial.at[child, "ObservedParentCountMinimum"] = max(
                 int(partial.at[child, "ObservedParentCountMinimum"]), retained)
             partial.at[child, "InferenceStatus"] = f"{tier}_marginal_parent_support"
+        elif withheld:
+            partial.at[child, "InferenceStatus"] = f"{tier}_marginal_parent_orientation_unresolved"
     return partial
 
 

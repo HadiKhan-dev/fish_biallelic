@@ -8,7 +8,9 @@ def score_emissions(emissions, local_indices, penalty, samples):
     k = local_indices.shape[1]
     # Unphased emissions and a uniform off-diagonal switch penalty are
     # exchange-symmetric. Max scores need one copy of each unordered state;
-    # traceback remains unchanged in the separate painting kernel.
+    # traceback remains unchanged in the separate painting kernel. Each
+    # block's state emissions are first copied into one array, contiguous
+    # per bin (the same values in the same recursion).
     pairs = k * (k + 1) // 2
     first = np.empty(pairs, np.int64)
     second = np.empty(pairs, np.int64)
@@ -17,17 +19,26 @@ def score_emissions(emissions, local_indices, penalty, samples):
         for b in range(a, k):
             first[index], second[index] = a, b
             index += 1
+    widest = 1
+    for block in range(len(emissions)):
+        widest = max(widest, emissions[block].shape[3])
     result = np.empty(samples, dtype=np.float64)
     for sample in prange(samples):
         scores = np.empty(pairs, dtype=np.float64)
+        gathered = np.empty((widest, pairs))
         initialized = False
         for block in range(len(emissions)):
             values = emissions[block]
-            for marker in range(values.shape[3]):
+            bins = values.shape[3]
+            for pair in range(pairs):
+                row = local_indices[block, first[pair]]
+                column = local_indices[block, second[pair]]
+                for marker in range(bins):
+                    gathered[marker, pair] = values[sample, row, column, marker]
+            for marker in range(bins):
                 if not initialized:
                     for pair in range(pairs):
-                        scores[pair] = values[sample, local_indices[block, first[pair]],
-                                              local_indices[block, second[pair]], marker]
+                        scores[pair] = gathered[marker, pair]
                     initialized = True
                     continue
                 best = -np.inf
@@ -36,13 +47,8 @@ def score_emissions(emissions, local_indices, penalty, samples):
                         best = scores[pair]
                 switch_base = best - penalty
                 for pair in range(pairs):
-                    emission = values[sample, local_indices[block, first[pair]],
-                                      local_indices[block, second[pair]], marker]
                     stay = scores[pair]
-                    if stay > switch_base:
-                        scores[pair] = stay + emission
-                    else:
-                        scores[pair] = switch_base + emission
+                    scores[pair] = (stay if stay > switch_base else switch_base) + gathered[marker, pair]
         best = -np.inf
         for pair in range(pairs):
             if scores[pair] > best:
@@ -50,7 +56,8 @@ def score_emissions(emissions, local_indices, penalty, samples):
         result[sample] = best
     return result
 
-def score_panel(paths, sub, penalty, samples):
+def panel_indices(paths, sub):
+    """The block emissions and each path's local row per block (blocks x paths)."""
     arrays = List()
     indices = np.empty((len(sub), len(paths)), dtype=np.int64)
     for block, item in enumerate(sub):
@@ -60,4 +67,89 @@ def score_panel(paths, sub, penalty, samples):
             lookup = {key: index for index, key in enumerate(item["hap_keys"])}
         for path, keys in enumerate(paths):
             indices[block, path] = lookup[keys[block]]
+    return arrays, indices
+
+
+def score_panel(paths, sub, penalty, samples):
+    arrays, indices = panel_indices(paths, sub)
     return score_emissions(arrays, indices, float(penalty), samples)
+
+
+@njit(cache=True, parallel=True, fastmath=True)
+def paint_emissions(emissions, local_indices, penalty, start, stop):
+    """Viterbi painting of samples start..stop-1 (the join objective's traceback), reported per
+    bin as the ordered state a * k + b of panel paths a <= b.
+
+    Unphased emissions and the uniform switch penalty make the ordered states (a, b) and (b, a)
+    carry equal scores at every bin, so the ordered-pair programme's first maximiser and every
+    back pointer it follows are pairs with a <= b (the first of each symmetric pair in state
+    order); this programme runs over those pairs alone, in the same order, with the same
+    operations and tie rules (first maximiser; stay when stay >= switch).
+    """
+    k = local_indices.shape[1]
+    pairs = k * (k + 1) // 2
+    first = np.empty(pairs, np.int64)
+    second = np.empty(pairs, np.int64)
+    code = np.empty(pairs, np.int32)
+    index = 0
+    for a in range(k):
+        for b in range(a, k):
+            first[index], second[index], code[index] = a, b, a * k + b
+            index += 1
+    total = 0
+    widest = 1
+    for block in range(len(emissions)):
+        total += emissions[block].shape[3]
+        widest = max(widest, emissions[block].shape[3])
+    sample_paths = np.zeros((stop - start, total), dtype=np.int32)
+    for position in prange(stop - start):
+        sample = start + position
+        current = np.empty(pairs, dtype=np.float64)
+        new_scores = np.empty(pairs, dtype=np.float64)
+        backptrs = np.zeros((total, pairs), dtype=np.int32)
+        gathered = np.empty((widest, pairs))
+        t = 0
+        for block in range(len(emissions)):
+            values = emissions[block]
+            bins = values.shape[3]
+            for pair in range(pairs):
+                row = local_indices[block, first[pair]]
+                column = local_indices[block, second[pair]]
+                for marker in range(bins):
+                    gathered[marker, pair] = values[sample, row, column, marker]
+            for marker in range(bins):
+                if t == 0:
+                    for pair in range(pairs):
+                        current[pair] = gathered[marker, pair]
+                else:
+                    best_prev = -np.inf
+                    best_prev_idx = 0
+                    for pair in range(pairs):
+                        if current[pair] > best_prev:
+                            best_prev = current[pair]
+                            best_prev_idx = pair
+                    switch_base = best_prev - penalty
+                    for pair in range(pairs):
+                        emission = gathered[marker, pair]
+                        stay = current[pair] + emission
+                        switch = switch_base + emission
+                        if stay >= switch:
+                            new_scores[pair] = stay
+                            backptrs[t, pair] = pair
+                        else:
+                            new_scores[pair] = switch
+                            backptrs[t, pair] = best_prev_idx
+                    for pair in range(pairs):
+                        current[pair] = new_scores[pair]
+                t += 1
+        best_final = -np.inf
+        state = 0
+        for pair in range(pairs):
+            if current[pair] > best_final:
+                best_final = current[pair]
+                state = pair
+        sample_paths[position, total - 1] = code[state]
+        for t in range(total - 1, 0, -1):
+            state = backptrs[t, state]
+            sample_paths[position, t - 1] = code[state]
+    return sample_paths

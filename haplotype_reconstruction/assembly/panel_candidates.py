@@ -3,6 +3,44 @@ import numpy as np
 from numba import njit, prange
 from numba.typed import List
 
+@njit(cache=True, inline='always')
+def _max_range(values, lo, hi, initial):
+    """max(initial, values[lo:hi]) through eight independent running maxima. A maximum is exact,
+    so the value equals one sequential scan's; the independent chains let comparisons overlap."""
+    m0 = initial
+    m1 = m2 = m3 = m4 = m5 = m6 = m7 = -np.inf
+    z = lo
+    while z + 8 <= hi:
+        v = values[z]
+        m0 = v if v > m0 else m0
+        v = values[z + 1]
+        m1 = v if v > m1 else m1
+        v = values[z + 2]
+        m2 = v if v > m2 else m2
+        v = values[z + 3]
+        m3 = v if v > m3 else m3
+        v = values[z + 4]
+        m4 = v if v > m4 else m4
+        v = values[z + 5]
+        m5 = v if v > m5 else m5
+        v = values[z + 6]
+        m6 = v if v > m6 else m6
+        v = values[z + 7]
+        m7 = v if v > m7 else m7
+        z += 8
+    while z < hi:
+        v = values[z]
+        m0 = v if v > m0 else m0
+        z += 1
+    m0 = m1 if m1 > m0 else m0
+    m2 = m3 if m3 > m2 else m2
+    m4 = m5 if m5 > m4 else m4
+    m6 = m7 if m7 > m6 else m6
+    m0 = m2 if m2 > m0 else m0
+    m4 = m6 if m6 > m4 else m4
+    return m4 if m4 > m0 else m0
+
+
 @njit(cache=True, parallel=True)
 def prefix_scores(emissions, local, candidates, order, common_prefix, penalty, samples):
     m, blocks = candidates.shape
@@ -23,13 +61,13 @@ def prefix_scores(emissions, local, candidates, order, common_prefix, penalty, s
                 dp[:] = prefix_dp[b]
                 started = starts[b]
                 for site in range(block.shape[3]):
-                    switch_base = np.max(dp) - penalty
+                    switch_base = _max_range(dp, 0, k + 1, -np.inf) - penalty
                     for mate in range(k + 1):
                         partner = local[mate, b] if mate < k else c
                         e = block[sample, c, partner, site]
                         dp[mate] = (max(dp[mate], switch_base) if started else 0.) + e
                     started = True
-            result[sample, candidate] = np.max(prefix_dp[blocks])
+            result[sample, candidate] = _max_range(prefix_dp[blocks], 0, k + 1, -np.inf)
     return result
 
 def prepare_candidate_scores(sub, candidates):
@@ -50,12 +88,82 @@ def prepare_candidate_scores(sub, candidates):
     return emissions, order, common
 
 
-def continuous_candidate_scores(sub, local, candidates, penalty, *, workspace=None):
-    if workspace is None:
-        workspace = prepare_candidate_scores(sub, candidates)
-    emissions, order, common = workspace
-    return prefix_scores(emissions, local, candidates, order, common, float(penalty),
-                         emissions[0].shape[0])
+@njit(cache=True, parallel=True)
+def block_restart_scores(emissions, local, penalty, samples):
+    """W[s, b, r]: prefix_scores' recursion over block b alone for candidate row r, started
+    afresh at the block's first bin (-inf for rows a block does not have).
+
+    Any state sequence restricted to one block is a sequence of that block alone, and the
+    switches at block starts are free here, so sum_b W[s, b, c_b] >= the candidate's score."""
+    k = local.shape[0]
+    blocks = len(emissions)
+    widest = 1
+    for b in range(blocks):
+        widest = max(widest, emissions[b].shape[1])
+    result = np.full((samples, blocks, widest), -np.inf)
+    for task in prange(samples * blocks):
+        sample = task // blocks
+        b = task % blocks
+        block = emissions[b]
+        dp = np.empty(k + 1)
+        for c in range(block.shape[1]):
+            if block.shape[3] == 0:
+                result[sample, b, c] = 0.
+                continue
+            for site in range(block.shape[3]):
+                switch_base = _max_range(dp, 0, k + 1, -np.inf) - penalty if site else 0.
+                for mate in range(k + 1):
+                    partner = local[mate, b] if mate < k else c
+                    e = block[sample, c, partner, site]
+                    dp[mate] = (max(dp[mate], switch_base) if site else 0.) + e
+            result[sample, b, c] = _max_range(dp, 0, k + 1, -np.inf)
+    return result
+
+
+@njit(cache=True, parallel=True)
+def _possibly_novel(restart, candidates, margin):
+    """True where some sample's block-restart bound exceeds margin[s]."""
+    samples, blocks, _ = restart.shape
+    result = np.zeros(candidates.shape[0], np.bool_)
+    for c in prange(candidates.shape[0]):
+        for s in range(samples):
+            total = 0.
+            for b in range(blocks):
+                total += restart[s, b, candidates[c, b]]
+            if total > margin[s]:
+                result[c] = True
+                break
+    return result
+
+
+def candidate_novelty(local, candidates, penalty, panel_scores, eligible, *, workspace):
+    """novelty[c] = sum_s max(score_s(c) - V_s(P), 0) for the eligible candidates, where
+    score_s(c) is prefix_scores' value (one strand on c, the other on a panel path or c).
+
+    A candidate is scored exactly unless its block-restart bound stays below V_s(P) in every
+    sample by more than the float resolution (the bound and the score sum the same terms in
+    another order); then score_s(c) < V_s(P) in every sample and its novelty is exactly 0 (any
+    candidate with score_s(c) > V_s(P) in some sample, even by rounding, is scored). Exact scores
+    reuse DP prefixes shared by consecutive scored candidates in sorted order, so every scored
+    value equals the all-candidate computation. Returns (novelty, candidates scored exactly)."""
+    emissions, order, _ = workspace
+    samples = emissions[0].shape[0]
+    restart = block_restart_scores(emissions, local, float(penalty), samples)
+    margin = panel_scores - 1e-9 * (1.0 + np.abs(panel_scores))
+    possible = _possibly_novel(restart, candidates, margin) & eligible
+    novelty = np.zeros(len(candidates))
+    chosen = order[possible[order]]
+    if not len(chosen):
+        return novelty, 0
+    paths = np.ascontiguousarray(candidates[chosen])
+    common = np.zeros(len(chosen), np.int64)
+    if len(chosen) > 1:
+        equal = paths[1:] == paths[:-1]
+        common[1:] = np.where(equal.all(axis=1), paths.shape[1], np.argmin(equal, axis=1))
+    scores = prefix_scores(emissions, local, paths, np.arange(len(chosen)), common, float(penalty),
+                           samples)
+    novelty[chosen] = np.maximum(scores - panel_scores[:, None], 0.).sum(axis=0)
+    return novelty, len(chosen)
 
 @njit(cache=True)
 def top_replacement_indices(gains, eligible, quota):

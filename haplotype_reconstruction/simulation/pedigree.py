@@ -366,7 +366,8 @@ def create_offspring(first_pair, second_pair,
     return offspring
 
 
-def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rng=None, read_model=None):
+def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rng=None, read_model=None,
+                                positions=None):
     """
     Vectorized read sampling across ALL individuals at once.
 
@@ -380,6 +381,8 @@ def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rn
         error_rate: Per-base sequencing error rate.
         rng: Optional numpy Generator for reproducibility. If None, uses
              np.random (legacy global state, not reproducible).
+        positions: Site coordinates; required when read_model draws
+             fragments (read_length_bp > 0).
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -389,6 +392,11 @@ def read_sample_all_individuals(individual_list, read_depth, error_rate=0.02, rn
 
     hap0 = np.array([ind[0] for ind in individual_list])  # (N, S)
     hap1 = np.array([ind[1] for ind in individual_list])  # (N, S)
+    if read_model is not None and read_model.read_length_bp:
+        if positions is None:
+            raise ValueError("fragment read sampling requires site positions")
+        from .designs import fragment_read_sampling
+        return fragment_read_sampling(hap0, hap1, positions, read_depth, read_model, rng)
     if read_model is not None and (
             read_model.depth_cv or read_model.dropout_fraction
             or read_model.heterozygote_alt_probability != 0.5):
@@ -1118,7 +1126,8 @@ def _process_single_contig_postprocessing(args):
     # 2. Simulate sequencing reads (vectorized across all individuals)
     reads_rng = np.random.default_rng(seed)
     new_reads_array = read_sample_all_individuals(
-        offspring_haps, read_depth, error_rate=error_rate, rng=reads_rng, read_model=read_model
+        offspring_haps, read_depth, error_rate=error_rate, rng=reads_rng, read_model=read_model,
+        positions=sites,
     )
 
     # 3. Chunk into blocks

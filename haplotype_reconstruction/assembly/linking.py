@@ -602,10 +602,9 @@ def _max_transition_probability_change(old_probs, new_probs):
     return max_change
 
 
-def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps_data,
+def calculate_hap_transition_probabilities(haps_data,
                                            max_num_iterations=MAX_LINKING_ITERATIONS, space_gap=1,
                                            recomb_rate=5e-7, learning_rate=1.0,
-                                           num_processes=16,
                                            min_cutoff_change=0.001,
                                            precalculated_viterbi_emissions=None,
                                            dynamic_cores_fn=None, chromosome_map=None,
@@ -622,8 +621,6 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
         min_cutoff_change: Maximum absolute transition-probability change
             allowed at convergence.
         precalculated_viterbi_emissions: Required ViterbiBlockList.
-            full_samples_data / sample_sites are kept in the signature
-            for upstream symmetry but unused.
         dynamic_cores_fn: Optional callable returning the current core
             allocation for this worker.  Called at the top of each EM
             iteration (here) and the top of each M-step block loop (in
@@ -632,8 +629,6 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
             up the live thread count.  Mirrors the in-flight rescaling
             allocation of the outer batch pool. No-op when None.
     """
-    del full_samples_data, sample_sites, num_processes
-
     if precalculated_viterbi_emissions is None:
         raise ValueError(
             "precalculated_viterbi_emissions is required (pass a "
@@ -696,11 +691,10 @@ def calculate_hap_transition_probabilities(full_samples_data, sample_sites, haps
 
 
 def generate_transition_probability_mesh(
-        full_samples_data, sample_sites, haps_data,
+        haps_data,
         max_num_iterations=MAX_LINKING_ITERATIONS, recomb_rate=5e-7,
         precalculated_viterbi_emissions=None,
-        num_processes=1, dynamic_cores_fn=None, chromosome_map=None, max_gap=None,
-        structured_config=None):
+        dynamic_cores_fn=None, chromosome_map=None, max_gap=None):
     """Fit consumed gaps, reusing fixed emissions/zero-prior scans within this mesh.
 
     Gaps retain independent EM fits and the original convergence settings.
@@ -709,7 +703,6 @@ def generate_transition_probability_mesh(
     """
     if precalculated_viterbi_emissions is None:
         raise ValueError("precalculated_viterbi_emissions is required")
-    del full_samples_data, sample_sites, num_processes
     prepared = _prepare_block_scans(
         precalculated_viterbi_emissions, recomb_rate, chromosome_map,
         dynamic_cores_fn)
@@ -720,19 +713,12 @@ def generate_transition_probability_mesh(
     for gap in range(1, last_gap + 1):
         if dynamic_cores_fn is not None:
             numba.set_num_threads(dynamic_cores_fn())
-        if structured_config is None:
-            results[gap] = calculate_hap_transition_probabilities(
-                None, None, haps_data, max_num_iterations=max_num_iterations,
-                space_gap=gap, recomb_rate=recomb_rate,
-                precalculated_viterbi_emissions=precalculated_viterbi_emissions,
-                dynamic_cores_fn=dynamic_cores_fn, chromosome_map=chromosome_map,
-                prepared_scans=prepared)
-        else:
-            from .structured_transitions import fit_gap
-            results[gap] = fit_gap(precalculated_viterbi_emissions, prepared,
-                [sorted(block.haplotypes) for block in haps_data], gap,
-                max_iterations=max_num_iterations, config=structured_config,
-                dynamic_cores_fn=dynamic_cores_fn)
+        results[gap] = calculate_hap_transition_probabilities(
+            haps_data, max_num_iterations=max_num_iterations,
+            space_gap=gap, recomb_rate=recomb_rate,
+            precalculated_viterbi_emissions=precalculated_viterbi_emissions,
+            dynamic_cores_fn=dynamic_cores_fn, chromosome_map=chromosome_map,
+            prepared_scans=prepared)
         core_parallel.malloc_trim()
     mesh = TransitionMesh(results)
     mesh.scan_diagnostics = {

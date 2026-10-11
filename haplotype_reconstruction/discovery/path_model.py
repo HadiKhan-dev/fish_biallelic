@@ -18,12 +18,18 @@ messages are scaled; backward messages are rescaled by their maximum because
 their arbitrary common scale cancels from all posterior/conditional ratios.
 
 score_panel needs O(threads*S**2) working memory; e_step needs
-O(threads*L*S**2) forward memory plus O(threads*K*L) aggregate statistics.
+O(threads*L*S**2) forward memory plus O(min(N, 128)*K*L) per-sample aggregate
+rows, summed in sample order so the statistics do not depend on the thread count.
 Optional sample statistics cost O(N*K*L); optional ordered pair posteriors cost
 O(N*L*S**2), S=K+1. Caller controls Numba threads externally.
 """
 import numpy as np
-from numba import njit, prange, get_num_threads
+from numba import njit, prange
+
+# Samples per parallel E-step batch (memory bound only: aggregate sums are
+# sequential in sample order for any width) and elements per combine tile.
+_E_STEP_SAMPLE_BATCH = 128
+_COMBINE_TILE = 4096
 
 
 @njit(cache=True)
@@ -188,14 +194,25 @@ def _transition_statistics(filtered, future, pi, rate, denominator):
 
 
 @njit(cache=True, parallel=True)
-def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, workers):
+def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, batch):
+    """Per-sample posteriors; aggregate statistics summed in sample order.
+
+    Samples run in parallel batches of at most ``batch``. Each sample writes
+    its aggregate contributions to its own buffer row, and every aggregate
+    element then adds the rows of the batch one by one in sample order, so the
+    sums are the same sequential chain over samples at any thread count.
+    """
     n, length, k = len(gl), gl.shape[1], len(panel)
     s = k + 1
     likelihoods = np.empty(n)
     # Q flip, exact flip, known-partner Q, known-partner exact flip,
     # carrier mass, known-partner carrier mass, current/flip support mass.
-    stats = np.zeros((workers, 8, k, length))
-    occupancy = np.zeros((workers, s, length))
+    stats = np.zeros((8, k, length))
+    occupancy = np.zeros((s, length))
+    width = max(1, min(batch, n))
+    stat_rows = np.empty((width, 8, k, length))
+    occupancy_rows = np.empty((width, s, length))
+    stat_size, occupancy_size = 8 * k * length, s * length
     sample_occupancy = np.zeros((n, s))
     unknown = np.zeros((n, length))
     initial = np.zeros((n, s))
@@ -204,9 +221,13 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, worke
     redraws = np.zeros((n, max(0, length - 1)))
     pair = np.empty((n, length, s, s)) if pair_output else np.empty((0, 0, 0, 0))
     sample_stats = np.zeros((n, 4, k, length)) if sample_output else np.empty((0, 0, 0, 0))
-    for worker_index in prange(workers):
-        worker = np.int64(worker_index)
-        for sample in range(worker, n, workers):
+    for start in range(0, n, width):
+        count = min(width, n - start)
+        for slot_index in prange(count):
+            worker = np.int64(slot_index)
+            sample = start + worker
+            stat_rows[worker] = 0.
+            occupancy_rows[worker] = 0.
             ll, forward = _forward(panel, gl[sample], observed[sample], pi, rates, True)
             likelihoods[sample] = ll
             if not np.isfinite(ll):
@@ -225,7 +246,7 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, worke
                     copies = 0.
                     for b in range(s):
                         copies += posterior[a, b] + posterior[b, a]
-                    occupancy[worker, a, site] += copies
+                    occupancy_rows[worker, a, site] = copies
                     sample_occupancy[sample, a] += copies
                     if site == 0:
                         initial[sample, a] = copies
@@ -266,14 +287,14 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, worke
                         exact_gain = _log_ratio(outside[a] + alt_mass, denominator)
                         if known_denominator > 0 and known_carrier > 0:
                             known_exact_gain = _log_ratio(known_outside[a] + known_alt_mass, known_denominator)
-                    stats[worker, 0, a, site] += qgain
-                    stats[worker, 1, a, site] += exact_gain
-                    stats[worker, 2, a, site] += known_qgain
-                    stats[worker, 3, a, site] += known_exact_gain
-                    stats[worker, 4, a, site] += carrier
-                    stats[worker, 5, a, site] += known_carrier
-                    stats[worker, 6, a, site] += current_support
-                    stats[worker, 7, a, site] += flip_support
+                    stat_rows[worker, 0, a, site] = qgain
+                    stat_rows[worker, 1, a, site] = exact_gain
+                    stat_rows[worker, 2, a, site] = known_qgain
+                    stat_rows[worker, 3, a, site] = known_exact_gain
+                    stat_rows[worker, 4, a, site] = carrier
+                    stat_rows[worker, 5, a, site] = known_carrier
+                    stat_rows[worker, 6, a, site] = current_support
+                    stat_rows[worker, 7, a, site] = flip_support
                     if sample_output:
                         sample_stats[sample, 0, a, site] = exact_gain
                         sample_stats[sample, 1, a, site] = known_exact_gain
@@ -287,6 +308,24 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, worke
                     redraws[sample, site - 1] = np.sum(redraw)
                     state_changes[sample, site - 1] = changes
                     backward = _backward(future, pi, rates[site - 1])
+        # Fixed-order combine: each element adds this batch's rows in sample
+        # order; tiles only distribute elements, never change an addition.
+        stat_matrix = stat_rows.reshape((width, stat_size))
+        stat_total = stats.reshape(stat_size)
+        for stat_tile in prange((stat_size + _COMBINE_TILE - 1) // _COMBINE_TILE):
+            low = np.int64(stat_tile) * _COMBINE_TILE
+            high = min(stat_size, low + _COMBINE_TILE)
+            for stat_row in range(count):
+                for element in range(low, high):
+                    stat_total[element] += stat_matrix[stat_row, element]
+        occupancy_matrix = occupancy_rows.reshape((width, occupancy_size))
+        occupancy_total = occupancy.reshape(occupancy_size)
+        for occupancy_tile in prange((occupancy_size + _COMBINE_TILE - 1) // _COMBINE_TILE):
+            low_cell = np.int64(occupancy_tile) * _COMBINE_TILE
+            high_cell = min(occupancy_size, low_cell + _COMBINE_TILE)
+            for occupancy_row in range(count):
+                for cell in range(low_cell, high_cell):
+                    occupancy_total[cell] += occupancy_matrix[occupancy_row, cell]
     return (likelihoods, stats, occupancy, sample_occupancy, unknown, initial,
             destinations, state_changes, redraws, pair, sample_stats)
 
@@ -365,11 +404,10 @@ def e_step(panel, gl, positions, observed_mask, *, generations=3.,
     panel, gl, observed, pi, rates = _prepare(panel, gl, positions, observed_mask,
         generations, recombination_rate_per_bp, wildcard_mass, interval_morgans, founder_frequencies)
     values = _e_samples(panel, gl, observed, pi, rates, return_pair_posteriors, return_sample_stats,
-                        min(len(gl), get_num_threads()))
-    ll, partial, occ, sample_occ, unknown, initial, destinations, changes, redraws, pair, sample_stats = values
+                        _E_STEP_SAMPLE_BATCH)
+    ll, stats, occ, sample_occ, unknown, initial, destinations, changes, redraws, pair, sample_stats = values
     if np.any(~np.isfinite(ll)):
         raise ValueError('E-step undefined for a sample with zero panel likelihood')
-    stats = partial.sum(axis=0)
     gains = stats[1]
     probability = np.empty_like(gains)
     positive = gains >= 0
@@ -383,7 +421,7 @@ def e_step(panel, gl, positions, observed_mask, *, generations=3.,
         current_support_mass=stats[6], flip_support_mass=stats[7],
         conditional_current_allele_probability=probability,
         conditional_alt_probability=np.where(panel == 1, probability, 1 - probability),
-        occupancy=occ.sum(axis=0), sample_occupancy=sample_occ,
+        occupancy=occ, sample_occupancy=sample_occ,
         sample_unknown_copy_posterior=unknown,
         initial_copy_counts=initial.sum(axis=0), sample_initial_copy_counts=initial,
         redraw_destination_counts=destinations.sum(axis=0), sample_redraw_destination_counts=destinations,

@@ -174,27 +174,40 @@ per-user controller allowance.
 
 ### SL4 worker size, partition and walltime
 
-Apply the user's partition policy (28 September 2026) to new SL4 CPU workers:
+Apply the user's partition policy (updated 29 September 2026) to new SL4 CPU
+workers. Account for scheduling tier as well as hardware and memory:
 
+- **Prefer `icelake-himem` for suitable Ice Lake requests.** On 29 September
+  2026, `icelake-himem` had `PriorityTier=2`, while `icelake` and `sapphire`
+  had tier 1. Slurm considers partition tier before numerical job priority;
+  within a tier, an older array's age-based priority can put it ahead of a
+  new request. See [Slurm scheduling order](https://slurm.schedmd.com/priority_multifactor.html).
+  Treat these tier values as dated observations. Reuse shared partition
+  snapshots and verify at setup or when admission changes, not for every job.
 - **Large workers, at roughly half-node scale or larger (including the
-  established 48-CPU profile): use `icelake` or `icelake-himem` with a
-  two-hour walltime.** Choose between those partitions using memory needs and
-  current admission evidence. Use checkpoint/resume for longer investigations;
-  do not default these large workers to Sapphire.
-- **Small workers: prefer `sapphire`.** This preference aims to benefit from
-  Sapphire's higher per-core performance/IPC where useful; it is not a promise
-  of a particular speedup. Request a realistic useful runtime for the work.
-- If Sapphire admission is blocked or unsuitable for a small worker, use
-  `icelake` or `icelake-himem` instead. Base the fallback on shared current
-  queue/limit evidence; do not wait indefinitely, launch admission-only probes,
-  or keep duplicate live requests for the same work.
-- Assess worker size against the actual node profile and requested/allocated
-  CPUs, including memory-driven extra cores. These are worker-shape preferences,
-  not a new aggregate SL4 core cap. Do not assume changing partitions bypasses
-  a shared QoS CPU-minute limit.
+  established 48-CPU profile): prefer `icelake-himem` with a two-hour
+  walltime.** Fall back to `icelake` when high-memory nodes are inaccessible,
+  unsuitable, or current resource/admission evidence favors ordinary Ice Lake.
+  Record the reason for the fallback. Use checkpoint/resume for longer
+  investigations; do not default these large workers to Sapphire.
+- **Small workers: prefer `sapphire` when suitable capacity can start promptly
+  and its per-core performance is useful.** When admission is constrained,
+  prioritize suitable `icelake-himem` capacity before ordinary `icelake`;
+  Sapphire's possible per-core advantage must not outweigh a material wait
+  caused by its lower scheduling tier. Request a realistic useful runtime.
+- Request genuine CPU and memory needs and respect partition/account access
+  rules. Do not inflate memory requests to justify a partition choice. Assess
+  actual allocated CPUs, including any memory-driven extra cores.
+- A higher tier changes scheduling order; it does not create free resources
+  or bypass the shared `cpu3` `GrpTRESRunMins` limit. Sufficient CPU-minute
+  headroom and suitable physical resources are still required. Neither tier
+  nor prior success guarantees immediate admission, and this preference adds
+  no aggregate SL4 core cap.
 - Preserve healthy running work and checkpoints when changing future requests.
   Reconcile pending/in-flight replacements, protect the runner, and retain the
   existing shared submission cadence, array accounting and cleanup rules.
+  Do not launch admission-only probes or duplicate live requests to compare
+  partitions.
 
 ### Building useful SL4 capacity incrementally
 
@@ -219,19 +232,23 @@ For substantial authorized work with independent checkpointable units:
   merely to gain admission, assume an extension, or bypass scheduler limits.
 - Use a shared, atomic task queue so workers starting at different times
   claim distinct chromosomes or other independent units. Reuse each worker
-  for further eligible tasks, then exit immediately when none remain.
-  Preserve intermediate checkpoints across normal scheduler expiry.
-- Consider suitable accessible partitions, including Ice Lake high-memory,
-  using current partition rules, memory needs and actual admission evidence.
-  Prior success on one partition is not a guarantee; requested memory must
-  not silently increase allocated CPUs beyond the ledger.
+  for further eligible tasks, including known follow-on work that is not ready
+  yet. A temporarily empty ready queue is not a reason to release an SL4
+  allocation; running SL4 workers stay until their natural expiry (see **Keep
+  SL4 allocations until they expire naturally** below). Preserve
+  intermediate checkpoints across normal scheduler expiry.
+- Apply the high-memory partition preference above: prefer suitable
+  `icelake-himem` workers, using current partition tiers, memory needs and
+  admission evidence. Prior success on one partition is not a guarantee;
+  requested memory must not silently increase allocated CPUs beyond the ledger.
 - Let the scheduler admit queued requests as capacity opens. Reassess at
   useful task boundaries, respecting the existing minimum 120-second queue
   polling interval. Do not race submissions, churn jobs, or run repeated
   admission-only probes when useful queued work can provide the evidence.
 - Bound pending lifetime with a realistic deadline or durable cancellation.
   A Slurm completion deadline must allow both pending wait and requested
-  runtime. Cancel unused pending workers when the useful backlog disappears.
+  runtime. Cancel surplus pending workers after accounting for retained
+  allocations and both ready and known upcoming work.
 - Record every job's account, requested and actual cores/memory, submission,
   start, expiry/end, task ownership, checkpoint state and release action.
   Recover an interrupted task claim only after its former writer is confirmed
@@ -239,6 +256,63 @@ For substantial authorized work with independent checkpointable units:
 - SL4 remains outside the user's combined 448-core SL3/SL2 cap, but all site
   limits still apply. Use permitted SL3 capacity for the critical path when
   SL4 admission would delay the task; never disturb the protected runner.
+
+### Keep SL4 allocations until they expire naturally
+
+**Never release, cancel or shorten a running SL4-CPU allocation before its
+scheduler walltime expires.** The user is not charged for SL4-CPU (user
+instruction, 7 October 2026: "don't free up SL4 until they naturally expire,
+I don't get charged for those"). For SL4-CPU allocations this overrides the
+completion-release, no-follow-on-work release and two-hour inactivity rules
+in this file.
+
+- Keep an idle or finished SL4 worker until its walltime ends, and give it
+  useful authorized work in the meantime instead of releasing it.
+- Do not end an SL4 allocation early through a cleanup timer, reduced
+  TimeLimit, completion hook or scheduled cancellation.
+- The rule covers running allocations. Surplus pending SL4 requests remain
+  under the pending-request rules, and other service levels (SL3-CPU,
+  SL2-CPU, SL3-GPU) keep the existing release rules. The protected hosting
+  allocation is never released.
+- Only release timing changes. Submission pacing, realistic request sizing,
+  the shared SL4 `GrpTRESRunMins` budget and other site limits still apply;
+  do not submit SL4 workers that no authorized work can use.
+
+### Full-node allocations for whole-genome runs
+
+**Never run a full-genome or whole-genome workload on less than one full
+node's allocated CPU capacity.** This user requirement (4 October 2026)
+applies equally to production, validation, merge-correctness checks, checkpoint
+resume tests, and runs described as a canary or the last remaining check.
+Resuming from checkpoints or expecting only a short final stage does not
+exempt a whole-genome run. It also applies to delegated agents and checkers.
+
+- For successive whole-genome tests, the user's default is a **76-CPU,
+  single-node Ice Lake allocation on SL3-CPU for 12 hours**, reused across
+  tests. Reuse an existing suitable full-node allocation when its resources
+  and remaining walltime suffice; otherwise obtain the requested allocation.
+  This specific whole-genome policy takes precedence over the general
+  cheaper-tier preference and the 48-CPU/two-hour SL4 worker profile.
+- Before launch, record the job ID, allocated CPUs, memory, remaining walltime,
+  and effective worker affinity. Verify full-node capacity is actually
+  allocated and available to this run, not merely present on its physical
+  host or split among unrelated tasks. For another node type, use its verified
+  full-node CPU count rather than assuming 76 CPUs always constitute a node.
+- Pass the full verified CPU budget through the launcher, test harness,
+  delegated checker, and scientific worker configuration. Use all of it for
+  safely parallelizable work, with process-by-thread limits that prevent
+  oversubscription. Do not leave a hardcoded 16-, 48-, or other partial-node
+  cap in the execution path after obtaining a full node. Explain genuine
+  serial, memory, or I/O bottlenecks rather than silently reducing the budget.
+- If suitable full-node capacity is unavailable, coordinate, queue, or defer
+  the whole-genome run; do not start it on a smaller allocation as a fallback.
+  Keep the aggregate 448-CPU SL3/SL2 cap (including pending requests), protected
+  runner, shared submission pacing, and site limits intact. Never cancel the
+  protected runner to make room.
+- Genuinely bounded unit, fixture, or single-chromosome checks may use smaller
+  resources. Calling a whole-genome execution a test does not make it bounded.
+  Keep the reusable allocation alive for known follow-on tests, subject to
+  the existing expiry, ownership, and idle-cleanup rules.
 
 ### Allocation reuse and execution
 
@@ -248,6 +322,35 @@ requesting a fresh allocation for every test. Estimate the whole sequence's
 runtime and memory, allow practical headroom, and use checkpoint/resume when
 needed. Keep process-by-thread use within verified affinity; the existing
 pre-run audit and scientific validation requirements still apply.
+
+**Keep a managed SL4 allocation running when known, compatible follow-on work
+is coming.** Completing one task is not completion of the allocation's useful
+purpose. This is the default reuse policy (4 October 2026), and does not require
+proof that the cluster has become more overloaded.
+
+- At each task boundary, check the shared work plan for ready and upcoming
+  authorized tests, stages, or tasks, including work coordinated with another
+  agent. Reuse the existing allocation before submitting a replacement.
+- Keep the batch script, allocation session, or worker alive between tasks and
+  dispatch subsequent work within that same allocation. Do not arrange for
+  every task completion, temporarily empty queue, or short per-task idle timer
+  to terminate the allocation when known follow-on work remains.
+- Retain it through preparation or dependency gaps when that follow-on work
+  is expected to use its remaining CPU, memory and walltime. Record the next
+  use, expected readiness and allocation expiry so the coordinator can manage
+  the gap. Each next task must fit or checkpoint within the remaining time;
+  retaining an allocation does not extend its scheduler-enforced expiry.
+- For example, if a 48-CPU/two-hour allocation finishes its first task after
+  12 minutes, keep and reuse the remaining 1 hour 48 minutes for known next
+  tasks instead of releasing it and making those tasks queue again.
+
+Release it when there is no known compatible work able to use the remaining
+allocation, subject to the bounded retention rules below; SL4-CPU allocations
+are instead kept until they expire naturally (see **Keep SL4 allocations until
+they expire naturally**). Waiting between
+steps of an actively managed authorized workflow differs from retaining an
+idle allocation while awaiting new user instructions; the latter still has
+the two-hour inactivity limit.
 
 Record each managed job's ID, account, resources, purpose, ownership/sharing,
 and expiry so another agent can reuse or release it without guessing. An
@@ -262,24 +365,30 @@ Do not change the runner setup or sandbox merely to acquire resources.
 
 These cleanup and retention rules apply only to worker allocations that do
 not host Codex or its remote runner. The protected hosting allocation must
-never be selected for release or automatic inactivity cleanup.
+never be selected for release or automatic inactivity cleanup. Running SL4-CPU
+allocations are exempt from release under these rules: keep them until they
+expire naturally (see **Keep SL4 allocations until they expire naturally**).
 
-- Release managed allocations promptly when the authorized work is done, and
-  cancel pending requests that are no longer needed.
-- Exception: retain a useful allocation temporarily if current scheduler
-  evidence shows substantially worse contention and obtaining a replacement
+- Release managed allocations promptly when their authorized work, including
+  known compatible follow-on tasks, is exhausted. Apply the SL4 reuse rule
+  above before treating a single task's completion as a release point. Cancel
+  pending requests that are no longer needed after accounting for retained
+  capacity and upcoming work.
+- Beyond that planned reuse, retain a useful allocation temporarily if current
+  scheduler evidence shows substantially worse contention and obtaining a replacement
   soon would be difficult. Record the evidence, expected reuse, cost, job ID,
   and release deadline. Do not hold resources merely because they were hard
   to acquire earlier, and reassess retention when work or user input resumes.
 - An idle allocation retained while awaiting the user must be released after
   **two hours without user input** in the task using it, or at its existing
-  expiry if sooner. If two hours have already elapsed when useful work ends,
-  release it immediately. Agent messages, polling, and automated heartbeats
-  do not reset this clock. Coordinate genuinely shared allocations with their
+  expiry if sooner. If two hours have already elapsed when the workflow's
+  ready and known follow-on work ends, release it immediately. Agent messages,
+  polling, and automated heartbeats do not reset this clock. Coordinate genuinely shared allocations with their
   other active tasks rather than terminating someone else's work.
-- This timeout applies to idle retention, not authorized computations still
-  making useful progress. Long tests may continue without user messages;
-  release their resources at completion if the inactivity deadline has passed.
+- This timeout applies to idle retention while awaiting the user, not an
+  actively managed authorized workflow and its known follow-on work. Long
+  tests may continue without user messages; release their resources when all
+  such work is finished if the inactivity deadline has passed.
 - Before leaving an idle allocation running, arrange and verify cleanup that
   survives the agent ending its turn or disconnecting. Use a scheduler-enforced
   expiry or a durable job-specific timer, not a promise to check later. A
@@ -757,6 +866,9 @@ Do not infer the allocation from physical node size, `/proc/cpuinfo`, or `nproc 
   execution. Once it passes, launch the canary and independent provisional
   units concurrently rather than serializing deeper validation.
 - Estimate CPU, memory, I/O, and runtime before expensive execution.
+- Before any whole-genome launch, including validation or resume checks,
+  enforce **Full-node allocations for whole-genome runs** above and verify
+  that the execution path receives the full allocated CPU budget.
 - Use only allocated resources. Do not reserve dedicated CPUs for the agent,
   operating system, filesystem, or orchestration.
 - Use reviewed `srun` commands where required and reviewed `sbatch` scripts for long or production work.

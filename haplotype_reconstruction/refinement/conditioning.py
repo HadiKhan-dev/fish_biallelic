@@ -34,12 +34,15 @@ no inferred allele fill is represented as a new founder label.
                 for left, right in zip(boundaries[:-1], boundaries[1:]):
                     marker = int(np.searchsorted(positions, left))
                     flip = marker < len(positions) and positions[marker] < right and phase_map[index, marker] == 1
-                    first, second = (source.hap2, source.hap1) if flip else (source.hap1, source.hap2)
-                    if chunks and chunks[-1].end == left and (chunks[-1].hap1, chunks[-1].hap2) == (first, second):
-                        old = chunks[-1]
-                        chunks[-1] = painting_components.PaintedChunk(old.start, int(right), first, second)
+                    # A flip swaps each track's label together with its candidate rows.
+                    if flip:
+                        fields = (source.hap2, source.hap1, source.hap2_members, source.hap1_members)
                     else:
-                        chunks.append(painting_components.PaintedChunk(int(left), int(right), first, second))
+                        fields = (source.hap1, source.hap2, source.hap1_members, source.hap2_members)
+                    if chunks and chunks[-1].end == left and tuple(chunks[-1][2:]) == fields:
+                        chunks[-1] = painting_components.PaintedChunk(chunks[-1].start, int(right), *fields)
+                    else:
+                        chunks.append(painting_components.PaintedChunk(int(left), int(right), *fields))
             samples.append(painting_components.SamplePainting(index, chunks))
         output.append(
             painting_components.BlockPainting((component.painting.start_pos, component.painting.end_pos), samples)
@@ -47,7 +50,7 @@ no inferred allele fill is represented as a new founder label.
     return tuple(output)
 
 
-SCHEMA = "discovery1-stable-final-phase-v2"
+SCHEMA = "discovery1-stable-final-phase-v3"
 
 
 @dataclass(frozen=True)
@@ -59,7 +62,9 @@ class PhaseScaffold:
 
 
 @njit(cache=True, parallel=True)
-def _map_reference(positions, source_columns, frozen, offsets, chunks):
+def _map_reference(positions, source_columns, frozen, offsets, chunks, member_offsets, member_rows):
+    """Scaffold alleles: a named track's row allele; a pooled track's rows' common
+    allele where every member row is called and they agree; otherwise -1."""
     samples = len(offsets) - 1
     result = np.full((samples, len(positions), 2), -1, dtype=np.int8)
     for sample in prange(samples):
@@ -74,17 +79,30 @@ def _map_reference(positions, source_columns, frozen, offsets, chunks):
             if column < 0:
                 continue
             for track in range(2):
-                founder = chunks[chunk, track + 2]
-                if 0 <= founder < frozen.shape[0]:
-                    result[sample, index, track] = frozen[founder, column]
+                first = member_offsets[2 * chunk + track]
+                stop = member_offsets[2 * chunk + track + 1]
+                if first == stop:
+                    continue
+                allele = frozen[member_rows[first], column]
+                for member in range(first + 1, stop):
+                    if allele < 0 or frozen[member_rows[member], column] != allele:
+                        allele = -1
+                        break
+                result[sample, index, track] = allele
     return result
 
 
-def prepare_phase_scaffold(painting_checkpoint, positions):
-    """Decode only frozen hard alleles; unknowns are never argmaxed to REF."""
+def prepare_phase_scaffold(painting_checkpoint, positions, refit_panel=None):
+    """Decode only frozen hard alleles; unknowns are never argmaxed to REF.
+
+    With ``refit_panel``, decode its post-painting allele refit instead of the
+    assembly snapshot: same rows, sites and unknown cells, re-estimated values.
+    """
     painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(painting_checkpoint)
     pos = np.asarray(positions, dtype=np.int64)
     blocks = core_runtime.validate_phase_component_manifest(painting_checkpoint.component_manifest)
+    refit = (None if refit_panel is None
+             else painting_allele_refit.inference_alleles(refit_panel, painting_checkpoint))
     reference = np.full((len(painting_checkpoint.sample_ids), len(pos), 2), -1, dtype=np.int8)
     phase_bins = np.full(len(pos), -1, dtype=np.int64)
     component_ids = np.full(len(pos), -1, dtype=np.int32)
@@ -92,7 +110,7 @@ def prepare_phase_scaffold(painting_checkpoint, positions):
     offset = 0
     for index, (block, component) in enumerate(zip(blocks, painting_checkpoint.painting_bundle.components)):
         source_pos = np.asarray(block.positions, dtype=np.int64)
-        frozen = np.asarray(block.missing_aware_inference_discrete_haps)
+        frozen = np.asarray(block.missing_aware_inference_discrete_haps if refit is None else refit[index])
         if frozen.shape != (len(component.founder_keys), len(source_pos)) or np.any(~np.isin(frozen, (-1, 0, 1))):
             raise ValueError("frozen component allele matrix has incompatible rows/sites")
         lo, hi = np.searchsorted(pos, [source_pos[0], source_pos[-1]], side="left")
@@ -103,9 +121,18 @@ def prepare_phase_scaffold(painting_checkpoint, positions):
         valid = cols < len(source_pos)
         valid[valid] &= source_pos[cols[valid]] == local[valid]
         cols = np.where(valid, cols, -1).astype(np.int64)
-        chunks = np.asarray([tuple(chunk) for sample in component.painting.samples for chunk in sample.chunks], dtype=np.int64).reshape((-1, 4))
+        sample_chunks = [chunk for sample in component.painting.samples for chunk in sample.chunks]
+        chunks = np.asarray([(chunk.start, chunk.end, chunk.hap1, chunk.hap2) for chunk in sample_chunks],
+                            dtype=np.int64).reshape((-1, 4))
+        members = [chunk.members(track) for chunk in sample_chunks for track in (0, 1)]
+        member_offsets = np.zeros(len(members) + 1, dtype=np.int64)
+        member_offsets[1:] = np.cumsum([len(rows) for rows in members])
+        member_rows = np.asarray([row for rows in members for row in rows], dtype=np.int64)
+        if np.any((member_rows < 0) | (member_rows >= frozen.shape[0])):
+            raise ValueError("painted chunk names a founder row outside the component")
         starts = np.concatenate(([0], np.cumsum([len(sample.chunks) for sample in component.painting.samples]))).astype(np.int64)
-        reference[:, lo:hi] = _map_reference(local, cols, np.asarray(frozen, dtype=np.int8), starts, chunks)
+        reference[:, lo:hi] = _map_reference(local, cols, np.asarray(frozen, dtype=np.int8), starts, chunks,
+                                             member_offsets, member_rows)
         diagnostic = component.ragged_diagnostics
         if diagnostic is not None:
             edges = np.asarray(diagnostic.bin_edges, dtype=np.int64)
@@ -126,7 +153,7 @@ def refinement_code_identity():
         "refinement/pipeline.py", "refinement/conditioning.py", "refinement/model.py",
         "refinement/messages.py", "refinement/factors.py", "refinement/selector_chains.py",
         "refinement/phase_chains.py", "refinement/polish.py", "refinement/evidence.py",
-        "core/genetic_map.py", "core/raw_evidence.py",
+        "refinement/frames.py", "core/genetic_map.py", "core/raw_evidence.py",
     )
     return {name: hashlib.sha256((PACKAGE_ROOT / name).read_bytes()).hexdigest()
             for name in files}
@@ -146,4 +173,5 @@ def _write_summary_table(output, stage, summaries):
     temporary.replace(output/f"{stage}.csv")
 
 import haplotype_reconstruction.core.runtime as core_runtime
+import haplotype_reconstruction.painting.allele_refit as painting_allele_refit
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints

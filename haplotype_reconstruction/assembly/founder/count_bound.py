@@ -57,3 +57,50 @@ def upper_bound(leaves, offsets, logs, penalty, target):
         else:
             bounds[block] = _block_score(haps, logs, offsets[block], offsets[block + 1], penalty, -1)
     return bounds, constrained
+
+
+@njit(cache=True)
+def _block_sample_scores(haps, logs, start, stop, penalty, removed):
+    """``_block_score`` before the sum over samples."""
+    rows = np.arange(len(haps))
+    if removed >= 0:
+        rows = rows[rows != removed]
+    first, second = _unordered_pairs(len(rows))
+    result = np.empty(logs.shape[0], np.float64)
+    center = math.log(1. / 3.)
+    for sample in range(logs.shape[0]):
+        scores = np.zeros(len(first), np.float64)
+        for site in range(start, stop):
+            emission = logs[sample, site]
+            if emission[0] == 0. and emission[1] == 0. and emission[2] == 0.:
+                continue
+            switched = np.max(scores) - penalty
+            for state in range(len(first)):
+                dosage = haps[rows[first[state]], site - start] + haps[rows[second[state]], site - start]
+                scores[state] = max(scores[state], switched) + emission[dosage] - center
+        result[sample] = np.max(scores)
+    return result
+
+
+@njit(cache=True, parallel=True)
+def upper_bound_per_sample(leaves, offsets, logs, penalty, target):
+    """Per-block, per-sample optimistic scores; their sum over blocks bounds each sample.
+
+    The same relaxation as ``upper_bound``, further relaxed so that every sample may
+    drop a different row of a target+1-row block (a maximum of sums becomes a sum
+    of maxima). Count criteria that weigh samples separately need these bounds.
+    """
+    bounds = np.empty((len(leaves), logs.shape[0]), np.float64)
+    for block_index in prange(len(leaves)):
+        block = np.int64(block_index)
+        haps = leaves[block]
+        if len(haps) == target + 1:
+            best = np.full(logs.shape[0], -np.inf)
+            for removed in range(len(haps)):
+                best = np.maximum(best, _block_sample_scores(
+                    haps, logs, offsets[block], offsets[block + 1], penalty, removed))
+            bounds[block] = best
+        else:
+            bounds[block] = _block_sample_scores(
+                haps, logs, offsets[block], offsets[block + 1], penalty, -1)
+    return bounds

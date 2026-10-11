@@ -13,6 +13,7 @@ together; the two criteria are not interchangeable.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import numpy as np
 
 from . import cavity, fitting, modes, objectives, search
@@ -21,19 +22,44 @@ from ..core import haplotypes, parallel
 
 @dataclass(frozen=True)
 class CandidateSelectionConfig:
+    """Candidate-bank search; its work limits are K-scaled reported backstops.
+
+    With K the current panel's founder count, a call fits at most
+    ``start_backstop_base + start_backstop_per_founder * K`` novel starts,
+    the search admits at most ``score_backstop_base + score_backstop_per_founder
+    * K`` modes and runs at most ``round_backstop_base + ceil(K / 2)`` rounds.
+    Rounds stop when the selection score does not improve; any backstop hit
+    sets ``search_budget_bound`` (target: never). T19 replays: real L1/L2
+    banks with selected K 12-22 needed up to 1,482 admitted modes in 9 rounds
+    when unlimited (256 + 16K bound 6 of them), hence 1024 + 128K and
+    512 + 64K, which no replayed block reaches.
+    """
     discovery: search.ReversibleCavitySearchConfig = field(
         default_factory=search.ReversibleCavitySearchConfig)
-    max_rounds: int = 8
-    max_scores: int = 256
-    max_starts_per_round: int = 128
+    round_backstop_base: int = 8
+    score_backstop_base: int = 1024
+    score_backstop_per_founder: int = 128
+    start_backstop_base: int = 512
+    start_backstop_per_founder: int = 64
     criterion: str = "cavity"
 
     def __post_init__(self):
         if self.criterion not in ("cavity", "bic"):
             raise ValueError("criterion must be cavity or bic")
-        for value in (self.max_rounds, self.max_scores, self.max_starts_per_round):
+        for value in (self.round_backstop_base, self.score_backstop_base,
+                      self.score_backstop_per_founder, self.start_backstop_base,
+                      self.start_backstop_per_founder):
             if isinstance(value, bool) or int(value) != value or value < 1:
-                raise ValueError("candidate search budgets must be positive integers")
+                raise ValueError("candidate search backstops must be positive integers")
+
+    def score_backstop(self, k):
+        return self.score_backstop_base + self.score_backstop_per_founder * k
+
+    def start_backstop(self, k):
+        return self.start_backstop_base + self.start_backstop_per_founder * k
+
+    def round_backstop(self, k):
+        return self.round_backstop_base + math.ceil(k / 2)
 
 
 @dataclass
@@ -168,7 +194,7 @@ unchanged; the ordinary default evaluates every admitted mode.
         raise ValueError("panel markers must match evidence")
     workspace = fitting._prepare_fixed_k_fit_workspace(
         likelihood, base.lambda_wildcard_penalty, observed_mask=observed)
-    score_config = search._stage_config(base.cavity, "mean_field")
+    score_config = search._stage_config(base.cavity)
     score_evidence = likelihood if np.all(active) else np.ascontiguousarray(likelihood[active])
     score_workspace = cavity._prepare_cavity_scoring_workspace(score_evidence, score_config)
     fit_config = search._internal_move_config(base)
@@ -194,7 +220,14 @@ unchanged; the ordinary default evaluates every admitted mode.
                 score.mode.canonical_key)
 
     def fit_and_score(panels, *, require_cavity=False):
+        """Fit novel starts; K for the backstops is the current panel's.
+
+        The current panel is the selected one during rounds, otherwise the
+        largest panel of this call (a source or the whole bank).
+        """
         nonlocal budget_bound
+        k = (selected.mode.k if selected is not None
+             else max((len(panel) for panel in panels), default=0))
         novel = []
         for panel in panels:
             if not len(panel):
@@ -210,11 +243,12 @@ unchanged; the ordinary default evaluates every admitted mode.
                 if len(panel):
                     keys.update(endpoint_keys.get(modes._canonical_haplotype_key(panel), ()))
             return tuple(scored[key] for key in keys if key in scored)
-        if len(novel) > settings.max_starts_per_round:
+        start_limit = settings.start_backstop(k)
+        if len(novel) > start_limit:
             budget_bound = True
-            for panel in novel[settings.max_starts_per_round:]:
+            for panel in novel[start_limit:]:
                 fitted_starts.remove(panel.astype(np.int8).tobytes())
-            novel = novel[:settings.max_starts_per_round]
+            novel = novel[:start_limit]
         parallel.apply_dynamic_threads()
         raw, refitted = modes._fit_starts_with_synchronized_endpoints(
             likelihood, novel, fit_config, workspace)
@@ -227,7 +261,7 @@ unchanged; the ordinary default evaluates every admitted mode.
             endpoint_keys[modes._canonical_haplotype_key(novel[0])] = tuple(
                 mode.canonical_key for mode in unique)
         pending = [mode for mode in unique if mode.canonical_key not in scored]
-        room = max(0, settings.max_scores - len(scored))
+        room = max(0, settings.score_backstop(k) - len(scored))
         if len(pending) > room:
             budget_bound = True
             pending = sorted(pending, key=search._mode_order)[:room]
@@ -245,6 +279,7 @@ unchanged; the ordinary default evaluates every admitted mode.
 
     # Score each source separately before union/neighbour proposals. This
     # provides fair source-only refit controls and protects all input basins.
+    selected = None
     source_scores = []
     cavity_source_scores = []
     for panel in starts:
@@ -261,16 +296,21 @@ unchanged; the ordinary default evaluates every admitted mode.
     fit_and_score([bank])
     rounds = []
     selected = min(scored.values(), key=rank)
-    for iteration in range(settings.max_rounds):
+    iteration = 0
+    while True:
+        if iteration >= settings.round_backstop(selected.mode.k):
+            budget_bound = True
+            break
         before = selected
         old_count = len(scored)
         fit_and_score(_neighbours(selected.mode.haplotypes, bank))
         selected = min(scored.values(), key=rank)
-        rounds.append(dict(round=iteration + 1, scores=len(scored) - old_count,
+        iteration += 1
+        rounds.append(dict(round=iteration, scores=len(scored) - old_count,
                            k=selected.mode.k, score=float(selection_score(selected))))
         if selection_score(selected) <= selection_score(before) + base.score_tolerance:
             break
-        if len(scored) >= settings.max_scores:
+        if len(scored) >= settings.score_backstop(selected.mode.k):
             budget_bound = True
             break
 

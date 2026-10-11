@@ -98,8 +98,7 @@ class ReversibleCandidateSearchDiagnostic:
 
     search_kind: str
     data_start_count: int
-    supplied_panel_start_count: int
-    supplied_candidate_row_count: int
+    expansion_count: int
     natural_k_ceiling: int
     exact_score_evaluations: int
     exact_score_cache_hits: int
@@ -899,9 +898,9 @@ def discover_block_reversible_cavity(
     """Discover and select one block panel by adaptive reversible search.
 
     The only K ceiling is the finite identifiable state-space ceiling computed
-    by :func:`search_reversible_cavity`.  Operational proposal, scoring, and
-    expansion budgets are reported as search limitations rather than treated
-    as biological bounds on founder count. Optional normalized read likelihoods
+    by :func:`search_reversible_cavity`.  Proposal-generator truncations and
+    K-scaled expansion/exact-score backstop hits are reported as search
+    limitations rather than treated as biological bounds on founder count. Optional normalized read likelihoods
     replace only the observation model, in both search and materialization.
     Read depths remain authoritative for missing observations.
     """
@@ -962,8 +961,7 @@ def discover_block_reversible_cavity(
     candidate_diagnostic = ReversibleCandidateSearchDiagnostic(
         search_kind="adaptive_reversible_complete_panel_search",
         data_start_count=int(search.data_start_count),
-        supplied_panel_start_count=int(search.supplied_panel_start_count),
-        supplied_candidate_row_count=int(search.candidate_row_count),
+        expansion_count=int(search.expansion_count),
         natural_k_ceiling=int(search.natural_k_ceiling),
         exact_score_evaluations=int(search.exact_score_evaluations),
         exact_score_cache_hits=int(search.exact_score_cache_hits),
@@ -1178,9 +1176,20 @@ def generate_all_block_haplotypes(
     results = [
         result for _index, result in indexed_results if result is not None
     ]
+    print(f"[Discovery] backstop hits {backstop_summary(results)}", flush=True)
     if discard_reads_after:
         gc.collect()
     return core_haplotypes.BlockResults(results)
+
+
+def backstop_summary(block_results):
+    """Count blocks whose search hit a reported K-scaled backstop (target 0)."""
+    counts = dict(blocks=len(block_results), expansion_backstop=0, exact_score_backstop=0)
+    for block in block_results:
+        reasons = block.cavity_discovery_diagnostics["candidate_search"]["search_limit_reasons"]
+        for name in ("expansion_backstop", "exact_score_backstop"):
+            counts[name] += name in reasons
+    return counts
 
 import haplotype_reconstruction.core.genotypes as core_genotypes
 import haplotype_reconstruction.core.haplotypes as core_haplotypes

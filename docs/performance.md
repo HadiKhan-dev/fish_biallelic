@@ -70,6 +70,50 @@ establish working cross-node execution, not a performance win. Both campaigns
 kept their frozen executor, including sequential family-phase orchestration;
 the newer chromosome-parallel family scheduler was validated separately below.
 
+## Concurrent contig reconstruction
+
+Block feedback, final assembly and painting of different contigs are
+independent, and one contig keeps only part of a large allocation busy. By
+default (`--contig-workers auto`, TOML `[run].contig_workers`, environment
+`HAPLOTYPES_CONTIG_WORKERS`) the workflows reconstruct up to one contig per
+eight `--cores` concurrently, in persistent contig coordinators that share
+`--cores` as leases (the chromosome scheduler used downstream). Larger contigs
+start first. Each contig runs the unchanged sequential route with its lease as
+release, painting and checkpoint-compression ceiling; a coordinator that has
+finished its contigs returns its lease, and the others take it at their next
+contig boundary, not inside a contig. `--contig-workers 1` keeps the sequential
+route; an integer sets the maximum explicitly. A memory estimate (eight times
+the decoded block-discovery checkpoint plus 2 GiB, and 256 MiB per core) can
+lower the number of concurrent contigs, never the core budget.
+
+Core ceilings are excluded from every scientific identity, so checkpoints,
+stage identities and resume are unchanged; painting checkpoints record the
+contig's actual ceilings as runtime provenance. Each contig writes only its own
+checkpoints, and only the parent publishes stage completion. Each contig's
+output goes to `logs/reconstruction_<contig>_<stamp>_<pid>.log`; the run record
+keeps one `reconstruction` stage for the concurrent section and per-contig
+timings under `products.reconstruction`. The first failing contig stops the run
+and is named with its log; the other contigs are stopped and resume from their
+own checkpoints. The contigs also stop in this way when the workflow's main
+process exits for any reason, such as a signal sent to that process alone, so
+none continues without an owner. Block discovery still processes contigs one
+after another: its discovery step already uses the whole allocation through one
+worker pool.
+
+On 7 October 2026, sequential and concurrent runs from the same
+block-discovery checkpoints (76-CPU Ice Lake nodes; three simulations and the
+whole TroMau genome) gave identical published outputs: pedigree, phase,
+recombination-map and evaluation tables, and benchmark scorecards. Checkpoints
+differed only in timings, recorded core ceilings, execution counters, search
+traces and tolerance-level values of a few continuous path fits (up to about
+5e-7 relative). Two sequential runs differ in the same way, because the
+path-fitting thread team grows dynamically. On the real genome the
+reconstruction section took 4,927 s instead of 7,411 s (CPU busy 0.84 instead
+of 0.65), and the whole run 5,309 s instead of 7,803 s; the simulations took
+23-38% less reconstruction time. Each coordinator keeps a static, longest-first
+list of contigs, and a contig keeps its lease until it finishes, so a long
+contig late in a list can leave a tail.
+
 ## Native compilation caches
 
 Package startup automatically isolates Numba's compiled-code cache by **run/job
@@ -243,26 +287,19 @@ fresh-run measurement.
 ## Final founder refinement
 
 Progressive refinement runs after each executed level of final L1–L4
-assembly, never in the two local-feedback passes. A separate final count-up/refit
-was added on 24 September; the earlier timing tables below do not include that
-later pass or joint observation calibration. Small components run
-concurrently and share a chromosome-derived early proposal resolution;
-late levels retain component-specific resolution. The implementation shares
-invariant evidence and background scores,
-uses compiled beam/dual scans and contiguous emission tables, scores localized
-edits with exact flanks, and bounds losing searches. Independent candidates
-share the verified CPU budget; freed threads become available at numerical
-boundaries. Likelihoods, missing masks, genotype-fit guards and canonical
-full-site acceptance are retained.
+assembly, never in the two local-feedback passes. Since 6 October 2026 it is
+the converged search with effective-carrier count decisions (see
+[methods](methods.md#final-founder-path-refinement) and the
+[work analysis](founder_scaling.md#final-founder-refinement-explicit-work-and-parallelism)):
+every count decision refits each candidate panel to convergence, with no
+deficit screen. Small components run concurrently and share a
+chromosome-derived early proposal resolution; late levels retain
+component-specific resolution. Independent candidates share the verified CPU
+budget; freed threads become available at numerical boundaries.
 
-There are also explicit search approximations. All single-founder deletions
-receive cheap repairs, but only the best repaired deletion enters deep search.
-The default skips that deep search if every repaired deletion still loses by
-more than eight per-founder complexity costs. This is a heuristic, not a safe
-mathematical bound. Improving repairs are retained;
-`FounderRefinementConfig(count_refit_deficit_multiple=None)` disables the
-deficit screen. Large-K interval partners are bounded as documented in the
-[work and storage analysis](founder_scaling.md#final-founder-refinement-explicit-work-and-parallelism).
+The timing tables below were measured with the earlier budgeted sparse
+refiner and its separate final count-up/refit, both since removed; they are
+historical records, not timings of the current search.
 
 ### Progressive final assembly at N80
 
@@ -415,6 +452,15 @@ chromosomes in all three workflows. Active workers share the full caller's CPU
 affinity; freed cores become available at the next numerical phase boundary.
 A running Numba kernel cannot acquire additional threads mid-call.
 
+Scientific results do not depend on the thread count, the contig layout or
+timing. Kernels never combine floating-point partial sums by thread or worker:
+the copying-model E-step writes per-sample statistic rows in parallel and adds
+them element by element in sample order, and totals in parallel kernels are
+sequential loops rather than team-size-dependent `np.sum` reductions. Formerly
+ulp-level, team-size-dependent sums could resolve exact ties differently
+between runs (for example a level-0 merge/drop choice); the fixed order makes
+every checkpoint and published output bitwise reproducible at any thread count.
+
 Painting, genome-wide pedigree inference and family refinement use their
 supplied Numba budgets with other numerical libraries limited to one thread.
 Compression/decompression and raw-GL tile work are also bounded by the caller's
@@ -479,8 +525,11 @@ their scientific fields. No new full-genome discovery timing is implied.
 ## Founder completion before L1
 
 Let D=K(K+1)/2 be unordered diplotypes, U_l unresolved founder alleles at site l,
-and C_l=2^U_l allowed allele configurations. Completion retains the shared
-latent-allele model, robustness parameters, release gates and cap U_l<=6.
+and C_l allowed allele configurations: C_l=2^U_l for U_l<=10, otherwise the
+uncertain-core support of `assembly/site_posterior.py` (an exact core of at
+most 2^10 assignments or a Hamming ball of O(U_l^3)), fixed for the whole EM.
+Completion retains the shared latent-allele model, robustness parameters and
+release gates; the former cap U_l<=6 is gone.
 
 For each configuration update, dosage sufficient statistics accumulate sample
 log evidence once. Dosage terms are quadratic polynomials in the unknown binary
@@ -497,8 +546,11 @@ not constitute five independent searches after their identical first update.
 Whole-bin cavity completion reuses outside-bin scores, counts and separations.
 Its core likelihood table improves from O(N K² 2^U) to O(N K² + N 2^U).
 The public assignment table and exact carrier-sensitivity diagnostics still
-retain O(N U 2^U) work. Near-cancellation polynomial values use direct positive
-mixtures. There is no posterior truncation or increased enumeration cap.
+retain O(N U 2^U) work for U<=10. Near-cancellation polynomial values use direct
+positive mixtures. Above ten unresolved founders the uncertain-core support
+replaces the enumeration (O(N U^3) per site, support-restricted sensitivity in
+O(N U^2)); its Hamming-ball regime adds the shell release guard, and sites with
+two comparable unconnected posterior basins release nothing.
 
 | Complete preprocessing, fixed chr16 blocks, 112 CPUs | Before | Updated |
 | --- | ---: | ---: |
@@ -513,13 +565,10 @@ were unchanged. This is documented numerical variation, not bitwise identity.
 
 ## L1–L4 assembly
 
-Both assembly models use the same linker and at most 20 fitting iterations.
-The default bounded search uses 16 full proposal scores per category. With
-that search, dense learned transitions are cubic in K; the optional
-sparse-plus-background model is near quadratic. `--assembly-search broad`
-retains the optimized broader full-refit search, at additional cost; the
-near-quadratic whole-assembly bound does not apply to it. Search quality
-and model restrictions are described in [founder scaling](founder_scaling.md).
+Assembly uses one linker with at most 20 fitting iterations and bounded
+search with 16 full proposal scores per category; dense learned transitions
+are cubic in K. Search quality is described in
+[founder scaling](founder_scaling.md).
 
 Model-preserving optimizations include range-guarded dense BLAS contractions,
 streamed scores, shared candidate prefixes, native stable top-q ranking,
@@ -576,6 +625,18 @@ Earlier paired painting tests on 19 seed402 chromosomes at 76 threads reduced
 painting-call time from 247.87 to 74.74 s; largest chr3 fell from 48.50 to 13.12 s.
 These exclude discovery, assembly, input loading and checkpoint writes.
 
+Label continuity ranks row-suffix transpositions by exact Viterbi-score gains
+in O(links N S^3) per search iteration. A transposition fixes every state that
+involves neither of its rows, so the identity terms are sorted once per link
+and sample and only the 4S - 4 affected states are evaluated per pair; the
+gains are bitwise identical to the former O(links N S^4) scan. A candidate
+check re-decodes only the samples whose best state at the link can involve the
+transposed rows; the other samples' painted switch counts cannot change. On
+random message arrays (40 links, 116 samples, 8 threads) the gains took
+0.0026/0.014/0.039/0.070 s at K = 8/16/24/30, versus 0.0012/0.021/0.104/0.258 s
+(time exponent over K = 16-30: 2.6 versus 4.0). Accepted moves and painting
+checkpoints are unchanged.
+
 The latest full 22-chromosome metadata-free seed401 pedigree call took **15.04 min**,
 including loading/preparation/output; inference itself took **9.44 min** on
 112 CPUs. Peak process RSS was about 66.9 GiB and sampled CPU activity 97.9%.
@@ -597,6 +658,19 @@ With 22 tasks and 76 CPUs, 10 workers initially receive four threads and 12
 receive three. Larger chromosomes start first. Finished workers return their
 thread allocation; remaining workers expand at projection, child-batch and
 checkpoint boundaries. An active numerical kernel is not resized mid-call.
+
+Both phases limit concurrent chromosome processes with `memory_worker_limit()`.
+A preparation worker is budgeted its decoded raw evidence and painting plus
+three arrays of 8 N B S^2 bytes (source emissions, factors and working space;
+founders and markers per component come from the painting's founder-support
+report). A scoring worker is budgeted its decoded painting plus four decoded
+prepared chromosomes, whose source factors are N B S^2 doubles. On chr7-scale
+synthetic input at K = 30 (production kernels) the preparation estimate was
+1.33x and 1.10x the measured peak RSS plus the decoded painting a worker holds,
+at N = 116 and 500. At K <= 9 and N <= 120 every chromosome fits, so process
+counts are unchanged; for 22
+chr7-sized chromosomes at K = 30 and N = 500 a 501 GiB node runs 20
+preparation and 16 scoring workers, a 256 GiB node 10 and 8.
 Claims never exceed the total budget, and results/aggregation retain configured
 chromosome order regardless of completion order.
 

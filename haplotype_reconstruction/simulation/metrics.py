@@ -316,3 +316,47 @@ def phase_counts(calls, truth, components):
         for component in range(component_count):
             result[sample, 6] += min(direct[component], swapped[component])
     return result.sum(axis=0)
+
+
+@njit(cache=True, parallel=True)
+def long_switch_counts(calls, truth, components, minimum_runs):
+    """Count long-range orientation changes of true heterozygotes, per run threshold.
+
+    Orientation runs are formed over correct-genotype true heterozygotes of a
+    supported component, skipping (bridging) uncalled and wrong-genotype ones,
+    so one bad call at a switch point does not hide the switch. Runs break at
+    orientation and component changes. A change within one component counts
+    for threshold t when both adjacent runs hold at least t heterozygotes;
+    isolated flips and short flipped stretches are not long switches.
+    """
+    samples, sites, _ = calls.shape
+    result = np.zeros((samples, len(minimum_runs)), dtype=np.int64)
+    for sample in prange(samples):
+        # left: length of the run before the current one when an orientation
+        # change (not a component change) separates them; 0 otherwise.
+        left = length = 0
+        run_flip = False
+        run_component = -1
+        for site in range(sites):
+            a, b = calls[sample, site]
+            x, y = truth[sample, site]
+            component = components[site]
+            if x == y or component < 0 or a < 0 or b < 0 or a + b != x + y:
+                continue
+            flip = a != x
+            if length and component == run_component and flip == run_flip:
+                length += 1
+                continue
+            if left:
+                shorter = min(left, length)
+                for index in range(len(minimum_runs)):
+                    result[sample, index] += int(shorter >= minimum_runs[index])
+            left = length if length and component == run_component else 0
+            length = 1
+            run_flip = flip
+            run_component = component
+        if left:
+            shorter = min(left, length)
+            for index in range(len(minimum_runs)):
+                result[sample, index] += int(shorter >= minimum_runs[index])
+    return result.sum(axis=0)

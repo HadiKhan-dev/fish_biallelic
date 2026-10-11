@@ -309,7 +309,8 @@ def infer_from_parent_state_evidence(
         (n_samples, n_samples), dtype=np.int64
     )
 
-    bootstrap_worker_count, bootstrap_depth_refits, n_loco = (
+    (bootstrap_worker_count, bootstrap_depth_refits, n_loco,
+     bootstrap_nonconverged, loco_nonconverged) = (
         pedigree_bootstrap._run_parent_state_bootstraps(
             contig_log_likelihoods,
             alternatives,
@@ -410,6 +411,23 @@ def infer_from_parent_state_evidence(
         if not np.isfinite(denominator) or denominator <= 0.0:
             return 0.0
         return float(count / denominator)
+
+    # Released inferred edges must also be oriented: the full-data reciprocal
+    # comparison of the pair must favour p -> c over c -> p decisively.
+    # Resampling support alone can pass a near-tie between two strongly linked
+    # fish. Caller-supplied chronology is exempt; "cluster" has no such score.
+    orientation_log_odds = score_diagnostics.get("orientation_log_odds")
+    orientation_cutoff = float(
+        np.log1p(-settings.orientation_release_reversal_probability)
+        - np.log(settings.orientation_release_reversal_probability))
+    explicit_direction = np.asarray(eligibility.direction_supported_parents, dtype=np.bool_)
+
+    def orientation_resolved(child: int, parent: int) -> bool:
+        if orientation_log_odds is None or explicit_direction[child, parent]:
+            return True
+        return bool(orientation_log_odds[child, parent] >= orientation_cutoff)
+
+    orientation_flags: dict[int, tuple[bool, bool]] = {}
 
     for child, sample in enumerate(samples):
         child_rows = by_child[child]
@@ -528,6 +546,13 @@ def infer_from_parent_state_evidence(
         )
         first_loco = parent_loco[0] if parent_loco else np.nan
         second_loco = parent_loco[1] if len(parent_loco) > 1 else np.nan
+        parent_orientation = [
+            orientation_resolved(child, parent) for parent in selected_parents
+        ]
+        orientation_flags[child] = (
+            parent_orientation[0] if parent_orientation else True,
+            parent_orientation[1] if len(parent_orientation) > 1 else True,
+        )
 
         m0_sensitivity_state_agreement = bool(
             local_state != pedigree_models._ZERO_OBSERVED
@@ -557,7 +582,7 @@ def infer_from_parent_state_evidence(
             state_bootstrap_cutoff: float,
             parent_bootstrap_cutoff: float,
             loco_cutoff: float,
-        ) -> tuple[bool, bool, tuple[bool, bool]]:
+        ) -> tuple[bool, bool, tuple[bool, bool], bool]:
             state_pass = bool(
                 local_state is not None
                 and enough_contigs
@@ -565,7 +590,7 @@ def infer_from_parent_state_evidence(
                 and state_loco >= loco_cutoff
                 and m0_sensitivity_state_agreement
             )
-            parent_flags = tuple(
+            resampling_flags = tuple(
                 bool(
                     state_pass
                     and parent_bootstrap[index]
@@ -574,7 +599,11 @@ def infer_from_parent_state_evidence(
                 )
                 for index in range(len(selected_parents))
             )
-            identity_pass = bool(
+            parent_flags = tuple(
+                flag and parent_orientation[index]
+                for index, flag in enumerate(resampling_flags)
+            )
+            configuration_pass = bool(
                 state_pass
                 and local_row is not None
                 and graph_row == local_row
@@ -585,21 +614,27 @@ def infer_from_parent_state_evidence(
                 >= state_bootstrap_cutoff
                 and local_configuration_loco >= loco_cutoff
                 and graph_configuration_loco >= loco_cutoff
-                and all(parent_flags)
                 and m0_sensitivity_graph_agreement
+            )
+            identity_pass = bool(configuration_pass and all(parent_flags))
+            # Withheld by the orientation condition alone (status only).
+            orientation_withheld = bool(
+                configuration_pass and all(resampling_flags) and not identity_pass
             )
             padded_flags = (
                 parent_flags[0] if len(parent_flags) > 0 else False,
                 parent_flags[1] if len(parent_flags) > 1 else False,
             )
-            return state_pass, identity_pass, padded_flags
+            return state_pass, identity_pass, padded_flags, orientation_withheld
 
-        tier_a_state_pass, tier_a_identity_pass, tier_a_flags = tier_decision(
+        (tier_a_state_pass, tier_a_identity_pass, tier_a_flags,
+         tier_a_orientation_withheld) = tier_decision(
             settings.tier_a_pair_bootstrap,
             settings.tier_a_parent_bootstrap,
             settings.tier_a_loco_fraction,
         )
-        tier_b_state_pass, tier_b_identity_pass, tier_b_flags = tier_decision(
+        (tier_b_state_pass, tier_b_identity_pass, tier_b_flags,
+         tier_b_orientation_withheld) = tier_decision(
             settings.tier_b_pair_bootstrap,
             settings.tier_b_parent_bootstrap,
             settings.tier_b_loco_fraction,
@@ -653,6 +688,7 @@ def infer_from_parent_state_evidence(
             tier_states: dict[int, int],
             tier_status: dict[int, str],
             label: str,
+            orientation_withheld: bool=False,
         ) -> None:
             if not eligibility.eligible_children[child]:
                 tier_rows[child] = None
@@ -682,7 +718,11 @@ def infer_from_parent_state_evidence(
                     else (
                         "graph_conflict"
                         if graph_conflict
-                        else "identity_unresolved"
+                        else (
+                            "orientation_unresolved"
+                            if orientation_withheld
+                            else "identity_unresolved"
+                        )
                     )
                 )
                 tier_status[child] = (
@@ -696,6 +736,7 @@ def infer_from_parent_state_evidence(
             tier_a_states,
             tier_a_status,
             "tier_a",
+            tier_a_orientation_withheld,
         )
         populate_tier(
             tier_b_state_pass,
@@ -704,6 +745,7 @@ def infer_from_parent_state_evidence(
             tier_b_states,
             tier_b_status,
             "tier_b",
+            tier_b_orientation_withheld,
         )
 
         sensitivity_state_agreement = []
@@ -1299,9 +1341,9 @@ def infer_from_parent_state_evidence(
 
     from .release import partial_relationships, add_partial_support
     tier_a_partial_frame = partial_relationships(
-        tier_a_frame, diagnostics, settings, "tier_a")
+        tier_a_frame, diagnostics, settings, "tier_a", orientation_flags)
     tier_b_partial_frame = partial_relationships(
-        tier_b_frame, diagnostics, settings, "tier_b")
+        tier_b_frame, diagnostics, settings, "tier_b", orientation_flags)
     for child, diagnostic in enumerate(diagnostics):
         for label, frame in (("TierA", tier_a_partial_frame),
                              ("TierB", tier_b_partial_frame)):
@@ -1331,6 +1373,7 @@ def infer_from_parent_state_evidence(
             if (
                 bootstrap >= settings.tier_b_parent_bootstrap
                 and loco >= settings.tier_b_loco_fraction
+                and orientation_resolved(child, parent)
             ):
                 return parent
             return None
@@ -1438,7 +1481,10 @@ def infer_from_parent_state_evidence(
         retry_iterations=int(score_diagnostics.get('final_family_retry_iterations', 0)),
         retry_limit=settings.parent_state_family_retry_iterations,
         retry_damping=settings.parent_state_family_retry_damping,
-        frozen_path_preparation_passes=settings.parent_state_family_message_passes)
+        frozen_path_preparation_passes=settings.parent_state_family_message_passes,
+        # Resamples that abstained for every fish (lower support, never a call).
+        nonconverged_bootstrap_replicates=int(bootstrap_nonconverged),
+        nonconverged_loco_replicates=int(loco_nonconverged))
     from .explanations import explain_calls
     result.call_explanations, result.alternative_explanations = explain_calls(
         samples, alternatives, states, by_child, full_counts, scored_counts,
@@ -1521,6 +1567,10 @@ def infer_from_parent_state_evidence(
             "family_message_passes": settings.parent_state_family_message_passes,
             "final_family_solve": result.final_family_solve,
             "direction_robustness_mixture": settings.parent_state_contamination_probability,
+            "direction_chromosome_error_probability": (
+                settings.parent_state_direction_chromosome_error_probability),
+            "orientation_release_reversal_probability": (
+                settings.orientation_release_reversal_probability),
             "direction_gate": False,
             "ancestry_path_budget": settings.parent_state_ancestry_path_budget,
             "family_constraint": (
@@ -1540,8 +1590,14 @@ def infer_from_parent_state_evidence(
             "explicit_direction_policy": "exempt_supported_focal_parental_side",
         }
         result.ancestry_depth_model_specification = (
-            "Paired chromosome junction contrasts provide finite, neutral-centered "
-            "orientation support with summary-level callability adjustment. "
+            "A per-chromosome count likelihood of painted junctions (a transmitted "
+            "homologue carries each parental junction with probability one half, "
+            "seen where the child is callable; other junctions are a non-negative "
+            "remainder) with a per-chromosome painting-failure mixture provides "
+            "orientation log odds that add over chromosomes; a pair-level "
+            "painting-failure mixture bounds the neutral-centered correction. "
+            "Released inferred edges also need a decisive full-data orientation "
+            "(the pair's reciprocal factor evaluated with other messages fixed). "
             "Family modes marginalize competing M0/M1/M2 configurations using "
             "synchronous cavity messages that exclude immediate reverse "
             "feedback. With a positive ancestry-path budget, an additional "

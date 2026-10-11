@@ -154,6 +154,7 @@ def _projected_m1_screen(
         candidate_selector_switch_probability=(
             component.cache.switch_probabilities[1:]
         ),
+        source_gap_support_sites=settings.parent_state_source_gap_support_sites,
     )
     batch = _score_balanced_transmission(
         projected,
@@ -215,6 +216,9 @@ def _score_projected_component_with_diagnostics(
             precomputed_source_marginals=structure_marginals,
             candidate_selector_switch_probability=(
                 component.cache.switch_probabilities[1:]
+            ),
+            source_gap_support_sites=(
+                settings.parent_state_source_gap_support_sites
             ),
         )
         reuse_scores = None

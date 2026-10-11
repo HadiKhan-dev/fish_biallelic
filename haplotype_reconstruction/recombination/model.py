@@ -21,6 +21,11 @@ class RecombinationMapConfig:
     minimum_origin_probability: float = .98
     maximum_gap_bp: int = 1_000_000
     bin_bp: int = 1_000_000
+    # A sample's run of at least this many consecutive zero-depth sites is
+    # unobserved for it (its final calls there are imputed); 0 disables. 1000
+    # sites is ten 100-SNP painting bins; observed chance runs are far shorter
+    # (<= 15 sites in the 5x simulations, <= 604 in real tromau3 data).
+    read_free_tract_sites: int = 1000
 
     def validated(self):
         if not (np.isfinite(self.recombination_rate) and self.recombination_rate >= 0):
@@ -32,6 +37,8 @@ class RecombinationMapConfig:
             raise ValueError("invalid correlated orientation-error process")
         if self.maximum_gap_bp <= 0 or self.bin_bp <= 0:
             raise ValueError("gap and physical bin widths must be positive")
+        if self.read_free_tract_sites < 0:
+            raise ValueError("read_free_tract_sites must be nonnegative")
         return self
 
 
@@ -269,6 +276,54 @@ are checked independently. Unknown founder IDs do not become known alleles.
     return np.asarray(packed, dtype=np.int64).reshape(-1, 2), np.asarray(offsets, dtype=np.int64)
 
 
+def read_free_tracts(observed, minimum_sites):
+    """Per sample, half-open site-index runs of >= minimum_sites zero-depth sites."""
+    tracts = []
+    for row in np.asarray(observed, dtype=bool):
+        change = np.flatnonzero(np.diff(np.r_[0, (~row).view(np.int8), 0]))
+        starts, stops = change[0::2], change[1::2]
+        keep = stops - starts >= minimum_sites
+        tracts.append(np.stack((starts[keep], stops[keep]), axis=1))
+    return tracts
+
+
+def observed_coverage(product, observed=None, minimum_read_free_sites=0):
+    """Painting coverage minus each sample's read-free tracts.
+
+    Final calls inside a long run without reads are imputed from the painting,
+    not observed. Removing the run from that sample's coverage treats it as a
+    coverage gap: no observation, independent restarts on both sides, so no
+    exposure and no crossover inside or across it for any meiosis involving the
+    sample, in both the shared-orientation fit and the per-meiosis decoder.
+    Without a read-depth mask (``observed=None``) coverage is unchanged.
+    """
+    coverage, offsets = painting_coverage(product)
+    if observed is None or minimum_read_free_sites <= 0:
+        return coverage, offsets, 0, 0
+    observed = np.asarray(observed, dtype=bool)
+    if observed.shape != (len(product["sample_ids"]), len(product["positions"])):
+        raise ValueError("read-depth mask axes differ from the final phase product")
+    removed = read_free_tracts(observed, minimum_read_free_sites)
+    packed, packed_offsets = [], [0]
+    for sample, cuts in enumerate(removed):
+        for start, stop in coverage[offsets[sample]:offsets[sample + 1]]:
+            for cut_start, cut_stop in cuts:
+                if cut_stop <= start or cut_start >= stop:
+                    continue
+                if cut_start > start:
+                    packed.append((start, cut_start))
+                start = max(start, cut_stop)
+                if start >= stop:
+                    break
+            if start < stop:
+                packed.append((start, stop))
+        packed_offsets.append(len(packed))
+    return (np.asarray(packed, dtype=np.int64).reshape(-1, 2),
+            np.asarray(packed_offsets, dtype=np.int64),
+            sum(len(cuts) for cuts in removed),
+            int(sum(int((cuts[:, 1] - cuts[:, 0]).sum()) for cuts in removed)))
+
+
 @njit(cache=True)
 def _sample_run_ids(samples, sites, coverage, offsets, components, positions, maximum_gap):
     runs = np.full((samples, sites), -1, dtype=np.int32)
@@ -488,7 +543,7 @@ def _genetic_coordinates(positions, chromosome_map, genetic_positions_morgans):
 
 
 def prepare_shared_data(product, relationships, config, genetic_positions_morgans=None,
-                        chromosome_map=None):
+                        chromosome_map=None, observed=None):
     """Apply the same final-phase gauge and observed-edge rules as recombination."""
     config.validated()
     if not product["phase_stable"]:
@@ -505,7 +560,7 @@ def prepare_shared_data(product, relationships, config, genetic_positions_morgan
     gauge = np.asarray(phase.phase_map) ^ np.asarray(phase.conditional_result.phase_map)
     calls = np.take_along_axis(calls, np.stack((gauge, 1 ^ gauge), axis=-1), axis=-1)
     parents, children, slots = refinement_model.pedigree_edges(relationships, names)
-    coverage, offsets = painting_coverage(product)
+    coverage, offsets, _, _ = observed_coverage(product, observed, config.read_free_tract_sites)
     runs = _sample_run_ids(len(names), len(positions), coverage, offsets, components,
                           positions, config.maximum_gap_bp)
     if chromosome_map is not None:
@@ -653,40 +708,54 @@ def posterior_intervals(positions, components, resets, switch, bins, rate,
 
 @njit(cache=True)
 def _return_tracts(indices, posterior, resets, threshold):
-    """Same supported alternating-run proposals, retaining only the last run."""
+    """Same supported alternating-run proposals, retaining only the last run.
+
+    Rows are half-open (first_marker, stop_marker, kind). Kind 0 lies between
+    two opposite supported runs. Kinds 1 and 2 are the leading and trailing
+    runs of a reset segment: one state change and the segment's first or last
+    informative marker bound them, so no second flanking run exists.
+    """
     output = []
     previous_state = -1
     previous_start = 0
+    segment_start = 0
     run_count = 0
     for i, probability in enumerate(posterior):
         if resets[i]:
+            if run_count >= 2:
+                output.append((int(indices[previous_start]), int(indices[i - 1]) + 1, 2))
             run_count = 0
             previous_state = -1
+            segment_start = i
         if max(probability, 1 - probability) < threshold:
             continue
         state = int(probability < .5)
         if state != previous_state:
             if run_count >= 2:
-                output.append((int(indices[previous_start]), int(indices[i])))
+                output.append((int(indices[previous_start]), int(indices[i]), 0))
+            elif run_count == 1:
+                output.append((int(indices[segment_start]), int(indices[i]), 1))
             previous_state = state
             previous_start = i
             run_count += 1
+    if run_count >= 2:
+        output.append((int(indices[previous_start]), int(indices[len(indices) - 1]) + 1, 2))
     return output
 
 @njit(cache=True, parallel=True)
 def _screen_edge_tracts(calls, orientation, positions, runs, parents, children, slots,
                 genetic, maximum_gap, error, support):
     """Screen independent meioses in parallel; no redundant artifact-HMM score."""
-    results = [np.empty((0, 2), dtype=np.int64) for _ in range(len(parents))]
+    results = [np.empty((0, 3), dtype=np.int64) for _ in range(len(parents))]
     for edge in prange(len(parents)):
         indices, obs, resets = edge_observations(
             calls, orientation, positions, runs, parents[edge], children[edge],
             slots[edge], maximum_gap)
         posterior = origin_posterior(obs, genetic[indices], resets, 1., error)
         tracts = _return_tracts(indices, posterior, resets, support)
-        result = np.empty((len(tracts), 2), dtype=np.int64)
+        result = np.empty((len(tracts), 3), dtype=np.int64)
         for i in range(len(tracts)):
-            result[i, 0], result[i, 1] = tracts[i]
+            result[i, 0], result[i, 1], result[i, 2] = tracts[i]
         results[edge] = result
     return results
 
@@ -712,16 +781,33 @@ def screen_candidates(data, orientation, config, shared_config):
         calls, orientation, positions, runs, parents, children, slots, genetic,
         config.maximum_gap_bp, config.copy_error, shared_config.candidate_support)
     candidates = set()
+    run_limits = {}
     for edge, tracts in enumerate(proposals):
-        for left, right in tracts:
-            left, right = int(left), int(right)
-            if positions[right] - positions[left] > shared_config.maximum_candidate_bp:
-                continue
-            for sample in (parents[edge], children[edge]):
+        for left, right, kind in tracts:
+            for sample in (int(parents[edge]), int(children[edge])):
                 if len(adjacent[sample]) < shared_config.minimum_incident_edges:
                     continue
-                if runs[sample, left] >= 0 and runs[sample, left] == runs[sample, right]:
-                    candidates.add((int(sample), left, right))
+                start, stop = int(left), int(right)
+                # Run identifiers are contiguous, so both ends locate the tract.
+                if runs[sample, start] < 0 or runs[sample, start] != runs[sample, stop - 1]:
+                    continue
+                if kind:
+                    # A boundary tract reaches this individual's own run end,
+                    # which can lie beyond the edge's informative markers.
+                    if sample not in run_limits:
+                        run_limits[sample] = np.r_[
+                            0, np.flatnonzero(np.diff(runs[sample])) + 1, len(positions)]
+                    limits = run_limits[sample]
+                    cut = np.searchsorted(limits, start, side="right")
+                    if kind == 1:
+                        start = int(limits[cut - 1])
+                    else:
+                        stop = int(limits[cut])
+                # No marker of the same run follows a trailing tract.
+                end = positions[stop - 1] if kind == 2 else positions[stop]
+                if end - positions[start] > shared_config.maximum_candidate_bp:
+                    continue
+                candidates.add((sample, start, stop))
     return sorted(candidates), adjacent
 
 
@@ -882,16 +968,19 @@ def _candidate_scores(data, orientation, candidates, adjacent, config, epochs,
 def fit_shared_orientations(product, relationships, *, config=RecombinationMapConfig(),
                             shared_config=SharedOrientationConfig(),
                             genetic_positions_morgans=None, chromosome_map=None,
-                            candidates=None):
+                            candidates=None, observed=None):
     """Screened collapsed coordinate ascent; never alters the source product.
 
 ``candidates`` is an optional list of (sample_index, first_marker, stop_marker)
     half-open tracts for independent tiny-state reference tests. Production
     screening uses only supplied alleles, inferred edges and declared priors.
+    ``observed`` is the sample x site positive-read-depth mask; see
+    ``observed_coverage``.
     """
     started = time.monotonic()
     shared_config.validated()
-    data = prepare_shared_data(product, relationships, config, genetic_positions_morgans, chromosome_map)
+    data = prepare_shared_data(product, relationships, config, genetic_positions_morgans, chromosome_map,
+                               observed)
     calls, positions, runs, parents, children, slots, genetic = data
     orientation = np.zeros(calls.shape[:2], dtype=np.int8)
     screened, adjacent = screen_candidates(data, orientation, config, shared_config)
@@ -951,8 +1040,10 @@ def fit_shared_orientations(product, relationships, *, config=RecombinationMapCo
                 epochs[incident] += 1
                 orientation_epochs[sample] += 1
                 prior[sample] = new_prior
+                # Half-open: a tract reaching the last marker stops one bp beyond it.
+                stop_bp = int(positions[right]) if right < len(positions) else int(positions[-1]) + 1
                 accepted.append({"sample_index": sample, "start_index": left, "stop_index": right,
-                    "start_bp": int(positions[left]), "stop_bp": int(positions[right]),
+                    "start_bp": int(positions[left]), "stop_bp": stop_bp,
                     "sweep": sweep + 1, "conditional_objective_gain": gain,
                     "conditional_log_likelihood_gain": float(per_edge.sum()),
                     "log_prior_change": prior_change, "incident_edges": list(map(int, incident)),
@@ -980,7 +1071,7 @@ def fit_shared_orientations(product, relationships, *, config=RecombinationMapCo
 
 
 def build_missing_aware_map(product, relationships, *, config=RecombinationMapConfig(),
-                           chromosome_map=None, genetic_positions_morgans=None):
+                           chromosome_map=None, genetic_positions_morgans=None, observed=None):
     if chromosome_map is not None:
         config = replace(config, recombination_rate=chromosome_map.fallback_rate_per_bp)
     config = config.validated()
@@ -1000,7 +1091,8 @@ def build_missing_aware_map(product, relationships, *, config=RecombinationMapCo
     internal = np.asarray(phase.conditional_result.phase_map, dtype=np.int8)
     if displayed.shape != calls.shape[:2] or internal.shape != displayed.shape:
         raise ValueError("final phase coordinate frames differ")
-    coverage, offsets = painting_coverage(product)
+    coverage, offsets, read_free_tracts, read_free_sites = observed_coverage(
+        product, observed, config.read_free_tract_sites)
     bins = map_bins(positions, components, config.bin_bp)
     events, spans, diagnostics, sc, se, ss = decode_meioses(calls, displayed, internal, positions, components,
         coverage, offsets, parents, children, slots, config.recombination_rate, config.copy_error,
@@ -1024,6 +1116,8 @@ def build_missing_aware_map(product, relationships, *, config=RecombinationMapCo
             "covered_bp": float(curve["covered_bp"].sum()),
             "cumulative_observed_cM": float(curve["cumulative_observed_cM"][-1]),
             "uncovered_bins": int(np.sum(curve["exposure_meiosis_bp"] == 0)),
+            "read_depth_mask_applied": observed is not None and config.read_free_tract_sites > 0,
+            "read_free_tracts": read_free_tracts, "read_free_sample_sites": read_free_sites,
             "source_posterior_converged": bool(product["source_posterior_converged"]),
             "elapsed_seconds": time.monotonic() - started},
         "interpretation": "conditional on final internal family phase and fixed inferred pedigree; not calibrated joint-pedigree uncertainty",
@@ -1039,7 +1133,7 @@ def build_missing_aware_map(product, relationships, *, config=RecombinationMapCo
 
 def build_shared_family_map(product, relationships, *, config=RecombinationMapConfig(),
                             shared_config=SharedOrientationConfig(),
-                            genetic_positions_morgans=None, chromosome_map=None):
+                            genetic_positions_morgans=None, chromosome_map=None, observed=None):
     """Shared correction followed by residual per-meiosis artifact inference.
 
 Final crossover expectations marginalize selectors/residual artifacts only,
@@ -1047,12 +1141,13 @@ conditional on selected shared paths. Shared-path uncertainty is NOT included.
 """
     corrected, orientation, diagnostics = fit_shared_orientations(product, relationships,
         config=config, shared_config=shared_config,
-        genetic_positions_morgans=genetic_positions_morgans, chromosome_map=chromosome_map)
+        genetic_positions_morgans=genetic_positions_morgans, chromosome_map=chromosome_map,
+        observed=observed)
     kwargs = {} if genetic_positions_morgans is None else {
         "genetic_positions_morgans": genetic_positions_morgans}
     if chromosome_map is not None:
         kwargs["chromosome_map"] = chromosome_map
-    result = build_missing_aware_map(corrected, relationships, config=config, **kwargs)
+    result = build_missing_aware_map(corrected, relationships, config=config, observed=observed, **kwargs)
     result["schema"] = "shared-orientation-recombination-map-v1"
     result["shared_orientation"] = diagnostics
     result["interpretation"] += "; additionally conditional on screened coordinate-MAP shared sample orientation corrections"

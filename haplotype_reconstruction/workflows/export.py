@@ -10,7 +10,7 @@ import numpy as np
 from cyvcf2 import VCF, Writer
 
 from ..core import parallel, runtime
-from ..core.products import load_panels, panel_alleles
+from ..core.products import load_panels, panel_alleles, panel_location
 
 
 def _reference_identity(store, supplied):
@@ -97,7 +97,9 @@ def _export_contig(task):
     stem = quote(contig, safe="")
     files, panels = [], []
     if "founders" in products:
-        blocks = load_panels(store, contig)
+        # The post-painting allele refit is the released panel; runs without it export the painting panel.
+        stage = "allele_refit" if panel_location(store, contig, "allele_refit") else "painting"
+        blocks = load_panels(store, contig, stage)
         for component, block in enumerate(blocks):
             positions, keys, calls = panel_alleles(block)
             filename = f"{stem}.component{component:04d}.founders.tsv.gz"
@@ -113,7 +115,8 @@ def _export_contig(task):
                                local_columns={f"H{i}": str(key) for i, key in enumerate(keys)},
                                first_position=int(positions[0]), last_position=int(positions[-1]),
                                markers=len(positions), called_alleles=int((calls>=0).sum()),
-                               missing_alleles=int((calls<0).sum()), file=filename))
+                               missing_alleles=int((calls<0).sum()), founder_stage=stage,
+                               file=filename))
         del blocks
     if "samples" in products:
         phase = store.load_contig("family_phase", contig)

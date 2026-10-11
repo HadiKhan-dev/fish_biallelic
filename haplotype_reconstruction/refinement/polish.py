@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import numpy as np
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import math
 import time
 from numba import njit, prange
@@ -34,6 +34,10 @@ class PhasePolishConfig:
     minimum_score_gain: float = 1e-6
     transmission_only: bool = False
     minimum_biological_gain: float | None = None
+    # True: polish only called scaffold alleles, starting from the scaffold
+    # phase (see finish_family_phase). False: family context with 0.98 gap
+    # fills, starting from the family MAP phase (behaviour before 2026-09-30).
+    polish_from_scaffold: bool = False
 
 
 @njit(cache=True, inline='always')
@@ -105,19 +109,36 @@ def finish_family_phase(reference, family, positions, phase_bins, component_ids,
     comparison of both changing inputs in its fixed-input invocation. Displayed
     phase is deliberately not cached: incomplete-parent tracks and observable
     changes must always be derived from the current family state.
+
+    With ``config.polish_from_scaffold`` the polish scores copy consistency on
+    called scaffold alleles only and starts every sample from the scaffold
+    phase, so the called phase does not depend on the family messages. Family
+    gap fills are posterior modes of the same family model; where a parent has
+    no reads they are imputed from its children's current phase, and as hard
+    copy evidence they then confirm that phase, including switch errors of the
+    family MAP start. Missing alleles contribute no evidence. Samples the
+    polish holds fixed (fewer than two observed parents) are presented in
+    their displayed scaffold orientation; their released internal frame, which
+    recombination decodes, remains the family MAP.
     """
-    context = family.phase_context
+    incomplete = np.bincount(children, minlength=len(reference)) < 2
+    context, initial = family.phase_context, family.inferred_phase_map
+    if config.polish_from_scaffold:
+        context, initial = reference, np.zeros_like(family.inferred_phase_map)
     result = conditional_result
     if result is None:
-        result = polish_phase(context, family.inferred_phase_map, positions, phase_bins,
+        result = polish_phase(context, initial, positions, phase_bins,
             component_ids, parents, children, slots, config=config, callback=callback, resume=resume,
             chromosome_map=chromosome_map)
     if not result.converged:
         raise RuntimeError(
             'conditional phase finalization has not converged; retain its iteration checkpoint'
         )
+    if config.polish_from_scaffold and not config.correct_incomplete_parent_phase:
+        internal = result.phase_map.copy()
+        internal[incomplete] = family.inferred_phase_map[incomplete]
+        result = replace(result, phase_map=internal)
     emitted = result.phase_map.copy()
-    incomplete = np.bincount(children, minlength=len(reference)) < 2
     if not config.correct_incomplete_parent_phase:
         emitted[incomplete] = family.phase_map[incomplete]
     calls, provenance, changed, counts, invalid = refinement_evidence.phase_views(
@@ -299,7 +320,12 @@ def conditional_score(reference, flips, selectors, parents, children, slots,
                 if j:
                     value += logjump[j - 1] if selectors[e, j] != selectors[e, j - 1] else logstay[j - 1]
         values[task] = value
-    return np.sum(values)
+    # Fixed-order sequential total: np.sum here would become a parfor reduction
+    # whose association order depends on the Numba team size.
+    total = 0.
+    for task in range(len(values)):
+        total += values[task]
+    return total
 
 
 @njit(cache=True)

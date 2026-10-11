@@ -79,6 +79,28 @@ def _maximize_predictive(prediction):
     return best, log_scale, converged, grid, values
 
 
+def _reciprocal_dominant_mask(alternatives, zero, one, contigs):
+    """Return 0/-inf objective weights excluding reciprocal-dominant rows.
+
+    An M1/M2 row proposing p as a parent of c is excluded when, on the given
+    contigs, M1(p with parent c) - M0(p) >= M1(c with parent p) - M0(c). The
+    genetic score cannot order such reciprocal hypotheses; direction and
+    reciprocal family messages settle them. They are excluded from the scale's
+    objective only, never from decisions.
+    """
+    with np.errstate(invalid="ignore"):
+        # Ineligible children have -inf M0 and M1; their NaN gains never win.
+        gain = one[contigs].sum(axis=0) - zero[contigs].sum(axis=0)[:, None]
+    mask = np.zeros(len(alternatives), dtype=np.float64)
+    child = alternatives[:, 0]
+    for column in (1, 2):
+        rows = np.flatnonzero(alternatives[:, column] >= 0)
+        parent = alternatives[rows, column]
+        dominant = gain[parent, child[rows]] >= gain[child[rows], parent]
+        mask[rows[dominant]] = -np.inf
+    return mask
+
+
 def _fit(scored, settings, resolved):
     # Whole physical contigs, not adjacent markers, define the split. Each of
     # folds 0/1/2 is predicted by the other two; fold 3 never selects the scale.
@@ -86,7 +108,7 @@ def _fit(scored, settings, resolved):
     groups = [np.flatnonzero(folds == i) for i in range(4)]
     report = dict(
         scale=1.0, selected=False, status="insufficient_contigs",
-        estimator="pooled-three-fold-predictive-v1",
+        estimator="pooled-three-fold-predictive-v2-reciprocal-excluded",
         partitions={f"fold_{i}": [str(scored.contig_names[j]) for j in group]
                     for i, group in enumerate(groups)},
         testing_fold="fold_3",
@@ -95,10 +117,12 @@ def _fit(scored, settings, resolved):
     )
     if min(map(len, groups)) < 2:
         return report
+    zero = np.stack([c.zero_parent_log_likelihoods for c in scored.chromosomes])
+    one = np.stack([c.one_parent_log_likelihoods for c in scored.chromosomes])
     alternatives, state, scores, by_child, full_counts, _ = states._parent_state_alternatives(
         scored.trios,
-        np.stack([c.zero_parent_log_likelihoods for c in scored.chromosomes]),
-        np.stack([c.one_parent_log_likelihoods for c in scored.chromosomes]),
+        zero,
+        one,
         np.stack([c.two_parent_log_likelihoods for c in scored.chromosomes]),
         settings.parent_state_contamination_probability, resolved,
         candidate_source_mode=settings.parent_state_candidate_source_mode,
@@ -110,6 +134,11 @@ def _fit(scored, settings, resolved):
     all_training = scores[folds < 3].sum(axis=0)
     prior = np.log(np.asarray(settings.parent_state_priors)[state])
     prior -= np.log(np.maximum(1, full_counts[alternatives[:, 0], state]))
+    # Objective-only masks (0 or -inf), from the contigs that fit each fold.
+    fit_mask = np.stack([
+        _reciprocal_dominant_mask(alternatives, zero, one, (folds < 3) & (folds != i))
+        for i in range(3)])
+    test_mask = _reciprocal_dominant_mask(alternatives, zero, one, folds < 3)
     prepared, omitted = [], 0
     for rows in by_child:
         finite = np.isfinite(scores[:, rows]).all(axis=0)
@@ -117,25 +146,35 @@ def _fit(scored, settings, resolved):
         valid = rows[finite]
         if len(valid) < 2:
             continue
+        # A finite M0 row is never masked, so every fold keeps a maximum.
+        fit_kept = np.isfinite(fit_mask[:, valid])
+        test_kept = np.isfinite(test_mask[valid])
+        if not (fit_kept.any(axis=1).all() and test_kept.any()):
+            continue
         train, validation = training[:, valid], held[:, valid]
         train = train - train.max(axis=1, keepdims=True)
-        validation = validation - validation.max(axis=1, keepdims=True)
+        validation = validation - np.max(
+            np.where(fit_kept, validation, -np.inf), axis=1, keepdims=True)
         combined = all_training[valid] - all_training[valid].max()
-        test = testing[valid] - testing[valid].max()
-        prepared.append((train, validation, combined, test, prior[valid]))
-    report.update(eligible_children=len(prepared), omitted_nonfinite_alternatives=omitted)
+        test = testing[valid] - testing[valid][test_kept].max()
+        prepared.append((train, validation, combined, test,
+                         prior[valid][None, :] + fit_mask[:, valid],
+                         prior[valid] + test_mask[valid]))
+    report.update(eligible_children=len(prepared), omitted_nonfinite_alternatives=omitted,
+                  reciprocal_dominant_rows_excluded_per_fold=[
+                      int(np.count_nonzero(~np.isfinite(mask))) for mask in fit_mask])
     if not prepared:
         report["status"] = "insufficient_alternatives"
         return report
 
     def prediction(log_scale, test=False):
         scale, total = np.exp(log_scale), 0.0
-        for train, validation, combined, held_test, p in prepared:
+        for train, validation, combined, held_test, p, p_test in prepared:
             if test:
-                weights = scale * combined + p
+                weights = scale * combined + p_test
                 total += logsumexp(weights + held_test) - logsumexp(weights)
             else:
-                weights = scale * train + p[None, :]
+                weights = scale * train + p
                 total += np.sum(logsumexp(weights + validation, axis=1)
                                 - logsumexp(weights, axis=1))
         return float(total)
@@ -143,13 +182,17 @@ def _fit(scored, settings, resolved):
     best, log_scale, success, grid, values = _maximize_predictive(prediction)
     gain = best - prediction(0.0)
     boundary = min(log_scale-_LOG_SCALE_BOUNDS[0], _LOG_SCALE_BOUNDS[1]-log_scale) < 0.01
-    selected = bool(success and np.isfinite(gain) and gain > 1e-8 and not boundary)
+    # Tempering only: a scale above one would sharpen evidence without calibration support.
+    above_unit = log_scale >= 0.0
+    selected = bool(success and np.isfinite(gain) and gain > 1e-8 and not boundary
+                    and not above_unit)
     applied_log_scale = log_scale if selected else 0.0
     report.update(
         scale=float(np.exp(log_scale)) if selected else 1.0,
         fitted_scale=float(np.exp(log_scale)), selected=selected,
         status=("selected" if selected else "boundary_optimum" if boundary else
-                "optimizer_failed" if not success else "no_predictive_gain"),
+                "optimizer_failed" if not success else
+                "above_unit_scale" if above_unit and gain > 1e-8 else "no_predictive_gain"),
         optimizer_success=success, at_search_boundary=bool(boundary),
         selection_gain=float(gain), search_log_scale_grid=grid.tolist(),
         search_predictive_grid=values.tolist(),

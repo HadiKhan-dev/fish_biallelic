@@ -9,18 +9,22 @@ from pathlib import Path
 
 from ..core.environment import configured_regions
 import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
+import haplotype_reconstruction.core.config as core_config
 import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.core.read_calibration as read_calibration
 import haplotype_reconstruction.core.runtime as core_runtime
+import haplotype_reconstruction.core.sample_quality as core_sample_quality
+import haplotype_reconstruction.core.site_quality as core_site_quality
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.discovery.blocks as discovery_blocks
 import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.simulation.pedigree as simulation_pedigree
 import haplotype_reconstruction.simulation.templates as simulation_templates
 from ..simulation.truth import save_truth
+import haplotype_reconstruction.workflows.contig_parallel as workflows_contig_parallel
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
 from . import CICHLID_AUTOSOMES
 from .downstream import run_downstream
@@ -875,8 +879,18 @@ def run():
     # =========================================================================
     # The generating/template identities above deliberately remain independent
     # of the inference read model. Fit only the observed simulated allele depths.
+    # Off by default here (core.config.SIMULATION_SITE_QUALITY); when switched
+    # on, the kept simulated sites are re-blocked like the real loader's.
+    site_quality_config = core_site_quality.configured(
+        core_config.SIMULATION_SITE_QUALITY)
+    # The per-sample QC (core.config.SIMULATION_SAMPLE_QUALITY, off) runs only
+    # together with the site filter, whose quality-passing sites it uses.
+    sample_quality_config = core_sample_quality.configured(
+        core_config.SIMULATION_SAMPLE_QUALITY)
     discovery_identity_record = read_calibration.discovery_identity(
-        discovery_blocks.DISCOVERY_BACKEND, discovery_config)
+        discovery_blocks.DISCOVERY_BACKEND, discovery_config,
+        core_site_quality.identity(site_quality_config),
+        core_sample_quality.identity(sample_quality_config, site_quality_config))
     DISCOVERY_STAGE = "block_discovery"
     checkpoint_store.bind_stage_identity(
         DISCOVERY_STAGE, discovery_identity_record
@@ -920,9 +934,20 @@ def run():
                 global_sites = np.asarray(
                     multi_contig_results[r_name]['naive_long_haps'][0]
                 )
+                simd_genomic_data, site_quality = core_site_quality.filter_loaded_sites(
+                    simd_genomic_data, contig=r_name, config=site_quality_config,
+                    threads=n_processes, snps_per_block=simulation_run_spec['snps_per_block'],
+                    sample_config=sample_quality_config)
+                founder_excluded = core_sample_quality.contig_flags(
+                    site_quality, contig=r_name, sample_ids=sample_names, output_dir=output_dir)
+                if site_quality.get('applied'):
+                    global_sites, simulated_reads = (
+                        core_variants.concatenate_unique_block_reads(simd_genomic_data))
 
                 global_probs, calibration = read_calibration.prepare_likelihoods(
                     simulated_reads, global_sites, threads=n_processes)
+                simd_genomic_data = core_sample_quality.exclude_from_discovery(
+                    simd_genomic_data, founder_excluded)
                 t_chr = time.time()
                 simd_block_results = discovery_blocks.generate_all_block_haplotypes(
                     simd_genomic_data,
@@ -947,6 +972,7 @@ def run():
                     'global_sites': global_sites,
                     'global_probs': global_probs,
                     'read_calibration': calibration,
+                    'site_quality': site_quality,
                     'global_observed_mask': global_observed_mask,
                     'observed_call_mask_mode': (
                         workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
@@ -956,6 +982,8 @@ def run():
                     ),
                     'discovery_backend': discovery_identity_record['backend'],
                     'discovery_config': discovery_config_record,
+                    **({} if founder_excluded is None
+                       else {'founder_evidence_excluded': founder_excluded}),
                 })
 
                 hap_counts = [len(b.haplotypes) for b in valid_blocks]
@@ -995,10 +1023,10 @@ def run():
     print("ASSEMBLY: DISCOVERED BLOCKS -> COMPONENT painting")
     print(f"{'='*60}")
     print(
-        "  Sequential contigs; release and painting are non-overlapping "
-        f"phases with a {n_processes}-core ceiling"
+        "  Release and painting are non-overlapping phases within each contig; "
+        f"concurrent contigs share a {n_processes}-core ceiling"
     )
-    summaries = workflows_reconstruction.run_reconstruction(
+    summaries = workflows_contig_parallel.run_reconstruction(
         checkpoint_store,
         region_keys,
         sample_names,

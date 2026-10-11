@@ -5,6 +5,7 @@ import os
 
 from ..core.environment import configured_regions
 import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
+import haplotype_reconstruction.core.config as core_config
 import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
@@ -12,10 +13,13 @@ import haplotype_reconstruction.core.numerics as core_numerics
 import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.core.read_calibration as read_calibration
 import haplotype_reconstruction.core.runtime as core_runtime
+import haplotype_reconstruction.core.sample_quality as core_sample_quality
+import haplotype_reconstruction.core.site_quality as core_site_quality
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.discovery.blocks as discovery_blocks
 import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.workflows.design as workflows_design
+import haplotype_reconstruction.workflows.contig_parallel as workflows_contig_parallel
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
 from . import CICHLID_AUTOSOMES
 from .downstream import run_downstream
@@ -229,11 +233,20 @@ def run():
     DISCOVERY_STAGE = "block_discovery"
     discovery_config = discovery_search.ReversibleCavitySearchConfig()
     discovery_config_record = asdict(discovery_config)
+    site_quality_config = core_site_quality.configured(core_config.SiteQualityConfig())
+    sample_quality_config = core_sample_quality.configured(core_config.SampleQualityConfig())
     discovery_identity_record = read_calibration.discovery_identity(
-        DISCOVERY_BACKEND, discovery_config)
-    checkpoint_store.bind_stage_identity(
-        DISCOVERY_STAGE, discovery_identity_record
-    )
+        DISCOVERY_BACKEND, discovery_config,
+        core_site_quality.identity(site_quality_config),
+        core_sample_quality.identity(sample_quality_config, site_quality_config))
+    # Bind the input file, loader, sample axis and contigs as well, so a
+    # different input never resumes these sites (as the general route does);
+    # downstream stages still receive the narrower discovery identity.
+    checkpoint_store.bind_stage_identity(DISCOVERY_STAGE, dict(
+        schema="tropheops-vcf-ad-v1", **core_variants.input_identity(vcf_path),
+        sample_ids=sample_names_active, reference_sample_ids=g0_sample_names,
+        include_reference_samples=INCLUDE_REFERENCE_SAMPLES, contigs=region_keys,
+        discovery=discovery_identity_record, block_sites=200))
 
     if stage_complete(DISCOVERY_STAGE):
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
@@ -246,8 +259,12 @@ def run():
             "  Cap-free reversible cavity discovery: no explicit K grid or "
             "scientific K cap; "
             f"beam_width={discovery_config.beam_width}, "
-            f"max_expansions={discovery_config.max_expansions}, "
-            f"max_exact_scores={discovery_config.max_exact_scores}, "
+            "expansion backstop="
+            f"{discovery_config.expansion_backstop_base}+"
+            f"{discovery_config.expansion_backstop_per_founder}K, "
+            "exact-score backstop="
+            f"{discovery_config.exact_score_backstop_base}+"
+            f"{discovery_config.exact_score_backstop_per_founder}K, "
             "max_proposals_per_expansion="
             f"{discovery_config.max_proposals_per_expansion}"
         )
@@ -274,6 +291,18 @@ def run():
                     num_processes=n_processes
                 )
                 print(f"    [Loader] {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
+
+                # Self-calibrated site quality on the analysed cohort, before
+                # read calibration; kept sites are re-blocked 200 at a time.
+                genomic_data, site_quality = core_site_quality.filter_loaded_sites(
+                    genomic_data, contig=r_name, config=site_quality_config,
+                    threads=n_processes, snps_per_block=200,
+                    sample_rows=None if INCLUDE_REFERENCE_SAMPLES else active_vcf_indices,
+                    sample_config=sample_quality_config)
+                # Samples flagged by the per-sample QC on this contig (None if off).
+                founder_excluded = core_sample_quality.contig_flags(
+                    site_quality, contig=r_name, sample_ids=sample_names_active,
+                    output_dir=output_dir)
 
                 # Full reads: (n_samples_total, n_sites, 2) — all 116 samples
                 global_sites, global_reads_full = (
@@ -327,6 +356,9 @@ def run():
                 print(f"    Sites: {len(global_sites)}, Samples (active): {global_probs.shape[0]}, "
                       f"Depth: {avg_depth:.1f}x")
                 del global_reads_full, active_reads_full, g0_reads
+                # Flagged libraries enter discovery without reads (unobserved).
+                genomic_data = core_sample_quality.exclude_from_discovery(
+                    genomic_data, founder_excluded)
 
                 t0 = time.time()
                 block_results = discovery_blocks.generate_all_block_haplotypes(
@@ -353,6 +385,7 @@ def run():
                 save_contig(DISCOVERY_STAGE, r_name, {
                     'global_probs': global_probs, 'global_sites': global_sites,
                     'read_calibration': calibration,
+                    'site_quality': site_quality,
                     'global_observed_mask': global_observed_mask,
                     'observed_call_mask_mode': (
                         workflows_reconstruction.EXACT_OBSERVED_MASK_MODE),
@@ -363,6 +396,8 @@ def run():
                     'active_vcf_indices': active_vcf_indices,
                     'discovery_backend': discovery_identity_record['backend'],
                     'discovery_config': discovery_config_record,
+                    **({} if founder_excluded is None
+                       else {'founder_evidence_excluded': founder_excluded}),
                 })
                 del genomic_data, block_results, global_probs, global_sites
                 del global_observed_mask, g0_probs
@@ -415,10 +450,10 @@ def run():
     print("ASSEMBLY: block discovery -> COMPONENT painting")
     print(f"{'='*60}")
     print(
-        "  Sequential contigs; release and painting are non-overlapping "
-        f"phases with a {n_processes}-core ceiling"
+        "  Release and painting are non-overlapping phases within each contig; "
+        f"concurrent contigs share a {n_processes}-core ceiling"
     )
-    assembly_summaries = workflows_reconstruction.run_reconstruction(
+    assembly_summaries = workflows_contig_parallel.run_reconstruction(
         checkpoint_store,
         region_keys,
         sample_names_active,
