@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 
-from dataclasses import replace
 import math
 
 import time
@@ -87,43 +86,6 @@ def _compact_component_gl(component: pedigree_components.PreparedComponentPedigr
     ], axis=1))
 
 
-def _score_balanced_transmission(
-        projected, transition, gl, observed, exponent, trios, **kwargs,
-):
-    """Pool tempered and full-strength forward log scores with equal weight.
-
-    Both views use the same markers and transmission model. Tempering before
-    path marginalization suppresses correlated evidence, but can also conceal
-    contradictions that distinguish an observed relative from a missing parent.
-    The full-strength view retains those contradictions. Their average is a
-    composite score, not two independent data sets or a calibrated posterior.
-
-    Reused M0/M1 screening scores are already pooled. Passing those same arrays
-    to both views preserves them, including reductions for unavailable parents.
-    """
-    shared_inputs = {}
-    current_threads()
-    tempered = pedigree_transmission.score_projected_ragged_quadratic(
-        projected, transition, gl, observed, exponent, trios,
-        _shared_inputs=shared_inputs, **kwargs,
-    )
-    current_threads()
-    full = pedigree_transmission.score_projected_ragged_quadratic(
-        projected, transition, gl, observed, np.ones_like(exponent), trios,
-        _shared_inputs=shared_inputs, **kwargs,
-    )
-    changes = {
-        name: 0.5 * (getattr(tempered, name) + getattr(full, name))
-        for name in ("zero_observed", "one_observed", "two_observed")
-    }
-    changes.update({
-        name: getattr(tempered, name) + getattr(full, name)
-        for name in ("scoring_seconds", "m0_scoring_seconds",
-                     "m1_scoring_seconds", "m2_scoring_seconds")
-    })
-    return replace(tempered, **changes)
-
-
 def _projected_m1_screen(
         component: pedigree_components.PreparedComponentPedigree,
         exponent: np.ndarray,
@@ -156,7 +118,8 @@ def _projected_m1_screen(
         ),
         source_gap_support_sites=settings.parent_state_source_gap_support_sites,
     )
-    batch = _score_balanced_transmission(
+    current_threads()
+    batch = pedigree_transmission.score_projected_ragged_quadratic(
         projected,
         factors.transition,
         compact_gl,
@@ -229,7 +192,8 @@ def _score_projected_component_with_diagnostics(
         )
         projected = reuse_screen.projected_model
         reuse_scores = reuse_screen.batch_scores
-    batch = _score_balanced_transmission(
+    current_threads()
+    batch = pedigree_transmission.score_projected_ragged_quadratic(
         projected,
         factors.transition,
         compact_gl,

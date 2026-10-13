@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import json
 import getpass
+import hashlib
 import re
 from pathlib import Path
 import socket
@@ -127,18 +128,92 @@ def _batch_cache_scope():
     return None
 
 
-def configure_numba_cache():
-    """Isolate native caches by run/job and host, without splitting its workers.
+# NUMBA_* settings that do not change compiled machine code: where it is
+# cached, how many threads run it and which threading layer runs it.
+_RUNTIME_NUMBA_SETTINGS = frozenset((
+    "NUMBA_CACHE_DIR", "NUMBA_NUM_THREADS", "NUMBA_THREADING_LAYER",
+    "NUMBA_THREADING_LAYER_OVERRIDE",
+))
 
-    The automatic path marker distinguishes our inherited setting from a user
-    override. Spawned processes reuse the run ID, but recalculate the path so
-    a remote host or a different batch allocation cannot inherit our old cache.
-    These are disposable compiled kernels, not scientific checkpoints.
+
+def _host_cpu_model():
+    """CPU vendor, model and instruction-set flags (Linux), else the platform name."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as handle:
+            first = handle.read(1 << 16).split("\n\n", 1)[0]
+    except OSError:
+        import platform
+        return f"{platform.machine()} {platform.processor()}"
+    fields = {name.strip(): value.strip() for name, value in
+              (line.split(":", 1) for line in first.splitlines() if ":" in line)}
+    return " | ".join(fields.get(name, "") for name in ("vendor_id", "model name", "flags"))
+
+
+def numba_code_key():
+    """Key of every input of this package's compiled Numba kernels.
+
+    Numba's own disk cache checks only the timestamp of each kernel's source
+    file, so a kernel whose callee or imported constant changed in another file
+    would load stale machine code. This key covers the whole package source and
+    its location (Numba's cache layout depends on it), the Python, NumPy, Numba
+    and llvmlite versions, the code-generation NUMBA_* settings and the host CPU
+    model: any edit gives a new key. It is computed once per process tree; child
+    processes inherit it together with the package location.
+    """
+    root = str(Path(__file__).resolve().parents[1])
+    inherited_root, _, inherited_key = os.environ.get(
+        "_HAPLOTYPES_NUMBA_CODE_KEY", "").rpartition("|")
+    if inherited_key and inherited_root == root:
+        return inherited_key
+    from importlib import metadata
+    digest = hashlib.sha256()
+
+    def add(*values):
+        for value in values:
+            digest.update(str(value).encode("utf-8", "surrogateescape") + b"\0")
+
+    add(root, sys.version, sys.implementation.cache_tag, getattr(sys, "abiflags", ""))
+    for package in ("numba", "llvmlite", "numpy"):
+        try:
+            add(package, metadata.version(package))
+        except metadata.PackageNotFoundError:
+            add(package, None)
+    for name in sorted(os.environ):
+        if name.startswith("NUMBA_") and name not in _RUNTIME_NUMBA_SETTINGS:
+            add(name, os.environ[name])
+    add(_host_cpu_model())
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = sorted(name for name in subdirectories if name != "__pycache__")
+        for name in sorted(files):
+            if name.endswith(".py"):
+                path = os.path.join(directory, name)
+                add(os.path.relpath(path, root))
+                with open(path, "rb") as handle:
+                    digest.update(handle.read())
+    key = digest.hexdigest()[:24]
+    os.environ["_HAPLOTYPES_NUMBA_CODE_KEY"] = f"{root}|{key}"
+    return key
+
+
+def configure_numba_cache():
+    """Give Numba a run-local cache directory for exactly this compiled code.
+
+    The directory is <base>/<numba_code_key()>: base is the user's
+    NUMBA_CACHE_DIR, otherwise a directory isolated by run/job and host. A
+    directory therefore only ever holds kernels of one package source, so
+    core.numba_warmup can seed it from, and publish it to, a persistent store.
+    Markers distinguish our inherited setting (and the user's base, kept for
+    child processes) from a new user override. Spawned processes reuse the run
+    ID, but recalculate the automatic path so a remote host or a different batch
+    allocation cannot inherit our old cache. These are disposable compiled
+    kernels, not scientific checkpoints.
     """
     explicit = os.environ.get("NUMBA_CACHE_DIR")
-    automatic = os.environ.get("_HAPLOTYPES_NUMBA_CACHE_DIR")
-    if explicit and explicit != automatic:
-        cache = explicit
+    if explicit and explicit != os.environ.get("_HAPLOTYPES_NUMBA_CACHE_DIR"):
+        os.environ["_HAPLOTYPES_NUMBA_CACHE_BASE"] = explicit
+    base = os.environ.get("_HAPLOTYPES_NUMBA_CACHE_BASE")
+    if base:
+        directory = Path(base)
     else:
         run_id = os.environ.get("_HAPLOTYPES_NUMBA_CACHE_RUN")
         if not run_id:
@@ -153,10 +228,11 @@ def configure_numba_cache():
         scratch = Path((os.environ.get("SLURM_TMPDIR") if job_id else None)
                        or tempfile.gettempdir())
         directory = scratch / f"haplotype-reconstruction-numba-{user}" / name
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        cache = str(directory)
-        os.environ["NUMBA_CACHE_DIR"] = cache
-        os.environ["_HAPLOTYPES_NUMBA_CACHE_DIR"] = cache
+    directory = directory / numba_code_key()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cache = str(directory)
+    os.environ["NUMBA_CACHE_DIR"] = cache
+    os.environ["_HAPLOTYPES_NUMBA_CACHE_DIR"] = cache
 
     # Library callers and forkserver preloads may import Numba first. Apply
     # our setting before our numerical modules create cached dispatchers,

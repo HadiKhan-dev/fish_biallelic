@@ -135,7 +135,7 @@ class QuadraticComplexityDiagnostic:
 
 @dataclass(frozen=True)
 class ProjectedRaggedQuadraticScores:
-    """Projected M0/M1/M2 batch scores and approximation diagnostics."""
+    """Projected M0/M1/M2 batch scores (tempered and full views pooled) and diagnostics."""
 
     zero_observed: np.ndarray
     one_observed: np.ndarray
@@ -379,9 +379,22 @@ def score_projected_ragged_quadratic(
     mismatch_probability: float=0.01,
     reuse_scores: ProjectedRaggedQuadraticScores | None=None,
     uniform_tolerance: float=1e-12,
-    _shared_inputs: dict | None=None,
 ) -> ProjectedRaggedQuadraticScores:
-    """Score projected M0/M1/M2 batches with O(S**2) task workspaces."""
+    """Score projected M0/M1/M2 batches with O(S**2) task workspaces.
+
+    Each score pools tempered and full-strength forward log scores with
+    equal weight. Both views use the same markers and transmission model.
+    Tempering before path marginalization suppresses correlated evidence,
+    but can also conceal contradictions that distinguish an observed
+    relative from a missing parent. The full-strength view (exponent one)
+    retains those contradictions. Their average is a composite score, not two
+    independent data sets or a calibrated posterior. Every task runs both
+    views' forward recurrences in one pass, sharing their emission products.
+
+    Reused M0/M1 screening scores are already pooled; both views take those
+    same arrays, so pooling preserves them, including the reductions for
+    unavailable parents.
+    """
 
     started = time.perf_counter()
     if not _same_transition(projected.transition, transition):
@@ -392,20 +405,15 @@ def score_projected_ragged_quadratic(
     ):
         raise ValueError("reuse_scores must be ProjectedRaggedQuadraticScores")
 
-    # Local to the two balanced-score views: no persistent cache or cross-input
-    # reuse. Both forward recurrences remain independent and unchanged.
-    prepared = {} if _shared_inputs is None else _shared_inputs
-    if "children" not in prepared:
-        children_gl = pedigree_sources._normalise_gl(child_genotype_likelihoods, "child GL")
-        if children_gl.shape[1] != projected.n_sites:
-            raise ValueError("child GL site count disagrees with projection")
-        child_seen = np.asarray(child_observed, dtype=np.bool_)
-        if child_seen.shape != children_gl.shape[:2]:
-            raise ValueError("child observed mask has wrong shape")
-        order = projected.selected_input_order
-        prepared["children"] = (np.ascontiguousarray(children_gl[:, order]),
-                                np.ascontiguousarray(child_seen[:, order]))
-    children_gl, child_seen = prepared["children"]
+    children_gl = pedigree_sources._normalise_gl(child_genotype_likelihoods, "child GL")
+    if children_gl.shape[1] != projected.n_sites:
+        raise ValueError("child GL site count disagrees with projection")
+    child_seen = np.asarray(child_observed, dtype=np.bool_)
+    if child_seen.shape != children_gl.shape[:2]:
+        raise ValueError("child observed mask has wrong shape")
+    order = projected.selected_input_order
+    children_gl = np.ascontiguousarray(children_gl[:, order])
+    child_seen = np.ascontiguousarray(child_seen[:, order])
     children = children_gl.shape[0]
     exponent = np.asarray(child_information_exponent, dtype=np.float64)
     if (
@@ -463,31 +471,28 @@ def score_projected_ragged_quadratic(
         raise ValueError("trio row violates child/parent eligibility")
     trio_array = np.ascontiguousarray(trio_array)
 
-    if "coefficients" not in prepared:
-        null_selector = pedigree_sources._probability_matrix(
-            null_selector_switch_probability,
-            children,
-            projected.n_bins - 1,
-            "null selector switch",
-        )
-        null_diagonal, null_off = _null_transition_coefficients(
-            projected, transition, null_selector
-        )
-        coefficient = pedigree_sources._child_likelihood_coefficients(
-            children_gl, float(mismatch_probability)
-        )
-        observed_site, observed_start, observed_stop = pedigree_sources._compact_observed_sites(
-            child_seen, projected.bin_start, projected.bin_stop
-        )
-        prepared["coefficients"] = (null_diagonal, null_off, coefficient,
-                                    observed_site, observed_start, observed_stop)
-    (null_diagonal, null_off, coefficient, observed_site,
-     observed_start, observed_stop) = prepared["coefficients"]
+    null_selector = pedigree_sources._probability_matrix(
+        null_selector_switch_probability,
+        children,
+        projected.n_bins - 1,
+        "null selector switch",
+    )
+    null_diagonal, null_off = _null_transition_coefficients(
+        projected, transition, null_selector
+    )
+    coefficient = pedigree_sources._child_likelihood_coefficients(
+        children_gl, float(mismatch_probability)
+    )
+    observed_site, observed_start, observed_stop = pedigree_sources._compact_observed_sites(
+        child_seen, projected.bin_start, projected.bin_stop
+    )
     fractional_powers = bool(np.any((exponent > 0.) & (exponent < 1.)))
 
     # Keep temporary emission storage bounded even for large founder panels.
     # If a single child's cache cannot fit, use the same quadratic scorer
-    # without caching, rather than exceeding the workspace allowance.
+    # without caching, rather than exceeding the workspace allowance. The
+    # called-founder products do not depend on the exponent and serve both
+    # views; their powers serve the tempered view.
     per_child_bytes = projected.n_bins * projected.n_states ** 2 * 16
     cache_children = _COMMON_EMISSION_CACHE_BYTES // max(1, per_child_bytes)
     child_batch_size = min(children, cache_children) if cache_children else children
@@ -508,6 +513,7 @@ def score_projected_ragged_quadratic(
         projected.bridge_operator_pivot,
         projected.bridge_excursion_probability,
     )
+    # zero, one and two hold the (tempered, full) views until they are pooled.
     if reuse_scores is None:
         m0_started = time.perf_counter()
         scheduling.current_threads()
@@ -527,7 +533,8 @@ def score_projected_ragged_quadratic(
         )
         m0_seconds = time.perf_counter() - m0_started
         m1_started = time.perf_counter()
-        one = np.empty((children, projected.n_candidates), dtype=np.float64)
+        one = tuple(np.empty((children, projected.n_candidates), dtype=np.float64)
+                    for _ in range(2))
         for child_start in range(0, children, child_batch_size):
             scheduling.current_threads()
             child_stop = min(children, child_start + child_batch_size)
@@ -538,7 +545,7 @@ def score_projected_ragged_quadratic(
             common_powered = (_power_common_products(common_products, exponent, child_start)
                               if common_products is not None and fractional_powers else None)
             scheduling.current_threads()
-            one[child_start:child_stop] = _score_m1_kernel(
+            one[0][child_start:child_stop], one[1][child_start:child_stop] = _score_m1_kernel(
                 *args,
                 projected.available,
                 projected.state_alt_probability,
@@ -552,7 +559,7 @@ def score_projected_ragged_quadratic(
                 null_off,
                 float(mismatch_probability),
                 eligible_edge,
-                zero, common_products, child_start, child_stop,
+                *zero, common_products, child_start, child_stop,
                 projected.bridge_branch, common_powered,
             )
             del common_products, common_powered
@@ -581,8 +588,8 @@ def score_projected_ragged_quadratic(
             )
         ):
             raise ValueError("reuse_scores candidate metadata are incompatible")
-        zero = zero.copy()
-        one = one.copy()
+        zero = (zero.copy(),) * 2
+        one = (one.copy(),) * 2
         m0_seconds = 0.0
         m1_seconds = 0.0
     m2_started = time.perf_counter()
@@ -597,15 +604,16 @@ def score_projected_ragged_quadratic(
         else np.empty(0, dtype=np.bool_)
     )
     active = available1 & available2
-    two = np.empty(len(trio_array), dtype=np.float64)
+    two = tuple(np.empty(len(trio_array), dtype=np.float64) for _ in range(2))
     for row in np.flatnonzero(~active):
         child, first, second = trio_array[row]
-        if available1[row]:
-            two[row] = one[child, first]
-        elif available2[row]:
-            two[row] = one[child, second]
-        else:
-            two[row] = zero[child]
+        for view in range(2):
+            if available1[row]:
+                two[view][row] = one[view][child, first]
+            elif available2[row]:
+                two[view][row] = one[view][child, second]
+            else:
+                two[view][row] = zero[view][child]
     active_rows = np.flatnonzero(active)
     if len(active_rows):
         active_children = trio_array[active_rows, 0]
@@ -624,7 +632,7 @@ def score_projected_ragged_quadratic(
             common_powered = (_power_common_products(common_products, exponent, child_start)
                               if common_products is not None and fractional_powers else None)
             scheduling.current_threads()
-            two[batch_rows] = _score_m2_kernel(
+            two[0][batch_rows], two[1][batch_rows] = _score_m2_kernel(
                 np.ascontiguousarray(trio_array[batch_rows]),
                 *args,
                 projected.state_alt_probability,
@@ -643,11 +651,10 @@ def score_projected_ragged_quadratic(
             del common_products, common_powered
 
     m2_seconds = time.perf_counter() - m2_started
-    if "informative_counts" not in prepared:
-        informative = child_seen & (np.ptp(children_gl, axis=2) > float(uniform_tolerance))
-        prepared["informative_counts"] = np.sum(informative, axis=1, dtype=np.int64)
+    informative = child_seen & (np.ptp(children_gl, axis=2) > float(uniform_tolerance))
     states = projected.n_states
-    workspace_values = 2 * states * states + 2 * (states + 1)
+    # Two forward states, the shared emission and a scratch matrix.
+    workspace_values = 4 * states * states + 2 * (states + 1)
     complexity = QuadraticComplexityDiagnostic(
         n_states=states,
         projected_hidden_state_count=states * states,
@@ -658,14 +665,14 @@ def score_projected_ragged_quadratic(
         memory_complexity_per_task="O(S^2)",
     )
     return ProjectedRaggedQuadraticScores(
-        zero_observed=zero,
-        one_observed=one,
-        two_observed=two,
+        zero_observed=0.5 * (zero[0] + zero[1]),
+        one_observed=0.5 * (one[0] + one[1]),
+        two_observed=0.5 * (two[0] + two[1]),
         candidate_source_available=projected.available.copy(),
         candidate_source_informative_site_count=(
             projected.informative_site_count.copy()
         ),
-        child_informative_site_count=prepared["informative_counts"],
+        child_informative_site_count=np.sum(informative, axis=1, dtype=np.int64),
         m2_active_trio_count=int(np.sum(active)),
         m2_reduced_trio_count=int(len(trio_array) - np.sum(active)),
         approximation_name=APPROXIMATION_NAME,

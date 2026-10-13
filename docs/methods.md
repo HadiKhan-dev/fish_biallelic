@@ -496,7 +496,10 @@ exact gains), and decides on the best-F of them. The refits of a round run
 concurrently, each with its share of the threads. With more than r candidates the
 ranking chooses which are refitted, so it can miss a deletion or addition that only
 a refit of another candidate would show. An optimistic bound may skip a round
-only when it proves the decision for every candidate; a deletion round only when
+only when it proves the decision for every candidate; an addition round also when
+no sample's gain under any panel with one row more can exceed the criterion's
+per-carrier threshold c/(2S), which keeps the point margin and every bootstrap
+replicate below zero (the decision is then recorded as skipped by the bound); a deletion round only when
 every row has a private cell, where the per-sample bound on any panel with one
 row fewer also bounds every shadow panel (below). An accepted addition is
 followed by one deletion round from the larger panel, which must reject;

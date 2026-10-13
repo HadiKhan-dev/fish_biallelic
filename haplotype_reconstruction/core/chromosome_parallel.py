@@ -49,21 +49,42 @@ def memory_worker_limit(estimates, workers, available, *, label):
     return count
 
 
+def _apportion(budget, work):
+    """Split ``budget`` CPUs over workers in proportion to their work.
+
+    Each worker keeps one CPU; the others follow the largest remainders of the
+    proportional shares (ties to the lower index). Equal shares if no work is
+    known. Requires at least one CPU per worker.
+    """
+    total = float(sum(work))
+    if total <= 0.0:
+        work, total = [1.0] * len(work), float(len(work))
+    spare = budget - len(work)
+    shares = [spare * value / total for value in work]
+    result = [1 + int(share) for share in shares]
+    order = sorted(range(len(work)), key=lambda i: (int(shares[i]) - shares[i], i))
+    for i in order[:budget - sum(result)]:
+        result[i] += 1
+    return result
+
+
 def current_threads():
     """Grow this worker's lease at a numeric boundary; otherwise change nothing.
 
-    Claims are never stolen from a peer that may still be inside a kernel.
-    Finished partitions release their whole lease, and surviving workers can
-    claim the free capacity at their next boundary. No mid-kernel resizing is
-    attempted. The shared claim sum cannot exceed the executor's CPU budget.
+    The target is this worker's share of the CPU budget in proportion to the
+    work it still has (its partition's unfinished tasks, the current one
+    included) among the workers still running. Claims are never stolen from a
+    peer that may still be inside a kernel: finished partitions release their
+    whole lease, and surviving workers claim free capacity toward their targets
+    at their next boundary. No mid-kernel resizing is attempted. The shared
+    claim sum cannot exceed the executor's CPU budget.
     """
     if _LEASE is None:
         return numba.get_num_threads()
-    claims, lock, index, budget = _LEASE
+    claims, remaining, lock, index, budget = _LEASE
     with lock:
         active = [i for i, value in enumerate(claims) if value > 0]
-        floor, remainder = divmod(budget, len(active))
-        desired = floor + (active.index(index) < remainder)
+        desired = _apportion(budget, [remaining[i] for i in active])[active.index(index)]
         free = budget - sum(claims)
         claims[index] += min(free, max(0, desired - claims[index]))
         threads = int(claims[index])
@@ -72,9 +93,11 @@ def current_threads():
     return threads
 
 
-def _worker(connection, partition, handler, claims, lock, index, budget):
+def _worker(connection, partition, weights, handler, claims, remaining, lock, index, budget):
     global _LEASE
     states = {task_index: None for task_index, _ in partition}
+    # Work left after each task of the partition, in task order.
+    after = [sum(weights[position + 1:]) for position in range(len(weights))]
     try:
         capacity = min(len(os.sched_getaffinity(0)), numba.config.NUMBA_NUM_THREADS)
         if capacity < budget:
@@ -86,14 +109,16 @@ def _worker(connection, partition, handler, claims, lock, index, budget):
             if command is None:
                 break
             phase, common = command
-            _LEASE = (claims, lock, index, budget)
-            # Apply the exact initial allocation before allowing tail growth.
+            _LEASE = (claims, remaining, lock, index, budget)
+            # Apply the exact initial allocation before allowing growth.
             numba.set_num_threads(int(claims[index]))
             results = []
-            for task_index, task in partition:
+            for (task_index, task), left in zip(partition, after):
                 current_threads()
                 states[task_index], result = handler(task, states[task_index], phase, common)
                 results.append((task_index, result))
+                with lock:
+                    remaining[index] = left
             numba.set_num_threads(1)
             with lock:
                 claims[index] = 0
@@ -117,9 +142,12 @@ class ChromosomeExecutor:
     It is bounded by affinity and configured Numba capacity. There are at most
     min(number of tasks, CPU budget) persistent processes. ``weights`` are
     nonnegative workload estimates in task order; largest tasks are assigned
-    first to the least-loaded partition. Results always retain input order.
-    ``max_workers`` optionally limits concurrent processes for memory-heavy
-    tasks without reducing the total CPU budget shared between those processes.
+    first to the least-loaded partition. Each phase starts every worker with a
+    lease proportional to its partition's work, and leases grow toward shares of
+    the work still remaining (current_threads). Results always retain input
+    order. ``max_workers`` optionally limits concurrent processes for
+    memory-heavy tasks without reducing the total CPU budget shared between
+    those processes.
     """
 
     def __init__(self, tasks, handler, *, n_workers=None, weights=None,
@@ -141,13 +169,16 @@ class ChromosomeExecutor:
                 not math.isfinite(value) or value < 0 for value in values):
             raise ValueError("weights must be finite nonnegative values in task order")
         self.partitions = [[] for _ in range(self.worker_count)]
-        loads = [0.0] * self.worker_count
+        self._loads = [0.0] * self.worker_count
         for task_index in sorted(range(len(self.tasks)), key=lambda i: (-values[i], i)):
-            owner = min(range(self.worker_count), key=lambda i: (loads[i], len(self.partitions[i]), i))
+            owner = min(range(self.worker_count),
+                        key=lambda i: (self._loads[i], len(self.partitions[i]), i))
             self.partitions[owner].append((task_index, self.tasks[task_index]))
-            loads[owner] += values[task_index]
+            self._loads[owner] += values[task_index]
+        self._weights = values
         context = parallel.forkserver_context
         self._claims = context.Array("i", self.worker_count, lock=False)
+        self._remaining = context.Array("d", self.worker_count, lock=False)
         self._lock = context.Lock()
         self._connections = []
         self._processes = []
@@ -169,7 +200,9 @@ class ChromosomeExecutor:
                     parent, child = parallel.forkserver_context.Pipe()
                     process = parallel.forkserver_context.Process(
                         target=_worker,
-                        args=(child, partition, self.handler, self._claims,
+                        args=(child, partition,
+                              [self._weights[task_index] for task_index, _ in partition],
+                              self.handler, self._claims, self._remaining,
                               self._lock, index, self.cpu_budget),
                     )
                     try:
@@ -221,10 +254,10 @@ class ChromosomeExecutor:
             raise RuntimeError("run requires an open chromosome executor context")
         if not self.tasks:
             return []
-        floor, remainder = divmod(self.cpu_budget, self.worker_count)
         with self._lock:
-            for index in range(self.worker_count):
-                self._claims[index] = floor + (index < remainder)
+            for index, share in enumerate(_apportion(self.cpu_budget, self._loads)):
+                self._claims[index] = share
+                self._remaining[index] = self._loads[index]
         print(f"{self.label} chromosome phase={phase}: {self.worker_count} workers, "
               f"{self.cpu_budget} CPUs; initial threads={list(self._claims)}", flush=True)
         results = [None] * len(self.tasks)
@@ -232,7 +265,7 @@ class ChromosomeExecutor:
             if self.worker_count == 1:
                 old_lease = _LEASE
                 try:
-                    _LEASE = (self._claims, self._lock, 0, self.cpu_budget)
+                    _LEASE = (self._claims, self._remaining, self._lock, 0, self.cpu_budget)
                     with parallel.numba_thread_scope(self.cpu_budget):
                         for index, task in self.partitions[0]:
                             self._states[index], results[index] = self.handler(

@@ -149,8 +149,9 @@ other states then follow the current panel's forward chain exactly; the remainin
 samples use every state. A count round refits at most nine candidates (every
 candidate when K <= 9), concurrently, so a count step that moves K by d costs at
 most 9 (d + 1) refits. Every fit (start fit or refit) is the better of two
-concurrent searches, forward-first and reverse-first: twice the work per fit,
-the same exponent in K.
+concurrent searches, forward-first and reverse-first, which share their common
+first sweep's messages and window proposals: at most twice the work per fit, the
+same exponent in K.
 
 Window proposals use bins of at least 200 SNPs, targeting 2,000 bins per
 component; L1/L2 share a chromosome-derived minimum. Acceptance always uses

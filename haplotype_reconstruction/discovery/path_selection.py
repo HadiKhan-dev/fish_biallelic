@@ -8,7 +8,8 @@ refits the top eight per proposal kind: O(N L K^3) per round. Reuse is keyed
 by the complete binary panel AND its frequency vector: equal alleles with
 different starts must still compete. Prepared observations and memoized fits
 live within one block search. A completed deterministic search can also be
-reused across feedback rounds when all its inputs match exactly.
+reused across feedback rounds when all its inputs match exactly, and its
+founder-independent fits, scores and merge bounds always are (LikelihoodMemo).
 """
 import hashlib
 import math
@@ -297,6 +298,78 @@ def selection_objective(fit, learn_frequencies, context):
                                                learn_frequencies, free, code)
 
 
+def _digest(*arrays):
+    """Exact content key of arrays (shape, dtype and bytes); a cache key only."""
+    digest = hashlib.blake2b(digest_size=20)
+    for array in arrays:
+        value = np.ascontiguousarray(array)
+        digest.update(str((value.shape, value.dtype.str)).encode())
+        digest.update(memoryview(value).cast('B'))
+    return digest.digest()
+
+
+# Posterior arrays of a fit, restored by one E-step instead of being memoized.
+_POSTERIOR_FIELDS = ('allele_probability', 'occupancy')
+
+
+class LikelihoodMemo:
+    """Founder-independent likelihood results of one block, kept across rounds.
+
+    Context founders enter only the selection regularizer (coded rows), never
+    a likelihood. A fixed-K fit is a deterministic function of its canonical
+    start, a forward score of its (panel, frequencies), and the merge bounds of
+    a fit of that fit's (panel, frequencies), each given the block data, copying
+    model and fit settings that ``bind`` checks. The kernels are thread-
+    invariant (sample-ordered sums), so an entry equals its recomputation bit
+    for bit. Fits are kept without their two K x L posterior arrays (one E-step
+    restores them) and with bit-packed panels, restored as C-contiguous int64
+    because proposal ties break on panel bytes: O(fits K L / 8) bytes.
+    """
+
+    def __init__(self, state=None):
+        state = state or dict(data_key=None, fits={}, scores={}, bounds={})
+        self.data_key = state['data_key']
+        self.fits = dict(state['fits'])
+        self.scores = dict(state['scores'])
+        self.bounds = dict(state['bounds'])
+        self.hits = dict(fits=0, scores=0, bounds=0, completed=0)
+
+    def bind(self, data_key):
+        """Discard entries of other block data, model or fit settings."""
+        if data_key != self.data_key:
+            self.data_key, self.fits, self.scores, self.bounds = data_key, {}, {}, {}
+
+    def state(self):
+        """Picklable entries for a later round of the same block."""
+        return dict(data_key=self.data_key, fits=self.fits, scores=self.scores, bounds=self.bounds)
+
+    def fit(self, key):
+        stored = self.fits.get(key)
+        if stored is None:
+            return None
+        self.hits['fits'] += 1
+        length, packed = stored['panel']
+        panel = np.ascontiguousarray(np.unpackbits(packed, axis=1, count=length), dtype=np.int64)
+        return dict(stored, panel=panel)
+
+    def add_fit(self, key, result):
+        # Posterior fields stay as None placeholders, keeping the key order.
+        panel = result['panel']
+        self.fits[key] = {name: None if name in _POSTERIOR_FIELDS else value
+                          for name, value in result.items()}
+        self.fits[key]['panel'] = (panel.shape[1], np.packbits(panel.astype(np.uint8), axis=1))
+
+
+def _memo_data_key(gl, observed, positions, model_options, fit_options):
+    """Exact identity of everything a memoized result depends on besides its key."""
+    intervals = model_options['interval_morgans']
+    digest = hashlib.blake2b(_digest(gl, observed, positions), digest_size=20)
+    digest.update(b'None' if intervals is None else _digest(intervals))
+    digest.update(repr(sorted((name, value) for name, value in {**model_options, **fit_options}.items()
+                              if name != 'interval_morgans')).encode())
+    return digest.hexdigest()
+
+
 def _search_input_key(start, bank, gl, observed, positions, options, founders=None):
     """Exact deterministic-search inputs; reuse only within compatible fits.
 
@@ -322,7 +395,7 @@ def search_panel(start, bank, gl, observed, positions, *, generations,
                  update_backstop_per_founder=4, update_backstop_per_site=2, initial_fit=None,
                  bulk=False, prepared=None,
                  previous_search=None, incumbent=None, recombination_rate_per_bp=5e-8,
-                 interval_morgans=None, wildcard_mass=.01, founders=None):
+                 interval_morgans=None, wildcard_mass=.01, founders=None, memo=None):
     """Local search from ``start``, or from ``incumbent`` when it scores better.
 
     ``incumbent`` is a previous-round fit of the same block data and objective.
@@ -334,6 +407,8 @@ def search_panel(start, bank, gl, observed, positions, *, generations,
     ``founders`` (feedback rounds) are the assembled context's founders in this
     block: the objective then codes only the rows no founder claims as new
     haplotypes (ContextFounders); None (the initial fit) codes every row.
+    ``memo`` (LikelihoodMemo) carries this block's fits, scores and merge
+    bounds into later rounds; it is updated in place, None keeps them local.
     """
     assert not bulk, 'This optimized route preserves the ordinary-neighbour search only'
     model_options = dict(generations=generations,
@@ -355,6 +430,12 @@ def search_panel(start, bank, gl, observed, positions, *, generations,
     if prepared is None:
         prepared = scoring.prepare_observations(gl, observed, positions, **model_options)
     prepared = fitting.prepare_fit_observations(prepared)
+    fit_options = dict(learn_frequencies=learn_frequencies,
+                       update_backstop_base=update_backstop_base,
+                       update_backstop_per_founder=update_backstop_per_founder,
+                       update_backstop_per_site=update_backstop_per_site)
+    memo = LikelihoodMemo() if memo is None else memo
+    memo.bind(_memo_data_key(gl, observed, positions, model_options, fit_options))
     score_cache, fit_cache = {}, {}
     work = dict(score_calls=0, score_cache_hits=0, fit_calls=0, fit_cache_hits=0,
                 bound_passes=0)
@@ -364,15 +445,51 @@ def search_panel(start, bank, gl, observed, positions, *, generations,
         if key in fit_cache:
             work['fit_cache_hits'] += 1
             return fit_cache[key]
-        result = fitting.fit_fixed(panel, gl, observed, positions,
-            learn_frequencies=learn_frequencies, frequencies=frequencies,
-            update_backstop_base=update_backstop_base,
-            update_backstop_per_founder=update_backstop_per_founder,
-            update_backstop_per_site=update_backstop_per_site, prepared=prepared,
-            **model_options)
-        work['fit_calls'] += 1
+        # fit_fixed depends on its input only through this canonical start.
+        start_panel, start_frequencies = canonical(panel, frequencies)
+        if not learn_frequencies:
+            start_frequencies = np.full(len(start_panel), 1. / len(start_panel))
+        memo_key = _digest(start_panel, start_frequencies)
+        result = memo.fit(memo_key)
+        if result is None:
+            result = fitting.fit_fixed(panel, gl, observed, positions, frequencies=frequencies,
+                                       prepared=prepared, **fit_options, **model_options)
+            work['fit_calls'] += 1
+            memo.add_fit(memo_key, result)
         fit_cache[key] = result
         return result
+
+    def complete(value):
+        """Restore a memoized fit's posterior arrays (proposals and output read
+        them): a function of its (panel, frequencies), so the incumbent's when
+        it is the same fit, else one E-step."""
+        if value['occupancy'] is not None:
+            return
+        if (incumbent is not None and np.array_equal(value['panel'], incumbent['panel'])
+                and np.array_equal(value['frequencies'], incumbent['frequencies'])):
+            value.update(allele_probability=incumbent['allele_probability'],
+                         occupancy=incumbent['occupancy'])
+        else:
+            memo.hits['completed'] += 1
+            value.update(fitting.fit_posteriors(value['panel'], value['frequencies'], gl, observed,
+                                                positions, prepared=prepared, **model_options))
+
+    def log_likelihood(panel, frequency):
+        key = (panel.tobytes(), frequency.tobytes())
+        if key in score_cache:
+            work['score_cache_hits'] += 1
+            return score_cache[key]
+        memo_key = _digest(panel, frequency)
+        value = memo.scores.get(memo_key)
+        if value is None:
+            parallel.apply_dynamic_threads()
+            value = scoring.score_prepared(panel, frequency, prepared)['log_likelihood']
+            work['score_calls'] += 1
+            memo.scores[memo_key] = value
+        else:
+            memo.hits['scores'] += 1
+        score_cache[key] = value
+        return value
 
     context = None if founders is None else ContextFounders(founders)
 
@@ -402,6 +519,7 @@ def search_panel(start, bank, gl, observed, positions, *, generations,
             round_backstop = True
             break
         ranked, seen, drops, merges = {}, set(), {}, []
+        complete(fit)
         for kind, panel, frequency, origin in proposals(fit, bank):
             if not learn_frequencies:
                 frequency = np.full(len(panel), 1./len(panel))
@@ -415,33 +533,26 @@ def search_panel(start, bank, gl, observed, positions, *, generations,
                 ranked.setdefault(kind, [])
                 merges.append((panel, frequency, origin))
                 continue
-            if key in score_cache:
-                work['score_cache_hits'] += 1
-                ll = score_cache[key]
-            else:
-                parallel.apply_dynamic_threads()
-                ll = scoring.score_prepared(panel, frequency, prepared)['log_likelihood']
-                score_cache[key] = ll
-                work['score_calls'] += 1
-            score = ll + coded(panel, frequency)
+            score = log_likelihood(panel, frequency) + coded(panel, frequency)
             ranked.setdefault(kind, []).append((score, panel, frequency))
             if kind == 'drop':
                 drops[origin] = (panel, frequency)
         if merges:
-            bounds, passes = merge_bounds(fit['panel'], drops, merges, gl, observed, positions,
-                                          prepared, model_options)
-            work['bound_passes'] += passes
+            # The drop and merge lists, hence the bounds, are functions of the
+            # fit's (panel, frequencies) and the block data only.
+            bounds_key = _digest(fit['panel'], fit['frequencies'])
+            bounds = memo.bounds.get(bounds_key)
+            if bounds is None:
+                bounds, passes = merge_bounds(fit['panel'], drops, merges, gl, observed, positions,
+                                              prepared, model_options)
+                work['bound_passes'] += passes
+                memo.bounds[bounds_key] = bounds
+            else:
+                memo.hits['bounds'] += 1
             exact = double_removal_merges(fit['panel'], merges)
             for index, (bound, (panel, frequency, _merge)) in enumerate(zip(bounds, merges)):
                 if index in exact:
-                    key = (panel.tobytes(), frequency.tobytes())
-                    if key in score_cache:
-                        work['score_cache_hits'] += 1
-                    else:
-                        parallel.apply_dynamic_threads()
-                        score_cache[key] = scoring.score_prepared(panel, frequency, prepared)['log_likelihood']
-                        work['score_calls'] += 1
-                    bound = score_cache[key]
+                    bound = log_likelihood(panel, frequency)
                 ranked['merge'].append(
                     (bound + coded(panel, frequency), panel, frequency))
         trials = []
@@ -461,6 +572,7 @@ def search_panel(start, bank, gl, observed, positions, *, generations,
         if objective(best) <= objective(fit) + 1e-6:
             break
         fit = best
+    complete(fit)
     return dict(fit, search_trace=trace, search_method='reference_neighbours',
                 computational_work=work, search_input_key=input_key,
                 search_start=search_start, round_backstop=round_backstop,

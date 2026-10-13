@@ -200,11 +200,15 @@ def _evaluate_bootstrap_chunk(
             ),
         )
 
+    pair_values = shared["junction_pair_values"]
+    pair_evidence = (None if pair_values is None
+                     else (pair_values, shared["junction_pair_compared"]))
     for replicate, multiplicity in enumerate(multiplicities):
         depth_model = pedigree_orientation.fit_direction(
             junction_matrix, callable_matrix, shared["structure_total_bins_by_contig"],
             multiplicity, settings,
             component_count=shared["depth_component_count"],
+            pair_evidence=pair_evidence,
         )
         depth_refits += 1
         try:
@@ -475,6 +479,10 @@ def _run_parent_state_bootstraps(
             settings.bootstrap_seed)
         depth_component_count = full_depth.posterior.shape[1]
     ordinary_shared["depth_component_count"] = int(depth_component_count)
+    # Every refit reweights the same per-chromosome orientation evidence.
+    pair_evidence = pedigree_orientation.junction_pair_evidence(
+        junction_matrix, callable_matrix, structure_total_bins_by_contig, settings)
+    pair_values, pair_compared = (None, None) if pair_evidence is None else pair_evidence
     depth_refits = 0
     loco_refits = 0
     nonconverged = [0, 0]  # bootstrap, LOCO resamples whose family solve failed
@@ -515,6 +523,8 @@ def _run_parent_state_bootstraps(
             "edge_exposure_presence_words": edge_exposure_presence_words,
             "direction_supported_parents": direction_supported_parents,
             "pair_exposure_presence_words": pair_exposure_presence_words,
+            "junction_pair_values": pair_values,
+            "junction_pair_compared": pair_compared,
         }
         for is_loco, weights in tasks:
             chunk = _evaluate_bootstrap_chunk(shared, weights)
@@ -547,12 +557,15 @@ def _run_parent_state_bootstraps(
         ("direction_supported_parents", direction_supported_parents),
         ("edge_exposure_presence_words", edge_exposure_presence_words),
         ("pair_exposure_presence_words", pair_exposure_presence_words),
+        ("junction_pair_values", pair_values),
+        ("junction_pair_compared", pair_compared),
     ):
         if array is None:
             shared[key] = None
         else:
             try:
-                handle, metadata = core_parallel.create_shared_array(array)
+                handle, metadata = core_parallel.create_shared_array(
+                    array, copy_threads=cpu_budget)
             except BaseException:
                 with core_parallel.shared_memory_cleanup(handles):
                     pass

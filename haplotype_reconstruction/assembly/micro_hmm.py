@@ -132,12 +132,15 @@ def _scaled_scan(weights, error_weights, invalid_emission, stay, switch, quality
             unsafe[sample] = True
             continue
         log_scale = prior_max + math.log(scale)
+        # The state matrices are symmetric: each normalisation divides one triangle and mirrors
+        # it (the same divisions, hence the same values as dividing every entry).
         for a in range(haps):
-            for b in range(haps):
-                normal[a, b] /= scale
-                error[a, b] /= scale
-                if normal[a, b] < _MIN_SCALED_MASS or (
-                        error_fraction > 0.0 and error[a, b] < _MIN_SCALED_MASS):
+            for b in range(a, haps):
+                n = normal[a, b] / scale
+                e = error[a, b] / scale
+                normal[a, b] = normal[b, a] = n
+                error[a, b] = error[b, a] = e
+                if n < _MIN_SCALED_MASS or (error_fraction > 0.0 and e < _MIN_SCALED_MASS):
                     unsafe[sample] = True
         for step in range(1, sites):
             if unsafe[sample]:
@@ -172,11 +175,12 @@ def _scaled_scan(weights, error_weights, invalid_emission, stay, switch, quality
                 break
             log_scale += math.log(scale)
             for a in range(haps):
-                for b in range(haps):
-                    next_normal[a, b] /= scale
-                    next_error[a, b] /= scale
-                    if next_normal[a, b] < _MIN_SCALED_MASS or (
-                            error_fraction > 0.0 and next_error[a, b] < _MIN_SCALED_MASS):
+                for b in range(a, haps):
+                    n = next_normal[a, b] / scale
+                    e = next_error[a, b] / scale
+                    next_normal[a, b] = next_normal[b, a] = n
+                    next_error[a, b] = next_error[b, a] = e
+                    if n < _MIN_SCALED_MASS or (error_fraction > 0.0 and e < _MIN_SCALED_MASS):
                         unsafe[sample] = True
             normal, next_normal = next_normal, normal
             error, next_error = next_error, error

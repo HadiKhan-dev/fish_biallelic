@@ -68,7 +68,6 @@ import numpy as np
 from scipy.special import expit
 
 from .environment import boolean_setting
-from .run_record import record_product
 
 
 VERSION = "private-low-fraction-qc-per-contig-v2"
@@ -289,8 +288,21 @@ def _write_table(path, lines):
     temporary.replace(path)
 
 
+def run_record_summary(site_record, sample_ids):
+    """Run-record product of one contig's decision, or None when the QC did not run."""
+    record = site_record.get("sample_quality")
+    if record is None:
+        return None
+    sample_ids = [str(value) for value in sample_ids]
+    flagged = np.asarray(record["flagged"], bool)
+    names = [sample_ids[index] for index in np.flatnonzero(flagged)]
+    return dict(record, sample_ids=sample_ids, flagged_samples=names)
+
+
 def contig_flags(site_record, *, contig, sample_ids, output_dir):
-    """Report one contig's decision (log, run record, TSVs); return the flagged mask.
+    """Report one contig's decision (log, TSVs); return the flagged mask.
+
+    The coordinator records run_record_summary(site_record, sample_ids).
 
     site_record is filter_loaded_sites' record. Returns a boolean over the
     analysed samples, or None when the QC did not run on this contig (QC off,
@@ -314,7 +326,6 @@ def contig_flags(site_record, *, contig, sample_ids, output_dir):
           + "; highest " + ", ".join(f"{sample_ids[index]} z {z[index]:.1f} ({low[index]:.0f} low-fraction events)"
                                      for index in order)
           + f"; {len(segments)} inherited-segment regions reported", flush=True)
-    record_product("sample_quality", contig, dict(record, sample_ids=sample_ids, flagged_samples=names))
     directory = Path(output_dir) / "sample_quality"
     directory.mkdir(parents=True, exist_ok=True)
 

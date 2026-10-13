@@ -701,7 +701,7 @@ def _region_retreat(gathered, bins, removed, has_region, region, t0, penalty, be
 
 @njit(cache=True, parallel=True)
 def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, prefixes,
-                   prefix_common, prefix_of, suffixes, suffix_common, suffix_of, width):
+                   prefix_common, prefix_of, suffixes, suffix_common, suffix_of, width, wanted):
     """Per-sample two-region bounds of replace(f, c) for every row f with a single cover in the
     sample (index >= 0) and every path c of one group: out[s, i, j] for the j-th such row of
     sample s (rows in increasing order).
@@ -713,6 +713,8 @@ def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, pr
     state F after its prefix and the backward vector beta of its suffix: every distinct prefix and
     suffix is run once, reusing the state over shared leading (trailing) blocks. Equal to
     _two_region's recursion in exact arithmetic; float rounding differs by the summation order.
+    Only the rows with wanted[f] are bounded: each row's DP is independent of the others, so
+    their values are unchanged, and the other rows get -inf (their replacements are not searched).
     """
     k, blocks = rows.shape
     samples = index.shape[0]
@@ -724,11 +726,19 @@ def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, pr
     has_region = k > 1
     for sample in prange(samples):
         regions = np.empty(k, np.int64)
+        columns = np.empty(k, np.int64)
         nreg = 0
+        column = 0
         for founder in range(k):
             if index[sample, founder] >= 0:
-                regions[nreg] = founder
-                nreg += 1
+                if wanted[founder]:
+                    regions[nreg] = founder
+                    columns[nreg] = column
+                    nreg += 1
+                else:
+                    for i in range(count):
+                        out[sample, i, column] = -np.inf
+                column += 1
         if nreg == 0:
             continue
         size = k + 2                       # the retained-state bound, then k + 1 new states
@@ -786,7 +796,7 @@ def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, pr
                 for z in range(size):
                     work_value = forward_states[p, rg, z] + backward[q, rg, z]
                     buffer[z] = work_value
-                out[sample, i, rg] = _max_range(buffer, 0, size, -np.inf)
+                out[sample, i, columns[rg]] = _max_range(buffer, 0, size, -np.inf)
     return out
 
 
@@ -944,14 +954,16 @@ class PanelForwards:
             return np.empty((samples, 0))
         return np.stack([self.births[key] for key in keys], axis=1)
 
-    def pool_bounds(self, paths, offsets, keep):
+    def pool_bounds(self, paths, offsets, keep, replaced=None):
         """Summed bounds of [birth(c), replace(0, c) .. replace(k-1, c)] per pool path (rows of
         paths), as one (len(paths), k + 1) array, and the per-sample bounds of the replacements
         whose sum keep(sums) retains ({(path, column): vector}).
 
         Births come from birth_values (exact, shared with the count step); replacements from
         replace_bounds over groups of paths, split where the distinct prefixes and suffixes
-        need the fewest block passes, with at most about 2**26 bytes of per-sample values."""
+        need the fewest block passes, with at most about 2**26 bytes of per-sample values.
+        replaced: if given, only replacements of these rows are bounded; a row outside it sums
+        to -inf wherever it has a single cover (lower_bounds then excludes its moves)."""
         k, blocks = self.rows.shape
         samples = self.forward.shape[0]
         paths = np.ascontiguousarray(paths, dtype=np.int64)
@@ -961,6 +973,10 @@ class PanelForwards:
             return result, kept
         births = self.birth_values(paths, offsets)
         offsets = np.ascontiguousarray(offsets, dtype=np.int64)
+        wanted = np.ones(k, dtype=np.bool_)
+        if replaced is not None:
+            wanted[:] = False
+            wanted[list(replaced)] = True
         singles = self.index >= 0
         width = max(1, int(singles.sum(axis=1).max()))
         slot = np.where(singles, np.cumsum(singles, axis=1) - 1, -1)
@@ -977,7 +993,7 @@ class PanelForwards:
             out = replace_bounds(self.emissions, self.rows, self.penalty, self.index,
                                  self.excluded, offsets, split, np.ascontiguousarray(prefixes),
                                  prefix_common, prefix_of.ravel().astype(np.int64), suffixes,
-                                 suffix_common, suffix_of.ravel().astype(np.int64), width)
+                                 suffix_common, suffix_of.ravel().astype(np.int64), width, wanted)
             part = np.ascontiguousarray(births[:, start:start + len(group)])
             sums = pool_sums(out, part, self.index)
             result[start:start + len(group)] = sums
@@ -1047,12 +1063,20 @@ def _sparse_scores(forwards, lower, founder, new_row, trial_rows, score_samples,
     return values, len(need)
 
 
+def replaced_row(moves, move):
+    """The panel row f a move replaces by one new path, or None for any other move."""
+    first = int(moves.first_removed[move])
+    if first < 0 or int(moves.second_removed[move]) >= 0 or int(moves.second_new[move]) >= 0:
+        return None
+    return first
+
+
 def one_path_move_scores(forwards, moves, local_new, removal, move, trial_rows, score_samples,
                          sample_bounds=None):
     """Exact per-sample scores (_sparse_scores) of a move that replaces one panel row f by one new
     path, or None for any other move."""
-    first = int(moves.first_removed[move])
-    if first < 0 or int(moves.second_removed[move]) >= 0 or int(moves.second_new[move]) >= 0:
+    first = replaced_row(moves, move)
+    if first is None:
         return None
     return _sparse_scores(forwards, removal[:, first], first, local_new[int(moves.first_new[move])],
                           trial_rows, score_samples, sample_bounds)
@@ -1250,14 +1274,15 @@ class Moves:
         return ('birth', (index,))
 
 
-def lower_bounds(moves, forwards, likelihood, to_local, offsets):
+def lower_bounds(moves, forwards, likelihood, to_local, offsets, replaced=None):
     """Lower bound of every move's change of the join score -2 LL: -2 (sum_n U_n - LL(P)).
 
     to_local maps dense paths to emission rows; offsets are the first bin of
     every block. birth(c) moves are bounded with their replace(f, c) moves but get
     +inf: the panel size is decided by panel_count. Also returns the per-sample
     bounds of every move best_improvement's exclusion test keeps ({move: vector}),
-    with which the exact scores skip samples."""
+    with which the exact scores skip samples. replaced: bound only the replacements
+    of these panel rows (PanelForwards.pool_bounds); the caller excludes the others."""
     totals = np.empty(len(moves))
     likelihood = float(likelihood)
     eps = 1e-9 * (1.0 + abs(-2.0 * likelihood))
@@ -1268,7 +1293,7 @@ def lower_bounds(moves, forwards, likelihood, to_local, offsets):
     sample_bounds = {}
     pool = moves.pool_moves
     if pool:
-        values, kept = forwards.pool_bounds(to_local(moves.pool_paths), offsets, keep)
+        values, kept = forwards.pool_bounds(to_local(moves.pool_paths), offsets, keep, replaced)
         group = values.shape[1] - (0 if moves.pool_births else 1)
         shift = 0 if moves.pool_births else 1
         totals[:pool] = (values if moves.pool_births else values[:, 1:]).ravel()

@@ -9,8 +9,10 @@ import pickle
 import pandas as pd
 
 import os
+import resource
+import time
 from multiprocessing import Pool
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 
 def materialize_simulation_haplotypes(haps_list, rng):
@@ -1105,20 +1107,16 @@ def convert_truth_to_painting_objects(all_paintings_flat, num_workers=8):
 
 @timed_stage("simulate_reads")
 def _process_single_contig_postprocessing(args):
+    """Simulate one contig's sequencing reads and convert its truth painting.
+
+    Only allele depths are simulated output: block discovery re-forms its
+    blocks from them (:func:`simulated_genomic_data`), and genotype
+    likelihoods come from read calibration on the same depths.
     """
-    Worker: process one contig's post-simulation steps (read sampling,
-    chunking, probability conversion, truth painting conversion).
-
-    All operations are numpy/scipy — they release the GIL, so
-    ThreadPoolExecutor gives true parallelism here.
-    """
-
-
     (r_name, offspring_haps, paintings_raw, sites, read_depth,
-     error_rate, snps_per_block, snp_shift, seed) = args[:9]
+     error_rate, seed) = args[:7]
     from .designs import ReadModel
-    read_model = ReadModel(error_rate=error_rate, **(args[9] if len(args) > 9 else {}))
-    inference_error = core_numerics.core_config.DEFAULT_READ_ERROR_PROBABILITY
+    read_model = ReadModel(error_rate=error_rate, **(args[7] if len(args) > 7 else {}))
 
     # 1. Convert truth paintings to SamplePainting objects
     true_biological_painting = convert_truth_to_painting_objects(paintings_raw)
@@ -1129,38 +1127,150 @@ def _process_single_contig_postprocessing(args):
         offspring_haps, read_depth, error_rate=error_rate, rng=reads_rng, read_model=read_model,
         positions=sites,
     )
-
-    # 3. Chunk into blocks
-    min_pos = sites[0]
-    max_pos = sites[-1] + 1
-    simd_genomic_data = chunk_up_data(
-        sites, new_reads_array,
-        min_pos, max_pos, 0, 0,
-        use_snp_count=True,
-        snps_per_block=snps_per_block,
-        snp_shift=snp_shift,
-        error_rate=inference_error,
-    )
-
-    # 4. Convert reads to raw genotype likelihoods.  Population-frequency
-    # priors are useful during local haplotype discovery, but reusing them as
-    # sample evidence in linkage HMMs counts the cohort information again.
-    (simd_site_priors, simd_probabalistic_genotypes) = core_numerics.reads_to_probabilities(
-        new_reads_array,
-        read_error_prob=inference_error,
-        use_hwe_prior=False,
-    )
-
     return {
         'r_name': r_name,
         'simulated_reads': new_reads_array,
-        'simd_genomic_data': simd_genomic_data,
-        'simd_probs': simd_probabalistic_genotypes,
-        'simd_priors': simd_site_priors,
         'truth_painting': true_biological_painting,
     }
 
+
+def simulated_genomic_data(sites, reads, snps_per_block, snp_shift):
+    """Discovery blocks of one contig's simulated reads: SNP-count windows."""
+    return chunk_up_data(
+        sites, reads,
+        sites[0], sites[-1] + 1, 0, 0,
+        use_snp_count=True,
+        snps_per_block=snps_per_block,
+        snp_shift=snp_shift,
+        error_rate=core_numerics.core_config.DEFAULT_READ_ERROR_PROBABILITY,
+    )
+
+
+# Peak bytes per (individual, site) of one contig's simulation worker: int8
+# haplotype copies, int64 depth, ALT, REF and stacked read tensors. Measured
+# 48-50 at N=320 (chr3, chr8, chr19, process included); the estimate adds
+# 1 GiB per worker for the process and checkpoint buffers.
+POSTPROCESSING_BYTES_PER_INDIVIDUAL_SITE = 48
+
+# (shared individual-site total of the contigs not yet checkpointed, CPU
+# budget), set once per worker process.
+_POSTPROCESSING_STATE = None
+
+
+def _init_postprocessing_worker(unsaved_size, cpu_budget):
+    global _POSTPROCESSING_STATE
+    _POSTPROCESSING_STATE = (unsaved_size, cpu_budget)
+
+
+def _contig_size(task):
+    return len(task['offspring']) * len(task['sites'])
+
+
+def checkpoint_simulated_contig(task):
+    """Forkserver worker: simulate one contig and write its checkpoints.
+
+    Compression work is proportional to contig size, so the checkpoint gets
+    the contig's share of the CPU budget by size among the contigs not yet
+    checkpointed: early small contigs take a few threads and the last,
+    largest one nearly all. The read checkpoint is durable before the compact
+    evaluation truth that is bound to its file identity. Returns only a
+    small timing record.
+    """
+    unsaved_size, cpu_budget = _POSTPROCESSING_STATE
+    size = _contig_size(task)
+    started = time.monotonic()
+    with core_run_record.worker_stages() as stages:
+        result = _process_single_contig_postprocessing((
+            task['contig'], task['offspring'], task['paintings'], task['sites'],
+            task['read_depth'], task['error_rate'], task['seed'], task['read_model'],
+        ))
+    payload = {
+        'simulated_reads': result['simulated_reads'],
+        'truth_painting': result['truth_painting'],
+        'truth_founder_haplotypes': tuple(
+            np.asarray(haplotype, dtype=np.int8)
+            for parent in task['founders']
+            for haplotype in parent
+        ),
+        'truth_alleles': np.asarray(task['offspring'], dtype=np.int8).transpose(0, 2, 1),
+        'truth_crossovers': task['crossovers'],
+    }
+    del result
+    simulated = time.monotonic()
+    with unsaved_size.get_lock():
+        threads = max(1, round(cpu_budget * size / max(size, unsaved_size.value)))
+    store = core_runtime.CheckpointStore(task['root'], nthreads=threads)
+    store.save_contig(task['stage'], task['contig'], payload)
+    if not store.contig_done(task['stage'], task['contig']):
+        raise OSError(f"Failed to checkpoint {task['stage']}/{task['contig']}")
+    simulation_truth.save_truth(
+        store, task['contig'], task['sample_names'], task['sites'], payload)
+    with unsaved_size.get_lock():
+        unsaved_size.value -= size
+    return dict(
+        contig=task['contig'], stages=stages,
+        simulate_seconds=simulated - started,
+        save_seconds=time.monotonic() - simulated,
+        compression_threads=threads,
+        peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+    )
+
+
+def checkpoint_simulated_contigs(tasks, *, cpu_budget):
+    """Simulate and checkpoint contigs in parallel forkserver workers.
+
+    The largest contigs start first. The worker count is bounded by the CPU
+    budget and by the estimated peak memory of the largest concurrent
+    contigs; each contig runs in a fresh process and compresses its checkpoint
+    on its size share of the budget among the contigs not yet saved. Returns
+    one small timing record per contig.
+    """
+    if not tasks:
+        return []
+    sizes = [_contig_size(task) for task in tasks]
+    order = sorted(range(len(tasks)), key=lambda index: (-sizes[index], index))
+    estimates = [
+        POSTPROCESSING_BYTES_PER_INDIVIDUAL_SITE * size + (1 << 30)
+        for size in sizes
+    ]
+    workers = core_chromosome_parallel.memory_worker_limit(
+        estimates, min(len(tasks), cpu_budget),
+        core_runtime.available_memory_bytes(), label="SIMULATED READS")
+    unsaved_size = core_parallel.forkserver_context.Value("q", sum(sizes))
+    records = []
+    # Workers start lazily, one per contig, so the guard spans the executor.
+    # A worker that dies (for example out of memory) breaks the executor and
+    # fails the stage instead of leaving its contig pending.
+    with core_parallel.main_module_guard():
+        with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=core_parallel.forkserver_context,
+                initializer=_init_postprocessing_worker,
+                initargs=(unsaved_size, cpu_budget),
+                max_tasks_per_child=1) as executor:
+            futures = [
+                executor.submit(checkpoint_simulated_contig, tasks[index])
+                for index in order
+            ]
+            for future in as_completed(futures):
+                record = future.result()
+                print(
+                    f"  [simulated_reads] {record['contig']}: reads "
+                    f"{record['simulate_seconds']:.1f}s, checkpoint "
+                    f"{record['save_seconds']:.1f}s on "
+                    f"{record['compression_threads']} threads, worker peak "
+                    f"{record['peak_rss_bytes'] / 2**30:.1f} GiB",
+                    flush=True,
+                )
+                records.append(record)
+    return records
+
+
+import haplotype_reconstruction.core.chromosome_parallel as core_chromosome_parallel
 import haplotype_reconstruction.core.numerics as core_numerics
 import haplotype_reconstruction.core.parallel as core_parallel
+import haplotype_reconstruction.core.run_record as core_run_record
+import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.painting.components as painting_components
+import haplotype_reconstruction.simulation.truth as simulation_truth

@@ -48,6 +48,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from numba import njit
 import numpy as np
 import pandas as pd
 
@@ -232,14 +233,202 @@ def reversed_segment_calls(result, breakpoints):
             for rows in result["crossover_intervals"]]
 
 
-def _flip_mixture(counts, grid):
-    """Grid of sum_p log(1/2 p^k (1-p)^(n-k) + 1/2 p^(n-k) (1-p)^k) for (k, n) rows."""
+def _mixture_terms(counts, grid):
+    """(grid, rows) terms log(1/2 p^k (1-p)^(n-k) + 1/2 p^(n-k) (1-p)^k) for (k, n) rows."""
     counts = np.asarray(counts, dtype=np.float64).reshape(-1, 2)
     p = np.asarray(grid, dtype=np.float64)[:, None]
     k, n = counts[:, 0][None, :], counts[:, 1][None, :]
     same = k * np.log(p) + (n - k) * np.log1p(-p)
     flipped = (n - k) * np.log(p) + k * np.log1p(-p)
-    return (np.logaddexp(same, flipped) - math.log(2.)).sum(axis=1)
+    return np.logaddexp(same, flipped) - math.log(2.)
+
+
+def _flip_mixture(counts, grid):
+    """Grid of sum_p log(1/2 p^k (1-p)^(n-k) + 1/2 p^(n-k) (1-p)^k) for (k, n) rows."""
+    return _mixture_terms(counts, grid).sum(axis=1)
+
+
+# Pairing statistic for every locus pair. Each parent decidable at both loci
+# contributes the term of its (k, n) count to three flip mixtures; a (k, n)
+# count is stored as the code n (n + 1) / 2 + k. The terms are tabulated once by
+# _mixture_terms (identical elementwise arithmetic), and each mixture adds its
+# parents' terms in parent order as numpy's pairwise summation adds a row of
+# that (grid, parents) matrix, so every score equals the numpy reduction
+# exactly.
+@njit(cache=True)
+def _pair_codes(decidable, odd, parent_offsets, parent_edges, first, second, here, there, discordance):
+    """Count codes per parent with edges decidable at both loci; returns the number of parents."""
+    rows = 0
+    for parent in range(len(parent_offsets) - 1):
+        n = k_here = k_there = k_discordant = 0
+        for slot in range(parent_offsets[parent], parent_offsets[parent + 1]):
+            edge = parent_edges[slot]
+            if decidable[first, edge] and decidable[second, edge]:
+                n += 1
+                k_here += odd[first, edge]
+                k_there += odd[second, edge]
+                if odd[first, edge] != odd[second, edge]:
+                    k_discordant += 1
+        if n:
+            offset = n * (n + 1) // 2
+            here[rows] = offset + k_here
+            there[rows] = offset + k_there
+            discordance[rows] = offset + k_discordant
+            rows += 1
+    return rows
+
+
+@njit(cache=True)
+def _used_pair_codes(decidable, odd, parent_offsets, parent_edges, codes):
+    """Mark the switch (here/there) and discordance count codes that occur in any locus pair."""
+    loci, parents = decidable.shape[0], len(parent_offsets) - 1
+    switch, discordant = np.zeros(codes, dtype=np.bool_), np.zeros(codes, dtype=np.bool_)
+    here, there = np.empty(parents, dtype=np.int64), np.empty(parents, dtype=np.int64)
+    discordance = np.empty(parents, dtype=np.int64)
+    for first in range(loci):
+        for second in range(first + 1, loci):
+            rows = _pair_codes(decidable, odd, parent_offsets, parent_edges, first, second,
+                               here, there, discordance)
+            for row in range(rows):
+                switch[here[row]] = True
+                switch[there[row]] = True
+                discordant[discordance[row]] = True
+    return switch, discordant
+
+
+@njit(cache=True)
+def _pairwise_block(table, rows, codes, start, count, partial, out):
+    """out[g] = sum of table[rows[codes[start:start + count]], g] for count <= 128, in numpy's order.
+
+    numpy sums fewer than 8 values left to right; otherwise eight interleaved
+    partial sums combined as a balanced tree, then the remainder.
+    """
+    grid = table.shape[1]
+    if count < 8:
+        for g in range(grid):
+            out[g] = 0.
+        for index in range(start, start + count):
+            row = rows[codes[index]]
+            for g in range(grid):
+                out[g] += table[row, g]
+        return
+    for lane in range(8):
+        row = rows[codes[start + lane]]
+        for g in range(grid):
+            partial[lane, g] = table[row, g]
+    index = 8
+    while index < count - count % 8:
+        for lane in range(8):
+            row = rows[codes[start + index + lane]]
+            for g in range(grid):
+                partial[lane, g] += table[row, g]
+        index += 8
+    for g in range(grid):
+        out[g] = (((partial[0, g] + partial[1, g]) + (partial[2, g] + partial[3, g]))
+                  + ((partial[4, g] + partial[5, g]) + (partial[6, g] + partial[7, g])))
+    while index < count:
+        row = rows[codes[start + index]]
+        for g in range(grid):
+            out[g] += table[row, g]
+        index += 1
+
+
+@njit(cache=True)
+def _pairwise_rows(table, rows, codes, count, partial, out):
+    """out[g] = sum of table[rows[codes[:count]], g] exactly as numpy's pairwise row sum.
+
+    numpy splits runs longer than 128 values into two halves (the first a
+    multiple of 8 long) and adds the halves' sums. That recursion is walked
+    with explicit stacks (numba's cache does not support recursive kernels);
+    each level at least halves the run, so 64 levels cover any count.
+    """
+    if count <= 128:
+        _pairwise_block(table, rows, codes, 0, count, partial, out)
+        return
+    starts, lengths = np.zeros(64, dtype=np.int64), np.zeros(64, dtype=np.int64)
+    visits = np.zeros(64, dtype=np.int64)
+    sums = np.empty((64, table.shape[1]))
+    lengths[0] = count
+    nodes, results = 1, 0
+    while nodes:
+        node = nodes - 1
+        start, length = starts[node], lengths[node]
+        if length <= 128:
+            _pairwise_block(table, rows, codes, start, length, partial, sums[results])
+            results += 1
+            nodes -= 1
+            continue
+        half = length // 2
+        half -= half % 8
+        if visits[node] < 2:
+            # Descend into the first, then the second half.
+            first = visits[node] == 0
+            starts[nodes] = start if first else start + half
+            lengths[nodes] = half if first else length - half
+            visits[nodes] = 0
+            visits[node] += 1
+            nodes += 1
+        else:
+            sums[results - 2] += sums[results - 1]
+            results -= 1
+            nodes -= 1
+    out[:] = sums[0]
+
+
+@njit(cache=True)
+def _mixture_maximum(table, rows, codes, count, partial, sums):
+    """Maximum over the grid of the parents' summed mixture terms (numpy's reduction plus its zero start)."""
+    _pairwise_rows(table, rows, codes, count, partial, sums)
+    best = -np.inf
+    for g in range(len(sums)):
+        total = 0. + sums[g]
+        if total > best:
+            best = total
+    return best
+
+
+@njit(cache=True)
+def _pairing_scores(decidable, odd, parent_offsets, parent_edges, switch_table, switch_rows,
+                    discordance_table, discordance_rows):
+    """Symmetric pairing log-LR of every locus pair; -inf where no parent is decidable at both loci."""
+    loci, parents = decidable.shape[0], len(parent_offsets) - 1
+    scores = np.full((loci, loci), -np.inf)
+    here, there = np.empty(parents, dtype=np.int64), np.empty(parents, dtype=np.int64)
+    discordance = np.empty(parents, dtype=np.int64)
+    switch_sums, switch_partial = np.empty(switch_table.shape[1]), np.empty((8, switch_table.shape[1]))
+    discordance_sums = np.empty(discordance_table.shape[1])
+    discordance_partial = np.empty((8, discordance_table.shape[1]))
+    for first in range(loci):
+        for second in range(first + 1, loci):
+            rows = _pair_codes(decidable, odd, parent_offsets, parent_edges, first, second,
+                               here, there, discordance)
+            if rows:
+                paired = _mixture_maximum(discordance_table, discordance_rows, discordance, rows,
+                                          discordance_partial, discordance_sums)
+                independent = max(
+                    _mixture_maximum(switch_table, switch_rows, here, rows, switch_partial, switch_sums),
+                    _mixture_maximum(switch_table, switch_rows, there, rows, switch_partial, switch_sums))
+                scores[first, second] = scores[second, first] = paired - independent
+    return scores
+
+
+def _pairing_log_lr(loci, parents):
+    """Pairing statistic of every locus pair (the pair loop of detect_junctions, all pairs at once)."""
+    decidable = np.ascontiguousarray([locus["decidable"] for locus in loci], dtype=np.bool_)
+    odd = np.ascontiguousarray([locus["odd"] for locus in loci], dtype=np.int64)
+    order = np.argsort(parents, kind="stable")
+    parent_offsets = np.r_[0, np.cumsum(np.unique(parents, return_counts=True)[1])].astype(np.int64)
+    largest = int(np.diff(parent_offsets).max())
+    count_n = np.repeat(np.arange(largest + 1), np.arange(1, largest + 2))
+    count_k = np.arange(len(count_n)) - count_n * (count_n + 1) // 2
+    tables = []
+    for used, grid in zip(_used_pair_codes(decidable, odd, parent_offsets, order, len(count_n)),
+                          (_SWITCH_GRID, _DISCORDANCE_GRID)):
+        rows = np.full(len(count_n), -1, dtype=np.int64)
+        rows[used] = np.arange(int(used.sum()))
+        terms = _mixture_terms(np.stack((count_k[used], count_n[used]), axis=1), grid)
+        tables += [np.ascontiguousarray(terms.T), rows]
+    return _pairing_scores(decidable, odd, parent_offsets, order, *tables)
 
 
 def _hotspot_ceiling(left, right, config, rate, chromosome_map):
@@ -323,30 +512,16 @@ def detect_junctions(result, reported, *, config, rate, chromosome_map=None,
             "paired_locus": "", "paired_odd_meioses": 0, "pairing_log_lr": 0., "pairing_tests": 0,
             "nearest_supplied_breakpoint": nearest, "breakpoint_distance_bp": distance})
     tests = len(loci) * (len(loci) - 1) // 2
+    scores = _pairing_log_lr(loci, parents) if len(loci) > 1 else None
     for i, locus in enumerate(loci):
-        best = (0., None, 0)
-        for j, other in enumerate(loci):
-            if i == j:
-                continue
+        # The best pairing is the first locus with the largest positive score.
+        j = -1 if scores is None else int(np.argmax(scores[i]))
+        if j >= 0 and scores[i, j] > 0.:
+            other = loci[j]
             both = locus["decidable"] & other["decidable"]
-            discordance, here, there = [], [], []
-            for parent in np.unique(parents[both]):
-                edges = np.flatnonzero((parents == parent) & both)
-                a, b = locus["odd"][edges], other["odd"][edges]
-                discordance.append((int((a != b).sum()), len(edges)))
-                here.append((int(a.sum()), len(edges)))
-                there.append((int(b.sum()), len(edges)))
-            if not discordance:
-                continue
-            paired = _flip_mixture(discordance, _DISCORDANCE_GRID).max()
-            score = paired - max(_flip_mixture(here, _SWITCH_GRID).max(),
-                                 _flip_mixture(there, _SWITCH_GRID).max())
-            if score > best[0]:
-                shared = int(((locus["odd"] == 1) & (other["odd"] == 1) & both).sum())
-                best = (float(score), j, shared)
-        if best[1] is not None:
-            rows[i].update(paired_locus=rows[best[1]]["locus"], paired_odd_meioses=best[2],
-                           pairing_log_lr=best[0])
+            rows[i].update(paired_locus=rows[j]["locus"],
+                           paired_odd_meioses=int(((locus["odd"] == 1) & (other["odd"] == 1) & both).sum()),
+                           pairing_log_lr=float(scores[i, j]))
         rows[i]["pairing_tests"] = tests
     for row in rows:
         adjusted = row["pairing_log_lr"] - (math.log(row["pairing_tests"]) if row["pairing_tests"] else 0.)

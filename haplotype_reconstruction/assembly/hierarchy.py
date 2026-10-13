@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
+import hashlib
+import json
+import pickle
 import numpy as np
 import numba
 from numba.typed import List
@@ -200,6 +205,72 @@ def _missing_aware_batch_informative_sample_mask(block_masks):
     if len(shape) != 1 or any(mask.shape != shape for mask in masks):
         raise ValueError("batch informative masks must be aligned vectors")
     return np.logical_and.reduce(masks)
+
+
+# Block attributes no join reads: path selection's records (discovery/path_blocks.py) and the
+# panel-search records of earlier levels. They differ between a contig's assemblies without
+# changing any join, so the batch input digest leaves them out.
+_UNREAD_BLOCK_ATTRIBUTES = frozenset((
+    'path_fit', 'path_unknown_copy_fraction', 'path_wildcard_interpretation',
+    'panel_search_diagnostics',
+))
+_DIGEST_SAMPLE_CHUNK = 32
+
+
+def _update_value_digest(digest, value):
+    """Feed one attribute value to a digest in a type-tagged, length-prefixed encoding."""
+    if isinstance(value, np.ndarray) and not value.dtype.hasobject:
+        digest.update(f'A{value.dtype.str}{value.shape}'.encode())
+        digest.update(np.ascontiguousarray(value))
+    elif isinstance(value, dict):
+        digest.update(f'D{len(value)}'.encode())
+        for key in sorted(value, key=repr):
+            _update_value_digest(digest, key)
+            _update_value_digest(digest, value[key])
+    elif isinstance(value, (list, tuple)):
+        digest.update(f'{type(value).__name__}{len(value)}'.encode())
+        for item in value:
+            _update_value_digest(digest, item)
+    elif value is None or isinstance(value, (bool, int, float, complex, str, bytes, np.generic)):
+        text = repr(value).encode()
+        digest.update(f'S{type(value).__name__}{len(text)}:'.encode())
+        digest.update(text)
+    else:
+        text = pickle.dumps(value, protocol=5)
+        digest.update(f'P{len(text)}:'.encode())
+        digest.update(text)
+
+
+def _evidence_digest(blocks, global_probs, global_sites):
+    """SHA-256 of a batch's evidence slice as _process_single_batch takes it: the scoring evidence
+    between its first and last site, and their positions. Contiguous copies of a few samples at
+    a time keep the copy and the hash outside the GIL, so batches are digested concurrently."""
+    indices = np.searchsorted(global_sites, np.concatenate([b.positions for b in blocks]))
+    first, last = int(indices.min()), int(indices.max())
+    digest = hashlib.sha256()
+    _update_value_digest(digest, global_sites[first:last + 1])
+    digest.update(f'E{global_probs.dtype.str}{global_probs.shape[0]}x{last + 1 - first}'.encode())
+    for start in range(0, global_probs.shape[0], _DIGEST_SAMPLE_CHUNK):
+        digest.update(np.ascontiguousarray(
+            global_probs[start:start + _DIGEST_SAMPLE_CHUNK, first:last + 1]))
+    return digest.digest()
+
+
+def _batch_input_digest(context, blocks, informative_mask, evidence_digest):
+    """SHA-256 of everything one batch's join reads: context (the join settings and the assembly
+    code identity, canonical JSON bytes), the batch's informative samples, its evidence slice
+    (_evidence_digest) and every block attribute except _UNREAD_BLOCK_ATTRIBUTES. Joins are
+    deterministic, so equal digests give equal super-blocks."""
+    digest = hashlib.sha256(context)
+    _update_value_digest(digest, np.asarray(informative_mask, dtype=np.bool_))
+    digest.update(evidence_digest)
+    for block in blocks:
+        names = sorted(set(vars(block)) - _UNREAD_BLOCK_ATTRIBUTES)
+        digest.update(f'B{len(names)}'.encode())
+        for name in names:
+            digest.update(f'{len(name)}:{name}'.encode())
+            _update_value_digest(digest, getattr(block, name))
+    return digest.hexdigest()
 
 
 def _linking_proxy_indices(block, max_sites, panel=None):
@@ -885,7 +956,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           min_boundary_informative_samples=1,
                           chromosome_map=None,
                           panel_search_config=None, scoring_probs=None,
-                          batch_queue_key=None):
+                          batch_queue_key=None, code_identity=None, reusable=None,
+                          batch_provenance=None):
     """Performs one level of Hierarchical Assembly.
 
     Memory strategy:
@@ -922,6 +994,14 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
           max_workers = available_ram / budget.
       min_boundary_informative_samples: Require this many samples informative
           in both adjacent frozen inference panels.
+      code_identity: the assembly code identity (pipeline.assembly_release_code_identity).
+          With it every joined batch (two or more blocks, some informative sample) gets
+          the digest of its exact inputs (_batch_input_digest), and batch_provenance (a
+          list) receives one record per such super-block: its position span, digest and
+          whether it was reused.
+      reusable: {input digest: super-block} of joins by earlier assemblies of this
+          contig (pipeline.earlier_join_results). A batch whose digest is found there
+          is not recomputed: joins are deterministic, so its super-block is identical.
 
     IMPORTANT: The entry script must NOT be named main.py — otherwise
     forkserver workers will re-execute it.
@@ -1002,35 +1082,85 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             if h.dtype == np.float64:
                 block.haplotypes[k] = h.astype(np.float32)
 
+    batch_masks = [_missing_aware_batch_informative_sample_mask(
+        block_informative_masks[start_i:end_i]) for start_i, end_i in batch_ranges]
+    digests = {}
+    if code_identity is not None:
+        context = json.dumps(dict(
+            schema='hierarchy-batch-inputs-v1', code=code_identity, recomb_rate=recomb_rate,
+            max_sites_for_linking=max_sites_for_linking, n_generations=n_generations,
+            recomb_tolerance=recomb_tolerance, cc_scale=cc_scale,
+            chromosome_map=None if chromosome_map is None else chromosome_map.identity(),
+            panel_search=None if panel_search_config is None else asdict(panel_search_config)),
+            sort_keys=True, separators=(',', ':')).encode()
+        joined = [b_idx for b_idx, (start_i, end_i) in enumerate(batch_ranges)
+                  if end_i - start_i >= 2 and np.any(batch_masks[b_idx])]
+        # Evidence slices are digested concurrently; the block attributes, mostly small Python
+        # objects, in this thread (concurrent small updates only contend for the GIL).
+        with ThreadPoolExecutor(max_workers=max(1, min(total_cores, len(joined)))) as executor:
+            evidence = list(executor.map(lambda b_idx: _evidence_digest(
+                input_blocks[batch_ranges[b_idx][0]:batch_ranges[b_idx][1]], global_probs,
+                global_sites), joined))
+        digests = {b_idx: _batch_input_digest(
+            context, input_blocks[batch_ranges[b_idx][0]:batch_ranges[b_idx][1]],
+            batch_masks[b_idx], value) for b_idx, value in zip(joined, evidence)}
+    reused = {b_idx: reusable[digest] for b_idx, digest in digests.items()
+              if reusable and digest in reusable}
+    if reused:
+        print(f"  Reused {len(reused)} of {num_batches} batches with inputs identical to an "
+              f"earlier assembly's join")
+
     def make_worker_args(inner_num_processes):
         worker_args = []
 
         for b_idx, (start_i, end_i) in enumerate(batch_ranges):
+            if b_idx in reused:
+                continue
             original_blocks_list = list(input_blocks[start_i:end_i])
-            batch_informative_sample_mask = (
-                _missing_aware_batch_informative_sample_mask(
-                    block_informative_masks[start_i:end_i]
-                )
-            )
 
             worker_args.append((
                 b_idx, start_i, end_i, original_blocks_list,
                 recomb_rate,
                 max_sites_for_linking, n_generations, recomb_tolerance,
                 cc_scale, inner_num_processes, verbose,
-                chromosome_map, panel_search_config, batch_informative_sample_mask,
+                chromosome_map, panel_search_config, batch_masks[b_idx],
             ))
         return worker_args
+
+    def finish(results):
+        results = list(results) + [
+            {'batch_idx': b_idx, 'super_block': block, 'status': 'reused'}
+            for b_idx, block in reused.items()]
+        if batch_provenance is not None:
+            joined_blocks = {result['batch_idx']: result.get('super_block') for result in results
+                             if result['status'] in ('success', 'reused')}
+            for b_idx, digest in digests.items():
+                if joined_blocks.get(b_idx) is not None:
+                    start_i, end_i = batch_ranges[b_idx]
+                    batch_provenance.append(dict(
+                        position_start=int(input_blocks[start_i].positions[0]),
+                        position_end=int(input_blocks[end_i - 1].positions[-1]),
+                        inputs_sha256=digest, reused=b_idx in reused))
+        return _collect_batch_results(results)
+
+    pending_ranges = [batch_range for b_idx, batch_range in enumerate(batch_ranges)
+                      if b_idx not in reused]
+    if not pending_ranges:
+        return finish([])
 
     from ..core import batch_queue
     if batch_queue.configured() and num_batches > 1:
         worker_gb = max(min_gb_per_worker, _hmm_batch_memory_gb(
-            input_blocks, batch_ranges, global_probs.shape[0], max_sites_for_linking,
+            input_blocks, pending_ranges, global_probs.shape[0], max_sites_for_linking,
             global_sites, panel_search_config))
+        if reused and batch_queue_key is not None:
+            # Queue results are keyed by bundle number: a different task subset is another stage.
+            batch_queue_key = hashlib.sha256(json.dumps(
+                [batch_queue_key, sorted(reused)]).encode()).hexdigest()
         results = list(batch_queue.map_batches('hierarchy', make_worker_args(1),
             (global_probs, global_sites), total_cores, key=batch_queue_key,
             worker_memory_gb=worker_gb))
-        return _collect_batch_results(results)
+        return finish(results)
 
     # Create POSIX shared memory for the global arrays.
     t0 = time.time()
@@ -1049,7 +1179,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     # memory creation so it already accounts for parent + loaded data
     # + shared segments.
     worker_gb = max(min_gb_per_worker, _hmm_batch_memory_gb(
-        input_blocks, batch_ranges, global_probs.shape[0], max_sites_for_linking,
+        input_blocks, pending_ranges, global_probs.shape[0], max_sites_for_linking,
         global_sites, panel_search_config))
     max_by_ram = num_processes  # fallback: no capping
     try:
@@ -1062,19 +1192,20 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     except Exception:
         pass  # non-Linux or /proc unavailable — use num_processes as-is
 
-    outer_workers = min(num_batches, num_processes, max_by_ram)
+    num_tasks = len(pending_ranges)
+    outer_workers = min(num_tasks, num_processes, max_by_ram)
     inner_num_processes = max(1, total_cores // outer_workers)
 
     # Preview
     print(f"Parallelism: {outer_workers} outer workers x {inner_num_processes} inner cores "
           f"= {outer_workers * inner_num_processes} total")
-    if outer_workers < num_processes and outer_workers < num_batches:
+    if outer_workers < num_processes and outer_workers < num_tasks:
         print(f"  Workers capped by RAM: {mem_available_gb:.0f} GB available / "
               f"{worker_gb:.2f} GB per worker = {max_by_ram} max")
     print(f"  Dynamic threading: enabled (ceiling={total_cores} cores)")
 
     if maxtasksperchild is not None:
-        tasks_per_worker = math.ceil(num_batches / outer_workers)
+        tasks_per_worker = math.ceil(num_tasks / outer_workers)
         n_recycles = max(0, tasks_per_worker // maxtasksperchild - 1)
         print(f"  Worker recycling: every {maxtasksperchild} batches "
               f"(~{tasks_per_worker} tasks/worker, ~{n_recycles} recycles each)")
@@ -1092,7 +1223,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         "started_counter": core_parallel.forkserver_context.Value('i', 0),
         "participant_counter": core_parallel.forkserver_context.Value('i', 0),
         "batch_generation": core_parallel.forkserver_context.Value('i', 0),
-        "batch_task_count": core_parallel.forkserver_context.Value('i', num_batches),
+        "batch_task_count": core_parallel.forkserver_context.Value('i', num_tasks),
         "startup_target": core_parallel.forkserver_context.Value('i', outer_workers),
         "startup_ready": core_parallel.forkserver_context.Value('i', 0),
     }
@@ -1136,7 +1267,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             try:
                 for result in tqdm(
                     pool.imap_unordered(_process_single_batch, worker_args),
-                    total=num_batches,
+                    total=num_tasks,
                     desc="Processing Batches"
                 ):
                     results.append(result)
@@ -1168,7 +1299,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         finally:
             _main_guard.__exit__(None, None, None)
 
-    return _collect_batch_results(results)
+    return finish(results)
 
 
 def _collect_batch_results(results):
@@ -1177,6 +1308,7 @@ def _collect_batch_results(results):
 
     output_super_blocks = []
     success_count = 0
+    reused_count = 0
     passthrough_count = 0
     unresolved_count = 0
     failed_count = 0
@@ -1194,13 +1326,15 @@ def _collect_batch_results(results):
             output_super_blocks.append(result['super_block'])
             if result['status'] == 'success':
                 success_count += 1
+            elif result['status'] == 'reused':
+                reused_count += 1
             elif result['status'] == 'passthrough':
                 passthrough_count += 1
         else:
             failed_count += 1
 
     print(f"Hierarchical Step Complete. Produced {len(output_super_blocks)} Super-Blocks.")
-    print(f"  Success: {success_count}, Passthrough: {passthrough_count}, "
+    print(f"  Success: {success_count}, Reused: {reused_count}, Passthrough: {passthrough_count}, "
           f"Unresolved: {unresolved_count}, Failed: {failed_count}")
     from .panel_search import search_summary
     summary = search_summary(

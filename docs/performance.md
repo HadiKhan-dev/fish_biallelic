@@ -33,7 +33,7 @@ checkpoints; helpers publish attempt-specific results. Results are gathered in
 genomic order before dependent levels proceed. Claims have renewable leases;
 late results cannot overwrite a reassigned claim. Completed hierarchy bundles
 can resume under the existing scientific checkpoint identity. Local fitting
-retains its ordinary per-block checkpoints.
+retains its ordinary block checkpoints (written in chunks of 64 blocks).
 
 Without this option, execution stays node-local. Discovery, chromosome-wide
 founder refinement and downstream inference are not distributed by this queue.
@@ -76,15 +76,20 @@ Block feedback, final assembly and painting of different contigs are
 independent, and one contig keeps only part of a large allocation busy. By
 default (`--contig-workers auto`, TOML `[run].contig_workers`, environment
 `HAPLOTYPES_CONTIG_WORKERS`) the workflows reconstruct up to one contig per
-eight `--cores` concurrently, in persistent contig coordinators that share
+sixteen `--cores` concurrently, in persistent contig coordinators that share
 `--cores` as leases (the chromosome scheduler used downstream). Larger contigs
-start first. Each contig runs the unchanged sequential route with its lease as
-release, painting and checkpoint-compression ceiling; a coordinator that has
-finished its contigs returns its lease, and the others take it at their next
-contig boundary, not inside a contig. `--contig-workers 1` keeps the sequential
-route; an integer sets the maximum explicitly. A memory estimate (eight times
-the decoded block-discovery checkpoint plus 2 GiB, and 256 MiB per core) can
-lower the number of concurrent contigs, never the core budget.
+start first. Leases start in proportion to each coordinator's work (decoded
+block-discovery sizes), so the longest contig starts with its share. Each
+contig runs the unchanged sequential route with its lease as release, painting
+and checkpoint-compression ceiling; a coordinator that has finished its contigs
+returns its lease, and the others take it, in proportion to their remaining
+work, at their next contig boundary, not inside a contig. `--contig-workers 1`
+keeps the sequential route; an integer sets the maximum explicitly. A memory
+estimate (three times the decoded block-discovery checkpoint plus 16 GiB, and
+768 MiB per core; fitted to node memory sampled every 10 s in an N=320 run) can
+lower the number of concurrent contigs, never the core budget. Narrow lanes are
+more efficient: a contig at 16 threads used about 7% fewer core-seconds than at
+32-37 (hierarchy, refinement tails and serial checkpoint phases scale poorly).
 
 Core ceilings are excluded from every scientific identity, so checkpoints,
 stage identities and resume are unchanged; painting checkpoints record the
@@ -98,7 +103,8 @@ own checkpoints. The contigs also stop in this way when the workflow's main
 process exits for any reason, such as a signal sent to that process alone, so
 none continues without an owner. Block discovery still processes contigs one
 after another: its discovery step already uses the whole allocation through one
-worker pool.
+persistent worker pool, while helper threads prepare the next contig (loading,
+site quality, read calibration) and save the previous one.
 
 On 7 October 2026, sequential and concurrent runs from the same
 block-discovery checkpoints (76-CPU Ice Lake nodes; three simulations and the
@@ -116,11 +122,17 @@ contig late in a list can leave a tail.
 
 ## Native compilation caches
 
-Package startup automatically isolates Numba's compiled-code cache by **run/job
-and hostname**, on both local machines and clusters. Slurm, PBS/Torque, LSF
-and SGE job IDs (including array-task identifiers) allow reuse between commands
-in the same job. Otherwise, each independent invocation creates a run ID
-inherited by its subprocesses. No scheduler-specific wrapper is needed.
+Package startup gives Numba a run-local cache directory for exactly the current
+compiled code, `<base>/<code key>`. The code key hashes the whole package
+source and its location, the Python, NumPy, Numba and llvmlite versions, the
+code-generation `NUMBA_*` settings and the host CPU model. Any edit therefore
+selects a new, empty directory, including an edited constant or callee in
+another file, which Numba's own per-file timestamp check would miss. The base
+isolates automatic caches by **run/job and hostname**, on both local machines
+and clusters. Slurm, PBS/Torque, LSF and SGE job IDs (including array-task
+identifiers) allow reuse between commands in the same job. Otherwise, each
+independent invocation creates a run ID inherited by its subprocesses. No
+scheduler-specific wrapper is needed.
 
 Parallel workers on the same host within that run/job reuse compiled kernels.
 The program recognizes its own inherited cache setting and recalculates it on
@@ -128,18 +140,32 @@ startup: another hostname or recognized batch job gets a different path even whe
 parent's environment was forwarded. This does not serialize chromosome work
 or change the scientific model or checkpoints.
 
-The cache lives below `SLURM_TMPDIR` within Slurm when supplied, otherwise
+The base lives below `SLURM_TMPDIR` within Slurm when supplied, otherwise
 Python's temporary directory (`TMPDIR` where configured). Even when that
 storage is shared, run/job/host-specific paths separate independent writers.
 No writable source checkout or administrator privileges are required.
-Explicit, nonempty `NUMBA_CACHE_DIR` overrides remain authoritative; users
-choosing a shared override are responsible for its suitability.
+An explicit, nonempty `NUMBA_CACHE_DIR` replaces the base; the code-key
+directory is created inside it.
 
-The selected path is recorded in run metadata. First use in a new cache requires
-compilation, then workers and subsequent chromosomes reuse it. In particular,
-independent runs without a recognized batch job now compile afresh rather than silently
-sharing a persistent source-tree cache. This is the startup-cost trade-off for
-automatic isolation; an explicit cache path can opt into deliberate reuse.
+Compiled kernels persist between runs in a store under
+`$XDG_CACHE_HOME/haplotype-reconstruction/numba` (by default
+`~/.cache/haplotype-reconstruction/numba`; on a cluster, a home directory that
+every node shares). It holds one directory per code key with a single
+`cache.tar` snapshot of a run-local cache (about 60-100 MB), and
+`manifest.pkl`, the compiled signatures and compile times of the latest
+publication. The `simulate`, `reconstruct`, `tropheops` and `astcal` workflows
+first install their key's snapshot, then compile the manifest overloads that
+the run-local cache still lacks (all of them for a new key) in a pool of the
+run's `--cores`, one function per task and longest first, before the workflow
+starts its own pools. When the workflow ends, also after a failure, it
+publishes the run-local cache as its key's snapshot if anything was compiled.
+Publication is an atomic rename, so concurrent runs on several hosts read only
+complete snapshots (the last publication of a key wins). The six most recently
+used keys are kept. Store failures (no writable home, full quota) only cost
+compilation time and are reported in the run log; the run record times the
+`numba_warmup` and `numba_publish` stages. Other commands (`evaluate`,
+`recombination`, `export`, `batch-worker`) use their run-local cache without
+the store.
 
 These disposable files are separate from pipeline checkpoints and do not need
 to be retained to resume scientific work. Scratch cleanup follows the site's

@@ -4,6 +4,9 @@ At a fixed site, equal assigned pairs and equal likelihood triples imply equal
 held-out potentials, support and deterministic starts. Solve each such case
 once, including their predictive emissions and entropy terms. The caller
 bounds the site tile so storage never grows as an N L K-squared tensor.
+Further reuse is exact as well: later mean-field starts that reach a state of
+the converged first start replay its remaining sweeps, and predictive values
+equal to a floored evidence value reuse that value's cached logarithm.
 """
 from __future__ import annotations
 
@@ -14,6 +17,10 @@ from numba import njit, prange
 
 @njit(cache=True)
 def _stable_sigmoid(logit: float) -> float:
+    # exp(-37) < 2**-53, so 1 + exp(-logit) already rounds to exactly one:
+    # returning 1.0 skips the exponential without changing any result.
+    if logit >= 37.0:
+        return 1.0
     if logit >= 0.0:
         return 1.0 / (1.0 + math.exp(-logit))
     exponential = math.exp(logit)
@@ -21,7 +28,7 @@ def _stable_sigmoid(logit: float) -> float:
 
 
 @njit(cache=True)
-def _site_workspace(k, n_edges):
+def _site_workspace(k, n_edges, max_iter):
     q = np.empty(k, dtype=np.float64)
     candidate_q = np.empty((3, k), dtype=np.float64)
     candidate_elbo = np.empty(3, dtype=np.float64)
@@ -37,6 +44,7 @@ def _site_workspace(k, n_edges):
     cavity_edge_potential = np.empty((n_edges, 4), dtype=np.float64)
     remaining_support_by_founder = np.empty(k, dtype=np.int64)
     supported_founders = np.empty(k, dtype=np.int64)
+    trajectory = np.empty((max_iter + 1, k), dtype=np.float64)
     return (
         q,
         candidate_q,
@@ -51,6 +59,7 @@ def _site_workspace(k, n_edges):
         cavity_edge_potential,
         remaining_support_by_founder,
         supported_founders,
+        trajectory,
     )
 
 
@@ -74,6 +83,7 @@ def _solve_cavity_site(
         cavity_edge_potential,
         remaining_support_by_founder,
         supported_founders,
+        trajectory,
     ) = work
     wildcard = k
     n_edges = pair.shape[0]
@@ -151,6 +161,9 @@ def _solve_cavity_site(
         ] = v11 - v10
 
     candidate_converged[:] = 0
+    # Sweeps used by the first start; with ``trajectory`` (its state after
+    # every sweep) this lets later starts reuse its exact continuation.
+    first_length = 0
     for start_index in range(3):
         for founder in range(k):
             if (
@@ -166,7 +179,11 @@ def _solve_cavity_site(
                 )
 
         converged = False
+        joined = False
         used_iterations = 0
+        if start_index == 0:
+            for founder in range(k):
+                trajectory[0, founder] = q[founder]
         for iteration in range(mean_field_max_iter):
             maximum_change = 0.0
             for supported_index in range(n_supported):
@@ -194,12 +211,62 @@ def _solve_cavity_site(
                     maximum_change = change
                 q[founder] = updated
             used_iterations = iteration + 1
+            if start_index == 0:
+                for founder in range(k):
+                    trajectory[used_iterations, founder] = q[founder]
             if maximum_change <= mean_field_tolerance:
                 converged = True
                 break
+            # A sweep is a deterministic function of the state alone (an
+            # isolated founder held at its exact unary value contributes a
+            # zero change whether or not it is revisited). A later start that
+            # reaches state s of the converged first start therefore repeats
+            # that start's remaining sweeps, convergence test and endpoint bit
+            # for bit; count those sweeps instead of recomputing them. A
+            # continuation that would pass the sweep limit is not taken.
+            if start_index > 0 and candidate_converged[0] == 1:
+                for state in range(first_length):
+                    if (used_iterations + first_length - state
+                            > mean_field_max_iter):
+                        continue
+                    same_state = True
+                    for founder in range(k):
+                        if q[founder] != trajectory[state, founder]:
+                            same_state = False
+                            break
+                    if same_state:
+                        used_iterations += first_length - state
+                        converged = True
+                        joined = True
+                        break
+                if joined:
+                    break
+        if start_index == 0:
+            first_length = used_iterations
         heldout_iterations += used_iterations
         if converged:
             candidate_converged[start_index] = 1
+        if start_index > 0:
+            same_endpoint = joined
+            if not joined:
+                same_endpoint = True
+                for founder in range(k):
+                    if q[founder] != candidate_q[0, founder]:
+                        same_endpoint = False
+                        break
+            if same_endpoint:
+                # The ELBO and its entropy terms are functions of the
+                # endpoint alone, so an equal endpoint reuses them exactly.
+                candidate_elbo[start_index] = candidate_elbo[0]
+                for founder in range(k):
+                    candidate_q[start_index, founder] = candidate_q[0, founder]
+                    candidate_q_log_q[start_index, founder] = (
+                        candidate_q_log_q[0, founder]
+                    )
+                    candidate_one_minus_q_log_one_minus_q[
+                        start_index, founder
+                    ] = candidate_one_minus_q_log_one_minus_q[0, founder]
+                continue
 
         elbo = 0.0
         for founder in range(k):
@@ -211,11 +278,13 @@ def _solve_cavity_site(
             one_minus_q_log_one_minus_q = 0.0
             if probability > 0.0 and probability < 1.0:
                 q_log_q = probability * math.log(probability)
-                one_minus_q_log_one_minus_q = (
-                    (1.0 - probability) * math.log(
-                        1.0 - probability
+                complement = 1.0 - probability
+                # log(1) is exactly zero: a complement that rounds to one
+                # contributes the same zero term without the logarithm.
+                if complement != 1.0:
+                    one_minus_q_log_one_minus_q = (
+                        complement * math.log(complement)
                     )
-                )
                 elbo -= q_log_q
                 elbo -= one_minus_q_log_one_minus_q
             candidate_q_log_q[start_index, founder] = q_log_q
@@ -303,7 +372,8 @@ def grouped_cavity_predictions(
         likelihood, log_likelihood, rw_log_likelihood, ww_log_emission,
         haplotypes, assignments, founder_support, unary, pair, edge_first,
         edge_second, neighbours, neighbour_counts, mean_field_max_iter,
-        mean_field_tolerance, likelihood_floor, site_start, site_stop):
+        mean_field_tolerance, likelihood_floor, site_start, site_stop,
+        shared_triple):
     """Solve and predict exact cases once in a bounded, site-parallel tile."""
     n_samples = likelihood.shape[0]
     k = haplotypes.shape[0]
@@ -316,19 +386,22 @@ def grouped_cavity_predictions(
     spreads = np.empty((tile_sites, n_samples), dtype=np.float64)
     for offset in prange(tile_sites):
         site = site_start + offset
-        work = _site_workspace(k, pair.shape[0])
+        work = _site_workspace(k, pair.shape[0], mean_field_max_iter)
         seen = {}
         for heldout in range(n_samples):
             # Supported inputs are finite normalized likelihoods; their log
             # and wildcard caches are deterministic functions of this triple.
             # Equality is exact, with no rounding or likelihood bucketing.
-            key = (assignments[heldout, 0], assignments[heldout, 1],
-                   likelihood[heldout, site, 0], likelihood[heldout, site, 1],
-                   likelihood[heldout, site, 2])
-            if key in seen:
-                representatives[offset, heldout] = seen[key]
-                continue
-            seen[key] = heldout
+            # A sample whose triple no other sample shares at this site can
+            # never join a group, so only shared triples are looked up.
+            if shared_triple[heldout, site]:
+                key = (assignments[heldout, 0], assignments[heldout, 1],
+                       likelihood[heldout, site, 0], likelihood[heldout, site, 1],
+                       likelihood[heldout, site, 2])
+                if key in seen:
+                    representatives[offset, heldout] = seen[key]
+                    continue
+                seen[key] = heldout
             representatives[offset, heldout] = heldout
             (q, iterations, failed, zero, alternate, spread,
              q_log_q, complement_log_complement) = _solve_cavity_site(
@@ -352,6 +425,21 @@ def grouped_cavity_predictions(
             g0 = likelihood[heldout, site, 0]
             g1 = likelihood[heldout, site, 1]
             g2 = likelihood[heldout, site, 2]
+            # log() is a pure function: a floored predictive value equal to
+            # a floored evidence value reuses that value's cached logarithm
+            # (the floors below mirror the cache construction exactly).
+            c0 = g0
+            if c0 < likelihood_floor:
+                c0 = likelihood_floor
+            c1 = g1
+            if c1 < likelihood_floor:
+                c1 = likelihood_floor
+            c2 = g2
+            if c2 < likelihood_floor:
+                c2 = likelihood_floor
+            l0 = log_likelihood[heldout, site, 0]
+            l1 = log_likelihood[heldout, site, 1]
+            l2 = log_likelihood[heldout, site, 2]
             # Geometry is RR (row-major upper triangle), RW, WW. Retain
             # exactly the scalar arithmetic and floors within each state.
             state = 0
@@ -360,7 +448,12 @@ def grouped_cavity_predictions(
                 predictive = (1.0 - qi) * g0 + qi * g2
                 if predictive < likelihood_floor:
                     predictive = likelihood_floor
-                predictions[offset, heldout, state] = math.log(predictive)
+                if predictive == c0:
+                    predictions[offset, heldout, state] = l0
+                elif predictive == c2:
+                    predictions[offset, heldout, state] = l2
+                else:
+                    predictions[offset, heldout, state] = math.log(predictive)
                 state += 1
                 for second in range(first + 1, k):
                     qj = q[second]
@@ -370,8 +463,23 @@ def grouped_cavity_predictions(
                     predictive = p0 * g0 + p1 * g1 + p2 * g2
                     if predictive < likelihood_floor:
                         predictive = likelihood_floor
-                    predictions[offset, heldout, state] = math.log(predictive)
+                    if predictive == c0:
+                        predictions[offset, heldout, state] = l0
+                    elif predictive == c1:
+                        predictions[offset, heldout, state] = l1
+                    elif predictive == c2:
+                        predictions[offset, heldout, state] = l2
+                    else:
+                        predictions[offset, heldout, state] = math.log(predictive)
                     state += 1
+            m0 = 0.5 * (g0 + g1)
+            m1 = 0.5 * (g1 + g2)
+            if m0 < likelihood_floor:
+                m0 = likelihood_floor
+            if m1 < likelihood_floor:
+                m1 = likelihood_floor
+            r0 = rw_log_likelihood[heldout, site, 0]
+            r1 = rw_log_likelihood[heldout, site, 1]
             for first in range(k):
                 qi = q[first]
                 predictive = (
@@ -381,7 +489,12 @@ def grouped_cavity_predictions(
                 )
                 if predictive < likelihood_floor:
                     predictive = likelihood_floor
-                predictions[offset, heldout, state] = math.log(predictive)
+                if predictive == m0:
+                    predictions[offset, heldout, state] = r0
+                elif predictive == m1:
+                    predictions[offset, heldout, state] = r1
+                else:
+                    predictions[offset, heldout, state] = math.log(predictive)
                 state += 1
             predictions[offset, heldout, state] = ww_log_emission[heldout, site]
     return representatives, predictions, entropy_terms, diagnostics, spreads

@@ -8,7 +8,8 @@ count rule, count_criterion.decide_with_sequence (the assembly join's rule).
 Fixed-K fit C(X): repeat sweeps of
   (i) exact normalised forward/backward block messages of the panel (O(S n Q));
   (ii) proposals computed from the panel at the start of the sweep, independently and
-      in parallel (a pure function of the panel): for every founder and every 8-block
+      in parallel (a pure function of the panel; a window whose inputs are unchanged since
+      the search last solved it reuses that solve): for every founder and every 8-block
       window (stride 4, plus the window ending at the last block) the canonical exact
       maximiser of the binned window problem (window_dp.py); where an L1 context exists,
       for every founder and every window of 4 consecutive L1 spans (stride 2) the same
@@ -23,9 +24,10 @@ Fixed-K fit C(X): repeat sweeps of
   (iv) the canonical F is recomputed and must equal the start F plus the accepted gains.
 Best of two: every fixed-K fit runs this search twice from the same start, concurrently,
 once with its first pass forward and once with its first pass reversed (both then
-alternate). Each is a deterministic local search; the fit keeps the one with the higher
-exact F (exact ties: the forward-first one), so at a fixed start it never ends below the
-forward-first search, and reports both (record["best_of_two"]).
+alternate; their common sweep-0 messages and proposals are computed once). Each is a
+deterministic local search; the fit keeps the one with the higher exact F (exact ties:
+the forward-first one), so at a fixed start it never ends below the forward-first
+search, and reports both (record["best_of_two"]).
 
 Coarse-move guard (config.coarse_move_guard). A long founder edit can raise F by letting
 several samples drop the switch of a crossover they share (descendants of one meiosis
@@ -95,6 +97,7 @@ the upper bound is a reported backstop).
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import threading
 import time
 import warnings
 
@@ -207,11 +210,13 @@ def _candidate_arrays(props, blocks):
 
 
 def _gs_pass(o, X, stored, stored_cnt, stored_scale, props, penalty, perms, pa, pb, guard, threads,
-             exchanges=True):
+             exchanges=True, start_fwd=None, start_fcnt=None):
     """One exact Gauss-Seidel acceptance pass on orientation o; X is modified in place.
 
     exchanges=False scores and applies the content proposals only (the copy-only pass of
-    an addition round's best responses).
+    an addition round's best responses). start_fwd / start_fcnt: the forward messages (and
+    counts) of X itself in orientation o, if known (a forward pass); until the first accepted
+    move the carried forward message is read from them instead of being advanced.
 
     Invariants: (i) the current panel equals sigma(start panel) on every block at or after
     `frontier` (the furthest right end of a block changed by an accepted content move),
@@ -241,8 +246,10 @@ def _gs_pass(o, X, stored, stored_cnt, stored_scale, props, penalty, perms, pa, 
     kernels on the same messages (bitwise the junction-by-junction values); the call ends
     at the first junction that accepts a move; chunks start at BULK_CHUNK junctions and
     double while nothing is accepted. Otherwise a call evaluates JUNCTION_BATCH junctions
-    one by one. Decisions, order and results never depend on the thread count or the
-    chunking. Returns (acc, junction_gain, junction_pair).
+    one by one. The lookahead and backward-chain caches carry over from call to call
+    (they hold exact current messages over the ranges they mark valid). Decisions, order
+    and results never depend on the thread count or the chunking. Returns (acc,
+    junction_gain, junction_pair).
     """
     founders, blocks = X.shape
     samples, states = stored.shape[1], stored.shape[2]
@@ -263,6 +270,16 @@ def _gs_pass(o, X, stored, stored_cnt, stored_scale, props, penalty, perms, pa, 
     fcnt = np.zeros((samples, states), np.int64) if lexmode else count2
     gperm = np.arange(states, dtype=np.int64)
     lab = np.arange(founders, dtype=np.int64)
+    # Lookahead and backward-chain caches, carried from call to call (empty at the start).
+    ahead = (False, 0, -1, np.zeros((1, 1, 1)), np.zeros((1, 1, 1), np.int64), np.zeros((1, 1)),
+             np.zeros((1, 1), np.int32), np.zeros((1, 1)), np.zeros((1, 1), np.int32),
+             np.zeros((1, 1), np.int32))
+    chain = (False, 0, 0, np.zeros((1, 1, 1)), np.zeros((1, 1, 1), np.int64), np.zeros((1, 1)))
+    pristine = start_fwd is not None
+    if start_fwd is None:
+        start_fwd = np.zeros((1, 1, 1))
+    if start_fcnt is None:
+        start_fcnt = count3
     chunk_max = max(BULK_CHUNK, min(BULK_CHUNK_MAX, BULK_CHUNK_BYTES // (
         8 * samples * max(states, len(pa)) * 3)))
     junction_gain = np.full(blocks + 1, -np.inf)
@@ -275,11 +292,13 @@ def _gs_pass(o, X, stored, stored_cnt, stored_scale, props, penalty, perms, pa, 
             parallel._numba.set_num_threads(n)
             size = chunk if n > BULK_MIN_THREADS else 0
             stop = min(blocks, p + (size if size else JUNCTION_BATCH))
-            moves, gains, jg, jp, gperm, f, fcnt, frontier, nxt, accepted = kernels.gs_pass_chunk(
+            (moves, gains, jg, jp, gperm, f, fcnt, frontier, nxt, accepted, ahead,
+             chain) = kernels.gs_pass_chunk(
                 haps, X, o.leaves, o.logs, o.offsets, float(penalty), p, stop, frontier, f, fcnt,
                 local, local_cnt, stored, stored_cnt if lexmode else count3, stored_scale, gperm,
                 lab, *cands, perms, pa, pb, _GUARD_CODES[guard], bool(exchanges), AHEAD_BLOCKS, TOL,
-                GUARD_TOLERANCE, int(size), acc)
+                GUARD_TOLERANCE, int(size), acc, ahead, chain, start_fwd, start_fcnt, pristine)
+            pristine = pristine and not accepted
             junction_gain[p:nxt] = jg
             junction_pair[p:nxt] = jp
             if size:
@@ -290,6 +309,49 @@ def _gs_pass(o, X, stored, stored_cnt, stored_scale, props, penalty, perms, pa, 
     record = {key: (int(round(value)) if key in _INT_ACC else float(value))
               for key, value in zip(kernels.ACC_KEYS, acc.tolist())}
     return record, junction_gain, junction_pair
+
+
+class ProposalCache:
+    """One search's last solved window inputs and results (SweepEngine.proposals).
+
+    Invariant: the cached result of template t was solved from the rows windows[t][0] and
+    the boundary messages fwd[a_t], bwd[c_t] held here (a boundary's messages are replaced
+    only when every template ending there is re-solved)."""
+
+    def __init__(self, source=None):
+        self.fwd = {} if source is None else dict(source.fwd)
+        self.bwd = {} if source is None else dict(source.bwd)
+        self.windows = {} if source is None else dict(source.windows)
+        self._fwd_same = self._bwd_same = None
+
+    def lookup(self, engine, X, fwd, bwd, results):
+        """Fill results[t] = (cached result, 0 CPU) for templates with unchanged inputs;
+        return the others' indices."""
+        self._fwd_same, self._bwd_same = {}, {}
+        todo = []
+        for index, (a, c) in enumerate(engine.spans):
+            held = self.windows.get(index)
+            if held is not None:
+                if a not in self._fwd_same:
+                    self._fwd_same[a] = np.array_equal(self.fwd[a], fwd[a])
+                if c not in self._bwd_same:
+                    self._bwd_same[c] = np.array_equal(self.bwd[c], bwd[c])
+                if self._fwd_same[a] and self._bwd_same[c] and np.array_equal(held[0], X[:, a:c]):
+                    results[index] = (held[1], 0.0)
+                    continue
+            todo.append(index)
+        return todo
+
+    def store(self, engine, X, fwd, bwd, todo, computed):
+        for index, (result, _) in zip(todo, computed):
+            a, c = engine.spans[index]
+            self.windows[index] = (X[:, a:c].copy(), result)
+            if not self._fwd_same.get(a, False):
+                self.fwd[a] = fwd[a].copy()
+                self._fwd_same[a] = True
+            if not self._bwd_same.get(c, False):
+                self.bwd[c] = bwd[c].copy()
+                self._bwd_same[c] = True
 
 
 class SweepEngine:
@@ -320,6 +382,13 @@ class SweepEngine:
         self.checkpoints = checkpoints
         self.prefix = prefix
         self.templates = window_templates(self.blocks, None if self.coarse is None else self.coarse[0])
+        # Block range [a, c) of every template and the message boundaries a proposal cache
+        # holds (fwd at window starts, bwd at window ends).
+        self.spans = [(a, c) if kind == "fine" else (self.coarse[0][a][0], self.coarse[0][c - 1][1])
+                      for kind, a, c in self.templates]
+        self.cached_boundaries = (len({a for a, _ in self.spans}) + len({c for _, c in self.spans}))
+        # Per-sample scores of converged fits by label, kept from their last sweep (fit_scores).
+        self._fit_scores = {}
 
     def _load(self, label):
         return None if self.checkpoints is None else self.checkpoints.load(f"{self.prefix}.{label}")
@@ -338,13 +407,25 @@ class SweepEngine:
     def score(self, panel):
         return float(self.per_sample(panel).sum())
 
+    def fit_scores(self, label, panel, threads):
+        """Per-sample scores of the converged fit `label` (whose panel is `panel`): the scores
+        its last sweep computed for that panel, or computed now (a fit loaded from its
+        checkpoint)."""
+        scores = self._fit_scores.pop(label, None)
+        if scores is None:
+            with parallel.numba_thread_scope(int(resolve_threads(threads))):
+                scores = self.per_sample(panel)
+        return scores
+
     def fit_bytes(self, founders):
         """Memory of one fixed-K search: the message arrays its pass holds (stored backward
         values, + counts with a guard, + the forward history of the shared-junction test)."""
         samples = len(self.workspace.evidence)
         states = founders * (founders + 1) // 2
         arrays = {None: 2, "genotype_fit": 4, "shared_junction": 6}[self.guard]
-        return 8 * (self.blocks + 1) * samples * states * arrays + 256 * 1024 ** 2
+        # + the boundary messages of its proposal cache (ProposalCache)
+        boundaries = (self.blocks + 1) * arrays + self.cached_boundaries
+        return 8 * boundaries * samples * states + 256 * 1024 ** 2
 
     # ------------------------------------------------------------------ proposals
     def _solve(self, problem):
@@ -458,9 +539,17 @@ class SweepEngine:
             out.append(("coarse", a, c, k, rows, diagnostic))
         return out
 
-    def proposals(self, X, fwd, bwd, threads):
-        def run(task):
-            kind, a, c = task
+    def proposals(self, X, fwd, bwd, threads, cache=None):
+        """Every window template's proposals for panel X with messages fwd, bwd.
+
+        cache (a search's ProposalCache, updated in place): a window problem is a pure
+        function of the panel's rows in the window and the messages fwd[a], bwd[c] at its
+        ends, and normalised max-plus messages of panels that differ only further away are
+        often bitwise equal, so a template whose three inputs equal the cached ones bitwise
+        takes its cached result (the same proposals and diagnostics) instead of a solve.
+        """
+        def run(index):
+            kind, a, c = self.templates[index]
             with parallel.numba_thread_scope(1):
                 started = time.thread_time()
                 if kind == "fine":
@@ -469,12 +558,19 @@ class SweepEngine:
                     result = self._coarse(X, fwd, bwd, a, c)
                 return result, time.thread_time() - started
 
-        workers = max(1, min(int(threads), len(self.templates)))
+        results = [None] * len(self.templates)
+        todo = list(range(len(self.templates))) if cache is None else cache.lookup(self, X, fwd, bwd,
+                                                                                 results)
+        workers = max(1, min(int(threads), len(todo)))
         if workers == 1:
-            results = [run(task) for task in self.templates]
+            computed = [run(index) for index in todo]
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                results = list(executor.map(run, self.templates))
+                computed = list(executor.map(run, todo))
+        for index, value in zip(todo, computed):
+            results[index] = value
+        if cache is not None:
+            cache.store(self, X, fwd, bwd, todo, computed)
         proposals = []
         stats = dict(windows=0, screened=0, certified=0, dp=0, fixing_dps=0, max_frontier=0,
                      changed=0, worker_cpu=0.0)
@@ -527,7 +623,7 @@ class SweepEngine:
         with parallel.numba_thread_scope(n):
             acc, _, _ = _gs_pass(self.forward, np.ascontiguousarray(Y, np.int64).copy(), bwd, None,
                                  bscale, props, self.penalty, perms, pa, pb, None, threads,
-                                 exchanges=False)
+                                 exchanges=False, start_fwd=fwd)
         return float(acc["fine_gain"]), dict(windows=windows, proposals=int(sum(map(len, props.values()))),
                                             accepted=int(acc["fine"]), gain=float(acc["fine_gain"]))
 
@@ -544,12 +640,29 @@ class SweepEngine:
         if done is not None:
             return np.asarray(done["rows"], np.int64).copy(), done["record"]
         started = time.perf_counter()
+        # Both searches start from the same panel, so the F, messages and window proposals
+        # of their sweep 0 (pure functions of the panel) are computed once, with the fit's
+        # whole thread budget, and shared; only their acceptance passes differ. A search
+        # that resumes from its own checkpoints computes its sweeps itself.
+        shared = None
+        if all(self._load(f"{label}.{first}.{stage}") is None
+               for first in ("fwd", "rev") for stage in ("done", "sweep0")):
+            X = np.ascontiguousarray(start, np.int64)
+            n = int(resolve_threads(threads))
+            with parallel.numba_thread_scope(n):
+                F0 = self.score(X)
+            cache = ProposalCache()
+            shared = dict(F0=F0, inputs=self._sweep_inputs(X, n, cache), cache=cache,
+                          waiting={"fwd", "rev"}, lock=threading.Lock())
         (X_fwd, fwd), (X_rev, rev) = _parallel_map(
             [lambda budget, first=first: self._converge_direction(start, label, first,
-                                                                  budget or threads)
+                                                                  budget or threads, shared)
              for first in ("fwd", "rev")], threads, self.fit_bytes(len(start)))
         chosen = "rev" if rev["F"] > fwd["F"] else "fwd"
         X, kept = (X_rev, rev) if chosen == "rev" else (X_fwd, fwd)
+        scores = {first: self._fit_scores.pop(f"{label}.{first}", None) for first in ("fwd", "rev")}
+        if scores[chosen] is not None:
+            self._fit_scores[label] = scores[chosen]
         record = dict(kept, label=label, first=chosen,
                       worker_cpu=fwd["worker_cpu"] + rev["worker_cpu"],
                       thread_cpu=fwd["thread_cpu"] + rev["thread_cpu"],
@@ -563,10 +676,33 @@ class SweepEngine:
         self._save(f"{label}.done", dict(rows=X, record=record))
         return X, record
 
-    def _converge_direction(self, start, label, first, threads):
+    def _messages(self, X, threads):
+        """The messages of panel X (with switch counts under a guard) and their wall time."""
+        started = time.perf_counter()
+        with parallel.numba_thread_scope(threads):
+            haps = self.forward.haps(X)
+            if self.guard:
+                messages = kernels.messages_lex(haps, self.workspace.logs, self.forward.offsets,
+                                                self.penalty)
+            else:
+                fwd, bwd, fscale, bscale = kernels.messages(haps, self.workspace.logs,
+                                                            self.forward.offsets, self.penalty)
+                messages = (fwd, bwd, None, None, fscale, bscale)
+        return messages, time.perf_counter() - started
+
+    def _sweep_inputs(self, X, threads, cache):
+        """The messages of panel X and its window proposals (pure functions of the panel)."""
+        messages, message_wall = self._messages(X, threads)
+        started = time.perf_counter()
+        proposals, stats = self.proposals(X, messages[0], messages[1], threads, cache)
+        return dict(messages=messages, proposals=proposals, stats=stats, message_wall=message_wall,
+                    proposal_wall=time.perf_counter() - started)
+
+    def _converge_direction(self, start, label, first, threads, shared=None):
         """One search from start: sweeps until one accepts nothing (or the reported
         backstop); the first pass runs forward (first "fwd") or reversed ("rev"), later
-        passes alternate. Checkpoints <label>.<first>.sweep<n> / .done."""
+        passes alternate. Checkpoints <label>.<first>.sweep<n> / .done. shared: the start
+        panel's F and sweep-0 inputs computed once for both searches (converge)."""
         label = f"{label}.{first}"
         done = self._load(f"{label}.done")
         if done is not None:
@@ -575,9 +711,14 @@ class SweepEngine:
         X = np.ascontiguousarray(start, np.int64).copy()
         founders, blocks = X.shape
         perms, pa, pb = kernels.swap_permutations(founders)
-        with parallel.numba_thread_scope(int(resolve_threads(threads))):
-            F0 = self.score(X)
+        if shared is not None:
+            F0 = shared["F0"]
+        else:
+            with parallel.numba_thread_scope(int(resolve_threads(threads))):
+                F0 = self.score(X)
         F, history, junctions, converged, sweep = F0, [], None, False, 0
+        # The search's proposal cache (seeded by the shared sweep 0).
+        cache = ProposalCache(None if shared is None else shared["cache"])
         backstop = self.config.sweep_backstop
         resumed = 0
         while sweep < backstop:
@@ -594,19 +735,25 @@ class SweepEngine:
         while not converged and sweep < backstop:
             n = int(resolve_threads(threads))
             sweep_started = time.perf_counter()
-            with parallel.numba_thread_scope(n):
-                haps = self.forward.haps(X)
-                if self.guard:
-                    fwd, bwd, fcnt, bcnt, fscale, bscale = kernels.messages_lex(
-                        haps, self.workspace.logs, self.forward.offsets, self.penalty)
-                else:
-                    fwd, bwd, fscale, bscale = kernels.messages(
-                        haps, self.workspace.logs, self.forward.offsets, self.penalty)
-                    fcnt = bcnt = None
-            message_wall = time.perf_counter() - sweep_started
-            proposal_started = time.perf_counter()
-            proposals, stats = self.proposals(X, fwd, bwd, n)
-            proposal_wall = time.perf_counter() - proposal_started
+            if sweep == 0 and shared is not None:
+                with shared["lock"]:
+                    inputs = shared["inputs"]
+                    shared["waiting"].discard(first)
+                    if not shared["waiting"]:
+                        shared["inputs"] = None
+                if first == "rev":
+                    # The shared proposals' CPU is reported once, by the forward-first search.
+                    inputs = dict(inputs, stats=dict(inputs["stats"], worker_cpu=0.0))
+                if inputs["messages"] is None:
+                    # The other search ran first and released them (see below).
+                    messages, message_wall = self._messages(X, n)
+                    inputs = dict(inputs, messages=messages, message_wall=message_wall)
+            else:
+                inputs = self._sweep_inputs(X, n, cache)
+            fwd, bwd, fcnt, bcnt, fscale, bscale = inputs["messages"]
+            proposals, stats = inputs["proposals"], inputs["stats"]
+            message_wall, proposal_wall = inputs["message_wall"], inputs["proposal_wall"]
+            del inputs
             reverse = (sweep % 2 == 1) if first == "fwd" else (sweep % 2 == 0)
             props = {}
             for kind, a, c, k, rows in proposals:
@@ -626,15 +773,26 @@ class SweepEngine:
                         stored, stored_cnt = kernels.clamp_reverse(fwd, self.penalty), None
                     stored_scale = np.ascontiguousarray(fscale[::-1])
                     Xo = np.ascontiguousarray(X[:, ::-1])
+                    start_fwd = start_fcnt = None
                 else:
                     o, stored, stored_cnt, stored_scale, Xo = self.forward, bwd, bcnt, bscale, X.copy()
+                    start_fwd, start_fcnt = fwd, fcnt
                 del fwd, bwd, fcnt, bcnt, fscale, bscale
                 acc, gains, pairs = _gs_pass(o, Xo, stored, stored_cnt, stored_scale, props,
-                                             self.penalty, perms, pa, pb, self.guard, threads)
-                del stored, stored_cnt, stored_scale
+                                             self.penalty, perms, pa, pb, self.guard, threads,
+                                             start_fwd=start_fwd, start_fcnt=start_fcnt)
+                del stored, stored_cnt, stored_scale, start_fwd, start_fcnt
+            if sweep == 0 and shared is not None:
+                # Run one after the other (a one-thread or memory-limited budget), the other
+                # search has not started: its message arrays are not kept alive through this
+                # whole search; it recomputes them and keeps the shared proposals.
+                with shared["lock"]:
+                    if shared["inputs"] is not None:
+                        shared["inputs"] = dict(shared["inputs"], messages=None)
             X = np.ascontiguousarray(Xo[:, ::-1]) if reverse else Xo
             with parallel.numba_thread_scope(n):
-                F_new = self.score(X)
+                scores = self.per_sample(X)
+            F_new = float(scores.sum())
             pass_wall = time.perf_counter() - pass_started
             accounted = acc["fine_gain"] + acc["coarse_gain"] + acc["exchange_gain"]
             deviation = F_new - (F + accounted)
@@ -660,6 +818,8 @@ class SweepEngine:
         if not converged:
             warnings.warn(f"converged founder sweep {self.prefix}.{label} reached its "
                           f"{backstop}-sweep backstop without converging", RuntimeWarning)
+        if len(history) > resumed:
+            self._fit_scores[label] = scores
         record = dict(label=label, founders=int(founders), F0=float(F0), F=float(F),
                       gain=float(F - F0), converged=bool(converged), sweeps=len(history),
                       resumed_sweeps=resumed, backstop=int(backstop),
@@ -894,12 +1054,14 @@ def count_pass(engine, start, cost, threads, seed_key, additions=True):
     lower seed) is decided, its sequence part from the refit with every cell the incumbent
     lacks replaced. An optimistic bound may skip a round only when it proves the decision
     for every candidate: the addition bound (an accepted addition needs the total-gain
-    test) as before; the deletion bound when every founder has a private cell, where its
-    per-sample bounds also bound every shadow panel (count_criterion.
-    deletion_bound_excludes). A kept deletion round reports the other founders whose
-    sequence part fails the test (hidden_sequence_failures; diagnostics only). additions:
-    run the addition rounds (the final count step); False makes deletion decisions only
-    (earlier levels).
+    test) as before; then the per-sample addition bound, which proves every addition
+    rejected and not ambiguous when no sample's optimistic gain reaches the per-carrier
+    cost (count_criterion.addition_per_sample_bound_excludes); the deletion bound when
+    every founder has a private cell, where its per-sample bounds also bound every shadow
+    panel (count_criterion.deletion_bound_excludes). A kept deletion round reports the
+    other founders whose sequence part fails the test (hidden_sequence_failures;
+    diagnostics only). additions: run the addition rounds (the final count step); False
+    makes deletion decisions only (earlier levels).
     """
     from ..founder_refinement import COUNT_RANKED_REFITS as ranked_refits
     config = engine.config
@@ -911,8 +1073,7 @@ def count_pass(engine, start, cost, threads, seed_key, additions=True):
     # The join's called-site geometry of the component's prepared rows (near-identity,
     # nearest covered rows).
     geometry = panel_count.RowGeometry(ws.batch)
-    with parallel.numba_thread_scope(int(resolve_threads(threads))):
-        scores = engine.per_sample(X)
+    scores = engine.fit_scores(record["label"], X, threads)
     samples = len(scores)
     round_index = 0
     # Reported backstop: additions stop at the incoming count plus count_round_backstop
@@ -944,10 +1105,9 @@ def count_pass(engine, start, cost, threads, seed_key, additions=True):
             # bound every shadow panel (count_criterion.deletion_bound_excludes), so a bound that
             # proves the total-gain test for every deletion proves the sequence test too.
             with parallel.numba_thread_scope(int(resolve_threads(threads))):
-                bounds, _ = founder_count_bound.upper_bound(ws.leaves, ws.offsets, ws.logs,
-                                                            ws.penalty, K - 1)
-                per_sample_optimistic = founder_count_bound.upper_bound_per_sample(
-                    ws.leaves, ws.offsets, ws.logs, ws.penalty, K - 1).sum(axis=0)
+                bounds, _, per_block_sample = founder_count_bound.upper_bound(
+                    ws.leaves, ws.offsets, ws.logs, ws.penalty, K - 1)
+            per_sample_optimistic = per_block_sample.sum(axis=0)
             optimistic = float(bounds.sum())
             margin = 1e-8 * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
             if count_criterion.deletion_bound_excludes(
@@ -976,8 +1136,7 @@ def count_pass(engine, start, cost, threads, seed_key, additions=True):
         pick = _best_refit(chosen, values)
         smaller, fit = results[pick]
         founder = chosen[pick]
-        with parallel.numba_thread_scope(int(resolve_threads(threads))):
-            smaller_scores = engine.per_sample(smaller)
+        smaller_scores = engine.fit_scores(fit["label"], smaller, threads)
         shadow_scores, sequence = _sequence_scores(engine, geometry, X, scores,
                                                    np.delete(X, founder, axis=0), threads)
         decision = count_criterion.decide_with_sequence(
@@ -1013,13 +1172,25 @@ def count_pass(engine, start, cost, threads, seed_key, additions=True):
         round_index += 1
         F = float(scores.sum())
         with parallel.numba_thread_scope(int(resolve_threads(threads))):
-            bounds, _ = founder_count_bound.upper_bound(ws.leaves, ws.offsets, ws.logs,
-                                                        ws.penalty, K + 1)
+            bounds, _, per_block_sample = founder_count_bound.upper_bound(
+                ws.leaves, ws.offsets, ws.logs, ws.penalty, K + 1)
         optimistic = float(bounds.sum())
         margin = 1e-8 * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
         if count_criterion.addition_bound_excludes(optimistic, F, cost, samples, margin=margin):
             return dict(kind="addition", round=label, founders=K, skipped_by_bound=True,
                         optimistic_score=optimistic, accept_larger=False, ambiguous=False), None, None
+        # No sample's optimistic gain reaches the per-carrier cost c/(2S): no seed's refit (nor
+        # any (K+1)-panel) can pass or make the call ambiguous, so the round is decided unrun.
+        per_sample_optimistic = per_block_sample.sum(axis=0)
+        tolerance = 1e-9 * max(1.0, abs(F), float(np.max(np.abs(per_sample_optimistic))))
+        excluded, gain_bound, gain_sample = count_criterion.addition_per_sample_bound_excludes(
+            per_sample_optimistic, scores, cost, tolerance=tolerance)
+        if excluded:
+            return dict(kind="addition", round=label, founders=K, skipped_by_bound=True,
+                        optimistic_score=optimistic, bound="per_sample_effective_carrier",
+                        per_sample_gain_bound=gain_bound, per_sample_gain_bound_sample=gain_sample,
+                        threshold_per_carrier=cost / (2.0 * samples), accept_larger=False,
+                        ambiguous=False), None, None
         starts = [np.vstack((X, X[f:f + 1])) for f in range(K)]
         responses = gains = None
         if K > ranked_refits:
@@ -1041,8 +1212,7 @@ def count_pass(engine, start, cost, threads, seed_key, additions=True):
         values = [result[1]["F"] for result in results]
         pick = _best_refit(chosen, values)
         larger, fit = results[pick]
-        with parallel.numba_thread_scope(int(resolve_threads(threads))):
-            larger_scores = engine.per_sample(larger)
+        larger_scores = engine.fit_scores(fit["label"], larger, threads)
         # The refit may have moved any founder: its sequence part is the gain over the refit
         # with every cell the incumbent does not use replaced by the incumbent's nearest row.
         shadow_scores, sequence = _sequence_scores(engine, geometry, larger, larger_scores, X,

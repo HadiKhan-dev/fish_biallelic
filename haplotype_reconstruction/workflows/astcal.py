@@ -8,7 +8,6 @@ import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
 import haplotype_reconstruction.core.config as core_config
 import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.genetic_map as core_genetic_map
-import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.read_calibration as read_calibration
 import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.core.runtime as core_runtime
@@ -49,7 +48,6 @@ def run():
     import pandas as pd
     import time
     import platform
-    import gc
     from dataclasses import asdict
     from cyvcf2 import VCF
 
@@ -114,7 +112,6 @@ def run():
     stage_complete = checkpoint_store.stage_complete
     mark_stage_complete = checkpoint_store.mark_stage_complete
     contig_done = checkpoint_store.contig_done
-    save_contig = checkpoint_store.save_contig
     save_global = checkpoint_store.save_global
 
     region_keys = [r['contig'] for r in regions_config]
@@ -148,92 +145,93 @@ def run():
         print(f"{'='*60}")
         start = time.time()
 
+        def prepare_discovery(r_name):
+            """Load a contig, filter its sites and fit its read model."""
+            print(f"\n  Preparing {r_name}...", flush=True)
+            t0 = time.time()
+            genomic_data = core_variants.cleanup_block_reads_list(
+                vcf_path, r_name,
+                use_snp_count=True, snps_per_block=200, snp_shift=200,
+                num_processes=n_processes
+            )
+            print(f"    [Loader] {r_name}: {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
+            genomic_data, site_quality = core_site_quality.filter_loaded_sites(
+                genomic_data, contig=r_name, config=site_quality_config,
+                threads=n_processes, snps_per_block=200,
+                sample_config=sample_quality_config)
+            # Samples flagged by the per-sample QC on this contig (None if off).
+            founder_excluded = core_sample_quality.contig_flags(
+                site_quality, contig=r_name, sample_ids=sample_names, output_dir=output_dir)
+
+            global_sites, global_reads = (
+                core_variants.concatenate_unique_block_reads(genomic_data)
+            )
+            if global_sites is None:
+                print(f"    WARNING: No data for {r_name}, skipping")
+                return None
+
+            # Preserve the observation event before releasing read counts.
+            global_observed_mask = (
+                workflows_reconstruction.observed_call_mask_from_read_counts(
+                    global_reads
+                )
+            )
+
+            # Fit once on observed AD; every stage consumes these same raw GLs.
+            global_probs, calibration = read_calibration.prepare_likelihoods(
+                global_reads, global_sites, threads=n_processes)
+            avg_depth = np.mean(np.sum(global_reads, axis=-1))
+            print(f"    {r_name} sites: {len(global_sites)}, Samples: {global_probs.shape[0]}, "
+                  f"Depth: {avg_depth:.1f}x")
+            del global_reads
+            # Flagged libraries enter discovery without reads (unobserved).
+            genomic_data = core_sample_quality.exclude_from_discovery(
+                genomic_data, founder_excluded)
+            return discovery_blocks.PreparedContig(
+                genomic_data=genomic_data,
+                genotype_likelihoods_by_block=read_calibration.block_likelihoods(
+                    genomic_data, global_sites, global_probs),
+                fields=dict(
+                    global_probs=global_probs, read_calibration=calibration,
+                    site_quality=site_quality, global_sites=global_sites,
+                    global_observed_mask=global_observed_mask, avg_depth=avg_depth,
+                    founder_excluded=founder_excluded),
+                products=core_site_quality.run_record_products(site_quality, sample_names),
+            )
+
+        def save_discovery(r_name, prepared, block_results):
+            fields = prepared.fields
+            founder_excluded = fields['founder_excluded']
+            checkpoint_store.save_contig(DISCOVERY_STAGE, r_name, {
+                'global_probs': fields['global_probs'],
+                'read_calibration': fields['read_calibration'],
+                'site_quality': fields['site_quality'],
+                'global_sites': fields['global_sites'],
+                'global_observed_mask': fields['global_observed_mask'],
+                'observed_call_mask_mode': (
+                    workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
+                ),
+                'genotype_evidence_mode': (
+                    workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
+                ),
+                'block_results': block_results,
+                'avg_depth': fields['avg_depth'],
+                'discovery_backend': discovery_identity_record['backend'],
+                'discovery_config': discovery_config_record,
+                **({} if founder_excluded is None
+                   else {'founder_evidence_excluded': founder_excluded}),
+            })
+
+        pending_contigs = []
+        for r_name in region_keys:
+            if contig_done(DISCOVERY_STAGE, r_name):
+                print(f"  [RESUME] {r_name} already done")
+            else:
+                pending_contigs.append(r_name)
         with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
-            for r_name in region_keys:
-                if contig_done(DISCOVERY_STAGE, r_name):
-                    print(f"  [RESUME] {r_name} already done")
-                    continue
-                print(f"\n  Processing {r_name}...")
-
-                t0 = time.time()
-                genomic_data = core_variants.cleanup_block_reads_list(
-                    vcf_path, r_name,
-                    use_snp_count=True, snps_per_block=200, snp_shift=200,
-                    num_processes=n_processes
-                )
-                print(f"    [Loader] {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
-                genomic_data, site_quality = core_site_quality.filter_loaded_sites(
-                    genomic_data, contig=r_name, config=site_quality_config,
-                    threads=n_processes, snps_per_block=200,
-                    sample_config=sample_quality_config)
-                # Samples flagged by the per-sample QC on this contig (None if off).
-                founder_excluded = core_sample_quality.contig_flags(
-                    site_quality, contig=r_name, sample_ids=sample_names, output_dir=output_dir)
-
-                global_sites, global_reads = (
-                    core_variants.concatenate_unique_block_reads(genomic_data)
-                )
-                if global_sites is None:
-                    print(f"    WARNING: No data for {r_name}, skipping")
-                    continue
-
-                # Preserve the observation event before releasing read counts.
-                global_observed_mask = (
-                    workflows_reconstruction.observed_call_mask_from_read_counts(
-                        global_reads
-                    )
-                )
-
-                # Fit once on observed AD; every stage consumes these same raw GLs.
-                global_probs, calibration = read_calibration.prepare_likelihoods(
-                    global_reads, global_sites, threads=n_processes)
-                avg_depth = np.mean(np.sum(global_reads, axis=-1))
-                print(f"    Sites: {len(global_sites)}, Samples: {global_probs.shape[0]}, "
-                      f"Depth: {avg_depth:.1f}x")
-                del global_reads
-                # Flagged libraries enter discovery without reads (unobserved).
-                genomic_data = core_sample_quality.exclude_from_discovery(
-                    genomic_data, founder_excluded)
-
-                t0 = time.time()
-                block_results = discovery_blocks.generate_all_block_haplotypes(
-                    genomic_data,
-                    num_processes=n_processes,
-                    block_pool=block_pool,
-                    discovery_config=discovery_config,
-                    genotype_likelihoods_by_block=read_calibration.block_likelihoods(
-                        genomic_data, global_sites, global_probs),
-                )
-                valid_blocks = [b for b in block_results if len(b.positions) > 0]
-                block_results = core_haplotypes.BlockResults(valid_blocks)
-
-                hap_counts = [len(b.haplotypes) for b in valid_blocks]
-                print(f"    [Discovery] {len(valid_blocks)} blocks, haps/block: "
-                      f"min={min(hap_counts)}, max={max(hap_counts)}, "
-                      f"mean={np.mean(hap_counts):.1f} in {time.time()-t0:.1f}s")
-
-                save_contig(DISCOVERY_STAGE, r_name, {
-                    'global_probs': global_probs,
-                    'read_calibration': calibration,
-                    'site_quality': site_quality,
-                    'global_sites': global_sites,
-                    'global_observed_mask': global_observed_mask,
-                    'observed_call_mask_mode': (
-                        workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-                    ),
-                    'genotype_evidence_mode': (
-                        workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
-                    ),
-                    'block_results': block_results,
-                    'avg_depth': avg_depth,
-                    'discovery_backend': discovery_identity_record['backend'],
-                    'discovery_config': discovery_config_record,
-                    **({} if founder_excluded is None
-                       else {'founder_evidence_excluded': founder_excluded}),
-                })
-                del genomic_data, block_results, global_probs, global_sites
-                del global_observed_mask
-                gc.collect()
+            discovery_blocks.discover_contigs(
+                pending_contigs, prepare_discovery, save_discovery,
+                block_pool=block_pool, discovery_config=discovery_config)
 
         save_global(DISCOVERY_STAGE, {
             'sample_ids': sample_names,

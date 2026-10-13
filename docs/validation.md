@@ -10,6 +10,63 @@ and 20/100/200 sample cohorts. The 22 template contigs are chr1–20, chr22 and 
 Seeds400–402 are development data; seed401 was held out specifically when
 choosing the family phase stopping rule, not from all project development.
 
+## Faster defaults against `7f2abc5` — 13 October 2026
+
+The defaults committed on 13 October 2026 compute the same results as `7f2abc5`
+(11 October) about twice as fast. The changes are computational: rounds of
+block feedback reuse every fit, score and bound whose inputs did not change, and
+the three assemblies of a contig reuse join batches with identical inputs; the
+founder-refinement and linker kernels use cheaper memory layouts and share work
+between the two directions of each fit; simulation post-processing runs contigs
+in parallel and block discovery prepares and saves neighbouring contigs while it
+discovers; contigs are reconstructed in more, narrower lanes whose threads
+follow each contig's remaining work; compiled kernels persist between runs; the
+pedigree, family-phase and recombination stages fuse or reuse repeated
+calculations. One change skips work by proof: at the final founder count step,
+the addition round is skipped when no sample's gain under any panel with one
+row more can exceed the count rule's per-carrier threshold, which keeps the
+point margin and every bootstrap replicate below zero; the decision (reject) is
+the same, and the founder-count report records it as skipped by the bound,
+without a margin.
+
+Default design (20/100/200 cohorts, 5×, 22 chromosomes), seed 10000, one
+112-CPU Sapphire Rapids node, simulation through truth evaluation, both runs
+starting without compiled kernels:
+
+| Phase | `7f2abc5` | 13 October |
+| --- | ---: | ---: |
+| Founder templates and read simulation | 7.5 min | 1.3 min |
+| Block discovery | 24 min | 19 min |
+| Reconstruction | 5 h 36 min | 2 h 27 min |
+| Pedigree, allele refit, family phase and recombination maps | 22 min | 17 min |
+| Truth evaluation | 1 min | 2 min |
+| Total | **6 h 31 min** | **3 h 06 min** |
+
+Mean CPU occupancy was 0.84 and 0.83; peak node memory 253 and 310 GiB. On
+48-CPU Ice Lake pieces (one chromosome per piece, then the genome-wide step),
+seed10001 used 443 CPU-hours instead of 810.
+
+Every result matched `7f2abc5`'s:
+
+- Seeds 10000 and 10001 (whole-node and piece runs): every truth metric is
+  identical (320/320 exact observed-parent configurations and 600/600 edges for
+  both seeds; founder allele errors 135 and 24; genotype errors 481,081 and
+  477,899; phase switches 599 and 649), and every checkpoint of every chromosome
+  and genome-wide stage is identical apart from timings, recorded code and
+  identity hashes, execution counters and the skipped addition round's
+  diagnostics.
+- The real Tropheops cross and three simulated designs (standard N80, F3
+  families and a real-like six-founder design), each run from scratch: every
+  published table is identical, and the real cross's benchmark scorecards are
+  identical on all 22 chromosomes.
+
+Compiled kernels are kept in `~/.cache/haplotype-reconstruction/numba` (about
+80 MB per code version; the six most recently used versions are kept; see
+[performance](performance.md)); a later run of the same code starts with them
+compiled. Checkpoints written by `7f2abc5` remain readable, but stages whose
+code changed are recomputed when an older run is resumed. Records are kept
+locally in `claude_lab/speed_20261012/` (outside the repository).
+
 ## Review-campaign defaults against `e993604` — 11 October 2026
 
 The defaults committed on 11 October 2026 combine the changes of a review

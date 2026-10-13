@@ -25,6 +25,13 @@ DONE_MARKER = "_done.p5v2"
 CLEVEL = 5
 
 
+# Work checkpoints exist only to resume a contig's reconstruction and are
+# rewritten by every run: ZSTD level 1 writes them ~2.4x faster than level 5
+# for ~5% more bytes (assembly preprocess, 452 MB raw). Decoding is unchanged.
+# Not for floating-point evidence arrays (genotype evidence: 25% more bytes).
+WORK_CLEVEL = 1
+
+
 CODEC = blosc2.Codec.ZSTD
 
 
@@ -84,7 +91,7 @@ def _aligned_buffer(nbytes):
     return storage[offset:offset + nbytes]
 
 
-def _compress(raw, nthreads):
+def _compress(raw, nthreads, clevel):
     # A packed group may end with int8 calls and have an odd byte length.
     # Blosc2 4.5.1 emits unreadable all-zero special chunks when that length
     # is not divisible by its default eight-byte element size. Keep the
@@ -93,7 +100,7 @@ def _compress(raw, nthreads):
     return blosc2.compress2(
         raw,
         cparams=blosc2.CParams(
-            nthreads=max(1, int(nthreads)), clevel=CLEVEL, codec=CODEC,
+            nthreads=max(1, int(nthreads)), clevel=clevel, codec=CODEC,
             typesize=typesize,
         ),
     )
@@ -248,15 +255,16 @@ class _ChunkPipeline:
                 _PARALLEL_READ_LOCK.release()
 
 
-def _compress_checked(raw, nthreads):
-    compressed = _compress(raw, nthreads)
+def _compress_checked(raw, clevel, nthreads):
+    compressed = _compress(raw, nthreads, clevel)
     return raw.nbytes, compressed, zlib.crc32(compressed)
 
 
 class _BufferWriter:
-    def __init__(self, handle, nthreads):
+    def __init__(self, handle, nthreads, clevel):
         self.handle = handle
         self.nthreads = nthreads
+        self.clevel = clevel
         self.pending = []
         self.pending_bytes = 0
         self.n_buffers = 0
@@ -308,9 +316,10 @@ class _BufferWriter:
             if self.pipeline is None:
                 self.pipeline = _ChunkPipeline(self.nthreads, ordered=True)
             # Blosc output is bounded by raw bytes plus its small frame overhead.
-            self.pipeline.add(_compress_checked, (raw,), 2 * raw.nbytes + blosc2.MAX_OVERHEAD, consume)
+            self.pipeline.add(_compress_checked, (raw, self.clevel),
+                              2 * raw.nbytes + blosc2.MAX_OVERHEAD, consume)
         else:
-            consume(_compress_checked(raw, self.nthreads))
+            consume(_compress_checked(raw, self.clevel, self.nthreads))
 
     def _write_group(self, buffers):
         key = id(buffers)
@@ -368,7 +377,7 @@ def global_path(ckpt_dir, stage):
     return os.path.join(ckpt_dir, stage, "_global" + SUFFIX)
 
 
-def _write_metadata(handle, metadata, metadata_size, nthreads):
+def _write_metadata(handle, metadata, metadata_size, nthreads, clevel):
     n_chunks = (
         (metadata_size + _GROUP_BYTES - 1) // _GROUP_BYTES
         if metadata_size else 0
@@ -381,7 +390,7 @@ def _write_metadata(handle, metadata, metadata_size, nthreads):
         raw = metadata.read(min(_GROUP_BYTES, remaining))
         if not raw:
             raise OSError("failed to read spooled checkpoint metadata")
-        compressed = _compress(raw, nthreads)
+        compressed = _compress(raw, nthreads, clevel)
         handle.write(
             _CHUNK_DESC.pack(len(raw), len(compressed), zlib.crc32(compressed))
         )
@@ -389,21 +398,33 @@ def _write_metadata(handle, metadata, metadata_size, nthreads):
         remaining -= len(raw)
 
 
-def write(path, obj, nthreads=1):
-    """Write a v2 protocol-5 checkpoint atomically and return its byte size."""
+def _create(path):
+    """Open a new file, creating its directory only when it is missing."""
+    try:
+        return open(path, "w+b")
+    except FileNotFoundError:
+        parent = os.path.dirname(path)
+        if not parent:
+            raise
+        os.makedirs(parent, exist_ok=True)
+        return open(path, "w+b")
+
+
+def write(path, obj, nthreads=1, *, clevel=CLEVEL):
+    """Write a v2 protocol-5 checkpoint atomically and return its byte size.
+
+    ``clevel`` is the ZSTD level (WORK_CLEVEL for work checkpoints).
+    """
     nthreads = max(1, int(nthreads))
     if hasattr(os, 'sched_getaffinity'):
         nthreads = min(nthreads, len(os.sched_getaffinity(0)))
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
     tmp = path + ".tmp"
     try:
         with tempfile.SpooledTemporaryFile(
             max_size=_METADATA_SPOOL_BYTES, mode="w+b"
-        ) as metadata, open(tmp, "w+b") as handle:
+        ) as metadata, _create(tmp) as handle:
             handle.write(_HEADER.pack(_MAGIC, 0, 0))
-            buffer_writer = _BufferWriter(handle, nthreads)
+            buffer_writer = _BufferWriter(handle, nthreads, clevel)
             try:
                 pickler = _ArrayPickler(
                     metadata, protocol=5, buffer_callback=buffer_writer
@@ -415,7 +436,7 @@ def write(path, obj, nthreads=1):
 
                 metadata_offset = handle.tell()
                 _write_metadata(
-                    handle, metadata, metadata_size, max(1, int(nthreads))
+                    handle, metadata, metadata_size, max(1, int(nthreads)), clevel
                 )
                 end = handle.tell()
                 handle.seek(0)
@@ -434,7 +455,7 @@ def write(path, obj, nthreads=1):
         except OSError:
             pass
         raise
-    return os.path.getsize(path)
+    return end
 
 
 def _read_exact(handle, size, context):

@@ -7,8 +7,10 @@ Each coordinator calls the unchanged per-contig route,
 ``publish_completion=False``, and sets that contig's release, painting and
 checkpoint core ceilings to its lease. Pools, Numba teams and compression teams
 inside a contig stay within its lease, so concurrent contigs never exceed the
-run's ceiling. A coordinator that has finished its contigs returns its lease;
-the others claim it at their next contig boundary, never inside a contig.
+run's ceiling. Leases start in proportion to each coordinator's work. A
+coordinator that has finished its contigs returns its lease; the others claim
+it, in proportion to their remaining work, at their next contig boundary, never
+inside a contig.
 
 A contig's computation does not read other contigs' work in progress, and core
 ceilings are execution choices outside every scientific identity. Each
@@ -26,6 +28,7 @@ compilation) is re-armed and sent again.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
 import faulthandler
@@ -47,18 +50,31 @@ import haplotype_reconstruction.painting.components as painting_components
 from haplotype_reconstruction.workflows import reconstruction
 
 # Operational scheduling rule, not a scientific setting; core/config.py and
-# core/chromosome_parallel.py are hashed into checkpoint identities. One contig
-# kept 85-98% of 8 cores busy but ~44% of 48 (r4-performance F3), so the
-# automatic rule gives each concurrent contig at least eight cores.
-CONTIG_WORKER_CORES = 8
+# core/chromosome_parallel.py are hashed into checkpoint identities. Narrow
+# contig lanes need fewer core-seconds: the same contig at 16 threads took 7%
+# fewer than at 32-37 (N=320 chr19 and chr8 shards; path selection scales
+# fully, hierarchy, refinement tails and serial checkpoint phases do not). So
+# the automatic rule gives each concurrent contig about sixteen cores, and
+# leases start in proportion to each coordinator's work.
+CONTIG_WORKER_CORES = 16
 
-# Peak process-tree memory of one contig, for limiting concurrency only. Replays
-# of real contigs at 8 workers peaked at ~6.4x the decoded source checkpoint plus
-# 0.3 GiB (r4-performance F7); allow 8x plus 2 GiB, and 256 MiB per core for
-# worker processes. Resumed contigs only validate and rewrite reports.
-SOURCE_MEMORY_FACTOR = 8
-CONTIG_MEMORY_BYTES = 2 << 30
-CORE_MEMORY_BYTES = 1 << 28
+# Peak memory of one contig lane (coordinator, its pools and shared arrays),
+# for limiting concurrency only: SOURCE_MEMORY_FACTOR x the decoded source
+# checkpoint + CONTIG_MEMORY_BYTES + CORE_MEMORY_BYTES per lease core. Fitted to
+# node memory sampled every 10 s in the N=320 host run (3 lanes of 37 threads,
+# 22 contigs, 39 GiB outside the lanes): the sum over running lanes bounds all
+# 2,015 samples, including contig transitions, the node peak (236 GiB with
+# chr3, chr4 and chr11), a chr3 lane implied at ~100 GiB (estimate 112 GiB)
+# and a lane of chr19 (4.1 GiB decoded) alone at ~50 GiB (estimate 56 GiB).
+# Resumed contigs only validate and rewrite reports.
+SOURCE_MEMORY_FACTOR = 3
+CONTIG_MEMORY_BYTES = 16 << 30
+CORE_MEMORY_BYTES = 3 << 28
+
+# Decoded-size scans of the source checkpoints only read chunk headers, so
+# they wait on shared-filesystem latency: 22 N=320 discovery checkpoints took
+# 11 s one after another and 1.0 s with 16 threads.
+SIZE_SCAN_THREADS = 16
 
 _FAILURE = "contig coordinator failed on"
 
@@ -97,12 +113,14 @@ def plan_contig_workers(checkpoint_store, contigs, *, cores, requested,
     if workers < 2:
         return 1, None
     lease = cores // workers
+    paths = [[core_checkpoints.contig_path(checkpoint_store.root, stage, contig)
+              for stage in source_stages] for contig in contigs]
+    flat = [path for group in paths for path in group]
+    with ThreadPoolExecutor(min(SIZE_SCAN_THREADS, len(flat))) as scanner:
+        decoded = dict(zip(flat, scanner.map(core_checkpoints.read_size_bytes, flat)))
     weights, estimates = [], []
-    for contig in contigs:
-        source = sum(
-            core_checkpoints.read_size_bytes(
-                core_checkpoints.contig_path(checkpoint_store.root, stage, contig))
-            for stage in source_stages)
+    for contig, group in zip(contigs, paths):
+        source = sum(decoded[path] for path in group)
         if contig in pending:
             weights.append(float(source))
             estimates.append(SOURCE_MEMORY_FACTOR * source + CONTIG_MEMORY_BYTES
@@ -224,7 +242,8 @@ def _run_concurrently(checkpoint_store, contigs, sample_ids, executor, *, all_co
             for contig in contigs}
     partitions = [[contig for _, contig in partition] for partition in executor.partitions]
     print(f"  Contigs: {executor.worker_count} concurrent coordinators share "
-          f"{executor.cpu_budget} cores (leases grow at contig boundaries); "
+          f"{executor.cpu_budget} cores (leases in proportion to work, growing at "
+          "contig boundaries); "
           "longest first per coordinator: "
           + "; ".join(", ".join(partition) for partition in partitions), flush=True)
     for contig in contigs:

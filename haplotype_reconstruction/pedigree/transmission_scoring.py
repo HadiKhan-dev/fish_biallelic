@@ -322,6 +322,64 @@ def _apply_null_axis(current, output, diagonal, off, axis):
 
 
 @njit(cache=True, fastmath=False)
+def _advance_selectors(
+    current, work, child, first_parent, second_parent, mode, boundary,
+    bridge_left, bridge_right, bridge_diagonal, bridge_row_arm, bridge_column_arm,
+    bridge_large_index, bridge_excursion, null_diagonal, null_off, bridge_branch,
+    prefix, suffix,
+):
+    """Cross one bin boundary on both selector axes; the result returns to ``current``."""
+    if mode >= 1:
+        _apply_bridge_axis(
+            current,
+            work,
+            bridge_left[first_parent, boundary],
+            bridge_right[first_parent, boundary],
+            bridge_diagonal[first_parent, boundary],
+            bridge_row_arm[first_parent, boundary],
+            bridge_column_arm[first_parent, boundary],
+            bridge_large_index[first_parent, boundary],
+            0, prefix, suffix,
+            -1 if bridge_branch is None else bridge_branch[first_parent, boundary],
+        )
+        excursion = bridge_excursion[first_parent, boundary]
+        if excursion > 0.0:
+            _apply_excursion_axis(current, work, excursion, 0)
+    else:
+        _apply_null_axis(
+            current,
+            work,
+            null_diagonal[child, boundary],
+            null_off[child, boundary],
+            0,
+        )
+    if mode == 2:
+        _apply_bridge_axis(
+            work,
+            current,
+            bridge_left[second_parent, boundary],
+            bridge_right[second_parent, boundary],
+            bridge_diagonal[second_parent, boundary],
+            bridge_row_arm[second_parent, boundary],
+            bridge_column_arm[second_parent, boundary],
+            bridge_large_index[second_parent, boundary],
+            1, prefix, suffix,
+            -1 if bridge_branch is None else bridge_branch[second_parent, boundary],
+        )
+        excursion = bridge_excursion[second_parent, boundary]
+        if excursion > 0.0:
+            _apply_excursion_axis(work, current, excursion, 1)
+    else:
+        _apply_null_axis(
+            work,
+            current,
+            null_diagonal[child, boundary],
+            null_off[child, boundary],
+            1,
+        )
+
+
+@njit(cache=True, fastmath=False)
 def _score_path(
     child,
     first_parent,
@@ -352,130 +410,102 @@ def _score_path(
     bridge_branch=None,
     common_powered=None,
 ):
+    """Forward log scores of the tempered (bin ``exponent``) and full-strength view.
+
+    The two recurrences are independent: each keeps its own forward state,
+    scaling and underflow path, and a view stops at its first non-finite
+    increment. They share only the observed-site emission products (or
+    their logarithms), which do not depend on the exponent; the full view
+    applies them with exponent one.
+    """
     states = state_alt.shape[0]
     bins = exponent.shape[1]
-    current = np.empty((states, states), dtype=np.float64)
-    work = np.empty_like(current)
+    tempered = np.empty((states, states), dtype=np.float64)
+    full = np.empty_like(tempered)
+    work = np.empty_like(tempered)
+    scratch = np.empty_like(tempered)
     prefix = np.empty(states + 1, dtype=np.float64)
     suffix = np.empty(states + 1, dtype=np.float64)
     for first in range(states):
         for second in range(states):
             if mode == 0:
-                current[first, second] = 1.0 / (states * states)
+                tempered[first, second] = 1.0 / (states * states)
             elif mode == 1:
-                current[first, second] = pi[first_parent, 0, first] / states
+                tempered[first, second] = pi[first_parent, 0, first] / states
             else:
-                current[first, second] = (
+                tempered[first, second] = (
                     pi[first_parent, 0, first] * pi[second_parent, 0, second]
                 )
-    total_log = 0.0
+            full[first, second] = tempered[first, second]
+    tempered_log = 0.0
+    full_log = 0.0
+    tempered_alive = True
+    full_alive = True
     for block in range(bins):
         if block > 0:
             boundary = block - 1
-            if mode >= 1:
-                _apply_bridge_axis(
-                    current,
-                    work,
-                    bridge_left[first_parent, boundary],
-                    bridge_right[first_parent, boundary],
-                    bridge_diagonal[first_parent, boundary],
-                    bridge_row_arm[first_parent, boundary],
-                    bridge_column_arm[first_parent, boundary],
-                    bridge_large_index[first_parent, boundary],
-                    0, prefix, suffix,
-                    -1 if bridge_branch is None else bridge_branch[first_parent, boundary],
+            if tempered_alive:
+                _advance_selectors(
+                    tempered, scratch, child, first_parent, second_parent, mode,
+                    boundary, bridge_left, bridge_right, bridge_diagonal,
+                    bridge_row_arm, bridge_column_arm, bridge_large_index,
+                    bridge_excursion, null_diagonal, null_off, bridge_branch,
+                    prefix, suffix,
                 )
-                excursion = bridge_excursion[first_parent, boundary]
-                if excursion > 0.0:
-                    _apply_excursion_axis(current, work, excursion, 0)
-            else:
-                _apply_null_axis(
-                    current,
-                    work,
-                    null_diagonal[child, boundary],
-                    null_off[child, boundary],
-                    0,
+            if full_alive:
+                _advance_selectors(
+                    full, scratch, child, first_parent, second_parent, mode,
+                    boundary, bridge_left, bridge_right, bridge_diagonal,
+                    bridge_row_arm, bridge_column_arm, bridge_large_index,
+                    bridge_excursion, null_diagonal, null_off, bridge_branch,
+                    prefix, suffix,
                 )
-            current, work = work, current
-            if mode == 2:
-                _apply_bridge_axis(
-                    current,
-                    work,
-                    bridge_left[second_parent, boundary],
-                    bridge_right[second_parent, boundary],
-                    bridge_diagonal[second_parent, boundary],
-                    bridge_row_arm[second_parent, boundary],
-                    bridge_column_arm[second_parent, boundary],
-                    bridge_large_index[second_parent, boundary],
-                    1, prefix, suffix,
-                    -1 if bridge_branch is None else bridge_branch[second_parent, boundary],
-                )
-                excursion = bridge_excursion[second_parent, boundary]
-                if excursion > 0.0:
-                    _apply_excursion_axis(current, work, excursion, 1)
-            else:
-                _apply_null_axis(
-                    current,
-                    work,
-                    null_diagonal[child, boundary],
-                    null_off[child, boundary],
-                    1,
-                )
-            current, work = work, current
 
-        eta = exponent[child, block]
         stable_product = True
-        if eta == 0.0:
-            work[:] = 1.0
-        else:
-            for first in range(states):
-                for second in range(states):
-                    if common_products is not None:
-                        saved = common_products[
-                            child - first_cached_child, block, first, second
-                        ]
-                        if np.isfinite(saved):
-                            work[first, second] = saved
-                            continue
-                    product = 1.0
-                    for slot in range(
-                        observed_start[child, block], observed_stop[child, block]
-                    ):
-                        site = observed_site[slot]
-                        first_alt = (
-                            candidate_alt[first_parent, site, first]
-                            if mode >= 1
-                            else state_alt[first, site]
-                        )
-                        second_alt = (
-                            candidate_alt[second_parent, site, second]
-                            if mode == 2
-                            else state_alt[second, site]
-                        )
-                        value = _site_likelihood(
-                            child_gl[child, site],
-                            child_coefficient[child, site],
-                            first_alt,
-                            second_alt,
-                            mismatch,
-                        )
-                        if value <= 0.0:
-                            product = 0.0
-                            break
-                        product *= value
-                        if not np.isfinite(product) or product < 2.2250738585072014e-308:
-                            stable_product = False
-                            break
-                    work[first, second] = product
-                    if not stable_product:
+        for first in range(states):
+            for second in range(states):
+                if common_products is not None:
+                    saved = common_products[
+                        child - first_cached_child, block, first, second
+                    ]
+                    if np.isfinite(saved):
+                        work[first, second] = saved
+                        continue
+                product = 1.0
+                for slot in range(
+                    observed_start[child, block], observed_stop[child, block]
+                ):
+                    site = observed_site[slot]
+                    first_alt = (
+                        candidate_alt[first_parent, site, first]
+                        if mode >= 1
+                        else state_alt[first, site]
+                    )
+                    second_alt = (
+                        candidate_alt[second_parent, site, second]
+                        if mode == 2
+                        else state_alt[second, site]
+                    )
+                    value = _site_likelihood(
+                        child_gl[child, site],
+                        child_coefficient[child, site],
+                        first_alt,
+                        second_alt,
+                        mismatch,
+                    )
+                    if value <= 0.0:
+                        product = 0.0
                         break
+                    product *= value
+                    if not np.isfinite(product) or product < 2.2250738585072014e-308:
+                        stable_product = False
+                        break
+                work[first, second] = product
                 if not stable_product:
                     break
-        if stable_product:
-            powered = (None if common_powered is None else
-                       common_powered[child - first_cached_child, block])
-            increment = _apply_probability_emission(current, work, eta, powered)
-        else:
+            if not stable_product:
+                break
+        if not stable_product:
             for first in range(states):
                 for second in range(states):
                     log_emission = 0.0
@@ -504,12 +534,43 @@ def _score_path(
                             log_emission = -np.inf
                             break
                         log_emission += math.log(value)
-                    work[first, second] = eta * log_emission
-            increment = _apply_log_emission(current, work)
-        if not np.isfinite(increment):
-            return -np.inf
-        total_log += increment
-    return total_log
+                    work[first, second] = log_emission
+
+        if tempered_alive:
+            eta = exponent[child, block]
+            if eta == 0.0:
+                # A zero exponent makes the tempered emission uniform.
+                scratch[:] = 1.0
+                powered = (None if common_powered is None else
+                           common_powered[child - first_cached_child, block])
+                increment = _apply_probability_emission(tempered, scratch, eta, powered)
+            elif stable_product:
+                powered = (None if common_powered is None else
+                           common_powered[child - first_cached_child, block])
+                increment = _apply_probability_emission(tempered, work, eta, powered)
+            else:
+                for first in range(states):
+                    for second in range(states):
+                        scratch[first, second] = eta * work[first, second]
+                increment = _apply_log_emission(tempered, scratch)
+            if np.isfinite(increment):
+                tempered_log += increment
+            else:
+                tempered_alive = False
+                tempered_log = -np.inf
+        if full_alive:
+            if stable_product:
+                increment = _apply_probability_emission(full, work, 1.0, None)
+            else:
+                increment = _apply_log_emission(full, work)
+            if np.isfinite(increment):
+                full_log += increment
+            else:
+                full_alive = False
+                full_log = -np.inf
+        if not tempered_alive and not full_alive:
+            break
+    return tempered_log, full_log
 
 
 @njit(cache=True, parallel=True, fastmath=False)
@@ -519,20 +580,21 @@ def _score_m0_kernel(
     state_alt, child_gl, child_coefficient, observed_site, observed_start,
     observed_stop, exponent, null_diagonal, null_off, mismatch, eligible_child,
 ):
-    output = np.empty(child_gl.shape[0], dtype=np.float64)
+    tempered = np.empty(child_gl.shape[0], dtype=np.float64)
+    full = np.empty(child_gl.shape[0], dtype=np.float64)
     for child in prange(child_gl.shape[0]):
-        output[child] = (
-            _score_path(
+        if eligible_child[child]:
+            tempered[child], full[child] = _score_path(
                 child, 0, 0, 0, pi, candidate_alt, bridge_left, bridge_right,
                 bridge_diagonal, bridge_off, bridge_row_arm, bridge_column_arm,
                 bridge_large_index, bridge_excursion, state_alt, child_gl,
                 child_coefficient, observed_site, observed_start, observed_stop,
                 exponent, null_diagonal, null_off, mismatch,
             )
-            if eligible_child[child]
-            else -np.inf
-        )
-    return output
+        else:
+            tempered[child] = -np.inf
+            full[child] = -np.inf
+    return tempered, full
 
 
 @njit(cache=True, parallel=True, fastmath=False)
@@ -541,22 +603,25 @@ def _score_m1_kernel(
     bridge_row_arm, bridge_column_arm, bridge_large_index, bridge_excursion,
     available, state_alt, child_gl, child_coefficient, observed_site,
     observed_start, observed_stop, exponent, null_diagonal, null_off, mismatch,
-    eligible_edge, m0, common_products, child_start, child_stop, bridge_branch=None,
-    common_powered=None,
+    eligible_edge, tempered_m0, full_m0, common_products, child_start, child_stop,
+    bridge_branch=None, common_powered=None,
 ):
     children = child_stop - child_start
     candidates = pi.shape[0]
-    output = np.empty((children, candidates), dtype=np.float64)
+    tempered = np.empty((children, candidates), dtype=np.float64)
+    full = np.empty((children, candidates), dtype=np.float64)
     for task in prange(children * candidates):
         local_child = task // candidates
         child = child_start + local_child
         parent = task % candidates
         if not eligible_edge[child, parent]:
-            output[local_child, parent] = -np.inf
+            tempered[local_child, parent] = -np.inf
+            full[local_child, parent] = -np.inf
         elif not available[parent]:
-            output[local_child, parent] = m0[child]
+            tempered[local_child, parent] = tempered_m0[child]
+            full[local_child, parent] = full_m0[child]
         else:
-            output[local_child, parent] = _score_path(
+            tempered[local_child, parent], full[local_child, parent] = _score_path(
                 child, parent, 0, 1, pi, candidate_alt, bridge_left,
                 bridge_right, bridge_diagonal, bridge_off, bridge_row_arm,
                 bridge_column_arm, bridge_large_index, bridge_excursion,
@@ -565,7 +630,7 @@ def _score_m1_kernel(
                 exponent, null_diagonal, null_off, mismatch,
                 common_products, child_start, bridge_branch, common_powered,
             )
-    return output
+    return tempered, full
 
 
 @njit(cache=True, parallel=True, fastmath=False)
@@ -577,12 +642,13 @@ def _score_m2_kernel(
     observed_start, observed_stop, exponent, null_diagonal, null_off, mismatch,
     common_products, first_cached_child, bridge_branch=None, common_powered=None,
 ):
-    output = np.empty(len(trios), dtype=np.float64)
+    tempered = np.empty(len(trios), dtype=np.float64)
+    full = np.empty(len(trios), dtype=np.float64)
     for row in prange(len(trios)):
         child = trios[row, 0]
         first = trios[row, 1]
         second = trios[row, 2]
-        output[row] = _score_path(
+        tempered[row], full[row] = _score_path(
             child, first, second, 2, pi, candidate_alt, bridge_left,
             bridge_right, bridge_diagonal, bridge_off, bridge_row_arm,
             bridge_column_arm, bridge_large_index, bridge_excursion,
@@ -591,4 +657,4 @@ def _score_m2_kernel(
             exponent, null_diagonal, null_off, mismatch,
             common_products, first_cached_child, bridge_branch, common_powered,
         )
-    return output
+    return tempered, full

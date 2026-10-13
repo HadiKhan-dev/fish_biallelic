@@ -192,6 +192,27 @@ def addition_bound_excludes(optimistic_score, score, cost, samples, *, margin):
     return gain < -margin
 
 
+def addition_per_sample_bound_excludes(per_sample_optimistic, per_sample_score, cost, *, tolerance):
+    """True iff per-sample optimistic scores prove every addition rejected and not ambiguous.
+
+    For every larger panel X+ the per-sample gain d_s = F_s(X+) - F_s(X) is at most
+    u_s = U_s - F_s(X) (``per_sample_optimistic`` U bounds F_s of every panel with one row
+    more per block, ``count_bound``; ``per_sample_score`` is F_s(X)). Let M = max_s d_s and
+    P = sum_s d_s+. If P = 0, m = sum_s d_s / c <= 0; otherwise sum_s (d_s+)^2 <= M P, so
+    n_eff >= P / M and m <= P (1/c - 1/(2 S M)) < 0 whenever M < c / (2S). A bootstrap
+    replicate is a length-S vector of entries of d (maximum <= M, divided by the same S), so
+    its margin is <= 0 as well: the band's upper end is <= 0, the call is not ambiguous and
+    the addition is rejected under either ``ambiguous_count_action``, whatever the sequence
+    part. Hence max_s u_s + tolerance < c / (2S) proves the decision; the tolerance covers
+    the rounding of the computed scores, and a NaN never passes this form. Only the maximum
+    over all samples is exact: the leave-one-sample-out margin m' is not what the bootstrap
+    resamples, so a bound on it cannot fix the band. Returns (excluded, max_s u_s, its sample).
+    """
+    gains = np.asarray(per_sample_optimistic, np.float64) - np.asarray(per_sample_score, np.float64)
+    bound = float(np.max(gains))
+    return bool(bound + tolerance < cost / (2. * len(gains))), bound, int(np.argmax(gains))
+
+
 def deletion_bound_excludes(score, optimistic_score, cost, *, margin,
                             per_sample_score=None, per_sample_optimistic=None):
     """True iff optimistic K-1 scores prove that every deletion keeps the larger panel.

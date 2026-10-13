@@ -513,6 +513,21 @@ def _run_or_resume_one_contig(
 ):
     """Run one contig without retaining large arrays across boundaries."""
 
+    raw_evidence_source = dict(
+        raw_gl_stage=probabilities_stage or source_stage,
+        raw_sites_stage=source_stage,
+        raw_gl_key=probabilities_key if probabilities_stage else "global_probs",
+    )
+    if checkpoint_store.contig_done(target_stage, contig):
+        evidence = raw_evidence.load(checkpoint_store, contig, **raw_evidence_source)
+        if evidence is not None:
+            try:
+                return _resume_painted_contig(
+                    checkpoint_store, contig, ordered_ids, evidence, config=config,
+                    target_stage=target_stage, chromosome_map=chromosome_map)
+            finally:
+                del evidence
+                gc.collect()
     source = checkpoint_store.load_contig(source_stage, contig)
     probabilities_payload = None
     try:
@@ -544,16 +559,41 @@ def _run_or_resume_one_contig(
             target_stage=target_stage,
             painter_factory=painter_factory,
             chromosome_map=chromosome_map,
-            raw_evidence_source=dict(
-                raw_gl_stage=probabilities_stage or source_stage,
-                raw_sites_stage=source_stage,
-                raw_gl_key=probabilities_key if probabilities_stage else "global_probs",
-            ),
+            raw_evidence_source=raw_evidence_source,
         )
     finally:
         del source, probabilities_payload
         gc.collect()
         core_parallel.malloc_trim()
+
+
+def _resume_painted_contig(checkpoint_store, contig, ordered_ids, evidence, *, config,
+                           target_stage, chromosome_map):
+    """Resume a painted contig from its painting and genotype evidence alone.
+
+    The contig's genotype evidence is written when its reconstruction starts
+    and records the size and mtime of the discovery checkpoint it came from, so
+    current evidence shows that the painting was built from the present source.
+    The stage identity bound the configuration, code and discovery identity.
+    The painting is therefore validated without reloading the discovery
+    checkpoint or rerunning block feedback to recompute its release identity
+    (which repeats digests of exactly those inputs).
+    """
+    checkpoint = painting_checkpoints.validate_painting_checkpoint(
+        checkpoint_store.load_contig(target_stage, contig),
+        expected_sample_ids=ordered_ids,
+        expected_painting_product_identity=assembly_painting_product_identity(
+            config, chromosome_map=chromosome_map),
+    )
+    mask_mode = evidence["observed_call_mask_mode"]
+    if mask_mode != EXACT_OBSERVED_MASK_MODE:
+        raise RuntimeError(f"{contig}: genotype evidence observation-mask provenance mismatch")
+    from ..assembly.support import write_founder_support
+    write_founder_support(checkpoint, np.asarray(evidence["global_sites"]),
+                          np.ascontiguousarray(evidence["global_observed_mask"], dtype=np.bool_),
+                          Path(checkpoint_store.root) / target_stage / "reports" / contig,
+                          feedback=_feedback_count_panels(checkpoint_store, contig, target_stage))
+    return _checkpoint_summary(contig, checkpoint, True, mask_mode)
 
 
 def _run_or_resume_loaded_contig(
@@ -579,6 +619,10 @@ def _run_or_resume_loaded_contig(
     if raw_evidence_source is not None:
         raw_evidence.save(checkpoint_store, contig, probabilities, sites, observed,
                           source, **raw_evidence_source)
+    # Feedback and assembly work checkpoints only serve resume: they are
+    # written at the fast work compression level (the genotype evidence, read
+    # by every downstream stage, compresses 25% worse at that level).
+    work_store = checkpoint_store.work_store()
     # Samples flagged by the sample-quality QC do not inform founder
     # construction (feedback, assembly, founder refinement); painting and the
     # raw evidence above keep every sample's full evidence.
@@ -588,7 +632,7 @@ def _run_or_resume_loaded_contig(
         chromosome_evidence = assembly_pipeline.prepare_chromosome_evidence(
             blocks, founder_probabilities, sites, founder_observed)
     blocks, feedback_identity = block_feedback.run_block_feedback(
-        checkpoint_store, contig, blocks, founder_probabilities, sites, founder_observed, ordered_ids,
+        work_store, contig, blocks, founder_probabilities, sites, founder_observed, ordered_ids,
         discovery_identity=discovery_identity, assembly_config=config.release_config,
         config=config.feedback_config, chromosome_map=chromosome_map,
         chromosome_evidence=chromosome_evidence)
@@ -632,7 +676,7 @@ def _run_or_resume_loaded_contig(
     # Release pools and painting pools never overlap. In particular, no idle
     # painter workers retain memory or process slots during hierarchical work.
     release_checkpoints = assembly_checkpoints.AssemblyCheckpointStore(
-        checkpoint_store,
+        work_store,
         work_stage=("assembly" if target_stage == PAINTING_STAGE else f"{target_stage}_assembly"),
         contig=contig,
     )
@@ -648,6 +692,9 @@ def _run_or_resume_loaded_contig(
             release_checkpoints=release_checkpoints,
             chromosome_map=chromosome_map,
             chromosome_evidence=chromosome_evidence,
+            # Joins whose exact inputs the last feedback assembly joined are reused.
+            earlier_joins=assembly_pipeline.earlier_join_results(
+                checkpoint_store, contig, FEEDBACK_ASSEMBLY_STAGES[-1:]),
         )
     if release.get("identity") != expected_release_identity:
         raise RuntimeError(

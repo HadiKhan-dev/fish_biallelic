@@ -3,7 +3,8 @@ from __future__ import annotations
 from ..core.run_record import timed_stage
 
 
-from dataclasses import asdict, dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, field
 import inspect
 import math
 from typing import Any, Mapping, Sequence
@@ -11,6 +12,7 @@ import numpy as np
 import ctypes
 import gc
 import os
+import time
 import numba
 import haplotype_reconstruction.discovery.modes as discovery_modes
 import haplotype_reconstruction.discovery.search as discovery_search
@@ -1182,6 +1184,102 @@ def generate_all_block_haplotypes(
     return core_haplotypes.BlockResults(results)
 
 
+@dataclass
+class PreparedContig:
+    """One contig's discovery inputs and the checkpoint fields made with them."""
+
+    genomic_data: Any
+    genotype_likelihoods_by_block: Sequence[np.ndarray]
+    fields: dict[str, Any]
+    # Run-record product summaries, recorded by the coordinating thread.
+    products: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+def discover_contigs(contigs, prepare, save, *, block_pool, discovery_config):
+    """Discover contigs in order with one pool, overlapping their serial work.
+
+    While the persistent block pool discovers contig i, one helper thread
+    prepares contig i+1 (loading, site quality, read calibration and block
+    likelihoods) and another saves contig i-1, so the pool no longer idles
+    between contigs. Each step is deterministic and invariant to its thread
+    count, so the checkpoints equal those of the sequential loop. The steps
+    keep the run's whole CPU budget: while discovery runs they briefly share
+    the CPUs with it (they cost a few percent of its CPU time), and when
+    discovery is shorter than a preparation it is no slower than before.
+    ``prepare(contig)`` returns a :class:`PreparedContig`, or None to skip
+    the contig; ``save(contig, prepared, block_results)`` writes it.
+    """
+    contigs = list(contigs)
+    if not contigs:
+        return
+    cpu_budget = block_pool.total_numba_threads
+
+    # Numba team sizes are per thread: kernels in the helper threads use the
+    # run's budget, as they would in the coordinating thread.
+    def prepare_timed(contig):
+        started = time.monotonic()
+        with core_parallel.numba_thread_scope(cpu_budget):
+            prepared = prepare(contig)
+        return prepared, dict(prepare_seconds=time.monotonic() - started)
+
+    def save_timed(contig, prepared, block_results, timing):
+        started = time.monotonic()
+        with core_parallel.numba_thread_scope(cpu_budget):
+            save(contig, prepared, block_results)
+        del prepared, block_results
+        gc.collect()
+        return contig, dict(timing, save_seconds=time.monotonic() - started)
+
+    def record(saved):
+        contig, timing = saved.result()
+        core_run_record.record_product("block_discovery_pipeline", contig, timing)
+
+    with ThreadPoolExecutor(1, thread_name_prefix="discovery-prepare") as preparer, \
+            ThreadPoolExecutor(1, thread_name_prefix="discovery-save") as saver:
+        upcoming = preparer.submit(prepare_timed, contigs[0])
+        saving = None
+        for index, contig in enumerate(contigs):
+            waited = time.monotonic()
+            prepared, timing = upcoming.result()
+            timing["prepare_wait_seconds"] = time.monotonic() - waited
+            if index + 1 < len(contigs):
+                upcoming = preparer.submit(prepare_timed, contigs[index + 1])
+            if prepared is None:
+                continue
+            for name, summary in prepared.products.items():
+                core_run_record.record_product(name, contig, summary)
+            print(f"\n  Discovering {contig}...", flush=True)
+            started = time.monotonic()
+            block_results = generate_all_block_haplotypes(
+                prepared.genomic_data,
+                num_processes=block_pool.num_processes,
+                total_numba_threads=block_pool.total_numba_threads,
+                block_pool=block_pool,
+                discovery_config=discovery_config,
+                genotype_likelihoods_by_block=(
+                    prepared.genotype_likelihoods_by_block),
+            )
+            block_results = core_haplotypes.BlockResults(
+                [block for block in block_results if len(block.positions) > 0])
+            timing["discovery_seconds"] = time.monotonic() - started
+            hap_counts = [len(block.haplotypes) for block in block_results]
+            print(
+                f"    [Discovery] {contig}: {len(block_results)} blocks"
+                + (f", haps/block: min={min(hap_counts)}, max={max(hap_counts)}, "
+                   f"mean={np.mean(hap_counts):.1f}" if hap_counts else "")
+                + f" in {timing['discovery_seconds']:.1f}s; preparation "
+                f"{timing['prepare_seconds']:.1f}s, of which "
+                f"{timing['prepare_wait_seconds']:.1f}s was waited for",
+                flush=True,
+            )
+            if saving is not None:
+                record(saving)
+            saving = saver.submit(
+                save_timed, contig, prepared, block_results, timing)
+            del prepared, block_results
+        if saving is not None:
+            record(saving)
+
 def backstop_summary(block_results):
     """Count blocks whose search hit a reported K-scaled backstop (target 0)."""
     counts = dict(blocks=len(block_results), expansion_backstop=0, exact_score_backstop=0)
@@ -1194,3 +1292,4 @@ def backstop_summary(block_results):
 import haplotype_reconstruction.core.genotypes as core_genotypes
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.parallel as core_parallel
+import haplotype_reconstruction.core.run_record as core_run_record

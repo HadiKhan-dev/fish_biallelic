@@ -44,40 +44,40 @@ def _emission(a, b, gl):
 
 
 @njit(cache=True)
-def _emission_matrix(panel, site, gl, observed):
+def _emission_matrix_into(panel, site, gl, observed, out):
     k = len(panel)
-    out = np.ones((k + 1, k + 1), np.float64)
-    if observed:
-        for a in range(k + 1):
-            ha = panel[a, site] if a < k else -1
-            for b in range(k + 1):
-                hb = panel[b, site] if b < k else -1
-                out[a, b] = _emission(ha, hb, gl)
-    return out
+    if not observed:
+        out[:, :] = 1.
+        return
+    for a in range(k + 1):
+        ha = panel[a, site] if a < k else -1
+        for b in range(k + 1):
+            hb = panel[b, site] if b < k else -1
+            out[a, b] = _emission(ha, hb, gl)
 
 
 @njit(cache=True)
-def _predict(filtered, pi, rate):
+def _predict_into(filtered, pi, rate, row, col, out):
     s = len(pi)
-    row, col = np.zeros(s), np.zeros(s)
+    row[:] = 0.
+    col[:] = 0.
     for a in range(s):
         for b in range(s):
             row[a] += filtered[a, b]
             col[b] += filtered[a, b]
     stay = 1. - rate
-    out = np.empty((s, s), np.float64)
     for a in range(s):
         for b in range(s):
             out[a, b] = (stay * stay * filtered[a, b]
                 + stay * rate * (row[a] * pi[b] + pi[a] * col[b])
                 + rate * rate * pi[a] * pi[b])
-    return out
 
 
 @njit(cache=True)
-def _backward(weighted_future, pi, rate):
+def _backward_into(weighted_future, pi, rate, row, col, out):
     s = len(pi)
-    row, col = np.zeros(s), np.zeros(s)
+    row[:] = 0.
+    col[:] = 0.
     total = 0.
     for a in range(s):
         for b in range(s):
@@ -86,7 +86,6 @@ def _backward(weighted_future, pi, rate):
             col[b] += value * pi[a]
             total += pi[a] * value * pi[b]
     stay = 1. - rate
-    out = np.empty((s, s), np.float64)
     for a in range(s):
         for b in range(s):
             out[a, b] = (stay * stay * weighted_future[a, b]
@@ -94,25 +93,42 @@ def _backward(weighted_future, pi, rate):
     maximum = np.max(out)
     if maximum > 0:
         out /= maximum
-    return out
+
+
+@njit(cache=True)
+def _forward_into(panel, gl, observed, pi, rates, history, store_path, filtered, prior,
+                  emission, row, col):
+    """Scaled forward log-likelihood; normalized filtered states go to history
+    (every site with ``store_path``, else only the last in history[0])."""
+    length, s = len(gl), len(pi)
+    for a in range(s):
+        for b in range(s):
+            filtered[a, b] = pi[a] * pi[b]
+    log_likelihood = 0.
+    for site in range(length):
+        if site:
+            _predict_into(filtered, pi, rates[site - 1], row, col, prior)
+        else:
+            prior[:, :] = filtered
+        _emission_matrix_into(panel, site, gl[site], observed[site], emission)
+        for a in range(s):
+            for b in range(s):
+                filtered[a, b] = prior[a, b] * emission[a, b]
+        scale = np.sum(filtered)
+        if scale <= 0:
+            return -np.inf
+        log_likelihood += np.log(scale)
+        filtered /= scale
+        history[site if store_path else 0] = filtered
+    return log_likelihood
 
 
 @njit(cache=True)
 def _forward(panel, gl, observed, pi, rates, store_path):
     length, s = len(gl), len(pi)
     history = np.empty((length if store_path else 1, s, s), np.float64)
-    filtered = np.outer(pi, pi)
-    log_likelihood = 0.
-    for site in range(length):
-        prior = filtered if site == 0 else _predict(filtered, pi, rates[site - 1])
-        emission = _emission_matrix(panel, site, gl[site], observed[site])
-        filtered = prior * emission
-        scale = np.sum(filtered)
-        if scale <= 0:
-            return -np.inf, history
-        log_likelihood += np.log(scale)
-        filtered /= scale
-        history[site if store_path else 0] = filtered
+    log_likelihood = _forward_into(panel, gl, observed, pi, rates, history, store_path,
+        np.empty((s, s)), np.empty((s, s)), np.empty((s, s)), np.empty(s), np.empty(s))
     return log_likelihood, history
 
 
@@ -125,13 +141,13 @@ def _score_samples(panel, gl, observed, pi, rates):
 
 
 @njit(cache=True)
-def _outside_rows_and_columns(matrix):
+def _outside_rows_and_columns_into(matrix, tl, tr, bl, br, out):
     """Nonnegative quadrant sums; avoid subtracting nearly all of the total."""
     s = len(matrix)
-    tl = np.zeros((s + 1, s + 1))
-    tr = np.zeros((s + 1, s + 1))
-    bl = np.zeros((s + 1, s + 1))
-    br = np.zeros((s + 1, s + 1))
+    tl[:, :] = 0.
+    tr[:, :] = 0.
+    bl[:, :] = 0.
+    br[:, :] = 0.
     for a in range(s):
         left, right = 0., 0.
         for b in range(s):
@@ -148,10 +164,8 @@ def _outside_rows_and_columns(matrix):
             j = s - 1 - b
             right += matrix[a, j]
             br[a, j] = br[a + 1, j] + right
-    out = np.empty(s)
     for a in range(s):
         out[a] = tl[a, a] + tr[a, a + 1] + bl[a + 1, a] + br[a + 1, a + 1]
-    return out
 
 
 @njit(cache=True)
@@ -165,16 +179,17 @@ def _log_ratio(new, old):
 
 
 @njit(cache=True)
-def _transition_statistics(filtered, future, pi, rate, denominator):
-    """Redraw destinations include redraw-to-self; state changes exclude it."""
+def _transition_statistics_into(filtered, future, pi, rate, denominator, row, col, destinations):
+    """Redraw destinations (into ``destinations``) include redraw-to-self; the
+    returned expected state changes exclude it."""
     s = len(pi)
-    row, col = np.zeros(s), np.zeros(s)
+    row[:] = 0.
+    col[:] = 0.
     for a in range(s):
         for b in range(s):
             row[a] += filtered[a, b]
             col[b] += filtered[a, b]
     stay = 1. - rate
-    destinations = np.zeros(s)
     same_redraw = 0.
     for a in range(s):
         first, second, same_first, same_second = 0., 0., 0., 0.
@@ -190,7 +205,7 @@ def _transition_statistics(filtered, future, pi, rate, denominator):
         same_redraw += rate * pi[a] * (stay * (same_first + same_second)
             + rate * (row[a] * weighted_row + col[a] * weighted_col)) / denominator
     # Roundoff can make a mathematically zero difference slightly negative.
-    return destinations, max(0., np.sum(destinations) - same_redraw)
+    return max(0., np.sum(destinations) - same_redraw)
 
 
 @njit(cache=True, parallel=True)
@@ -200,7 +215,11 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, batch
     Samples run in parallel batches of at most ``batch``. Each sample writes
     its aggregate contributions to its own buffer row, and every aggregate
     element then adds the rows of the batch one by one in sample order, so the
-    sums are the same sequential chain over samples at any thread count.
+    sums are the same sequential chain over samples at any thread count. A
+    sample's per-site matrices live in buffers allocated once per sample, and
+    an observed site's Q log ratios are evaluated once per distinct allele
+    pair (current allele h in {0, 1} against partner 0, 1 or unknown, and the
+    flip of both copies), not once per founder pair.
     """
     n, length, k = len(gl), gl.shape[1], len(panel)
     s = k + 1
@@ -228,18 +247,37 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, batch
             sample = start + worker
             stat_rows[worker] = 0.
             occupancy_rows[worker] = 0.
-            ll, forward = _forward(panel, gl[sample], observed[sample], pi, rates, True)
+            forward = np.empty((length, s, s))
+            emission, prior = np.empty((s, s)), np.empty((s, s))
+            weights, mass = np.empty((s, s)), np.empty((s, s))
+            posterior, future = np.empty((s, s)), np.empty((s, s))
+            backward = np.ones((s, s))
+            row, col, redraw = np.empty(s), np.empty(s), np.empty(s)
+            outside, known_outside = np.empty(s), np.empty(k)
+            ratio, self_ratio = np.empty((2, 3)), np.empty(2)
+            tl, tr = np.empty((s + 1, s + 1)), np.empty((s + 1, s + 1))
+            bl, br = np.empty((s + 1, s + 1)), np.empty((s + 1, s + 1))
+            ll = _forward_into(panel, gl[sample], observed[sample], pi, rates, forward, True,
+                               mass, prior, emission, row, col)
             likelihoods[sample] = ll
             if not np.isfinite(ll):
                 continue
-            backward = np.ones((s, s))
             for site in range(length - 1, -1, -1):
-                emission = _emission_matrix(panel, site, gl[sample, site], observed[sample, site])
-                prior = np.outer(pi, pi) if site == 0 else _predict(forward[site - 1], pi, rates[site - 1])
-                weights = prior * backward
-                mass = weights * emission
+                _emission_matrix_into(panel, site, gl[sample, site], observed[sample, site], emission)
+                if site == 0:
+                    for a in range(s):
+                        for b in range(s):
+                            prior[a, b] = pi[a] * pi[b]
+                else:
+                    _predict_into(forward[site - 1], pi, rates[site - 1], row, col, prior)
+                for a in range(s):
+                    for b in range(s):
+                        weights[a, b] = prior[a, b] * backward[a, b]
+                        mass[a, b] = weights[a, b] * emission[a, b]
                 denominator = np.sum(mass)
-                posterior = mass / denominator
+                for a in range(s):
+                    for b in range(s):
+                        posterior[a, b] = mass[a, b] / denominator
                 if pair_output:
                     pair[sample, site] = posterior
                 for a in range(s):
@@ -252,10 +290,19 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, batch
                         initial[sample, a] = copies
                     if a == k:
                         unknown[sample, site] = copies
-                outside = _outside_rows_and_columns(mass)
+                _outside_rows_and_columns_into(mass, tl, tr, bl, br, outside)
                 known_mass = mass[:k, :k]
                 known_denominator = np.sum(known_mass)
-                known_outside = _outside_rows_and_columns(known_mass)
+                _outside_rows_and_columns_into(known_mass, tl, tr, bl, br, known_outside)
+                if observed[sample, site]:
+                    site_gl = gl[sample, site]
+                    for h in range(2):
+                        self_ratio[h] = _log_ratio(_emission(1 - h, 1 - h, site_gl),
+                                                   _emission(h, h, site_gl))
+                        for partner in range(3):
+                            allele = partner if partner < 2 else -1
+                            ratio[h, partner] = _log_ratio(_emission(1 - h, allele, site_gl),
+                                                           _emission(h, allele, site_gl))
                 for a in range(k):
                     qgain, known_qgain, carrier, known_carrier = 0., 0., 0., 0.
                     alt_mass, known_alt_mass, current_support, flip_support = 0., 0., 0., 0.
@@ -274,7 +321,9 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, batch
                         if b < k:
                             known_alt_mass += weight * alternative
                         if prob > 0:
-                            delta = _log_ratio(alternative, emission[a, b])
+                            # = _log_ratio(alternative, emission[a, b])
+                            delta = (self_ratio[panel[a, site]] if a == b else
+                                     ratio[panel[a, site], panel[b, site] if b < k else 2])
                             qgain += prob * delta
                             if b < k:
                                 known_qgain += prob * delta
@@ -301,13 +350,15 @@ def _e_samples(panel, gl, observed, pi, rates, pair_output, sample_output, batch
                         sample_stats[sample, 2, a, site] = carrier
                         sample_stats[sample, 3, a, site] = known_carrier
                 if site > 0:
-                    future = emission * backward
-                    redraw, changes = _transition_statistics(forward[site - 1], future,
-                        pi, rates[site - 1], denominator)
+                    for a in range(s):
+                        for b in range(s):
+                            future[a, b] = emission[a, b] * backward[a, b]
+                    changes = _transition_statistics_into(forward[site - 1], future, pi,
+                        rates[site - 1], denominator, row, col, redraw)
                     destinations[sample] += redraw
                     redraws[sample, site - 1] = np.sum(redraw)
                     state_changes[sample, site - 1] = changes
-                    backward = _backward(future, pi, rates[site - 1])
+                    _backward_into(future, pi, rates[site - 1], row, col, backward)
         # Fixed-order combine: each element adds this batch's rows in sample
         # order; tiles only distribute elements, never change an addition.
         stat_matrix = stat_rows.reshape((width, stat_size))

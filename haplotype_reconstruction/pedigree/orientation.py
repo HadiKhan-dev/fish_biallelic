@@ -81,25 +81,26 @@ def _binomial_log_cdf(trials, success, observed):
 
 
 @njit(cache=True, nogil=True)
-def _junction_count_log_odds(junctions, callable_bins, total_bins, multiplicity,
-                             error_probability):
-    """Weighted per-chromosome log odds of parent -> child against the reverse.
+def _junction_pair_log_odds(junctions, callable_bins, total_bins, error_probability):
+    """Per-chromosome log odds of parent -> child against the reverse.
 
-    ``result[child, parent]``. A transmitted homologue copies one parental
-    homologue at each position, so it carries each painted parental junction
-    with probability 1/2, seen where the child is callable (MAR). New
-    crossovers, co-parent junctions and false junctions form a non-negative
-    remainder with no assumed distribution, so on chromosome k
-    L(p -> c) is proportional to P(Binomial(J_p, f_c/2) <= J_c). With
-    probability ``error_probability`` a chromosome comparison is painting
-    failure carrying no orientation evidence. Chromosomes add independently.
+    ``values[chrom, child, parent]`` for parent < child, where ``compared``.
+    A transmitted homologue copies one parental homologue at each position,
+    so it carries each painted parental junction with probability 1/2, seen
+    where the child is callable (MAR). New crossovers, co-parent junctions
+    and false junctions form a non-negative remainder with no assumed
+    distribution, so on chromosome k L(p -> c) is proportional to
+    P(Binomial(J_p, f_c/2) <= J_c). With probability ``error_probability`` a
+    chromosome comparison is painting failure carrying no orientation
+    evidence. The values do not depend on chromosome weights.
     """
     chromosomes, samples = junctions.shape
-    result = np.zeros((samples, samples))
+    values = np.zeros((chromosomes, samples, samples))
+    compared = np.zeros((chromosomes, samples, samples), dtype=np.bool_)
     keep = 1.0 - error_probability
     floor = 0.5 * error_probability
     for chrom in range(chromosomes):
-        if multiplicity[chrom] <= 0 or total_bins[chrom] <= 0:
+        if total_bins[chrom] <= 0:
             continue
         for child in range(samples):
             fc = min(1.0, callable_bins[chrom, child] / (2.0 * total_bins[chrom]))
@@ -121,18 +122,51 @@ def _junction_count_log_odds(junctions, callable_bins, total_bins, multiplicity,
                 value = math.log(larger) - math.log(smaller)
                 if difference < 0.0:
                     value = -value
-                result[child, parent] += multiplicity[chrom] * value
-                result[parent, child] -= multiplicity[chrom] * value
+                values[chrom, child, parent] = value
+                compared[chrom, child, parent] = True
+    return values, compared
+
+
+@njit(cache=True, nogil=True)
+def _junction_count_log_odds(values, compared, total_bins, multiplicity):
+    """Weighted chromosome sum of the pair log odds, ``result[child, parent]``.
+
+    Chromosomes add independently, in chromosome order.
+    """
+    chromosomes, samples = values.shape[:2]
+    result = np.zeros((samples, samples))
+    for chrom in range(chromosomes):
+        if multiplicity[chrom] <= 0 or total_bins[chrom] <= 0:
+            continue
+        for child in range(samples):
+            for parent in range(child):
+                if compared[chrom, child, parent]:
+                    value = values[chrom, child, parent]
+                    result[child, parent] += multiplicity[chrom] * value
+                    result[parent, child] -= multiplicity[chrom] * value
     return result
 
 
+def junction_pair_evidence(junctions, callable_bins, total_bins, settings):
+    """Weight-independent orientation evidence of ``fit_direction``, or None if unused.
+
+    Bootstrap and LOCO refits share one evaluation; each refit only reweights it.
+    """
+    if settings.parent_state_direction_model in ("cluster", "family"):
+        return None
+    return _junction_pair_log_odds(
+        junctions, callable_bins, total_bins,
+        settings.parent_state_direction_chromosome_error_probability)
+
+
 def fit_direction(junctions, callable_bins, total_bins, weights, settings,
-                  *, component_count=None):
+                  *, component_count=None, pair_evidence=None):
     """Use the selected model in full, bootstrap and LOCO evaluations.
 
     ``edge_probability`` (paired junction-density contrast) only orders the
     acyclic graph search and is reported; ``edge_log_odds`` is the
-    orientation score evidence.
+    orientation score evidence. ``pair_evidence`` is
+    ``junction_pair_evidence`` of the same inputs, computed here if absent.
     """
     if settings.parent_state_direction_model == "cluster":
         return direction._fit_ancestry_depth_model(
@@ -148,9 +182,9 @@ def fit_direction(junctions, callable_bins, total_bins, weights, settings,
         probabilities[:] = 0.5
         log_odds = np.zeros_like(probabilities)
     else:
-        log_odds = _junction_count_log_odds(
-            junctions, callable_bins, total_bins, weights,
-            settings.parent_state_direction_chromosome_error_probability)
+        if pair_evidence is None:
+            pair_evidence = junction_pair_evidence(junctions, callable_bins, total_bins, settings)
+        log_odds = _junction_count_log_odds(*pair_evidence, total_bins, weights)
     return direction._AncestryDepthModel(
         adjusted, fractions, np.ones((len(counts), 1)),
         np.asarray([np.nan]), np.asarray([np.nan]), np.asarray([1.0]),

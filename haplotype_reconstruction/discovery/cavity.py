@@ -223,6 +223,7 @@ class _CavityScoringWorkspace:
         "log_likelihood",
         "rw_log_likelihood",
         "ww_log_emission",
+        "shared_triple",
         "state_geometry_by_k",
     )
 
@@ -239,6 +240,7 @@ class _CavityScoringWorkspace:
         ) = _build_evidence_emission_cache_kernel(
             self.likelihood, float(config.likelihood_floor)
         )
+        self.shared_triple = _shared_likelihood_triples(self.likelihood)
         self.state_geometry_by_k: dict[
             int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
         ] = {}
@@ -249,6 +251,28 @@ class _CavityScoringWorkspace:
             value = _build_state_geometry(int(k), self.config)
             self.state_geometry_by_k[int(k)] = value
         return value
+
+
+def _shared_likelihood_triples(likelihood: np.ndarray) -> np.ndarray:
+    """Flag (sample, site) likelihood triples that another sample shares.
+
+    Only a shared triple can form an exact cavity group (equal assignments
+    and equal triples), so the grouped solve looks up nothing else. Sorting
+    each site's triples lexicographically makes equal triples adjacent; the
+    comparison is the same exact float equality that the grouping applies.
+    """
+    order = np.lexsort(
+        (likelihood[:, :, 2], likelihood[:, :, 1], likelihood[:, :, 0]),
+        axis=0,
+    )
+    ordered = np.take_along_axis(likelihood, order[:, :, None], axis=0)
+    equal_to_next = np.all(ordered[1:] == ordered[:-1], axis=2)
+    shared_in_order = np.zeros(order.shape, dtype=np.bool_)
+    shared_in_order[1:] |= equal_to_next
+    shared_in_order[:-1] |= equal_to_next
+    shared = np.empty_like(shared_in_order)
+    np.put_along_axis(shared, order, shared_in_order, axis=0)
+    return shared
 
 
 def _prepare_cavity_scoring_workspace(
@@ -497,6 +521,7 @@ def _score_mode_cavity_kernel(
     mean_field_max_iter: int,
     mean_field_tolerance: float,
     likelihood_floor: float,
+    shared_triple: np.ndarray,
 ) -> tuple[np.ndarray, int, int, int, float, int, float]:
     """Compiled fixed-A cavity score for one complete mode.
 
@@ -638,6 +663,7 @@ def _score_mode_cavity_kernel(
             haplotypes, assignments, founder_support, unary, pair, edge_first,
             edge_second, neighbours, neighbour_counts, mean_field_max_iter,
             mean_field_tolerance, likelihood_floor, site_start, site_stop,
+            shared_triple,
         )
         for heldout in prange(n_samples):
             heldout_iterations = iterations_by_heldout[heldout]
@@ -719,6 +745,7 @@ def _score_prepared_mode(
     mode: _PreparedMode,
     config: CavitySelectionConfig,
     state_geometry: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    shared_triple: np.ndarray,
 ) -> tuple[float, float, int, int, int, float, int, float]:
     kind, first, second, prior_base = state_geometry
     haplotypes = np.ascontiguousarray(mode.haplotypes, dtype=np.int64)
@@ -746,6 +773,7 @@ def _score_prepared_mode(
         int(config.mean_field_max_iter),
         float(config.mean_field_tolerance),
         float(config.likelihood_floor),
+        shared_triple,
     )
     total = math.fsum(float(value) for value in sample_scores)
     n_site_fits = evidence.shape[0] * evidence.shape[1]
@@ -797,6 +825,7 @@ def select_cavity_predictive_k(
         state_geometry_by_k: dict[
             int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
         ] = {}
+        shared_triple = _shared_likelihood_triples(likelihood)
     else:
         if not isinstance(_workspace, _CavityScoringWorkspace):
             raise TypeError("_workspace must be a _CavityScoringWorkspace")
@@ -808,6 +837,7 @@ def select_cavity_predictive_k(
         log_likelihood = _workspace.log_likelihood
         rw_log_likelihood = _workspace.rw_log_likelihood
         ww_log_emission = _workspace.ww_log_emission
+        shared_triple = _workspace.shared_triple
         state_geometry_by_k = _workspace.state_geometry_by_k
     n_samples, n_sites, _ = likelihood.shape
     modes, counts = _prepare_modes(modes_by_k, n_samples, n_sites)
@@ -849,6 +879,7 @@ def select_cavity_predictive_k(
                 mode,
                 settings,
                 state_geometry_by_k[k],
+                shared_triple,
             )
             components[(k, mode.digest)] = component
             mode_scores.append(component[0])

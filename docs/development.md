@@ -220,9 +220,10 @@ package path in a forkserver worker as well as in the parent: a frozen entry
 script alone does not isolate preloaded worker imports.
 
 Package startup configures disposable Numba caches in `core/environment.py`
-before numerical imports. Run/job and hostname isolate automatic caches;
-workers in that scope reuse them. An explicit `NUMBA_CACHE_DIR` remains a user
-override. Native caches, batch-transport results and scientific checkpoints
+before numerical imports. Run/job, hostname and a key of the package source
+isolate automatic caches; workers in that scope reuse them, and
+`core/numba_warmup.py` keeps them between runs per source key. An explicit
+`NUMBA_CACHE_DIR` replaces the automatic base. Native caches, batch-transport results and scientific checkpoints
 have different lifetimes: neither a native cache nor a queue directory replaces
 the checkpoint store. See [cache policy](performance.md#native-compilation-caches).
 

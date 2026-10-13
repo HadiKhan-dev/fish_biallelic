@@ -38,7 +38,7 @@ from scipy import special
 from scipy.optimize import minimize
 
 from .environment import boolean_setting
-from .run_record import record_product, timed_stage
+from .run_record import timed_stage
 from . import sample_quality, variants
 
 
@@ -413,6 +413,22 @@ def _unique_block_sites(genomic_data):
     return positions[first], reads, keep, snp
 
 
+# Per-record arrays stay in the discovery checkpoint, not in the run record.
+_RECORD_ARRAY_FIELDS = ("loaded_positions", "rule_bits", "sample_quality")
+
+
+def run_record_products(record, sample_ids):
+    """Run-record products of one contig's site and sample QC (none when off)."""
+    products = {}
+    if record.get("enabled"):
+        products["site_quality"] = {key: value for key, value in record.items()
+                                    if key not in _RECORD_ARRAY_FIELDS}
+    samples = sample_quality.run_record_summary(record, sample_ids)
+    if samples is not None:
+        products["sample_quality"] = samples
+    return products
+
+
 @timed_stage("site_quality", contig_arg="contig")
 def filter_loaded_sites(genomic_data, *, contig, config, threads, snps_per_block, sample_rows=None,
                         sample_config=None):
@@ -428,7 +444,7 @@ def filter_loaded_sites(genomic_data, *, contig, config, threads, snps_per_block
     only; the decision is the record's "sample_quality" entry.
     Returns (genomic_data, record); the record names every rule's fitted
     parameters and counts and carries each loaded record's rule bits
-    (bit k = rule rk).
+    (bit k = rule rk). The coordinator records run_record_products(record, ...).
     """
     if not config.enabled:
         if sample_config is not None and sample_config.enabled:
@@ -441,7 +457,6 @@ def filter_loaded_sites(genomic_data, *, contig, config, threads, snps_per_block
         record.update(applied=False, records=0 if positions is None else len(positions),
                       reason=f"fewer than {config.minimum_calibration_sites} biallelic SNPs")
         print(f"    [Site quality] {contig}: not applied ({record['reason']})", flush=True)
-        record_product("site_quality", contig, record)
         return genomic_data, record
     rows = reads if sample_rows is None else reads[np.asarray(sample_rows)]
     # (records, samples) C-ordered, as the reference computed its row sums.
@@ -478,7 +493,6 @@ def filter_loaded_sites(genomic_data, *, contig, config, threads, snps_per_block
           f"clean balance {parameters['balance']['h0']:.4f} (r4 applied {parameters['balance']['applied']})"
           + (f"; r5 carriers exclude {excluded} flagged samples" if excluded else ""),
           flush=True)
-    record_product("site_quality", contig, record)
     bits = np.zeros(len(positions), np.uint8)
     for bit, rule in enumerate(RULES):
         bits |= flags[rule].astype(np.uint8) << bit

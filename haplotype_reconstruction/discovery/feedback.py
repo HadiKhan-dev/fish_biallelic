@@ -265,7 +265,7 @@ def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromos
     metadata = []
     try:
         for array in (gl, observed):
-            handle, meta = parallel.create_shared_array(array)
+            handle, meta = parallel.create_shared_array(array, copy_threads=cpus)
             handles.append(handle)
             metadata.append(meta)
         diagnostics = []

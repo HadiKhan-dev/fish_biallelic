@@ -14,6 +14,9 @@ from ..core import parallel
 from ..core.haplotypes import BlockResult, BlockResults
 from . import feedback, path_fitting, path_scoring, path_selection
 
+# Completed blocks per path-selection checkpoint file (_BlockChunks).
+CHUNK_BLOCKS = 64
+
 
 def kept(block):
     return (np.ones(len(block.positions), dtype=bool) if block.keep_flags is None
@@ -61,7 +64,8 @@ def materialize(original, result):
 
 def worker(task):
     """Picklable callback; shared inputs contain no simulation truth."""
-    index, columns, positions, latent, proposals, incumbent, config, search, model, founders = task
+    (index, columns, positions, latent, proposals, incumbent, config, search, model, founders,
+     memo_state, keep_memo) = task
     parallel.increment_active()
     started = time.monotonic()
     try:
@@ -73,9 +77,10 @@ def worker(task):
             path_scoring.prepare_observations(gl, observed, positions, **model))
         start, bank, bank_diagnostic = path_selection.prepare_candidate_bank(
             gl, observed, latent, proposals, config, incumbent=incumbent)
+        memo = path_selection.LikelihoodMemo(memo_state)
         attempted = path_selection.search_panel(start, bank, gl, observed, positions,
             learn_frequencies=True, prepared=prepared, previous_search=incumbent,
-            incumbent=incumbent, founders=founders, **search, **model)
+            incumbent=incumbent, founders=founders, memo=memo, **search, **model)
         context = None if founders is None else path_selection.ContextFounders(founders)
         retained = incumbent is not None and (
             path_selection.selection_objective(incumbent, True, context)
@@ -87,17 +92,18 @@ def worker(task):
             computational_work=attempted.get('computational_work'),
             search_start=attempted.get('search_start'),
             round_backstop=bool(attempted.get('round_backstop', False)))
-        # Reusing a deterministic search also permits reuse of its release
-        # calculation when the calling rule is unchanged. These cached
-        # posteriors are outputs only, never additional read observations.
+        # The release is a function of the final fit's (panel, frequencies),
+        # the block data and the calling rule. A final fit equal to the
+        # incumbent's (retained, reused, or found again) reuses its release.
+        # These cached posteriors are outputs only, never additional read
+        # observations.
         release_rule = ('carrier_majority_supporters', config.discovery.score_tolerance,
                         config.discovery.min_hard_call_pseudo_probability,
                         config.discovery.min_directional_supporters)
-        saved_release = fit.get('release_result')
-        reused_search = diagnostic.get('computational_work', {}).get(
-            'reused_previous_search', False)
-        reuse_release = (reused_search and saved_release is not None
-                         and saved_release['rule'] == release_rule)
+        saved_release = None if incumbent is None else incumbent.get('release_result')
+        reuse_release = (saved_release is not None and saved_release['rule'] == release_rule
+                         and np.array_equal(fit['panel'], incumbent['panel'])
+                         and np.array_equal(fit['frequencies'], incumbent['frequencies']))
         if reuse_release:
             release, wildcard = saved_release['release'], saved_release['wildcard']
         else:
@@ -114,8 +120,10 @@ def worker(task):
             unknown_copy_fraction=release['unknown_copy_mass']/release['total_copy_mass'],
             spatial_map_unknown_mass=wildcard['mass'],
             expected_state_changes=release['expected_state_changes'],
-            seconds=time.monotonic()-started)
-        return index, dict(fit=fit, release=release, wildcard=wildcard, diagnostic=diagnostic)
+            memo_hits=memo.hits, seconds=time.monotonic()-started)
+        # The memo goes to the next round beside, never inside, the block.
+        return index, dict(fit=fit, release=release, wildcard=wildcard, diagnostic=diagnostic,
+                           memo=memo.state() if keep_memo else None)
     finally:
         set_num_threads(1)
         parallel.release_dynamic_extra()
@@ -136,22 +144,58 @@ def backstop_summary(diagnostics):
     return counts
 
 
+class _BlockChunks:
+    """Completed blocks checkpointed CHUNK_BLOCKS at a time, numbered from zero.
+
+    One file per block kept the serial parent loop waiting on shared-storage
+    creates (40-100 ms each) and left ~134k files per run. Chunks are written
+    in completion order and their numbers stay contiguous across resumes; a
+    kill loses at most the unwritten blocks of one chunk.
+    """
+
+    def __init__(self, checkpoint_io):
+        self.checkpoint_io, self.pending, self.written = checkpoint_io, [], 0
+
+    def load(self):
+        """Yield the saved (index, block, diagnostic, memo) of every chunk."""
+        while True:
+            saved = self.checkpoint_io.load(f'chunk{self.written:06d}')
+            if saved is None:
+                return
+            self.written += 1
+            yield from saved['blocks']
+
+    def add(self, index, block, diagnostic, memo):
+        self.pending.append((index, block, diagnostic, memo))
+        if len(self.pending) == CHUNK_BLOCKS:
+            self.flush()
+
+    def flush(self):
+        if self.pending:
+            self.checkpoint_io.save(f'chunk{self.written:06d}', dict(blocks=self.pending))
+            self.pending, self.written = [], self.written + 1
+
+
 def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
                   search_config, checkpoint_io, *, generations, recombination_rate_per_bp,
-                  wildcard_mass=.01, chromosome_map=None):
+                  wildcard_mass=.01, chromosome_map=None, memo_states=None, keep_memo=False):
     """One worker per block initially; freed cores join remaining numerical work.
 
-    Each completed block is saved by the parent. The caller supplies a
-    single-compression-thread checkpoint store so tiny writes do not spawn a
-    node-wide compression team while numerical workers are running.
+    The parent saves completed blocks in chunks (_BlockChunks); blocks without
+    a latent fit or observed kept site are cheap fallbacks rebuilt on resume.
+    The caller supplies a single-compression-thread checkpoint store so small
+    writes do not spawn a node-wide compression team while numerical workers
+    run. ``memo_states`` are the previous round's likelihood memos by block
+    (LikelihoodMemo states); with ``keep_memo`` the updated ones are returned
+    as the third value for the next round, else Nones.
     """
     output = BlockResults(list(originals))
-    diagnostics, tasks = [None]*len(originals), []
+    diagnostics, memos, tasks = [None]*len(originals), [None]*len(originals), []
+    chunks = _BlockChunks(checkpoint_io)
+    for index, block, diagnostic, memo in chunks.load():
+        output.blocks[index], diagnostics[index], memos[index] = block, diagnostic, memo
     for index, original in enumerate(originals):
-        phase = f'block{index:06d}'
-        saved = checkpoint_io.load(phase)
-        if saved is not None:
-            output.blocks[index], diagnostics[index] = saved['block'], saved['diagnostic']
+        if diagnostics[index] is not None:
             continue
         keep = kept(original)
         columns = np.searchsorted(sites, original.positions)
@@ -161,11 +205,10 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
         incumbent = (getattr(proposal_sets[-2][index], 'path_fit', None)
                      if len(proposal_sets) >= 2 else None)
         if mode is None or not keep.any() or not observed[:, columns[keep]].any():
-            diagnostic = dict(skipped='no_latent_fit_or_observed_kept_sites')
             fallback = copy.copy(original)
             fallback.reads_count_matrix = fallback.probs_array = None
-            output.blocks[index], diagnostics[index] = fallback, diagnostic
-            checkpoint_io.save(phase, dict(block=fallback, diagnostic=diagnostic))
+            output.blocks[index] = fallback
+            diagnostics[index] = dict(skipped='no_latent_fit_or_observed_kept_sites')
             continue
         proposals = []
         for blocks in proposal_sets:
@@ -188,22 +231,36 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
         model = dict(generations=generations, recombination_rate_per_bp=recombination_rate_per_bp,
                      wildcard_mass=wildcard_mass, interval_morgans=intervals)
         tasks.append((index, columns[keep], positions, latent, proposals, incumbent, config,
-                      asdict(search_config), model, founders))
+                      asdict(search_config), model, founders,
+                      None if memo_states is None else memo_states[index], keep_memo))
     if not tasks:
-        return output, diagnostics
+        return output, diagnostics, memos
+
+    def completed(index, result):
+        block, diagnostic = materialize(originals[index], result), result['diagnostic']
+        output.blocks[index], diagnostics[index], memos[index] = block, diagnostic, result['memo']
+        chunks.add(index, block, diagnostic, result['memo'])
+
+    def finish():
+        chunks.flush()
+        hits = {}
+        for diagnostic in diagnostics:
+            for name, value in diagnostic.get('memo_hits', {}).items():
+                hits[name] = hits.get(name, 0) + value
+        print(f'[Path selection] backstop hits {backstop_summary(diagnostics)}; '
+              f'likelihood memo hits {hits}', flush=True)
+        return output, diagnostics, memos
+
     from ..core import batch_queue
     if batch_queue.configured():
         for index, result in batch_queue.map_batches(
                 'local_fit', tasks, (gl, observed), cpus):
-            block, diagnostic = materialize(originals[index], result), result['diagnostic']
-            output.blocks[index], diagnostics[index] = block, diagnostic
-            checkpoint_io.save(f'block{index:06d}', dict(block=block, diagnostic=diagnostic))
-        print(f'[Path selection] backstop hits {backstop_summary(diagnostics)}', flush=True)
-        return output, diagnostics
+            completed(index, result)
+        return finish()
     handles, metadata = [], []
     try:
         for array in (gl, observed):
-            handle, meta = parallel.create_shared_array(array)
+            handle, meta = parallel.create_shared_array(array, copy_threads=cpus)
             handles.append(handle)
             metadata.append(meta)
         ctx = parallel.forkserver_context
@@ -217,13 +274,9 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
         with parallel.ForkserverPool(workers, initializer=feedback.initialize,
                 initargs=(metadata, cpus, active, extra, startup)) as pool:
             for done, (index, result) in enumerate(pool.imap_unordered(worker, tasks, chunksize=1), 1):
-                block = materialize(originals[index], result)
-                diagnostic = result['diagnostic']
-                output.blocks[index], diagnostics[index] = block, diagnostic
-                checkpoint_io.save(f'block{index:06d}', dict(block=block, diagnostic=diagnostic))
+                completed(index, result)
                 if done % 20 == 0 or done == len(tasks):
                     print(f'[Path selection] completed {done}/{len(tasks)}', flush=True)
     finally:
         parallel.close_shared_memory(handles, unlink=True)
-    print(f'[Path selection] backstop hits {backstop_summary(diagnostics)}', flush=True)
-    return output, diagnostics
+    return finish()

@@ -27,11 +27,14 @@ their memory estimates (`--contig-workers`, below, for reconstruction). Survivin
 workers take freed threads at numerical (reconstruction: contig) boundaries;
 genome-wide pedigree decisions remain barriers.
 
-Package startup isolates compiled Numba caches by run/job and host, while
-workers within that scope share them. No launch-wrapper setting is required.
-Scientific checkpoints remain independent and persistent. See
+Package startup isolates compiled Numba caches by run/job, host and code
+version, while workers within that scope share them; workflows keep compiled
+kernels between runs in `~/.cache/haplotype-reconstruction/numba` (or under
+`$XDG_CACHE_HOME`) and compile a new code version's kernels in parallel before
+their first pool. No launch-wrapper setting is required. Scientific checkpoints
+remain independent and persistent. See
 [native compilation caches](performance.md#native-compilation-caches) for
-startup costs and the explicit cache override.
+the store and the explicit cache override.
 
 ## Optional cross-node batches
 
@@ -508,8 +511,8 @@ Do not share a checkpoint directory between different seeds or configurations.
 | `founder_templates/` | Frozen simulation sequence inputs |
 | `simulated_reads/` | Simulated observations, true pedigree, alleles and raw crossover events |
 | `block_discovery/` | Discovered 200-SNP block haplotypes, raw likelihoods/observation masks as applicable |
-| `feedback_path_initial/` | Initial local path fits, per-block checkpoints and selected panels |
-| `feedback_path_l1_assembly/`, `feedback_path_l1/` | L1 context, local proposals, per-block path fits and selected panels |
+| `feedback_path_initial/` | Initial local path fits (checkpointed in chunks of 64 blocks) and selected panels |
+| `feedback_path_l1_assembly/`, `feedback_path_l1/` | L1 context, local proposals, path fits (chunks of 64 blocks) and selected panels |
 | `feedback_path_l2_assembly/`, `feedback_path_l2/` | L1+L2 context from selected L1 panels, proposals and selected local panels |
 | `genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
 | `assembly/` | Preprocessing, L1–L4 levels, per-level founder-refinement components/searches and final aggregate |

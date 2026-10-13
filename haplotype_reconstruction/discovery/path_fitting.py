@@ -180,15 +180,135 @@ def _forward_samples(panel, emissions, pi, rates, priors, rows, workers):
     return likelihoods
 
 
+@njit(cache=True)
+def _backward_sample(sample, panel, emissions, ratios, self_ratios, observed, pi, rates,
+                     priors, rows, full_statistics, gains, occupancy, initial, destinations):
+    """One sample's backward pass over its cached forward trajectory.
+
+    Adds the sample's flip gains (observed sites only) and copy occupancy to
+    ``gains`` and ``occupancy``; writes its initial copies and its redraw
+    destinations summed over sites to ``initial`` and ``destinations``.
+    Both homologues have the same copying prior/transition and genotype
+    emissions are unordered. Thus all messages are symmetric even when the
+    founder frequencies are unequal. Evaluate each unordered cell once and
+    store what is read later: weights and posteriors in full, mass, future
+    and backward messages as upper triangles.
+    """
+    length, k = emissions.shape[1], len(panel)
+    s = k + 1
+    backward = np.empty((s, s))
+    weights = np.empty((s, s))
+    mass = np.empty((s, s))
+    posterior = np.empty((s, s))
+    future = np.empty((s, s))
+    row, previous = np.empty(s), np.empty(s)
+    copies, redraw = np.empty(s), np.empty(s)
+    outside = np.empty(s)
+    prefix = np.empty((s, s+1))
+    suffix = np.empty((s, s+1))
+    tail = np.empty(s+1)
+    destinations[:] = 0.
+    # Defined before the site loop; every use at site > 0 follows the
+    # assignment for that site.
+    rate, stay = 0., 1.
+    backward[:, :] = 1.
+    for site in range(length-1, -1, -1):
+        emission = emissions[sample, site]
+        denominator = 0.
+        row[:] = 0.
+        redraw[:] = 0.
+        if site:
+            rate = rates[site-1]
+            stay = 1. - rate
+            for b in range(s):
+                previous[b] = stay * rows[sample, site-1, b] + rate * pi[b]
+        index = 0
+        for a in range(s):
+            ha = panel[a, site] if a < k else 2
+            for b in range(a, s):
+                hb = panel[b, site] if b < k else 2
+                weight = priors[sample, site, index] * backward[a, b]
+                index += 1
+                value = weight * emission[ha, hb]
+                weighted_future = emission[ha, hb] * backward[a, b]
+                if full_statistics:
+                    weights[a, b] = weights[b, a] = weight
+                if full_statistics or site == 0:
+                    mass[a, b] = value
+                future[a, b] = weighted_future
+                if site:
+                    row[a] += weighted_future * pi[b]
+                    redraw[a] += weighted_future * previous[b]
+                    if b != a:
+                        row[b] += weighted_future * pi[a]
+                        redraw[b] += weighted_future * previous[a]
+                denominator += value if a == b else 2. * value
+        if full_statistics or site == 0:
+            copies[:] = 0.
+            for a in range(s):
+                for b in range(a, s):
+                    prob = mass[a, b] / denominator
+                    posterior[a, b] = posterior[b, a] = prob
+                    copies[a] += 2. * prob
+                    if b != a:
+                        copies[b] += 2. * prob
+            for a in range(s):
+                if full_statistics:
+                    occupancy[a, site] += copies[a]
+                if site == 0:
+                    initial[a] = copies[a]
+        if full_statistics and observed[sample, site]:
+            _outside_into(mass, prefix, suffix, tail, outside)
+            for a in range(k):
+                ha = panel[a, site]
+                qgain, alt_mass = 0., 0.
+                for b in range(s):
+                    hb = panel[b, site] if b < k else 2
+                    if a == b:
+                        prob, weight = posterior[a, b], weights[a, b]
+                        alternative = emission[1-ha, 1-ha]
+                        delta = self_ratios[sample, site, ha]
+                    else:
+                        prob = 2. * posterior[a, b]
+                        weight = 2. * weights[a, b]
+                        alternative = emission[1-ha, hb]
+                        delta = ratios[sample, site, ha, hb]
+                    alt_mass += weight * alternative
+                    if prob > 0:
+                        qgain += prob * delta
+                gains[0, a, site] += qgain
+                gains[1, a, site] += reference._log_ratio(outside[a] + alt_mass, denominator)
+        if site > 0:
+            total = 0.
+            for a in range(s):
+                destinations[a] += 2. * rate * pi[a] * redraw[a] / denominator
+                total += pi[a] * row[a]
+            maximum = 0.
+            for a in range(s):
+                for b in range(a, s):
+                    value = (stay * stay * future[a, b]
+                             + stay * rate * (row[a] + row[b]) + rate * rate * total)
+                    backward[a, b] = value
+                    maximum = max(maximum, value)
+            if maximum > 0:
+                for a in range(s):
+                    for b in range(a, s):
+                        backward[a, b] /= maximum
+
+
 @njit(cache=True, parallel=True)
 def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates,
-                      priors, rows, full_statistics, batch):
+                      priors, rows, full_statistics, batch, serial):
     """Sufficient statistics summed over samples in ascending sample order.
 
-    Samples run in parallel batches of at most ``batch``; each writes its own
-    statistics row, and every output element then adds the rows of the batch
-    one by one in sample order. Every sum is therefore the same sequential
-    chain over samples 0..N-1 for any thread count or batch width.
+    With ``serial`` (one thread) the samples add their statistics to the
+    totals directly, one after another. Otherwise samples run in parallel
+    batches of at most ``batch``; each writes its own statistics row, and
+    every output element then adds the rows of the batch one by one in sample
+    order. Every sum is therefore the same sequential chain over samples
+    0..N-1 for any thread count or batch width: a sample's zero row at an
+    unobserved site adds nothing, as the totals start at +0 and so never
+    hold -0.
     """
     n, length, k = len(emissions), emissions.shape[1], len(panel)
     s = k + 1
@@ -196,121 +316,38 @@ def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates
     occupancy = np.zeros((s, length))
     initial = np.zeros(s)
     destinations = np.zeros(s)
+    if serial:
+        sample_initial, sample_destinations = np.empty(s), np.empty(s)
+        for sample in range(n):
+            _backward_sample(sample, panel, emissions, ratios, self_ratios, observed, pi, rates,
+                             priors, rows, full_statistics, gains, occupancy,
+                             sample_initial, sample_destinations)
+            for a in range(s):
+                initial[a] += sample_initial[a]
+                destinations[a] += sample_destinations[a]
+        return gains, occupancy, initial, destinations
     width = max(1, min(batch, n))
     sample_gains = np.empty((width if full_statistics else 0, 2, k, length))
     sample_occupancy = np.empty((width if full_statistics else 0, s, length))
     sample_initial = np.empty((width, s))
     sample_destinations = np.empty((width, s))
     gain_size, occupancy_size = 2 * k * length, s * length
-    # Both homologues have the same copying prior/transition and genotype
-    # emissions are unordered. Thus all messages are symmetric even when the
-    # founder frequencies are unequal. Evaluate each unordered cell once;
-    # retain full scratch matrices for the sufficient-statistic interface.
     for start in range(0, n, width):
         count = min(width, n - start)
         for slot_index in prange(count):
             row_slot = np.int64(slot_index)
-            sample = start + row_slot
-            backward = np.empty((s, s))
-            weights = np.empty((s, s))
-            mass = np.empty((s, s))
-            posterior = np.empty((s, s))
-            future = np.empty((s, s))
-            row, previous = np.empty(s), np.empty(s)
-            copies, redraw = np.empty(s), np.empty(s)
-            outside = np.empty(s)
-            prefix = np.empty((s, s+1))
-            suffix = np.empty((s, s+1))
-            tail = np.empty(s+1)
             if full_statistics:
                 sample_gains[row_slot] = 0.
-            sample_initial[row_slot] = 0.
-            sample_destinations[row_slot] = 0.
-            # Defined before the site loop so they are private to the sample;
-            # every use at site > 0 follows the assignment for that site.
-            rate, stay = 0., 1.
-            backward[:, :] = 1.
-            for site in range(length-1, -1, -1):
-                emission = emissions[sample, site]
-                denominator = 0.
-                row[:] = 0.
-                redraw[:] = 0.
-                if site:
-                    rate = rates[site-1]
-                    stay = 1. - rate
-                    for b in range(s):
-                        previous[b] = stay * rows[sample, site-1, b] + rate * pi[b]
-                index = 0
-                for a in range(s):
-                    ha = panel[a, site] if a < k else 2
-                    for b in range(a, s):
-                        hb = panel[b, site] if b < k else 2
-                        weight = priors[sample, site, index] * backward[a, b]
-                        index += 1
-                        value = weight * emission[ha, hb]
-                        weighted_future = emission[ha, hb] * backward[a, b]
-                        if full_statistics:
-                            weights[a, b] = weights[b, a] = weight
-                        if full_statistics or site == 0:
-                            mass[a, b] = mass[b, a] = value
-                        future[a, b] = future[b, a] = weighted_future
-                        if site:
-                            row[a] += weighted_future * pi[b]
-                            redraw[a] += weighted_future * previous[b]
-                            if b != a:
-                                row[b] += weighted_future * pi[a]
-                                redraw[b] += weighted_future * previous[a]
-                        denominator += value if a == b else 2. * value
-                if full_statistics or site == 0:
-                    copies[:] = 0.
-                    for a in range(s):
-                        for b in range(a, s):
-                            prob = mass[a, b] / denominator
-                            posterior[a, b] = posterior[b, a] = prob
-                            copies[a] += 2. * prob
-                            if b != a:
-                                copies[b] += 2. * prob
-                    for a in range(s):
-                        if full_statistics:
-                            sample_occupancy[row_slot, a, site] = copies[a]
-                        if site == 0:
-                            sample_initial[row_slot, a] = copies[a]
-                if full_statistics and observed[sample, site]:
-                    _outside_into(mass, prefix, suffix, tail, outside)
-                    for a in range(k):
-                        ha = panel[a, site]
-                        qgain, alt_mass = 0., 0.
-                        for b in range(s):
-                            hb = panel[b, site] if b < k else 2
-                            if a == b:
-                                prob, weight = posterior[a, b], weights[a, b]
-                                alternative = emission[1-ha, 1-ha]
-                                delta = self_ratios[sample, site, ha]
-                            else:
-                                prob = 2. * posterior[a, b]
-                                weight = 2. * weights[a, b]
-                                alternative = emission[1-ha, hb]
-                                delta = ratios[sample, site, ha, hb]
-                            alt_mass += weight * alternative
-                            if prob > 0:
-                                qgain += prob * delta
-                        sample_gains[row_slot, 0, a, site] = qgain
-                        sample_gains[row_slot, 1, a, site] = reference._log_ratio(
-                            outside[a] + alt_mass, denominator)
-                if site > 0:
-                    total = 0.
-                    for a in range(s):
-                        sample_destinations[row_slot, a] += 2. * rate * pi[a] * redraw[a] / denominator
-                        total += pi[a] * row[a]
-                    maximum = 0.
-                    for a in range(s):
-                        for b in range(a, s):
-                            value = (stay * stay * future[a, b]
-                                     + stay * rate * (row[a] + row[b]) + rate * rate * total)
-                            backward[a, b] = backward[b, a] = value
-                            maximum = max(maximum, value)
-                    if maximum > 0:
-                        backward /= maximum
+                sample_occupancy[row_slot] = 0.
+                _backward_sample(start + row_slot, panel, emissions, ratios, self_ratios, observed,
+                                 pi, rates, priors, rows, True, sample_gains[row_slot],
+                                 sample_occupancy[row_slot], sample_initial[row_slot],
+                                 sample_destinations[row_slot])
+            else:
+                # Without full statistics no gain or occupancy is written.
+                _backward_sample(start + row_slot, panel, emissions, ratios, self_ratios, observed,
+                                 pi, rates, priors, rows, False, gains, occupancy,
+                                 sample_initial[row_slot], sample_destinations[row_slot])
         # Fixed-order combine: each element adds this batch's rows in sample
         # order; tiles only distribute elements, never change an addition.
         if full_statistics:
@@ -400,7 +437,7 @@ class _Workspace:
             return self.state_cache
         gains, occ, initial, dest = _backward_samples(panel, self.emissions, self.ratios,
             self.self_ratios, self.observed, self.pi, self.rates, self.priors,
-            self.rows, full_statistics, _E_STEP_SAMPLE_BATCH)
+            self.rows, full_statistics, _E_STEP_SAMPLE_BATCH, get_num_threads() == 1)
         self.state_cache = dict(log_likelihood=float(self.likelihoods.sum()),
             sample_log_likelihood=self.likelihoods, state_prior=self.pi,
             redraw_probabilities=self.rates, flip_gains=gains[0],
@@ -419,6 +456,23 @@ def fit_e_step(panel, gl, positions, observed_mask, *, generations=3.,
     panel = np.ascontiguousarray(panel, dtype=np.int64)
     frequencies = np.ones(len(panel)) if founder_frequencies is None else np.asarray(founder_frequencies)
     return workspace.state(panel, frequencies)
+
+
+def _reported_posteriors(state, panel):
+    """A fit's allele probabilities and copy occupancy, from its final E-step."""
+    from scipy.special import expit
+    current_p = expit(-state['conditional_flip_gains'])
+    return dict(allele_probability=np.where(panel == 1, current_p, 1-current_p),
+                occupancy=state['occupancy'][:-1])
+
+
+def fit_posteriors(panel, frequencies, gl, observed, positions, *, prepared, generations,
+                   recombination_rate_per_bp, wildcard_mass, interval_morgans):
+    """The posterior arrays fit_fixed reports for a fit ending at (panel, frequencies)."""
+    workspace = _Workspace(panel, gl, positions, observed, generations=generations,
+        recombination_rate_per_bp=recombination_rate_per_bp, wildcard_mass=wildcard_mass,
+        interval_morgans=interval_morgans, prepared=prepared)
+    return _reported_posteriors(workspace.state(panel, frequencies), panel)
 
 
 def fit_fixed(panel, gl, observed, positions, *, generations, learn_frequencies,
@@ -445,7 +499,6 @@ def fit_fixed(panel, gl, observed, positions, *, generations, learn_frequencies,
     control dynamic Numba allocation; one fit owns O(N*L*(K+1)**2) trajectory
     storage.
     """
-    from scipy.special import expit
     from haplotype_reconstruction.core import parallel
 
     panel, frequencies = canonical(panel, frequencies)
@@ -509,11 +562,9 @@ def fit_fixed(panel, gl, observed, positions, *, generations, learn_frequencies,
         panel, score, objective = trial, trial_score, trial_objective
     else:
         backstop_reached = True
-    final_state = workspace.state(panel, frequencies)
-    current_p = expit(-final_state['conditional_flip_gains'])
-    allele_p = np.where(panel == 1, current_p, 1-current_p)
-    return dict(panel=panel, frequencies=frequencies, allele_probability=allele_p,
-                occupancy=final_state['occupancy'][:-1], log_likelihood=float(score),
+    return dict(panel=panel, frequencies=frequencies,
+                **_reported_posteriors(workspace.state(panel, frequencies), panel),
+                log_likelihood=float(score),
                 objective=float(objective), history=history, converged=converged,
                 frequency_history=frequency_history,
                 update_backstop_reached=backstop_reached, termination=termination)

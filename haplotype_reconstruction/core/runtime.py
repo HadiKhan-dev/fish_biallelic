@@ -125,7 +125,11 @@ def run_log(log_path):
 
 
 def logged_workflow(label):
-    """Give each workflow invocation one closed, uniquely named stdout log."""
+    """Give each workflow invocation one closed, uniquely named stdout log.
+
+    The workflow runs with stored and warmed-up Numba kernels
+    (core.numba_warmup), compiled before it starts any pool.
+    """
     def decorate(function):
         @wraps(function)
         def wrapped(*args, **kwargs):
@@ -133,11 +137,15 @@ def logged_workflow(label):
             os.makedirs(directory, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             path = os.path.join(directory, f"{label}_{stamp}_{os.getpid()}.log")
+            from .numba_warmup import persistent_numba_cache
             from .run_record import record_run
             output = os.environ.get('HAPLOTYPES_OUTPUT_DIR', os.path.dirname(directory))
+            cores = min(available_cpu_count(),
+                        int(os.environ.get("BHD_NUM_PROCESSES") or available_cpu_count()))
             with run_log(path), record_run(output, label, path):
                 print(f"Logging to: {path}")
-                return function(*args, **kwargs)
+                with persistent_numba_cache(cores):
+                    return function(*args, **kwargs)
         return wrapped
     return decorate
 
@@ -147,13 +155,22 @@ class CheckpointStore:
 
     Writes are atomic, and filesystem ``OSError`` exceptions are reported then
     re-raised so a stage cannot be marked complete after losing a checkpoint.
+    ``clevel`` is the ZSTD level of its writes (see work_store).
     """
 
-    def __init__(self, root, *, nthreads=1, global_log_indent="  "):
+    def __init__(self, root, *, nthreads=1, global_log_indent="  ",
+                 clevel=None):
         self.root = os.fspath(root)
         self.nthreads = max(1, int(nthreads))
         self.global_log_indent = global_log_indent
+        self.clevel = core_checkpoints.CLEVEL if clevel is None else int(clevel)
         os.makedirs(self.root, exist_ok=True)
+
+    def work_store(self):
+        """This store writing resume-only work checkpoints (core.checkpoints.WORK_CLEVEL)."""
+        return CheckpointStore(self.root, nthreads=self.nthreads,
+                               global_log_indent=self.global_log_indent,
+                               clevel=core_checkpoints.WORK_CLEVEL)
 
     def stage_dir(self, stage):
         path = os.path.join(self.root, stage)
@@ -257,12 +274,12 @@ class CheckpointStore:
         return os.path.exists(core_checkpoints.global_path(self.root, stage))
 
     def save_contig(self, stage, contig, payload):
-        self.stage_dir(stage)
         try:
             written = core_checkpoints.write(
                 core_checkpoints.contig_path(self.root, stage, contig),
                 payload,
                 nthreads=self.nthreads,
+                clevel=self.clevel,
             )
             size_mb = written / (1024 * 1024)
             print(f"    [Checkpoint] {stage}/{contig} ({size_mb:.1f} MB)")
@@ -280,12 +297,12 @@ class CheckpointStore:
         )
 
     def save_global(self, stage, payload):
-        self.stage_dir(stage)
         try:
             written = core_checkpoints.write(
                 core_checkpoints.global_path(self.root, stage),
                 payload,
                 nthreads=self.nthreads,
+                clevel=self.clevel,
             )
             size_mb = written / (1024 * 1024)
             print(
@@ -352,7 +369,8 @@ class CheckpointStore:
         os.close(descriptor)
         os.unlink(candidate)
         try:
-            core_checkpoints.write(candidate, payload, nthreads=self.nthreads)
+            core_checkpoints.write(candidate, payload, nthreads=self.nthreads,
+                                   clevel=self.clevel)
             try:
                 os.link(candidate, target)
             except FileExistsError:

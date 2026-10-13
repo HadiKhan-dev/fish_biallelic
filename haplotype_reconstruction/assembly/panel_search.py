@@ -52,6 +52,9 @@ SWEEP_BACKSTOP_BASE = 100
 SWEEP_BACKSTOP_PER_ROW = 20
 POOL_QUOTA_DOUBLINGS = 4
 POOL_EXTENDED_DOUBLINGS = 6
+# Distinct-path sets whose birth bounds are kept for reuse (memory: one samples-long vector
+# per pool path and set).
+BIRTH_SETS = 4
 
 
 @dataclass(frozen=True)
@@ -512,10 +515,17 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         return -2.0 * trial_ll, (trial_ll, trial_scores)
 
     forwards_cache = {}
+    births_by_set = {}
 
     def panel_forwards(panel):
         """Exclusion forwards of a panel (row order matters), kept for the last few panels: a
-        sweep, its stall, tier 2 and the saturation ladder often share one panel."""
+        sweep, its stall, tier 2 and the saturation ladder often share one panel.
+
+        Birth bounds depend only on the set of distinct panel paths: the forward maxima and the
+        maxima over the new path's states are exact over the same values, which duplicate rows
+        and row order do not change. Panels with one path set therefore share them (kept for
+        the last BIRTH_SETS sets), above all the duplicate-seed refits of a count step, whose
+        panels start as P plus a copy and mostly continue through the same accepted moves."""
         key = tuple(map(tuple, panel))
         found = forwards_cache.get(key)
         if found is None:
@@ -525,13 +535,25 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             if len(forwards_cache) >= 3:
                 forwards_cache.pop(next(iter(forwards_cache)))
             forwards_cache[key] = found
+        path_set = tuple(sorted(set(key)))
+        shared = births_by_set.pop(path_set, None)
+        if shared is None:
+            shared = found.births
+        elif shared is not found.births:
+            shared.update(found.births)
+            found.births = shared
+        births_by_set[path_set] = shared
+        if len(births_by_set) > BIRTH_SETS:
+            births_by_set.pop(next(iter(births_by_set)))
         return found
 
-    def certify(panel, pool, pool_offset, structural, pool_capacity, panel_ll=None, slots=None):
+    def certify(panel, pool, pool_offset, structural, pool_capacity, panel_ll=None, slots=None,
+                refit_scores=None):
         """Bound every same-count move of N(P, pool) (or only replacements by pool paths).
 
         slots: a seed refit; only moves changing these rows, which are exempt from the
-        novelty rule of same-count moves."""
+        novelty rule of same-count moves. refit_scores: the exact one-path scores shared by
+        the seed refits of one count step."""
         started = time.perf_counter()
         panel_ll = likelihood if panel_ll is None else panel_ll
         rows = np.asarray(panel, dtype=np.int64)
@@ -544,7 +566,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         forwards = panel_forwards(panel)
         kernels._resolve_threads(num_threads)
         bounds, sample_bounds = panel_certify.lower_bounds(moves, forwards, panel_ll, to_local,
-                                                           block_offsets)
+                                                           block_offsets, replaced=slots)
         # A seed refit moves the seed and its copy freely (no novelty rule for any path while the
         # copies separate); its panel is settled by the count rule afterwards.
         exempt = frozenset() if slots is None else frozenset(range(len(panel)))
@@ -558,6 +580,16 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         def exact_move(trial, move):
             # A survivor replacing one path is scored exactly per sample where its bound exceeds
             # V_n(P minus f) (one_path_move_scores); other moves by the full score.
+            row = panel_certify.replaced_row(moves, move)
+            shared = None
+            if refit_scores is not None and row is not None:
+                # The sparse scores are a function of the retained rows and the new path alone
+                # (V_n(P minus f), the move's two-region bound, and V_n of the trial at the
+                # samples the bound leaves open), whatever panel and move produced them.
+                shared = (tuple(sorted(trial[:row] + trial[row + 1:])), trial[row])
+                found = refit_scores.get(shared)
+                if found is not None:
+                    return found
             if not cache:
                 cache['removal'] = forwards.removal_scores()
                 cache['local_new'] = np.ascontiguousarray(to_local(moves.new_paths))
@@ -571,7 +603,10 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             sparse['scores'] += 1
             sparse['samples'] += scored_samples
             trial_ll = float(values.sum())
-            return -2.0 * trial_ll, (trial_ll, values)
+            result = -2.0 * trial_ll, (trial_ll, values)
+            if shared is not None:
+                refit_scores[shared] = result
+            return result
 
         best_move, survivors, exact_scores = panel_certify.best_improvement(
             bounds, moves.canonical,
@@ -767,13 +802,14 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             seconds=time.perf_counter() - started)
         return best, record
 
-    def refit_seed(panel, panel_scores, panel_ll, slots):
+    def refit_seed(panel, panel_scores, panel_ll, slots, refit_scores):
         """The duplicate-seed refit: certified best-improvement over the same-count moves that
         change the seed or its copy (both exempt from the novelty rule meanwhile)."""
         moves = []
         for _ in range(sweep_backstop):
             best_move, record, _ = certify(panel, candidates, 0, True, len(candidates) + 1,
-                                           panel_ll=panel_ll, slots=slots)
+                                           panel_ll=panel_ll, slots=slots,
+                                           refit_scores=refit_scores)
             moves.append(dict(accepted=record['accepted'], survivors=record['survivors'],
                               exact=record['exact_scores'],
                               change=record['accepted_likelihood_change']))
@@ -876,10 +912,14 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
                     if len(chosen) >= SEED_REFITS:
                         break
             seed_started = time.perf_counter()
+            # Every refit starts from P plus a copy, so the refits of one count step reach many of
+            # the same one-path moves (above all replace(seed, c) = P + c): each is scored once.
+            shared_scores = {}
             for seed in chosen:
                 seeded = selected + [selected[seed]]
                 refit, refit_scores, refit_ll, used = refit_seed(
-                    seeded, baseline_scores, likelihood, frozenset((seed, len(selected))))
+                    seeded, baseline_scores, likelihood, frozenset((seed, len(selected))),
+                    shared_scores)
                 settled, settled_scores, settle_record, survives = counter.settle(refit, refit_scores)
                 count['seed_refits'] += 1
                 settled_ll = float(settled_scores.sum())

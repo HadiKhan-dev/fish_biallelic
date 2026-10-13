@@ -171,7 +171,7 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
     model_options = dict(generations=assembly_config.n_generations,
         recombination_rate_per_bp=assembly_config.recombination_rate,
         wildcard_mass=config.background_mass, chromosome_map=chromosome_map)
-    selected_rounds, current = [], originals
+    selected_rounds, current, memos = [], originals, None
     for level in (0, 1, 2):
         stage = "feedback_path_initial" if level == 0 else f"feedback_path_l{level}"
         pass_identity = dict(identity, selection="path", feedback_level=level)
@@ -181,6 +181,7 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
         saved = selection_io.load("selected")
         if saved is not None:
             current = saved["blocks"]
+            memos = saved.get("memos")
             selected_rounds.append(current)
             print(f"[Feedback] {contig}: resumed path selection round {level}", flush=True)
             continue
@@ -196,7 +197,10 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
                         discovery_identity=dict(discovery_identity, feedback_pass=pass_identity),
                         config=replace(assembly_config, max_level=level),
                         release_checkpoints=assembly_io, chromosome_map=chromosome_map,
-                        chromosome_evidence=chromosome_evidence)
+                        chromosome_evidence=chromosome_evidence,
+                        # Joins of the previous context assembly with identical inputs are reused.
+                        earlier_joins=assembly.earlier_join_results(store, contig,
+                            [f"feedback_path_l{j}_assembly" for j in range(1, level)]))
                     proposed, diagnostic = feedback.refine(current, context["components"],
                         gl, sites, observed, cpus, options, chromosome_map=chromosome_map,
                         n_generations=assembly_config.n_generations)
@@ -209,9 +213,13 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
                 parallel.malloc_trim()
             proposed = saved_proposals["blocks"]
         with parallel.numba_thread_scope(cpus):
-            current, diagnostic = path_blocks.select_blocks(originals,
+            current, diagnostic, memos = path_blocks.select_blocks(originals,
                 [*selected_rounds, proposed] if level else [], gl, sites, observed, cpus,
-                selection_config, config.path_search, selection_io, **model_options)
-        selection_io.save("selected", dict(blocks=current, diagnostic=diagnostic))
+                selection_config, config.path_search, selection_io, memo_states=memos,
+                keep_memo=level < 2, **model_options)
+        # Founder-independent likelihood memos only accelerate the next round,
+        # also after a resume; they never reach the selected blocks.
+        selection_io.save("selected", dict(blocks=current, diagnostic=diagnostic,
+                                           **({"memos": memos} if level < 2 else {})))
         selected_rounds.append(current)
     return current, selected_identity

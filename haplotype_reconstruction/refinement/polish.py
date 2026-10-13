@@ -105,10 +105,13 @@ def finish_family_phase(reference, family, positions, phase_bins, component_ids,
                         conditional_result=None):
     """Render the current family frame, optionally reusing an identical solve.
 
-    The chromosome driver alone supplies ``conditional_result`` after exact
-    comparison of both changing inputs in its fixed-input invocation. Displayed
-    phase is deliberately not cached: incomplete-parent tracks and observable
-    changes must always be derived from the current family state.
+    The chromosome driver alone supplies ``conditional_result``, from an
+    earlier check of its fixed-input invocation whose solve had the same
+    inputs: with ``polish_from_scaffold`` always (the start does not depend on
+    the family state), otherwise after exact comparison of both changing
+    inputs. Displayed phase is deliberately not cached: incomplete-parent
+    tracks and observable changes must always be derived from the current
+    family state.
 
     With ``config.polish_from_scaffold`` the polish scores copy consistency on
     called scaffold alleles only and starts every sample from the scaffold

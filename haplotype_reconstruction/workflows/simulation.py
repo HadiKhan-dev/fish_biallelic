@@ -15,6 +15,7 @@ import haplotype_reconstruction.core.genetic_map as core_genetic_map
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.core.read_calibration as read_calibration
+import haplotype_reconstruction.core.run_record as core_run_record
 import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.core.sample_quality as core_sample_quality
 import haplotype_reconstruction.core.site_quality as core_site_quality
@@ -23,7 +24,6 @@ import haplotype_reconstruction.discovery.blocks as discovery_blocks
 import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.simulation.pedigree as simulation_pedigree
 import haplotype_reconstruction.simulation.templates as simulation_templates
-from ..simulation.truth import save_truth
 import haplotype_reconstruction.workflows.contig_parallel as workflows_contig_parallel
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
 from . import CICHLID_AUTOSOMES
@@ -297,11 +297,6 @@ def run():
     # Source checkpoint for each value needed before the canonical assembly.
     _KEY_SOURCE = {
         'naive_long_haps': 'founder_templates',
-        'simulated_reads': 'simulated_reads',
-        'simd_genomic_data': 'simulated_reads',
-        'simd_probs': 'simulated_reads',
-        'simd_priors': 'simulated_reads',
-        'truth_painting': 'simulated_reads',
     }
 
     def _ensure_key(r_name, key, *additional_keys):
@@ -316,17 +311,6 @@ def run():
                 if _KEY_SOURCE[name] == src:
                     mcr[name] = ckpt[name]
             del ckpt
-
-    def _prune_key(key):
-        """Remove a key from all contigs to free RAM."""
-        n = 0
-        for r_name in list(multi_contig_results.keys()):
-            if key in multi_contig_results.get(r_name, {}):
-                del multi_contig_results[r_name][key]
-                n += 1
-        if n > 0:
-            gc.collect()
-            print(f"  [Prune] Dropped '{key}' from {n} contigs")
 
     vcf_path = os.environ.get(
         "HAPLOTYPES_VCF",
@@ -731,10 +715,9 @@ def run():
 
         sample_names = truth_pedigree['Sample'].tolist()
 
-        # 4. Process and checkpoint one contig at a time. Holding all 22
-        # processed payloads while compression workers make pickle copies can
-        # exceed the intended memory budget. These per-contig seeds exactly
-        # match process_all_contigs_parallel for a fixed master seed.
+        # 4. Simulate reads and checkpoint each contig in parallel workers.
+        # Every contig keeps its own read seed, drawn here in contig order,
+        # so worker scheduling cannot change a simulated read.
         t0 = time.time()
         read_seed = realized_simulation_seed + 1_000_000
         read_seed_rng = np.random.default_rng(read_seed)
@@ -743,64 +726,44 @@ def run():
             for _ in region_keys
         ]
         print(
-            "Post-processing one contig at a time for bounded peak memory"
+            "Post-processing contigs in parallel, memory-bounded"
             + (f" (seed={read_seed})" if read_seed is not None else "")
         )
-
-        simulation_payload_keys = (
-            'simulated_reads', 'simd_genomic_data', 'simd_probs',
-            'simd_priors', 'truth_painting',
-        )
+        read_model_settings = {
+            key: value for key, value in read_model.record().items()
+            if key != 'error_rate'
+        }
+        postprocessing_tasks = []
         for contig_index, r_name in enumerate(region_keys):
             if contig_done(SIMULATION_STAGE, r_name):
                 print(f"  [RESUME] {r_name} post-processing already done")
-            else:
-                result = (
-                    simulation_pedigree._process_single_contig_postprocessing((
-                        r_name,
-                        all_offspring_lists[contig_index],
-                        truth_paintings_lists[contig_index],
-                        sites_list[contig_index],
-                        simulation_run_spec['read_depth'],
-                        simulation_run_spec['read_error_rate'],
-                        simulation_run_spec['snps_per_block'],
-                        simulation_run_spec['snp_shift'],
-                        contig_read_seeds[contig_index],
-                        {key: value for key, value in read_model.record().items() if key != 'error_rate'},
-                    ))
-                )
-                payload = {
-                    key: result[key] for key in simulation_payload_keys
-                }
-                payload['truth_founder_haplotypes'] = tuple(
-                    np.asarray(haplotype, dtype=np.int8)
-                    for parent in founders_list[contig_index]
-                    for haplotype in parent
-                )
-                payload['truth_alleles'] = np.asarray(all_offspring_lists[contig_index], dtype=np.int8).transpose(0, 2, 1)
-                payload['truth_crossovers'] = truth_crossovers[contig_index]
-                save_contig(SIMULATION_STAGE, r_name, payload)
-                if not contig_done(SIMULATION_STAGE, r_name):
-                    raise OSError(
-                        f"Failed to checkpoint {SIMULATION_STAGE}/{r_name}"
-                    )
-                save_truth(checkpoint_store, r_name, sample_names,
-                           sites_list[contig_index], payload)
-                del payload, result
-
-            # Release each contig as soon as its checkpoint is durable.
-            truth_crossovers[contig_index] = None
-            all_offspring_lists[contig_index] = None
-            truth_paintings_lists[contig_index] = None
-            founders_list[contig_index] = None
-            sites_list[contig_index] = None
-            gc.collect()
+                continue
+            postprocessing_tasks.append(dict(
+                root=checkpoint_store.root,
+                stage=SIMULATION_STAGE,
+                contig=r_name,
+                sample_names=sample_names,
+                offspring=all_offspring_lists[contig_index],
+                paintings=truth_paintings_lists[contig_index],
+                sites=sites_list[contig_index],
+                founders=founders_list[contig_index],
+                crossovers=truth_crossovers[contig_index],
+                read_depth=simulation_run_spec['read_depth'],
+                error_rate=simulation_run_spec['read_error_rate'],
+                seed=contig_read_seeds[contig_index],
+                read_model=read_model_settings,
+            ))
+        for record in simulation_pedigree.checkpoint_simulated_contigs(
+                postprocessing_tasks, cpu_budget=n_processes):
+            core_run_record.record_product(
+                SIMULATION_STAGE, record.pop('contig'), record)
+        del postprocessing_tasks
 
         core_runtime.require_contig_checkpoints(
             checkpoint_store, SIMULATION_STAGE, region_keys
         )
         print(
-            f"Post-processing ({len(region_keys)} contigs, bounded): "
+            f"Post-processing ({len(region_keys)} contigs, parallel): "
             f"{time.time()-t0:.1f}s"
         )
 
@@ -835,12 +798,11 @@ def run():
         del persisted_simulation_payload, completed_simulation_payload
         mark_stage_complete(SIMULATION_STAGE)
         # Free heavy simulation data — all checkpointed, will reload on demand
-        for r_name in region_keys:
-            for _k in ('simulated_reads', 'simd_genomic_data', 'simd_probs', 'simd_priors', 'truth_painting'):
-                multi_contig_results[r_name].pop(_k, None)
-        del all_offspring_lists, truth_paintings_lists
+        del all_offspring_lists, truth_paintings_lists, truth_crossovers
         del founders_list, sites_list
-        gc.collect()
+    # Discovery loads each contig's sites and reads from its checkpoints.
+    multi_contig_results.clear()
+    gc.collect()
 
     # Ensure output_dir and globals exist for all subsequent stages
     output_dir = SIMULATION_OUTPUT_DIR
@@ -920,87 +882,83 @@ def run():
 
         start = time.time()
 
-        with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
-            for r_name in region_keys:
-                if contig_done(DISCOVERY_STAGE, r_name):
-                    print(f"  [RESUME] {r_name} already done")
-                    continue
-                print(f"\n  Processing {r_name}...")
-
-                _ensure_key(r_name, 'simd_genomic_data', 'simulated_reads')
-                _ensure_key(r_name, 'naive_long_haps')
-                simd_genomic_data = multi_contig_results[r_name]['simd_genomic_data']
-                simulated_reads = multi_contig_results[r_name]['simulated_reads']
-                global_sites = np.asarray(
-                    multi_contig_results[r_name]['naive_long_haps'][0]
+        def prepare_discovery(r_name):
+            """Load a contig's simulated reads and fit its read model."""
+            print(f"\n  Preparing {r_name}...", flush=True)
+            simulated_reads = load_contig(SIMULATION_STAGE, r_name)['simulated_reads']
+            global_sites = np.asarray(
+                load_contig(TEMPLATE_STAGE, r_name)['naive_long_haps'][0])
+            simd_genomic_data = simulation_pedigree.simulated_genomic_data(
+                global_sites, simulated_reads,
+                simulation_run_spec['snps_per_block'],
+                simulation_run_spec['snp_shift'])
+            simd_genomic_data, site_quality = core_site_quality.filter_loaded_sites(
+                simd_genomic_data, contig=r_name, config=site_quality_config,
+                threads=n_processes, snps_per_block=simulation_run_spec['snps_per_block'],
+                sample_config=sample_quality_config)
+            founder_excluded = core_sample_quality.contig_flags(
+                site_quality, contig=r_name, sample_ids=sample_names, output_dir=output_dir)
+            if site_quality.get('applied'):
+                global_sites, simulated_reads = (
+                    core_variants.concatenate_unique_block_reads(simd_genomic_data))
+            global_observed_mask = (
+                workflows_reconstruction.observed_call_mask_from_read_counts(
+                    simulated_reads
                 )
-                simd_genomic_data, site_quality = core_site_quality.filter_loaded_sites(
-                    simd_genomic_data, contig=r_name, config=site_quality_config,
-                    threads=n_processes, snps_per_block=simulation_run_spec['snps_per_block'],
-                    sample_config=sample_quality_config)
-                founder_excluded = core_sample_quality.contig_flags(
-                    site_quality, contig=r_name, sample_ids=sample_names, output_dir=output_dir)
-                if site_quality.get('applied'):
-                    global_sites, simulated_reads = (
-                        core_variants.concatenate_unique_block_reads(simd_genomic_data))
-
-                global_probs, calibration = read_calibration.prepare_likelihoods(
-                    simulated_reads, global_sites, threads=n_processes)
-                simd_genomic_data = core_sample_quality.exclude_from_discovery(
-                    simd_genomic_data, founder_excluded)
-                t_chr = time.time()
-                simd_block_results = discovery_blocks.generate_all_block_haplotypes(
-                    simd_genomic_data,
-                    num_processes=n_processes,
-                    block_pool=block_pool,
-                    discovery_config=discovery_config,
-                    genotype_likelihoods_by_block=read_calibration.block_likelihoods(
-                        simd_genomic_data, global_sites, global_probs),
-                )
-                disc_time = time.time() - t_chr
-
-                valid_blocks = [b for b in simd_block_results if len(b.positions) > 0]
-                simd_block_results = core_haplotypes.BlockResults(valid_blocks)
-
-                global_observed_mask = (
-                    workflows_reconstruction.observed_call_mask_from_read_counts(
-                        simulated_reads
-                    )
-                )
-                save_contig(DISCOVERY_STAGE, r_name, {
-                    'block_results': simd_block_results,
+            )
+            global_probs, calibration = read_calibration.prepare_likelihoods(
+                simulated_reads, global_sites, threads=n_processes)
+            simd_genomic_data = core_sample_quality.exclude_from_discovery(
+                simd_genomic_data, founder_excluded)
+            return discovery_blocks.PreparedContig(
+                genomic_data=simd_genomic_data,
+                genotype_likelihoods_by_block=read_calibration.block_likelihoods(
+                    simd_genomic_data, global_sites, global_probs),
+                fields={
                     'global_sites': global_sites,
                     'global_probs': global_probs,
                     'read_calibration': calibration,
                     'site_quality': site_quality,
                     'global_observed_mask': global_observed_mask,
-                    'observed_call_mask_mode': (
-                        workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-                    ),
-                    'genotype_evidence_mode': (
-                        workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
-                    ),
-                    'discovery_backend': discovery_identity_record['backend'],
-                    'discovery_config': discovery_config_record,
                     **({} if founder_excluded is None
                        else {'founder_evidence_excluded': founder_excluded}),
-                })
+                },
+                products=core_site_quality.run_record_products(site_quality, sample_names),
+            )
 
-                hap_counts = [len(b.haplotypes) for b in valid_blocks]
-                print(f"    {len(valid_blocks)} blocks, haps/block: "
-                      f"min={min(hap_counts)}, max={max(hap_counts)}, mean={np.mean(hap_counts):.1f} "
-                      f"[discovery: {disc_time:.1f}s]")
+        def save_discovery(r_name, prepared, simd_block_results):
+            fields = prepared.fields
+            save_contig(DISCOVERY_STAGE, r_name, {
+                'block_results': simd_block_results,
+                'global_sites': fields['global_sites'],
+                'global_probs': fields['global_probs'],
+                'read_calibration': fields['read_calibration'],
+                'site_quality': fields['site_quality'],
+                'global_observed_mask': fields['global_observed_mask'],
+                'observed_call_mask_mode': (
+                    workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
+                ),
+                'genotype_evidence_mode': (
+                    workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
+                ),
+                'discovery_backend': discovery_identity_record['backend'],
+                'discovery_config': discovery_config_record,
+                **({} if 'founder_evidence_excluded' not in fields
+                   else {'founder_evidence_excluded': fields['founder_evidence_excluded']}),
+            })
 
-                # Free this contig's data immediately (don't accumulate across contigs)
-                del global_probs
-                for _k in (
-                        'simd_genomic_data', 'simulated_reads', 'naive_long_haps',
-                        'global_probs',
-                ):
-                    multi_contig_results[r_name].pop(_k, None)
+        pending_contigs = []
+        for r_name in region_keys:
+            if contig_done(DISCOVERY_STAGE, r_name):
+                print(f"  [RESUME] {r_name} already done")
+            else:
+                pending_contigs.append(r_name)
+        with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
+            discovery_blocks.discover_contigs(
+                pending_contigs, prepare_discovery, save_discovery,
+                block_pool=block_pool, discovery_config=discovery_config)
 
         print(f"\nBlock haplotype discovery complete in {time.time()-start:.1f}s")
-        _prune_key('simd_genomic_data')
         core_runtime.require_contig_checkpoints(
             checkpoint_store, DISCOVERY_STAGE, region_keys
         )

@@ -17,12 +17,13 @@ from .scoring import _unordered_pairs
 
 
 @njit(cache=True)
-def _block_score(haps, logs, start, stop, penalty, removed):
+def _block_sample_scores(haps, logs, start, stop, penalty, removed):
+    """Per-sample optimistic scores of one block (its rows minus row ``removed`` if >= 0)."""
     rows = np.arange(len(haps))
     if removed >= 0:
         rows = rows[rows != removed]
     first, second = _unordered_pairs(len(rows))
-    total = 0.
+    result = np.empty(logs.shape[0], np.float64)
     center = math.log(1. / 3.)
     for sample in range(logs.shape[0]):
         scores = np.zeros(len(first), np.float64)
@@ -36,71 +37,40 @@ def _block_score(haps, logs, start, stop, penalty, removed):
             for state in range(len(first)):
                 dosage = haps[rows[first[state]], site - start] + haps[rows[second[state]], site - start]
                 scores[state] = max(scores[state], switched) + emission[dosage] - center
-        total += np.max(scores)
-    return total
-
-
-@njit(cache=True, parallel=True)
-def upper_bound(leaves, offsets, logs, penalty, target):
-    bounds = np.empty(len(leaves), np.float64)
-    constrained = np.zeros(len(leaves), np.int64)
-    for block_index in prange(len(leaves)):
-        block = np.int64(block_index)
-        haps = leaves[block]
-        if len(haps) == target + 1:
-            best = -np.inf
-            for removed in range(len(haps)):
-                best = max(best, _block_score(haps, logs, offsets[block], offsets[block + 1],
-                                              penalty, removed))
-            bounds[block] = best
-            constrained[block] = 1
-        else:
-            bounds[block] = _block_score(haps, logs, offsets[block], offsets[block + 1], penalty, -1)
-    return bounds, constrained
-
-
-@njit(cache=True)
-def _block_sample_scores(haps, logs, start, stop, penalty, removed):
-    """``_block_score`` before the sum over samples."""
-    rows = np.arange(len(haps))
-    if removed >= 0:
-        rows = rows[rows != removed]
-    first, second = _unordered_pairs(len(rows))
-    result = np.empty(logs.shape[0], np.float64)
-    center = math.log(1. / 3.)
-    for sample in range(logs.shape[0]):
-        scores = np.zeros(len(first), np.float64)
-        for site in range(start, stop):
-            emission = logs[sample, site]
-            if emission[0] == 0. and emission[1] == 0. and emission[2] == 0.:
-                continue
-            switched = np.max(scores) - penalty
-            for state in range(len(first)):
-                dosage = haps[rows[first[state]], site - start] + haps[rows[second[state]], site - start]
-                scores[state] = max(scores[state], switched) + emission[dosage] - center
         result[sample] = np.max(scores)
     return result
 
 
 @njit(cache=True, parallel=True)
-def upper_bound_per_sample(leaves, offsets, logs, penalty, target):
-    """Per-block, per-sample optimistic scores; their sum over blocks bounds each sample.
+def upper_bound(leaves, offsets, logs, penalty, target):
+    """Per-block optimistic scores (bounds, constrained) and their per-sample form.
 
-    The same relaxation as ``upper_bound``, further relaxed so that every sample may
-    drop a different row of a target+1-row block (a maximum of sums becomes a sum
-    of maxima). Count criteria that weigh samples separately need these bounds.
+    bounds[b] is the block's score summed over samples under the relaxation above; a
+    target+1-row block takes its best one-row deletion (constrained[b] = 1). per_sample[b]
+    is the same relaxation further relaxed so that every sample may drop a different row
+    of a target+1-row block (a maximum of sums becomes a sum of maxima); summed over blocks
+    it bounds each sample, as count criteria that weigh samples separately need. Both come
+    from one evaluation of the per-sample block scores (a block total is their in-order sum).
     """
-    bounds = np.empty((len(leaves), logs.shape[0]), np.float64)
+    samples = logs.shape[0]
+    bounds = np.empty(len(leaves), np.float64)
+    constrained = np.zeros(len(leaves), np.int64)
+    per_sample = np.empty((len(leaves), samples), np.float64)
     for block_index in prange(len(leaves)):
         block = np.int64(block_index)
         haps = leaves[block]
-        if len(haps) == target + 1:
-            best = np.full(logs.shape[0], -np.inf)
-            for removed in range(len(haps)):
-                best = np.maximum(best, _block_sample_scores(
-                    haps, logs, offsets[block], offsets[block + 1], penalty, removed))
-            bounds[block] = best
-        else:
-            bounds[block] = _block_sample_scores(
-                haps, logs, offsets[block], offsets[block + 1], penalty, -1)
-    return bounds
+        deletion = len(haps) == target + 1
+        best = -np.inf
+        best_sample = np.full(samples, -np.inf)
+        for removed in range(len(haps) if deletion else 1):
+            scores = _block_sample_scores(haps, logs, offsets[block], offsets[block + 1], penalty,
+                                          removed if deletion else -1)
+            total = 0.
+            for sample in range(samples):
+                total += scores[sample]
+            best = max(best, total)
+            best_sample = np.maximum(best_sample, scores)
+        bounds[block] = best
+        per_sample[block] = best_sample
+        constrained[block] = int(deletion)
+    return bounds, constrained, per_sample

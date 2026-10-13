@@ -74,7 +74,10 @@ stage repeats it exactly. It needs the scaffold polish, which it edits.
         checks = list(saved["checks"])
         del saved
     converged = bool(state is not None and state.deltas and state.deltas[-1] < config.tolerance)
-    last_saved = -np.inf
+    # Progress is saved every checkpoint_min_seconds of work, never sooner: a
+    # resumed solve repeats any later iterations and checks exactly, and the
+    # final product follows the stable release within seconds.
+    last_saved = time.perf_counter()
 
     def save(messages, phase, stable_count, *, force=False):
         nonlocal last_saved
@@ -98,6 +101,10 @@ stage repeats it exactly. It needs the scaffold polish, which it edits.
     # Only the immediately preceding independent solve is reusable. Fixed
     # chromosome axes, pedigree, map and configuration belong to this call;
     # restarting from messages intentionally starts with an empty cache.
+    # With polish_from_scaffold the solve reads only these fixed inputs (the
+    # scaffold alleles and a zero start), never the family state, so the first
+    # solve of the call serves every later check.
+    polished = False
     polish_context = polish_initial = None
     while point is None or (not converged and unchanged < config.required_unchanged):
         current_threads()
@@ -119,17 +126,18 @@ stage repeats it exactly. It needs the scaffold polish, which it edits.
             workspace=workspace, chromosome_map=chromosome_map)
         state = family.messages
         try:
-            same_inputs = (polish_context is not None
-                and np.array_equal(polish_context, family.phase_context)
-                and np.array_equal(polish_initial, family.inferred_phase_map))
+            same_inputs = polished and (phase_config.polish_from_scaffold or (
+                np.array_equal(polish_context, family.phase_context)
+                and np.array_equal(polish_initial, family.inferred_phase_map)))
             following = polish.finish_family_phase(
                 scaffold.reference_alleles, family, positions, scaffold.phase_bins,
                 scaffold.component_ids, workspace.parents, workspace.children, workspace.slots,
                 config=phase_config, chromosome_map=chromosome_map,
                 conditional_result=point.conditional_result if same_inputs else None)
-            if not same_inputs:
+            if not same_inputs and not phase_config.polish_from_scaffold:
                 polish_context = family.phase_context.copy()
                 polish_initial = family.inferred_phase_map.copy()
+            polished = True
         except Exception:
             # These messages have advanced; do not pair them with an older
             # phase check. Retry this exact iteration after an interruption.
@@ -144,8 +152,7 @@ stage repeats it exactly. It needs the scaffold polish, which it edits.
                 "latent_converged": converged, "changed_called_alleles": changed,
                 "consecutive_unchanged": unchanged}
         checks.append(item)
-        stable = converged or unchanged >= config.required_unchanged
-        save(state, point, unchanged, force=stable or state.iteration >= config.max_iterations)
+        save(state, point, unchanged)
         print(f"  [family phase] iteration={state.iteration} delta={state.deltas[-1]:.6g} "
               f"changed_alleles={changed} unchanged_checks={unchanged}", flush=True)
         if progress_callback is not None:
@@ -355,12 +362,16 @@ def _refine_contig(contig, state, phase_name, common):
 def _refinement_resources(store, contigs, workers, raw_gl_stage, raw_sites_stage):
     """Bound concurrent chromosome workspaces using decoded source sizes.
 
-    Twelve evidence-sized copies allow for float64 GLs, four-state family
-    messages, selector caches, polishing and I/O; add two painting copies and
-    2 GiB per process for Python/JIT. Prefer the compact evidence used by the
-    downstream loader rather than multiplying unused discovery workspaces.
-    This is a scheduling estimate, not an RSS guarantee. Already completed
-    chromosomes need only a decoded product and read buffers.
+    Float64 GLs, four-state family messages, selector caches, polishing and
+    iteration checkpoints peaked at 7.7 compact-evidence sizes plus 3.2 GiB
+    for Python/JIT, plus up to 3.6 GiB of heap a worker retains from earlier
+    chromosomes (N = 320, independent of the thread count: 94 GiB for 11.2
+    GiB of evidence, 19-38 GiB for 1.9-4.1 GiB). Nine evidence-sized copies,
+    two painting copies and 5 GiB per process stay above every measured peak
+    by 12-21%. Prefer the compact evidence used by the downstream loader
+    rather than multiplying unused discovery workspaces. This is a scheduling
+    estimate, not an RSS guarantee. Already completed chromosomes need only a
+    decoded product and read buffers.
     """
     estimates = []
     for contig in contigs:
@@ -379,8 +390,8 @@ def _refinement_resources(store, contigs, workers, raw_gl_stage, raw_sites_stage
                 checkpoints.contig_path(store.root, PAINTING_STAGE, contig))
             # Also allow loading the original source if the compact cache is
             # unavailable to the reader; it validates ordinary source changes.
-            estimate = max(source_bytes, 12 * evidence_bytes) + 2 * painting_bytes
-        estimates.append(estimate + (2 << 30))
+            estimate = max(source_bytes, 9 * evidence_bytes) + 2 * painting_bytes
+        estimates.append(estimate + (5 << 30))
     return estimates, memory_worker_limit(
         estimates, workers, runtime.available_memory_bytes(), label="FAMILY PHASE")
 

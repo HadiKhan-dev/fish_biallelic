@@ -738,6 +738,41 @@ def _preprocess_result_diagnostics_mode(preprocess_result) -> str:
     return mode
 
 
+def earlier_join_results(checkpoint_store, contig, work_stages):
+    """The hierarchy joins of earlier assemblies of one contig, for exact batch reuse.
+
+    Returns reusable(level) -> {batch input digest: super-block} from each work stage's
+    hierarchy_l<level> checkpoint, whose level diagnostics record every joined batch's input
+    digest (hierarchy.run_hierarchical_step). Absent checkpoints and ones written without digests
+    contribute nothing. A digest covers the assembly code identity and every input of its batch,
+    so only a batch identical in every respect matches.
+    """
+    def reusable(level):
+        phase = f"hierarchy_l{level}"
+        found = {}
+        for stage in work_stages:
+            reader = assembly_checkpoints.AssemblyCheckpointStore(
+                checkpoint_store, work_stage=stage, contig=contig)
+            artifact = reader._artifact(phase)
+            if not checkpoint_store.contig_done(stage, artifact):
+                continue
+            saved = checkpoint_store.load_contig(stage, artifact)
+            payload = getattr(saved, "payload", None)
+            if (not isinstance(saved, assembly_checkpoints.AssemblyWorkCheckpoint)
+                    or saved.phase != phase or not isinstance(payload, Mapping)
+                    or payload.get("schema") != "assembly-release-hierarchy-phase-v1"
+                    or payload.get("level") != level):
+                continue
+            blocks = {(int(block.positions[0]), int(block.positions[-1])): block
+                      for block in payload.get("blocks") or ()}
+            for record in (payload.get("diagnostic") or {}).get("batch_input_provenance", ()):
+                block = blocks.get((record["position_start"], record["position_end"]))
+                if block is not None:
+                    found.setdefault(record["inputs_sha256"], block)
+        return found
+    return reusable
+
+
 @timed_stage("assembly")
 def assemble_chromosome(
     input_blocks,
@@ -753,8 +788,13 @@ def assemble_chromosome(
     release_checkpoints: assembly_checkpoints.AssemblyCheckpointIO | None=None,
     chromosome_map=None,
     chromosome_evidence=None,
+    earlier_joins=None,
 ) -> dict[str, Any]:
-    """Preprocess and refine local row choices after each final hierarchy level."""
+    """Preprocess and refine local row choices after each final hierarchy level.
+
+    earlier_joins: earlier_join_results of this contig's earlier assemblies; a hierarchy batch
+    whose exact inputs one of them already joined reuses that super-block.
+    """
 
     if not isinstance(config, AssemblyConfig):
         raise TypeError("config must be an AssemblyConfig")
@@ -908,6 +948,7 @@ def assemble_chromosome(
             if hierarchy_probs is None:
                 hierarchy_probs = assembly_evidence.float32_evidence(neutral_probs)
             from ..core.batch_queue import checkpoint_key
+            batch_provenance = []
             output = assembly_hierarchy.run_hierarchical_step(
                 working,
                 neutral_probs,
@@ -929,6 +970,9 @@ def assemble_chromosome(
                     config.min_boundary_informative_samples
                 ),
                 panel_search_config=config.panel_search_config,
+                code_identity=identity["code_identity_sha256"],
+                reusable=None if earlier_joins is None else earlier_joins(level),
+                batch_provenance=batch_provenance,
             )
             elapsed_seconds = time.perf_counter() - started
             stored_diagnostic = None
@@ -995,6 +1039,9 @@ def assemble_chromosome(
                     "position_end": int(block.positions[-1]),
                     "records": getattr(block, "panel_search_diagnostics", ()),
                 } for block in next_blocks),
+                # Per joined batch: its span and input digest (for exact reuse by a later
+                # assembly of this contig) and whether an earlier assembly's join was reused.
+                "batch_input_provenance": tuple(batch_provenance),
             }
             if release_checkpoints is not None:
                 release_checkpoints.save(phase, {
