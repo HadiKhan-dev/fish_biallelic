@@ -245,6 +245,172 @@ def run():
         include_reference_samples=INCLUDE_REFERENCE_SAMPLES, contigs=region_keys,
         discovery=discovery_identity_record, block_sites=200))
 
+    # Sample/contig manifest checked by reconstruction; written before any contig.
+    if not checkpoint_store.global_done(DISCOVERY_STAGE):
+        save_global(DISCOVERY_STAGE, {
+            'sample_ids': sample_names_active,
+            'sample_names_full': sample_names,
+            'contigs': region_keys,
+            'g0_vcf_indices': g0_vcf_indices,
+            'g0_sample_names': g0_sample_names,
+            'active_vcf_indices': active_vcf_indices,
+            'include_reference_samples': INCLUDE_REFERENCE_SAMPLES,
+            'genotype_evidence_mode': 'normalized_raw_linear_likelihood_v1',
+            'observed_call_mask_mode': (
+                workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
+            ),
+            'discovery_backend': discovery_identity_record['backend'],
+            'discovery_config': discovery_config_record,
+        })
+
+    def prepare_discovery(r_name):
+        """Load a contig, filter its sites and fit its read model."""
+        print(f"\n  Preparing {r_name}...", flush=True)
+        t0 = time.time()
+        genomic_data = core_variants.cleanup_block_reads_list(
+            vcf_path, r_name,
+            use_snp_count=True, snps_per_block=200, snp_shift=200,
+            num_processes=n_processes
+        )
+        print(f"    [Loader] {r_name}: {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
+
+        # Self-calibrated site quality on the analysed cohort, before
+        # read calibration; kept sites are re-blocked 200 at a time.
+        genomic_data, site_quality = core_site_quality.filter_loaded_sites(
+            genomic_data, contig=r_name, config=site_quality_config,
+            threads=n_processes, snps_per_block=200,
+            sample_rows=None if INCLUDE_REFERENCE_SAMPLES else active_vcf_indices,
+            sample_config=sample_quality_config)
+        # Samples flagged by the per-sample QC on this contig (None if off).
+        founder_excluded = core_sample_quality.contig_flags(
+            site_quality, contig=r_name, sample_ids=sample_names_active,
+            output_dir=output_dir)
+
+        # Full reads: (n_samples_total, n_sites, 2) — all 116 samples
+        global_sites, global_reads_full = (
+            core_variants.concatenate_unique_block_reads(genomic_data)
+        )
+        if global_sites is None:
+            print(f"    WARNING: No data for {r_name}, skipping")
+            return None
+
+        # ALWAYS extract G0 reads separately for post-hoc validation.
+        # Retain observed reference genotypes under either discovery
+        # policy. They are not independent biological truth.
+        g0_reads = global_reads_full[g0_vcf_indices,:,:]
+        (_, g0_probs) = core_numerics.reads_to_probabilities(
+            g0_reads,
+            use_hwe_prior=False,
+        )
+        # Downcast G0 probs to float32 — we only use argmax for validation,
+        # so float64 precision is wasted.
+        if g0_probs.dtype == np.float64:
+            g0_probs = g0_probs.astype(np.float32)
+
+        # Select which samples the pipeline will see (116 or 112).
+        # IMPORTANT: we also need to slice genomic_data.reads along the
+        # sample axis so generate_all_block_haplotypes
+        # operates on the filtered sample set.  The GenomicData container
+        # stores per-block (samples, sites, 2) arrays.
+        if INCLUDE_REFERENCE_SAMPLES:
+            active_reads_full = global_reads_full
+        else:
+            active_reads_full = global_reads_full[active_vcf_indices,:,:]
+            # Also filter genomic_data in place so block discovery sees 112 samples
+            for bi in range(len(genomic_data.reads)):
+                if genomic_data.reads[bi].shape[0] == n_samples_total:
+                    genomic_data.reads[bi] = genomic_data.reads[bi][active_vcf_indices,:,:]
+
+        # Preserve the exact observation event before read counts are
+        # released. Zero-depth cells are scientifically distinct from
+        # uncertain observed genotypes and must remain state-neutral in
+        # missing-aware assembly.
+        global_observed_mask = (
+            workflows_reconstruction.observed_call_mask_from_read_counts(
+                active_reads_full
+            )
+        )
+
+        # Calibrate only the selected analysis cohort, not excluded rows.
+        global_probs, calibration = read_calibration.prepare_likelihoods(
+            active_reads_full, global_sites, threads=n_processes)
+        avg_depth = np.mean(np.sum(active_reads_full, axis=-1))
+        print(f"    {r_name} sites: {len(global_sites)}, Samples (active): {global_probs.shape[0]}, "
+              f"Depth: {avg_depth:.1f}x")
+        del global_reads_full, active_reads_full, g0_reads
+        # Flagged libraries enter discovery without reads (unobserved).
+        genomic_data = core_sample_quality.exclude_from_discovery(
+            genomic_data, founder_excluded)
+        return discovery_blocks.PreparedContig(
+            genomic_data=genomic_data,
+            genotype_likelihoods_by_block=read_calibration.block_likelihoods(
+                genomic_data, global_sites, global_probs),
+            fields=dict(
+                global_probs=global_probs, global_sites=global_sites,
+                read_calibration=calibration, site_quality=site_quality,
+                global_observed_mask=global_observed_mask,
+                avg_depth=avg_depth, g0_probs=g0_probs,
+                founder_excluded=founder_excluded),
+            products=core_site_quality.run_record_products(
+                site_quality, sample_names_active),
+        )
+
+    def save_discovery(r_name, prepared, block_results):
+        report_discovery(block_results)
+        fields = prepared.fields
+        founder_excluded = fields['founder_excluded']
+        # G0 probabilities are retained as an explicit reference; they are
+        # non-independent when G0 rows entered reconstruction above.
+        checkpoint_store.save_contig(DISCOVERY_STAGE, r_name, {
+            'global_probs': fields['global_probs'],
+            'global_sites': fields['global_sites'],
+            'read_calibration': fields['read_calibration'],
+            'site_quality': fields['site_quality'],
+            'global_observed_mask': fields['global_observed_mask'],
+            'observed_call_mask_mode': (
+                workflows_reconstruction.EXACT_OBSERVED_MASK_MODE),
+            'genotype_evidence_mode': (
+                'normalized_raw_linear_likelihood_v1'),
+            'block_results': block_results, 'avg_depth': fields['avg_depth'],
+            'g0_probs': fields['g0_probs'], 'g0_sample_names': g0_sample_names,
+            'active_vcf_indices': active_vcf_indices,
+            'discovery_backend': discovery_identity_record['backend'],
+            'discovery_config': discovery_config_record,
+            **({} if founder_excluded is None
+               else {'founder_evidence_excluded': founder_excluded}),
+        })
+
+    def discover(contigs):
+        """Discover these contigs with one block pool, closed on return."""
+        with discovery_blocks.BlockDiscoveryPool(
+            block_discovery_processes,
+            block_discovery_numba_threads,
+        ) as block_pool:
+            discovery_blocks.discover_contigs(
+                contigs, prepare_discovery, save_discovery,
+                block_pool=block_pool, discovery_config=discovery_config)
+
+    assembly_config = workflows_reconstruction.ReconstructionConfig(
+        release_config=assembly_pipeline.AssemblyConfig(
+            num_processes=n_processes,
+            maxtasksperchild=WORKER_MAXTASKS,
+            recombination_rate=inference_recombination_rate,
+        ),
+        paint_cores=n_processes,
+        paint_recombination_rate=inference_recombination_rate,
+    )
+
+    # Serial contigs: each contig is discovered, assembled and painted before
+    # the next; the stages below then publish completion as in a normal run.
+    serial_contigs, max_contigs = (
+        workflows_contig_parallel.configured_serial_contigs())
+    if serial_contigs and not workflows_contig_parallel.run_serially(
+            checkpoint_store, region_keys, sample_names_active, discover=discover,
+            discovery_identity=discovery_identity_record, config=assembly_config,
+            max_contigs=max_contigs, source_stage=DISCOVERY_STAGE,
+            genetic_maps=inference_genetic_maps):
+        return
+
     if stage_complete(DISCOVERY_STAGE):
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
     else:
@@ -271,152 +437,14 @@ def run():
             f"Numba budget={block_discovery_numba_threads}"
         )
 
-        def prepare_discovery(r_name):
-            """Load a contig, filter its sites and fit its read model."""
-            print(f"\n  Preparing {r_name}...", flush=True)
-            t0 = time.time()
-            genomic_data = core_variants.cleanup_block_reads_list(
-                vcf_path, r_name,
-                use_snp_count=True, snps_per_block=200, snp_shift=200,
-                num_processes=n_processes
-            )
-            print(f"    [Loader] {r_name}: {len(genomic_data)} blocks in {time.time()-t0:.1f}s")
-
-            # Self-calibrated site quality on the analysed cohort, before
-            # read calibration; kept sites are re-blocked 200 at a time.
-            genomic_data, site_quality = core_site_quality.filter_loaded_sites(
-                genomic_data, contig=r_name, config=site_quality_config,
-                threads=n_processes, snps_per_block=200,
-                sample_rows=None if INCLUDE_REFERENCE_SAMPLES else active_vcf_indices,
-                sample_config=sample_quality_config)
-            # Samples flagged by the per-sample QC on this contig (None if off).
-            founder_excluded = core_sample_quality.contig_flags(
-                site_quality, contig=r_name, sample_ids=sample_names_active,
-                output_dir=output_dir)
-
-            # Full reads: (n_samples_total, n_sites, 2) — all 116 samples
-            global_sites, global_reads_full = (
-                core_variants.concatenate_unique_block_reads(genomic_data)
-            )
-            if global_sites is None:
-                print(f"    WARNING: No data for {r_name}, skipping")
-                return None
-
-            # ALWAYS extract G0 reads separately for post-hoc validation.
-            # Retain observed reference genotypes under either discovery
-            # policy. They are not independent biological truth.
-            g0_reads = global_reads_full[g0_vcf_indices,:,:]
-            (_, g0_probs) = core_numerics.reads_to_probabilities(
-                g0_reads,
-                use_hwe_prior=False,
-            )
-            # Downcast G0 probs to float32 — we only use argmax for validation,
-            # so float64 precision is wasted.
-            if g0_probs.dtype == np.float64:
-                g0_probs = g0_probs.astype(np.float32)
-
-            # Select which samples the pipeline will see (116 or 112).
-            # IMPORTANT: we also need to slice genomic_data.reads along the
-            # sample axis so generate_all_block_haplotypes
-            # operates on the filtered sample set.  The GenomicData container
-            # stores per-block (samples, sites, 2) arrays.
-            if INCLUDE_REFERENCE_SAMPLES:
-                active_reads_full = global_reads_full
-            else:
-                active_reads_full = global_reads_full[active_vcf_indices,:,:]
-                # Also filter genomic_data in place so block discovery sees 112 samples
-                for bi in range(len(genomic_data.reads)):
-                    if genomic_data.reads[bi].shape[0] == n_samples_total:
-                        genomic_data.reads[bi] = genomic_data.reads[bi][active_vcf_indices,:,:]
-
-            # Preserve the exact observation event before read counts are
-            # released. Zero-depth cells are scientifically distinct from
-            # uncertain observed genotypes and must remain state-neutral in
-            # missing-aware assembly.
-            global_observed_mask = (
-                workflows_reconstruction.observed_call_mask_from_read_counts(
-                    active_reads_full
-                )
-            )
-
-            # Calibrate only the selected analysis cohort, not excluded rows.
-            global_probs, calibration = read_calibration.prepare_likelihoods(
-                active_reads_full, global_sites, threads=n_processes)
-            avg_depth = np.mean(np.sum(active_reads_full, axis=-1))
-            print(f"    {r_name} sites: {len(global_sites)}, Samples (active): {global_probs.shape[0]}, "
-                  f"Depth: {avg_depth:.1f}x")
-            del global_reads_full, active_reads_full, g0_reads
-            # Flagged libraries enter discovery without reads (unobserved).
-            genomic_data = core_sample_quality.exclude_from_discovery(
-                genomic_data, founder_excluded)
-            return discovery_blocks.PreparedContig(
-                genomic_data=genomic_data,
-                genotype_likelihoods_by_block=read_calibration.block_likelihoods(
-                    genomic_data, global_sites, global_probs),
-                fields=dict(
-                    global_probs=global_probs, global_sites=global_sites,
-                    read_calibration=calibration, site_quality=site_quality,
-                    global_observed_mask=global_observed_mask,
-                    avg_depth=avg_depth, g0_probs=g0_probs,
-                    founder_excluded=founder_excluded),
-                products=core_site_quality.run_record_products(
-                    site_quality, sample_names_active),
-            )
-
-        def save_discovery(r_name, prepared, block_results):
-            report_discovery(block_results)
-            fields = prepared.fields
-            founder_excluded = fields['founder_excluded']
-            # G0 probabilities are retained as an explicit reference; they are
-            # non-independent when G0 rows entered reconstruction above.
-            checkpoint_store.save_contig(DISCOVERY_STAGE, r_name, {
-                'global_probs': fields['global_probs'],
-                'global_sites': fields['global_sites'],
-                'read_calibration': fields['read_calibration'],
-                'site_quality': fields['site_quality'],
-                'global_observed_mask': fields['global_observed_mask'],
-                'observed_call_mask_mode': (
-                    workflows_reconstruction.EXACT_OBSERVED_MASK_MODE),
-                'genotype_evidence_mode': (
-                    'normalized_raw_linear_likelihood_v1'),
-                'block_results': block_results, 'avg_depth': fields['avg_depth'],
-                'g0_probs': fields['g0_probs'], 'g0_sample_names': g0_sample_names,
-                'active_vcf_indices': active_vcf_indices,
-                'discovery_backend': discovery_identity_record['backend'],
-                'discovery_config': discovery_config_record,
-                **({} if founder_excluded is None
-                   else {'founder_evidence_excluded': founder_excluded}),
-            })
-
         pending_contigs = []
         for r_name in region_keys:
             if contig_done(DISCOVERY_STAGE, r_name):
                 print(f"  [RESUME] {r_name} already done")
             else:
                 pending_contigs.append(r_name)
-        with discovery_blocks.BlockDiscoveryPool(
-            block_discovery_processes,
-            block_discovery_numba_threads,
-        ) as block_pool:
-            discovery_blocks.discover_contigs(
-                pending_contigs, prepare_discovery, save_discovery,
-                block_pool=block_pool, discovery_config=discovery_config)
-
-        save_global(DISCOVERY_STAGE, {
-            'sample_ids': sample_names_active,
-            'sample_names_full': sample_names,
-            'contigs': region_keys,
-            'g0_vcf_indices': g0_vcf_indices,
-            'g0_sample_names': g0_sample_names,
-            'active_vcf_indices': active_vcf_indices,
-            'include_reference_samples': INCLUDE_REFERENCE_SAMPLES,
-            'genotype_evidence_mode': 'normalized_raw_linear_likelihood_v1',
-            'observed_call_mask_mode': (
-                workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-            ),
-            'discovery_backend': discovery_identity_record['backend'],
-            'discovery_config': discovery_config_record,
-        })
+        if pending_contigs:
+            discover(pending_contigs)
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
         mark_stage_complete(DISCOVERY_STAGE)
 
@@ -436,15 +464,6 @@ def run():
     # The canonical release preprocesses the raw block discovery blocks, assembles
     # rectangular-K phase components through L1-L4, and paints each component
     # in an independent founder namespace using the exact block discovery observation mask.
-    assembly_config = workflows_reconstruction.ReconstructionConfig(
-        release_config=assembly_pipeline.AssemblyConfig(
-            num_processes=n_processes,
-            maxtasksperchild=WORKER_MAXTASKS,
-            recombination_rate=inference_recombination_rate,
-        ),
-        paint_cores=n_processes,
-        paint_recombination_rate=inference_recombination_rate,
-    )
     print(f"\n{'='*60}")
     print("ASSEMBLY: block discovery -> COMPONENT painting")
     print(f"{'='*60}")

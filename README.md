@@ -132,6 +132,8 @@ and [genetic-map guide](docs/genetic_maps.md) before choosing a comparison model
 
 Rerun the same command to resume compatible checkpoints. A run directory
 contains logs, readable tables and atomic chromosome/stage checkpoints.
+For short allocations, `--serial-contigs` and `--max-contigs N` finish whole
+chromosomes one at a time ([running in short allocations](docs/running.md#running-in-short-allocations)).
 Use a new output root when changing upstream inputs or scientific settings;
 never relabel old checkpoints as current.
 

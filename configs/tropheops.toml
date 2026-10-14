@@ -1,6 +1,8 @@
 [run]
 cores = "auto"
 # batch_queue = "/shared/run/batches" # Optional helpers: haplotypes batch-worker --queue PATH
+# serial_contigs = true # One contig at a time, each checkpointed; for short allocations.
+# max_contigs = 2 # Finish at most 2 more contigs per invocation; implies serial_contigs.
 # read_calibration = true # Default: fit the observation model from allele depths.
 # pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
 founder_refinement = "on" # Final chromosome paths; "off" is a controlled comparison.

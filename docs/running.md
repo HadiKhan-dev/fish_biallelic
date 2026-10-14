@@ -175,7 +175,9 @@ The same options are wired through `simulate`, `reconstruct`, `astcal` and
 | `--read-calibration` / `--no-read-calibration` | on | Observed-AD calibration reused from discovery through final phase |
 | `--pedigree-calibration predictive\|off` | predictive | Cross-chromosome pedigree evidence scale |
 | `--founder-refinement on\|off` | on | Progressive final L1–L4 refinement with converged founder-count decisions |
-| `--contig-workers auto\|N` | auto | Contigs reconstructed concurrently within `--cores` (feedback, assembly, painting); auto is one per eight cores, memory-limited; 1 is sequential. Execution only |
+| `--contig-workers auto\|N` | auto | Contigs reconstructed concurrently within `--cores` (feedback, assembly, painting); auto is one per sixteen cores, memory-limited; 1 is sequential. Execution only |
+| `--serial-contigs` / `--no-serial-contigs` | off | One contig at a time from discovery through painting, each checkpointed before the next (see [Running in short allocations](#running-in-short-allocations)). Execution only |
+| `--max-contigs N` | none | Finish at most N more contigs, then exit cleanly; implies `--serial-contigs`. Execution only |
 | `--shared-family-evidence` / `--no-shared-family-evidence` | on | Shared phase-error evidence in downstream recombination maps |
 | `--order-breakpoints FILE` | none | Reference-order breakpoint TSV for the recombination map (see [Reference-order breakpoints](#reference-order-breakpoints)) |
 
@@ -290,6 +292,53 @@ The environment accepts `1/0`, `true/false`, `yes/no` and `on/off`, ignoring cas
 and surrounding whitespace. Invalid values are rejected rather than enabling
 the feature accidentally. Use `--no-shared-family-evidence` to explicitly
 disable it even when the selected TOML example sets it to true.
+
+## Running in short allocations
+
+By default, block discovery covers every chromosome before reconstruction
+starts several chromosomes at once, so an allocation that ends early can leave
+many chromosomes partly done. `--serial-contigs` instead takes one chromosome
+at a time, in the run's contig order, through block discovery, local feedback,
+final L1–L4 assembly and painting with all `--cores`; its checkpoints are
+complete before the next chromosome starts. `--max-contigs N` (which implies
+`--serial-contigs`) finishes at most N more chromosomes, counting one resumed
+from partial checkpoints, then exits with status 0 and lists the chromosomes
+painted and remaining. Rerun the same command to continue:
+
+```bash
+# Each invocation paints at most two more chromosomes.
+haplotypes reconstruct --vcf cross.bcf --output work/runs/my_cross \
+  --cores 32 --max-contigs 2
+```
+
+When every chromosome is painted, the run continues as a normal run: it
+validates the painted chromosomes, publishes the stage completion markers and
+runs the genome-wide stages (pedigree, allele refit, family phase and
+recombination), unless `--stop-after-stage painting` stops it first. Each
+chromosome runs the same code from the same checkpoints as in a normal run, so
+results are identical, and invocations may mix modes on one run directory: for
+example, serial bursts and then a normal run to finish. With `simulate
+--process-contigs`, the shard's chromosomes run serially and stay a shard.
+Simulation first generates its inputs (templates, pedigree and reads) for all
+chromosomes together. TOML uses `[run].serial_contigs = true` and
+`[run].max_contigs = 2`, the environment `HAPLOTYPES_SERIAL_CONTIGS` and
+`HAPLOTYPES_MAX_CONTIGS`, with precedence CLI > TOML > environment. A cap
+cannot be combined with `--no-serial-contigs`, and serial runs cannot stop
+after `block_discovery`. `--contig-workers` has no effect in serial mode.
+
+On a large node the default concurrent contigs finish sooner, because one
+chromosome rarely keeps every core busy; serial mode trades that throughput
+for small units of durable progress.
+
+In either mode, checkpoint writes are atomic and rerunning the same command
+resumes after identity checks. An interruption loses at most: the current
+chromosome's block discovery (checkpointed per chromosome); the current chunk
+of 64 blocks of a local-feedback path-selection round; the current final
+assembly phase (preprocessing, each hierarchy level and each level's founder
+refinement per component, long components also per sweep); the current
+chromosome's painting; the current chromosome of pedigree evidence and scores,
+allele refit, family phase and recombination; and up to about 120 s of family
+phase iterations.
 
 ## Reference-order breakpoints
 

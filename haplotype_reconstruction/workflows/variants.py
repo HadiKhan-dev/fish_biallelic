@@ -78,64 +78,79 @@ def run():
                         loader_sha256=hashlib.sha256(Path(variants.__file__).read_bytes()).hexdigest())
     source_stage = "block_discovery"
     store.bind_stage_identity(source_stage, run_identity)
-    print(f"General reconstruction: {len(names)} samples, {len(contigs)} contigs; {workers}-core ceiling")
-    print("Sequential scientific stages: pooled discovery/assembly, threaded painting/scoring, pooled resampling.")
-    started = time.perf_counter()
-    if not store.stage_complete(source_stage):
-        def prepare(contig):
-            reads = variants.cleanup_block_reads_list(
-                str(path), contig, use_snp_count=True, snps_per_block=200, snp_shift=200,
-                num_processes=workers, strict_input=True)
-            reads, site_record = site_quality.filter_loaded_sites(
-                reads, contig=contig, config=site_quality_config, threads=workers, snps_per_block=200,
-                sample_config=sample_quality_config)
-            # Samples flagged by the per-sample QC on this contig (None if off).
-            founder_excluded = sample_quality.contig_flags(
-                site_record, contig=contig, sample_ids=names, output_dir=output)
-            sites, counts = variants.concatenate_unique_block_reads(reads)
-            if sites is None:
-                raise ValueError(f"{contig}: no usable SNPs")
-            observed = reconstruction.observed_call_mask_from_read_counts(counts)
-            probabilities, calibration = read_calibration.prepare_likelihoods(counts, sites, threads=workers)
-            # Flagged libraries enter discovery without reads (unobserved).
-            reads = sample_quality.exclude_from_discovery(reads, founder_excluded)
-            return blocks.PreparedContig(
-                reads, read_calibration.block_likelihoods(reads, sites, probabilities),
-                dict(global_sites=sites, global_probs=probabilities, read_calibration=calibration,
-                     site_quality=site_record, global_observed_mask=observed,
-                     founder_excluded=founder_excluded),
-                site_quality.run_record_products(site_record, names))
-
-        def save(contig, prepared, discovered):
-            fields = prepared.fields
-            founder_excluded = fields["founder_excluded"]
-            store.save_contig(source_stage, contig, dict(
-                block_results=discovered, global_sites=fields["global_sites"],
-                global_probs=fields["global_probs"], read_calibration=fields["read_calibration"],
-                site_quality=fields["site_quality"], global_observed_mask=fields["global_observed_mask"],
-                discovery_backend=identity["backend"], discovery_config=identity["config"],
-                genotype_evidence_mode=reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
-                observed_call_mask_mode=reconstruction.EXACT_OBSERVED_MASK_MODE,
-                **({} if founder_excluded is None else dict(founder_evidence_excluded=founder_excluded))))
-
-        with blocks.BlockDiscoveryPool(workers) as pool:
-            blocks.discover_contigs(
-                [contig for contig in contigs if not store.contig_done(source_stage, contig)],
-                prepare, save, block_pool=pool, discovery_config=discovery_config)
+    # Sample/contig manifest checked by reconstruction; written before any contig.
+    if not store.global_done(source_stage):
         store.save_global(source_stage, dict(
             sample_ids=names, contigs=contigs, discovery_backend=identity["backend"],
             discovery_config=identity["config"],
             genotype_evidence_mode=reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
             observed_call_mask_mode=reconstruction.EXACT_OBSERVED_MASK_MODE))
+    print(f"General reconstruction: {len(names)} samples, {len(contigs)} contigs; {workers}-core ceiling")
+    print("Sequential scientific stages: pooled discovery/assembly, threaded painting/scoring, pooled resampling.")
+    started = time.perf_counter()
+
+    def prepare(contig):
+        reads = variants.cleanup_block_reads_list(
+            str(path), contig, use_snp_count=True, snps_per_block=200, snp_shift=200,
+            num_processes=workers, strict_input=True)
+        reads, site_record = site_quality.filter_loaded_sites(
+            reads, contig=contig, config=site_quality_config, threads=workers, snps_per_block=200,
+            sample_config=sample_quality_config)
+        # Samples flagged by the per-sample QC on this contig (None if off).
+        founder_excluded = sample_quality.contig_flags(
+            site_record, contig=contig, sample_ids=names, output_dir=output)
+        sites, counts = variants.concatenate_unique_block_reads(reads)
+        if sites is None:
+            raise ValueError(f"{contig}: no usable SNPs")
+        observed = reconstruction.observed_call_mask_from_read_counts(counts)
+        probabilities, calibration = read_calibration.prepare_likelihoods(counts, sites, threads=workers)
+        # Flagged libraries enter discovery without reads (unobserved).
+        reads = sample_quality.exclude_from_discovery(reads, founder_excluded)
+        return blocks.PreparedContig(
+            reads, read_calibration.block_likelihoods(reads, sites, probabilities),
+            dict(global_sites=sites, global_probs=probabilities, read_calibration=calibration,
+                 site_quality=site_record, global_observed_mask=observed,
+                 founder_excluded=founder_excluded),
+            site_quality.run_record_products(site_record, names))
+
+    def save(contig, prepared, discovered):
+        fields = prepared.fields
+        founder_excluded = fields["founder_excluded"]
+        store.save_contig(source_stage, contig, dict(
+            block_results=discovered, global_sites=fields["global_sites"],
+            global_probs=fields["global_probs"], read_calibration=fields["read_calibration"],
+            site_quality=fields["site_quality"], global_observed_mask=fields["global_observed_mask"],
+            discovery_backend=identity["backend"], discovery_config=identity["config"],
+            genotype_evidence_mode=reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
+            observed_call_mask_mode=reconstruction.EXACT_OBSERVED_MASK_MODE,
+            **({} if founder_excluded is None else dict(founder_evidence_excluded=founder_excluded))))
+
+    def discover(selected):
+        """Discover these contigs with one block pool, closed on return."""
+        with blocks.BlockDiscoveryPool(workers) as pool:
+            blocks.discover_contigs(selected, prepare, save, block_pool=pool,
+                                    discovery_config=discovery_config)
+
+    config = reconstruction.ReconstructionConfig(
+        release_config=AssemblyConfig(num_processes=workers, recombination_rate=rate),
+        paint_cores=workers, paint_recombination_rate=rate)
+    serial, max_contigs = contig_parallel.configured_serial_contigs()
+    if serial and not contig_parallel.run_serially(
+            store, contigs, names, discover=discover, discovery_identity=identity,
+            config=config, max_contigs=max_contigs, source_stage=source_stage,
+            genetic_maps=genetic_maps):
+        return
+    if not store.stage_complete(source_stage):
+        pending = [contig for contig in contigs if not store.contig_done(source_stage, contig)]
+        if pending:
+            discover(pending)
         runtime.require_contig_checkpoints(store, source_stage, contigs)
         store.mark_stage_complete(source_stage)
     if stop == "block_discovery":
         return
     contig_parallel.run_reconstruction(
         store, contigs, names, discovery_identity=identity, source_stage=source_stage,
-        config=reconstruction.ReconstructionConfig(
-            release_config=AssemblyConfig(num_processes=workers, recombination_rate=rate),
-            paint_cores=workers, paint_recombination_rate=rate), genetic_maps=genetic_maps)
+        config=config, genetic_maps=genetic_maps)
     if stop == "painting":
         return
     run_downstream(

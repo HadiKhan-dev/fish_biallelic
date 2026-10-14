@@ -50,6 +50,7 @@ import traceback
 
 import haplotype_reconstruction.core.checkpoints as core_checkpoints
 import haplotype_reconstruction.core.chromosome_parallel as core_chromosome_parallel
+import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.run_record as core_run_record
 import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.painting.components as painting_components
@@ -120,6 +121,70 @@ def configured_contig_workers(value=None):
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("contig_workers must be 'auto' or a positive integer")
     return value
+
+
+def configured_serial_contigs():
+    """Return (serial, max_contigs) from HAPLOTYPES_SERIAL_CONTIGS and HAPLOTYPES_MAX_CONTIGS.
+
+    The CLI resolves both (CLI > TOML > environment); a contig cap implies serial contigs.
+    """
+    limit = os.environ.get("HAPLOTYPES_MAX_CONTIGS")
+    if limit is not None:
+        if not limit.strip().isdigit() or int(limit) < 1:
+            raise ValueError("HAPLOTYPES_MAX_CONTIGS must be a positive integer")
+        limit = int(limit)
+    serial = core_environment.boolean_setting(
+        os.environ.get("HAPLOTYPES_SERIAL_CONTIGS", "off"), "serial_contigs")
+    return serial or limit is not None, limit
+
+
+def run_serially(checkpoint_store, contigs, sample_ids, *, discover, discovery_identity, config,
+                 max_contigs=None, source_stage="block_discovery", all_contigs=None,
+                 genetic_maps=None):
+    """Discover, assemble and paint one contig at a time, each checkpointed before the next.
+
+    For each of ``contigs`` (run order) still lacking its painting:
+    ``discover([contig])`` when it lacks its ``source_stage`` checkpoint (the
+    workflow's block discovery, whose pool is closed before reconstruction),
+    then ``reconstruction.run_reconstruction`` for that contig alone: the
+    sequential route with the whole core ceiling. A contig thus runs the code of
+    a normal run and resumes from its own checkpoints. No stage completion is
+    published here: once every contig is painted, the caller continues as a
+    normal run, which validates the painted contigs, publishes the completion
+    markers and runs the genome-wide stages.
+
+    ``max_contigs`` caps the contigs finished in this call, including a resumed
+    partial one. Returns True when every contig is painted, or False after a
+    clean stop that leaves contigs for a later invocation.
+    """
+    target_stage = reconstruction.PAINTING_STAGE
+    contigs = tuple(contigs)
+    pending = [contig for contig in contigs
+               if not checkpoint_store.contig_done(target_stage, contig)]
+    selected = pending if max_contigs is None else pending[:max_contigs]
+    cores = max(config.release_config.num_processes, config.paint_cores)
+    print(f"\nSERIAL CONTIGS: {len(contigs) - len(pending)} of {len(contigs)} contigs painted"
+          + (f"; now {', '.join(selected)}: discovery, assembly and painting, one contig at a "
+             f"time with a {cores}-core ceiling" if selected else ""), flush=True)
+    for done, contig in enumerate(selected, start=len(contigs) - len(pending) + 1):
+        started = time.monotonic()
+        if not checkpoint_store.contig_done(source_stage, contig):
+            discover([contig])
+        reconstruction.run_reconstruction(
+            checkpoint_store, (contig,), sample_ids, discovery_identity=discovery_identity,
+            config=config, source_stage=source_stage,
+            all_contigs=contigs if all_contigs is None else all_contigs,
+            publish_completion=False, genetic_maps=genetic_maps)
+        print(f"  [SERIAL] {contig} painted in {time.monotonic() - started:.1f} s; "
+              f"{done} of {len(contigs)} contigs painted", flush=True)
+    remaining = pending[len(selected):]
+    if remaining:
+        print(f"[STOP] max_contigs = {max_contigs} reached: "
+              f"{len(contigs) - len(remaining)} of {len(contigs)} contigs painted; "
+              f"remaining: {', '.join(remaining)}. Completed checkpoints are kept; "
+              "rerun the same command to continue.", flush=True)
+        return False
+    return True
 
 
 def plan_contig_workers(checkpoint_store, contigs, *, cores, requested,

@@ -873,6 +873,99 @@ def run():
         DISCOVERY_STAGE, discovery_source_manifest
     )
 
+    def prepare_discovery(r_name):
+        """Load a contig's simulated reads and fit its read model."""
+        print(f"\n  Preparing {r_name}...", flush=True)
+        simulated_reads = load_contig(SIMULATION_STAGE, r_name)['simulated_reads']
+        global_sites = np.asarray(
+            load_contig(TEMPLATE_STAGE, r_name)['naive_long_haps'][0])
+        simd_genomic_data = simulation_pedigree.simulated_genomic_data(
+            global_sites, simulated_reads,
+            simulation_run_spec['snps_per_block'],
+            simulation_run_spec['snp_shift'])
+        simd_genomic_data, site_quality = core_site_quality.filter_loaded_sites(
+            simd_genomic_data, contig=r_name, config=site_quality_config,
+            threads=n_processes, snps_per_block=simulation_run_spec['snps_per_block'],
+            sample_config=sample_quality_config)
+        founder_excluded = core_sample_quality.contig_flags(
+            site_quality, contig=r_name, sample_ids=sample_names, output_dir=output_dir)
+        if site_quality.get('applied'):
+            global_sites, simulated_reads = (
+                core_variants.concatenate_unique_block_reads(simd_genomic_data))
+        global_observed_mask = (
+            workflows_reconstruction.observed_call_mask_from_read_counts(
+                simulated_reads
+            )
+        )
+        global_probs, calibration = read_calibration.prepare_likelihoods(
+            simulated_reads, global_sites, threads=n_processes)
+        simd_genomic_data = core_sample_quality.exclude_from_discovery(
+            simd_genomic_data, founder_excluded)
+        return discovery_blocks.PreparedContig(
+            genomic_data=simd_genomic_data,
+            genotype_likelihoods_by_block=read_calibration.block_likelihoods(
+                simd_genomic_data, global_sites, global_probs),
+            fields={
+                'global_sites': global_sites,
+                'global_probs': global_probs,
+                'read_calibration': calibration,
+                'site_quality': site_quality,
+                'global_observed_mask': global_observed_mask,
+                **({} if founder_excluded is None
+                   else {'founder_evidence_excluded': founder_excluded}),
+            },
+            products=core_site_quality.run_record_products(site_quality, sample_names),
+        )
+
+    def save_discovery(r_name, prepared, simd_block_results):
+        fields = prepared.fields
+        save_contig(DISCOVERY_STAGE, r_name, {
+            'block_results': simd_block_results,
+            'global_sites': fields['global_sites'],
+            'global_probs': fields['global_probs'],
+            'read_calibration': fields['read_calibration'],
+            'site_quality': fields['site_quality'],
+            'global_observed_mask': fields['global_observed_mask'],
+            'observed_call_mask_mode': (
+                workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
+            ),
+            'genotype_evidence_mode': (
+                workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
+            ),
+            'discovery_backend': discovery_identity_record['backend'],
+            'discovery_config': discovery_config_record,
+            **({} if 'founder_evidence_excluded' not in fields
+               else {'founder_evidence_excluded': fields['founder_evidence_excluded']}),
+        })
+
+    def discover(contigs):
+        """Discover these contigs with one block pool, closed on return."""
+        with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
+            discovery_blocks.discover_contigs(
+                contigs, prepare_discovery, save_discovery,
+                block_pool=block_pool, discovery_config=discovery_config)
+
+    assembly_config = workflows_reconstruction.ReconstructionConfig(
+        release_config=assembly_pipeline.AssemblyConfig(
+            num_processes=n_processes,
+            maxtasksperchild=WORKER_MAXTASKS,
+            recombination_rate=inference_recombination_rate,
+        ),
+        paint_cores=n_processes,
+        paint_recombination_rate=inference_recombination_rate,
+    )
+
+    # Serial contigs: each contig is discovered, assembled and painted before
+    # the next; the stages below then publish completion as in a normal run.
+    serial_contigs, max_contigs = (
+        workflows_contig_parallel.configured_serial_contigs())
+    if serial_contigs and not workflows_contig_parallel.run_serially(
+            checkpoint_store, region_keys, sample_names, discover=discover,
+            discovery_identity=discovery_identity_record, config=assembly_config,
+            max_contigs=max_contigs, source_stage=DISCOVERY_STAGE,
+            all_contigs=all_region_keys, genetic_maps=inference_genetic_maps):
+        return
+
     if stage_complete(DISCOVERY_STAGE) and not SIMULATION_SHARD_MODE:
         print(f"\n[RESUME] Skipping block haplotype discovery (checkpoint found)")
     else:
@@ -882,81 +975,14 @@ def run():
 
         start = time.time()
 
-        def prepare_discovery(r_name):
-            """Load a contig's simulated reads and fit its read model."""
-            print(f"\n  Preparing {r_name}...", flush=True)
-            simulated_reads = load_contig(SIMULATION_STAGE, r_name)['simulated_reads']
-            global_sites = np.asarray(
-                load_contig(TEMPLATE_STAGE, r_name)['naive_long_haps'][0])
-            simd_genomic_data = simulation_pedigree.simulated_genomic_data(
-                global_sites, simulated_reads,
-                simulation_run_spec['snps_per_block'],
-                simulation_run_spec['snp_shift'])
-            simd_genomic_data, site_quality = core_site_quality.filter_loaded_sites(
-                simd_genomic_data, contig=r_name, config=site_quality_config,
-                threads=n_processes, snps_per_block=simulation_run_spec['snps_per_block'],
-                sample_config=sample_quality_config)
-            founder_excluded = core_sample_quality.contig_flags(
-                site_quality, contig=r_name, sample_ids=sample_names, output_dir=output_dir)
-            if site_quality.get('applied'):
-                global_sites, simulated_reads = (
-                    core_variants.concatenate_unique_block_reads(simd_genomic_data))
-            global_observed_mask = (
-                workflows_reconstruction.observed_call_mask_from_read_counts(
-                    simulated_reads
-                )
-            )
-            global_probs, calibration = read_calibration.prepare_likelihoods(
-                simulated_reads, global_sites, threads=n_processes)
-            simd_genomic_data = core_sample_quality.exclude_from_discovery(
-                simd_genomic_data, founder_excluded)
-            return discovery_blocks.PreparedContig(
-                genomic_data=simd_genomic_data,
-                genotype_likelihoods_by_block=read_calibration.block_likelihoods(
-                    simd_genomic_data, global_sites, global_probs),
-                fields={
-                    'global_sites': global_sites,
-                    'global_probs': global_probs,
-                    'read_calibration': calibration,
-                    'site_quality': site_quality,
-                    'global_observed_mask': global_observed_mask,
-                    **({} if founder_excluded is None
-                       else {'founder_evidence_excluded': founder_excluded}),
-                },
-                products=core_site_quality.run_record_products(site_quality, sample_names),
-            )
-
-        def save_discovery(r_name, prepared, simd_block_results):
-            fields = prepared.fields
-            save_contig(DISCOVERY_STAGE, r_name, {
-                'block_results': simd_block_results,
-                'global_sites': fields['global_sites'],
-                'global_probs': fields['global_probs'],
-                'read_calibration': fields['read_calibration'],
-                'site_quality': fields['site_quality'],
-                'global_observed_mask': fields['global_observed_mask'],
-                'observed_call_mask_mode': (
-                    workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-                ),
-                'genotype_evidence_mode': (
-                    workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
-                ),
-                'discovery_backend': discovery_identity_record['backend'],
-                'discovery_config': discovery_config_record,
-                **({} if 'founder_evidence_excluded' not in fields
-                   else {'founder_evidence_excluded': fields['founder_evidence_excluded']}),
-            })
-
         pending_contigs = []
         for r_name in region_keys:
             if contig_done(DISCOVERY_STAGE, r_name):
                 print(f"  [RESUME] {r_name} already done")
             else:
                 pending_contigs.append(r_name)
-        with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
-            discovery_blocks.discover_contigs(
-                pending_contigs, prepare_discovery, save_discovery,
-                block_pool=block_pool, discovery_config=discovery_config)
+        if pending_contigs:
+            discover(pending_contigs)
 
         print(f"\nBlock haplotype discovery complete in {time.time()-start:.1f}s")
         core_runtime.require_contig_checkpoints(
@@ -967,15 +993,6 @@ def run():
     # =========================================================================
     # ASSEMBLY: COMPONENT ASSEMBLY AND PAINTING
     # =========================================================================
-    assembly_config = workflows_reconstruction.ReconstructionConfig(
-        release_config=assembly_pipeline.AssemblyConfig(
-            num_processes=n_processes,
-            maxtasksperchild=WORKER_MAXTASKS,
-            recombination_rate=inference_recombination_rate,
-        ),
-        paint_cores=n_processes,
-        paint_recombination_rate=inference_recombination_rate,
-    )
     print()
     print("=" * 60)
     print("ASSEMBLY: DISCOVERED BLOCKS -> COMPONENT painting")

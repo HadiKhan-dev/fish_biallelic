@@ -72,8 +72,16 @@ def build_parser():
             command.add_argument('--contigs', nargs='+', help='Physical contigs to analyze, in input order.')
             command.add_argument('--contig-workers',
                                  help='Contigs reconstructed concurrently within --cores (feedback, assembly, '
-                                      'painting): auto (default; one per 8 cores, memory-limited) or a count; '
+                                      'painting): auto (default; one per 16 cores, memory-limited) or a count; '
                                       '1 keeps the sequential route.')
+            command.add_argument('--serial-contigs', action=argparse.BooleanOptionalAction, default=None,
+                                 help='Discover, assemble and paint one contig at a time with all --cores, each '
+                                      'checkpointed before the next starts; genome-wide stages follow once every '
+                                      'contig is painted. For short allocations; default off (concurrent '
+                                      'contigs finish sooner on a large node).')
+            command.add_argument('--max-contigs', type=int, metavar='N',
+                                 help='Finish at most N more contigs in this invocation, then exit cleanly; '
+                                      'rerun the same command to continue. Implies --serial-contigs.')
             command.add_argument(
                 '--vcf',
                 help='Input VCF/BCF; optional when simulation templates are supplied.'
@@ -216,6 +224,34 @@ def _configure_inference(args, config, parser):
         parser.error(str(error))
 
 
+def _configure_serial_contigs(args, config, parser, stop):
+    """Apply CLI > TOML > environment to serial contigs; a contig cap implies serial."""
+    serial = _setting(args, config, 'run', 'serial_contigs',
+                      os.environ.get('HAPLOTYPES_SERIAL_CONTIGS'))
+    limit = _setting(args, config, 'run', 'max_contigs', os.environ.get('HAPLOTYPES_MAX_CONTIGS'))
+    try:
+        serial = None if serial is None else boolean_setting(serial, 'serial_contigs')
+    except ValueError as error:
+        parser.error(str(error))
+    if limit is not None:
+        if isinstance(limit, str) and limit.strip().isdigit():
+            limit = int(limit)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            parser.error('max_contigs must be a positive integer')
+        if serial is False:
+            parser.error('max_contigs runs contigs serially; it cannot be combined with '
+                         'serial_contigs = false (--no-serial-contigs)')
+        serial = True
+    if serial and stop == 'block_discovery':
+        parser.error('serial contigs are painted before the next is discovered; '
+                     'they cannot stop after block_discovery')
+    os.environ['HAPLOTYPES_SERIAL_CONTIGS'] = 'on' if serial else 'off'
+    if limit is None:
+        os.environ.pop('HAPLOTYPES_MAX_CONTIGS', None)
+    else:
+        os.environ['HAPLOTYPES_MAX_CONTIGS'] = str(limit)
+
+
 def _configure_simulation(args, config, *, seed, output, checkpoints,
                           process_contigs, stop_after_stage):
     """Keep generating parameters separate from inference settings."""
@@ -352,6 +388,9 @@ def main(argv=None):
         if contig_workers != 'auto' and not (contig_workers.isdigit() and int(contig_workers) >= 1):
             parser.error("contig_workers must be 'auto' or a positive integer")
         os.environ['HAPLOTYPES_CONTIG_WORKERS'] = contig_workers
+        _configure_serial_contigs(args, config, parser, (
+            stop_after_stage if args.command == 'simulate'
+            else _setting(args, config, 'run', 'stop_after_stage')))
     seed = _setting(args, config, 'simulation', 'seed', 400)
     default_output = (f'work/runs/seed_{seed}' if args.command == 'simulate'
                       else f'work/runs/{args.command}')
