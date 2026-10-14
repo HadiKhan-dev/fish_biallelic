@@ -3,18 +3,19 @@
 Feedback rounds generate competing proposals; they do not add observations.
 Path selection follows the initial fit and each round, and its panels seed the
 next context assembly. Final L1–L4 assembly is owned by reconstruction.py and
-consumes the final selected local panels.
+consumes the final selected local panels. Records: round R's under
+``feedback/R`` of the contig file (discovery/path_blocks.py), round R's context
+assembly under ``feedback/R/assembly`` (assembly/checkpoints.py).
 """
 from ..core.run_record import timed_stage
 from dataclasses import asdict, dataclass, field, replace
 import gc
 import hashlib
-import json
 
 from haplotype_reconstruction import PACKAGE_ROOT
 from haplotype_reconstruction.assembly import pipeline as assembly
 from haplotype_reconstruction.assembly.checkpoints import (
-    AssemblyCheckpointStore, AssemblyWorkCheckpoint, ASSEMBLY_RELEASE_CHECKPOINT_SCHEMA)
+    AssemblyCheckpoints, FEEDBACK, feedback_round)
 from haplotype_reconstruction.assembly.founder_refinement import FounderRefinementConfig
 from haplotype_reconstruction.core import chromosome_parallel, parallel, runtime
 from haplotype_reconstruction.core.config import PathSelectionConfig
@@ -58,15 +59,12 @@ def scientific_identity(config):
 
 
 def _initial_path_identity(record):
-    """Identity of the local fit, excluding later assembly search choices.
+    """Identity of the initial local fit, excluding later assembly search choices.
 
     Version this schema when initial-fit orchestration changes mathematically.
-    Numerical/local-model dependencies remain content-tracked. Projecting the
-    older encompassing identity permits reuse of unchanged initial fits and
-    per-block checkpoints without relabelling downstream assembly as current.
+    Numerical/local-model dependencies remain content-tracked; assembly-only
+    changes leave the initial fits and their records valid.
     """
-    if record.get("schema") == "initial-local-path-fit-v1":
-        return record
     if record.get("selection") != "path" or record.get("feedback_level") != 0:
         raise ValueError("Only the initial path fit has assembly-independent identity")
     source = record["source"]
@@ -87,43 +85,22 @@ def _initial_path_identity(record):
               if name != "workflows/block_feedback.py"})
 
 
-class _InitialPathCheckpointStore(AssemblyCheckpointStore):
-    """Read unchanged initial fits across a downstream-only linker update."""
-
-    def bind(self, identity):
-        super().bind(_initial_path_identity(identity))
-
-    def load(self, phase):
-        artifact = self._artifact(phase)
-        if not self.checkpoint_store.contig_done(self.work_stage, artifact):
-            return None
-        saved = self.checkpoint_store.load_contig(self.work_stage, artifact)
-        if (not isinstance(saved, AssemblyWorkCheckpoint)
-                or saved.schema != ASSEMBLY_RELEASE_CHECKPOINT_SCHEMA
-                or saved.phase != phase):
-            raise ValueError("Unrecognized initial-fit work checkpoint")
-        projected = _initial_path_identity(json.loads(saved.identity_json))
-        if projected != json.loads(self._identity_json):
-            raise RuntimeError("Initial-fit scientific identity mismatch")
-        return saved.payload
-
-
 def _discovery_config(record):
     values = dict(record)
     values["cavity"] = cavity.HybridCavitySelectionConfig(**values["cavity"])
     return search.ReversibleCavitySearchConfig(**values)
 
 
-@timed_stage("block_feedback", "contig")
-def run_block_feedback(store, contig, originals, gl, sites, observed, sample_ids,
+@timed_stage("block_feedback")
+def run_block_feedback(file, originals, gl, sites, observed, sample_ids,
                        *, discovery_identity, assembly_config, config, chromosome_map=None,
                        chromosome_evidence=None):
     """Return the path-selected local blocks and their scientific identity.
 
-    Raw block discovery files are never replaced. Path selection first refits
-    the original panels, then selects after each context round; selected L1
-    panels feed the second context. Only the outer reconstruction runner
-    publishes genome-wide completion.
+    ``file``: the contig's checkpoint file. Discovery records are never
+    replaced. Path selection first refits the original panels, then selects
+    after each context round; selected L1 panels feed the second context. Only
+    the outer reconstruction runner publishes genome-wide completion.
     """
     cpus = min(assembly_config.num_processes, runtime.available_cpu_count())
     # This option affects only final chromosomes. Do not invalidate or refit
@@ -141,28 +118,35 @@ def run_block_feedback(store, contig, originals, gl, sites, observed, sample_ids
         if fitted is not None:
             latent.update(assembly._array_digest(fitted.haplotypes).encode())
     identity.update(source=original_identity, original_latent_sha256=latent.hexdigest())
-    return _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids,
+    return _run_path_feedback(file, originals, gl, sites, observed, sample_ids,
         discovery_identity=discovery_identity, assembly_config=assembly_config,
         config=config, chromosome_map=chromosome_map, chromosome_evidence=chromosome_evidence,
         identity=identity, cpus=cpus)
 
 
-def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids, *,
+def _round_checkpoints(file, level, identity):
+    """Round ``level``'s records, bound to its identity (the initial fit's projection).
+
+    Small per-block writes stay single-threaded while numerical workers run.
+    """
+    checkpoints = AssemblyCheckpoints(file, f"{FEEDBACK}/{feedback_round(level)}", nthreads=1)
+    checkpoints.bind(_initial_path_identity(identity) if level == 0 else identity)
+    return checkpoints
+
+
+def _run_path_feedback(file, originals, gl, sites, observed, sample_ids, *,
                        discovery_identity, assembly_config, config, chromosome_map,
                        chromosome_evidence, identity, cpus):
     """Keep original latent starts, select initially and after each context round."""
     import copy
     from haplotype_reconstruction.discovery import path_blocks
 
-    # Small per-block writes stay single-threaded while numerical workers run.
-    local_store = runtime.CheckpointStore(store.root, nthreads=1)
+    contig = file.name
     selected_identity = dict(identity, selection="path", feedback_level=2)
-    final_io = AssemblyCheckpointStore(local_store, work_stage="feedback_path_l2", contig=contig)
-    final_io.bind(selected_identity)
-    saved = final_io.load("selected")
+    saved = path_blocks.load_selection(_round_checkpoints(file, 2, selected_identity), originals)
     if saved is not None:
         print(f"[Feedback] {contig}: resumed path-selected local panels", flush=True)
-        return saved["blocks"], selected_identity
+        return saved[0], selected_identity
 
     selection_config = CandidateSelectionConfig(
         discovery=_discovery_config(discovery_identity["config"]), criterion="bic")
@@ -173,34 +157,28 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
         wildcard_mass=config.background_mass, chromosome_map=chromosome_map)
     selected_rounds, current, memos = [], originals, None
     for level in (0, 1, 2):
-        stage = "feedback_path_initial" if level == 0 else f"feedback_path_l{level}"
         pass_identity = dict(identity, selection="path", feedback_level=level)
-        checkpoint_type = _InitialPathCheckpointStore if level == 0 else AssemblyCheckpointStore
-        selection_io = checkpoint_type(local_store, work_stage=stage, contig=contig)
-        selection_io.bind(pass_identity)
-        saved = selection_io.load("selected")
+        selection = _round_checkpoints(file, level, pass_identity)
+        saved = path_blocks.load_selection(selection, originals)
         if saved is not None:
-            current = saved["blocks"]
-            memos = saved.get("memos")
+            current, _diagnostics, memos = saved
             selected_rounds.append(current)
             print(f"[Feedback] {contig}: resumed path selection round {level}", flush=True)
             continue
         proposed = None
         if level:
-            saved_proposals = selection_io.load("proposals")
+            saved_proposals = selection.load("proposals")
             if saved_proposals is None:
                 print(f"[Feedback] {contig}: assembling selected context through L{level}", flush=True)
-                assembly_io = AssemblyCheckpointStore(store,
-                    work_stage=stage + "_assembly", contig=contig)
+                # Batches any earlier assembly of the contig joined with identical
+                # inputs are reused from their join records.
                 with parallel.numba_thread_scope(cpus):
                     context = assembly.assemble_chromosome(current, gl, sites, observed, sample_ids,
                         discovery_identity=dict(discovery_identity, feedback_pass=pass_identity),
                         config=replace(assembly_config, max_level=level),
-                        release_checkpoints=assembly_io, chromosome_map=chromosome_map,
-                        chromosome_evidence=chromosome_evidence,
-                        # Joins of the previous context assembly with identical inputs are reused.
-                        earlier_joins=assembly.earlier_join_results(store, contig,
-                            [f"feedback_path_l{j}_assembly" for j in range(1, level)]))
+                        release_checkpoints=AssemblyCheckpoints(file, selection.key("assembly")),
+                        chromosome_map=chromosome_map,
+                        chromosome_evidence=chromosome_evidence)
                 # In a contig lane the lease may grow at each phase start and while the
                 # phase's pool runs (execution only).
                 budget = chromosome_parallel.lease_budget(cpus, f"feedback_l{level}_refine")
@@ -212,7 +190,7 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
                 proposed = feedback.BlockResults([copy.copy(block) for block in proposed])
                 runtime.strip_block_evidence(proposed)
                 saved_proposals = dict(blocks=proposed, diagnostic=diagnostic)
-                selection_io.save("proposals", saved_proposals)
+                selection.save("proposals", saved_proposals)
                 del context
                 gc.collect()
                 parallel.malloc_trim()
@@ -220,13 +198,12 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
         budget = chromosome_parallel.lease_budget(cpus, f"feedback_round{level}")
         cpus = parallel.budget_value(budget)
         with parallel.numba_thread_scope(cpus):
-            current, diagnostic, memos = path_blocks.select_blocks(originals,
+            # Records the round's completion. Founder-independent likelihood memos
+            # only accelerate the next round, also after a resume; they never reach
+            # the selected blocks.
+            current, _diagnostics, memos = path_blocks.select_blocks(originals,
                 [*selected_rounds, proposed] if level else [], gl, sites, observed, budget,
-                selection_config, config.path_search, selection_io, memo_states=memos,
+                selection_config, config.path_search, selection, memo_states=memos,
                 keep_memo=level < 2, **model_options)
-        # Founder-independent likelihood memos only accelerate the next round,
-        # also after a resume; they never reach the selected blocks.
-        selection_io.save("selected", dict(blocks=current, diagnostic=diagnostic,
-                                           **({"memos": memos} if level < 2 else {})))
         selected_rounds.append(current)
     return current, selected_identity

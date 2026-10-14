@@ -44,10 +44,11 @@ known-truth simulation validation.
 | Pedigree inference | `pedigree/pipeline.py`, `pedigree/inference.py` | Aggregate chromosome evidence and infer observed-parent states and identities |
 | Family phase correction | `refinement/pipeline.py`, `refinement/polish.py` | Pedigree-conditioned, genotype-preserving final phase |
 | Recombination maps | `recombination/pipeline.py`, `recombination/model.py` | Conditional rates, crossover intervals and observable exposure |
-| Truth evaluation | `simulation/evaluation.py`, `simulation/founder_metrics.py`, `simulation/metrics.py`, `simulation/truth.py` | Parallel founder/sample/pedigree metrics and compact cached truth, never inference inputs |
+| Truth evaluation | `simulation/evaluation.py`, `simulation/founder_metrics.py`, `simulation/metrics.py`, `simulation/truth.py` | Parallel founder/sample/pedigree metrics from each chromosome's truth record, never inference inputs |
 | Portable simulation controls | `simulation/designs.py`, `simulation/example.py` | Backcrosses, observed-only sampling, read perturbations and generated examples |
 | Interoperable export | `workflows/export.py`, `core/products.py` | Lossless component-local founder tracks and final sample GT/PS |
-| Run provenance and timing | `core/run_record.py` | Coordinator records and non-overlapping wall times |
+| Checkpoints | `core/checkpoints.py`, `core/runtime.py`, `core/products.py` | One append-only record file per chromosome plus the run file; reading evidence and every founder stage back |
+| Run provenance and timing | `core/run_record.py` | Coordinator records, non-overlapping wall times and `status` |
 
 Paths in this table are relative to `haplotype_reconstruction/`.
 
@@ -200,13 +201,22 @@ The [running guide](running.md) distinguishes broad-only assembly controls
 from bounded-search budgets.
 
 `core/haplotypes.py` owns shared block types. `core/checkpoints.py` implements
-compressed atomic serialization with rolling chunk reads and ordered pipelined
-writes; checksums and final atomic publication are retained. `core/runtime.py`
-owns run-stage stores and scoped logging. Each workflow restores stdout and
-closes its log on normal
-return, interruption or failure.
-Assembly and painting add their own typed checkpoint and scientific-identity
-handling. Keep public serialized types at stable module paths when possible.
+the checkpoint container: an append-only file of immutable, checksummed
+records, each appended under an exclusive `flock` and flushed to disk before it
+counts, whose payloads use compressed protocol-5 serialization with rolling
+chunk reads and ordered pipelined writes. `core/runtime.py` owns the
+`CheckpointStore` (`run.ckpt`, one `contigs/<contig>.ckpt` per chromosome and
+transient `work/` states) and scoped logging. Each workflow restores stdout and
+closes its log on normal return, interruption or failure.
+Each stage owns its record keys and scientific identities
+(`discovery/checkpoints.py`, `assembly/checkpoints.py`,
+`painting/checkpoints.py`, `pedigree/cache.py` and the stage pipelines);
+`core/products.py` reads evidence and founder panels back for downstream
+stages, evaluation and export. A chromosome worker writes only its own
+chromosome's file; genome-wide records come from the coordinator. Downstream
+stages bind the record identities (`RecordInfo.identity`) of the upstream
+records they read, never file paths or modification times. Keep public
+serialized types at stable module paths when possible.
 
 Moving a numerical helper requires updating its imports **and** every relevant
 source-dependency list used for checkpoint identity. Source changes can make

@@ -2,6 +2,13 @@
 
 Raw discovery supplies latent starts; assembled context supplies candidates,
 never additional observations. Every round fits the same calibrated GLs.
+
+A round's records (key prefix ``feedback/<round>`` of the contig file):
+``blocks/<k:06d>``, its selected blocks CHUNK_BLOCKS at a time in completion
+order, each with its diagnostic and likelihood memo (the round's product), and
+``selected``, its completion: {chunks: count, skipped: indices of the blocks
+kept as discovered (fallback), blocks: count}, so the round's panels are the
+chunks' blocks plus fallback copies of the skipped discovery blocks.
 """
 import copy
 from dataclasses import asdict
@@ -14,8 +21,12 @@ from ..core import parallel
 from ..core.haplotypes import BlockResult, BlockResults
 from . import feedback, path_fitting, path_scoring, path_selection
 
-# Completed blocks per path-selection checkpoint file (_BlockChunks).
+# Completed blocks per path-selection record (_BlockChunks).
 CHUNK_BLOCKS = 64
+
+
+# Diagnostic of a block kept as discovered (fallback).
+SKIPPED = 'no_latent_fit_or_observed_kept_sites'
 
 
 def kept(block):
@@ -59,6 +70,13 @@ def materialize(original, result):
     for name in ('missing_aware_break_before', 'missing_aware_break_after'):
         if hasattr(original, name):
             setattr(block, name, getattr(original, name))
+    return block
+
+
+def fallback(original):
+    """A block without a latent fit or observed kept site: its discovery panel, no evidence."""
+    block = copy.copy(original)
+    block.reads_count_matrix = block.probs_array = None
     return block
 
 
@@ -145,22 +163,23 @@ def backstop_summary(diagnostics):
 
 
 class _BlockChunks:
-    """Completed blocks checkpointed CHUNK_BLOCKS at a time, numbered from zero.
+    """Completed blocks recorded CHUNK_BLOCKS at a time, numbered from zero.
 
-    One file per block kept the serial parent loop waiting on shared-storage
-    creates (40-100 ms each) and left ~134k files per run. Chunks are written
-    in completion order and their numbers stay contiguous across resumes; a
-    kill loses at most the unwritten blocks of one chunk.
+    Chunks are written in completion order and their numbers stay contiguous
+    across resumes; a kill loses at most the unwritten blocks of one chunk.
     """
 
-    def __init__(self, checkpoint_io):
-        self.checkpoint_io, self.pending, self.written = checkpoint_io, [], 0
+    def __init__(self, checkpoints):
+        self.checkpoints, self.pending, self.written = checkpoints, [], 0
 
-    def load(self):
-        """Yield the saved (index, block, diagnostic, memo) of every chunk."""
-        while True:
-            saved = self.checkpoint_io.load(f'chunk{self.written:06d}')
+    def load(self, count=None):
+        """Yield the recorded (index, block, diagnostic, memo) of every chunk (of ``count``)."""
+        while count is None or self.written < count:
+            saved = self.checkpoints.load(f'blocks/{self.written:06d}')
             if saved is None:
+                if count is not None:
+                    raise RuntimeError(f'{self.checkpoints!r}: path-selection chunk '
+                                       f'{self.written} is missing')
                 return
             self.written += 1
             yield from saved['blocks']
@@ -172,21 +191,44 @@ class _BlockChunks:
 
     def flush(self):
         if self.pending:
-            self.checkpoint_io.save(f'chunk{self.written:06d}', dict(blocks=self.pending))
+            self.checkpoints.save(f'blocks/{self.written:06d}', dict(blocks=self.pending))
             self.pending, self.written = [], self.written + 1
 
 
+def load_selection(checkpoints, originals):
+    """A completed round's (blocks, diagnostics, memos) as select_blocks returned them.
+
+    Rebuilt from the round's chunk records and fallback copies of its skipped
+    discovery blocks (``originals``); None while the round is incomplete.
+    """
+    selected = checkpoints.load('selected')
+    if selected is None:
+        return None
+    if selected['blocks'] != len(originals):
+        raise ValueError(f'{checkpoints!r}: the round selected {selected["blocks"]} blocks, '
+                         f'not the {len(originals)} discovery blocks given')
+    output = BlockResults(list(originals))
+    diagnostics, memos = [None]*len(originals), [None]*len(originals)
+    for index, block, diagnostic, memo in _BlockChunks(checkpoints).load(selected['chunks']):
+        output.blocks[index], diagnostics[index], memos[index] = block, diagnostic, memo
+    for index in selected['skipped']:
+        output.blocks[index], diagnostics[index] = fallback(originals[index]), dict(skipped=SKIPPED)
+    return output, diagnostics, memos
+
+
 def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
-                  search_config, checkpoint_io, *, generations, recombination_rate_per_bp,
+                  search_config, checkpoints, *, generations, recombination_rate_per_bp,
                   wildcard_mass=.01, chromosome_map=None, memo_states=None, keep_memo=False):
     """One worker per block initially; freed cores join remaining numerical work.
 
-    The parent saves completed blocks in chunks (_BlockChunks); blocks without
-    a latent fit or observed kept site are cheap fallbacks rebuilt on resume.
-    The caller supplies a single-compression-thread checkpoint store so small
-    writes do not spawn a node-wide compression team while numerical workers
-    run. ``memo_states`` are the previous round's likelihood memos by block
-    (LikelihoodMemo states); with ``keep_memo`` the updated ones are returned
+    The parent records completed blocks in chunks (_BlockChunks) and, at the
+    end, the round's completion (``selected``; see the module docstring);
+    blocks without a latent fit or observed kept site are cheap fallbacks
+    rebuilt on resume. ``checkpoints`` (the round's records,
+    assembly.checkpoints.AssemblyCheckpoints) write with one compression
+    thread, so small writes do not spawn a node-wide compression team while
+    numerical workers run. ``memo_states`` are the previous round's likelihood
+    memos by block (LikelihoodMemo states); with ``keep_memo`` the updated ones are returned
     as the third value for the next round, else Nones. ``cpus``: an int, or a
     callable live budget (a contig lane's growing lease): the pool's process
     count follows its value at the start, the workers' shared thread total its
@@ -194,8 +236,8 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
     """
     budget, cpus = cpus, parallel.budget_value(cpus)
     output = BlockResults(list(originals))
-    diagnostics, memos, tasks = [None]*len(originals), [None]*len(originals), []
-    chunks = _BlockChunks(checkpoint_io)
+    diagnostics, memos, tasks, skipped = [None]*len(originals), [None]*len(originals), [], []
+    chunks = _BlockChunks(checkpoints)
     for index, block, diagnostic, memo in chunks.load():
         output.blocks[index], diagnostics[index], memos[index] = block, diagnostic, memo
     for index, original in enumerate(originals):
@@ -209,10 +251,9 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
         incumbent = (getattr(proposal_sets[-2][index], 'path_fit', None)
                      if len(proposal_sets) >= 2 else None)
         if mode is None or not keep.any() or not observed[:, columns[keep]].any():
-            fallback = copy.copy(original)
-            fallback.reads_count_matrix = fallback.probs_array = None
-            output.blocks[index] = fallback
-            diagnostics[index] = dict(skipped='no_latent_fit_or_observed_kept_sites')
+            output.blocks[index] = fallback(original)
+            diagnostics[index] = dict(skipped=SKIPPED)
+            skipped.append(index)
             continue
         proposals = []
         for blocks in proposal_sets:
@@ -237,8 +278,14 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
         tasks.append((index, columns[keep], positions, latent, proposals, incumbent, config,
                       asdict(search_config), model, founders,
                       None if memo_states is None else memo_states[index], keep_memo))
-    if not tasks:
+
+    def complete():
+        checkpoints.save('selected', dict(chunks=chunks.written, skipped=tuple(skipped),
+                                          blocks=len(originals)))
         return output, diagnostics, memos
+
+    if not tasks:
+        return complete()
 
     def completed(index, result):
         block, diagnostic = materialize(originals[index], result), result['diagnostic']
@@ -253,7 +300,7 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
                 hits[name] = hits.get(name, 0) + value
         print(f'[Path selection] backstop hits {backstop_summary(diagnostics)}; '
               f'likelihood memo hits {hits}', flush=True)
-        return output, diagnostics, memos
+        return complete()
 
     from ..core import batch_queue
     if batch_queue.configured():

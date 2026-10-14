@@ -357,34 +357,27 @@ def _summary(panel, elapsed):
 def _refit_contig(contig, state, phase, common):
     """Chromosome-worker handler: load, refit and checkpoint one chromosome."""
     from haplotype_reconstruction.pedigree import components as pedigree_components
-    from haplotype_reconstruction.pedigree import pipeline as pedigree_pipeline
 
     started = time.perf_counter()
-    store = core_runtime.CheckpointStore(
-        common["checkpoint_root"], nthreads=core_chromosome_parallel.current_threads())
-    if store.contig_done(ALLELE_REFIT_STAGE, contig):
-        panel = store.load_contig(ALLELE_REFIT_STAGE, contig)
+    file = core_runtime.CheckpointStore(common["checkpoint_root"]).contig(contig)
+    if file.has(ALLELE_REFIT_STAGE):
+        panel = file.get(ALLELE_REFIT_STAGE, nthreads=core_chromosome_parallel.current_threads())
         if panel.schema != SCHEMA or tuple(panel.sample_ids) != common["names"]:
             raise ValueError(f"{contig}: allele refit checkpoint differs from this run")
     else:
-        painting = store.load_contig(common["painting_stage"], contig)
+        painting = file.get(common["painting"], nthreads=core_chromosome_parallel.current_threads())
         if tuple(painting.sample_ids) != common["names"]:
             raise ValueError(f"{contig}: painting sample order differs from this run")
-        gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
-            store, contig, raw_gl_stage=common["raw_gl_stage"],
-            raw_sites_stage=common["raw_sites_stage"], raw_gl_key=common["raw_gl_key"],
-            raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
-        flags = pedigree_pipeline._founder_evidence_flags(
-            store, contig, sites_payload, raw_sites_stage=common["raw_sites_stage"])
-        digests = core_raw_evidence.recorded_digests(sites_payload)
-        del gl_payload, sites_payload
+        gl, pos, observed = core_products.load_evidence(
+            file, nthreads=core_chromosome_parallel.current_threads())
+        flags, digests = core_products.evidence_checks(file)
         excluded = pedigree_components._validate_release_array_identity(
             painting, np.asarray(gl), np.asarray(pos), np.asarray(observed), flags, digests)
         panel = refit_painting_alleles(painting, gl, pos, observed, contig=contig,
                                        config=common["config"], founder_evidence_excluded=excluded)
         del painting, gl, pos, observed
         gc.collect()
-        store.save_contig(ALLELE_REFIT_STAGE, contig, panel)
+        file.put(ALLELE_REFIT_STAGE, panel, nthreads=core_chromosome_parallel.current_threads())
     summary = _summary(panel, time.perf_counter() - started)
     excluded_ids = panel.identity.get("founder_evidence_excluded", ())
     print(f"[allele refit {contig}] {summary['changed_alleles']} of {summary['called_alleles']} "
@@ -397,29 +390,19 @@ def _refit_contig(contig, state, phase, common):
     return None, summary
 
 
-def _refit_resources(store, contigs, workers, painting_stage, raw_gl_stage, raw_sites_stage):
+def _refit_resources(store, contigs, workers, painting):
     """Decoded evidence (read in place) plus the painting, pair arrays and 2 GiB/process."""
-    sources = {contig: ((core_raw_evidence.STAGE,) if store.contig_done(core_raw_evidence.STAGE, contig)
-                        else tuple(dict.fromkeys((raw_gl_stage, raw_sites_stage))))
-               for contig in contigs}
-
-    def path(stage, contig):
-        return core_checkpoints.contig_path(store.root, stage, contig)
-
-    sizes = core_checkpoints.read_size_bytes_many(
-        path(stage, contig) for contig in contigs for stage in (*sources[contig], painting_stage))
     estimates = []
     for contig in contigs:
-        evidence = sum(sizes[path(stage, contig)] for stage in sources[contig])
-        painting = sizes[path(painting_stage, contig)]
-        estimates.append(evidence * 5 // 4 + 2 * painting + (2 << 30))
+        file = store.contig(contig)
+        evidence = file.info(core_products.EVIDENCE).decoded_bytes
+        estimates.append(evidence * 5 // 4 + 2 * file.info(painting).decoded_bytes + (2 << 30))
     return estimates, core_chromosome_parallel.memory_worker_limit(
         estimates, workers, core_runtime.available_memory_bytes(), label="ALLELE REFIT")
 
 
 @timed_stage(ALLELE_REFIT_STAGE)
-def run_allele_refit(checkpoint_store, contigs, sample_ids, *, output_dir, raw_gl_stage,
-                     raw_sites_stage, raw_gl_key="global_probs", n_workers=None, config=None):
+def run_allele_refit(store, contigs, sample_ids, *, output_dir, n_workers=None, config=None):
     """Checkpoint one refit panel per chromosome; family phase consumes them."""
     from haplotype_reconstruction.workflows.reconstruction import PAINTING_STAGE
 
@@ -429,41 +412,30 @@ def run_allele_refit(checkpoint_store, contigs, sample_ids, *, output_dir, raw_g
         raise ValueError("allele refit CPU budget exceeds allocation")
     names = tuple(map(str, sample_ids))
     contigs = tuple(map(str, contigs))
-    source_files = []
-    for source in dict.fromkeys((PAINTING_STAGE, raw_gl_stage, raw_sites_stage)):
-        core_runtime.require_contig_checkpoints(checkpoint_store, source, contigs)
-        for contig in contigs:
-            path = Path(core_checkpoints.contig_path(checkpoint_store.root, source, contig)).resolve()
-            stat = path.stat()
-            source_files.append({"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
     identity = {"schema": SCHEMA, "config": asdict(config), "code": refit_code_identity(),
-                "sample_ids": names, "contigs": contigs, "source_files": source_files,
-                "raw_gl_key": raw_gl_key}
-    checkpoint_store.bind_stage_identity(ALLELE_REFIT_STAGE, identity)
-    weights, process_limit = _refit_resources(
-        checkpoint_store, contigs, workers, PAINTING_STAGE, raw_gl_stage, raw_sites_stage)
-    common = dict(checkpoint_root=checkpoint_store.root, names=names, config=config,
-                  painting_stage=PAINTING_STAGE, raw_gl_stage=raw_gl_stage,
-                  raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key)
+                "sample_ids": names, "contigs": contigs,
+                "source_records": core_products.record_identities(
+                    store, (PAINTING_STAGE, core_products.EVIDENCE), contigs)}
+    store.bind_identity(store.run, ALLELE_REFIT_STAGE, identity)
+    weights, process_limit = _refit_resources(store, contigs, workers, PAINTING_STAGE)
+    common = dict(checkpoint_root=store.root, names=names, config=config, painting=PAINTING_STAGE)
     with core_chromosome_parallel.ChromosomeExecutor(
             contigs, _refit_contig, n_workers=workers, weights=weights,
             max_workers=process_limit, label="ALLELE REFIT") as executor:
         summaries = executor.run("refit", common)
-    core_runtime.require_contig_checkpoints(checkpoint_store, ALLELE_REFIT_STAGE, contigs)
+    core_runtime.require_records(store, ALLELE_REFIT_STAGE, contigs)
     output = Path(output_dir) / ALLELE_REFIT_STAGE
     output.mkdir(parents=True, exist_ok=True)
     temporary = output / ".summary.csv.tmp"
     pd.DataFrame(summaries).to_csv(temporary, index=False)
     temporary.replace(output / "summary.csv")
-    if not checkpoint_store.stage_complete(ALLELE_REFIT_STAGE):
-        checkpoint_store.mark_stage_complete(ALLELE_REFIT_STAGE)
+    store.mark_stage_complete(ALLELE_REFIT_STAGE)
     return summaries
 
 
-import haplotype_reconstruction.core.checkpoints as core_checkpoints
 import haplotype_reconstruction.core.chromosome_parallel as core_chromosome_parallel
 import haplotype_reconstruction.core.parallel as core_parallel
-import haplotype_reconstruction.core.raw_evidence as core_raw_evidence
+import haplotype_reconstruction.core.products as core_products
 import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.core.sample_quality as core_sample_quality
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints

@@ -1,15 +1,12 @@
-"""Run logging, stage checkpoint stores and lightweight workflow utilities."""
+"""Run logging, the checkpoint store and lightweight workflow utilities."""
 from __future__ import annotations
 
 
-import copy
 from contextlib import contextmanager
 from functools import wraps
 import sys
 
-import json
 import os
-import tempfile
 from pathlib import Path
 
 from datetime import datetime
@@ -167,248 +164,159 @@ def logged_workflow(label):
     return decorate
 
 
-class CheckpointStore:
-    """Facade for atomic pipeline checkpoints with optional stage binding.
+CONTIG_DIRECTORY = "contigs"
 
-    Writes are atomic, and filesystem ``OSError`` exceptions are reported then
-    re-raised so a stage cannot be marked complete after losing a checkpoint.
-    ``clevel`` is the ZSTD level of its writes (see work_store).
+
+WORK_DIRECTORY = "work"
+
+
+RUN_FILE = "run.ckpt"
+
+
+CONTIG_SUFFIX = ".ckpt"
+
+
+def _path_token(value, name):
+    result = str(value)
+    if (not result or result in {".", ".."} or os.sep in result
+            or (os.altsep is not None and os.altsep in result)):
+        raise ValueError(f"{name} must be a nonempty path-component token")
+    return result
+
+
+class CheckpointStore:
+    """A run's checkpoint directory.
+
+    At rest it holds ``run.ckpt`` (genome-wide records), one append-only
+    ``contigs/<contig>.ckpt`` per chromosome, and ``work/`` only while
+    transient resume-only state is live (core.checkpoints describes the
+    container format and its concurrency rules). Cheap and picklable.
     """
 
-    def __init__(self, root, *, nthreads=1, global_log_indent="  ",
-                 clevel=None):
+    def __init__(self, root, *, nthreads=1, clevel=None):
         self.root = os.fspath(root)
         self.nthreads = max(1, int(nthreads))
-        self.global_log_indent = global_log_indent
         self.clevel = core_checkpoints.CLEVEL if clevel is None else int(clevel)
         os.makedirs(self.root, exist_ok=True)
-
-    def work_store(self):
-        """This store writing resume-only work checkpoints (core.checkpoints.WORK_CLEVEL)."""
-        return CheckpointStore(self.root, nthreads=self.nthreads,
-                               global_log_indent=self.global_log_indent,
-                               clevel=core_checkpoints.WORK_CLEVEL)
-
-    def stage_dir(self, stage):
-        path = os.path.join(self.root, stage)
-        os.makedirs(path, exist_ok=True)
-        return path
-
-    def bind_stage_identity(self, stage, identity):
-        """Bind a stage directory to one exact model/configuration record.
-
-        Existing outputs without an identity are rejected rather than being
-        retroactively treated as current. Concurrent first binders publish a
-        fully written sidecar with an atomic hard-link claim.
-        """
-
-        stage_path = os.path.join(self.root, stage)
-        identity_path = os.path.join(stage_path, "_identity.json")
-        expected_text = json.dumps(
-            copy.deepcopy(identity),
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-
-        def verify_existing():
-            try:
-                with open(identity_path, "r", encoding="utf-8") as handle:
-                    observed = json.load(handle)
-            except (OSError, ValueError) as error:
+        for entry in os.scandir(self.root):
+            if entry.is_dir() and entry.name not in (CONTIG_DIRECTORY, WORK_DIRECTORY):
                 raise RuntimeError(
-                    f"{stage}: checkpoint identity is unreadable"
-                ) from error
-            observed_text = json.dumps(
-                observed,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            if observed_text != expected_text:
-                raise RuntimeError(
-                    f"{stage}: checkpoint identity does not match the "
-                    "current model/configuration"
-                )
+                    f"{self.root} holds '{entry.name}/', which is not part of this "
+                    "release's checkpoint layout (run.ckpt, contigs/, work/): use a "
+                    "new output root, or the release that wrote these checkpoints")
 
-        if os.path.exists(identity_path):
-            verify_existing()
-            return
+    @property
+    def run(self):
+        """The genome-wide container, run.ckpt."""
+        return core_checkpoints.CheckpointFile(
+            os.path.join(self.root, RUN_FILE), kind="run",
+            nthreads=self.nthreads, clevel=self.clevel)
 
-        os.makedirs(stage_path, exist_ok=True)
-        existing = [
-            name for name in os.listdir(stage_path)
-            if name != "_identity.json"
-            and not (
-                name.startswith("_identity.")
-                and name.endswith(".tmp")
-            )
-        ]
-        if existing:
-            if os.path.exists(identity_path):
-                verify_existing()
-                return
-            raise RuntimeError(
-                f"{stage}: existing checkpoints lack the required "
-                "model/configuration identity"
-            )
+    def contig(self, name):
+        """The container of one chromosome (created by its first put)."""
+        name = _path_token(name, "contig")
+        return core_checkpoints.CheckpointFile(
+            os.path.join(self.root, CONTIG_DIRECTORY, name + CONTIG_SUFFIX),
+            kind="contig", name=name, nthreads=self.nthreads, clevel=self.clevel)
 
-        descriptor, temporary_path = tempfile.mkstemp(
-            prefix="_identity.", suffix=".tmp", dir=stage_path
-        )
+    def contig_names(self):
+        """Chromosomes that have a container, sorted by name."""
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(expected_text)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            try:
-                os.link(temporary_path, identity_path)
-            except FileExistsError:
-                pass
-        finally:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
-        verify_existing()
+            names = os.listdir(os.path.join(self.root, CONTIG_DIRECTORY))
+        except FileNotFoundError:
+            return ()
+        return tuple(sorted(name[:-len(CONTIG_SUFFIX)] for name in names
+                            if name.endswith(CONTIG_SUFFIX) and not name.startswith(".")))
+
+    def bind_identity(self, file, section, identity):
+        """Bind a section of a container to one exact model/configuration record.
+
+        The first binder records ``identity/<section>``; later runs must match
+        it exactly (canonical JSON), else a clear error names the section.
+        """
+        try:
+            file.put_once(f"identity/{section}", identity)
+        except core_checkpoints.CheckpointMismatch:
+            raise RuntimeError(
+                f"{file.label}: checkpoint identity '{section}' does not match the "
+                "current model/configuration; use a new output root") from None
+
+    def bind_manifest(self, key, payload):
+        """Publish one JSON-compatible run manifest exactly once (manifest/<key>)."""
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError("a run manifest must be a nonempty dictionary")
+        try:
+            self.run.put_once(f"manifest/{key}", payload)
+        except core_checkpoints.CheckpointMismatch:
+            raise RuntimeError(
+                f"manifest '{key}' does not match the current run; use a new "
+                "output root") from None
 
     def stage_complete(self, stage):
-        return os.path.exists(
-            os.path.join(self.stage_dir(stage), core_checkpoints.DONE_MARKER)
-        )
+        return self.run.has(f"complete/{stage}")
 
     def mark_stage_complete(self, stage):
-        marker = os.path.join(self.stage_dir(stage), core_checkpoints.DONE_MARKER)
-        with open(marker, "w") as handle:
-            handle.write(datetime.now().isoformat())
-        print(f"  [Checkpoint] Stage '{stage}' marked complete")
+        if not self.stage_complete(stage):
+            self.run.put_once(f"complete/{stage}", True)
+            print(f"  [Checkpoint] Stage '{stage}' marked complete")
 
-    def contig_done(self, stage, contig):
-        return os.path.exists(core_checkpoints.contig_path(self.root, stage, contig))
+    def work(self, contig, name):
+        """Transient resume-only state of one contig step (see WorkState)."""
+        return WorkState(self.root, contig, name, nthreads=self.nthreads)
 
-    def global_done(self, stage):
-        return os.path.exists(core_checkpoints.global_path(self.root, stage))
 
-    def save_contig(self, stage, contig, payload):
+class WorkState:
+    """Resume-only state of one contig step: ``work/<contig>/<name>.p5.b2``.
+
+    Saved by atomic, durable replacement; cleared (with any directories it
+    leaves empty) once its step's product is recorded, so a completed run has
+    no ``work/`` directory.
+    """
+
+    def __init__(self, root, contig, name, *, nthreads=1):
+        self.root = os.fspath(root)
+        self.contig = _path_token(contig, "contig")
+        self.name = _path_token(name, "work state name")
+        self.nthreads = max(1, int(nthreads))
+
+    @property
+    def path(self):
+        return os.path.join(self.root, WORK_DIRECTORY, self.contig,
+                            self.name + core_checkpoints.PAYLOAD_SUFFIX)
+
+    def exists(self):
+        return os.path.exists(self.path)
+
+    def save(self, payload):
+        """Replace the state atomically; return its size in bytes."""
+        return core_checkpoints.write(self.path, payload, nthreads=self.nthreads,
+                                      clevel=core_checkpoints.FAST_CLEVEL)
+
+    def load(self):
+        """The saved state, or None when there is none."""
         try:
-            written = core_checkpoints.write(
-                core_checkpoints.contig_path(self.root, stage, contig),
-                payload,
-                nthreads=self.nthreads,
-                clevel=self.clevel,
-            )
-            size_mb = written / (1024 * 1024)
-            print(f"    [Checkpoint] {stage}/{contig} ({size_mb:.1f} MB)")
-        except OSError as error:
-            print(f"    [Checkpoint] WARNING: {stage}/{contig}: {error}")
-            raise
+            return core_checkpoints.read(self.path, nthreads=self.nthreads)
+        except FileNotFoundError:
+            return None
 
-    def load_contig(self, stage, contig, *, nthreads=None):
-        read_threads = (
-            self.nthreads if nthreads is None else max(1, int(nthreads))
-        )
-        return core_checkpoints.read(
-            core_checkpoints.contig_path(self.root, stage, contig),
-            nthreads=read_threads,
-        )
-
-    def save_global(self, stage, payload):
+    def clear(self):
         try:
-            written = core_checkpoints.write(
-                core_checkpoints.global_path(self.root, stage),
-                payload,
-                nthreads=self.nthreads,
-                clevel=self.clevel,
-            )
-            size_mb = written / (1024 * 1024)
-            print(
-                f"{self.global_log_indent}[Checkpoint] "
-                f"{stage}/_global ({size_mb:.1f} MB)"
-            )
-        except OSError as error:
-            print(
-                f"{self.global_log_indent}[Checkpoint] WARNING: "
-                f"{stage}/_global: {error}"
-            )
-            raise
-
-    def load_global(self, stage):
-        return core_checkpoints.read(
-            core_checkpoints.global_path(self.root, stage),
-            nthreads=self.nthreads,
-        )
-
-
-    def bind_global_manifest(self, stage, payload):
-        """Publish one JSON-compatible global manifest exactly once.
-
-        Concurrent chromosome shards write fully formed unique candidates and
-        use an atomic hard-link claim for the shared target. Every contender
-        then verifies that the published manifest is scientifically identical.
-        """
-
-        if not isinstance(payload, dict) or not payload:
-            raise ValueError("global manifest must be a nonempty dictionary")
-
-        def canonical(value):
-            return json.dumps(
-                copy.deepcopy(value),
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-
-        expected = canonical(payload)
-        target = core_checkpoints.global_path(self.root, stage)
-
-        def verify_existing():
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+        directory = os.path.dirname(self.path)
+        for path in (directory, os.path.dirname(directory)):
             try:
-                observed = self.load_global(stage)
-                observed_text = canonical(observed)
-            except (OSError, TypeError, ValueError) as error:
-                raise RuntimeError(
-                    f"{stage}: global manifest is unreadable"
-                ) from error
-            if observed_text != expected:
-                raise RuntimeError(
-                    f"{stage}: global manifest does not match the current run"
-                )
-
-        if os.path.exists(target):
-            verify_existing()
-            return
-
-        stage_path = self.stage_dir(stage)
-        descriptor, candidate = tempfile.mkstemp(
-            prefix="_global.", suffix=".candidate", dir=stage_path
-        )
-        os.close(descriptor)
-        os.unlink(candidate)
-        try:
-            core_checkpoints.write(candidate, payload, nthreads=self.nthreads,
-                                   clevel=self.clevel)
-            try:
-                os.link(candidate, target)
-            except FileExistsError:
-                pass
-        finally:
-            for temporary in (candidate, candidate + ".tmp"):
-                try:
-                    os.unlink(temporary)
-                except FileNotFoundError:
-                    pass
-        verify_existing()
+                os.rmdir(path)
+            except OSError:
+                return
 
 
-def require_contig_checkpoints(store, stage, contigs):
-    """Require every expected per-contig payload before marking a stage done."""
-    missing = [str(contig) for contig in contigs
-               if not store.contig_done(stage, contig)]
+def require_records(store, key, contigs):
+    """Require ``key`` in every listed contig's container (e.g. before completion)."""
+    missing = [str(contig) for contig in contigs if not store.contig(contig).has(key)]
     if missing:
-        raise OSError(
-            f"Failed to checkpoint {stage}: " + ", ".join(missing)
-        )
+        raise OSError(f"Failed to checkpoint {key}: " + ", ".join(missing))
 
 
 def strip_block_evidence(blocks):

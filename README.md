@@ -131,7 +131,11 @@ and [genetic-map guide](docs/genetic_maps.md) before choosing a comparison model
 ## Outputs and reproducibility
 
 Rerun the same command to resume compatible checkpoints. A run directory
-contains logs, readable tables and atomic chromosome/stage checkpoints.
+contains logs, readable tables and its checkpoints: one file per chromosome,
+growing as its stages complete and holding every intermediate stage, plus one
+genome-wide file. An interruption loses only the work in progress, and
+`haplotypes status --output RUN` shows how far each chromosome has got
+([checkpoints and outputs](docs/running.md#checkpoints-and-outputs)).
 For short allocations, `--serial-contigs` and `--max-contigs N` finish whole
 chromosomes one at a time ([running in short allocations](docs/running.md#running-in-short-allocations)).
 Use a new output root when changing upstream inputs or scientific settings;

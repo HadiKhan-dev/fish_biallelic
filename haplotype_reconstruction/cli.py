@@ -40,7 +40,7 @@ def build_parser():
             help='TOML configuration; paths are relative to the current directory.'
         )
         command.add_argument('--output', help='Run directory containing outputs, logs and checkpoints.')
-        command.add_argument('--checkpoints', help='Checkpoint directory; default OUTPUT/checkpoints.')
+        command.add_argument('--checkpoints', help='Checkpoint directory (run.ckpt plus one contigs/<contig>.ckpt per chromosome); default OUTPUT/checkpoints.')
         command.add_argument(
             '--cores',
             type=int,
@@ -133,14 +133,14 @@ def build_parser():
     evaluate.add_argument('--output', required=True, help='Report directory; defaults to reading checkpoints from OUTPUT/checkpoints.')
     evaluate.add_argument('--cores', type=int, default=None,
                           help='Total evaluation process/thread ceiling; default current CPU affinity.')
-    evaluate.add_argument('--checkpoints', help='Checkpoint root; default OUTPUT/checkpoints.')
+    evaluate.add_argument('--checkpoints', help='Checkpoint directory (run.ckpt plus one contigs/<contig>.ckpt per chromosome); default OUTPUT/checkpoints.')
     evaluate.add_argument('--contigs', nargs='+')
     evaluate.add_argument('--stages', nargs='+', default=['available'],
                           help='available (latest products), all, or named stages, including founder_refinement, painting, allele_refit, pedigree, family_phase and recombination.')
     export = commands.add_parser('export', help='Export released founder tracks and sample phase.')
     export.add_argument('--output', required=True, help='Existing run directory.')
     export.add_argument('--destination', required=True, help='New/empty export directory.')
-    export.add_argument('--checkpoints')
+    export.add_argument('--checkpoints', help='Checkpoint directory (run.ckpt plus one contigs/<contig>.ckpt per chromosome); default OUTPUT/checkpoints.')
     export.add_argument('--contigs', nargs='+')
     export.add_argument('--products', nargs='+', choices=('founders', 'samples'), default=['founders', 'samples'])
     export.add_argument('--format', choices=('bcf', 'vcf'), default='bcf')
@@ -163,8 +163,22 @@ def build_parser():
                         help='Total process/thread ceiling; default current CPU affinity.')
     helper.add_argument('--idle-seconds', type=int, default=120,
                         help='Exit after this many seconds without work; default 120.')
-    status = commands.add_parser('status', help='Read lightweight run records without loading checkpoints.')
-    status.add_argument('--output', required=True)
+    status = commands.add_parser(
+        'status', help='Show per-chromosome checkpoint progress and run records without decoding '
+                       'checkpoint payloads.',
+        description='Show each invocation\'s run record, then checkpoint progress read from record '
+                    'keys and metadata: genome-wide stages complete and pending; per contig its file '
+                    'size, last write, discovery block tasks recorded/planned, feedback rounds '
+                    '(64-block chunks until done), final assembly levels (Lk joins done/planned, '
+                    'then refine components done/total), painting, downstream products and live '
+                    'work states. Exits 1 if anything cannot be read.')
+    status.add_argument('--output', required=True, help='Run directory.')
+    status.add_argument('--checkpoints', help='Checkpoint directory (run.ckpt plus one '
+                        'contigs/<contig>.ckpt per chromosome); default OUTPUT/checkpoints.')
+    status.add_argument('--contigs', nargs='+',
+                        help='Only these contigs, in this order; default the configured contigs, '
+                             'then any others with checkpoints.')
+    status.add_argument('--json', action='store_true', help='Print the report as one JSON document.')
     return parser
 
 
@@ -312,9 +326,10 @@ def main(argv=None):
                              sites=args.sites, length_bp=args.length_bp))
         return 0
     if args.command == 'status':
-        from .core.run_record import run_status
-        print(json.dumps(run_status(args.output), indent=2))
-        return 0
+        from .core.run_record import format_status, run_status
+        report = run_status(args.output, checkpoints=args.checkpoints, contigs=args.contigs)
+        print(json.dumps(report, indent=2) if args.json else format_status(report))
+        return 1 if report['errors'] else 0
     if args.command == 'export':
         if args.cores is not None:
             os.environ['NUMBA_NUM_THREADS'] = str(args.cores)

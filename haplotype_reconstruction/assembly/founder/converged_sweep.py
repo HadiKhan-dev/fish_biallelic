@@ -341,7 +341,7 @@ class ProposalCache:
 class SweepEngine:
     """Immutable per-component inputs shared by every converged fit of the component."""
 
-    def __init__(self, workspace, context, config, checkpoints=None, prefix="converged_sweep"):
+    def __init__(self, workspace, context, config, checkpoints=None, name="converged_sweep"):
         self.workspace = workspace
         self.models = workspace.models()
         self.block_emissions = [model["bin_emissions"] for model in self.models]
@@ -363,8 +363,9 @@ class SweepEngine:
                       if config.coarse_move_guard != "none" and self.coarse is not None else None)
         self.forward = Orientation(workspace, False)
         self._reversed = Orientation(workspace, True)
+        # The component's sweep-state records (load/save by fit label), or None.
         self.checkpoints = checkpoints
-        self.prefix = prefix
+        self.name = name
         self.templates = window_templates(self.blocks, None if self.coarse is None else self.coarse[0])
         # Block range [a, c) of every template and the message boundaries a proposal cache
         # holds (fwd at window starts, bwd at window ends).
@@ -375,11 +376,11 @@ class SweepEngine:
         self._fit_scores = {}
 
     def _load(self, label):
-        return None if self.checkpoints is None else self.checkpoints.load(f"{self.prefix}.{label}")
+        return None if self.checkpoints is None else self.checkpoints.load(label)
 
     def _save(self, label, payload):
         if self.checkpoints is not None:
-            self.checkpoints.save(f"{self.prefix}.{label}", payload)
+            self.checkpoints.save(label, payload)
 
     def per_sample(self, panel, threads):
         """Per-sample canonical scores of panel, scored over consecutive sample ranges at the
@@ -831,7 +832,7 @@ class SweepEngine:
             deviation = F_new - (F + accounted)
             if abs(deviation) > 1e-6 * max(1.0, abs(F_new)):
                 raise RuntimeError(
-                    f"converged sweep {self.prefix}.{label}:{sweep}: canonical F changed by "
+                    f"converged sweep {self.name}.{label}:{sweep}: canonical F changed by "
                     f"{F_new - F}, accepted local gains {accounted}")
             junctions = _weak_junctions(gains, pairs, reverse, blocks)
             history.append(dict(sweep=sweep, reverse=bool(reverse), F=float(F_new),
@@ -848,7 +849,7 @@ class SweepEngine:
             if accepted == 0:
                 converged = True
         if not converged:
-            warnings.warn(f"converged founder sweep {self.prefix}.{label} reached its "
+            warnings.warn(f"converged founder sweep {self.name}.{label} reached its "
                           f"{backstop}-sweep backstop without converging", RuntimeWarning)
         if len(history) > resumed:
             self._fit_scores[label] = scores
@@ -1381,7 +1382,7 @@ def count_pass(engine, start, cost, threads, seed_key, additions=True):
         replaced.update(_restored_comparisons(engine, geometry, threads, X, scores, best_at,
                                               decisions, cost, config, seed_key))
     if backstop["reached"]:
-        warnings.warn(f"converged founder count pass {engine.prefix} reached its count backstop "
+        warnings.warn(f"converged founder count pass {engine.name} reached its count backstop "
                       f"K = {backstop['upper']}", RuntimeWarning)
     return X, dict(founders_before=int(incoming), founders_after=int(len(X)),
                    F=float(scores.sum()), cost=float(cost), fits=fits, decisions=decisions,
@@ -1419,29 +1420,38 @@ def _reconstruct(selected, score, batch, original):
     return result
 
 
+def level_diagnostics(components, additions):
+    """One level's refinement diagnostics from its components' records."""
+    return dict(
+        enabled=True, model="full_site_potts_converged_sweep_v1",
+        switch_penalty=founder_scoring.SWITCH_PENALTY,
+        candidate_rows="original_prepared_inference_panels",
+        search_approximation="certified_local_optimum_fine8_coarse4_exchanges",
+        acceptance="exact_local_full_site_gain_gauss_seidel",
+        count_criterion=count_criterion.CRITERION, count_additions=bool(additions),
+        components=list(components))
+
+
 def refine_components(prepared_blocks, components, neutral_probs, global_sites, *, config,
                       num_threads=1, checkpoints=None, l1_blocks=None, cc_scale=0.5,
                       additions=True):
     """Converged refinement and count decisions for each component (one level).
 
     additions: True at the final count step (deletion and addition rounds), False at
-    earlier levels (deletion rounds only).
+    earlier levels (deletion rounds only). checkpoints: the converged-sweep records
+    (load/save by fit label) of a single component, whose fits then resume.
     """
     from .. import founder_refinement as refiner, chimera_scoring
     from ...core import haplotypes
     from .workspace import component_workspace
+    if checkpoints is not None and len(components) != 1:
+        raise ValueError("converged-sweep records belong to a single component")
     prepared = list(prepared_blocks)
     starts = {int(block.positions[0]): index for index, block in enumerate(prepared)}
     ends = {int(block.positions[-1]): index + 1 for index, block in enumerate(prepared)}
     results, diagnostics = [], []
     workspaces = {}
     for number, component in enumerate(components):
-        token = f"converged_sweep.component{number}"
-        cached = refiner._load(checkpoints, f"{token}.result")
-        if cached is not None:
-            results.append(cached["block"])
-            diagnostics.append(cached["diagnostic"])
-            continue
         started = time.perf_counter()
         batch = prepared[starts[int(component.positions[0])]:ends[int(component.positions[-1])]]
         positions = np.concatenate([block.positions for block in batch])
@@ -1461,7 +1471,7 @@ def refine_components(prepared_blocks, components, neutral_probs, global_sites, 
                                             config.proposal_max_bins, num_threads,
                                             minimum_bin_size=config.proposal_min_sites_per_bin)
             context = refiner._macro_context(batch, l1_blocks)
-            engine = SweepEngine(workspace, context, config, checkpoints, token)
+            engine = SweepEngine(workspace, context, config, checkpoints, f"component{number}")
         cost = float(chimera_scoring.compute_cc(batch, len(neutral_probs), cc_scale))
         # Deterministic bootstrap streams per component and decision (positions, size).
         seed_key = [int(positions[0]), int(positions[-1]), int(len(batch)), int(len(selected))]
@@ -1491,17 +1501,9 @@ def refine_components(prepared_blocks, components, neutral_probs, global_sites, 
             ambiguous_count=count["ambiguous"],
             final_fit=count["final_fit"], best_f_replacement=count["best_f_replacement"],
             elapsed_seconds=time.perf_counter() - started)
-        refiner._save(checkpoints, f"{token}.result", dict(block=result, diagnostic=diagnostic))
         results.append(result)
         diagnostics.append(diagnostic)
-    return haplotypes.BlockResults(results), dict(
-        enabled=True, model="full_site_potts_converged_sweep_v1",
-        switch_penalty=founder_scoring.SWITCH_PENALTY,
-        candidate_rows="original_prepared_inference_panels",
-        search_approximation="certified_local_optimum_fine8_coarse4_exchanges",
-        acceptance="exact_local_full_site_gain_gauss_seidel",
-        count_criterion=count_criterion.CRITERION, count_additions=bool(additions),
-        components=diagnostics)
+    return haplotypes.BlockResults(results), level_diagnostics(diagnostics, additions)
 
 
 def convergence_summary(diagnostics):

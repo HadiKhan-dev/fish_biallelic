@@ -22,13 +22,13 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 
-from ..core import runtime
+from ..core import products, runtime
 from ..core import chromosome_parallel as scheduling
 from . import cache, eligibility, exclusion_patterns, release
 
 
 MODEL = "full-marker-mendelian-directed-v1"
-STAGE = "pedigree_exclusion"
+SECTION = "pedigree/exclusion"
 BET_SIZES = np.asarray([1/1024, 1/256, 1/64, 1/16, 1/4, 1.0])
 WINDOW_WIDTHS = (1_000_000, 5_000_000, 20_000_000)
 # Reassess the shared thread budget between independent candidate batches.
@@ -79,13 +79,10 @@ def score_dyads(gl, observed, rows, spans, delta):
 
 
 def _score_chromosome(contig, state, phase, common):
-    from .pipeline import _load_raw_evidence
-
     started = time.perf_counter()
-    store = runtime.CheckpointStore(common['root'], nthreads=scheduling.current_threads())
+    file = runtime.CheckpointStore(common['root']).contig(contig)
     rows, delta = common['rows'], common['delta']
-    gl, positions, observed, gl_payload, sites_payload = _load_raw_evidence(
-        store, contig, **common['source'])
+    gl, positions, observed = products.load_evidence(file, nthreads=scheduling.current_threads())
     if gl.shape != (common['samples'], len(positions), 3) or observed.shape != gl.shape[:2]:
         raise ValueError(f"{contig}: full-marker evidence axes differ from the pedigree")
     spans = physical_windows(positions)
@@ -109,16 +106,13 @@ def _score_chromosome(contig, state, phase, common):
     summary = dict(contig=contig, markers=len(positions), candidates=len(rows),
                    seconds=time.perf_counter()-started, final_threads=scheduling.current_threads(),
                    pattern_fallback_samples=int(np.count_nonzero(counts < 0)))
-    del gl, positions, observed, gl_payload, sites_payload, codes, catalog, counts
-    store.nthreads = scheduling.current_threads()
-    store.save_contig(common['stage'], contig, dict(values=values, summary=summary))
+    del gl, positions, observed, codes, catalog, counts
+    file.put(common['key'], dict(values=values, summary=summary), nthreads=scheduling.current_threads())
     return None, summary
 
 
 def refine_parent_counts(store, contigs, sample_ids, result, *, parent_eligibility=None,
-                         n_workers=None, raw_gl_stage, raw_sites_stage,
-                         raw_gl_key="global_probs", raw_sites_key="global_sites",
-                         raw_observed_mask_key="global_observed_mask"):
+                         n_workers=None):
     """Checkpoint full-marker evidence and apply the default Tier-B release.
 
     Called after ordinary genotype/painting inference, before publication.
@@ -143,40 +137,34 @@ def refine_parent_counts(store, contigs, sample_ids, result, *, parent_eligibili
     cpus = runtime.available_cpu_count() if n_workers is None else int(n_workers)
     if not 1 <= cpus <= runtime.available_cpu_count():
         raise ValueError("exclusion workers must fit the current CPU affinity")
-    source = dict(raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-                  raw_gl_key=raw_gl_key, raw_sites_key=raw_sites_key,
-                  raw_observed_mask_key=raw_observed_mask_key)
     identity = dict(model=MODEL, sample_ids=list(names), contigs=list(contigs), rows=rows.tolist(),
                     genotype_replacement_probability=settings.mendelian_genotype_replacement_probability,
-                    bets=BET_SIZES.tolist(), window_widths=list(WINDOW_WIDTHS), source=source,
-                    source_files=cache.source_files(store, (raw_gl_stage, raw_sites_stage), contigs),
+                    bets=BET_SIZES.tolist(), window_widths=list(WINDOW_WIDTHS),
+                    source_records=products.record_identities(store, (products.EVIDENCE,), contigs),
                     code={Path(path).name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
                           for path in (__file__, exclusion_patterns.__file__)})
-    stage = cache.versioned(STAGE, identity)
-    store.bind_stage_identity(stage, identity)
-    pending = [c for c in contigs if not store.contig_done(stage, c)]
+    section = cache.versioned(SECTION, identity)
+    store.bind_identity(store.run, section, identity)
+    pending = [c for c in contigs if not store.contig(c).has(section)]
     started = time.perf_counter()
     if pending:
-        from ..core.checkpoints import contig_path
-        weights = [Path(contig_path(store.root, raw_gl_stage, contig)).stat().st_size
-                   for contig in pending]
-        common = dict(root=store.root, stage=stage, samples=len(names), rows=rows, source=source,
+        weights = [store.contig(contig).info(products.EVIDENCE).stored_bytes for contig in pending]
+        common = dict(root=store.root, key=section, samples=len(names), rows=rows,
                       delta=settings.mendelian_genotype_replacement_probability)
         with scheduling.ChromosomeExecutor(pending, _score_chromosome,
                                            n_workers=cpus, weights=weights) as executor:
             print(f"  Full-marker exclusion: {len(rows)} dyads, {len(pending)} chromosomes, "
                   f"{executor.worker_count} workers sharing {executor.cpu_budget} CPUs", flush=True)
             executor.run('exclusion', common)
-    payloads = [store.load_contig(stage, contig) for contig in contigs]
+    payloads = [store.contig(contig).get(section, nthreads=store.nthreads) for contig in contigs]
     log_e = np.logaddexp.reduce(np.stack([p['values'][:, 0] for p in payloads]), axis=0)-np.log(len(contigs))
     observed = np.sum([p['values'][:, 1] for p in payloads], axis=0).astype(np.int64)
-    store.mark_stage_complete(stage)
     result.exclusion_evidence = pd.DataFrame(dict(
         Sample=[names[c] for c, _ in rows], CandidateParent=[names[p] for _, p in rows],
         LogE=log_e, ObservedSites=observed))
     release.apply_full_marker_release(result, rows, log_e, resolved)
     metadata.update(status='evaluated', seconds=time.perf_counter()-started,
                     chromosome_checkpoints_resumed=len(contigs)-len(pending),
-                    checkpoint_stage=stage, chromosomes=[p['summary'] for p in payloads],
+                    checkpoint_key=section, chromosomes=[p['summary'] for p in payloads],
                     released=int(result.exclusion_diagnostics['Released'].sum()))
     return metadata

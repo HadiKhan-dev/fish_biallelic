@@ -15,7 +15,7 @@ from typing import Any, Mapping
 import numpy as np
 import haplotype_reconstruction.assembly.pipeline as assembly_pipeline
 import haplotype_reconstruction.painting.components as painting_components
-from haplotype_reconstruction.core import raw_evidence
+from haplotype_reconstruction.discovery import checkpoints as discovery_checkpoints
 from haplotype_reconstruction.workflows import block_feedback
 
 RECONSTRUCTION_SCHEMA = "assembly-production-v4"
@@ -27,6 +27,11 @@ RECONSTRUCTION_BACKEND = (
 
 
 PAINTING_STAGE = "painting"
+
+
+# Run-level name of the block discovery stage (identity/, manifest/ and
+# complete/ records); its contig records are discovery.checkpoints'.
+DISCOVERY_STAGE = "discovery"
 
 
 PAINTING_CODE_FILES = (
@@ -49,7 +54,6 @@ SUPPORTED_GENOTYPE_EVIDENCE_MODE = "normalized_raw_linear_likelihood_v1"
 RECONSTRUCTION_CODE_FILES = (
     'painting/components.py',
     'core/runtime.py',
-    'core/raw_evidence.py',
     'painting/checkpoints.py',
     'workflows/reconstruction.py',
     'painting/model.py',
@@ -154,6 +158,23 @@ def observed_call_mask_from_read_counts(read_counts) -> np.ndarray:
     return np.ascontiguousarray(np.any(reads > 0, axis=2), dtype=np.bool_)
 
 
+def discovery_record_provenance(discovery_identity) -> dict[str, Any]:
+    """Modes and discovery identity recorded with every prepared contig."""
+
+    return {
+        "observed_call_mask_mode": EXACT_OBSERVED_MASK_MODE,
+        "genotype_evidence_mode": SUPPORTED_GENOTYPE_EVIDENCE_MODE,
+        "discovery_backend": discovery_identity["backend"],
+        "discovery_config": discovery_identity["config"],
+    }
+
+
+def painting_reports(output_dir, contig) -> Path:
+    """A contig's human-readable painting reports: OUTPUT/reports/painting/<contig>/."""
+
+    return Path(output_dir) / "reports" / PAINTING_STAGE / str(contig)
+
+
 def _canonical_mapping(value: Mapping[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(value, Mapping) or not value:
         raise ValueError(f"{name} must be a nonempty mapping")
@@ -239,43 +260,34 @@ def assembly_inputs_from_discovery(
 
 def _validate_discovery_global_source(
     checkpoint_store,
-    source_stage,
     contigs,
     ordered_ids,
     discovery_identity,
     *,
     require_complete,
 ):
-    """Bind cached block discovery arrays to persisted sample and contig order."""
+    """Bind the discovery records to the run's persisted sample and contig order."""
 
-    if require_complete and not checkpoint_store.stage_complete(source_stage):
-        raise RuntimeError(f"{source_stage} is not marked complete")
-    if not checkpoint_store.global_done(source_stage):
-        raise RuntimeError(f"{source_stage} lacks its global checkpoint")
-    payload = checkpoint_store.load_global(source_stage)
-    try:
-        stored_ids = _canonical_sample_ids(payload.get("sample_ids", ()))
-        if stored_ids != ordered_ids:
-            raise RuntimeError(f"{source_stage} cached sample order mismatch")
-        stored_contigs = tuple(
-            str(value) for value in payload.get("contigs", ())
-        )
-        if stored_contigs != contigs:
-            raise RuntimeError(f"{source_stage} cached contig order mismatch")
-        observed_identity = _canonical_mapping({
-            "backend": payload.get("discovery_backend"),
-            "config": payload.get("discovery_config"),
-        }, "global block discovery identity")
-        if observed_identity != _canonical_mapping(
-                discovery_identity, "discovery_identity"):
-            raise RuntimeError(f"{source_stage} global block discovery identity mismatch")
-        if payload.get("genotype_evidence_mode") != (
-                SUPPORTED_GENOTYPE_EVIDENCE_MODE):
-            raise RuntimeError(
-                f"{source_stage} global genotype-evidence provenance mismatch"
-            )
-    finally:
-        del payload
+    if require_complete and not checkpoint_store.stage_complete(DISCOVERY_STAGE):
+        raise RuntimeError("block discovery is not complete")
+    manifest_key = f"manifest/{DISCOVERY_STAGE}"
+    if not checkpoint_store.run.has(manifest_key):
+        raise RuntimeError("block discovery lacks its run manifest")
+    payload = checkpoint_store.run.get(manifest_key)
+    stored_ids = _canonical_sample_ids(payload.get("sample_ids", ()))
+    if stored_ids != ordered_ids:
+        raise RuntimeError("block discovery sample order mismatch")
+    stored_contigs = tuple(str(value) for value in payload.get("contigs", ()))
+    if stored_contigs != contigs:
+        raise RuntimeError("block discovery contig order mismatch")
+    observed_identity = _canonical_mapping({
+        "backend": payload.get("discovery_backend"),
+        "config": payload.get("discovery_config"),
+    }, "global block discovery identity")
+    if observed_identity != _canonical_mapping(discovery_identity, "discovery_identity"):
+        raise RuntimeError("global block discovery identity mismatch")
+    if payload.get("genotype_evidence_mode") != SUPPORTED_GENOTYPE_EVIDENCE_MODE:
+        raise RuntimeError("global genotype-evidence provenance mismatch")
 
 
 def _production_code_identity() -> dict[str, str]:
@@ -421,10 +433,6 @@ def assembly_production_stage_identity(
     discovery_identity,
     sample_ids,
     contigs,
-    source_stage,
-    target_stage,
-    probabilities_stage,
-    probabilities_key,
     genetic_maps=None,
 ) -> dict[str, Any]:
     """Return the shared multi-contig production-stage resume identity."""
@@ -437,12 +445,6 @@ def assembly_production_stage_identity(
         "discovery_identity": _canonical_mapping(discovery_identity, "discovery_identity"),
         "ordered_sample_ids": _canonical_sample_ids(sample_ids),
         "ordered_contigs": tuple(str(value) for value in contigs),
-        "source_stage": str(source_stage),
-        "probabilities_stage": (
-            None if probabilities_stage is None else str(probabilities_stage)
-        ),
-        "probabilities_key": str(probabilities_key),
-        "target_stage": str(target_stage),
         "config": {
             "block_feedback": block_feedback.scientific_identity(config.feedback_config),
             "release_scientific": (
@@ -504,111 +506,83 @@ def _run_or_resume_one_contig(
     *,
     discovery_identity,
     config,
-    source_stage,
-    probabilities_stage,
-    probabilities_key,
-    target_stage,
     painter_factory,
+    reports,
     chromosome_map=None,
 ):
     """Run one contig without retaining large arrays across boundaries."""
 
-    raw_evidence_source = dict(
-        raw_gl_stage=probabilities_stage or source_stage,
-        raw_sites_stage=source_stage,
-        raw_gl_key=probabilities_key if probabilities_stage else "global_probs",
-    )
-    if checkpoint_store.contig_done(target_stage, contig):
-        evidence = raw_evidence.load(checkpoint_store, contig, **raw_evidence_source)
-        if evidence is not None:
-            try:
-                return _resume_painted_contig(
-                    checkpoint_store, contig, ordered_ids, evidence, config=config,
-                    target_stage=target_stage, chromosome_map=chromosome_map)
-            finally:
-                del evidence
-                gc.collect()
-    source = checkpoint_store.load_contig(source_stage, contig)
-    probabilities_payload = None
+    file = checkpoint_store.contig(contig)
+    if file.has(PAINTING_STAGE):
+        return _resume_painted_contig(
+            file, ordered_ids, config=config, chromosome_map=chromosome_map, reports=reports)
+    source = file.get(discovery_checkpoints.PREPARED, items=SOURCE_FIELDS)
     try:
-        if probabilities_stage is not None:
-            if "global_probs" in source:
-                raise ValueError(
-                    f"{contig}: source payload already contains global_probs"
-                )
-            probabilities_payload = checkpoint_store.load_contig(
-                probabilities_stage, contig
-            )
-            if probabilities_key not in probabilities_payload:
-                raise KeyError(
-                    f"{probabilities_stage}/{contig} lacks "
-                    f"{probabilities_key!r}"
-                )
-            probabilities = probabilities_payload[probabilities_key]
-            source = dict(source)
-            source["global_probs"] = probabilities
-            probabilities_payload = None
-            gc.collect()
+        source["block_results"] = discovery_checkpoints.attach_probabilities(
+            discovery_checkpoints.load_blocks(file, probs=False), source)
         return _run_or_resume_loaded_contig(
-            checkpoint_store,
-            contig,
+            file,
             ordered_ids,
             source,
             discovery_identity=discovery_identity,
             config=config,
-            target_stage=target_stage,
             painter_factory=painter_factory,
+            reports=reports,
             chromosome_map=chromosome_map,
-            raw_evidence_source=raw_evidence_source,
         )
     finally:
-        del source, probabilities_payload
+        del source
         gc.collect()
         core_parallel.malloc_trim()
 
 
-def _resume_painted_contig(checkpoint_store, contig, ordered_ids, evidence, *, config,
-                           target_stage, chromosome_map):
-    """Resume a painted contig from its painting and genotype evidence alone.
+# Entries of discovery/prepared that reconstruction validates and uses.
+SOURCE_FIELDS = (
+    "global_probs", "global_sites", "global_observed_mask", "observed_call_mask_mode",
+    "genotype_evidence_mode", "discovery_backend", "discovery_config",
+    "founder_evidence_excluded",
+)
 
-    The contig's genotype evidence is written when its reconstruction starts
-    and records the size and mtime of the discovery checkpoint it came from, so
-    current evidence shows that the painting was built from the present source.
-    The stage identity bound the configuration, code and discovery identity.
-    The painting is therefore validated without reloading the discovery
-    checkpoint or rerunning block feedback to recompute its release identity
-    (which repeats digests of exactly those inputs).
+
+def _resume_painted_contig(file, ordered_ids, *, config, chromosome_map, reports):
+    """Resume a painted contig from its painting and prepared evidence alone.
+
+    The stage identity bound the configuration, code and discovery identity,
+    and the painting is recorded only after its contig's reconstruction from
+    these discovery records. The painting is therefore validated without
+    reloading the discovery blocks or rerunning block feedback to recompute
+    its release identity (which repeats digests of exactly those inputs).
     """
     checkpoint = painting_checkpoints.validate_painting_checkpoint(
-        checkpoint_store.load_contig(target_stage, contig),
+        file.get(PAINTING_STAGE),
         expected_sample_ids=ordered_ids,
         expected_painting_product_identity=assembly_painting_product_identity(
             config, chromosome_map=chromosome_map),
     )
+    evidence = file.get(discovery_checkpoints.PREPARED, items=(
+        "global_sites", "global_observed_mask", "observed_call_mask_mode"))
     mask_mode = evidence["observed_call_mask_mode"]
     if mask_mode != EXACT_OBSERVED_MASK_MODE:
-        raise RuntimeError(f"{contig}: genotype evidence observation-mask provenance mismatch")
+        raise RuntimeError(f"{file.label}: discovery observation-mask provenance mismatch")
     from ..assembly.support import write_founder_support
     write_founder_support(checkpoint, np.asarray(evidence["global_sites"]),
                           np.ascontiguousarray(evidence["global_observed_mask"], dtype=np.bool_),
-                          Path(checkpoint_store.root) / target_stage / "reports" / contig,
-                          feedback=_feedback_count_panels(checkpoint_store, contig, target_stage))
-    return _checkpoint_summary(contig, checkpoint, True, mask_mode)
+                          reports, feedback=_feedback_count_panels(file))
+    return _checkpoint_summary(file.name, checkpoint, True, mask_mode)
 
 
 def _run_or_resume_loaded_contig(
-    checkpoint_store,
-    contig,
+    file,
     ordered_ids,
     source,
     *,
     discovery_identity,
     config,
-    target_stage,
     painter_factory,
+    reports,
     chromosome_map=None,
-    raw_evidence_source=None,
 ):
+    contig = file.name
     blocks, probabilities, sites, observed, mask_mode = (
         assembly_inputs_from_discovery(
             source,
@@ -616,29 +590,25 @@ def _run_or_resume_loaded_contig(
             expected_sample_ids=ordered_ids,
         )
     )
-    # Feedback and assembly work checkpoints only serve resume: they are
-    # written at the fast work compression level (the genotype evidence, read
-    # by every downstream stage, compresses 25% worse at that level).
-    work_store = checkpoint_store.work_store()
     # Samples flagged by the sample-quality QC do not inform founder
-    # construction (feedback, assembly, founder refinement); painting and the
-    # raw evidence below keep every sample's full evidence.
+    # construction (feedback, assembly, founder refinement); painting and
+    # downstream stages keep every sample's full evidence.
     founder_probabilities, founder_observed = core_sample_quality.founder_evidence(
         probabilities, observed, source.get("founder_evidence_excluded"))
     with core_parallel.numba_thread_scope(config.release_config.num_processes):
         chromosome_evidence = assembly_pipeline.prepare_chromosome_evidence(
             blocks, founder_probabilities, sites, founder_observed)
-    if raw_evidence_source is not None:
-        # The release hashed these very arrays unless the QC replaced the
-        # founder evidence; consumers compare the recorded digests.
-        hashed = (chromosome_evidence.probabilities is probabilities
-                  and chromosome_evidence.sites is sites
-                  and chromosome_evidence.observed is observed)
-        raw_evidence.save(checkpoint_store, contig, probabilities, sites, observed, source,
-                          digests=chromosome_evidence.digests if hashed else None,
-                          **raw_evidence_source)
+    # The release hashed these very arrays unless the QC replaced the founder
+    # evidence: record the digests for downstream consumers.
+    if (chromosome_evidence.probabilities is probabilities
+            and chromosome_evidence.sites is sites
+            and chromosome_evidence.observed is observed
+            and not file.has(discovery_checkpoints.EVIDENCE_SHA256)):
+        file.put(discovery_checkpoints.EVIDENCE_SHA256, {
+            name: str(chromosome_evidence.digests[name])
+            for name in discovery_checkpoints.EVIDENCE_ARRAYS})
     blocks, feedback_identity = block_feedback.run_block_feedback(
-        work_store, contig, blocks, founder_probabilities, sites, founder_observed, ordered_ids,
+        file, blocks, founder_probabilities, sites, founder_observed, ordered_ids,
         discovery_identity=discovery_identity, assembly_config=config.release_config,
         config=config.feedback_config, chromosome_map=chromosome_map,
         chromosome_evidence=chromosome_evidence)
@@ -662,30 +632,9 @@ def _run_or_resume_loaded_contig(
     )
     expected_painting_identity = assembly_painting_product_identity(
         config, chromosome_map=chromosome_map)
-    runtime_provenance = _painting_runtime_provenance(
-        config, checkpoint_store.nthreads
-    )
-
-    if checkpoint_store.contig_done(target_stage, contig):
-        checkpoint = painting_checkpoints.validate_painting_checkpoint(
-            checkpoint_store.load_contig(target_stage, contig),
-            expected_sample_ids=ordered_ids,
-            expected_release_identity=expected_release_identity,
-            expected_painting_product_identity=expected_painting_identity,
-        )
-        from ..assembly.support import write_founder_support
-        write_founder_support(checkpoint, sites, observed,
-                              Path(checkpoint_store.root) / target_stage / "reports" / contig,
-                              feedback=_feedback_count_panels(checkpoint_store, contig, target_stage))
-        return _checkpoint_summary(contig, checkpoint, True, mask_mode)
 
     # Release pools and painting pools never overlap. In particular, no idle
     # painter workers retain memory or process slots during hierarchical work.
-    release_checkpoints = assembly_checkpoints.AssemblyCheckpointStore(
-        work_store,
-        work_stage=("assembly" if target_stage == PAINTING_STAGE else f"{target_stage}_assembly"),
-        contig=contig,
-    )
     with core_parallel.numba_thread_scope(config.release_config.num_processes):
         release = assembly_pipeline.assemble_chromosome(
             blocks,
@@ -695,12 +644,9 @@ def _run_or_resume_loaded_contig(
             ordered_ids,
             discovery_identity=release_discovery_identity,
             config=config.release_config,
-            release_checkpoints=release_checkpoints,
+            release_checkpoints=assembly_checkpoints.AssemblyCheckpoints(file, "assembly"),
             chromosome_map=chromosome_map,
             chromosome_evidence=chromosome_evidence,
-            # Joins whose exact inputs the last feedback assembly joined are reused.
-            earlier_joins=assembly_pipeline.earlier_join_results(
-                checkpoint_store, contig, FEEDBACK_ASSEMBLY_STAGES[-1:]),
         )
     if release.get("identity") != expected_release_identity:
         raise RuntimeError(
@@ -720,7 +666,7 @@ def _run_or_resume_loaded_contig(
         config.paint_cores, "painting"))
     if config.paint_label_continuity:
         # Painting product, not release: relabel row suffixes the painted
-        # samples read as continuous; the release checkpoints stay unchanged.
+        # samples read as continuous; the release records stay unchanged.
         with core_parallel.numba_thread_scope(config.paint_cores):
             components, continuity = painting_label_continuity.relabel_components(
                 components, probabilities, sites, observed,
@@ -750,7 +696,7 @@ def _run_or_resume_loaded_contig(
             **_painting_kwargs(config, chromosome_map),
         )
     runtime_provenance = _painting_runtime_provenance(
-        config, checkpoint_store.nthreads, painting_bundle
+        config, file.nthreads, painting_bundle
     )
     checkpoint = painting_checkpoints.build_painting_checkpoint(
         manifest,
@@ -760,36 +706,29 @@ def _run_or_resume_loaded_contig(
         expected_painting_identity,
         runtime_provenance,
     )
-    checkpoint_store.save_contig(target_stage, contig, checkpoint)
+    info = file.put(PAINTING_STAGE, checkpoint)
+    print(f"    [Checkpoint] {contig}: {PAINTING_STAGE} "
+          f"({info.stored_bytes / (1024 * 1024):.1f} MB)", flush=True)
     checkpoint = painting_checkpoints.validate_painting_checkpoint(
-        checkpoint_store.load_contig(target_stage, contig),
+        file.get(PAINTING_STAGE),
         expected_sample_ids=ordered_ids,
         expected_release_identity=expected_release_identity,
         expected_painting_product_identity=expected_painting_identity,
     )
     from ..assembly.support import write_founder_support
-    write_founder_support(checkpoint, sites, observed,
-                          Path(checkpoint_store.root) / target_stage / "reports" / contig,
-                          feedback=_feedback_count_panels(checkpoint_store, contig, target_stage))
+    write_founder_support(checkpoint, sites, observed, reports,
+                          feedback=_feedback_count_panels(file))
     return _checkpoint_summary(contig, checkpoint, False, mask_mode)
 
 
-# Work stages of the block-feedback context assemblies (workflows/block_feedback.py).
-FEEDBACK_ASSEMBLY_STAGES = ("feedback_path_l1_assembly", "feedback_path_l2_assembly")
-
-
-def _feedback_count_panels(checkpoint_store, contig, target_stage):
-    """The feedback assemblies' join search records of one contig, for the painting report
-    founder_counts.tsv (read-only; empty for other targets or absent checkpoints)."""
-    if target_stage != PAINTING_STAGE:
-        return ()
+def _feedback_count_panels(file):
+    """The feedback assemblies' join search records of one contig, for the painting
+    report founder_counts.tsv (read-only; empty when absent)."""
     panels = []
-    for stage in FEEDBACK_ASSEMBLY_STAGES:
-        for level in range(1, 5):
-            artifact = f"{contig}.__assembly_release__.hierarchy_l{level}"
-            if not checkpoint_store.contig_done(stage, artifact):
-                continue
-            payload = getattr(checkpoint_store.load_contig(stage, artifact), "payload", None) or {}
+    for key in file.keys("feedback/"):
+        parts = key.split("/")
+        if len(parts) == 5 and parts[2] == "assembly" and parts[4] == "join":
+            payload = file.get(key)
             panels.extend((payload.get("diagnostic") or {}).get("panel_search", ()))
     return panels
 
@@ -801,26 +740,19 @@ def run_reconstruction(
     *,
     discovery_identity,
     config,
-    source_stage="block_discovery",
-    target_stage=PAINTING_STAGE,
-    probabilities_stage=None,
-    probabilities_key="global_probs",
+    output_dir,
     all_contigs=None,
     publish_completion=True,
     painter_factory=painting_components.ComponentPainter,
     genetic_maps=None,
 ):
-    """Run the canonical assembly route and atomically checkpoint every contig."""
+    """Run the canonical assembly route and record every contig's painting.
+
+    Painting reports go to ``painting_reports(output_dir, contig)``.
+    """
 
     if not isinstance(config, ReconstructionConfig):
         raise TypeError("config must be a ReconstructionConfig")
-    if probabilities_stage is not None:
-        probabilities_stage = str(probabilities_stage)
-        if not probabilities_stage:
-            raise ValueError("probabilities_stage must be nonempty")
-    probabilities_key = str(probabilities_key)
-    if not probabilities_key:
-        raise ValueError("probabilities_key must be nonempty")
     contigs = tuple(str(value) for value in contigs)
     if not contigs or len(contigs) != len(set(contigs)):
         raise ValueError("contigs must be a nonempty unique ordered collection")
@@ -850,7 +782,6 @@ def run_reconstruction(
 
     _validate_discovery_global_source(
         checkpoint_store,
-        source_stage,
         all_contigs,
         ordered_ids,
         discovery_identity,
@@ -861,20 +792,16 @@ def run_reconstruction(
         discovery_identity=discovery_identity,
         sample_ids=ordered_ids,
         contigs=all_contigs,
-        source_stage=source_stage,
-        target_stage=target_stage,
-        probabilities_stage=probabilities_stage,
-        probabilities_key=probabilities_key,
         genetic_maps=genetic_maps,
     )
-    checkpoint_store.bind_stage_identity(target_stage, stage_identity)
+    checkpoint_store.bind_identity(checkpoint_store.run, PAINTING_STAGE, stage_identity)
     missing = [
         contig for contig in contigs
-        if not checkpoint_store.contig_done(target_stage, contig)
+        if not checkpoint_store.contig(contig).has(PAINTING_STAGE)
     ]
-    if checkpoint_store.stage_complete(target_stage) and missing:
+    if checkpoint_store.stage_complete(PAINTING_STAGE) and missing:
         raise RuntimeError(
-            f"{target_stage} is marked complete but lacks: {missing}"
+            f"{PAINTING_STAGE} is marked complete but lacks: {missing}"
         )
 
     summaries = tuple(
@@ -884,25 +811,17 @@ def run_reconstruction(
             ordered_ids,
             discovery_identity=discovery_identity,
             config=config,
-            source_stage=source_stage,
-            probabilities_stage=probabilities_stage,
-            probabilities_key=probabilities_key,
-            target_stage=target_stage,
             painter_factory=painter_factory,
+            reports=painting_reports(output_dir, contig),
             chromosome_map=(None if genetic_maps is None
                             else genetic_maps.for_contig(contig)),
         )
         for contig in contigs
     )
-    core_runtime.require_contig_checkpoints(
-        checkpoint_store, target_stage, contigs
-    )
+    core_runtime.require_records(checkpoint_store, PAINTING_STAGE, contigs)
     if publish_completion:
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, target_stage, all_contigs
-        )
-        if not checkpoint_store.stage_complete(target_stage):
-            checkpoint_store.mark_stage_complete(target_stage)
+        core_runtime.require_records(checkpoint_store, PAINTING_STAGE, all_contigs)
+        checkpoint_store.mark_stage_complete(PAINTING_STAGE)
     return summaries
 
 import haplotype_reconstruction.assembly.checkpoints as assembly_checkpoints

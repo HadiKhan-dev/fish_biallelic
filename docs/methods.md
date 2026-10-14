@@ -119,8 +119,9 @@ flagged samples are still painted, phased and scored. The assembly release
 identity hashes the founder evidence, so the stages that check their raw
 evidence against it (pedigree, allele refit, family phase) apply the recorded
 flags for that check. Per-sample statistics, z and flags are in
-`<output>/sample_quality/<contig>.tsv`, the run record and the block discovery
-checkpoint (`site_quality["sample_quality"]`, `founder_evidence_excluded`).
+`<output>/sample_quality/<contig>.tsv`, the run record and the chromosome's
+`discovery/prepared` record (`site_quality["sample_quality"]`,
+`founder_evidence_excluded`).
 Contamination shared by several libraries from one source is not private and
 is seen only in part, and DNA from another analysed sample brings no private
 alleles, so contamination within the cohort is not detected. The QC runs only
@@ -554,8 +555,9 @@ addition round's seed responses run concurrently inside a component, and the
 acceptance pass uses the component's threads for its per-sample kernels and
 evaluates chunks of junctions at once until something is accepted. Completion
 order never sets scientific selection order, and results
-do not depend on the thread count. Each final hierarchy level has a separate checkpoint namespace with
-per-fit records, so an interrupted level resumes from its completed fits. Source
+do not depend on the thread count. Each final hierarchy level records every
+refined component (`assembly/l<k>/refine/<n>`) as it completes, so an
+interrupted level resumes from its completed components. Source
 identities include every numerical module of the refiner.
 `--founder-refinement off` disables refinement and count decisions.
 
@@ -758,7 +760,7 @@ recombination decodes, remains the family MAP. If phase remains unstable at 520
 iterations, retain that attempt and restart from the scaffold with half
 damping, at most twice (0.5, then 0.25, then 0.125 by default). Tolerance
 scales with damping so the undamped residual criterion is unchanged. Successful ordinary solves are unaffected. Each attempt
-has a separate checkpoint; final summaries record attempted and final damping,
+has its own resume state; final summaries record attempted and final damping,
 and total solver iterations. Set `FamilyRefinementConfig.phase_retry_count=0`
 to disable retries. If every attempt remains unstable, no final phase is released.
 

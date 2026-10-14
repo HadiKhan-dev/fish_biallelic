@@ -153,7 +153,7 @@ def refinement_code_identity():
         "refinement/pipeline.py", "refinement/conditioning.py", "refinement/model.py",
         "refinement/messages.py", "refinement/factors.py", "refinement/selector_chains.py",
         "refinement/phase_chains.py", "refinement/polish.py", "refinement/evidence.py",
-        "refinement/frames.py", "core/genetic_map.py", "core/raw_evidence.py",
+        "refinement/frames.py", "core/genetic_map.py",
     )
     return {name: hashlib.sha256((PACKAGE_ROOT / name).read_bytes()).hexdigest()
             for name in files}

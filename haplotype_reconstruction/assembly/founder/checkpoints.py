@@ -1,10 +1,14 @@
-"""Path-based intermediate checkpoints for final founder refinement.
+"""Records of one founder refinement level (key prefix ``<assembly>/l<k>/refine``).
 
-The enclosing assembly store binds these paths to the exact prepared inputs and
-code/configuration identity. Final release products retain their ordinary block
-format. Only derived chromosome arrays are omitted from intermediate snapshots.
+``<n:05d>`` holds component n's refined block as rows of the prepared blocks
+(its paths), its non-derived fields and attribute names, and its diagnostic;
+decoding rebuilds the derived chromosome arrays from the prepared blocks
+exactly. ``<n:05d>/sweep/<fit>`` holds a long component's converged-sweep
+states (converged_sweep.SweepEngine). The enclosing assembly section binds
+them to the exact prepared inputs and code/configuration identity.
 """
 from .. import hierarchy, paths
+from ...core.haplotypes import BlockResults
 
 
 _DERIVED_FIELDS = {
@@ -16,11 +20,11 @@ _DERIVED_FIELDS = {
 }
 
 
-class FounderCheckpointStore:
-    """Wrap an already-bound store; preserve every phase and proposal token."""
+class RefinementCheckpoints:
+    """Component records of one refinement level on its assembly's prepared blocks."""
 
-    def __init__(self, store, prepared):
-        self.store = store
+    def __init__(self, checkpoints, prepared):
+        self.checkpoints = checkpoints
         self.prepared = list(prepared)
         self.starts = {int(b.positions[0]): i for i, b in enumerate(self.prepared)}
         self.ends = {int(b.positions[-1]): i + 1 for i, b in enumerate(self.prepared)}
@@ -30,12 +34,13 @@ class FounderCheckpointStore:
         start = self.starts[int(block.positions[0])]
         stop = self.ends[int(block.positions[-1])]
         return {
-            "founder_paths": True, "start": start, "stop": stop,
+            "start": start, "stop": stop,
             "rows": _local_selection(block, self.prepared[start:stop]),
             "keys": list(block.haplotypes),
             "haplotype_dtypes": [str(row.dtype) for row in block.haplotypes.values()],
-            # Preserve phase boundaries, keep masks and any non-derived fields.
+            # Phase boundaries, keep masks and every other non-derived field.
             "extras": {k: v for k, v in vars(block).items() if k not in _DERIVED_FIELDS},
+            "names": list(vars(block)),
         }
 
     def _decode(self, value):
@@ -47,16 +52,35 @@ class FounderCheckpointStore:
         block.haplotypes = {key: row.astype(dtype, copy=False) for key, row, dtype in zip(
             value["keys"], block.haplotypes.values(), value["haplotype_dtypes"])}
         vars(block).update(value["extras"])
+        # Fields the rebuild copied from prepared blocks the original never had.
+        for name in set(vars(block)).difference(value["names"]):
+            delattr(block, name)
         return block
 
-    def save(self, phase, payload):
-        if isinstance(payload, dict) and "block" in payload:
-            payload = dict(payload, block=self._encode(payload["block"]))
-        self.store.save(phase, payload)
+    def completed(self):
+        """Numbers of the components already recorded (one key listing)."""
+        prefix = self.checkpoints.key("")
+        return {int(key[len(prefix):]) for key in self.checkpoints.file.keys(prefix)
+                if key[len(prefix):].isdigit()}
 
-    def load(self, phase):
-        payload = self.store.load(phase)
-        if (isinstance(payload, dict) and isinstance(payload.get("block"), dict)
-                and payload["block"].get("founder_paths")):
-            payload = dict(payload, block=self._decode(payload["block"]))
-        return payload
+    def load(self, number):
+        """(block, diagnostic) of component ``number``, or None when not recorded."""
+        payload = self.checkpoints.load(f"{number:05d}")
+        if payload is None:
+            return None
+        return self._decode(payload["block"]), payload["diagnostic"]
+
+    def save(self, number, block, diagnostic):
+        self.checkpoints.save(f"{number:05d}", {"block": self._encode(block),
+                                                "diagnostic": diagnostic})
+
+    def blocks(self, count):
+        """The refined blocks of a completed level with ``count`` components."""
+        loaded = [self.load(number) for number in range(count)]
+        if any(item is None for item in loaded):
+            raise RuntimeError(f"{self.checkpoints!r}: a refined component record is missing")
+        return BlockResults([block for block, _diagnostic in loaded])
+
+    def sweeps(self, number):
+        """Component ``number``'s converged-sweep records (picklable; one writer thread)."""
+        return self.checkpoints.scoped(f"{number:05d}/sweep", nthreads=1)

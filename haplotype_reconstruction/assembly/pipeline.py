@@ -738,41 +738,6 @@ def _preprocess_result_diagnostics_mode(preprocess_result) -> str:
     return mode
 
 
-def earlier_join_results(checkpoint_store, contig, work_stages):
-    """The hierarchy joins of earlier assemblies of one contig, for exact batch reuse.
-
-    Returns reusable(level) -> {batch input digest: super-block} from each work stage's
-    hierarchy_l<level> checkpoint, whose level diagnostics record every joined batch's input
-    digest (hierarchy.run_hierarchical_step). Absent checkpoints and ones written without digests
-    contribute nothing. A digest covers the assembly code identity and every input of its batch,
-    so only a batch identical in every respect matches.
-    """
-    def reusable(level):
-        phase = f"hierarchy_l{level}"
-        found = {}
-        for stage in work_stages:
-            reader = assembly_checkpoints.AssemblyCheckpointStore(
-                checkpoint_store, work_stage=stage, contig=contig)
-            artifact = reader._artifact(phase)
-            if not checkpoint_store.contig_done(stage, artifact):
-                continue
-            saved = checkpoint_store.load_contig(stage, artifact)
-            payload = getattr(saved, "payload", None)
-            if (not isinstance(saved, assembly_checkpoints.AssemblyWorkCheckpoint)
-                    or saved.phase != phase or not isinstance(payload, Mapping)
-                    or payload.get("schema") != "assembly-release-hierarchy-phase-v1"
-                    or payload.get("level") != level):
-                continue
-            blocks = {(int(block.positions[0]), int(block.positions[-1])): block
-                      for block in payload.get("blocks") or ()}
-            for record in (payload.get("diagnostic") or {}).get("batch_input_provenance", ()):
-                block = blocks.get((record["position_start"], record["position_end"]))
-                if block is not None:
-                    found.setdefault(record["inputs_sha256"], block)
-        return found
-    return reusable
-
-
 @timed_stage("assembly")
 def assemble_chromosome(
     input_blocks,
@@ -785,15 +750,17 @@ def assemble_chromosome(
     config: AssemblyConfig=AssemblyConfig(),
     fold_assignments: np.ndarray | None=None,
     code_digest_overrides=None,
-    release_checkpoints: assembly_checkpoints.AssemblyCheckpointIO | None=None,
+    release_checkpoints: assembly_checkpoints.AssemblyCheckpoints | None=None,
     chromosome_map=None,
     chromosome_evidence=None,
-    earlier_joins=None,
 ) -> dict[str, Any]:
     """Preprocess and refine local row choices after each final hierarchy level.
 
-    earlier_joins: earlier_join_results of this contig's earlier assemblies; a hierarchy batch
-    whose exact inputs one of them already joined reuses that super-block.
+    release_checkpoints: this assembly's records in its contig's checkpoint file
+    (assembly/checkpoints.py: preprocess, every hierarchy level's plan and
+    manifest, refinement components and levels, the final count step). Each
+    hierarchy batch is recorded as it is joined, by its exact input digest, so
+    a batch whose inputs any assembly of the contig joined is reused.
     """
 
     if not isinstance(config, AssemblyConfig):
@@ -938,23 +905,23 @@ def assemble_chromosome(
             else config.higher_level_batch_size
         )
         phase = f"hierarchy_l{level}"
-        checkpoint_payload = (
+        manifest = (
             None if release_checkpoints is None
-            else release_checkpoints.load(phase)
+            else release_checkpoints.load(f"l{level}/join")
         )
         selected_path_input = _selected_path_snapshot(working)
-        if checkpoint_payload is None:
+        if manifest is None:
             started = time.perf_counter()
             if hierarchy_probs is None:
                 hierarchy_probs = assembly_evidence.float32_evidence(neutral_probs)
             from ..core.batch_queue import checkpoint_key
-            batch_provenance = []
+            batches = []
             output = assembly_hierarchy.run_hierarchical_step(
                 working,
                 neutral_probs,
                 sites,
                 scoring_probs=hierarchy_probs,
-                batch_queue_key=checkpoint_key(release_checkpoints, phase),
+                batch_queue_key=checkpoint_key(release_checkpoints, f"l{level}"),
                 batch_size=batch_size,
                 recomb_rate=config.recombination_rate,
                 chromosome_map=chromosome_map,
@@ -971,20 +938,17 @@ def assemble_chromosome(
                 ),
                 panel_search_config=config.panel_search_config,
                 code_identity=identity["code_identity_sha256"],
-                reusable=None if earlier_joins is None else earlier_joins(level),
-                batch_provenance=batch_provenance,
+                checkpoints=(None if release_checkpoints is None
+                             else release_checkpoints.scoped(f"l{level}")),
+                batches=batches,
             )
             elapsed_seconds = time.perf_counter() - started
             stored_diagnostic = None
         else:
-            if (
-                    not isinstance(checkpoint_payload, Mapping)
-                    or checkpoint_payload.get("schema")
-                    != "assembly-release-hierarchy-phase-v1"
-                    or checkpoint_payload.get("level") != level):
+            if manifest.get("level") != level:
                 raise ValueError("unrecognized hierarchy-level checkpoint")
-            output = checkpoint_payload.get("blocks")
-            stored_diagnostic = checkpoint_payload.get("diagnostic")
+            output = assembly_checkpoints.level_blocks(release_checkpoints, manifest)
+            stored_diagnostic = manifest.get("diagnostic")
             if not isinstance(stored_diagnostic, Mapping):
                 raise TypeError("hierarchy checkpoint lacks its diagnostics")
             elapsed_seconds = stored_diagnostic.get("elapsed_seconds")
@@ -1039,15 +1003,15 @@ def assemble_chromosome(
                     "position_end": int(block.positions[-1]),
                     "records": getattr(block, "panel_search_diagnostics", ()),
                 } for block in next_blocks),
-                # Per joined batch: its span and input digest (for exact reuse by a later
-                # assembly of this contig) and whether an earlier assembly's join was reused.
-                "batch_input_provenance": tuple(batch_provenance),
             }
             if release_checkpoints is not None:
-                release_checkpoints.save(phase, {
-                    "schema": "assembly-release-hierarchy-phase-v1",
+                # A joined batch by its join record; pass-through batches inline.
+                release_checkpoints.save(f"l{level}/join", {
+                    "schema": assembly_checkpoints.LEVEL_SCHEMA,
                     "level": level,
-                    "blocks": next_blocks,
+                    "batches": [blocks if digest is None else digest
+                                for digest, blocks in batches],
+                    "components": after_count,
                     "diagnostic": diagnostic,
                 })
         working = next_blocks
@@ -1061,18 +1025,20 @@ def assemble_chromosome(
             active_refinement_config = (refinement_config if level <= 2
                                         else config.founder_refinement_config)
             phase = f"refinement_l{level}"
+            # Component records are small writes beside the refinement pool.
+            refinement_records = (None if release_checkpoints is None else
+                                  release_checkpoints.scoped(f"l{level}/refine", nthreads=1))
             refined = (None if release_checkpoints is None
-                       else release_checkpoints.load(phase))
+                       else release_checkpoints.load(f"l{level}/refine"))
             started = time.perf_counter()
             if refined is None:
-                from .founder.components import scoped_checkpoints
                 # The converged search adds founders only at the last level (the
                 # final count step); earlier levels make deletion decisions only.
                 output, refinement_diagnostics = founder_refinement.refine_components(
                     preprocess_result.prepared_blocks, working, neutral_probs, sites,
                     config=active_refinement_config,
                     num_threads=_phase_lease(config, phase, dynamic=True),
-                    checkpoints=scoped_checkpoints(release_checkpoints, phase),
+                    checkpoints=refinement_records,
                     l1_blocks=refinement_context, cc_scale=config.cc_scale,
                     count_additions=(stopped is not None or level == config.max_level))
                 refinement_diagnostics = dict(refinement_diagnostics,
@@ -1096,7 +1062,10 @@ def assemble_chromosome(
                       f"{census['decided_by_sequence_part']}, kept founders failing the "
                       f"sequence test {census['hidden_sequence_failures']}", flush=True)
             else:
-                output = refined["blocks"]
+                from .founder.checkpoints import RefinementCheckpoints
+                output = RefinementCheckpoints(
+                    refinement_records, preprocess_result.prepared_blocks,
+                ).blocks(refined["components"])
                 refinement_diagnostics = refined["diagnostics"]
                 resumed_phases.append(phase)
             _assert_position_coverage(output, expected_positions)
@@ -1107,8 +1076,9 @@ def assemble_chromosome(
             core_runtime.strip_block_evidence(output)
             working = output
             if refined is None and release_checkpoints is not None:
-                release_checkpoints.save(phase, {
-                    "blocks": working, "diagnostics": refinement_diagnostics})
+                # The level's blocks are its component records.
+                release_checkpoints.save(f"l{level}/refine", {
+                    "diagnostics": refinement_diagnostics, "components": len(working)})
             refinement_levels.append(refinement_diagnostics)
             diagnostic = dict(diagnostic,
                 refinement_elapsed_seconds=refinement_diagnostics["elapsed_seconds"])
@@ -1125,41 +1095,30 @@ def assemble_chromosome(
 
     # The converged search makes its count decisions between converged fits:
     # deletions at every level, additions only at its last level, which is the
-    # final count step, recorded under the same phase name for product readers.
-    # It leaves early progressive refinement and feedback assembly unchanged.
-    if (config.max_level == 4 and config.founder_refinement_config.enabled
-            and refinement_levels):
-        count_result = (None if release_checkpoints is None
-                        else release_checkpoints.load("final_count_increase"))
-        if count_result is None:
-            count_diagnostics = dict(
-                enabled=True, model="converged_count_pass_of_last_level",
-                level=refinement_levels[-1].get("level"),
-                components=[dict(component=item.get("component"),
-                                 founders=item.get("founders"),
-                                 founders_before=item.get("founders_before"),
-                                 changed=item.get("changed"))
-                            for item in refinement_diagnostics.get("components", [])])
-            if release_checkpoints is not None:
-                release_checkpoints.save("final_count_increase",
-                    {"blocks": working, "diagnostics": count_diagnostics})
-        else:
-            working = count_result["blocks"]
-            count_diagnostics = count_result["diagnostics"]
-            resumed_phases.append("final_count_increase")
+    # final count step (recorded as "final"; its blocks are that level's
+    # component records). It leaves early progressive refinement and feedback
+    # assembly unchanged.
+    if refinement_levels:
+        count_diagnostics = dict(
+            enabled=True, model="converged_count_pass_of_last_level",
+            level=refinement_levels[-1].get("level"),
+            components=[dict(component=item.get("component"),
+                             founders=item.get("founders"),
+                             founders_before=item.get("founders_before"),
+                             changed=item.get("changed"))
+                        for item in refinement_diagnostics.get("components", [])])
         refinement_diagnostics = dict(refinement_diagnostics,
                                       final_count_increase=count_diagnostics)
-
-    if refinement_levels:
         refinement_diagnostics = dict(refinement_diagnostics,
             schedule="after_each_final_hierarchy_level",
             levels=tuple(refinement_levels))
-        # Preserve the final-product checkpoint name consumed by diagnostics;
-        # per-level checkpoints above contain the resumable computation.
-        if (release_checkpoints is not None
-                and release_checkpoints.load("founder_refinement") is None):
-            release_checkpoints.save("founder_refinement", {
-                "blocks": working, "diagnostics": refinement_diagnostics})
+        if release_checkpoints is not None:
+            if release_checkpoints.has("final"):
+                resumed_phases.append("final")
+            else:
+                release_checkpoints.save("final", {
+                    "level": refinement_levels[-1]["level"],
+                    "diagnostics": refinement_diagnostics})
 
     final_count_calls = (refinement_levels[-1].get("components", ()) if refinement_levels
                          else ())

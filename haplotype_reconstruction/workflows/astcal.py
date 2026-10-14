@@ -15,6 +15,7 @@ import haplotype_reconstruction.core.sample_quality as core_sample_quality
 import haplotype_reconstruction.core.site_quality as core_site_quality
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.discovery.blocks as discovery_blocks
+import haplotype_reconstruction.discovery.checkpoints as discovery_checkpoints
 import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.workflows.design as workflows_design
 import haplotype_reconstruction.workflows.contig_parallel as workflows_contig_parallel
@@ -105,14 +106,10 @@ def run():
     # =========================================================================
     # Checkpoint Infrastructure
     # =========================================================================
-    checkpoint_store = core_runtime.CheckpointStore(
-        CHECKPOINT_DIR, nthreads=n_processes, global_log_indent="    "
-    )
+    checkpoint_store = core_runtime.CheckpointStore(CHECKPOINT_DIR, nthreads=n_processes)
     os.makedirs(output_dir, exist_ok=True)
     stage_complete = checkpoint_store.stage_complete
     mark_stage_complete = checkpoint_store.mark_stage_complete
-    contig_done = checkpoint_store.contig_done
-    save_global = checkpoint_store.save_global
 
     region_keys = [r['contig'] for r in regions_config]
 
@@ -128,29 +125,31 @@ def run():
     # =========================================================================
     # STAGE block discovery: VCF Loading + Block Discovery + Global Probabilities
     # =========================================================================
-    DISCOVERY_STAGE = "block_discovery"
+    DISCOVERY_STAGE = workflows_reconstruction.DISCOVERY_STAGE
     # Bind the input file, loader, sample axis and contigs as well, so a
     # different input never resumes these sites (as the general route does);
     # downstream stages still receive the narrower discovery identity.
-    checkpoint_store.bind_stage_identity(DISCOVERY_STAGE, dict(
+    checkpoint_store.bind_identity(checkpoint_store.run, DISCOVERY_STAGE, dict(
         schema="astcal-vcf-ad-v1", **core_variants.input_identity(vcf_path),
         sample_ids=sample_names, contigs=region_keys,
         discovery=discovery_identity_record, block_sites=200))
 
-    # Sample/contig manifest checked by reconstruction; written before any contig.
-    if not checkpoint_store.global_done(DISCOVERY_STAGE):
-        save_global(DISCOVERY_STAGE, {
-            'sample_ids': sample_names,
-            'contigs': region_keys,
-            'genotype_evidence_mode': (
-                workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
-            ),
-            'observed_call_mask_mode': (
-                workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-            ),
-            'discovery_backend': discovery_identity_record['backend'],
-            'discovery_config': discovery_config_record,
-        })
+    # Sample/contig manifest checked by reconstruction; recorded before any contig.
+    checkpoint_store.bind_manifest(DISCOVERY_STAGE, {
+        'sample_ids': sample_names,
+        'contigs': region_keys,
+        'genotype_evidence_mode': (
+            workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
+        ),
+        'observed_call_mask_mode': (
+            workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
+        ),
+        'discovery_backend': discovery_identity_record['backend'],
+        'discovery_config': discovery_config_record,
+    })
+
+    record_provenance = workflows_reconstruction.discovery_record_provenance(
+        discovery_identity_record)
 
     def prepare_discovery(r_name):
         """Load a contig, filter its sites and fit its read model."""
@@ -201,39 +200,18 @@ def run():
             fields=dict(
                 global_probs=global_probs, read_calibration=calibration,
                 site_quality=site_quality, global_sites=global_sites,
-                global_observed_mask=global_observed_mask, avg_depth=avg_depth,
-                founder_excluded=founder_excluded),
+                global_observed_mask=global_observed_mask, **record_provenance,
+                avg_depth=avg_depth,
+                **({} if founder_excluded is None
+                   else dict(founder_evidence_excluded=founder_excluded))),
             products=core_site_quality.run_record_products(site_quality, sample_names),
         )
-
-    def save_discovery(r_name, prepared, block_results):
-        fields = prepared.fields
-        founder_excluded = fields['founder_excluded']
-        checkpoint_store.save_contig(DISCOVERY_STAGE, r_name, {
-            'global_probs': fields['global_probs'],
-            'read_calibration': fields['read_calibration'],
-            'site_quality': fields['site_quality'],
-            'global_sites': fields['global_sites'],
-            'global_observed_mask': fields['global_observed_mask'],
-            'observed_call_mask_mode': (
-                workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-            ),
-            'genotype_evidence_mode': (
-                workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
-            ),
-            'block_results': block_results,
-            'avg_depth': fields['avg_depth'],
-            'discovery_backend': discovery_identity_record['backend'],
-            'discovery_config': discovery_config_record,
-            **({} if founder_excluded is None
-               else {'founder_evidence_excluded': founder_excluded}),
-        })
 
     def discover(contigs):
         """Discover these contigs with one block pool, closed on return."""
         with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
             discovery_blocks.discover_contigs(
-                contigs, prepare_discovery, save_discovery,
+                checkpoint_store, contigs, prepare_discovery,
                 block_pool=block_pool, discovery_config=discovery_config)
 
     assembly_config = workflows_reconstruction.ReconstructionConfig(
@@ -253,7 +231,7 @@ def run():
     if serial_contigs and not workflows_contig_parallel.run_serially(
             checkpoint_store, region_keys, sample_names, discover=discover,
             discovery_identity=discovery_identity_record, config=assembly_config,
-            max_contigs=max_contigs, source_stage=DISCOVERY_STAGE,
+            output_dir=output_dir, max_contigs=max_contigs,
             genetic_maps=inference_genetic_maps):
         return
 
@@ -267,16 +245,17 @@ def run():
 
         pending_contigs = []
         for r_name in region_keys:
-            if contig_done(DISCOVERY_STAGE, r_name):
+            if discovery_checkpoints.complete(checkpoint_store.contig(r_name)):
                 print(f"  [RESUME] {r_name} already done")
             else:
                 pending_contigs.append(r_name)
         if pending_contigs:
             discover(pending_contigs)
         print(f"\nVCF loading + discovery complete in {time.time()-start:.1f}s")
+        discovery_checkpoints.require_complete(checkpoint_store, region_keys)
         mark_stage_complete(DISCOVERY_STAGE)
 
-    if os.environ.get("HAPLOTYPES_STOP_AFTER_STAGE") == DISCOVERY_STAGE:
+    if os.environ.get("HAPLOTYPES_STOP_AFTER_STAGE") == "block_discovery":
         print("[STOP] Block discovery checkpointed; feedback and assembly not started.")
         return
 
@@ -297,8 +276,8 @@ def run():
         sample_names,
         discovery_identity=discovery_identity_record,
         config=assembly_config,
+        output_dir=output_dir,
         genetic_maps=inference_genetic_maps,
-        source_stage=DISCOVERY_STAGE,
     )
     for summary in summaries:
         status = "resumed" if summary.resumed else "completed"
@@ -320,7 +299,6 @@ def run():
     run_downstream(
         checkpoint_store, region_keys, sample_names,
         output_dir=output_dir, n_workers=n_processes,
-        raw_gl_stage=DISCOVERY_STAGE, raw_sites_stage=DISCOVERY_STAGE,
         parent_eligibility=parent_eligibility,
         genetic_maps=inference_genetic_maps, recombination_rate=inference_recombination_rate,
     )

@@ -15,12 +15,12 @@ from ..recombination.model import RecombinationMapConfig
 
 def run_downstream(
     store, contigs, sample_ids, *, output_dir, n_workers,
-    raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
     parent_eligibility=None, genetic_maps=None, recombination_rate=5e-8,
     all_contigs=None, publish_global=True,
 ):
     """Run pedigree–recombination with one observation source and one shared CPU ceiling.
 
+    Every stage reads each chromosome's raw evidence from its discovery record.
     pedigree may prepare individual contigs for a distributed run. Such a shard
     cannot publish a genome-wide pedigree or run family-dependent stages;
     the coordinator calls again with all required chromosomes available.
@@ -28,8 +28,7 @@ def run_downstream(
     _, payload = pedigree.run_pedigree(
         store, contigs, sample_ids,
         output_dir=output_dir, n_workers=n_workers,
-        raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key, parent_eligibility=parent_eligibility,
+        parent_eligibility=parent_eligibility,
         all_contigs=all_contigs, publish_global=publish_global,
         genetic_maps=genetic_maps, recombination_rate=recombination_rate,
     )
@@ -39,16 +38,12 @@ def run_downstream(
     # Pedigree evidence keeps the frozen assembly alleles; family phase decodes the refit.
     print("ALLELE REFIT: founder alleles re-estimated from the fixed painting")
     allele_refit.run_allele_refit(
-        store, final_contigs, sample_ids, output_dir=output_dir,
-        raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key, n_workers=n_workers,
+        store, final_contigs, sample_ids, output_dir=output_dir, n_workers=n_workers,
     )
     print("FAMILY PHASE: pedigree-conditioned refinement and final phase polishing")
     refinement.run_refinement(
         store, final_contigs, sample_ids,
-        pedigree_payload=payload, output_dir=output_dir,
-        raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key, n_workers=n_workers,
+        pedigree_payload=payload, output_dir=output_dir, n_workers=n_workers,
         genetic_maps=genetic_maps,
         config=FamilyRefinementConfig(recombination_rate=recombination_rate),
     )
@@ -57,6 +52,5 @@ def run_downstream(
         pedigree_payload=payload, output_dir=output_dir, n_workers=n_workers,
         genetic_maps=genetic_maps,
         config=RecombinationMapConfig(recombination_rate=recombination_rate),
-        raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key,
     )
     return payload

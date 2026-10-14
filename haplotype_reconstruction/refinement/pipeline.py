@@ -13,12 +13,11 @@ from pathlib import Path
 import time
 import numpy as np
 
-from haplotype_reconstruction.core import checkpoints, parallel, raw_evidence, runtime
+from haplotype_reconstruction.core import parallel, products, runtime
 from haplotype_reconstruction.core.chromosome_parallel import (
     ChromosomeExecutor, current_threads, memory_worker_limit,
 )
 from haplotype_reconstruction.pedigree import components as pedigree_components
-from haplotype_reconstruction.pedigree import pipeline as pedigree_pipeline
 from haplotype_reconstruction.painting import allele_refit as painting_allele_refit
 from haplotype_reconstruction.painting import checkpoints as painting_checkpoints
 from haplotype_reconstruction.workflows.reconstruction import PAINTING_STAGE
@@ -35,12 +34,12 @@ class PhaseStabilityError(RuntimeError):
     """The supported solve reached its limit without a stable called phase."""
 
     def __init__(self, checks):
-        super().__init__("final called phase did not stabilize; iteration checkpoint retained, no final product released")
+        super().__init__("final called phase did not stabilize; iteration state retained, no final product released")
         self.checks = tuple(checks)
 
 
 def _fit_phase(gl, observed, scaffold, positions, relationships, names, *,
-               config, phase_config, identity, work_path=None, checkpoint_threads=1,
+               config, phase_config, identity, work=None, checkpoint_threads=1,
                checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None,
                frame_inputs=None):
     """Resume family messages and the actual consecutive called-phase checks.
@@ -61,15 +60,19 @@ stage repeats it exactly. It needs the scaffold polish, which it edits.
         raise ValueError("phase release needs at least two consecutive unchanged checks")
     if not np.isfinite(checkpoint_min_seconds) or checkpoint_min_seconds < 0:
         raise ValueError("checkpoint_min_seconds must be finite and nonnegative")
-    work = None if work_path is None else Path(work_path)
     state = point = None
     unchanged = 0
     checks = []
-    if work is not None and work.is_file():
-        saved = checkpoints.read(str(work), nthreads=(current_threads()
-                                 if checkpoint_threads is None else checkpoint_threads))
+
+    def work_threads():
+        # Encode and decode with the live CPU lease, like the chromosome's other records.
+        work.nthreads = current_threads() if checkpoint_threads is None else checkpoint_threads
+        return work
+
+    saved = None if work is None else work_threads().load()
+    if saved is not None:
         if saved["identity"] != identity:
-            raise ValueError("Family phase iteration checkpoint inputs/configuration differ")
+            raise ValueError("Family phase iteration state inputs/configuration differ")
         state, point, unchanged = saved["messages"], saved["phase"], saved["unchanged"]
         checks = list(saved["checks"])
         del saved
@@ -86,10 +89,10 @@ stage repeats it exactly. It needs the scaffold polish, which it edits.
             # Shallow copies preserve the live solver, cavities and phase checks.
             saved_messages = replace(messages, branch_clusters=tuple(
                 replace(cluster, emissions=None) for cluster in messages.branch_clusters))
-            checkpoints.write(str(work), {
+            work_threads().save({
                 "identity": identity, "messages": saved_messages, "phase": phase,
                 "unchanged": stable_count, "checks": tuple(checks),
-            }, nthreads=(current_threads() if checkpoint_threads is None else checkpoint_threads))
+            })
             last_saved = time.perf_counter()
 
     def save_initial(messages):
@@ -186,20 +189,27 @@ stage repeats it exactly. It needs the scaffold polish, which it edits.
     return point, tuple(checks), converged, repair
 
 
+def work_name(attempt):
+    """Name of an attempt's transient iteration state (CheckpointStore.work)."""
+    return FINAL_PHASE_STAGE if attempt == 0 else f"{FINAL_PHASE_STAGE}.retry{attempt}"
+
+
 def refine_chromosome(painting_checkpoint, gl, positions, observed, relationships, sample_ids, *,
                       contig, config=model.FamilyRefinementConfig(), phase_config=None,
-                      identity=None, work_path=None, checkpoint_threads=1,
+                      identity=None, work_store=None, checkpoint_threads=1,
                       checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None,
                       refit_panel=None, founder_evidence_excluded=None, protected_intervals=None,
                       recorded_digests=None):
     """Refine frozen painting/pedigree; ``checkpoint_threads=None`` uses the live CPU lease.
 
+    ``work_store`` (a CheckpointStore) keeps each attempt's iteration state
+    for resume, under ``work_name(attempt)``; None disables it.
     ``refit_panel`` (the allele refit of this painting) supplies the scaffold
     founder alleles; without it the frozen assembly snapshot is decoded.
     ``founder_evidence_excluded`` loads the contig's sample-quality flags and
-    ``recorded_digests`` are the compact evidence cache's identities of these
-    arrays, both for the release-identity check only; every sample's evidence
-    is decoded.
+    ``recorded_digests`` are the release's recorded identities of these arrays
+    (core.products.evidence_checks), both for the release-identity check only;
+    every sample's evidence is decoded.
     ``protected_intervals`` (closed bp intervals, shape (n, 2)) are reference
     order breakpoints where no root frame repair is made.
     """
@@ -249,17 +259,14 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
                                  tolerance=config.tolerance * scale)
         product_identity = {**product_identity, "family": {
             **family_identity, "config": asdict(attempt_config)}}
-        attempt_path = None if work_path is None else Path(work_path)
-        if retry and attempt_path is not None:
-            stem = attempt_path.name.removesuffix(".p5.b2")
-            attempt_path = attempt_path.with_name(f"{stem}.retry{retry}.p5.b2")
+        work = None if work_store is None else work_store.work(contig, work_name(retry))
         record = {"attempt": retry, "damping": attempt_config.damping,
                   "tolerance": attempt_config.tolerance,
-                  "checkpoint": None if attempt_path is None else str(attempt_path)}
+                  "work_state": None if work is None else work_name(retry)}
         try:
             phase, checks, converged, repair = _fit_phase(
                 gl, observed, scaffold, positions, relationships, names, config=attempt_config,
-                phase_config=phase_config, identity=product_identity, work_path=attempt_path,
+                phase_config=phase_config, identity=product_identity, work=work,
                 checkpoint_threads=checkpoint_threads, checkpoint_min_seconds=checkpoint_min_seconds,
                 progress_callback=progress_callback, chromosome_map=chromosome_map,
                 frame_inputs=frame_inputs)
@@ -291,7 +298,7 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
     }
 
 
-def _summary(result, store, elapsed):
+def _summary(result, file, elapsed):
     phase = result["phase"].summary
     checks = result["phase_stability_checks"]
     repairs = result.get("root_frame_repairs") or {}
@@ -309,8 +316,7 @@ def _summary(result, store, elapsed):
         "known_genotypes_changed": phase["known_genotypes_changed"],
         "imputation_enabled": False, "posterior_and_recombination_products_included": False,
         "confidence_policy": result["confidence_policy"], "elapsed_seconds": elapsed,
-        "final_checkpoint": str(Path(checkpoints.contig_path(
-            store.root, FINAL_PHASE_STAGE, result["contig"])).resolve()),
+        "final_checkpoint": str(Path(file.path).resolve()),
         "root_frame_moves": len(repairs.get("moves", ())),
         "root_frame_reverts": len(repairs.get("reverts", ())),
         "root_frame_transfers": len(repairs.get("transfers", ())),
@@ -318,43 +324,37 @@ def _summary(result, store, elapsed):
 
 
 def _refine_contig(contig, state, phase_name, common):
-    """Own one chromosome's evidence, iteration checkpoints and final product."""
+    """Own one chromosome's evidence, iteration state and final product."""
     parallel.malloc_trim()
     started = time.perf_counter()
-    store = runtime.CheckpointStore(common["checkpoint_root"], nthreads=current_threads())
+    store = runtime.CheckpointStore(common["checkpoint_root"])
+    file = store.contig(contig)
     identity = common["identity"]
-    if store.contig_done(FINAL_PHASE_STAGE, contig):
-        result = store.load_contig(FINAL_PHASE_STAGE, contig, nthreads=current_threads())
+    if file.has(FINAL_PHASE_STAGE):
+        result = file.get(FINAL_PHASE_STAGE, nthreads=current_threads())
         if result["identity"]["family"]["external"] != identity:
             raise ValueError("Family phase final chromosome identity differs")
     else:
-        painting = store.load_contig(PAINTING_STAGE, contig, nthreads=current_threads())
-        refit = store.load_contig(painting_allele_refit.ALLELE_REFIT_STAGE, contig,
-                                  nthreads=current_threads())
-        store.nthreads = current_threads()
-        gl, pos, observed, gl_payload, sites_payload = pedigree_pipeline._load_raw_evidence(
-            store, contig, raw_gl_stage=common["raw_gl_stage"],
-            raw_sites_stage=common["raw_sites_stage"], raw_gl_key=common["raw_gl_key"],
-            raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
-        flags = pedigree_pipeline._founder_evidence_flags(
-            store, contig, sites_payload, raw_sites_stage=common["raw_sites_stage"])
-        digests = raw_evidence.recorded_digests(sites_payload)
-        del gl_payload, sites_payload
+        painting = file.get(PAINTING_STAGE, nthreads=current_threads())
+        refit = file.get(painting_allele_refit.ALLELE_REFIT_STAGE, nthreads=current_threads())
+        gl, pos, observed = products.load_evidence(file, nthreads=current_threads())
+        flags, digests = products.evidence_checks(file)
         maps = common["genetic_maps"]
         chromosome_map = None if maps is None else maps.for_contig(contig)
         protected = common["protected_intervals"]
         current_threads()
         result = refine_chromosome(
             painting, gl, pos, observed, common["relationships"], common["names"],
-            contig=contig, config=common["config"], identity=identity,
-            work_path=Path(store.stage_dir(FINAL_PHASE_STAGE)) / f"{contig}.iterations.p5.b2",
+            contig=contig, config=common["config"], identity=identity, work_store=store,
             checkpoint_threads=None, chromosome_map=chromosome_map, refit_panel=refit,
             founder_evidence_excluded=flags, recorded_digests=digests,
             protected_intervals=None if protected is None else protected.get(contig, ()))
-        checkpoints.write(checkpoints.contig_path(store.root, FINAL_PHASE_STAGE, contig),
-                          result, nthreads=current_threads())
+        file.put(FINAL_PHASE_STAGE, result, nthreads=current_threads())
         del painting, refit, gl, pos, observed
-    summary = _summary(result, store, time.perf_counter() - started)
+    # The released product supersedes every attempt's resume state.
+    for attempt in range(common["config"].phase_retry_count + 1):
+        store.work(contig, work_name(attempt)).clear()
+    summary = _summary(result, file, time.perf_counter() - started)
     print(f"[family phase {contig}] Stable final phase released; latent converged="
           f"{result['source_posterior_converged']}; threads={current_threads()}", flush=True)
     del result
@@ -363,59 +363,42 @@ def _refine_contig(contig, state, phase_name, common):
     return None, summary
 
 
-def _refinement_resources(store, contigs, workers, raw_gl_stage, raw_sites_stage):
+def _refinement_resources(store, contigs, workers):
     """Bound concurrent chromosome workspaces using decoded source sizes.
 
     Float64 GLs, four-state family messages, selector caches, polishing and
-    iteration checkpoints peaked at 7.7 compact-evidence sizes plus 3.2 GiB
-    for Python/JIT, plus up to 3.6 GiB of heap a worker retains from earlier
+    iteration state peaked at 7.7 decoded-evidence sizes plus 3.2 GiB for
+    Python/JIT, plus up to 3.6 GiB of heap a worker retains from earlier
     chromosomes (N = 320, independent of the thread count: 94 GiB for 11.2
     GiB of evidence, 19-38 GiB for 1.9-4.1 GiB). Nine evidence-sized copies,
     two painting copies and 5 GiB per process stay above every measured peak
-    by 12-21%. Prefer the compact evidence used by the downstream loader
-    rather than multiplying unused discovery workspaces. This is a scheduling
-    estimate, not an RSS guarantee. Already completed chromosomes need only a
-    decoded product and read buffers.
+    by 12-21%. This is a scheduling estimate, not an RSS guarantee. Already
+    completed chromosomes need only a decoded product and read buffers.
     """
-    sources = tuple(dict.fromkeys((raw_gl_stage, raw_sites_stage)))
-    resumed = {contig: store.contig_done(FINAL_PHASE_STAGE, contig) for contig in contigs}
-    compact = {contig: store.contig_done(raw_evidence.STAGE, contig) for contig in contigs}
-
-    def path(stage, contig):
-        return checkpoints.contig_path(store.root, stage, contig)
-
-    sizes = checkpoints.read_size_bytes_many(
-        path(stage, contig) for contig in contigs
-        for stage in ((FINAL_PHASE_STAGE,) if resumed[contig] else
-                      (*sources, *((raw_evidence.STAGE,) if compact[contig] else ()), PAINTING_STAGE)))
     estimates = []
     for contig in contigs:
-        if resumed[contig]:
-            estimate = 2 * sizes[path(FINAL_PHASE_STAGE, contig)]
+        file = store.contig(contig)
+        if file.has(FINAL_PHASE_STAGE):
+            estimate = 2 * file.info(FINAL_PHASE_STAGE).decoded_bytes
         else:
-            source_bytes = sum(sizes[path(stage, contig)] for stage in sources)
-            evidence_bytes = (sizes[path(raw_evidence.STAGE, contig)] if compact[contig]
-                              else source_bytes)
-            painting_bytes = sizes[path(PAINTING_STAGE, contig)]
-            # Also allow loading the original source if the compact cache is
-            # unavailable to the reader; it validates ordinary source changes.
-            estimate = max(source_bytes, 9 * evidence_bytes) + 2 * painting_bytes
+            estimate = (9 * file.info(products.EVIDENCE).decoded_bytes
+                        + 2 * file.info(PAINTING_STAGE).decoded_bytes)
         estimates.append(estimate + (5 << 30))
     return estimates, memory_worker_limit(
         estimates, workers, runtime.available_memory_bytes(), label="FAMILY PHASE")
 
 
 @timed_stage("family_phase")
-def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
-                   output_dir, raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
+def run_refinement(store, contigs, sample_ids, *, pedigree_payload, output_dir,
                    n_workers=None, config=None, genetic_maps=None, protected_intervals=None):
     """Run independent chromosomes with a shared, dynamically reassigned CPU budget.
 
     Only final phase is a release product. Work-in-progress messages and
-    consecutive phase checks live beside it as *.iterations.p5.b2, never as
-    completed contigs. ``protected_intervals`` ({contig: (n, 2) bp intervals},
-    or a breakpoint TSV path in BHD_FAMILY_PHASE_PROTECTED_INTERVALS) blocks
-    root frame repairs at reference-order breakpoints; default none.
+    consecutive phase checks are transient resume state (CheckpointStore.work),
+    removed once the chromosome's final phase is stored.
+    ``protected_intervals`` ({contig: (n, 2) bp intervals}, or a breakpoint
+    TSV path in BHD_FAMILY_PHASE_PROTECTED_INTERVALS) blocks root frame
+    repairs at reference-order breakpoints; default none.
     """
     if pedigree_payload is None:
         print("[family phase] Waiting for the complete genome-wide pedigree; no shard inference.")
@@ -434,51 +417,41 @@ def run_refinement(checkpoint_store, contigs, sample_ids, *, pedigree_payload,
             tuple(map(str, pedigree_payload["ordered_contigs"])) != contigs):
         raise ValueError("Family phase axes differ from the complete pedigree")
     relationships = pedigree_payload["tier_b_partial_relationships"]
-    source_files = []
-    for source in dict.fromkeys((PAINTING_STAGE, painting_allele_refit.ALLELE_REFIT_STAGE,
-                                 raw_gl_stage, raw_sites_stage)):
-        runtime.require_contig_checkpoints(checkpoint_store, source, contigs)
-        for contig in contigs:
-            path = Path(checkpoints.contig_path(checkpoint_store.root, source, contig)).resolve()
-            stat = path.stat()
-            source_files.append({"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
     identity = {
         "schema": conditioning.SCHEMA, "config": asdict(config),
         "phase_config": asdict(replace(CANONICAL_PHASE_CONFIG, recombination_rate=config.recombination_rate)),
-        "sample_ids": names, "contigs": contigs, "source_files": source_files,
+        "sample_ids": names, "contigs": contigs,
+        "source_records": products.record_identities(
+            store, (PAINTING_STAGE, painting_allele_refit.ALLELE_REFIT_STAGE, products.EVIDENCE), contigs),
         "pedigree_sha256": conditioning.relationship_identity(relationships),
         "code": conditioning.refinement_code_identity(),
-        "raw_gl_key": raw_gl_key,
         "recombination_maps": None if genetic_maps is None else {c: genetic_maps.identity(c) for c in contigs},
         "protected_intervals": None if protected_intervals is None else {
             c: np.asarray(protected_intervals.get(c, ()), dtype=np.int64).reshape((-1, 2)).tolist()
             for c in contigs},
     }
-    checkpoint_store.bind_stage_identity(FINAL_PHASE_STAGE, identity)
+    store.bind_identity(store.run, FINAL_PHASE_STAGE, identity)
     output = Path(output_dir) / "phase_correction"
     output.mkdir(parents=True, exist_ok=True)
-    if checkpoint_store.stage_complete(FINAL_PHASE_STAGE) and checkpoint_store.global_done(FINAL_PHASE_STAGE):
-        runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
-        saved = checkpoint_store.load_global(FINAL_PHASE_STAGE)
+    if store.stage_complete(FINAL_PHASE_STAGE) and store.run.has(FINAL_PHASE_STAGE):
+        runtime.require_records(store, FINAL_PHASE_STAGE, contigs)
+        saved = store.run.get(FINAL_PHASE_STAGE)
         if saved["identity"] != identity:
             raise ValueError("Family phase final summary identity differs")
         conditioning._write_summary_table(output, FINAL_PHASE_STAGE, saved["summaries"])
         print("[family phase] Resumed complete final phase output from its compact summary.")
         return saved["summaries"]
-    weights, process_limit = _refinement_resources(
-        checkpoint_store, contigs, workers, raw_gl_stage, raw_sites_stage)
-    common = dict(checkpoint_root=checkpoint_store.root, identity=identity,
+    weights, process_limit = _refinement_resources(store, contigs, workers)
+    common = dict(checkpoint_root=store.root, identity=identity,
                   names=names, relationships=relationships, config=config,
-                  raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-                  raw_gl_key=raw_gl_key, genetic_maps=genetic_maps,
-                  protected_intervals=protected_intervals)
+                  genetic_maps=genetic_maps, protected_intervals=protected_intervals)
     with ChromosomeExecutor(contigs, _refine_contig, n_workers=workers,
                             weights=weights, max_workers=process_limit,
                             label="FAMILY PHASE") as executor:
         summaries = executor.run("refine", common)
-    runtime.require_contig_checkpoints(checkpoint_store, FINAL_PHASE_STAGE, contigs)
-    checkpoint_store.save_global(FINAL_PHASE_STAGE, {"identity": identity, "summaries": summaries})
+    runtime.require_records(store, FINAL_PHASE_STAGE, contigs)
+    store.run.put(FINAL_PHASE_STAGE, {"identity": identity, "summaries": summaries})
     conditioning._write_summary_table(output, FINAL_PHASE_STAGE, summaries)
-    checkpoint_store.mark_stage_complete(FINAL_PHASE_STAGE)
+    store.mark_stage_complete(FINAL_PHASE_STAGE)
     print(f"[COMPLETE] Final phase ready for recombination maps: {output / (FINAL_PHASE_STAGE + '.csv')}")
     return summaries

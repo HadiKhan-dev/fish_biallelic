@@ -974,8 +974,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                           min_boundary_informative_samples=1,
                           chromosome_map=None,
                           panel_search_config=None, scoring_probs=None,
-                          batch_queue_key=None, code_identity=None, reusable=None,
-                          batch_provenance=None):
+                          batch_queue_key=None, code_identity=None, checkpoints=None,
+                          batches=None):
     """Performs one level of Hierarchical Assembly.
 
     Memory strategy:
@@ -1017,12 +1017,16 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
           in both adjacent frozen inference panels.
       code_identity: the assembly code identity (pipeline.assembly_release_code_identity).
           With it every joined batch (two or more blocks, some informative sample) gets
-          the digest of its exact inputs (_batch_input_digest), and batch_provenance (a
-          list) receives one record per such super-block: its position span, digest and
-          whether it was reused.
-      reusable: {input digest: super-block} of joins by earlier assemblies of this
-          contig (pipeline.earlier_join_results). A batch whose digest is found there
-          is not recomputed: joins are deterministic, so its super-block is identical.
+          the digest of its exact inputs (_batch_input_digest).
+      checkpoints: this level's records (assembly.checkpoints.AssemblyCheckpoints scoped
+          to the level): its plan, [first input, end input, digest or None] per batch, is
+          recorded before any batch runs; a batch whose digest some assembly of the contig
+          already joined reuses that join record (joins are deterministic, so its
+          super-block is identical); every other joined batch is recorded by this
+          (coordinating) process as it completes, also from the batch queue.
+          Pass-through batches have no digest and are not recorded here.
+      batches: a list that receives, per batch in order, (digest or None, its output
+          blocks), for the caller's level manifest.
 
     IMPORTANT: The entry script must NOT be named main.py — otherwise
     forkserver workers will re-execute it.
@@ -1126,11 +1130,26 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         digests = {b_idx: _batch_input_digest(
             context, input_blocks[batch_ranges[b_idx][0]:batch_ranges[b_idx][1]],
             batch_masks[b_idx], value) for b_idx, value in zip(joined, evidence)}
-    reused = {b_idx: reusable[digest] for b_idx, digest in digests.items()
-              if reusable and digest in reusable}
+    reused = {}
+    if checkpoints is not None:
+        if not checkpoints.has("plan"):
+            checkpoints.save("plan", {"batches": [
+                [start_i, end_i, digests.get(b_idx)]
+                for b_idx, (start_i, end_i) in enumerate(batch_ranges)]})
+        recorded = checkpoints.joins(digests.values())
+        reused = {b_idx: recorded[digest]["super_block"] for b_idx, digest in digests.items()
+                  if digest in recorded}
     if reused:
-        print(f"  Reused {len(reused)} of {num_batches} batches with inputs identical to an "
-              f"earlier assembly's join")
+        print(f"  Reused {len(reused)} of {num_batches} batches already joined with "
+              f"identical inputs")
+
+    def record(result):
+        """Record a completed join (the coordinating process, as results arrive)."""
+        digest = digests.get(result['batch_idx'])
+        if checkpoints is not None and digest is not None and result['status'] == 'success':
+            checkpoints.save_join(digest, {'status': result['status'],
+                                           'super_block': result['super_block']})
+        return result
 
     def make_worker_args(inner_num_processes):
         worker_args = []
@@ -1153,16 +1172,8 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
         results = list(results) + [
             {'batch_idx': b_idx, 'super_block': block, 'status': 'reused'}
             for b_idx, block in reused.items()]
-        if batch_provenance is not None:
-            joined_blocks = {result['batch_idx']: result.get('super_block') for result in results
-                             if result['status'] in ('success', 'reused')}
-            for b_idx, digest in digests.items():
-                if joined_blocks.get(b_idx) is not None:
-                    start_i, end_i = batch_ranges[b_idx]
-                    batch_provenance.append(dict(
-                        position_start=int(input_blocks[start_i].positions[0]),
-                        position_end=int(input_blocks[end_i - 1].positions[-1]),
-                        inputs_sha256=digest, reused=b_idx in reused))
+        if batches is not None:
+            batches.extend(_batch_outputs(results, digests, num_batches))
         return _collect_batch_results(results)
 
     pending_ranges = [batch_range for b_idx, batch_range in enumerate(batch_ranges)
@@ -1179,9 +1190,9 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             # Queue results are keyed by bundle number: a different task subset is another stage.
             batch_queue_key = hashlib.sha256(json.dumps(
                 [batch_queue_key, sorted(reused)]).encode()).hexdigest()
-        results = list(batch_queue.map_batches('hierarchy', make_worker_args(1),
-            (global_probs, global_sites), total_cores, key=batch_queue_key,
-            worker_memory_gb=worker_gb))
+        results = [record(result) for result in batch_queue.map_batches(
+            'hierarchy', make_worker_args(1), (global_probs, global_sites), total_cores,
+            key=batch_queue_key, worker_memory_gb=worker_gb)]
         return finish(results)
 
     # Create POSIX shared memory for the global arrays.
@@ -1294,7 +1305,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
                         total=num_tasks,
                         desc="Processing Batches"
                     ):
-                        results.append(result)
+                        results.append(record(result))
                     pool.close()
                 except (KeyboardInterrupt, SystemExit, Exception) as e:
                     pool.terminate()
@@ -1315,7 +1326,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             core_parallel.set_dynamic_thread_state(total_cores, None, None)
             results = []
             for args in tqdm(worker_args, desc="Processing Batches"):
-                results.append(_process_single_batch(args))
+                results.append(record(_process_single_batch(args)))
     finally:
         try:
             # Clean up shared memory (always, even on error)
@@ -1324,6 +1335,24 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
             _main_guard.__exit__(None, None, None)
 
     return finish(results)
+
+
+def _batch_outputs(results, digests, num_batches):
+    """Per batch in order: (the digest of its join record, or None when its output is
+    kept inline: pass-through, unresolved or failed batches; its output blocks)."""
+    by_batch = {result['batch_idx']: result for result in results}
+    outputs = []
+    for b_idx in range(num_batches):
+        result = by_batch.get(b_idx, {})
+        if result.get('unresolved_components') is not None:
+            outputs.append((None, tuple(result['unresolved_components'])))
+        elif result.get('super_block') is None:
+            outputs.append((None, ()))
+        elif result['status'] in ('success', 'reused'):
+            outputs.append((digests.get(b_idx), (result['super_block'],)))
+        else:
+            outputs.append((None, (result['super_block'],)))
+    return outputs
 
 
 def _collect_batch_results(results):

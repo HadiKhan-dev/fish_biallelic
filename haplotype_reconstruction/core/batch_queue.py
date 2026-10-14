@@ -1,11 +1,11 @@
 """Opt-in shared-filesystem queue for independent scientific batch bundles.
 
-Only the chromosome coordinator publishes ordinary pipeline checkpoints. Helpers
+Only the chromosome coordinator records results in the checkpoint store. Helpers
 return immutable results under attempt-specific names; a renewable claim fences
 late writers after a worker interruption. No scheduler submission happens here.
 
 Lifecycle: map_batches publishes inputs -> serve_one claims and executes a
-bundle -> the coordinator gathers results and publishes scientific checkpoints.
+bundle -> the coordinator gathers results and records them as checkpoint records.
 batch_tasks owns array transport and the stage-specific callback adapters.
 A stage is active or stopped; its bundles are ready, running, done or failed.
 Only the current claim token may publish a bundle's terminal result.
@@ -54,11 +54,16 @@ def source_identity():
     return digest.hexdigest()
 
 
-def checkpoint_key(store, phase):
-    """Reuse queue results only under an existing exact scientific identity."""
-    if store is None or not hasattr(store, '_identity_json'):
+def checkpoint_key(checkpoints, phase):
+    """Stage key of one phase of a bound checkpoint section, or None without one.
+
+    ``checkpoints`` (assembly.checkpoints.AssemblyCheckpoints) carries its
+    contig file, key prefix and bound identity: queue results are reused only
+    under that exact scientific identity.
+    """
+    if checkpoints is None or checkpoints.identity is None:
         return None
-    value = (store._identity_json, store.work_stage, store.contig, phase)
+    value = (checkpoints.identity, checkpoints.file.name, checkpoints.prefix, phase)
     return hashlib.sha256(json.dumps(value).encode()).hexdigest()
 
 
@@ -212,9 +217,9 @@ def map_batches(kind, tasks, arrays, cores, *, key=None, worker_memory_gb=4.):
     observation masks, positions, model parameters and result IDs are preserved.
 
     ``key`` names a stage that a later attempt can resume: its consumed results
-    stay until the stage completes, because the caller checkpoints them only
-    afterwards, and bundles that failed in an earlier attempt are published
-    afresh. A failure within this attempt still stops it. Without a key no
+    stay until the stage completes, because the caller may record them only
+    later (path selection records 64 blocks at a time), and bundles that failed
+    in an earlier attempt are published afresh. A failure within this attempt still stops it. Without a key no
     other attempt can find the stage: results go once consumed, and a stopped
     stage at once; helpers still running its bundles then find their claims gone.
     """

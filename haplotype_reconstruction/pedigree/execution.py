@@ -7,12 +7,10 @@ worker until the common candidate panel arrives for M2 scoring.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from pathlib import Path
 import time
 
 import numpy as np
 
-from ..core import checkpoints as core_checkpoints
 from ..core import runtime
 from ..core import chromosome_parallel as scheduling
 from . import components, eligibility
@@ -24,17 +22,19 @@ class StoredChromosome:
     contig: str
     sample_ids: tuple[str, ...]
     preparation_identity: dict
-    painting_stage: str
-    preparation_stage: str
+    painting_key: str
+    preparation_key: str
+
+    def file(self):
+        return runtime.CheckpointStore(self.root).contig(self.contig)
 
     def load(self):
         from . import pipeline
 
-        store = runtime.CheckpointStore(self.root, nthreads=scheduling.current_threads())
-        painting = store.load_contig(self.painting_stage, self.contig)
-        store.nthreads = scheduling.current_threads()
+        file = self.file()
+        painting = file.get(self.painting_key, nthreads=scheduling.current_threads())
         checkpoint = pipeline._validate_prepared_checkpoint(
-            store.load_contig(self.preparation_stage, self.contig),
+            file.get(self.preparation_key, nthreads=scheduling.current_threads()),
             expected_contig=self.contig, expected_sample_ids=self.sample_ids,
             expected_preparation_identity=self.preparation_identity,
             expected_painting=painting)
@@ -42,8 +42,7 @@ class StoredChromosome:
 
     @property
     def weight(self):
-        from ..core.checkpoints import contig_path
-        return Path(contig_path(self.root, self.preparation_stage, self.contig)).stat().st_size
+        return self.file().info(self.preparation_key).stored_bytes
 
 
 @dataclass(frozen=True)
@@ -64,13 +63,6 @@ class ScreenSummary:
     checkpoint_source_identity: str | None
 
 
-def decoded_sizes(root, stage_contigs):
-    """{(stage, contig): decoded checkpoint bytes}, scanned concurrently."""
-    paths = {key: core_checkpoints.contig_path(root, *key) for key in stage_contigs}
-    sizes = core_checkpoints.read_size_bytes_many(paths.values())
-    return {key: sizes[path] for key, path in paths.items()}
-
-
 def scoring_memory_estimates(tasks):
     """Peak bytes per scoring worker: loaded painting, 4 x prepared chromosome, 2 GiB.
 
@@ -80,15 +72,12 @@ def scoring_memory_estimates(tasks):
     K = 30 audit benchmark (b7, N 116, chr7 scale). A screened chromosome keeps
     them until its score phase, so concurrent workers hold them together.
     """
-    path = core_checkpoints.contig_path
-    sizes = core_checkpoints.read_size_bytes_many(
-        path(task.root, stage, task.contig) for task in tasks if isinstance(task, StoredChromosome)
-        for stage in (task.painting_stage, task.preparation_stage))
     estimates = []
     for task in tasks:
         if isinstance(task, StoredChromosome):
-            painting = sizes[path(task.root, task.painting_stage, task.contig)]
-            prepared = sizes[path(task.root, task.preparation_stage, task.contig)]
+            file = task.file()
+            painting = file.info(task.painting_key).decoded_bytes
+            prepared = file.info(task.preparation_key).decoded_bytes
         else:
             painting = 0
             prepared = sum(component.ragged_source_factors.right_weight.nbytes

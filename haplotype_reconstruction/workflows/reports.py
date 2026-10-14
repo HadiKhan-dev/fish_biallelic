@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ..discovery import checkpoints as discovery_checkpoints
+
 GENOTYPE_CONFIDENCE = 0.85
 MATCH_THRESHOLD_PCT = 2.0
 MIN_CONF_SITES = 10
@@ -212,28 +214,27 @@ def validate_block_list_against_g0(blocks, g0_probs, g0_sites,
     return rows
 
 
-def write_reference_comparison(
-    store, contigs, output_dir, *, include_reference_samples,
-    source_stage="block_discovery",
-):
-    """Read each block discovery chromosome once and export G0 consistency metrics."""
+def write_reference_comparison(store, contigs, output_dir, *, include_reference_samples):
+    """Read each chromosome's discovery records once and export G0 consistency metrics."""
     kind = ("non-independent; references included in discovery"
             if include_reference_samples else "held-out reference comparison")
     print(f"G0 genotype consistency ({kind}); not founder or pedigree truth")
     rows = []
     for contig in contigs:
-        if not store.contig_done(source_stage, contig):
+        file = store.contig(contig)
+        if not discovery_checkpoints.complete(file):
             print(f"  [skip] {contig}: no discovery checkpoint")
             continue
-        payload = store.load_contig(source_stage, contig)
+        references = file.get(discovery_checkpoints.PREPARED,
+                              items=("g0_probs", "global_sites", "g0_sample_names"))
         current = validate_block_list_against_g0(
-            payload["block_results"], payload["g0_probs"], payload["global_sites"],
-            payload["g0_sample_names"], "block_discovery", contig,
-            include_reference_samples=include_reference_samples,
+            discovery_checkpoints.load_blocks(file, probs=False), references["g0_probs"],
+            references["global_sites"], references["g0_sample_names"], "block_discovery",
+            contig, include_reference_samples=include_reference_samples,
         )
         rows.extend(current)
         print(f"  {contig}: {len(current)} blocks compared")
-        del payload
+        del references
     if not rows:
         print("  No reference-comparison rows available.")
         return

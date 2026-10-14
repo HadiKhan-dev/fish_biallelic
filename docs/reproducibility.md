@@ -80,8 +80,8 @@ Generate the complete biological pedigree before selecting observed samples.
 Unobserved individuals are removed from reads and all inference inputs; their
 names remain in evaluation truth. M0/M1/M2 therefore mean zero/one/two
 **observed** biological parents. Cohort labels never supply inference eligibility.
-The global simulation checkpoint retains both the generated pedigree and the
-observed truth table.
+The run's simulation record (`simulation/global` in `run.ckpt`) retains both
+the generated pedigree and the observed truth table.
 
 Random observation selection uses a separate seeded stream. Backcross options
 explicitly change the pedigree-generating stream. With all new options at their
@@ -133,12 +133,11 @@ Explicitly requested products must exist.
 and numerical kernels. Memory estimates can limit the number of concurrent
 chromosomes while leaving all requested cores available to active workers.
 
-New simulations write compact, evaluation-only truth checkpoints under
-`evaluation_truth/` alongside the other stages. For older simulations,
-evaluation derives them once under `OUTPUT/evaluation/truth_cache/`, without
-rewriting the source checkpoints. Reusing the same report directory avoids
-reloading unused read/likelihood arrays. The cache is tied to source-file
-identities and sample order; it never supplies inference inputs.
+A simulation stores each chromosome's truth (founder haplotypes, painting,
+alleles and crossovers) once, as the `simulation/truth` record of the
+chromosome's checkpoint file. Evaluation reads that record and the products it
+compares, never the simulated reads or genotype likelihoods, and checks its
+sample order; inference never reads it.
 
 Reports are written under `OUTPUT/evaluation/`:
 

@@ -1152,7 +1152,10 @@ def simulated_genomic_data(sites, reads, snps_per_block, snp_shift):
 # 1 GiB per worker for the process and checkpoint buffers.
 POSTPROCESSING_BYTES_PER_INDIVIDUAL_SITE = 48
 
-# (shared individual-site total of the contigs not yet checkpointed, CPU
+# Contig record of a contig's simulated reads (its truth: simulation.truth.TRUTH).
+READS = "simulation/reads"
+
+# (shared individual-site total of the contigs not yet recorded, CPU
 # budget), set once per worker process.
 _POSTPROCESSING_STATE = None
 
@@ -1167,14 +1170,13 @@ def _contig_size(task):
 
 
 def checkpoint_simulated_contig(task):
-    """Forkserver worker: simulate one contig and write its checkpoints.
+    """Forkserver worker: simulate one contig and record it in its contig file.
 
-    Compression work is proportional to contig size, so the checkpoint gets
-    the contig's share of the CPU budget by size among the contigs not yet
-    checkpointed: early small contigs take a few threads and the last,
-    largest one nearly all. The read checkpoint is durable before the compact
-    evaluation truth that is bound to its file identity. Returns only a
-    small timing record.
+    Compression work is proportional to contig size, so the records get the
+    contig's share of the CPU budget by size among the contigs not yet
+    recorded: early small contigs take a few threads and the last, largest
+    one nearly all. The truth record precedes the reads record, whose
+    presence marks the contig simulated. Returns only a small timing record.
     """
     unsaved_size, cpu_budget = _POSTPROCESSING_STATE
     size = _contig_size(task)
@@ -1199,12 +1201,10 @@ def checkpoint_simulated_contig(task):
     simulated = time.monotonic()
     with unsaved_size.get_lock():
         threads = max(1, round(cpu_budget * size / max(size, unsaved_size.value)))
-    store = core_runtime.CheckpointStore(task['root'], nthreads=threads)
-    store.save_contig(task['stage'], task['contig'], payload)
-    if not store.contig_done(task['stage'], task['contig']):
-        raise OSError(f"Failed to checkpoint {task['stage']}/{task['contig']}")
-    simulation_truth.save_truth(
-        store, task['contig'], task['sample_names'], task['sites'], payload)
+    file = core_runtime.CheckpointStore(task['root'], nthreads=threads).contig(task['contig'])
+    if not file.has(simulation_truth.TRUTH):
+        simulation_truth.save_truth(file, task['sample_names'], task['sites'], payload)
+    file.put(READS, {'simulated_reads': payload['simulated_reads']})
     with unsaved_size.get_lock():
         unsaved_size.value -= size
     return dict(
@@ -1217,13 +1217,13 @@ def checkpoint_simulated_contig(task):
 
 
 def checkpoint_simulated_contigs(tasks, *, cpu_budget):
-    """Simulate and checkpoint contigs in parallel forkserver workers.
+    """Simulate and record contigs in parallel forkserver workers.
 
     The largest contigs start first. The worker count is bounded by the CPU
     budget and by the estimated peak memory of the largest concurrent
-    contigs; each contig runs in a fresh process and compresses its checkpoint
-    on its size share of the budget among the contigs not yet saved. Returns
-    one small timing record per contig.
+    contigs; each contig runs in a fresh process and compresses its records
+    on its size share of the budget among the contigs not yet recorded.
+    Returns one small timing record per contig.
     """
     if not tasks:
         return []

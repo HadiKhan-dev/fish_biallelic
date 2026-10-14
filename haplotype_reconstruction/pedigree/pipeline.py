@@ -16,6 +16,7 @@ import numpy as np
 import haplotype_reconstruction.painting.checkpoints as painting_checkpoints
 from . import execution as pedigree_execution
 from ..core import chromosome_parallel as pedigree_scheduling
+from ..core import products
 from . import cache as pedigree_cache
 from . import calibration as pedigree_calibration
 from . import exclusion as pedigree_exclusion
@@ -37,8 +38,7 @@ PEDIGREE_GLOBAL_SCHEMA = "pedigree_scoring-component-pedigree-result-v5"
 PEDIGREE_GLOBAL_BACKEND = "component-local-parent-state-combined-v4"
 
 
-EVIDENCE_STAGE = "pedigree_evidence"
-PEDIGREE_STAGE = "pedigree"
+PAINTING = workflows_reconstruction.PAINTING_STAGE
 
 
 PEDIGREE_INFERENCE_CODE_FILES = (
@@ -69,7 +69,6 @@ PEDIGREE_INFERENCE_CODE_FILES = (
     'painting/model.py',
     'painting/evidence.py',
     'core/genetic_map.py',
-    'core/raw_evidence.py',
     'pedigree/results.py',
     'pedigree/release.py',
     'pedigree/exclusion.py',
@@ -242,17 +241,14 @@ def pedigree_preparation_identity(
         *,
         sample_ids,
         contigs,
-        painting_stage,
-        raw_gl_stage,
-        raw_sites_stage,
-        raw_gl_key,
-        raw_sites_key,
-        raw_observed_mask_key,
         parent_eligibility_identity,
-        code_digest_overrides=None,
-        source_files=None,
+        source_records=None,
 ) -> dict[str, Any]:
-    """Return the common pedigree preparation identity, excluding runtime scheduling."""
+    """Return the common pedigree preparation identity, excluding runtime scheduling.
+
+    ``source_records`` are the identities of the painting and evidence records
+    of every chromosome (core.products.record_identities).
+    """
 
     if not isinstance(preparation_config, EvidenceConfig):
         raise TypeError("preparation_config must be EvidenceConfig")
@@ -277,17 +273,13 @@ def pedigree_preparation_identity(
         "ordered_sample_ids": _canonical_sample_ids(sample_ids),
         "ordered_contigs": _canonical_contigs(contigs, "contigs"),
         "source": {
-            "painting_stage": str(painting_stage),
+            "painting": PAINTING,
             "painting_schema": painting_checkpoints.PAINTING_COMPONENT_CHECKPOINT_SCHEMA,
-            "raw_gl_stage": str(raw_gl_stage),
-            "raw_sites_stage": str(raw_sites_stage),
-            "raw_gl_key": str(raw_gl_key),
-            "raw_sites_key": str(raw_sites_key),
-            "raw_observed_mask_key": str(raw_observed_mask_key),
+            "evidence": products.EVIDENCE,
             "genotype_evidence_mode": workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
             "observed_mask_mode": workflows_reconstruction.EXACT_OBSERVED_MASK_MODE,
         },
-        "source_files": source_files,
+        "source_records": source_records,
         "preparation_code_identity": pedigree_cache.preparation_code_identity(),
     }, "pedigree preparation identity")
 
@@ -306,84 +298,6 @@ def pedigree_global_identity(preparation_identity, settings, eligibility_identit
         "parent_eligibility_identity": eligibility_identity,
         "decision_code_identity": pedigree_inference_code_identity(),
     }, "pedigree global identity")
-
-
-def _validate_source_modes(payload, stage, contig) -> None:
-    if payload.get("genotype_evidence_mode") != workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE:
-        raise RuntimeError(
-            f"{stage}/{contig} lacks normalized raw-likelihood provenance"
-        )
-    if payload.get("observed_call_mask_mode") != workflows_reconstruction.EXACT_OBSERVED_MASK_MODE:
-        raise RuntimeError(
-            f"{stage}/{contig} lacks exact observation-mask provenance"
-        )
-
-
-def _load_raw_evidence(
-        checkpoint_store,
-        contig,
-        *,
-        raw_gl_stage,
-        raw_sites_stage,
-        raw_gl_key,
-        raw_sites_key,
-        raw_observed_mask_key,
-):
-    cached = raw_evidence.load(
-        checkpoint_store, contig, raw_gl_stage=raw_gl_stage,
-        raw_sites_stage=raw_sites_stage, raw_gl_key=raw_gl_key,
-        raw_sites_key=raw_sites_key, raw_observed_mask_key=raw_observed_mask_key)
-    if cached is not None:
-        _validate_source_modes(cached, raw_evidence.STAGE, contig)
-        return (cached["global_probs"], cached["global_sites"],
-                cached["global_observed_mask"], cached, cached)
-    sites_payload = checkpoint_store.load_contig(raw_sites_stage, contig)
-    gl_payload = None
-    try:
-        _validate_source_modes(sites_payload, raw_sites_stage, contig)
-        if raw_gl_stage == raw_sites_stage:
-            gl_payload = sites_payload
-        else:
-            gl_payload = checkpoint_store.load_contig(raw_gl_stage, contig)
-        for payload, key, stage in (
-            (gl_payload, raw_gl_key, raw_gl_stage),
-            (sites_payload, raw_sites_key, raw_sites_stage),
-            (sites_payload, raw_observed_mask_key, raw_sites_stage),
-        ):
-            if key not in payload:
-                raise KeyError(f"{stage}/{contig} lacks {key!r}")
-        return (
-            gl_payload[raw_gl_key],
-            sites_payload[raw_sites_key],
-            sites_payload[raw_observed_mask_key],
-            gl_payload,
-            sites_payload,
-        )
-    except Exception:
-        del gl_payload, sites_payload
-        raise
-
-
-def _founder_evidence_flags(checkpoint_store, contig, sites_payload, *, raw_sites_stage):
-    """Loader of the contig's sample-quality flags for the release-identity check.
-
-    Block discovery stores them as ``founder_evidence_excluded`` when the QC
-    ran (core/sample_quality.py); see
-    ``pedigree_components._validate_release_array_identity``. A raw sites
-    payload from ``_load_raw_evidence`` answers directly; the compact
-    raw-evidence cache does not carry the flags, so its loader reads the raw
-    sites stage, and only if the check needs them.
-    """
-
-    def copied(payload):
-        flags = payload.get("founder_evidence_excluded")
-        # A small copy, so the payload's decoded buffers can be released.
-        return None if flags is None else np.array(flags, dtype=np.bool_)
-
-    if sites_payload.get("schema") != raw_evidence.SCHEMA:
-        flags = copied(sites_payload)
-        return lambda: flags
-    return lambda: copied(checkpoint_store.load_contig(raw_sites_stage, contig))
 
 
 def _validate_ragged_component(
@@ -754,29 +668,23 @@ def _serialize_projected_scoring_diagnostics(diagnostics) -> dict[str, Any]:
 
 
 def _prepare_one_contig(
-        checkpoint_store,
+        store,
         contig,
         sample_ids,
         preparation_identity,
         preparation_config,
         pedigree_config,
         *,
-        painting_stage,
-        raw_gl_stage,
-        raw_sites_stage,
-        raw_gl_key,
-        raw_sites_key,
-        raw_observed_mask_key,
-        target_stage,
+        target_key,
 ) -> PedigreeContigSummary:
-    checkpoint_store.nthreads = pedigree_scheduling.current_threads()
+    file = store.contig(contig)
     painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(
-        checkpoint_store.load_contig(painting_stage, contig),
+        file.get(PAINTING, nthreads=pedigree_scheduling.current_threads()),
         expected_sample_ids=sample_ids,
     )
-    if checkpoint_store.contig_done(target_stage, contig):
+    if file.has(target_key):
         checkpoint = _validate_prepared_checkpoint(
-            checkpoint_store.load_contig(target_stage, contig),
+            file.get(target_key, nthreads=pedigree_scheduling.current_threads()),
             expected_contig=contig,
             expected_sample_ids=sample_ids,
             expected_preparation_identity=preparation_identity,
@@ -788,20 +696,11 @@ def _prepare_one_contig(
             prepared.omitted_reason,
         )
 
-    raw_gl = raw_sites = raw_observed = gl_payload = sites_payload = None
+    raw_gl = raw_sites = raw_observed = None
     try:
-        checkpoint_store.nthreads = pedigree_scheduling.current_threads()
-        raw_gl, raw_sites, raw_observed, gl_payload, sites_payload = (
-            _load_raw_evidence(
-                checkpoint_store,
-                contig,
-                raw_gl_stage=raw_gl_stage,
-                raw_sites_stage=raw_sites_stage,
-                raw_gl_key=raw_gl_key,
-                raw_sites_key=raw_sites_key,
-                raw_observed_mask_key=raw_observed_mask_key,
-            )
-        )
+        raw_gl, raw_sites, raw_observed = products.load_evidence(
+            file, nthreads=pedigree_scheduling.current_threads())
+        founder_evidence_excluded, recorded_digests = products.evidence_checks(file)
         pedigree_scheduling.current_threads()
         prepared = pedigree_components.prepare_painted_chromosome_components(
             painting_checkpoint,
@@ -823,10 +722,8 @@ def _prepare_one_contig(
             candidate_source_mode=(
                 pedigree_config.parent_state_candidate_source_mode
             ),
-            founder_evidence_excluded=_founder_evidence_flags(
-                checkpoint_store, contig, sites_payload,
-                raw_sites_stage=raw_sites_stage),
-            recorded_digests=raw_evidence.recorded_digests(sites_payload),
+            founder_evidence_excluded=founder_evidence_excluded,
+            recorded_digests=recorded_digests,
         )
         checkpoint = PedigreeEvidenceCheckpoint(
             schema=PEDIGREE_PREPARATION_SCHEMA,
@@ -842,13 +739,11 @@ def _prepare_one_contig(
         _validate_prepared_checkpoint(
             checkpoint, expected_contig=contig, expected_sample_ids=sample_ids,
             expected_preparation_identity=preparation_identity, expected_painting=painting_checkpoint)
-        # Atomic checkpoint I/O already propagates write failures. Validate
-        # this exact object before writing; global inference validates the
-        # persisted copy on load, without an immediate duplicate disk read.
-        checkpoint_store.nthreads = pedigree_scheduling.current_threads()
-        checkpoint_store.save_contig(target_stage, contig, checkpoint)
+        # Validate this exact object before writing; global inference
+        # validates the stored record on load, without an immediate re-read.
+        file.put(target_key, checkpoint, nthreads=pedigree_scheduling.current_threads())
     finally:
-        del raw_gl, raw_sites, raw_observed, gl_payload, sites_payload, painting_checkpoint
+        del raw_gl, raw_sites, raw_observed, painting_checkpoint
         gc.collect()
         core_parallel.malloc_trim()
 
@@ -859,13 +754,15 @@ def _prepare_one_contig(
     )
 
 
-def _painted_state_bytes(root, painting_stage, contig, n_samples):
+def _painted_state_bytes(output_dir, contig, n_samples):
     """Upper bound of the 8 N B S^2 bytes of one painted chromosome, or None.
 
-    Reads the painting stage's founder-support report: per component, its
-    founders (S <= founders + BACKGROUND) and markers (B <= markers / bin + 1).
+    Reads the painting's founder-support report: per component, its founders
+    (S <= founders + BACKGROUND) and markers (B <= markers / bin + 1).
     """
-    path = Path(root) / painting_stage / "reports" / contig / "founder_support.tsv"
+    if output_dir is None:
+        return None
+    path = workflows_reconstruction.painting_reports(output_dir, contig) / "founder_support.tsv"
     try:
         header, *rows = path.read_text().splitlines()
     except OSError:
@@ -882,25 +779,24 @@ def _painted_state_bytes(root, painting_stage, contig, n_samples):
                for key, count in founders.items())
 
 
-def preparation_memory_estimates(root, contigs, painting_stage, raw_stages, n_samples):
+def preparation_memory_estimates(store, contigs, n_samples, output_dir=None):
     """Peak bytes per preparation worker: raw evidence, painting, 3 x 8 N B S^2, 2 GiB.
 
     A worker decodes its raw evidence and painting, then builds the source
     emissions and factors (N B S^2 doubles each) with working space of about
     one more such array: 2.6-2.9 of them above the inputs at K = 30, N = 116
-    and 500 (chr7 scale, production kernels). Without the painting's
-    founder-support report, each is bounded by twice the decoded painting, which
-    holds while the painting caches its symmetric emissions (at most 1 GiB per
-    chromosome).
+    and 500 (chr7 scale, production kernels). The raw-evidence allowance is
+    the decoded discovery product (discovery.checkpoints.decoded_bytes).
+    Without the painting's founder-support report, each is bounded by twice
+    the decoded painting, which holds while the painting caches its symmetric
+    emissions (at most 1 GiB per chromosome).
     """
-    raw_stages = tuple(dict.fromkeys(raw_stages))
-    sizes = pedigree_execution.decoded_sizes(
-        root, [(stage, contig) for contig in contigs for stage in (*raw_stages, painting_stage)])
     estimates = []
     for contig in contigs:
-        raw = sum(sizes[stage, contig] for stage in raw_stages)
-        painting = sizes[painting_stage, contig]
-        states = _painted_state_bytes(root, painting_stage, contig, n_samples)
+        file = store.contig(contig)
+        raw = discovery_checkpoints.decoded_bytes(file)
+        painting = file.info(PAINTING).decoded_bytes
+        states = _painted_state_bytes(output_dir, contig, n_samples)
         states = 2 * painting if states is None else states
         estimates.append(raw * 5 // 4 + painting + 3 * states + (2 << 30))
     return estimates
@@ -908,25 +804,23 @@ def preparation_memory_estimates(root, contigs, painting_stage, raw_stages, n_sa
 
 @timed_stage("pedigree_evidence")
 def prepare_pedigree_contigs(
-        checkpoint_store,
+        store,
         contigs,
         sample_ids,
         *,
         pedigree_config,
         parent_eligibility=None,
         preparation_config=EvidenceConfig(),
-        painting_stage=workflows_reconstruction.PAINTING_STAGE,
-        raw_gl_stage,
-        raw_sites_stage,
-        raw_gl_key="global_probs",
-        raw_sites_key="global_sites",
-        raw_observed_mask_key="global_observed_mask",
         all_contigs=None,
         publish_completion=True,
-        target_stage=EVIDENCE_STAGE,
+        output_dir=None,
         n_workers=None,
 ) -> tuple[PedigreeContigSummary, ...]:
-    """Prepare requested pedigree preparation contigs; shards never publish full completion."""
+    """Prepare requested pedigree preparation contigs; shards never publish full completion.
+
+    ``output_dir`` (the run output directory) locates the painting's
+    founder-support reports, used only to plan worker memory.
+    """
 
     if not isinstance(preparation_config, EvidenceConfig):
         raise TypeError("preparation_config must be EvidenceConfig")
@@ -956,71 +850,42 @@ def prepare_pedigree_contigs(
         settings,
         sample_ids=ordered_ids,
         contigs=all_ordered,
-        painting_stage=painting_stage,
-        raw_gl_stage=raw_gl_stage,
-        raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key,
-        raw_sites_key=raw_sites_key,
-        raw_observed_mask_key=raw_observed_mask_key,
         parent_eligibility_identity=eligibility_identity,
-        source_files=pedigree_cache.source_files(
-            checkpoint_store, (painting_stage, raw_gl_stage, raw_sites_stage), all_ordered),
+        source_records=products.record_identities(
+            store, (PAINTING, products.EVIDENCE), all_ordered),
     )
-    target_stage = pedigree_cache.versioned(target_stage, identity)
-    checkpoint_store.bind_stage_identity(target_stage, identity)
-    if checkpoint_store.stage_complete(target_stage) and checkpoint_store.global_done(target_stage):
-        stored = checkpoint_store.load_global(target_stage)
+    target_key = pedigree_cache.versioned(pedigree_cache.EVIDENCE, identity)
+    store.bind_identity(store.run, target_key, identity)
+    if store.run.has(target_key):
+        stored = store.run.get(target_key)
         return tuple(PedigreeContigSummary(**dict(row, resumed=True))
                      for row in stored["summaries"] if row["contig"] in requested_set)
-    if checkpoint_store.stage_complete(target_stage):
-        missing = [
-            contig for contig in all_ordered
-            if not checkpoint_store.contig_done(target_stage, contig)
-        ]
-        if missing:
-            raise RuntimeError(
-                f"{target_stage} is marked complete but lacks: {missing}"
-            )
-    from ..core.checkpoints import contig_path
-    weights = [Path(contig_path(checkpoint_store.root, raw_gl_stage, contig)).stat().st_size
-               for contig in requested]
+    weights = [store.contig(contig).info(products.EVIDENCE).stored_bytes for contig in requested]
     process_limit = pedigree_scheduling.memory_worker_limit(
-        preparation_memory_estimates(checkpoint_store.root, requested, painting_stage,
-                                     (raw_gl_stage, raw_sites_stage), len(ordered_ids)),
+        preparation_memory_estimates(store, requested, len(ordered_ids), output_dir),
         len(requested), core_runtime.available_memory_bytes(), label="PEDIGREE PREPARATION")
     arguments = dict(sample_ids=ordered_ids, preparation_identity=identity,
-        preparation_config=preparation_config, pedigree_config=settings,
-        painting_stage=painting_stage, raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key, raw_sites_key=raw_sites_key,
-        raw_observed_mask_key=raw_observed_mask_key, target_stage=target_stage)
+        preparation_config=preparation_config, pedigree_config=settings, target_key=target_key)
     with pedigree_scheduling.ChromosomeExecutor(
             requested, pedigree_execution.prepare_chromosome,
             n_workers=n_workers, weights=weights, max_workers=process_limit) as executor:
         print(f"  Pedigree preparation: {executor.worker_count} chromosome workers "
               f"sharing {executor.cpu_budget} CPUs", flush=True)
-        summaries = tuple(executor.run('prepare', dict(root=checkpoint_store.root, arguments=arguments)))
+        summaries = tuple(executor.run('prepare', dict(root=store.root, arguments=arguments)))
 
-    core_runtime.require_contig_checkpoints(
-        checkpoint_store, target_stage, requested
-    )
+    core_runtime.require_records(store, target_key, requested)
     if publish_completion:
-        checkpoint_store.save_global(target_stage, {"summaries": [asdict(row) for row in summaries]})
-        if not checkpoint_store.stage_complete(painting_stage):
-            raise RuntimeError(f"{painting_stage} must be complete before pedigree preparation completion")
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, painting_stage, all_ordered
-        )
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, target_stage, all_ordered
-        )
-        if not checkpoint_store.stage_complete(target_stage):
-            checkpoint_store.mark_stage_complete(target_stage)
+        if not store.stage_complete(PAINTING):
+            raise RuntimeError(f"{PAINTING} must be complete before pedigree preparation completion")
+        for key in (PAINTING, target_key):
+            core_runtime.require_records(store, key, all_ordered)
+        store.run.put(target_key, {"summaries": [asdict(row) for row in summaries]})
     return summaries
 
 
 def _stored_prepared_run(
-        checkpoint_store, contigs, sample_ids, preparation_identity,
-        pedigree_config, preparation_config, *, painting_stage, preparation_stage):
+        store, contigs, sample_ids, preparation_identity,
+        pedigree_config, preparation_config, *, preparation_key):
     """Describe prepared inputs; each chromosome worker loads its own arrays."""
     layout = pedigree_components.PreparedPedigree(
         recombination_rate=preparation_config.recombination_rate,
@@ -1031,14 +896,14 @@ def _stored_prepared_run(
         sample_ids=sample_ids, chromosomes=(), omitted_chromosomes=(),
         source_mode=pedigree_config.parent_state_candidate_source_mode)
     return pedigree_execution.StoredPedigree(layout, tuple(
-        pedigree_execution.StoredChromosome(checkpoint_store.root, contig, sample_ids,
-            preparation_identity, painting_stage, preparation_stage)
+        pedigree_execution.StoredChromosome(store.root, contig, sample_ids,
+            preparation_identity, PAINTING, preparation_key)
         for contig in contigs))
 
 
 @timed_stage("pedigree")
 def run_global_pedigree_inference(
-        checkpoint_store,
+        store,
         contigs,
         sample_ids,
         *,
@@ -1046,14 +911,6 @@ def run_global_pedigree_inference(
         parent_eligibility=None,
         preparation_config=EvidenceConfig(),
         n_workers=None,
-        painting_stage=workflows_reconstruction.PAINTING_STAGE,
-        preparation_stage=EVIDENCE_STAGE,
-        target_stage=PEDIGREE_STAGE,
-        raw_gl_stage,
-        raw_sites_stage,
-        raw_gl_key="global_probs",
-        raw_sites_key="global_sites",
-        raw_observed_mask_key="global_observed_mask",
 ):
     """Require complete painting/pedigree preparation inputs and run or resume global pedigree scoring."""
 
@@ -1068,40 +925,27 @@ def run_global_pedigree_inference(
         settings,
         sample_ids=ordered_ids,
         contigs=ordered_contigs,
-        painting_stage=painting_stage,
-        raw_gl_stage=raw_gl_stage,
-        raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key,
-        raw_sites_key=raw_sites_key,
-        raw_observed_mask_key=raw_observed_mask_key,
         parent_eligibility_identity=eligibility_identity,
-        source_files=pedigree_cache.source_files(
-            checkpoint_store, (painting_stage, raw_gl_stage, raw_sites_stage), ordered_contigs),
+        source_records=products.record_identities(
+            store, (PAINTING, products.EVIDENCE), ordered_contigs),
     )
     scoring_identity = pedigree_cache.scoring_identity(
         preparation_identity, settings, parent_eligibility, ordered_ids, preparation_config)
     global_identity = pedigree_global_identity(
         preparation_identity, settings, eligibility_identity, scoring_identity)
-    preparation_stage = pedigree_cache.versioned(preparation_stage, preparation_identity)
-    published_stage = target_stage
-    target_stage = pedigree_cache.versioned(target_stage, global_identity)
-    checkpoint_store.bind_stage_identity(preparation_stage, preparation_identity)
-    checkpoint_store.bind_stage_identity(target_stage, global_identity)
-    for required_stage in (painting_stage, preparation_stage):
-        if not checkpoint_store.stage_complete(required_stage):
-            raise RuntimeError(
-                f"{required_stage} must be complete before global pedigree inference"
-            )
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, required_stage, ordered_contigs
-        )
+    preparation_key = pedigree_cache.versioned(pedigree_cache.EVIDENCE, preparation_identity)
+    decision_key = pedigree_cache.versioned(pedigree_cache.DECISION, global_identity)
+    store.bind_identity(store.run, preparation_key, preparation_identity)
+    store.bind_identity(store.run, decision_key, global_identity)
+    if not store.stage_complete(PAINTING):
+        raise RuntimeError(f"{PAINTING} must be complete before global pedigree inference")
+    if not store.run.has(preparation_key):
+        raise RuntimeError("pedigree preparation must be complete before global pedigree inference")
+    for key in (PAINTING, preparation_key):
+        core_runtime.require_records(store, key, ordered_contigs)
 
-    target_complete = checkpoint_store.stage_complete(target_stage)
-    target_global = checkpoint_store.global_done(target_stage)
-    if target_complete and not target_global:
-        raise RuntimeError(f"{target_stage} is complete but lacks _global")
-    if target_global:
-        payload = checkpoint_store.load_global(target_stage)
+    if store.run.has(decision_key):
+        payload = store.run.get(decision_key, nthreads=store.nthreads)
         if (
             payload.get("schema") != PEDIGREE_GLOBAL_SCHEMA
             or payload.get("backend") != PEDIGREE_GLOBAL_BACKEND
@@ -1110,29 +954,23 @@ def run_global_pedigree_inference(
             or tuple(payload.get("ordered_contigs", ())) != ordered_contigs
         ):
             raise RuntimeError("global pedigree checkpoint identity/order mismatch")
-        if not target_complete:
-            checkpoint_store.mark_stage_complete(target_stage)
-        pedigree_cache.publish_decision(checkpoint_store, published_stage, payload)
+        pedigree_cache.publish_decision(store, decision_key, payload)
         return payload
 
     started = time.perf_counter()
     def prepare():
         return _stored_prepared_run(
-            checkpoint_store, ordered_contigs, ordered_ids, preparation_identity,
-            settings, preparation_config, painting_stage=painting_stage,
-            preparation_stage=preparation_stage)
+            store, ordered_contigs, ordered_ids, preparation_identity,
+            settings, preparation_config, preparation_key=preparation_key)
 
     scored, source_identities, scores_resumed = pedigree_cache.load_or_score(
-        checkpoint_store, scoring_identity, prepare, settings, parent_eligibility, preparation_config,
+        store, scoring_identity, prepare, settings, parent_eligibility, preparation_config,
         n_workers=n_workers)
     scoring_elapsed = time.perf_counter() - started
     decision_started = time.perf_counter()
     result, calibration_report, full_marker_release = decide_scored_pedigree(
-        checkpoint_store, scored, settings, parent_eligibility=parent_eligibility,
-        n_workers=n_workers, contigs=ordered_contigs,
-        raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key, raw_sites_key=raw_sites_key,
-        raw_observed_mask_key=raw_observed_mask_key)
+        store, scored, settings, parent_eligibility=parent_eligibility,
+        n_workers=n_workers, contigs=ordered_contigs)
     pedigree_result = result.pedigree_result
     elapsed = time.perf_counter() - started
     tables = {
@@ -1213,7 +1051,7 @@ def run_global_pedigree_inference(
             "bootstrap_worker_count": int(
                 pedigree_result.bootstrap_worker_count
             ),
-            "checkpoint_compression_threads": int(checkpoint_store.nthreads),
+            "checkpoint_compression_threads": int(store.nthreads),
         },
     }
     ragged_diagnostics = getattr(result, "ragged_scoring_diagnostics", None)
@@ -1228,18 +1066,13 @@ def run_global_pedigree_inference(
         payload["projected_scoring_diagnostics"] = (
             _serialize_projected_scoring_diagnostics(projected_diagnostics)
         )
-    checkpoint_store.save_global(target_stage, payload)
-    if not checkpoint_store.global_done(target_stage):
-        raise OSError(f"failed to checkpoint {target_stage}/_global")
-    checkpoint_store.mark_stage_complete(target_stage)
-    pedigree_cache.publish_decision(checkpoint_store, published_stage, payload)
+    store.run.put(decision_key, payload, nthreads=store.nthreads)
+    pedigree_cache.publish_decision(store, decision_key, payload)
     return payload
 
 
 def decide_scored_pedigree(
-        checkpoint_store, scored, settings, *, parent_eligibility=None, n_workers=None,
-        contigs, raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
-        raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask"):
+        store, scored, settings, *, parent_eligibility=None, n_workers=None, contigs):
     """Decide from cached genetic scores, then run fresh raw-marker count release.
 
     Both ordinary runs and controlled decision replays use this boundary. A
@@ -1253,11 +1086,8 @@ def decide_scored_pedigree(
         decision_scores, parent_eligibility=parent_eligibility, config=settings, n_workers=n_workers)
     pedigree_result = result.pedigree_result
     full_marker_release = pedigree_exclusion.refine_parent_counts(
-        checkpoint_store, contigs, scored.sample_ids, pedigree_result,
-        parent_eligibility=parent_eligibility, n_workers=n_workers,
-        raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key, raw_sites_key=raw_sites_key,
-        raw_observed_mask_key=raw_observed_mask_key)
+        store, contigs, scored.sample_ids, pedigree_result,
+        parent_eligibility=parent_eligibility, n_workers=n_workers)
     pedigree_result.search_diagnostics = parent_search_diagnostics(
         scored, parent_eligibility, pedigree_result.tier_b_relationships)
     return result, calibration_report, full_marker_release
@@ -1287,8 +1117,7 @@ def write_pedigree_outputs(payload, output_dir):
 
 
 def run_pedigree(
-        checkpoint_store, contigs, sample_ids, *, output_dir,
-        raw_gl_stage, raw_sites_stage, raw_gl_key="global_probs",
+        store, contigs, sample_ids, *, output_dir,
         n_workers=None, parent_eligibility=None, all_contigs=None,
         publish_global=True, genetic_maps=None, recombination_rate=5e-8):
     """Canonical entry-point bridge: painting plus raw GL -> Tier-B pedigree.
@@ -1309,14 +1138,12 @@ def run_pedigree(
     print("Direction is a model assumption; same-depth and missing-parent crosses need caution.")
     with core_parallel.numba_thread_scope(workers):
         summaries, payload = run_or_resume_pedigree(
-            checkpoint_store, contigs, sample_ids,
+            store, contigs, sample_ids,
             pedigree_config=module_pedigree_config.config_from_environment(),
             preparation_config=EvidenceConfig(
                 recombination_rate=recombination_rate, genetic_maps=genetic_maps),
             parent_eligibility=parent_eligibility, n_workers=workers,
-            raw_gl_stage=raw_gl_stage, raw_sites_stage=raw_sites_stage,
-            raw_gl_key=raw_gl_key, all_contigs=all_contigs,
-            publish_global=publish_global,
+            all_contigs=all_contigs, publish_global=publish_global, output_dir=output_dir,
         )
     if payload is not None:
         output = write_pedigree_outputs(payload, output_dir)
@@ -1328,7 +1155,7 @@ def run_pedigree(
 
 
 def run_or_resume_pedigree(
-        checkpoint_store,
+        store,
         contigs,
         sample_ids,
         *,
@@ -1336,57 +1163,41 @@ def run_or_resume_pedigree(
         parent_eligibility=None,
         preparation_config=EvidenceConfig(),
         n_workers=None,
-        painting_stage=workflows_reconstruction.PAINTING_STAGE,
-        raw_gl_stage,
-        raw_sites_stage,
-        raw_gl_key="global_probs",
-        raw_sites_key="global_sites",
-        raw_observed_mask_key="global_observed_mask",
         all_contigs=None,
         publish_global=True,
+        output_dir=None,
 ):
     """Prepare pedigree preparation and, for a complete unsharded run, publish global pedigree scoring."""
 
     summaries = prepare_pedigree_contigs(
-        checkpoint_store,
+        store,
         contigs,
         sample_ids,
         pedigree_config=pedigree_config,
         parent_eligibility=parent_eligibility,
         preparation_config=preparation_config,
-        painting_stage=painting_stage,
-        raw_gl_stage=raw_gl_stage,
-        raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key,
-        raw_sites_key=raw_sites_key,
-        raw_observed_mask_key=raw_observed_mask_key,
         all_contigs=all_contigs,
-        publish_completion=publish_global, n_workers=n_workers,
+        publish_completion=publish_global,
+        output_dir=output_dir,
+        n_workers=n_workers,
     )
     if not publish_global:
         return summaries, None
     configured_contigs = contigs if all_contigs is None else all_contigs
     payload = run_global_pedigree_inference(
-        checkpoint_store,
+        store,
         configured_contigs,
         sample_ids,
         pedigree_config=pedigree_config,
         parent_eligibility=parent_eligibility,
         preparation_config=preparation_config,
         n_workers=n_workers,
-        painting_stage=painting_stage,
-        raw_gl_stage=raw_gl_stage,
-        raw_sites_stage=raw_sites_stage,
-        raw_gl_key=raw_gl_key,
-        raw_sites_key=raw_sites_key,
-        raw_observed_mask_key=raw_observed_mask_key,
     )
     return summaries, payload
 
 import haplotype_reconstruction.core.parallel as core_parallel
+import haplotype_reconstruction.discovery.checkpoints as discovery_checkpoints
 import haplotype_reconstruction.core.runtime as core_runtime
 import haplotype_reconstruction.pedigree.config as module_pedigree_config
 import haplotype_reconstruction.pedigree.likelihoods as pedigree_likelihoods
 import haplotype_reconstruction.pedigree.sources as pedigree_sources
-
-from haplotype_reconstruction.core import raw_evidence

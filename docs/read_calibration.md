@@ -72,8 +72,8 @@ raw likelihoods feed discovery, both feedback rounds, founder completion,
 L1–L4 assembly, painting, pedigree inference and family phase. Recombination
 inference consumes the resulting final phase. Sample order is preserved.
 
-The `block_discovery` payload stores `global_probs` and a `read_calibration`
-report with model identity, sample-ordered fitted parameters and nuisance
+Each chromosome's `discovery/prepared` record stores `global_probs` and a
+`read_calibration` report with model identity, sample-ordered fitted parameters and nuisance
 mixtures, convergence information, fold sizes, selection/test scores, selected
 model and fallback reason. Nuisance mixtures are recorded for reproducibility,
 not used as output genotype priors. The discovery identity distinguishes this

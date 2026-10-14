@@ -1108,6 +1108,8 @@ def generate_all_block_haplotypes(
     block_pool=None,
     discovery_config=None,
     genotype_likelihoods_by_block=None,
+    task_indices=None,
+    record=None,
 ):
     """Discover founder haplotypes in every informative input block.
 
@@ -1115,6 +1117,9 @@ def generate_all_block_haplotypes(
     retained sites are omitted. ``discovery_config`` defaults to the canonical
     calibrated :class:`ReversibleCavitySearchConfig`. Optional raw likelihood
     tensors must align with genomic_data in block, sample and marker order.
+    ``task_indices`` limits discovery to those input blocks (default: all);
+    ``record(index, result)`` receives every completed task in completion
+    order (result None for an omitted block), in the calling thread.
     """
 
     from tqdm import tqdm
@@ -1146,7 +1151,7 @@ def generate_all_block_haplotypes(
             and len(genotype_likelihoods_by_block) != len(genomic_data)):
         raise ValueError("likelihood block count must match genomic_data")
     tasks = []
-    for index in range(len(genomic_data)):
+    for index in (range(len(genomic_data)) if task_indices is None else task_indices):
         positions, reads, keep_flags = genomic_data[index]
         tasks.append((
             index,
@@ -1160,11 +1165,12 @@ def generate_all_block_haplotypes(
         ))
 
     def collect(pool):
-        return list(tqdm(
-            pool.imap_unordered(tasks),
-            total=len(tasks),
-            desc="Block haplotypes",
-        ))
+        completed = []
+        for item in tqdm(pool.imap_unordered(tasks), total=len(tasks), desc="Block haplotypes"):
+            if record is not None:
+                record(*item)
+            completed.append(item)
+        return completed
 
     if block_pool is None:
         with BlockDiscoveryPool(
@@ -1186,7 +1192,7 @@ def generate_all_block_haplotypes(
 
 @dataclass
 class PreparedContig:
-    """One contig's discovery inputs and the checkpoint fields made with them."""
+    """One contig's discovery inputs and its discovery/prepared record fields."""
 
     genomic_data: Any
     genotype_likelihoods_by_block: Sequence[np.ndarray]
@@ -1195,49 +1201,38 @@ class PreparedContig:
     products: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-def discover_contigs(contigs, prepare, save, *, block_pool, discovery_config):
-    """Discover contigs in order with one pool, overlapping their serial work.
+def discover_contigs(store, contigs, prepare, *, block_pool, discovery_config, report=None):
+    """Discover contigs in order with one pool, recording each as it goes.
 
     While the persistent block pool discovers contig i, one helper thread
     prepares contig i+1 (loading, site quality, read calibration and block
-    likelihoods) and another saves contig i-1, so the pool no longer idles
-    between contigs. Each step is deterministic and invariant to its thread
-    count, so the checkpoints equal those of the sequential loop. The steps
-    keep the run's whole CPU budget: while discovery runs they briefly share
-    the CPUs with it (they cost a few percent of its CPU time), and when
-    discovery is shorter than a preparation it is no slower than before.
-    ``prepare(contig)`` returns a :class:`PreparedContig`, or None to skip
-    the contig; ``save(contig, prepared, block_results)`` writes it.
+    likelihoods) and records it (discovery/prepared, discovery/plan), so the
+    pool no longer idles between contigs. Completed blocks are recorded as
+    they arrive (discovery.checkpoints.Chunks); a contig whose discovery was
+    interrupted discovers its missing blocks only. Each step is deterministic
+    and invariant to its thread count, so the records equal those of a
+    sequential uninterrupted run. The steps keep the run's whole CPU budget:
+    while discovery runs they briefly share the CPUs with it. ``prepare(contig)``
+    returns a :class:`PreparedContig`, or None to skip the contig;
+    ``report(contig, blocks)`` receives the blocks this call discovered.
     """
     contigs = list(contigs)
     if not contigs:
         return
     cpu_budget = block_pool.total_numba_threads
 
-    # Numba team sizes are per thread: kernels in the helper threads use the
+    # Numba team sizes are per thread: kernels in the helper thread use the
     # run's budget, as they would in the coordinating thread.
     def prepare_timed(contig):
         started = time.monotonic()
         with core_parallel.numba_thread_scope(cpu_budget):
             prepared = prepare(contig)
+            if prepared is not None:
+                discovery_checkpoints.record_prepared(store.contig(contig), prepared)
         return prepared, dict(prepare_seconds=time.monotonic() - started)
 
-    def save_timed(contig, prepared, block_results, timing):
-        started = time.monotonic()
-        with core_parallel.numba_thread_scope(cpu_budget):
-            save(contig, prepared, block_results)
-        del prepared, block_results
-        gc.collect()
-        return contig, dict(timing, save_seconds=time.monotonic() - started)
-
-    def record(saved):
-        contig, timing = saved.result()
-        core_run_record.record_product("block_discovery_pipeline", contig, timing)
-
-    with ThreadPoolExecutor(1, thread_name_prefix="discovery-prepare") as preparer, \
-            ThreadPoolExecutor(1, thread_name_prefix="discovery-save") as saver:
+    with ThreadPoolExecutor(1, thread_name_prefix="discovery-prepare") as preparer:
         upcoming = preparer.submit(prepare_timed, contigs[0])
-        saving = None
         for index, contig in enumerate(contigs):
             waited = time.monotonic()
             prepared, timing = upcoming.result()
@@ -1248,17 +1243,29 @@ def discover_contigs(contigs, prepare, save, *, block_pool, discovery_config):
                 continue
             for name, summary in prepared.products.items():
                 core_run_record.record_product(name, contig, summary)
-            print(f"\n  Discovering {contig}...", flush=True)
+            file = store.contig(contig)
+            recorded = discovery_checkpoints.recorded_indices(file)
+            pending = [task for task in range(len(prepared.genomic_data)) if task not in recorded]
+            print(f"\n  Discovering {contig}..."
+                  + (f" ({len(recorded)} blocks recorded earlier)" if recorded else ""), flush=True)
             started = time.monotonic()
-            block_results = generate_all_block_haplotypes(
-                prepared.genomic_data,
-                num_processes=block_pool.num_processes,
-                total_numba_threads=block_pool.total_numba_threads,
-                block_pool=block_pool,
-                discovery_config=discovery_config,
-                genotype_likelihoods_by_block=(
-                    prepared.genotype_likelihoods_by_block),
-            )
+            chunks = discovery_checkpoints.Chunks(file, prepared.fields)
+            try:
+                block_results = generate_all_block_haplotypes(
+                    prepared.genomic_data,
+                    num_processes=block_pool.num_processes,
+                    total_numba_threads=block_pool.total_numba_threads,
+                    block_pool=block_pool,
+                    discovery_config=discovery_config,
+                    genotype_likelihoods_by_block=(
+                        prepared.genotype_likelihoods_by_block),
+                    task_indices=pending,
+                    record=chunks.add,
+                )
+            finally:
+                chunks.flush()
+            if not discovery_checkpoints.complete(file):
+                raise RuntimeError(f"{contig}: block discovery records are incomplete")
             block_results = core_haplotypes.BlockResults(
                 [block for block in block_results if len(block.positions) > 0])
             timing["discovery_seconds"] = time.monotonic() - started
@@ -1272,13 +1279,12 @@ def discover_contigs(contigs, prepare, save, *, block_pool, discovery_config):
                 f"{timing['prepare_wait_seconds']:.1f}s was waited for",
                 flush=True,
             )
-            if saving is not None:
-                record(saving)
-            saving = saver.submit(
-                save_timed, contig, prepared, block_results, timing)
-            del prepared, block_results
-        if saving is not None:
-            record(saving)
+            if report is not None:
+                report(contig, block_results)
+            core_run_record.record_product("block_discovery_pipeline", contig, timing)
+            del prepared, block_results, chunks
+            gc.collect()
+
 
 def backstop_summary(block_results):
     """Count blocks whose search hit a reported K-scaled backstop (target 0)."""
@@ -1293,3 +1299,4 @@ import haplotype_reconstruction.core.genotypes as core_genotypes
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.core.run_record as core_run_record
+import haplotype_reconstruction.discovery.checkpoints as discovery_checkpoints

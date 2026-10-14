@@ -21,9 +21,11 @@ import haplotype_reconstruction.core.sample_quality as core_sample_quality
 import haplotype_reconstruction.core.site_quality as core_site_quality
 import haplotype_reconstruction.core.variants as core_variants
 import haplotype_reconstruction.discovery.blocks as discovery_blocks
+import haplotype_reconstruction.discovery.checkpoints as discovery_checkpoints
 import haplotype_reconstruction.discovery.search as discovery_search
 import haplotype_reconstruction.simulation.pedigree as simulation_pedigree
 import haplotype_reconstruction.simulation.templates as simulation_templates
+import haplotype_reconstruction.simulation.truth as simulation_truth
 import haplotype_reconstruction.workflows.contig_parallel as workflows_contig_parallel
 import haplotype_reconstruction.workflows.reconstruction as workflows_reconstruction
 from . import CICHLID_AUTOSOMES
@@ -63,6 +65,21 @@ if not math.isfinite(SIMULATION_READ_DEPTH) or SIMULATION_READ_DEPTH <= 0.0:
     raise ValueError("BHD_SIM_READ_DEPTH must be finite and positive")
 
 
+# Run-level stage names (complete/<stage>, identity/<stage> in run.ckpt) and
+# the contig records of the simulation stages.
+TEMPLATE_STAGE = "simulation/templates"
+
+
+SIMULATION_STAGE = "simulation/reads"
+
+
+DISCOVERY_STAGE = "discovery"
+
+
+TEMPLATES = "simulation/templates"
+
+
+# --stop-after-stage values.
 _PER_CONTIG_STAGE_NAMES = (
     "block_discovery",
     "painting",
@@ -131,16 +148,6 @@ SIMULATION_SHARD_LOG_ID = (
     hashlib.sha256(",".join(SIMULATION_CONTIG_SHARD).encode()).hexdigest()[:10]
     if SIMULATION_SHARD_MODE else None
 )
-
-
-def _finish_simulation_stage_checkpoints(
-        checkpoint_store, stage, contigs, shard_mode):
-    """Require every contig output and publish a marker only for full runs."""
-    core_runtime.require_contig_checkpoints(
-        checkpoint_store, stage, contigs
-    )
-    if not shard_mode and not checkpoint_store.stage_complete(stage):
-        checkpoint_store.mark_stage_complete(stage)
 
 
 @core_runtime.logged_workflow("simulation")
@@ -237,17 +244,12 @@ def run():
     print(f"Numba threading layer: {os.environ.get('NUMBA_THREADING_LAYER', 'not set')}")
 
     # =============================================================================
-    # PER-CONTIG CHECKPOINTING
+    # CHECKPOINTS
     # =============================================================================
-    # Each stage gets a subdirectory.  Each contig gets its own checkpoint
-    # file (a protocol-5/Blosc frame, suffix ".p5.b2"; see core/checkpoints).
-    # The format-qualified done marker means all contigs completed.
-    #
-    # On resume, _ensure_key loads ONLY the keys a stage needs from checkpoints,
-    # avoiding the monolithic pickle that caused OOM.
-    #
-    # Heavy arrays are loaded and released one contig at a time. assembly has
-    # atomic preprocessing, L1-L4, and final component-painting checkpoints.
+    # One growing file per contig (contigs/<contig>.ckpt) holds every record of
+    # that contig, from its simulated reads to its painting; run.ckpt holds the
+    # genome-wide records (core/checkpoints, core/runtime). A stage loads only
+    # the records it needs, one contig at a time.
     #
     # Resume with the same settings; use a new output root for a fresh run.
     # Preserve existing checkpoints and their original scientific identities.
@@ -255,22 +257,18 @@ def run():
     checkpoint_store = core_runtime.CheckpointStore(
         CHECKPOINT_DIR, nthreads=n_processes
     )
+    run_file = checkpoint_store.run
     stage_complete = checkpoint_store.stage_complete
     mark_stage_complete = checkpoint_store.mark_stage_complete
-    contig_done = checkpoint_store.contig_done
-    save_contig = checkpoint_store.save_contig
-    load_contig = checkpoint_store.load_contig
-    save_global = checkpoint_store.save_global
-    load_global = checkpoint_store.load_global
     if SIMULATION_SHARD_MODE:
         missing_shared_stages = [
-            stage for stage in ("founder_templates", "simulated_reads")
+            stage for stage in (TEMPLATE_STAGE, SIMULATION_STAGE)
             if not stage_complete(stage)
         ]
         if missing_shared_stages:
             raise RuntimeError(
                 "BHD_SIM_CONTIGS requires globally completed shared "
-                "founder templates and simulated reads; missing format-qualified completion markers for: "
+                "founder templates and simulated reads; missing completion records for: "
                 f"{missing_shared_stages}"
             )
         print(
@@ -278,39 +276,21 @@ def run():
             "diagnostic validations and per-contig plots are disabled"
         )
 
-    def _finish_per_contig_stage(stage):
-        """Verify a shard/stop boundary and publish only normal-run markers."""
-        _finish_simulation_stage_checkpoints(
-            checkpoint_store, stage, region_keys,
-            shard_mode=SIMULATION_SHARD_MODE,
-        )
-        if SIMULATION_SHARD_MODE:
+    def _finish_per_contig_stage(stage, stop_name):
+        """Verify a shard/stop boundary and publish only normal-run completion."""
+        if not SIMULATION_SHARD_MODE:
+            mark_stage_complete(stage)
+        else:
             print(
-                f"[SHARD] Verified {stage} outputs for "
-                f"{', '.join(region_keys)}; global completion marker not written"
+                f"[SHARD] Verified {stage} records for "
+                f"{', '.join(region_keys)}; genome-wide completion not recorded"
             )
-        if SIMULATION_STOP_AFTER_STAGE == stage:
+        if SIMULATION_STOP_AFTER_STAGE == stop_name:
             print(f"[STOP] Completed and verified {stage}; exiting cleanly")
             raise SystemExit(0)
 
-
-    # Source checkpoint for each value needed before the canonical assembly.
-    _KEY_SOURCE = {
-        'naive_long_haps': 'founder_templates',
-    }
-
-    def _ensure_key(r_name, key, *additional_keys):
-        """Load requested fields together, reading each source checkpoint once."""
-        mcr = multi_contig_results.setdefault(r_name, {})
-        missing = [name for name in (key, *additional_keys) if name not in mcr]
-        for src in dict.fromkeys(_KEY_SOURCE[name] for name in missing):
-            if not contig_done(src, r_name):
-                raise FileNotFoundError(f"Cannot find {src} for {r_name}")
-            ckpt = load_contig(src, r_name)
-            for name in missing:
-                if _KEY_SOURCE[name] == src:
-                    mcr[name] = ckpt[name]
-            del ckpt
+    def template_sites_and_haplotypes(r_name):
+        return checkpoint_store.contig(r_name).get(TEMPLATES)['naive_long_haps']
 
     vcf_path = os.environ.get(
         "HAPLOTYPES_VCF",
@@ -325,14 +305,11 @@ def run():
     block_size = 100000
     shift_size = 50000
 
-    multi_contig_results = {}
-
     total_start = time.time()
 
     # =========================================================================
     # FOUNDER TEMPLATES: empirical sequence construction
     # =========================================================================
-    TEMPLATE_STAGE = "founder_templates"
     template_directory = os.environ.get("HAPLOTYPES_TEMPLATES")
     if template_directory:
         template_identity = {
@@ -345,13 +322,14 @@ def run():
         template_identity = {'vcf': str(input_path), 'size': input_path.stat().st_size,
                              'mtime_ns': input_path.stat().st_mtime_ns,
                              'regions': regions_config, 'block_size': block_size, 'shift_size': shift_size}
-    checkpoint_store.bind_stage_identity(TEMPLATE_STAGE, {
+    checkpoint_store.bind_identity(run_file, TEMPLATE_STAGE, {
         'discovery': discovery_identity_record, 'inputs': template_identity,
     })
     if template_directory and not stage_complete(TEMPLATE_STAGE):
         for region in regions_config:
             contig = region['contig']
-            if contig_done(TEMPLATE_STAGE, contig):
+            template_file = checkpoint_store.contig(contig)
+            if template_file.has(TEMPLATES):
                 continue
             template_path = Path(template_directory) / f"{contig}.npz"
             with np.load(template_path, allow_pickle=False) as template:
@@ -359,19 +337,19 @@ def run():
                 probabilities = template['allele_probabilities']
             if probabilities.ndim != 3 or probabilities.shape[1:] != (len(positions), 2):
                 raise ValueError(f"{contig}: invalid founder-template axes")
-            save_contig(TEMPLATE_STAGE, contig, {'naive_long_haps': [positions, list(probabilities)],
+            template_file.put(TEMPLATES, {'naive_long_haps': [positions, list(probabilities)],
                 'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
                 'discovery_config': discovery_config_record})
         mark_stage_complete(TEMPLATE_STAGE)
 
     if stage_complete(TEMPLATE_STAGE):
         print(f"\n[RESUME] Skipping VCF loading + discovery (checkpoint found)")
-        # naive_long_haps loaded on-demand via _ensure_key
     else:
         with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
             for region in regions_config:
                 r_name = region['contig']
-                if contig_done(TEMPLATE_STAGE, r_name):
+                template_file = checkpoint_store.contig(r_name)
+                if template_file.has(TEMPLATES):
                     print(f"  [RESUME] {r_name} already done")
                     continue
 
@@ -414,11 +392,7 @@ def run():
                 )
                 print(f"  [Template construction] Chained {len(naive_long_haps[1])} haps in {time.time() - start:.2f}s")
 
-                # Store only naive_long_haps (genomic_data + block_results are huge, never needed again)
-                multi_contig_results[region['contig']] = {
-                    "naive_long_haps": naive_long_haps
-                }
-                save_contig(TEMPLATE_STAGE, r_name, {
+                template_file.put(TEMPLATES, {
                     'naive_long_haps': naive_long_haps,
                     'discovery_backend': discovery_blocks.DISCOVERY_BACKEND,
                     'discovery_config': discovery_config_record,
@@ -427,17 +401,13 @@ def run():
                 gc.collect()
 
         print(f"\nAll regions processed in {time.time() - total_start:.2f}s")
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store,
-            TEMPLATE_STAGE,
-            [region['contig'] for region in regions_config],
-        )
+        core_runtime.require_records(
+            checkpoint_store, TEMPLATES, [region['contig'] for region in regions_config])
         mark_stage_complete(TEMPLATE_STAGE)
 
     # =========================================================================
     # SIMULATED READS: pedigree, meiosis and observations
     # =========================================================================
-    SIMULATION_STAGE = "simulated_reads"
     generation_sizes = tuple(json.loads(os.environ.get("HAPLOTYPES_GENERATIONS", "[20, 100, 200]")))
     from ..simulation.designs import SimulationDesign, ReadModel, observed_indices
     if not generation_sizes or any(size < 2 for size in generation_sizes):
@@ -520,50 +490,49 @@ def run():
                 f"{context} contig order does not match this run"
             )
 
-    # An allocation can end after the complete global payload is durable but
-    # before its tiny marker is published. Validate it, then finish atomically.
+    # An allocation can end after the complete simulation record is durable
+    # but before the stage's completion record. Validate it, then complete.
     if (not stage_complete(SIMULATION_STAGE)
-            and checkpoint_store.global_done(SIMULATION_STAGE)):
-        durable_simulation_payload = load_global(SIMULATION_STAGE)
+            and run_file.has(simulation_truth.SIMULATION)):
+        durable_simulation_payload = run_file.get(simulation_truth.SIMULATION)
         if 'simulation_state' not in durable_simulation_payload:
             raise RuntimeError(
-                f"{SIMULATION_STAGE} global payload lacks simulation_state"
+                f"{simulation_truth.SIMULATION} lacks simulation_state"
             )
         durable_state = durable_simulation_payload['simulation_state']
         if durable_state == 'complete':
             require_completed_simulation_payload(
-                durable_simulation_payload, f"Durable {SIMULATION_STAGE}"
+                durable_simulation_payload, f"Durable {simulation_truth.SIMULATION}"
             )
             require_current_simulation_identity(
-                durable_simulation_payload, f"Durable {SIMULATION_STAGE}"
+                durable_simulation_payload, f"Durable {simulation_truth.SIMULATION}"
             )
-            core_runtime.require_contig_checkpoints(
-                checkpoint_store, SIMULATION_STAGE,
+            core_runtime.require_records(
+                checkpoint_store, simulation_pedigree.READS,
                 durable_simulation_payload['region_keys'],
             )
             mark_stage_complete(SIMULATION_STAGE)
-            print(f"  [RECOVER] Published completion marker for {SIMULATION_STAGE}")
+            print(f"  [RECOVER] Recorded completion of {SIMULATION_STAGE}")
         elif durable_state != 'in_progress':
             raise RuntimeError(
-                f"{SIMULATION_STAGE} global payload has invalid simulation_state "
+                f"{simulation_truth.SIMULATION} has invalid simulation_state "
                 f"{durable_state!r}"
             )
         del durable_simulation_payload
 
     if stage_complete(SIMULATION_STAGE):
         print(f"\n[RESUME] Skipping simulation (checkpoint found)")
-        g = load_global(SIMULATION_STAGE)
+        g = run_file.get(simulation_truth.SIMULATION)
         require_completed_simulation_payload(g, SIMULATION_STAGE)
         require_current_simulation_identity(g, SIMULATION_STAGE)
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, SIMULATION_STAGE, g['region_keys']
+        core_runtime.require_records(
+            checkpoint_store, simulation_pedigree.READS, g['region_keys']
         )
         realized_simulation_seed = g["simulation_seed"]
         truth_pedigree = g['truth_pedigree']
         sample_names = g['sample_names']
         region_keys = g['region_keys']
         del g
-        # Per-contig data loaded on-demand via _ensure_key
     else:
         start = time.time()
         output_dir = SIMULATION_OUTPUT_DIR
@@ -579,9 +548,7 @@ def run():
         region_keys = []
 
         for r_name in [r['contig'] for r in regions_config]:
-            _ensure_key(r_name, 'naive_long_haps')
-            data = multi_contig_results[r_name]
-            sites, haplotypes = data['naive_long_haps']
+            sites, haplotypes = template_sites_and_haplotypes(r_name)
             founder_templates.append(haplotypes)
             sites_list.append(sites)
             region_keys.append(r_name)
@@ -590,8 +557,8 @@ def run():
         # any per-contig assembly writes. This makes an entropy-seeded run
         # reproducible on restart and prevents old partial contigs from being
         # silently mixed with a newly generated pedigree.
-        if checkpoint_store.global_done(SIMULATION_STAGE):
-            simulation_provenance = load_global(SIMULATION_STAGE)
+        if run_file.has(simulation_truth.SIMULATION):
+            simulation_provenance = run_file.get(simulation_truth.SIMULATION)
             partial_required_keys = {
                 'simulation_seed', 'requested_simulation_seed',
                 'region_keys', 'run_spec', 'simulation_state',
@@ -599,17 +566,17 @@ def run():
             missing_keys = partial_required_keys.difference(simulation_provenance)
             if missing_keys:
                 raise RuntimeError(
-                    f"Partial {SIMULATION_STAGE} checkpoint lacks required keys: "
+                    f"Partial {simulation_truth.SIMULATION} lacks required keys: "
                     f"{sorted(missing_keys)!r}"
                 )
             if simulation_provenance['simulation_state'] != 'in_progress':
                 raise RuntimeError(
-                    f"Partial {SIMULATION_STAGE} checkpoint has simulation_state "
+                    f"Partial {simulation_truth.SIMULATION} has simulation_state "
                     f"{simulation_provenance['simulation_state']!r}, not "
                     "'in_progress'"
                 )
             require_current_simulation_identity(
-                simulation_provenance, f"Partial {SIMULATION_STAGE} checkpoint"
+                simulation_provenance, f"Partial {simulation_truth.SIMULATION}"
             )
             realized_simulation_seed = simulation_provenance["simulation_seed"]
             del simulation_provenance
@@ -620,7 +587,7 @@ def run():
         else:
             partial_contigs = [
                 r_name for r_name in region_keys
-                if contig_done(SIMULATION_STAGE, r_name)
+                if checkpoint_store.contig(r_name).has(simulation_pedigree.READS)
             ]
             if partial_contigs:
                 raise RuntimeError(
@@ -632,17 +599,13 @@ def run():
                 if SIMULATION_SEED is not None
                 else int.from_bytes(os.urandom(8), "little")
             )
-            save_global(SIMULATION_STAGE, {
+            run_file.put(simulation_truth.SIMULATION, {
                 'simulation_seed': realized_simulation_seed,
                 'requested_simulation_seed': SIMULATION_SEED,
                 'region_keys': list(region_keys),
                 'run_spec': simulation_run_spec,
                 'simulation_state': 'in_progress',
             })
-            if not checkpoint_store.global_done(SIMULATION_STAGE):
-                raise OSError(
-                    f"Failed to checkpoint early {SIMULATION_STAGE} provenance"
-                )
             print(
                 f"  {SIMULATION_STAGE} realized seed: {realized_simulation_seed}"
             )
@@ -735,12 +698,11 @@ def run():
         }
         postprocessing_tasks = []
         for contig_index, r_name in enumerate(region_keys):
-            if contig_done(SIMULATION_STAGE, r_name):
+            if checkpoint_store.contig(r_name).has(simulation_pedigree.READS):
                 print(f"  [RESUME] {r_name} post-processing already done")
                 continue
             postprocessing_tasks.append(dict(
                 root=checkpoint_store.root,
-                stage=SIMULATION_STAGE,
                 contig=r_name,
                 sample_names=sample_names,
                 offspring=all_offspring_lists[contig_index],
@@ -759,8 +721,8 @@ def run():
                 SIMULATION_STAGE, record.pop('contig'), record)
         del postprocessing_tasks
 
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, SIMULATION_STAGE, region_keys
+        core_runtime.require_records(
+            checkpoint_store, simulation_pedigree.READS, region_keys
         )
         print(
             f"Post-processing ({len(region_keys)} contigs, parallel): "
@@ -780,12 +742,10 @@ def run():
             'run_spec': simulation_run_spec,
             'simulation_state': 'complete',
         }
-        save_global(SIMULATION_STAGE, completed_simulation_payload)
-        if not checkpoint_store.global_done(SIMULATION_STAGE):
-            raise OSError(f"Failed to checkpoint {SIMULATION_STAGE}/_global")
-        persisted_simulation_payload = load_global(SIMULATION_STAGE)
+        run_file.put(simulation_truth.SIMULATION, completed_simulation_payload)
+        persisted_simulation_payload = run_file.get(simulation_truth.SIMULATION)
         require_completed_simulation_payload(
-            persisted_simulation_payload, f"Persisted {SIMULATION_STAGE}"
+            persisted_simulation_payload, f"Persisted {simulation_truth.SIMULATION}"
         )
         for key in (
             'sample_names', 'region_keys', 'simulation_seed',
@@ -793,39 +753,24 @@ def run():
         ):
             if persisted_simulation_payload[key] != completed_simulation_payload[key]:
                 raise RuntimeError(
-                    f"Persisted {SIMULATION_STAGE} changed {key!r} during checkpointing"
+                    f"Persisted {simulation_truth.SIMULATION} changed {key!r} during checkpointing"
                 )
         del persisted_simulation_payload, completed_simulation_payload
         mark_stage_complete(SIMULATION_STAGE)
         # Free heavy simulation data — all checkpointed, will reload on demand
         del all_offspring_lists, truth_paintings_lists, truth_crossovers
         del founders_list, sites_list
-    # Discovery loads each contig's sites and reads from its checkpoints.
-    multi_contig_results.clear()
     gc.collect()
 
     # Ensure output_dir and globals exist for all subsequent stages
     output_dir = SIMULATION_OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)
 
-    if 'region_keys' not in dir() or region_keys is None:
-        g = load_global('simulated_reads')
-        region_keys = g['region_keys']
-        sample_names = g['sample_names']
-        truth_pedigree = g['truth_pedigree']
-        del g
     all_region_keys = list(region_keys)
     if SIMULATION_SHARD_MODE:
-        if not checkpoint_store.global_done("simulated_reads"):
-            raise RuntimeError(
-                "BHD_SIM_CONTIGS requires the global simulation manifest"
-            )
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, "founder_templates", all_region_keys
-        )
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, "simulated_reads", all_region_keys
-        )
+        core_runtime.require_records(checkpoint_store, TEMPLATES, all_region_keys)
+        core_runtime.require_records(
+            checkpoint_store, simulation_pedigree.READS, all_region_keys)
         region_keys = _select_simulation_contigs(
             all_region_keys, SIMULATION_CONTIG_SHARD
         )
@@ -853,11 +798,10 @@ def run():
         discovery_blocks.DISCOVERY_BACKEND, discovery_config,
         core_site_quality.identity(site_quality_config),
         core_sample_quality.identity(sample_quality_config, site_quality_config))
-    DISCOVERY_STAGE = "block_discovery"
-    checkpoint_store.bind_stage_identity(
-        DISCOVERY_STAGE, discovery_identity_record
+    checkpoint_store.bind_identity(
+        run_file, DISCOVERY_STAGE, discovery_identity_record
     )
-    discovery_source_manifest = {
+    checkpoint_store.bind_manifest(DISCOVERY_STAGE, {
         'sample_ids': sample_names,
         'contigs': all_region_keys,
         'genotype_evidence_mode': (
@@ -868,17 +812,16 @@ def run():
         ),
         'discovery_backend': discovery_identity_record['backend'],
         'discovery_config': discovery_config_record,
-    }
-    checkpoint_store.bind_global_manifest(
-        DISCOVERY_STAGE, discovery_source_manifest
-    )
+    })
+    record_provenance = workflows_reconstruction.discovery_record_provenance(
+        discovery_identity_record)
 
     def prepare_discovery(r_name):
         """Load a contig's simulated reads and fit its read model."""
         print(f"\n  Preparing {r_name}...", flush=True)
-        simulated_reads = load_contig(SIMULATION_STAGE, r_name)['simulated_reads']
-        global_sites = np.asarray(
-            load_contig(TEMPLATE_STAGE, r_name)['naive_long_haps'][0])
+        simulated_reads = checkpoint_store.contig(r_name).get(
+            simulation_pedigree.READS)['simulated_reads']
+        global_sites = np.asarray(template_sites_and_haplotypes(r_name)[0])
         simd_genomic_data = simulation_pedigree.simulated_genomic_data(
             global_sites, simulated_reads,
             simulation_run_spec['snps_per_block'],
@@ -911,38 +854,18 @@ def run():
                 'read_calibration': calibration,
                 'site_quality': site_quality,
                 'global_observed_mask': global_observed_mask,
+                **record_provenance,
                 **({} if founder_excluded is None
                    else {'founder_evidence_excluded': founder_excluded}),
             },
             products=core_site_quality.run_record_products(site_quality, sample_names),
         )
 
-    def save_discovery(r_name, prepared, simd_block_results):
-        fields = prepared.fields
-        save_contig(DISCOVERY_STAGE, r_name, {
-            'block_results': simd_block_results,
-            'global_sites': fields['global_sites'],
-            'global_probs': fields['global_probs'],
-            'read_calibration': fields['read_calibration'],
-            'site_quality': fields['site_quality'],
-            'global_observed_mask': fields['global_observed_mask'],
-            'observed_call_mask_mode': (
-                workflows_reconstruction.EXACT_OBSERVED_MASK_MODE
-            ),
-            'genotype_evidence_mode': (
-                workflows_reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE
-            ),
-            'discovery_backend': discovery_identity_record['backend'],
-            'discovery_config': discovery_config_record,
-            **({} if 'founder_evidence_excluded' not in fields
-               else {'founder_evidence_excluded': fields['founder_evidence_excluded']}),
-        })
-
     def discover(contigs):
         """Discover these contigs with one block pool, closed on return."""
         with discovery_blocks.BlockDiscoveryPool(n_processes) as block_pool:
             discovery_blocks.discover_contigs(
-                contigs, prepare_discovery, save_discovery,
+                checkpoint_store, contigs, prepare_discovery,
                 block_pool=block_pool, discovery_config=discovery_config)
 
     assembly_config = workflows_reconstruction.ReconstructionConfig(
@@ -956,14 +879,14 @@ def run():
     )
 
     # Serial contigs: each contig is discovered, assembled and painted before
-    # the next; the stages below then publish completion as in a normal run.
+    # the next; the stages below then record completion as in a normal run.
     serial_contigs, max_contigs = (
         workflows_contig_parallel.configured_serial_contigs())
     if serial_contigs and not workflows_contig_parallel.run_serially(
             checkpoint_store, region_keys, sample_names, discover=discover,
             discovery_identity=discovery_identity_record, config=assembly_config,
-            max_contigs=max_contigs, source_stage=DISCOVERY_STAGE,
-            all_contigs=all_region_keys, genetic_maps=inference_genetic_maps):
+            output_dir=output_dir, max_contigs=max_contigs, all_contigs=all_region_keys,
+            genetic_maps=inference_genetic_maps):
         return
 
     if stage_complete(DISCOVERY_STAGE) and not SIMULATION_SHARD_MODE:
@@ -977,7 +900,7 @@ def run():
 
         pending_contigs = []
         for r_name in region_keys:
-            if contig_done(DISCOVERY_STAGE, r_name):
+            if discovery_checkpoints.complete(checkpoint_store.contig(r_name)):
                 print(f"  [RESUME] {r_name} already done")
             else:
                 pending_contigs.append(r_name)
@@ -985,10 +908,8 @@ def run():
             discover(pending_contigs)
 
         print(f"\nBlock haplotype discovery complete in {time.time()-start:.1f}s")
-        core_runtime.require_contig_checkpoints(
-            checkpoint_store, DISCOVERY_STAGE, region_keys
-        )
-    _finish_per_contig_stage(DISCOVERY_STAGE)
+        discovery_checkpoints.require_complete(checkpoint_store, region_keys)
+    _finish_per_contig_stage(DISCOVERY_STAGE, "block_discovery")
 
     # =========================================================================
     # ASSEMBLY: COMPONENT ASSEMBLY AND PAINTING
@@ -1007,8 +928,8 @@ def run():
         sample_names,
         discovery_identity=discovery_identity_record,
         config=assembly_config,
+        output_dir=output_dir,
         genetic_maps=inference_genetic_maps,
-        source_stage=DISCOVERY_STAGE,
         all_contigs=all_region_keys,
         publish_completion=not SIMULATION_SHARD_MODE,
     )
@@ -1029,7 +950,6 @@ def run():
     run_downstream(
         checkpoint_store, region_keys, sample_names,
         output_dir=output_dir, n_workers=n_processes,
-        raw_gl_stage=DISCOVERY_STAGE, raw_sites_stage=DISCOVERY_STAGE,
         parent_eligibility=None,
         all_contigs=all_region_keys, publish_global=not SIMULATION_SHARD_MODE,
         genetic_maps=inference_genetic_maps, recombination_rate=inference_recombination_rate,

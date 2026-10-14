@@ -23,9 +23,9 @@ ceilings are execution choices outside every scientific identity. Each
 coordinator re-binds the painting stage identity computed with its own ceiling,
 so a ceiling-dependent identity would fail at once rather than resume or mix
 outputs. The parent validates the source and binds that identity before any
-coordinator starts; it alone publishes stage completion. The first failing
+coordinator starts; it alone records stage completion. The first failing
 contig stops the run, as in the sequential route: the other coordinators are
-stopped and keep their completed phase checkpoints for resume. A coordinator
+stopped and keep their contigs' records for resume. A coordinator
 also stops in the same way as soon as the workflow's main process exits for any
 reason (for example a signal sent to that process alone), so no coordinator
 keeps computing or writing checkpoints without an owner, and it starts no
@@ -48,11 +48,11 @@ import threading
 import time
 import traceback
 
-import haplotype_reconstruction.core.checkpoints as core_checkpoints
 import haplotype_reconstruction.core.chromosome_parallel as core_chromosome_parallel
 import haplotype_reconstruction.core.environment as core_environment
 import haplotype_reconstruction.core.run_record as core_run_record
 import haplotype_reconstruction.core.runtime as core_runtime
+import haplotype_reconstruction.discovery.checkpoints as discovery_checkpoints
 import haplotype_reconstruction.painting.components as painting_components
 from haplotype_reconstruction.workflows import reconstruction
 
@@ -66,8 +66,9 @@ from haplotype_reconstruction.workflows import reconstruction
 CONTIG_WORKER_CORES = 16
 
 # Peak memory of one contig lane (coordinator, its pools and shared arrays),
-# for limiting concurrency only: SOURCE_MEMORY_FACTOR x the decoded source
-# checkpoint + CONTIG_MEMORY_BYTES + CORE_MEMORY_BYTES per lease core. Fitted to
+# for limiting concurrency only: SOURCE_MEMORY_FACTOR x the decoded discovery
+# product (discovery.checkpoints.decoded_bytes) + CONTIG_MEMORY_BYTES +
+# CORE_MEMORY_BYTES per lease core. Fitted to
 # node memory sampled every 10 s in the N=320 host run (3 lanes of 37 threads,
 # 22 contigs, 39 GiB outside the lanes): the sum over running lanes bounds all
 # 2,015 samples, including contig transitions, the node peak (236 GiB with
@@ -96,9 +97,8 @@ RECONSTRUCTION_PHASE_PROGRESS = {
     "painting": 0.989,
 }
 
-# Decoded-size scans of the source checkpoints only read chunk headers, so
-# they wait on shared-filesystem latency: 22 N=320 discovery checkpoints took
-# 11 s one after another and 1.0 s with 16 threads.
+# Decoded sizes come from record indexes (header/trailer reads) that wait on
+# shared-filesystem latency, so the contigs' files are indexed concurrently.
 SIZE_SCAN_THREADS = 16
 
 _FAILURE = "contig coordinator failed on"
@@ -139,28 +139,26 @@ def configured_serial_contigs():
 
 
 def run_serially(checkpoint_store, contigs, sample_ids, *, discover, discovery_identity, config,
-                 max_contigs=None, source_stage="block_discovery", all_contigs=None,
-                 genetic_maps=None):
-    """Discover, assemble and paint one contig at a time, each checkpointed before the next.
+                 output_dir, max_contigs=None, all_contigs=None, genetic_maps=None):
+    """Discover, assemble and paint one contig at a time, each recorded before the next.
 
     For each of ``contigs`` (run order) still lacking its painting:
-    ``discover([contig])`` when it lacks its ``source_stage`` checkpoint (the
+    ``discover([contig])`` when its block discovery is incomplete (the
     workflow's block discovery, whose pool is closed before reconstruction),
     then ``reconstruction.run_reconstruction`` for that contig alone: the
     sequential route with the whole core ceiling. A contig thus runs the code of
-    a normal run and resumes from its own checkpoints. No stage completion is
-    published here: once every contig is painted, the caller continues as a
-    normal run, which validates the painted contigs, publishes the completion
-    markers and runs the genome-wide stages.
+    a normal run and resumes from its own records. No stage completion is
+    recorded here: once every contig is painted, the caller continues as a
+    normal run, which validates the painted contigs, records stage completion
+    and runs the genome-wide stages.
 
     ``max_contigs`` caps the contigs finished in this call, including a resumed
     partial one. Returns True when every contig is painted, or False after a
     clean stop that leaves contigs for a later invocation.
     """
-    target_stage = reconstruction.PAINTING_STAGE
     contigs = tuple(contigs)
     pending = [contig for contig in contigs
-               if not checkpoint_store.contig_done(target_stage, contig)]
+               if not checkpoint_store.contig(contig).has(reconstruction.PAINTING_STAGE)]
     selected = pending if max_contigs is None else pending[:max_contigs]
     cores = max(config.release_config.num_processes, config.paint_cores)
     print(f"\nSERIAL CONTIGS: {len(contigs) - len(pending)} of {len(contigs)} contigs painted"
@@ -168,11 +166,11 @@ def run_serially(checkpoint_store, contigs, sample_ids, *, discover, discovery_i
              f"time with a {cores}-core ceiling" if selected else ""), flush=True)
     for done, contig in enumerate(selected, start=len(contigs) - len(pending) + 1):
         started = time.monotonic()
-        if not checkpoint_store.contig_done(source_stage, contig):
+        if not discovery_checkpoints.complete(checkpoint_store.contig(contig)):
             discover([contig])
         reconstruction.run_reconstruction(
             checkpoint_store, (contig,), sample_ids, discovery_identity=discovery_identity,
-            config=config, source_stage=source_stage,
+            config=config, output_dir=output_dir,
             all_contigs=contigs if all_contigs is None else all_contigs,
             publish_completion=False, genetic_maps=genetic_maps)
         print(f"  [SERIAL] {contig} painted in {time.monotonic() - started:.1f} s; "
@@ -181,35 +179,30 @@ def run_serially(checkpoint_store, contigs, sample_ids, *, discover, discovery_i
     if remaining:
         print(f"[STOP] max_contigs = {max_contigs} reached: "
               f"{len(contigs) - len(remaining)} of {len(contigs)} contigs painted; "
-              f"remaining: {', '.join(remaining)}. Completed checkpoints are kept; "
+              f"remaining: {', '.join(remaining)}. Completed records are kept; "
               "rerun the same command to continue.", flush=True)
         return False
     return True
 
 
-def plan_contig_workers(checkpoint_store, contigs, *, cores, requested,
-                        source_stages, target_stage):
+def plan_contig_workers(checkpoint_store, contigs, *, cores, requested):
     """Return concurrent coordinators and longest-first work weights per contig.
 
     Automatic: one coordinator per CONTIG_WORKER_CORES cores, at most one per
-    contig still lacking its product. A decoded-source memory estimate then
+    contig still lacking its painting. A decoded-source memory estimate then
     limits the concurrent group; it never reduces the shared core ceiling.
     """
-    pending = [contig for contig in contigs
-               if not checkpoint_store.contig_done(target_stage, contig)]
+    files = [checkpoint_store.contig(contig) for contig in contigs]
+    pending = [file.name for file in files if not file.has(reconstruction.PAINTING_STAGE)]
     limit = max(1, cores // CONTIG_WORKER_CORES) if requested is None else requested
     workers = min(len(pending), limit, cores)
     if workers < 2:
         return 1, None
     lease = cores // workers
-    paths = [[core_checkpoints.contig_path(checkpoint_store.root, stage, contig)
-              for stage in source_stages] for contig in contigs]
-    flat = [path for group in paths for path in group]
-    with ThreadPoolExecutor(min(SIZE_SCAN_THREADS, len(flat))) as scanner:
-        decoded = dict(zip(flat, scanner.map(core_checkpoints.read_size_bytes, flat)))
+    with ThreadPoolExecutor(min(SIZE_SCAN_THREADS, len(files))) as scanner:
+        decoded = list(scanner.map(discovery_checkpoints.decoded_bytes, files))
     weights, estimates = [], []
-    for contig, group in zip(contigs, paths):
-        source = sum(decoded[path] for path in group)
+    for contig, source in zip(contigs, decoded):
         if contig in pending:
             weights.append(float(source))
             estimates.append(SOURCE_MEMORY_FACTOR * source + CONTIG_MEMORY_BYTES
@@ -242,10 +235,7 @@ def _validated_contigs(contigs, all_contigs, publish_completion):
 
 
 def run_reconstruction(checkpoint_store, contigs, sample_ids, *, discovery_identity, config,
-                       source_stage="block_discovery",
-                       target_stage=reconstruction.PAINTING_STAGE,
-                       probabilities_stage=None, probabilities_key="global_probs",
-                       all_contigs=None, publish_completion=True,
+                       output_dir, all_contigs=None, publish_completion=True,
                        painter_factory=painting_components.ComponentPainter,
                        genetic_maps=None, contig_workers=None):
     """``reconstruction.run_reconstruction`` with independent contigs run concurrently.
@@ -258,11 +248,9 @@ def run_reconstruction(checkpoint_store, contigs, sample_ids, *, discovery_ident
     Returns the same summaries in the same contig order.
     """
     arguments = dict(
-        discovery_identity=discovery_identity, config=config, source_stage=source_stage,
-        target_stage=target_stage, probabilities_stage=probabilities_stage,
-        probabilities_key=probabilities_key, all_contigs=all_contigs,
-        publish_completion=publish_completion, painter_factory=painter_factory,
-        genetic_maps=genetic_maps)
+        discovery_identity=discovery_identity, config=config, output_dir=output_dir,
+        all_contigs=all_contigs, publish_completion=publish_completion,
+        painter_factory=painter_factory, genetic_maps=genetic_maps)
     requested = configured_contig_workers(contig_workers)
     if not isinstance(config, reconstruction.ReconstructionConfig):
         raise TypeError("config must be a ReconstructionConfig")
@@ -270,11 +258,8 @@ def run_reconstruction(checkpoint_store, contigs, sample_ids, *, discovery_ident
     cores = max(config.release_config.num_processes, config.paint_cores)
     workers, weights = 1, None
     if requested != 1 and len(contigs) > 1 and cores > 1:
-        sources = tuple(dict.fromkeys(
-            stage for stage in (source_stage, probabilities_stage) if stage is not None))
         workers, weights = plan_contig_workers(
-            checkpoint_store, contigs, cores=cores, requested=requested,
-            source_stages=sources, target_stage=target_stage)
+            checkpoint_store, contigs, cores=cores, requested=requested)
     if workers > 1:
         executor = core_chromosome_parallel.ChromosomeExecutor(
             contigs, _reconstruct_contig, n_workers=cores, weights=weights,
@@ -291,16 +276,8 @@ def run_reconstruction(checkpoint_store, contigs, sample_ids, *, discovery_ident
 
 def _run_concurrently(checkpoint_store, contigs, sample_ids, executor, *, all_contigs,
                       arguments):
-    """Validate and bind as the sequential route does, run coordinators, publish."""
-    target_stage = arguments["target_stage"]
-    probabilities_stage = arguments["probabilities_stage"]
-    if probabilities_stage is not None:
-        probabilities_stage = str(probabilities_stage)
-        if not probabilities_stage:
-            raise ValueError("probabilities_stage must be nonempty")
-    probabilities_key = str(arguments["probabilities_key"])
-    if not probabilities_key:
-        raise ValueError("probabilities_key must be nonempty")
+    """Validate and bind as the sequential route does, run coordinators, record."""
+    target_stage = reconstruction.PAINTING_STAGE
     config = arguments["config"]
     ordered_ids = reconstruction._canonical_sample_ids(sample_ids)
     available = core_runtime.available_cpu_count()
@@ -311,17 +288,15 @@ def _run_concurrently(checkpoint_store, contigs, sample_ids, executor, *, all_co
             f"({available})"
         )
     reconstruction._validate_discovery_global_source(
-        checkpoint_store, arguments["source_stage"], all_contigs, ordered_ids,
-        arguments["discovery_identity"], require_complete=arguments["publish_completion"])
-    checkpoint_store.bind_stage_identity(
-        target_stage, reconstruction.assembly_production_stage_identity(
+        checkpoint_store, all_contigs, ordered_ids, arguments["discovery_identity"],
+        require_complete=arguments["publish_completion"])
+    checkpoint_store.bind_identity(
+        checkpoint_store.run, target_stage, reconstruction.assembly_production_stage_identity(
             config, discovery_identity=arguments["discovery_identity"],
             sample_ids=ordered_ids, contigs=all_contigs,
-            source_stage=arguments["source_stage"], target_stage=target_stage,
-            probabilities_stage=probabilities_stage, probabilities_key=probabilities_key,
             genetic_maps=arguments["genetic_maps"]))
     missing = [contig for contig in contigs
-               if not checkpoint_store.contig_done(target_stage, contig)]
+               if not checkpoint_store.contig(contig).has(target_stage)]
     if checkpoint_store.stage_complete(target_stage) and missing:
         raise RuntimeError(f"{target_stage} is marked complete but lacks: {missing}")
 
@@ -339,8 +314,7 @@ def _run_concurrently(checkpoint_store, contigs, sample_ids, executor, *, all_co
     for contig in contigs:
         print(f"    {contig} log: {logs[contig]}", flush=True)
     common = dict(
-        root=checkpoint_store.root, log_indent=checkpoint_store.global_log_indent,
-        sample_ids=ordered_ids, logs=logs,
+        root=checkpoint_store.root, sample_ids=ordered_ids, logs=logs,
         arguments=dict(arguments, all_contigs=all_contigs, publish_completion=False))
     try:
         results = _run_coordinators(executor, common)
@@ -360,11 +334,10 @@ def _run_concurrently(checkpoint_store, contigs, sample_ids, executor, *, all_co
             resumed=bool(summary.resumed), threads=int(result["threads"]),
             wall_seconds=float(result["wall_seconds"]), log=result["log"],
             pid=int(result["pid"]), stages=result["stages"]))
-    core_runtime.require_contig_checkpoints(checkpoint_store, target_stage, contigs)
+    core_runtime.require_records(checkpoint_store, target_stage, contigs)
     if arguments["publish_completion"]:
-        core_runtime.require_contig_checkpoints(checkpoint_store, target_stage, all_contigs)
-        if not checkpoint_store.stage_complete(target_stage):
-            checkpoint_store.mark_stage_complete(target_stage)
+        core_runtime.require_records(checkpoint_store, target_stage, all_contigs)
+        checkpoint_store.mark_stage_complete(target_stage)
     return tuple(summaries)
 
 
@@ -382,14 +355,14 @@ def _failure_message(text, partitions, checkpoint_store, target_stage, logs):
     died = re.match(r"chromosome worker (\d+) (?:exited unexpectedly|closed its pipe)", text)
     if failed not in logs and died is not None and int(died.group(1)) < len(partitions):
         failed = next((contig for contig in partitions[int(died.group(1))]
-                       if not checkpoint_store.contig_done(target_stage, contig)), None)
+                       if not checkpoint_store.contig(contig).has(target_stage)), None)
     unfinished = [contig for partition in partitions for contig in partition
                   if contig != failed
-                  and not checkpoint_store.contig_done(target_stage, contig)]
+                  and not checkpoint_store.contig(contig).has(target_stage)]
     head = (f"reconstruction failed in contig {failed} (log {logs[failed]})"
             if failed in logs else "a reconstruction contig coordinator failed")
     return (f"{head}; the other coordinators were stopped and these contigs resume from "
-            f"their own checkpoints on rerun: {unfinished or 'none'}")
+            f"their own records on rerun: {unfinished or 'none'}")
 
 
 class _Stopped(SystemExit):
@@ -501,8 +474,7 @@ def _reconstruct_contig(contig, state, phase, common):
     arguments = dict(arguments, config=replace(
         config, paint_cores=threads,
         release_config=replace(config.release_config, num_processes=threads)))
-    store = core_runtime.CheckpointStore(
-        common["root"], nthreads=threads, global_log_indent=common["log_indent"])
+    store = core_runtime.CheckpointStore(common["root"], nthreads=threads)
     try:
         with core_runtime.run_log(log), core_run_record.worker_stages() as stages:
             print(f"[{contig}] contig coordinator pid {os.getpid()}: {threads}-core "
@@ -520,7 +492,7 @@ def _reconstruct_contig(contig, state, phase, common):
                               if _PARENT_EXITED.is_set()
                               else "by SIGTERM (another contig failed or the run was stopped)")
                     print(f"[{contig}] stopped {reason}; "
-                          "completed phase checkpoints are kept for resume", flush=True)
+                          "its records are kept for resume", flush=True)
                     raise
                 raise RuntimeError(f"{_FAILURE} {contig}: {type(error).__name__}: "
                                    f"{error} (log {log})") from error

@@ -237,20 +237,25 @@ interpretation and resampling limits.
 
 ## Stage vocabulary and checkpoint compatibility
 
-All workflows use descriptive stage names. A fresh checkpoint root contains
-`block_discovery/`, the `feedback_*/` contexts/selections,
-`assembly/` for internal assembly/refinement work,
-`painting/`, `pedigree_evidence/`, `pedigree_scores/`, `pedigree/`,
-`allele_refit/`, `family_phase/` and `recombination/`. Simulation additionally creates
-`founder_templates/` and `simulated_reads/`. Dataset names belong to the
-run directory, not to stage identifiers.
+All workflows record the same stages, whose names prefix the record keys in
+the checkpoint files ([checkpoints and outputs](#checkpoints-and-outputs)):
+`discovery`, the local-feedback rounds `feedback/initial`, `feedback/l1` and
+`feedback/l2`, final `assembly` (L1–L4 levels and founder refinement),
+`painting`, `pedigree`, `allele_refit`, `family_phase` and `recombination`;
+simulations add `simulation/templates`, `simulation/reads` and
+`simulation/truth`. Command-line options use the names `--stop-after-stage
+block_discovery|painting` and, for `evaluate --stages`, `block_discovery`,
+`feedback_initial`, `feedback_l1`, `feedback_l2`, `assembly_l1`–`assembly_l4`,
+`founder_refinement`, `painting`, `allele_refit`, `pedigree`, `family_phase`
+and `recombination`. Dataset names belong to the run directory, not to stage
+names.
 
-This naming refactor also renames internal APIs, serialized classes and
-identity keys. Historical checkpoint trees remain intact but are not accepted
-as the new format. Use a fresh output root; preserve the frozen source with
-older runs when reproducing them. Do not rename folders or edit identity
-sidecars to force compatibility. Curated real-data handoffs retain their
-original filenames and provenance.
+This release does not read checkpoints written by earlier releases: a
+checkpoint directory that contains stage directories such as
+`block_discovery/` stops the run with an error. Use a new output root, or
+continue such a run with the release that wrote it. Do not rename files or
+edit identity records to force compatibility. Curated real-data handoffs
+retain their original filenames and provenance.
 
 ## Simulation stage boundaries and chromosome shards
 
@@ -275,9 +280,11 @@ python run.py simulate --config configs/simulation.toml --seed 400 \
 ```
 
 Specify a stop boundary for shard workers, before genome-wide pedigree/family
-inference. Shards retain chromosome checkpoints but do not publish global stage
-completion. After every shard finishes, run once without shard or stop controls
-to validate/reuse the chromosome outputs and continue genome-wide inference.
+inference. Each shard writes its own chromosomes' files; genome-wide identity
+and manifest records are written once, by the first shard, and checked by the
+others. Shards never record genome-wide stage completion. After every shard
+finishes, run once without shard or stop controls: it validates and reuses the
+chromosome records, records completion and continues genome-wide inference.
 
 The TOML equivalents are `[run].process_contigs = ["chr1", "chr2"]` and
 `[run].stop_after_stage = "painting"`. Existing environment controls
@@ -312,7 +319,7 @@ haplotypes reconstruct --vcf cross.bcf --output work/runs/my_cross \
 ```
 
 When every chromosome is painted, the run continues as a normal run: it
-validates the painted chromosomes, publishes the stage completion markers and
+validates the painted chromosomes, records genome-wide stage completion and
 runs the genome-wide stages (pedigree, allele refit, family phase and
 recombination), unless `--stop-after-stage painting` stops it first. Each
 chromosome runs the same code from the same checkpoints as in a normal run, so
@@ -330,15 +337,10 @@ On a large node the default concurrent contigs finish sooner, because one
 chromosome rarely keeps every core busy; serial mode trades that throughput
 for small units of durable progress.
 
-In either mode, checkpoint writes are atomic and rerunning the same command
-resumes after identity checks. An interruption loses at most: the current
-chromosome's block discovery (checkpointed per chromosome); the current chunk
-of 64 blocks of a local-feedback path-selection round; the current final
-assembly phase (preprocessing, each hierarchy level and each level's founder
-refinement per component, long components also per sweep); the current
-chromosome's painting; the current chromosome of pedigree evidence and scores,
-allele refit, family phase and recombination; and up to about 120 s of family
-phase iterations.
+In either mode, every finished unit of work is a durable checkpoint record,
+and rerunning the same command resumes after identity checks. An interruption
+loses only the work in progress since the last record; the
+[checkpoint guide](#checkpoints-and-outputs) lists those units.
 
 ## Reference-order breakpoints
 
@@ -373,10 +375,11 @@ coordinates). The stage widens every interval to the painting bins it overlaps,
 removes those sites from the map axis and splits the component there, so no
 call, exposure or shared-orientation tract crosses a supplied breakpoint. The
 file path and its SHA-256 enter the recombination stage identity, and nothing
-upstream depends on the file. A checkpoint root whose recombination stage was
-made with another file (or none) refuses the new one; map with a different file
-from a checkpoint root holding only the upstream stages (for example linked
-copies), which recomputes recombination alone. The same format serves family phase's protected intervals
+upstream depends on the file. A checkpoint directory whose recombination stage
+was made with another file (or none) refuses the new one; map with a different
+file from a copy of the checkpoint directory taken before recombination ran
+(see [checkpoints and outputs](#checkpoints-and-outputs)), which recomputes
+recombination alone. The same format serves family phase's protected intervals
 (`BHD_FAMILY_PHASE_PROTECTED_INTERVALS`), which only stop root-frame repairs and
 do not mask anything.
 
@@ -450,7 +453,8 @@ exact local rows in the stressed control. Rare weak rows can still be lost;
 real-data counts are not independently established founder truth.
 
 Raw discovery is never overwritten. Initial fitting and each feedback round
-have separate resumable checkpoints. Changed read-model calibration makes
+have their own resumable records (`feedback/initial`, `feedback/l1`,
+`feedback/l2`). Changed read-model calibration makes
 old likelihood/discovery checkpoints scientifically incompatible: preserve old
 runs and use a new output/checkpoint root; do not relabel old products.
 
@@ -495,11 +499,12 @@ final refiner. Each level prints its fits at the sweep backstop, count
 backstops, count cycles, ambiguous count calls and best-F panel replacements;
 the refinement diagnostics record each decision and replacement.
 
-Each level saves its `refinement_l1` through `refinement_l4` result beneath
-`assembly/`. Independent small components save compact completed
-paths; long components also retain their converged fits.
-A completed component can be reused when a sibling is interrupted. The
-`founder_refinement` aggregate remains the final-product checkpoint.
+Each level saves every component's refinement as `assembly/l<k>/refine/<n>` in
+the chromosome's checkpoint file as soon as it completes, then the level
+summary `assembly/l<k>/refine`. Independent small components save compact
+completed paths; long components also retain their converged fits and save
+each sweep. A completed component is reused when a sibling is interrupted.
+`assembly/final` records the final count step.
 
 Components share read-only chromosome evidence and divide the existing core
 budget; surviving components and focal searches acquire freed threads at
@@ -562,49 +567,93 @@ incompatible reuse; no manual cache relabeling is needed.
 
 By default, a simulation writes `work/runs/seed_<seed>/`. Real-data defaults are
 `work/runs/astcal/` and `work/runs/tropheops/`. Use `--output` to isolate an
-alternative attempt and `--checkpoints` to override its checkpoint location.
-Do not share a checkpoint directory between different seeds or configurations.
+alternative attempt and `--checkpoints` to place its checkpoints elsewhere
+(default `OUTPUT/checkpoints`). Do not share a checkpoint directory between
+different seeds or configurations.
 
-| Checkpoint directory | Contents |
+A checkpoint directory holds one file per chromosome and one genome-wide file:
+
+| Path | Contents |
 | --- | --- |
-| `founder_templates/` | Frozen simulation sequence inputs |
-| `simulated_reads/` | Simulated observations, true pedigree, alleles and raw crossover events |
-| `block_discovery/` | Discovered 200-SNP block haplotypes, raw likelihoods/observation masks as applicable |
-| `feedback_path_initial/` | Initial local path fits (checkpointed in chunks of 64 blocks) and selected panels |
-| `feedback_path_l1_assembly/`, `feedback_path_l1/` | L1 context, local proposals, path fits (chunks of 64 blocks) and selected panels |
-| `feedback_path_l2_assembly/`, `feedback_path_l2/` | L1+L2 context from selected L1 panels, proposals and selected local panels |
-| `genotype_evidence/` | Lossless compact GL/position/observation-mask cache for downstream inference |
-| `assembly/` | Preprocessing, L1–L4 levels, per-level founder-refinement components/searches and final aggregate |
-| `painting/` | Typed component-local painting products |
-| `painting/reports/CONTIG/` | Founder callability/carrier support, per-sample painted switches and assembly-search TSVs |
-| `pedigree_evidence/versions/ID/` | Reusable prepared chromosome evidence |
-| `pedigree_scores/versions/ID/` | Compact genetic likelihoods, candidate panel, per-chromosome resume products |
-| `pedigree/versions/ID/` | Versioned pedigree decisions and support tables |
-| `pedigree/_global.p5.b2` | Current published pedigree view consumed downstream |
-| `allele_refit/` | Post-painting founder allele refit per chromosome (released and family-phase inference alleles) |
-| `family_phase/` | Final phase products, `CONTIG.iterations.p5.b2` work checkpoints, and compact completion summary |
-| `recombination/` | Conditional map products and completion summary |
+| `contigs/<contig>.ckpt` | Everything computed for one chromosome, from its simulated reads or discovery evidence to its recombination map, including every intermediate founder stage |
+| `run.ckpt` | Genome-wide records: stage identities, manifests and completion, the simulation manifest with the true pedigree, pedigree scores and decisions, family-phase and recombination summaries |
+| `work/` | Transient resume state (family-phase iterations), present only while it is live |
 
-Atomic protocol-5/Blosc checkpoints use `.p5.b2`; completion markers are written
-only after required outputs exist. Inputs, model/configuration and relevant
-source identities are checked at stage boundaries. Interrupted work resumes
-from durable chromosome, assembly-phase or family-iteration checkpoints. Source
-changes may invalidate affected stages; do not bypass a mismatch by relabeling
-an old checkpoint as current.
+Each file is a sequence of records appended as results arrive. A record has a
+key, such as `discovery/prepared`, `assembly/l2/refine/00004` or `painting`,
+and is never modified once written; a later record with the same key
+supersedes it. A chromosome's file therefore grows while its stages run, and
+afterwards it reproduces every intermediate stage: `python run.py evaluate
+--stages all` reads them, and in Python
+`CheckpointStore(path).contig("chr9").keys()` lists a file's records and
+`core.products.load_panels(file, stage)` returns a founder stage's panels.
 
-Reconstruction writes compact genotype evidence after validating its inputs.
-Pedigree and family phase use this derived cache when it matches the source checkpoint files;
-older runs without it continue to read their original raw/block checkpoints.
-The cache does not replace the rich simulation truth or discovery products:
-keep those source files, including linked targets, for validation and resume.
-It uses the same likelihood precision and missing-observation mask, trading an
-additional write and disk space for smaller repeated reads and lower memory.
+| Chromosome record | Holds |
+| --- | --- |
+| `simulation/templates`, `simulation/reads`, `simulation/truth` | Simulation inputs: founder templates, simulated reads, and the truth (founders, painting, alleles, crossovers) that only evaluation reads |
+| `discovery/prepared` | Sites, genotype likelihoods (their only stored copy), observation mask, read calibration and site/sample quality, written when preparation finishes |
+| `discovery/plan`, `discovery/blocks/<n>` | The block plan; discovered blocks, up to 64 per record, saved as they complete |
+| `feedback/<round>/...` | Local path selection in chunks of 64 blocks, context proposals and assemblies, and each round's summary |
+| `joins/<digest>` | Joined hierarchy batches, keyed by the digest of their exact inputs and shared by every assembly of the chromosome |
+| `assembly/...` | Preprocessing, each level's plan and join manifest, founder refinement per component (`assembly/l<k>/refine/<n>`), level summaries and the final count step (`assembly/final`) |
+| `painting` | The typed component painting |
+| `pedigree/evidence/<v>`, `pedigree/scores/<v>/<id>`, `pedigree/exclusion/<v>` | Versioned pedigree preparation, genetic scores and full-marker exclusion |
+| `allele_refit`, `family_phase`, `recombination` | Refit founder alleles, final phase and the recombination map |
+| `identity/<section>` | The model/configuration identity a section was computed under |
 
-Family phase uses one phase-focused path, with no separate full-posterior or imputed
-source stage. Iteration checkpoints retain family messages, the preceding
-polished phase and the consecutive-stability count; large numerical caches are
-rebuilt on restart. A 520-iteration safety limit refuses release if phase has
-not stabilized. Stable phase does not assert marginal-posterior convergence.
+Blocks are stored without their genotype-likelihood slices, which are rebuilt
+from `discovery/prepared` when the blocks are loaded. A feedback round's
+summary, a level summary and `assembly/final` refer to the chunk, join and
+component records instead of copying their blocks. Superseded records (such as
+long-component sweep states) are small, so files are never compacted.
+
+`identity/<section>` records bind each section to the exact model,
+configuration and code that produced it. A mismatch stops the run with an
+error naming the section: use a new output root rather than relabelling old
+records. Downstream stages record the identities of the upstream records they
+read; pedigree products are versioned by them instead (see
+[pedigree cache reuse](#pedigree-cache-reuse-and-explanations)).
+
+Each record is written under an exclusive lock on its file and flushed to disk
+before it counts. Readers never see a partial record: a run cut off mid-write
+leaves an incomplete last record, which readers ignore and the next writer
+removes with one warning. An interruption therefore loses only the work in
+progress:
+
+- the discovered blocks of a chromosome since its last saved chunk (at most 63);
+- the current chunk of 64 blocks of a local-feedback round;
+- the hierarchy batches being joined (each completed join is saved);
+- the components being refined (long components also save every sweep);
+- each chromosome being painted, and each chromosome in progress in pedigree
+  preparation, scoring and full-marker exclusion, allele refit, family phase
+  or recombination;
+- up to about 120 s of family-phase iterations.
+
+`haplotypes status --output RUN` reports progress from record metadata alone,
+without decoding any payload: the genome-wide stages completed and pending,
+then one line per chromosome with its file size, last write, the stages done
+and how far the current one has got, and any live work state, for example
+
+```text
+chr9   1.2 GiB  40s ago  discovery 1282/1282 blocks | feedback done | final L1 done L2 joins 55/129 | painting - | downstream -
+```
+
+together with the run-record summary. `--checkpoints` names another checkpoint
+directory, `--contigs` selects chromosomes and `--json` prints JSON.
+
+Threads, processes and nodes may write to the same file at once: appends are
+serialized with `flock`, which holds across nodes on the cluster's Lustre file
+system. Two invocations on one output root cannot corrupt it but repeat each
+other's work, so run one invocation per output root, apart from
+`--process-contigs` shards.
+
+Family phase uses one phase-focused path, with no separate full-posterior or
+imputed source stage. Its iteration state (`work/<contig>/family_phase*`)
+retains family messages, the preceding polished phase and the
+consecutive-stability count; large numerical caches are rebuilt on restart.
+The state is removed once the chromosome's final phase is stored. A 520-iteration
+safety limit refuses release if phase has not stabilized, keeping the state.
+Stable phase does not assert marginal-posterior convergence.
 
 Family phase preserves published genotype calls and missingness: family-supported fills
 are neither polishing evidence nor released as newly imputed alleles.
@@ -612,16 +661,16 @@ The retired `--impute-missing` flag and TOML `[refinement].impute_missing` key
 are rejected. Remove the TOML key (even if set to `false`); there is no replacement
 switch for publishing the former separate imputed product.
 
-Changes confined to family phase can reuse compatible painting/pedigree/raw checkpoints in a new
-downstream output root. The local-feedback change described above also changes
-painting inputs: reuse only compatible original input/discovery stages for that
-upgrade. Do not overwrite or relabel old scientific products.
+Records are never removed, so a stage cannot be rerun in place with different
+settings. To compare downstream settings on the same upstream results, copy the
+checkpoint directory before running the stage to be varied (for example after
+`--stop-after-stage painting`) and continue each copy as its own output root.
+Never share chromosome files between output roots: both runs would append to
+them. Do not overwrite or relabel old scientific products.
 
-When an attempt reuses validated inputs, its checkpoint directories may be
-symbolic links to an earlier attempt. `attempt.json` records that source.
-Keep the linked targets—including input stages under `work/history/`—while
-the current run or any future resume needs them. A history directory is not
-automatically disposable merely because its assembly attempt was superseded.
+Painting reports are written under `OUTPUT/reports/painting/<contig>/` (see
+[founder support](#founder-support-and-bounded-search-diagnostics)), also when
+`--checkpoints` points elsewhere.
 
 Readable output directories include `pedigree/`, `phase_correction/`, and
 `recombination_map/`. The latter separates posterior rate curves, called
@@ -641,7 +690,8 @@ the mixing and pairing log likelihood ratios, `junction_log_lr`, `flagged`
 describes the model. `summary.csv` adds `junction_loci`, `junction_loci_flagged`,
 `order_breakpoints` and `order_breakpoint_masked_sites`.
 Tables of phase-stability summaries do not replace the detailed allele arrays
-in checkpoints.
+in checkpoints: `phase_correction/family_phase.csv` names each chromosome's
+checkpoint file (`final_checkpoint`), whose `family_phase` record holds them.
 
 ## Simulation evaluation
 
@@ -719,18 +769,19 @@ Pedigree now has three independently identified products:
 Changing direction/family settings or support thresholds through the API
 reuses preparation and scores; changing candidate eligibility reuses
 preparation but rescores. A score-stage change never masquerades as a
-decision-only replay. Ordinary atomic replacement of an upstream checkpoint
-changes its source-file identity. pedigree v5 does not retroactively relabel older
-v4 preparation caches; the first new run prepares them once.
+decision-only replay. Each product is versioned by its identity, which includes
+the identities of the painting and evidence records it read, so a rewritten
+upstream record leads to new versions rather than stale reuse.
 
-Versioned decisions are retained. The conventional pedigree global file is the
-current published view; a pre-existing different view is archived before
-replacement. Do not run competing global publishers in the same output root.
-Family phase already keys conditioning on the actual Tier-B relationship table, so
-unchanged relationships reuse final phase. If relationships change, family phase
-rejects incompatible existing checkpoints: preserve those results and use a
-separate downstream output/checkpoint root rather than deleting or relabeling
-them. This change does not add an automatic family phase/recombination rerun or feedback loop.
+Every decision is kept as `pedigree/decision/<v>` in `run.ckpt`; the `pedigree`
+record names the current one, which later stages and evaluation read. Do not
+run competing genome-wide publishers in the same output root.
+Family phase keys conditioning on the actual Tier-B relationship table, so
+unchanged relationships reuse final phase. If relationships change, the family
+phase identity no longer matches and the run stops: preserve those results and
+use a separate output root (see [checkpoints and outputs](#checkpoints-and-outputs))
+rather than deleting or relabelling them. There is no automatic family
+phase/recombination rerun or feedback loop.
 
 The standard `pedigree/` exports now include:
 
@@ -769,7 +820,7 @@ When reference samples enter discovery, the comparison is non-independent.
 ## Founder support and bounded-search diagnostics
 
 Every completed or resumed painting chromosome writes small reports under
-`checkpoints/painting/reports/CONTIG/`:
+`OUTPUT/reports/painting/CONTIG/`:
 
 - `founder_support.tsv`: called/missing marker alleles per component-local
   founder, component boundaries, distinct observed carrier samples, and called

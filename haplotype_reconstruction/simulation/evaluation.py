@@ -9,15 +9,14 @@ import numpy as np
 import pandas as pd
 
 from ..core.runtime import CheckpointStore, available_cpu_count, available_memory_bytes
-from ..core.products import FOUNDER_STAGES, load_panels, panel_location
+from ..core.products import FOUNDER_STAGES, load_panels, panel_bytes, panel_keys, published_pedigree
 from ..core.chromosome_parallel import (
     ChromosomeExecutor, current_threads, memory_worker_limit,
 )
-from ..core.checkpoints import contig_path, read_size_bytes_many
 from ..core.parallel import malloc_trim
 from .founder_metrics import evaluate_founders, represented_ancestry
 from .metrics import long_switch_counts, phase_counts
-from .truth import load_truth, truth_location
+from .truth import SIMULATION, TRUTH, load_truth
 
 EVALUATION_STAGES = (*FOUNDER_STAGES, "pedigree", "family_phase", "recombination")
 PHASE_COLUMNS = ("called_alleles", "called_genotypes", "genotype_errors",
@@ -119,11 +118,10 @@ def _evaluate_chromosome(task, state, phase, common):
     print(f"EVALUATION {contig}: start; threads={current_threads()}", flush=True)
     names, requested = common["names"], common["requested"]
     automatic = requested in (("available",), ("all",))
-    store = CheckpointStore(common["checkpoint_root"], nthreads=current_threads())
+    file = CheckpointStore(common["checkpoint_root"], nthreads=current_threads()).contig(contig)
     founders, component_rows, matching_rows, skipped = [], [], [], []
-    source, positions = load_truth(store, contig, names, cache_root=common["truth_cache_root"])
-    # Evaluation never consumes reads or genotype-likelihood preparation arrays.
-    # Drop those local references before loading another large checkpoint.
+    source, positions = load_truth(file, names, nthreads=current_threads())
+    # Keep only the truth this chromosome's requested products are compared with.
     truth_keys = set()
     if founder_stages:
         truth_keys.update(("truth_founder_haplotypes", "truth_painting"))
@@ -137,8 +135,8 @@ def _evaluate_chromosome(task, state, phase, common):
         current_threads()
         represented = represented_ancestry(source["truth_painting"], positions, len(truth))
         for stage in founder_stages:
-            store.nthreads = current_threads()
-            blocks = load_panels(store, contig, stage)
+            file.nthreads = current_threads()
+            blocks = load_panels(file, stage)
             current_threads()
             summary, components, matches = evaluate_founders(
                 blocks, positions, truth, represented, contig=contig, stage=stage)
@@ -151,8 +149,8 @@ def _evaluate_chromosome(task, state, phase, common):
     added = {}  # long-range switch columns follow every existing column
     reported = {}  # then the reported-interval map columns
     if automatic or "family_phase" in requested:
-        if store.contig_done("family_phase", contig):
-            final = store.load_contig("family_phase", contig, nthreads=current_threads())
+        if file.has("family_phase"):
+            final = file.get("family_phase", nthreads=current_threads())
             calls, truth = final["phase"].allele_calls, np.asarray(source["truth_alleles"], dtype=np.int8)
             if tuple(final["sample_ids"]) != names or truth.shape != calls.shape:
                 raise ValueError(f"{contig}: incompatible true/final allele axes")
@@ -171,11 +169,10 @@ def _evaluate_chromosome(task, state, phase, common):
         else:
             skipped.append(f"{contig}/family_phase")
     if automatic or "recombination" in requested:
-        if store.contig_done("recombination", contig):
+        if file.has("recombination"):
             events = {(r["parent"], r["child"]): r["crossover_positions_bp"]
                       for r in source["truth_crossovers"]}
-            counts = map_counts(store.load_contig("recombination", contig, nthreads=current_threads()),
-                                events, names)
+            counts = map_counts(file.get("recombination", nthreads=current_threads()), events, names)
             reported = {key: counts.pop(key) for key in REPORTED_INTERVAL_COLUMNS}
             row.update(counts)
         elif not automatic:
@@ -189,32 +186,23 @@ def _evaluate_chromosome(task, state, phase, common):
     return None, (row, founders, component_rows, matching_rows, skipped)
 
 
-def _evaluation_resources(store, tasks, requested, workers, sample_ids, truth_cache_root):
-    """Bound concurrent chromosomes using decoded checkpoint sizes, not disk sizes.
+def _evaluation_resources(store, tasks, requested, workers):
+    """Bound concurrent chromosomes using decoded record sizes, not stored sizes.
 
-    Use the compact truth size when present; otherwise allow for the original
-    simulated-read source during one-time extraction. Add the largest selected
-    product, 25% for numerical copies and
-    2 GiB per process for the bounded compressed read workspace and Python/JIT
-    state. Reserve another 10% (at least 4 GiB, at most half) of available memory.
+    The decoded truth plus the largest selected product, 25% for numerical
+    copies and 2 GiB per process for the bounded compressed read workspace and
+    Python/JIT state. Reserve another 10% (at least 4 GiB, at most half) of
+    available memory.
     """
     automatic = requested in (("available",), ("all",))
-    plans = []
+    estimates = []
     for contig, founder_stages in tasks:
-        compact, _identity = truth_location(store, contig, sample_ids, truth_cache_root)
-        source = (compact if compact is not None else
-                  contig_path(store.root, "simulated_reads", contig))
-        paths = set() if compact is not None else {
-            contig_path(store.root, "founder_templates", contig)}
-        for stage in founder_stages:
-            paths.add(contig_path(store.root, *panel_location(store, contig, stage)))
-        for stage in ("family_phase", "recombination"):
-            if (automatic or stage in requested) and store.contig_done(stage, contig):
-                paths.add(contig_path(store.root, stage, contig))
-        plans.append((source, paths))
-    sizes = read_size_bytes_many(path for source, paths in plans for path in (source, *paths))
-    estimates = [(sizes[source] + max((sizes[path] for path in paths), default=0)) * 5 // 4
-                 + (2 << 30) for source, paths in plans]
+        file = store.contig(contig)
+        sizes = [panel_bytes(file, stage) for stage in founder_stages]
+        sizes += [file.info(key).decoded_bytes for key in ("family_phase", "recombination")
+                  if (automatic or key in requested) and file.has(key)]
+        estimates.append((file.info(TRUTH).decoded_bytes + max(sizes, default=0)) * 5 // 4
+                         + (2 << 30))
     return estimates, memory_worker_limit(
         estimates, workers, available_memory_bytes(), label="EVALUATION")
 
@@ -233,7 +221,9 @@ def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available
     if not 1 <= workers <= available_cpu_count():
         raise ValueError("evaluation cores must fit the current affinity")
     store = CheckpointStore(checkpoints or output/"checkpoints", nthreads=workers)
-    simulation = store.load_global("simulated_reads")
+    if not store.run.has(SIMULATION):
+        raise FileNotFoundError(f"{store.root}: no simulation manifest")
+    simulation = store.run.get(SIMULATION)
     if simulation.get("simulation_state") != "complete":
         raise ValueError("evaluation requires complete simulated truth")
     names = tuple(simulation["sample_names"])
@@ -252,15 +242,17 @@ def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available
                   chromosomes=[], founders=[], requested_stages=list(requested),
                   checkpoint_root=str(Path(store.root).resolve()), skipped=[])
     if automatic or "pedigree" in requested:
-        if store.global_done("pedigree"):
-            inferred = store.load_global("pedigree")["tier_b_relationships"]
-            report["pedigree"] = pedigree_counts(inferred, simulation["truth_pedigree"], names)
+        decision = published_pedigree(store)
+        if decision is not None:
+            report["pedigree"] = pedigree_counts(
+                decision["tier_b_relationships"], simulation["truth_pedigree"], names)
         elif not automatic:
             raise FileNotFoundError("no completed genome-wide pedigree")
     component_rows, matching_rows = [], []
     tasks = []
     for contig in selected:
-        found = [s for s in FOUNDER_STAGES if panel_location(store, contig, s)]
+        file = store.contig(contig)
+        found = [s for s in FOUNDER_STAGES if panel_keys(file, s) is not None]
         founder_stages = (found[-1:] if requested == ("available",) else
                           found if requested == ("all",) else
                           [s for s in requested if s in FOUNDER_STAGES])
@@ -271,14 +263,11 @@ def evaluate_run(output_dir, *, checkpoints=None, cores=None, stages=("available
                 raise FileNotFoundError(f"{contig}: no completed {stage} product")
         if not automatic:
             for stage, description in (("family_phase", "family phase"), ("recombination", "recombination map")):
-                if stage in requested and not store.contig_done(stage, contig):
+                if stage in requested and not file.has(stage):
                     raise FileNotFoundError(f"{contig}: no completed {description}")
         tasks.append((contig, tuple(founder_stages)))
-    truth_cache_root = str(output / "evaluation" / "truth_cache")
-    weights, process_limit = _evaluation_resources(
-        store, tasks, requested, workers, names, truth_cache_root)
-    common = dict(checkpoint_root=store.root, names=names, requested=requested,
-                  truth_cache_root=truth_cache_root)
+    weights, process_limit = _evaluation_resources(store, tasks, requested, workers)
+    common = dict(checkpoint_root=store.root, names=names, requested=requested)
     with ChromosomeExecutor(tasks, _evaluate_chromosome, n_workers=workers,
                             weights=weights, label="EVALUATION", max_workers=process_limit) as executor:
         results = executor.run("evaluate", common)

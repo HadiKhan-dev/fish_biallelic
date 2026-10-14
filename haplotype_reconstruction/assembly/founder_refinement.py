@@ -14,6 +14,7 @@ import numpy as np
 
 from .founder import count_criterion as founder_count_criterion
 from . import paths
+from ..core.haplotypes import BlockResults
 
 
 # Count decisions of the converged search (founder/converged_sweep.py) converge the
@@ -129,15 +130,6 @@ class _LeafKeyMap:
         return self.keys[block][row]
 
 
-def _load(checkpoints, phase):
-    return None if checkpoints is None else checkpoints.load(phase)
-
-
-def _save(checkpoints, phase, payload):
-    if checkpoints is not None:
-        checkpoints.save(phase, payload)
-
-
 def _local_selection(component, blocks):
     """Decode composed source provenance back to rows of the prepared inputs."""
     atomic, _, atomic_lengths, _ = paths.missing_aware_atomic_source_provenance(component)
@@ -199,17 +191,35 @@ def refine_components(prepared_blocks, components, neutral_probs, global_sites, 
 
     count_additions: the count pass adds founders only at the final count step
     (the last level); earlier levels make deletion decisions only.
+    checkpoints: the level's records (assembly.checkpoints.AssemblyCheckpoints
+    scoped to ``<assembly>/l<k>/refine``): every component's refinement is
+    recorded as it completes and reused on resume (founder/checkpoints.py), and
+    long components record their converged-sweep states.
     """
-    if config.enabled and len(components) > 1:
+    if not config.enabled:
+        return components, {"enabled": False, "components": []}
+    from .founder.checkpoints import RefinementCheckpoints
+    records = None if checkpoints is None else RefinementCheckpoints(checkpoints, prepared_blocks)
+    if len(components) > 1:
         from .founder.components import refine_independent_components
         return refine_independent_components(
             prepared_blocks, components, neutral_probs, global_sites,
-            config=config, num_threads=num_threads, checkpoints=checkpoints,
+            config=config, num_threads=num_threads, records=records,
             l1_blocks=l1_blocks, cc_scale=cc_scale, count_additions=count_additions)
-    return _refine_serial_components(
+    # A single component is refined in this process with the whole budget.
+    from .founder.converged_sweep import level_diagnostics
+    cached = None if records is None else records.load(0)
+    if cached is not None:
+        block, diagnostic = cached
+        return BlockResults([block]), level_diagnostics([diagnostic], count_additions)
+    output, diagnostics = _refine_serial_components(
         prepared_blocks, components, neutral_probs, global_sites,
-        config=config, num_threads=num_threads, checkpoints=checkpoints,
+        config=config, num_threads=num_threads,
+        checkpoints=None if records is None else records.sweeps(0),
         l1_blocks=l1_blocks, cc_scale=cc_scale, count_additions=count_additions)
+    if records is not None:
+        records.save(0, output[0], diagnostics["components"][0])
+    return output, diagnostics
 
 
 def _refine_serial_components(prepared_blocks, components, neutral_probs, global_sites, *,
@@ -221,12 +231,10 @@ def _refine_serial_components(prepared_blocks, components, neutral_probs, global
     Every accepted endpoint retains the canonical full-site objective.
     Independent components and inner candidates share dynamic thread budgets.
     No truth, generation labels or pedigree enters this assembly fit.
+    checkpoints: the converged-sweep records of a single component.
     """
     if not config.enabled:
         return components, {"enabled": False, "components": []}
-    if checkpoints is not None:
-        from .founder.checkpoints import FounderCheckpointStore
-        checkpoints = FounderCheckpointStore(checkpoints, prepared_blocks)
     from .founder import converged_sweep
     return converged_sweep.refine_components(
         prepared_blocks, components, neutral_probs, global_sites, config=config,

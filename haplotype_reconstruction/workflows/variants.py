@@ -16,6 +16,7 @@ from cyvcf2 import VCF
 from ..core import read_calibration, runtime, sample_quality, site_quality, variants
 from ..core.config import SampleQualityConfig, SiteQualityConfig
 from ..discovery import blocks, search
+from ..discovery import checkpoints as discovery_checkpoints
 from ..assembly.pipeline import AssemblyConfig
 from ..core.genetic_map import load_genetic_maps_from_environment
 from . import contig_parallel, reconstruction
@@ -76,15 +77,15 @@ def run():
                         mtime_ns=stat.st_mtime_ns, sample_ids=names, contigs=contigs,
                         discovery=identity, block_sites=200,
                         loader_sha256=hashlib.sha256(Path(variants.__file__).read_bytes()).hexdigest())
-    source_stage = "block_discovery"
-    store.bind_stage_identity(source_stage, run_identity)
-    # Sample/contig manifest checked by reconstruction; written before any contig.
-    if not store.global_done(source_stage):
-        store.save_global(source_stage, dict(
-            sample_ids=names, contigs=contigs, discovery_backend=identity["backend"],
-            discovery_config=identity["config"],
-            genotype_evidence_mode=reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
-            observed_call_mask_mode=reconstruction.EXACT_OBSERVED_MASK_MODE))
+    stage = reconstruction.DISCOVERY_STAGE
+    store.bind_identity(store.run, stage, run_identity)
+    # Sample/contig manifest checked by reconstruction; recorded before any contig.
+    store.bind_manifest(stage, dict(
+        sample_ids=names, contigs=contigs, discovery_backend=identity["backend"],
+        discovery_config=identity["config"],
+        genotype_evidence_mode=reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
+        observed_call_mask_mode=reconstruction.EXACT_OBSERVED_MASK_MODE))
+    provenance = reconstruction.discovery_record_provenance(identity)
     print(f"General reconstruction: {len(names)} samples, {len(contigs)} contigs; {workers}-core ceiling")
     print("Sequential scientific stages: pooled discovery/assembly, threaded painting/scoring, pooled resampling.")
     started = time.perf_counter()
@@ -109,26 +110,15 @@ def run():
         return blocks.PreparedContig(
             reads, read_calibration.block_likelihoods(reads, sites, probabilities),
             dict(global_sites=sites, global_probs=probabilities, read_calibration=calibration,
-                 site_quality=site_record, global_observed_mask=observed,
-                 founder_excluded=founder_excluded),
+                 site_quality=site_record, global_observed_mask=observed, **provenance,
+                 **({} if founder_excluded is None
+                    else dict(founder_evidence_excluded=founder_excluded))),
             site_quality.run_record_products(site_record, names))
-
-    def save(contig, prepared, discovered):
-        fields = prepared.fields
-        founder_excluded = fields["founder_excluded"]
-        store.save_contig(source_stage, contig, dict(
-            block_results=discovered, global_sites=fields["global_sites"],
-            global_probs=fields["global_probs"], read_calibration=fields["read_calibration"],
-            site_quality=fields["site_quality"], global_observed_mask=fields["global_observed_mask"],
-            discovery_backend=identity["backend"], discovery_config=identity["config"],
-            genotype_evidence_mode=reconstruction.SUPPORTED_GENOTYPE_EVIDENCE_MODE,
-            observed_call_mask_mode=reconstruction.EXACT_OBSERVED_MASK_MODE,
-            **({} if founder_excluded is None else dict(founder_evidence_excluded=founder_excluded))))
 
     def discover(selected):
         """Discover these contigs with one block pool, closed on return."""
         with blocks.BlockDiscoveryPool(workers) as pool:
-            blocks.discover_contigs(selected, prepare, save, block_pool=pool,
+            blocks.discover_contigs(store, selected, prepare, block_pool=pool,
                                     discovery_config=discovery_config)
 
     config = reconstruction.ReconstructionConfig(
@@ -137,25 +127,25 @@ def run():
     serial, max_contigs = contig_parallel.configured_serial_contigs()
     if serial and not contig_parallel.run_serially(
             store, contigs, names, discover=discover, discovery_identity=identity,
-            config=config, max_contigs=max_contigs, source_stage=source_stage,
+            config=config, output_dir=output, max_contigs=max_contigs,
             genetic_maps=genetic_maps):
         return
-    if not store.stage_complete(source_stage):
-        pending = [contig for contig in contigs if not store.contig_done(source_stage, contig)]
+    if not store.stage_complete(stage):
+        pending = [contig for contig in contigs
+                   if not discovery_checkpoints.complete(store.contig(contig))]
         if pending:
             discover(pending)
-        runtime.require_contig_checkpoints(store, source_stage, contigs)
-        store.mark_stage_complete(source_stage)
+        discovery_checkpoints.require_complete(store, contigs)
+        store.mark_stage_complete(stage)
     if stop == "block_discovery":
         return
     contig_parallel.run_reconstruction(
-        store, contigs, names, discovery_identity=identity, source_stage=source_stage,
-        config=config, genetic_maps=genetic_maps)
+        store, contigs, names, discovery_identity=identity, config=config,
+        output_dir=output, genetic_maps=genetic_maps)
     if stop == "painting":
         return
     run_downstream(
         store, contigs, names, output_dir=output, n_workers=workers,
-        raw_gl_stage=source_stage, raw_sites_stage=source_stage,
         parent_eligibility=eligibility, genetic_maps=genetic_maps, recombination_rate=rate)
     print(f"Reconstruction through final phase and recombination completed in {time.perf_counter()-started:.1f}s")
 

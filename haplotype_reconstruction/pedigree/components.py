@@ -746,9 +746,9 @@ def _validate_release_array_identity(
     the flags that reconcile the digests, or None when the raw arrays match
     as they are. Callers keep using the raw arrays.
 
-    ``recorded_digests`` are the identities that the compact evidence cache
-    recorded for exactly these arrays (core.raw_evidence.recorded_digests):
-    when all three equal the release's, the arrays match without hashing.
+    ``recorded_digests`` are the identities the release recorded for exactly
+    these arrays (core.products.evidence_checks): when all three equal the
+    release's, the arrays match without hashing.
     """
     release = checkpoint.release_identity.record()
     expected = release.get("input_array_sha256")
@@ -1379,8 +1379,8 @@ def prepare_painted_chromosome_components(
     """Validate and prepare independently rooted component HMM inputs.
 
     ``founder_evidence_excluded`` loads the contig's sample-quality flags and
-    ``recorded_digests`` are the compact evidence cache's identities of these
-    raw arrays, both for the release-identity check only
+    ``recorded_digests`` are the release's recorded identities of these raw
+    arrays, both for the release-identity check only
     (``_validate_release_array_identity``); every sample's raw evidence is
     prepared.
     """

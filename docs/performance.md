@@ -508,11 +508,11 @@ Compression/decompression and raw-GL tile work are also bounded by the caller's
 budget. Memory bandwidth, memory-limited worker counts, I/O and straggler tails
 can limit useful activity; a nominal thread count is not a utilization measure.
 
-Atomic stage/chromosome checkpoints retain scientific identities. A lossless
-`genotype_evidence` cache holds GLs, positions and observed masks so pedigree/family phase
-can avoid repeatedly decoding rich simulation/discovery payloads. Original
-inputs remain available; uncached runs use the original reader. This adds disk
-space and one cache write, not lossy evidence or relaxed input validation.
+Checkpoint records retain scientific identities. A chromosome's GLs,
+positions and observed mask are stored once, in its `discovery/prepared`
+record; pedigree, allele refit, family phase and recombination decode only the
+arrays they use from it, and discovery blocks rebuild their GL slices from it
+on loading.
 
 | Bounded raw-evidence work, 112 CPUs | Before | Updated |
 | --- | ---: | ---: |
@@ -739,7 +739,7 @@ zero-transition phase bins, and reuses settled selector chains and an identical
 immediately preceding conditional solve. Factor-produced 32-marker dirty tiles
 restrict selector-block inspections; forward/backward propagation and stopping
 semantics remain intact. Ordinary/branch caches are bounded near 24/4 GiB per
-chromosome. Atomic work checkpoints retain messages, phase and stability history.
+chromosome. Transient work states retain messages, phase and stability history.
 
 Family phase now uses the same node-local chromosome scheduler as pedigree
 scoring. Each worker loads and checkpoints its own chromosome; the parent
@@ -829,7 +829,7 @@ small files and one-thread loads retain the direct path. Blosc's GIL-release
 mode is enabled only within a protected parallel-I/O scope, then restored;
 without it, concurrent decoders serialize in the installed Blosc2 version.
 Checkpoint writes overlap compression and checksumming, while emitting chunks
-in their original order and publishing the file atomically. Pending writer
+in their original order; a record counts only once it is completely written. Pending writer
 workspace is bounded using raw-plus-compressed byte reservations, with a single
 oversized direct chunk allowed alone. Source/final arrays and any required
 contiguous producer copy are separate from that allowance; earlier asynchronous
@@ -838,14 +838,12 @@ retain the packed-group path.
 Metadata still uses the bounded spool, and no object is returned before
 verification completes.
 
-`run.py evaluate --cores N` now evaluates chromosomes concurrently using the
+`run.py evaluate --cores N` evaluates chromosomes concurrently using the
 shared chromosome scheduler in `core/chromosome_parallel.py`. Workers load their
-own checkpoints and return only metric rows; the coordinator retains simulation
-chromosome order and the existing JSON/CSV schemas. New simulations also save a
-compact, evaluation-only truth product. Existing simulations derive it once into the evaluation output's cache, leaving original
-checkpoints unchanged. Subsequent evaluations avoid reading/decompressing the
-large unused read and likelihood arrays. Source-file identities and sample
-order select the appropriate cached truth. No truth product is read by inference.
+own records and return only metric rows; the coordinator retains simulation
+chromosome order and the existing JSON/CSV schemas. Each chromosome's truth is
+a separate `simulation/truth` record, so evaluation never reads or decompresses
+the large read and likelihood arrays. No truth record is read by inference.
 
 Founder metrics batch small panels and tile large panels into parallel compiled
 integer counts. Hungarian matching, tie handling, component spans and metric
