@@ -28,11 +28,12 @@ workers take freed threads at numerical (reconstruction: contig) boundaries;
 genome-wide pedigree decisions remain barriers.
 
 Package startup isolates compiled Numba caches by run/job, host and code
-version, while workers within that scope share them; workflows keep compiled
-kernels between runs in `~/.cache/haplotype-reconstruction/numba` (or under
-`$XDG_CACHE_HOME`) and compile a new code version's kernels in parallel before
-their first pool. No launch-wrapper setting is required. Scientific checkpoints
-remain independent and persistent. See
+version, while workers within that scope share them; workflows, `evaluate` and
+`batch-worker` helpers keep compiled kernels between runs in
+`~/.cache/haplotype-reconstruction/numba` (or under `$XDG_CACHE_HOME`) and
+compile a new code version's kernels in parallel before their first pool. No
+launch-wrapper setting is required. Scientific checkpoints remain independent
+and persistent. See
 [native compilation caches](performance.md#native-compilation-caches) for
 the store and the explicit cache override.
 
@@ -75,10 +76,19 @@ Keep the queue and source snapshot while resuming interrupted work. Confirm
 the previous coordinator is terminal before restarting it; do not run two
 owners of the same scientific checkpoint stage. Expired Slurm coordinators
 stop offering work, and expired worker claims can be reclaimed. Completed
-hierarchy bundles can be reused under the exact checkpoint identity.
-For changed source, use a fresh queue: do not relabel old results to force reuse.
-Retained transport files can be removed once the run and any desired resume
-are finished, independently of the scientific checkpoints.
+hierarchy bundles can be reused under the exact checkpoint identity, and
+bundles that failed are retried; a failure still stops the attempt in which it
+happens. For changed source, use a fresh queue: do not relabel old results to
+force reuse.
+
+Transport files are temporary. A bundle's input is deleted once the
+coordinator has used its result, and a completed stage leaves neither files nor
+queue records. An interrupted hierarchy step keeps its finished results, and
+its failed bundles their inputs and tracebacks, for the resume. An interrupted
+local fit keeps nothing, because its blocks resume from their own checkpoints:
+its files go when its coordinator stops or, if that was killed outright, after
+its Slurm allocation's end time. Files of a run that will not be resumed can be
+removed independently of the scientific checkpoints.
 
 ## Inputs
 

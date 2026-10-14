@@ -6,6 +6,7 @@ module-scope callable ``(task, state, phase, common) -> (state, result)``.
 """
 from __future__ import annotations
 
+import functools
 import math
 import operator
 import os
@@ -18,6 +19,10 @@ from . import parallel
 
 
 _LEASE = None
+# In an executor worker: the executor's phase_progress, and (weight, work left
+# after it) of the task the worker is running, for lease_threads(phase=...).
+_PROGRESS = {}
+_TASK = None
 
 
 def memory_worker_limit(estimates, workers, available, *, label):
@@ -76,28 +81,88 @@ def current_threads():
     included) among the workers still running. Claims are never stolen from a
     peer that may still be inside a kernel: finished partitions release their
     whole lease, and surviving workers claim free capacity toward their targets
-    at their next boundary. No mid-kernel resizing is attempted. The shared
-    claim sum cannot exceed the executor's CPU budget.
+    at their next boundary (a task start here, a phase start through
+    lease_threads, or while a phase runs through lease_budget). No mid-kernel
+    resizing is attempted. The shared claim sum cannot exceed the executor's
+    CPU budget.
     """
     if _LEASE is None:
         return numba.get_num_threads()
-    claims, remaining, lock, index, budget = _LEASE
-    with lock:
-        active = [i for i, value in enumerate(claims) if value > 0]
-        desired = _apportion(budget, [remaining[i] for i in active])[active.index(index)]
-        free = budget - sum(claims)
-        claims[index] += min(free, max(0, desired - claims[index]))
-        threads = int(claims[index])
+    _, threads = _grow()
     if numba.get_num_threads() != threads:
         numba.set_num_threads(threads)
     return threads
 
 
-def _worker(connection, partition, weights, handler, claims, remaining, lock, index, budget):
-    global _LEASE
+def _grow(phase=None):
+    """Claim free capacity toward this worker's share; return (before, after).
+
+    A ``phase`` of the executor's phase_progress first lowers this worker's
+    remaining work to its later tasks plus the unfinished part of the current
+    one (all but the fraction done when that phase starts), so that shares
+    follow the work still to do inside long tasks too.
+    """
+    claims, remaining, lock, index, budget = _LEASE
+    done = _PROGRESS.get(phase)
+    with lock:
+        if done is not None and _TASK is not None:
+            weight, left = _TASK
+            remaining[index] = left + weight * (1.0 - done)
+        before = int(claims[index])
+        active = [i for i, value in enumerate(claims) if value > 0]
+        desired = _apportion(budget, [remaining[i] for i in active])[active.index(index)]
+        free = budget - sum(claims)
+        claims[index] += min(free, max(0, desired - claims[index]))
+        return before, int(claims[index])
+
+
+def lease_threads(default=None, phase=None):
+    """A running task's CPU lease at the start of one of its phases.
+
+    Inside an executor worker this grows the lease as current_threads() does
+    at task starts, so capacity that finished partitions released reaches the
+    running tasks at their next phase instead of their next task. ``phase``
+    names the phase (phase_progress, log). The caller sizes its own pools and
+    Numba scopes from the returned count; the calling thread's Numba team is
+    unchanged. Outside a worker it returns ``default`` (None: the current
+    Numba team size). Leases are execution choices: every phase's result is
+    invariant to its thread and process counts. A module-level function, so
+    functools.partial(lease_threads, n, phase) is a picklable dynamic budget
+    that a long phase can re-read as it runs (it returns n in pool processes).
+    """
+    if _LEASE is None:
+        return numba.get_num_threads() if default is None else int(default)
+    before, threads = _grow(phase)
+    if threads != before:
+        print(f"[lease] {phase}: {before} -> {threads} threads", flush=True)
+    return threads
+
+
+def lease_budget(default, phase):
+    """A phase's CPU budget that, in a contig lane, keeps growing while it runs.
+
+    Outside an executor worker this is lease_threads(default, phase), an int,
+    so the phase runs as before. Inside one it is the picklable callable
+    functools.partial(lease_threads, threads, phase), which the phase re-reads
+    as it runs: pool phases through core/parallel.live_total (a parent thread
+    raises the workers' shared total every LIVE_TOTAL_SECONDS), the founder
+    refinement at every sweep allocation. CPUs that finished partitions release
+    then reach a running phase without waiting for its next phase start. The
+    claim rule is lease_threads': never stolen, the claim sum within the budget.
+    """
+    threads = lease_threads(default, phase)
+    if _LEASE is None:
+        return threads
+    return functools.partial(lease_threads, threads, phase)
+
+
+def _worker(connection, partition, weights, handler, claims, remaining, lock, index, budget,
+            progress):
+    global _LEASE, _PROGRESS, _TASK
     states = {task_index: None for task_index, _ in partition}
     # Work left after each task of the partition, in task order.
     after = [sum(weights[position + 1:]) for position in range(len(weights))]
+    _PROGRESS = progress
     try:
         capacity = min(len(os.sched_getaffinity(0)), numba.config.NUMBA_NUM_THREADS)
         if capacity < budget:
@@ -113,9 +178,11 @@ def _worker(connection, partition, weights, handler, claims, remaining, lock, in
             # Apply the exact initial allocation before allowing growth.
             numba.set_num_threads(int(claims[index]))
             results = []
-            for (task_index, task), left in zip(partition, after):
+            for weight, (task_index, task), left in zip(weights, partition, after):
                 current_threads()
+                _TASK = (weight, left)
                 states[task_index], result = handler(task, states[task_index], phase, common)
+                _TASK = None
                 results.append((task_index, result))
                 with lock:
                     remaining[index] = left
@@ -131,7 +198,7 @@ def _worker(connection, partition, weights, handler, claims, remaining, lock, in
         except (OSError, EOFError):
             pass
     finally:
-        _LEASE = None
+        _LEASE = _TASK = None
         connection.close()
 
 
@@ -144,17 +211,21 @@ class ChromosomeExecutor:
     nonnegative workload estimates in task order; largest tasks are assigned
     first to the least-loaded partition. Each phase starts every worker with a
     lease proportional to its partition's work, and leases grow toward shares of
-    the work still remaining (current_threads). Results always retain input
-    order. ``max_workers`` optionally limits concurrent processes for
-    memory-heavy tasks without reducing the total CPU budget shared between
-    those processes.
+    the work still remaining (current_threads at task starts, lease_threads at
+    the handler's own phase starts, lease_budget while its phases run).
+    ``phase_progress`` optionally maps the phase names a handler passes to
+    lease_threads to the fraction of a task done when that phase starts.
+    Results always retain input order.
+    ``max_workers`` optionally limits concurrent processes for memory-heavy
+    tasks without reducing the total CPU budget shared between those processes.
     """
 
     def __init__(self, tasks, handler, *, n_workers=None, weights=None,
-                 label="CHROMOSOME", max_workers=None):
+                 label="CHROMOSOME", max_workers=None, phase_progress=None):
         self.tasks = tuple(tasks)
         self.handler = handler
         self.label = label
+        self.phase_progress = dict(phase_progress or {})
         capacity = min(len(os.sched_getaffinity(0)), numba.config.NUMBA_NUM_THREADS)
         requested = numba.get_num_threads() if n_workers is None else operator.index(n_workers)
         if requested < 1:
@@ -203,7 +274,7 @@ class ChromosomeExecutor:
                         args=(child, partition,
                               [self._weights[task_index] for task_index, _ in partition],
                               self.handler, self._claims, self._remaining,
-                              self._lock, index, self.cpu_budget),
+                              self._lock, index, self.cpu_budget, self.phase_progress),
                     )
                     try:
                         process.start()

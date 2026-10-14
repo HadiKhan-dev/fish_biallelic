@@ -6,7 +6,11 @@ once, including their predictive emissions and entropy terms. The caller
 bounds the site tile so storage never grows as an N L K-squared tensor.
 Further reuse is exact as well: later mean-field starts that reach a state of
 the converged first start replay its remaining sweeps, and predictive values
-equal to a floored evidence value reuse that value's cached logarithm.
+equal to a floored evidence value reuse that value's cached logarithm. Each
+site's complete-data potentials are filled once; a held-out solve subtracts
+its own sample's term from the one unary or edge it contributes to and then
+restores it. Sigmoid and entropy terms are pure functions, so equal arguments
+reuse earlier values.
 """
 from __future__ import annotations
 
@@ -45,6 +49,15 @@ def _site_workspace(k, n_edges, max_iter):
     remaining_support_by_founder = np.empty(k, dtype=np.int64)
     supported_founders = np.empty(k, dtype=np.int64)
     trajectory = np.empty((max_iter + 1, k), dtype=np.float64)
+    # Per-founder memos of pure functions, shared by the site's held-out
+    # solves. Sigmoid: row 0 keeps the last first-start logit and its value,
+    # row 1 the last later-start one. Entropy terms: keyed by the endpoint
+    # probability. NaN keys never compare equal, so empty entries miss.
+    memo_logit = np.full((2, k), np.nan, dtype=np.float64)
+    memo_sigmoid = np.empty((2, k), dtype=np.float64)
+    memo_probability = np.full(k, np.nan, dtype=np.float64)
+    memo_q_log_q = np.empty(k, dtype=np.float64)
+    memo_complement_log_complement = np.empty(k, dtype=np.float64)
     return (
         q,
         candidate_q,
@@ -60,7 +73,47 @@ def _site_workspace(k, n_edges, max_iter):
         remaining_support_by_founder,
         supported_founders,
         trajectory,
+        memo_logit,
+        memo_sigmoid,
+        memo_probability,
+        memo_q_log_q,
+        memo_complement_log_complement,
     )
+
+
+@njit(cache=True)
+def _set_site_potentials(site, k, unary, pair, edge_first, edge_second, work):
+    """Fill the site's complete-data potentials, shared by its held-outs.
+
+    Each held-out solve then patches only the one unary or edge to which its
+    own sample contributes and restores it afterwards.
+    """
+    cavity_unary = work[6]
+    cavity_unary_logit = work[7]
+    directed_difference_zero = work[8]
+    directed_difference_one = work[9]
+    cavity_edge_potential = work[10]
+    for founder in range(k):
+        u0 = unary[founder, site, 0]
+        u1 = unary[founder, site, 1]
+        cavity_unary[founder, 0] = u0
+        cavity_unary[founder, 1] = u1
+        cavity_unary_logit[founder] = u1 - u0
+    for edge_index in range(pair.shape[0]):
+        first_founder = edge_first[edge_index]
+        second_founder = edge_second[edge_index]
+        v00 = pair[edge_index, site, 0]
+        v01 = pair[edge_index, site, 1]
+        v10 = pair[edge_index, site, 2]
+        v11 = pair[edge_index, site, 3]
+        cavity_edge_potential[edge_index, 0] = v00
+        cavity_edge_potential[edge_index, 1] = v01
+        cavity_edge_potential[edge_index, 2] = v10
+        cavity_edge_potential[edge_index, 3] = v11
+        directed_difference_zero[first_founder, second_founder] = v10 - v00
+        directed_difference_one[first_founder, second_founder] = v11 - v01
+        directed_difference_zero[second_founder, first_founder] = v01 - v00
+        directed_difference_one[second_founder, first_founder] = v11 - v10
 
 
 @njit(cache=True)
@@ -68,7 +121,7 @@ def _solve_cavity_site(
         heldout, site, k, log_likelihood, rw_log_likelihood, haplotypes,
         assignments, founder_support, unary, pair, edge_first, edge_second,
         neighbours, neighbour_counts, mean_field_max_iter,
-        mean_field_tolerance, work):
+        mean_field_tolerance, work, edge_lookup):
     (
         q,
         candidate_q,
@@ -84,6 +137,11 @@ def _solve_cavity_site(
         remaining_support_by_founder,
         supported_founders,
         trajectory,
+        memo_logit,
+        memo_sigmoid,
+        memo_probability,
+        memo_q_log_q,
+        memo_complement_log_complement,
     ) = work
     wildcard = k
     n_edges = pair.shape[0]
@@ -115,50 +173,64 @@ def _solve_cavity_site(
         held_log_mix0 = rw_log_likelihood[heldout, site, 0]
         held_log_mix1 = rw_log_likelihood[heldout, site, 1]
 
-    for founder in range(k):
-        u0 = unary[founder, site, 0]
-        u1 = unary[founder, site, 1]
-        if held_a == held_b and held_a == founder:
+    # Remove this sample's own term from the site potentials: the same
+    # subtraction of the same values as rebuilding every potential, at the
+    # one unary or edge it contributes to (each is restored below).
+    patched_founder = -1
+    saved_u0 = 0.0
+    saved_u1 = 0.0
+    saved_logit = 0.0
+    if held_a == held_b and held_a < wildcard:
+        patched_founder = held_a
+    elif held_a < wildcard and held_b == wildcard:
+        patched_founder = held_a
+    if patched_founder >= 0:
+        saved_u0 = cavity_unary[patched_founder, 0]
+        saved_u1 = cavity_unary[patched_founder, 1]
+        saved_logit = cavity_unary_logit[patched_founder]
+        u0 = saved_u0
+        u1 = saved_u1
+        if held_a == held_b:
             u0 -= log_likelihood[heldout, site, 0]
             u1 -= log_likelihood[heldout, site, 2]
-        elif held_a == founder and held_b == wildcard:
+        else:
             u0 -= held_log_mix0
             u1 -= held_log_mix1
-        cavity_unary[founder, 0] = u0
-        cavity_unary[founder, 1] = u1
-        cavity_unary_logit[founder] = u1 - u0
-
-    for edge_index in range(n_edges):
-        first_founder = edge_first[edge_index]
-        second_founder = edge_second[edge_index]
-        v00 = pair[edge_index, site, 0]
-        v01 = pair[edge_index, site, 1]
-        v10 = pair[edge_index, site, 2]
-        v11 = pair[edge_index, site, 3]
-        if (
-            held_a == first_founder
-            and held_b == second_founder
-        ):
-            v00 -= log_likelihood[heldout, site, 0]
-            v01 -= log_likelihood[heldout, site, 1]
-            v10 -= log_likelihood[heldout, site, 1]
-            v11 -= log_likelihood[heldout, site, 2]
-        cavity_edge_potential[edge_index, 0] = v00
-        cavity_edge_potential[edge_index, 1] = v01
-        cavity_edge_potential[edge_index, 2] = v10
-        cavity_edge_potential[edge_index, 3] = v11
-        directed_difference_zero[
-            first_founder, second_founder
-        ] = v10 - v00
-        directed_difference_one[
-            first_founder, second_founder
-        ] = v11 - v01
-        directed_difference_zero[
-            second_founder, first_founder
-        ] = v01 - v00
-        directed_difference_one[
-            second_founder, first_founder
-        ] = v11 - v10
+        cavity_unary[patched_founder, 0] = u0
+        cavity_unary[patched_founder, 1] = u1
+        cavity_unary_logit[patched_founder] = u1 - u0
+    patched_edge = -1
+    saved_v00 = 0.0
+    saved_v01 = 0.0
+    saved_v10 = 0.0
+    saved_v11 = 0.0
+    saved_d0_ab = 0.0
+    saved_d1_ab = 0.0
+    saved_d0_ba = 0.0
+    saved_d1_ba = 0.0
+    if held_a < wildcard and held_b < wildcard:
+        patched_edge = edge_lookup[held_a, held_b]
+    if patched_edge >= 0:
+        saved_v00 = cavity_edge_potential[patched_edge, 0]
+        saved_v01 = cavity_edge_potential[patched_edge, 1]
+        saved_v10 = cavity_edge_potential[patched_edge, 2]
+        saved_v11 = cavity_edge_potential[patched_edge, 3]
+        saved_d0_ab = directed_difference_zero[held_a, held_b]
+        saved_d1_ab = directed_difference_one[held_a, held_b]
+        saved_d0_ba = directed_difference_zero[held_b, held_a]
+        saved_d1_ba = directed_difference_one[held_b, held_a]
+        v00 = saved_v00 - log_likelihood[heldout, site, 0]
+        v01 = saved_v01 - log_likelihood[heldout, site, 1]
+        v10 = saved_v10 - log_likelihood[heldout, site, 1]
+        v11 = saved_v11 - log_likelihood[heldout, site, 2]
+        cavity_edge_potential[patched_edge, 0] = v00
+        cavity_edge_potential[patched_edge, 1] = v01
+        cavity_edge_potential[patched_edge, 2] = v10
+        cavity_edge_potential[patched_edge, 3] = v11
+        directed_difference_zero[held_a, held_b] = v10 - v00
+        directed_difference_one[held_a, held_b] = v11 - v01
+        directed_difference_zero[held_b, held_a] = v01 - v00
+        directed_difference_one[held_b, held_a] = v11 - v10
 
     candidate_converged[:] = 0
     # Sweeps used by the first start; with ``trajectory`` (its state after
@@ -205,7 +277,17 @@ def _solve_cavity_site(
                         directed_difference_one[founder, other]
                     )
 
-                updated = _stable_sigmoid(logit)
+                # The sigmoid is a pure function of the logit: an equal
+                # logit reuses the earlier value bit for bit.
+                if logit == memo_logit[0, founder]:
+                    updated = memo_sigmoid[0, founder]
+                elif logit == memo_logit[1, founder]:
+                    updated = memo_sigmoid[1, founder]
+                else:
+                    updated = _stable_sigmoid(logit)
+                    memo_row = 0 if start_index == 0 else 1
+                    memo_logit[memo_row, founder] = logit
+                    memo_sigmoid[memo_row, founder] = updated
                 change = abs(updated - q[founder])
                 if change > maximum_change:
                     maximum_change = change
@@ -277,13 +359,25 @@ def _solve_cavity_site(
             q_log_q = 0.0
             one_minus_q_log_one_minus_q = 0.0
             if probability > 0.0 and probability < 1.0:
-                q_log_q = probability * math.log(probability)
-                complement = 1.0 - probability
-                # log(1) is exactly zero: a complement that rounds to one
-                # contributes the same zero term without the logarithm.
-                if complement != 1.0:
+                # Both terms are pure functions of the probability.
+                if probability == memo_probability[founder]:
+                    q_log_q = memo_q_log_q[founder]
                     one_minus_q_log_one_minus_q = (
-                        complement * math.log(complement)
+                        memo_complement_log_complement[founder]
+                    )
+                else:
+                    q_log_q = probability * math.log(probability)
+                    complement = 1.0 - probability
+                    # log(1) is exactly zero: a complement that rounds to one
+                    # contributes the same zero term without the logarithm.
+                    if complement != 1.0:
+                        one_minus_q_log_one_minus_q = (
+                            complement * math.log(complement)
+                        )
+                    memo_probability[founder] = probability
+                    memo_q_log_q[founder] = q_log_q
+                    memo_complement_log_complement[founder] = (
+                        one_minus_q_log_one_minus_q
                     )
                 elbo -= q_log_q
                 elbo -= one_minus_q_log_one_minus_q
@@ -360,6 +454,20 @@ def _solve_cavity_site(
     if best_start != 0:
         heldout_alternate_wins += 1
     q[:] = candidate_q[best_start,:]
+    # Restore the complete-data potentials for the site's next held-out.
+    if patched_founder >= 0:
+        cavity_unary[patched_founder, 0] = saved_u0
+        cavity_unary[patched_founder, 1] = saved_u1
+        cavity_unary_logit[patched_founder] = saved_logit
+    if patched_edge >= 0:
+        cavity_edge_potential[patched_edge, 0] = saved_v00
+        cavity_edge_potential[patched_edge, 1] = saved_v01
+        cavity_edge_potential[patched_edge, 2] = saved_v10
+        cavity_edge_potential[patched_edge, 3] = saved_v11
+        directed_difference_zero[held_a, held_b] = saved_d0_ab
+        directed_difference_one[held_a, held_b] = saved_d1_ab
+        directed_difference_zero[held_b, held_a] = saved_d0_ba
+        directed_difference_one[held_b, held_a] = saved_d1_ba
 
     return (q, heldout_iterations, heldout_not_converged, n_zero_support,
             heldout_alternate_wins, heldout_initialization_spread,
@@ -371,10 +479,14 @@ def _solve_cavity_site(
 def grouped_cavity_predictions(
         likelihood, log_likelihood, rw_log_likelihood, ww_log_emission,
         haplotypes, assignments, founder_support, unary, pair, edge_first,
-        edge_second, neighbours, neighbour_counts, mean_field_max_iter,
-        mean_field_tolerance, likelihood_floor, site_start, site_stop,
-        shared_triple):
-    """Solve and predict exact cases once in a bounded, site-parallel tile."""
+        edge_second, edge_lookup, neighbours, neighbour_counts,
+        mean_field_max_iter, mean_field_tolerance, likelihood_floor,
+        site_start, site_stop, shared_triple):
+    """Solve and predict exact cases once in a bounded, site-parallel tile.
+
+    ``edge_lookup[a, b]`` is the edge index of the pair factor of founders
+    a < b, or -1 when no real-real assignment uses that pair.
+    """
     n_samples = likelihood.shape[0]
     k = haplotypes.shape[0]
     n_states = (k + 1) * (k + 2) // 2
@@ -387,6 +499,9 @@ def grouped_cavity_predictions(
     for offset in prange(tile_sites):
         site = site_start + offset
         work = _site_workspace(k, pair.shape[0], mean_field_max_iter)
+        _set_site_potentials(
+            site, k, unary, pair, edge_first, edge_second, work
+        )
         seen = {}
         for heldout in range(n_samples):
             # Supported inputs are finite normalized likelihoods; their log
@@ -408,7 +523,7 @@ def grouped_cavity_predictions(
                 heldout, site, k, log_likelihood, rw_log_likelihood, haplotypes,
                 assignments, founder_support, unary, pair, edge_first,
                 edge_second, neighbours, neighbour_counts, mean_field_max_iter,
-                mean_field_tolerance, work)
+                mean_field_tolerance, work, edge_lookup)
             diagnostics[offset, heldout, 0] = iterations
             diagnostics[offset, heldout, 1] = failed
             diagnostics[offset, heldout, 2] = zero

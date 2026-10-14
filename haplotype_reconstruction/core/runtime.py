@@ -33,6 +33,19 @@ def available_cpu_count():
     return max(1, int(count))
 
 
+def _inactive_file_bytes(directory, version1):
+    """Reclaimable inactive file cache of a cgroup (hierarchical total in v1)."""
+    key = "total_inactive_file" if version1 else "inactive_file"
+    try:
+        for line in (directory / "memory.stat").read_text().splitlines():
+            name, _, value = line.partition(" ")
+            if name == key:
+                return int(value)
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
 def available_memory_bytes():
     """Respect the current nested Slurm cgroup and every enclosing memory cap."""
     candidates = []
@@ -63,6 +76,10 @@ def available_memory_bytes():
                 maximum = int((directory / maximum_name).read_text().strip())
                 current = int((directory / current_name).read_text().strip())
                 if 0 < maximum < (1 << 60):
+                    # Inactive file cache is charged to the cgroup but reclaimed under
+                    # pressure: count only the working set as used, so plans do not
+                    # depend on how much recently read checkpoint data is still cached.
+                    current -= _inactive_file_bytes(directory, bool(controllers))
                     candidates.append(max(0, maximum - current))
             except (OSError, ValueError):
                 pass

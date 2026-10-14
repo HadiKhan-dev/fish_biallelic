@@ -376,9 +376,10 @@ def _refit_contig(contig, state, phase, common):
             raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
         flags = pedigree_pipeline._founder_evidence_flags(
             store, contig, sites_payload, raw_sites_stage=common["raw_sites_stage"])
+        digests = core_raw_evidence.recorded_digests(sites_payload)
         del gl_payload, sites_payload
         excluded = pedigree_components._validate_release_array_identity(
-            painting, np.asarray(gl), np.asarray(pos), np.asarray(observed), flags)
+            painting, np.asarray(gl), np.asarray(pos), np.asarray(observed), flags, digests)
         panel = refit_painting_alleles(painting, gl, pos, observed, contig=contig,
                                        config=common["config"], founder_evidence_excluded=excluded)
         del painting, gl, pos, observed
@@ -398,17 +399,19 @@ def _refit_contig(contig, state, phase, common):
 
 def _refit_resources(store, contigs, workers, painting_stage, raw_gl_stage, raw_sites_stage):
     """Decoded evidence (read in place) plus the painting, pair arrays and 2 GiB/process."""
+    sources = {contig: ((core_raw_evidence.STAGE,) if store.contig_done(core_raw_evidence.STAGE, contig)
+                        else tuple(dict.fromkeys((raw_gl_stage, raw_sites_stage))))
+               for contig in contigs}
+
+    def path(stage, contig):
+        return core_checkpoints.contig_path(store.root, stage, contig)
+
+    sizes = core_checkpoints.read_size_bytes_many(
+        path(stage, contig) for contig in contigs for stage in (*sources[contig], painting_stage))
     estimates = []
     for contig in contigs:
-        if store.contig_done(core_raw_evidence.STAGE, contig):
-            evidence = core_checkpoints.read_size_bytes(
-                core_checkpoints.contig_path(store.root, core_raw_evidence.STAGE, contig))
-        else:
-            evidence = sum(core_checkpoints.read_size_bytes(
-                core_checkpoints.contig_path(store.root, stage, contig))
-                for stage in dict.fromkeys((raw_gl_stage, raw_sites_stage)))
-        painting = core_checkpoints.read_size_bytes(
-            core_checkpoints.contig_path(store.root, painting_stage, contig))
+        evidence = sum(sizes[path(stage, contig)] for stage in sources[contig])
+        painting = sizes[path(painting_stage, contig)]
         estimates.append(evidence * 5 // 4 + 2 * painting + (2 << 30))
     return estimates, core_chromosome_parallel.memory_worker_limit(
         estimates, workers, core_runtime.available_memory_bytes(), label="ALLELE REFIT")

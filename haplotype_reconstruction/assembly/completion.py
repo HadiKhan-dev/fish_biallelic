@@ -3,10 +3,14 @@ from __future__ import annotations
 from haplotype_reconstruction import PACKAGE_ROOT
 
 import atexit
+from contextlib import ExitStack
 import copy
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 import hashlib
 import json
+from multiprocessing.shared_memory import SharedMemory
+import queue
+import threading
 
 from typing import Any, Callable, Mapping, Sequence
 import numpy as np
@@ -338,12 +342,7 @@ def _copy_validated_evidence(source, destination):
     return valid
 
 
-def _validate_and_clone_inputs(
-    raw_blocks: core_haplotypes.BlockResults,
-    genotype_evidence: Sequence[np.ndarray],
-    observed_masks: Sequence[np.ndarray],
-    num_threads=1,
-):
+def _aligned_inputs(raw_blocks, genotype_evidence, observed_masks):
     if not isinstance(raw_blocks, core_haplotypes.BlockResults):
         raise TypeError("raw_blocks must be a BlockResults")
     source = tuple(raw_blocks)
@@ -357,68 +356,97 @@ def _validate_and_clone_inputs(
         raise ValueError(
             "blocks, per-block genotype evidence, and observed masks must align"
         )
+    return source, evidence_values, observed_values
 
+
+def _block_layout(index, block, block_evidence, block_observed, n_samples):
+    """Kept sites, float64 evidence and observed mask of one block, shape-checked.
+
+    The evidence is the caller's array unless a dtype conversion was needed
+    (then the fourth value is True and the conversion owns its values).
+    """
+    positions = np.asarray(block.positions)
+    if positions.ndim != 1 or len(positions) == 0:
+        raise ValueError(f"block {index} must contain positions")
+    keep_flags = getattr(block, "keep_flags", None)
+    kept_sites = (
+        np.ones(len(positions), dtype=np.bool_)
+        if keep_flags is None
+        else np.asarray(keep_flags) > 0
+    )
+    if kept_sites.shape != (len(positions),):
+        raise ValueError(
+            f"block {index} keep_flags must match positions"
+        )
+    source_values = np.asarray(block_evidence)
+    owns_conversion = source_values.dtype != np.float64
+    values = (np.asarray(source_values, dtype=np.float64, order="C")
+              if owns_conversion else source_values)
+    mask = np.asarray(block_observed, dtype=np.bool_)
+    if values.ndim != 3 or values.shape[1:] != (len(positions), 3):
+        raise ValueError(
+            f"block {index} evidence must have shape (samples, sites, 3)"
+        )
+    if mask.shape != values.shape[:2]:
+        raise ValueError(
+            f"block {index} observed mask must have shape (samples, sites)"
+        )
+    if n_samples is not None and values.shape[0] != n_samples:
+        raise ValueError("all blocks must share the same sample axis")
+    return kept_sites, values, mask, owns_conversion
+
+
+def _freeze_block_calls(index, block, kept_sites, previous_end):
+    """Check one cloned block's calls and store them with the immutable pre-fill snapshot.
+
+    Returns the block's last position, which the next block must exceed.
+    """
+    positions = np.asarray(block.positions)
+    keys = tuple(sorted(block.haplotypes))
+    discrete = np.asarray(getattr(block, "discrete_haps", None))
+    if len(positions) > 1 and np.any(positions[1:] <= positions[:-1]):
+        raise ValueError(f"block {index} positions must be strictly increasing")
+    if previous_end is not None and positions[0] <= previous_end:
+        raise ValueError("raw blocks must be ordered and non-overlapping")
+    if not keys:
+        raise ValueError(f"block {index} must contain founders")
+    if discrete.shape != (len(keys), len(positions)):
+        raise ValueError(
+            f"block {index} discrete_haps must have shape (founders, sites)"
+        )
+    if np.any(~np.isin(discrete, (-1, 0, 1))):
+        raise ValueError("discrete_haps must contain only -1, 0, or 1")
+    inference_discrete = np.ascontiguousarray(discrete, dtype=np.int8).copy()
+    inference_discrete[:, ~kept_sites] = -1
+    snapshot = _readonly(inference_discrete, np.int8)
+    block.discrete_haps = np.ascontiguousarray(discrete, dtype=np.int8).copy()
+    block.missing_aware_inference_discrete_haps = snapshot
+    return positions[-1]
+
+
+def _validate_and_clone_inputs(
+    raw_blocks: core_haplotypes.BlockResults,
+    genotype_evidence: Sequence[np.ndarray],
+    observed_masks: Sequence[np.ndarray],
+    num_threads=1,
+):
+    """Clone blocks, evidence and kept observed masks for the in-process path."""
+    _, evidence_values, observed_values = _aligned_inputs(
+        raw_blocks, genotype_evidence, observed_masks)
     cloned = copy.deepcopy(raw_blocks)
-    blocks = tuple(cloned)
     evidence = []
     source_evidence = List.empty_list(types.Array(types.float64, 3, "A", readonly=True))
     observed = []
     n_samples = None
     previous_end = None
     for index, (block, block_evidence, block_observed) in enumerate(
-            zip(blocks, evidence_values, observed_values)):
-        positions = np.asarray(block.positions)
-        keys = tuple(sorted(block.haplotypes))
-        discrete = np.asarray(getattr(block, "discrete_haps", None))
-        if positions.ndim != 1 or len(positions) == 0:
-            raise ValueError(f"block {index} must contain positions")
-        if len(positions) > 1 and np.any(positions[1:] <= positions[:-1]):
-            raise ValueError(f"block {index} positions must be strictly increasing")
-        if previous_end is not None and positions[0] <= previous_end:
-            raise ValueError("raw blocks must be ordered and non-overlapping")
-        if not keys:
-            raise ValueError(f"block {index} must contain founders")
-        if discrete.shape != (len(keys), len(positions)):
-            raise ValueError(
-                f"block {index} discrete_haps must have shape (founders, sites)"
-            )
-        if np.any(~np.isin(discrete, (-1, 0, 1))):
-            raise ValueError("discrete_haps must contain only -1, 0, or 1")
-        keep_flags = getattr(block, "keep_flags", None)
-        kept_sites = (
-            np.ones(len(positions), dtype=np.bool_)
-            if keep_flags is None
-            else np.asarray(keep_flags) > 0
-        )
-        if kept_sites.shape != (len(positions),):
-            raise ValueError(
-                f"block {index} keep_flags must match positions"
-            )
-
-        source_values = np.asarray(block_evidence)
-        owns_conversion = source_values.dtype != np.float64
-        values = (np.asarray(source_values, dtype=np.float64, order="C")
-                  if owns_conversion else source_values)
-        mask = np.asarray(block_observed, dtype=np.bool_).copy()
-        if values.ndim != 3 or values.shape[1:] != (len(positions), 3):
-            raise ValueError(
-                f"block {index} evidence must have shape (samples, sites, 3)"
-            )
-        if mask.shape != values.shape[:2]:
-            raise ValueError(
-                f"block {index} observed mask must have shape (samples, sites)"
-            )
-        mask &= kept_sites[None,:]
-        if n_samples is None:
-            n_samples = values.shape[0]
-        elif values.shape[0] != n_samples:
-            raise ValueError("all blocks must share the same sample axis")
-
-        inference_discrete = np.ascontiguousarray(discrete, dtype=np.int8).copy()
-        inference_discrete[:, ~kept_sites] = -1
-        snapshot = _readonly(inference_discrete, np.int8)
-        block.discrete_haps = np.ascontiguousarray(discrete, dtype=np.int8).copy()
-        block.missing_aware_inference_discrete_haps = snapshot
+            zip(tuple(cloned), evidence_values, observed_values)):
+        kept_sites, values, mask, owns_conversion = _block_layout(
+            index, block, block_evidence, block_observed, n_samples)
+        previous_end = _freeze_block_calls(
+            index, block, kept_sites, previous_end)
+        n_samples = values.shape[0]
+        mask = mask & kept_sites[None,:]
         frozen_values = values.view()
         frozen_values.setflags(write=False)
         source_evidence.append(frozen_values)
@@ -428,7 +456,6 @@ def _validate_and_clone_inputs(
                         else np.empty(values.shape, dtype=np.float64))
         mask.setflags(write=False)
         observed.append(mask)
-        previous_end = positions[-1]
 
     assert n_samples is not None
     with core_parallel.numba_thread_scope(num_threads):
@@ -452,71 +479,42 @@ def _validated_wildcard_mass(value, block_index: int) -> float:
     return mass
 
 
-def _discovery_underfit_flags(
-    blocks: Sequence[core_haplotypes.BlockResult],
+def _discovery_underfit_flag(
+    index: int,
+    block: core_haplotypes.BlockResult,
     n_samples: int,
     maximum_mass_for_fill_release: float,
-) -> tuple[tuple[bool, ...], tuple[DiscoveryWildcardDiagnostic, ...]]:
-    """Validate block discovery wildcard provenance and flag fitted-panel underfit."""
+) -> tuple[bool, DiscoveryWildcardDiagnostic]:
+    """Validate one block's discovery wildcard provenance and flag fitted-panel underfit."""
 
-    flags = []
-    diagnostics = []
-    for index, block in enumerate(blocks):
-        discrete = np.asarray(block.discrete_haps, dtype=np.int8)
-        keep_flags = getattr(block, "keep_flags", None)
-        kept = (
-            np.ones(discrete.shape[1], dtype=np.bool_)
-            if keep_flags is None
-            else np.asarray(keep_flags) > 0
-        )
-        inference_eligible_unknown_count = int(np.count_nonzero(
-            (discrete < 0) & kept[None,:]
-        ))
-        depth_value = getattr(
-            block, "sample_has_observed_kept_depth", None
-        )
-        slots_value = getattr(block, "wildcard_slots", None)
-        mass_value = getattr(block, "wildcard_mass", None)
-        has_depth = depth_value is not None
-        has_slots = slots_value is not None
-        has_mass = mass_value is not None
-        if not (has_depth or has_slots):
-            if not has_mass:
-                underfit = inference_eligible_unknown_count > 0
-                flags.append(underfit)
-                diagnostics.append(DiscoveryWildcardDiagnostic(
-                    block_index=index,
-                    metadata_present=False,
-                    observed_kept_depth_sample_count=None,
-                    observed_wildcard_sample_count=None,
-                    observed_wildcard_slot_count=None,
-                    wildcard_mass=None,
-                    maximum_mass_for_fill_release=(
-                        maximum_mass_for_fill_release
-                    ),
-                    inference_eligible_unknown_founder_cell_count=(
-                        inference_eligible_unknown_count
-                    ),
-                    underfit=underfit,
-                    reason=(
-                        "discovery_wildcard_metadata_absent_with_unknown_"
-                        "founder_cells"
-                        if underfit
-                        else "discovery_wildcard_metadata_absent_no_unknown_"
-                        "founder_cells"
-                    ),
-                ))
-                continue
-            summary_mass = _validated_wildcard_mass(mass_value, index)
-            underfit = summary_mass > maximum_mass_for_fill_release
-            flags.append(underfit)
-            diagnostics.append(DiscoveryWildcardDiagnostic(
+    discrete = np.asarray(block.discrete_haps, dtype=np.int8)
+    keep_flags = getattr(block, "keep_flags", None)
+    kept = (
+        np.ones(discrete.shape[1], dtype=np.bool_)
+        if keep_flags is None
+        else np.asarray(keep_flags) > 0
+    )
+    inference_eligible_unknown_count = int(np.count_nonzero(
+        (discrete < 0) & kept[None,:]
+    ))
+    depth_value = getattr(
+        block, "sample_has_observed_kept_depth", None
+    )
+    slots_value = getattr(block, "wildcard_slots", None)
+    mass_value = getattr(block, "wildcard_mass", None)
+    has_depth = depth_value is not None
+    has_slots = slots_value is not None
+    has_mass = mass_value is not None
+    if not (has_depth or has_slots):
+        if not has_mass:
+            underfit = inference_eligible_unknown_count > 0
+            return underfit, DiscoveryWildcardDiagnostic(
                 block_index=index,
-                metadata_present=True,
+                metadata_present=False,
                 observed_kept_depth_sample_count=None,
                 observed_wildcard_sample_count=None,
                 observed_wildcard_slot_count=None,
-                wildcard_mass=summary_mass,
+                wildcard_mass=None,
                 maximum_mass_for_fill_release=(
                     maximum_mass_for_fill_release
                 ),
@@ -524,84 +522,121 @@ def _discovery_underfit_flags(
                     inference_eligible_unknown_count
                 ),
                 underfit=underfit,
-                reason="discovery_wildcard_mass_summary_only",
-            ))
-            continue
-        if not (has_depth and has_slots):
-            raise ValueError(
-                f"block {index} has incomplete block discovery wildcard metadata"
+                reason=(
+                    "discovery_wildcard_metadata_absent_with_unknown_"
+                    "founder_cells"
+                    if underfit
+                    else "discovery_wildcard_metadata_absent_no_unknown_"
+                    "founder_cells"
+                ),
             )
-
-        raw_depth = np.asarray(depth_value)
-        raw_slots = np.asarray(slots_value)
-        if raw_depth.shape != (n_samples,):
-            raise ValueError(
-                f"block {index} sample_has_observed_kept_depth must "
-                "match samples"
-            )
-        if raw_slots.shape != (n_samples,):
-            raise ValueError(
-                f"block {index} wildcard_slots must match samples"
-            )
-        if np.any(~np.isin(raw_depth, (False, True))):
-            raise ValueError(
-                "sample_has_observed_kept_depth must be boolean"
-            )
-        slots_float = np.asarray(raw_slots, dtype=np.float64)
-        if (
-                np.any(~np.isfinite(slots_float))
-                or np.any(slots_float != np.floor(slots_float))
-                or np.any((slots_float < 0.0) | (slots_float > 2.0))):
-            raise ValueError(
-                "wildcard_slots must contain integer strand counts in [0, 2]"
-            )
-        depth = np.asarray(raw_depth, dtype=np.bool_)
-        slots = np.asarray(slots_float, dtype=np.int64)
-        observed_wildcard = depth & (slots > 0)
-        expected_mass = float(
-            np.sum(slots[depth], dtype=np.float64)
-            / max(2 * int(np.sum(depth)), 1)
-        )
-        if has_mass:
-            mass = _validated_wildcard_mass(mass_value, index)
-            if not np.isclose(
-                    mass, expected_mass, rtol=0.0,
-                    atol=np.finfo(np.float64).eps):
-                raise ValueError(
-                    f"block {index} wildcard_mass disagrees with "
-                    "wildcard_slots"
-                )
-
-        underfit = bool(
-            np.any(observed_wildcard)
-            and expected_mass > maximum_mass_for_fill_release
-        )
-        if underfit:
-            reason = "discovery_wildcard_panel_underfit"
-        elif np.any(observed_wildcard):
-            reason = "discovery_wildcard_mass_within_configured_threshold"
-        else:
-            reason = "no_observed_kept_depth_wildcards"
-        flags.append(underfit)
-        diagnostics.append(DiscoveryWildcardDiagnostic(
+        summary_mass = _validated_wildcard_mass(mass_value, index)
+        underfit = summary_mass > maximum_mass_for_fill_release
+        return underfit, DiscoveryWildcardDiagnostic(
             block_index=index,
             metadata_present=True,
-            observed_kept_depth_sample_count=int(np.sum(depth)),
-            observed_wildcard_sample_count=int(
-                np.sum(observed_wildcard)
+            observed_kept_depth_sample_count=None,
+            observed_wildcard_sample_count=None,
+            observed_wildcard_slot_count=None,
+            wildcard_mass=summary_mass,
+            maximum_mass_for_fill_release=(
+                maximum_mass_for_fill_release
             ),
-            observed_wildcard_slot_count=int(
-                np.sum(slots[depth], dtype=np.int64)
-            ),
-            wildcard_mass=expected_mass,
-            maximum_mass_for_fill_release=maximum_mass_for_fill_release,
             inference_eligible_unknown_founder_cell_count=(
                 inference_eligible_unknown_count
             ),
             underfit=underfit,
-            reason=reason,
-        ))
-    return tuple(flags), tuple(diagnostics)
+            reason="discovery_wildcard_mass_summary_only",
+        )
+    if not (has_depth and has_slots):
+        raise ValueError(
+            f"block {index} has incomplete block discovery wildcard metadata"
+        )
+
+    raw_depth = np.asarray(depth_value)
+    raw_slots = np.asarray(slots_value)
+    if raw_depth.shape != (n_samples,):
+        raise ValueError(
+            f"block {index} sample_has_observed_kept_depth must "
+            "match samples"
+        )
+    if raw_slots.shape != (n_samples,):
+        raise ValueError(
+            f"block {index} wildcard_slots must match samples"
+        )
+    if np.any(~np.isin(raw_depth, (False, True))):
+        raise ValueError(
+            "sample_has_observed_kept_depth must be boolean"
+        )
+    slots_float = np.asarray(raw_slots, dtype=np.float64)
+    if (
+            np.any(~np.isfinite(slots_float))
+            or np.any(slots_float != np.floor(slots_float))
+            or np.any((slots_float < 0.0) | (slots_float > 2.0))):
+        raise ValueError(
+            "wildcard_slots must contain integer strand counts in [0, 2]"
+        )
+    depth = np.asarray(raw_depth, dtype=np.bool_)
+    slots = np.asarray(slots_float, dtype=np.int64)
+    observed_wildcard = depth & (slots > 0)
+    expected_mass = float(
+        np.sum(slots[depth], dtype=np.float64)
+        / max(2 * int(np.sum(depth)), 1)
+    )
+    if has_mass:
+        mass = _validated_wildcard_mass(mass_value, index)
+        if not np.isclose(
+                mass, expected_mass, rtol=0.0,
+                atol=np.finfo(np.float64).eps):
+            raise ValueError(
+                f"block {index} wildcard_mass disagrees with "
+                "wildcard_slots"
+            )
+
+    underfit = bool(
+        np.any(observed_wildcard)
+        and expected_mass > maximum_mass_for_fill_release
+    )
+    if underfit:
+        reason = "discovery_wildcard_panel_underfit"
+    elif np.any(observed_wildcard):
+        reason = "discovery_wildcard_mass_within_configured_threshold"
+    else:
+        reason = "no_observed_kept_depth_wildcards"
+    return underfit, DiscoveryWildcardDiagnostic(
+        block_index=index,
+        metadata_present=True,
+        observed_kept_depth_sample_count=int(np.sum(depth)),
+        observed_wildcard_sample_count=int(
+            np.sum(observed_wildcard)
+        ),
+        observed_wildcard_slot_count=int(
+            np.sum(slots[depth], dtype=np.int64)
+        ),
+        wildcard_mass=expected_mass,
+        maximum_mass_for_fill_release=maximum_mass_for_fill_release,
+        inference_eligible_unknown_founder_cell_count=(
+            inference_eligible_unknown_count
+        ),
+        underfit=underfit,
+        reason=reason,
+    )
+
+
+def _discovery_underfit_flags(
+    blocks: Sequence[core_haplotypes.BlockResult],
+    n_samples: int,
+    maximum_mass_for_fill_release: float,
+) -> tuple[tuple[bool, ...], tuple[DiscoveryWildcardDiagnostic, ...]]:
+    """Validate block discovery wildcard provenance and flag fitted-panel underfit."""
+
+    values = tuple(
+        _discovery_underfit_flag(
+            index, block, n_samples, maximum_mass_for_fill_release)
+        for index, block in enumerate(blocks)
+    )
+    return (tuple(flag for flag, _ in values),
+            tuple(diagnostic for _, diagnostic in values))
 
 
 def _validated_folds(
@@ -728,6 +763,9 @@ _PREPROCESS_WORKER_JOINT_CONFIG = None
 _PREPROCESS_WORKER_CAVITY_RULE = None
 
 
+_PREPROCESS_WORKER_LINK_CONFIG = None
+
+
 _PREPROCESS_WORKER_DIAGNOSTICS_MODE = None
 
 
@@ -741,15 +779,15 @@ def _close_preprocess_worker_shared_memory() -> None:
 
 
 def _initialize_preprocess_worker(
-    evidence_metadata,
-    observed_metadata,
+    shared_metadata,
     offsets,
     folds,
     joint_config,
     cavity_rule,
+    link_config,
     diagnostics_mode,
 ) -> None:
-    """Attach shared read-only inputs and enforce one numerical thread."""
+    """Attach the shared block slabs and enforce one numerical thread."""
 
     core_environment.force_single_threaded_numeric_libraries()
     import numba
@@ -757,11 +795,12 @@ def _initialize_preprocess_worker(
     numba.set_num_threads(1)
     _close_preprocess_worker_shared_memory()
     handles = []
+    arrays = []
     try:
-        evidence_handle, evidence = core_parallel.attach_shared_array(evidence_metadata)
-        handles.append(evidence_handle)
-        observed_handle, observed = core_parallel.attach_shared_array(observed_metadata)
-        handles.append(observed_handle)
+        for metadata in shared_metadata:
+            handle, array = core_parallel.attach_shared_array(metadata)
+            handles.append(handle)
+            arrays.append(array)
     except BaseException:
         core_parallel.close_shared_memory(handles)
         raise
@@ -772,83 +811,81 @@ def _initialize_preprocess_worker(
     global _PREPROCESS_WORKER_FOLDS
     global _PREPROCESS_WORKER_JOINT_CONFIG
     global _PREPROCESS_WORKER_CAVITY_RULE
+    global _PREPROCESS_WORKER_LINK_CONFIG
     global _PREPROCESS_WORKER_DIAGNOSTICS_MODE
     global _PREPROCESS_WORKER_HANDLES
-    _PREPROCESS_WORKER_EVIDENCE = evidence
-    _PREPROCESS_WORKER_OBSERVED = observed
+    _PREPROCESS_WORKER_EVIDENCE, _PREPROCESS_WORKER_OBSERVED = arrays
     _PREPROCESS_WORKER_OFFSETS = np.asarray(offsets, dtype=np.int64)
     _PREPROCESS_WORKER_FOLDS = np.asarray(folds, dtype=np.int8)
     _PREPROCESS_WORKER_JOINT_CONFIG = joint_config
     _PREPROCESS_WORKER_CAVITY_RULE = cavity_rule
+    _PREPROCESS_WORKER_LINK_CONFIG = link_config
     _PREPROCESS_WORKER_DIAGNOSTICS_MODE = diagnostics_mode
     _PREPROCESS_WORKER_HANDLES = handles
     atexit.register(_close_preprocess_worker_shared_memory)
 
 
-def _preprocess_worker_arrays(block_index: int):
-    if (
-            _PREPROCESS_WORKER_EVIDENCE is None
-            or _PREPROCESS_WORKER_OBSERVED is None
-            or _PREPROCESS_WORKER_OFFSETS is None):
+def _block_slab(flat, offsets, samples, block, genotypes=None):
+    """One block's contiguous (samples, sites[, genotypes]) slab of a block-major array.
+
+    A block's rows are stored together, so a worker that reads a block maps
+    only that block's pages of the shared segment (a sample-major layout made
+    every worker map, and unmap at exit, nearly all of it).
+    """
+    width = 1 if genotypes is None else genotypes
+    start, stop = int(offsets[block]), int(offsets[block + 1])
+    shape = ((samples, stop - start) if genotypes is None
+             else (samples, stop - start, genotypes))
+    return flat[samples * start * width:samples * stop * width].reshape(shape)
+
+
+def _preprocess_block_worker(task):
+    """Crossfit and cavity fill of consecutive blocks, in order."""
+    return "blocks", tuple(_block_science(*item) for item in task)
+
+
+def _block_science(block_index, hard_panel, raw_panel):
+    """Crossfit and cavity fill of one block; both only read its private evidence copy."""
+    if _PREPROCESS_WORKER_EVIDENCE is None or _PREPROCESS_WORKER_OFFSETS is None:
         raise RuntimeError("assembly preprocess worker is not initialized")
-    start = int(_PREPROCESS_WORKER_OFFSETS[block_index])
-    stop = int(_PREPROCESS_WORKER_OFFSETS[block_index + 1])
-    evidence = np.ascontiguousarray(
-        _PREPROCESS_WORKER_EVIDENCE[:, start:stop,:]
-    )
-    observed = np.ascontiguousarray(
-        _PREPROCESS_WORKER_OBSERVED[:, start:stop]
-    )
-    return evidence, observed
-
-
-def _preprocess_crossfit_worker(task):
-    block_index, panel = task
-    evidence, observed = _preprocess_worker_arrays(block_index)
-    value = assembly_joint_completion.crossfit_block(
-        panel,
+    # The fold vector has one label per sample.
+    samples = len(_PREPROCESS_WORKER_FOLDS)
+    offsets = _PREPROCESS_WORKER_OFFSETS
+    evidence = np.array(_block_slab(
+        _PREPROCESS_WORKER_EVIDENCE, offsets, samples, block_index, 3))
+    observed = np.array(_block_slab(
+        _PREPROCESS_WORKER_OBSERVED, offsets, samples, block_index))
+    crossfit = assembly_joint_completion.crossfit_block(
+        hard_panel,
         evidence,
         observed,
         fold_assignments=_PREPROCESS_WORKER_FOLDS,
         config=_PREPROCESS_WORKER_JOINT_CONFIG,
     )
-    return (
-        block_index,
-        _retain_crossfit(value, _PREPROCESS_WORKER_DIAGNOSTICS_MODE),
-    )
-
-
-def _preprocess_cavity_worker(task):
-    block_index, panel = task
-    evidence, observed = _preprocess_worker_arrays(block_index)
-    value = assembly_boundaries.cavity_fill_unknown_alleles(
-        panel,
+    fill = assembly_boundaries.cavity_fill_unknown_alleles(
+        raw_panel,
         evidence,
         observed,
         _PREPROCESS_WORKER_CAVITY_RULE,
     )
-    return block_index, value
+    return (
+        block_index,
+        _retain_crossfit(crossfit, _PREPROCESS_WORKER_DIAGNOSTICS_MODE),
+        fill,
+    )
 
 
-def _preprocess_partial_link_worker(task):
-    """Independent adjacent boundaries share the already-running block pool."""
-    index, left_panel, right_panel, left, right, config = task
-    return index, assembly_partial_links.link_partial_profiles(
-        left_panel, right_panel, left, right,
-        fold_assignments=_PREPROCESS_WORKER_FOLDS, config=config)
-
-
-def _ordered_worker_results(records, count, value_name):
-    output = [None] * count
-    for index, value in records:
-        if not 0 <= index < count or output[index] is not None:
-            raise RuntimeError(
-                f"parallel {value_name} returned an invalid block index"
-            )
-        output[index] = value
-    if any(value is None for value in output):
-        raise RuntimeError(f"parallel {value_name} omitted a block")
-    return tuple(output)
+def _preprocess_link_worker(task):
+    """Links of consecutive boundaries; each needs only its two adjacent crossfits."""
+    first, panels, profiles = task
+    return "links", first, tuple(
+        assembly_partial_links.link_partial_profiles(
+            panels[offset], panels[offset + 1],
+            profiles[offset], profiles[offset + 1],
+            fold_assignments=_PREPROCESS_WORKER_FOLDS,
+            config=_PREPROCESS_WORKER_LINK_CONFIG)
+        for offset in range(len(panels) - 1)
+    )
 
 
 def _infer_partial_links(
@@ -920,103 +957,299 @@ def _run_sequential_block_science(
     return crossfit_blocks, links, cavity_fills
 
 
-@njit(cache=True, parallel=True)
-def _pack_preprocess_arrays(evidence, observed, offsets):
-    """Copy independent block/sample slabs into the worker transport layout."""
+# Consecutive blocks per task. A block takes 40-120 ms, so pairs halve the
+# coordinator's dispatch work per block (task pickling, result handling, thread
+# wake-ups), which limits the pool's occupancy at 24-48 workers (chr3: -4% wall
+# at 24, -2% at 48), while thousands of tasks still keep the tail short.
+_BLOCKS_PER_TASK = 2
+
+
+# Block tasks in flight per worker (one running, one queued): no worker waits for
+# the coordinator between tasks, and a boundary link, sent as soon as its two
+# crossfits exist, never queues behind the rest of the chromosome.
+_TASKS_IN_FLIGHT_PER_WORKER = 2
+
+
+# Consecutive boundary links sent as one task (one link is about 2 ms of work).
+_LINKS_PER_TASK = 8
+
+
+# Threads of the validated copy into fresh shared memory. As for
+# core.parallel.create_shared_array, first-touch page faults saturate at 16.
+_SHARED_COPY_THREADS = 16
+
+
+# Normalised genotype evidence whose range is at most this is uniform, hence
+# not focal-informative for the occupancy gate (the default of
+# occupancy.focal_informative_masks, which the in-process path calls).
+_FOCAL_UNIFORM_TOLERANCE = 1e-12
+
+
+@njit(cache=True, parallel=True, fastmath=False)
+def _pack_block_slabs(evidence, observed, kept, offsets, tolerance, values, masks, focal):
+    """Copy every block into its contiguous slab of the shared worker inputs.
+
+    One task per independent (block, sample) row and one scan: genotype
+    evidence is copied and checked finite and non-negative; the mask is the
+    observed and kept cells; the focal-informative mask (the occupancy gate's
+    input) is computed with occupancy.focal_informative_masks' operations
+    (divide before subtracting; observed and kept, range above tolerance),
+    so the coordinator needs no second pass over a private evidence copy.
+    The slab layout is _block_slab's.
+    """
     samples = evidence[0].shape[0]
     blocks = len(evidence)
-    values = np.empty((samples, offsets[-1], 3), np.float64)
-    masks = np.empty((samples, offsets[-1]), np.bool_)
-    for task in prange(samples * blocks):
-        sample, block = task // blocks, task % blocks
-        start, stop = offsets[block], offsets[block + 1]
-        values[sample, start:stop] = evidence[block][sample]
-        masks[sample, start:stop] = observed[block][sample]
-    return values, masks
+    valid = np.ones(blocks * samples, np.bool_)
+    for task in prange(blocks * samples):
+        block, sample = task // samples, task % samples
+        start = offsets[block]
+        width = offsets[block + 1] - start
+        row = samples * start + sample * width
+        source, mask = evidence[block], observed[block]
+        for site in range(width):
+            seen = mask[sample, site] and kept[start + site]
+            masks[row + site] = seen
+            a, b, c = source[sample, site]
+            values[3 * (row + site)] = a
+            values[3 * (row + site) + 1] = b
+            values[3 * (row + site) + 2] = c
+            if (not np.isfinite(a) or not np.isfinite(b) or not np.isfinite(c)
+                    or a < 0.0 or b < 0.0 or c < 0.0):
+                valid[task] = False
+                focal[row + site] = False
+                continue
+            total = (a + b) + c
+            if total > 0.0:
+                a, b, c = a / total, b / total, c / total
+                focal[row + site] = seen and max(a, b, c) - min(a, b, c) > tolerance
+            else:
+                focal[row + site] = False
+    return valid
+
+
+def _empty_shared_array(length, dtype):
+    """A new shared segment for a 1-D array: ``(handle, array, metadata)``."""
+    dtype = np.dtype(dtype)
+    handle = SharedMemory(create=True, size=max(int(length) * dtype.itemsize, 1))
+    try:
+        array = np.ndarray((int(length),), dtype=dtype, buffer=handle.buf)
+    except BaseException:
+        core_parallel.close_shared_memory([handle], unlink=True)
+        raise
+    return handle, array, {
+        "shm_name": handle.name, "shape": (int(length),), "dtype": str(dtype)}
+
+
+def _stream_block_science(pool, blocks, kept_sites, n_samples, config, worker_count):
+    """Dependency-driven block science in one pool, dispatched in block order.
+
+    A block's science (crossfit and cavity fill) needs only that block, so
+    each block is prepared (calls checked, discovery underfit flag, panels
+    frozen) and dispatched, in tasks of _BLOCKS_PER_TASK consecutive blocks,
+    while earlier blocks compute. A boundary link needs only its two adjacent
+    crossfits, so links go out in runs as soon as their crossfits exist,
+    interleaved with block tasks rather than after a barrier. Cavity fills are
+    validated as they arrive. Results are stored by index, so nothing depends
+    on completion order.
+    """
+    count = len(blocks)
+    raw_panels = [None] * count
+    hard_panels = [None] * count
+    crossfits = [None] * count
+    fills = [None] * count
+    links = [None] * (count - 1)
+    flags = []
+    wildcard_diagnostics = []
+    retained_bytes = 0
+    results = queue.SimpleQueue()
+
+    def submit(function, task):
+        pool.apply_async(function, (task,), callback=results.put,
+                         error_callback=results.put)
+
+    maximum_in_flight = (
+        _TASKS_IN_FLIGHT_PER_WORKER * _BLOCKS_PER_TASK * worker_count)
+    next_block = blocks_in_flight = link_tasks_in_flight = 0
+    crossfit_prefix = linked = 0
+    previous_end = None
+    while next_block < count or blocks_in_flight or link_tasks_in_flight:
+        while next_block < count and blocks_in_flight < maximum_in_flight:
+            task = []
+            stop = min(count, next_block + _BLOCKS_PER_TASK)
+            for block_index in range(next_block, stop):
+                block = blocks[block_index]
+                previous_end = _freeze_block_calls(
+                    block_index, block, kept_sites[block_index], previous_end)
+                flag, diagnostic = _discovery_underfit_flag(
+                    block_index, block, n_samples,
+                    config.maximum_discovery_wildcard_mass_for_fill_release)
+                flags.append(flag)
+                wildcard_diagnostics.append(diagnostic)
+                raw_panels[block_index] = _freeze_founder_panel(block)
+                hard_panels[block_index] = _hard_panel(raw_panels[block_index])
+                task.append((
+                    block_index, hard_panels[block_index], raw_panels[block_index]))
+            submit(_preprocess_block_worker, tuple(task))
+            next_block += len(task)
+            blocks_in_flight += len(task)
+        record = results.get()
+        if isinstance(record, BaseException):
+            raise record
+        if record[0] == "links":
+            _, first, values = record
+            links[first:first + len(values)] = values
+            link_tasks_in_flight -= 1
+            continue
+        for index, crossfit, fill in record[1]:
+            blocks_in_flight -= 1
+            _validate_cavity_fill(fill, raw_panels[index], blocks[index], index)
+            crossfits[index] = crossfit
+            fills[index] = fill
+            # Every block's crossfit is computed on its own, so blocks share
+            # no arrays and per-block sums equal one walk over all blocks.
+            retained_bytes += _retained_array_bytes(crossfit)
+        while crossfit_prefix < count and crossfits[crossfit_prefix] is not None:
+            crossfit_prefix += 1
+        # Boundaries [0, crossfit_prefix - 1) have both crossfits. Send full
+        # runs as they form, and the remainder once every crossfit is done.
+        ready = crossfit_prefix - 1
+        while (ready - linked >= _LINKS_PER_TASK
+               or (crossfit_prefix == count and linked < ready)):
+            last = min(ready, linked + _LINKS_PER_TASK)
+            submit(_preprocess_link_worker, (
+                linked,
+                tuple(hard_panels[linked:last + 1]),
+                tuple(crossfits[block].profiles
+                      for block in range(linked, last + 1)),
+            ))
+            link_tasks_in_flight += 1
+            linked = last
+    return (raw_panels, flags, wildcard_diagnostics, crossfits, links, fills,
+            retained_bytes)
 
 
 def _run_parallel_block_science(
-    raw_panels,
-    hard_panels,
-    evidence,
-    observed,
-    folds,
+    raw_blocks,
+    source,
+    evidence_values,
+    observed_values,
+    fold_assignments,
     config,
     diagnostics_mode,
     worker_count,
-    partial_link_fn,
 ):
-    offsets = np.zeros(len(evidence) + 1, dtype=np.int64)
-    offsets[1:] = np.cumsum(
-        [value.shape[1] for value in evidence], dtype=np.int64
-    )
-    with core_parallel.numba_thread_scope(worker_count):
-        combined_evidence, combined_observed = _pack_preprocess_arrays(
-            List(evidence), List(observed), offsets)
-    shared_input_bytes = (
-        int(combined_evidence.nbytes) + int(combined_observed.nbytes)
-    )
-    handles = []
-    try:
-        evidence_handle, evidence_metadata = core_parallel.create_shared_array(
-            combined_evidence, copy_threads=worker_count
-        )
-        handles.append(evidence_handle)
-        observed_handle, observed_metadata = core_parallel.create_shared_array(
-            combined_observed, copy_threads=worker_count
-        )
-        handles.append(observed_handle)
-        del combined_evidence, combined_observed
+    """Production path: one validated copy into shared memory, then streamed blocks.
 
-        with core_parallel.safe_forkserver_pool(
+    The evidence of every block is copied once, block-major, into shared
+    memory, in the scan that validates it and computes the focal-informative
+    masks (no separate clone, packing copy or mask pass). The worker pool is
+    then created and starts up while the coordinator clones the blocks, and
+    block science streams through it (_stream_block_science). Once every task
+    is done, a background thread releases the workers and the shared segments
+    while the coordinator runs the occupancy gate and finishes; the returned
+    callable joins it.
+    """
+    kept_sites = []
+    evidence = List.empty_list(types.Array(types.float64, 3, "A", readonly=True))
+    observed = List.empty_list(types.Array(types.boolean, 2, "A", readonly=True))
+    n_samples = None
+    for index, (block, block_evidence, block_observed) in enumerate(
+            zip(source, evidence_values, observed_values)):
+        kept, values, mask, _ = _block_layout(
+            index, block, block_evidence, block_observed, n_samples)
+        n_samples = values.shape[0]
+        kept_sites.append(kept)
+        frozen_values, frozen_mask = values.view(), mask.view()
+        frozen_values.setflags(write=False)
+        frozen_mask.setflags(write=False)
+        evidence.append(frozen_values)
+        observed.append(frozen_mask)
+    folds = _validated_folds(n_samples, config, fold_assignments)
+    offsets = np.zeros(len(source) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum([len(value) for value in kept_sites], dtype=np.int64)
+    cells = n_samples * int(offsets[-1])
+    focal = np.empty(cells, dtype=np.bool_)
+
+    handles = []
+    shared = []
+    pool_stack = ExitStack()
+    release_errors = []
+
+    def release():
+        try:
+            pool_stack.close()
+            # Views of the segments must go before their handles close.
+            shared.clear()
+            core_parallel.close_shared_memory(handles, unlink=True)
+        except BaseException as error:
+            release_errors.append(error)
+
+    try:
+        for length, dtype in ((3 * cells, np.float64), (cells, np.bool_)):
+            handle, array, metadata = _empty_shared_array(length, dtype)
+            handles.append(handle)
+            shared.append((array, metadata))
+        with core_parallel.numba_thread_scope(min(worker_count, _SHARED_COPY_THREADS)):
+            valid = _pack_block_slabs(
+                evidence, observed, np.concatenate(kept_sites), offsets,
+                _FOCAL_UNIFORM_TOLERANCE, shared[0][0], shared[1][0], focal)
+        if not np.all(valid):
+            raise ValueError("genotype evidence must be finite and non-negative")
+        pool = pool_stack.enter_context(core_parallel.safe_forkserver_pool(
             worker_count,
             initializer=_initialize_preprocess_worker,
             initargs=(
-                evidence_metadata,
-                observed_metadata,
+                tuple(metadata for _, metadata in shared),
                 offsets,
                 folds,
                 config.joint_block_config,
                 config.cavity_fill_rule,
+                config.partial_link_config,
                 diagnostics_mode,
             ),
-        ) as pool:
-            crossfit_blocks = _ordered_worker_results(
-                pool.imap_unordered(
-                    _preprocess_crossfit_worker,
-                    tuple(enumerate(hard_panels)),
-                    chunksize=1,
-                ),
-                len(hard_panels),
-                "crossfit",
-            )
-            if partial_link_fn is assembly_partial_links.link_partial_profiles:
-                # Boundaries depend only on the adjacent completed crossfits,
-                # never on another boundary's decision. Preserve result order.
-                links = _ordered_worker_results(pool.imap_unordered(
-                    _preprocess_partial_link_worker,
-                    ((index, hard_panels[index], hard_panels[index + 1],
-                      crossfit_blocks[index].profiles,
-                      crossfit_blocks[index + 1].profiles,
-                      config.partial_link_config)
-                     for index in range(len(hard_panels) - 1)),
-                    chunksize=4), len(hard_panels) - 1, "partial links")
-            else:
-                links = _infer_partial_links(
-                    hard_panels, crossfit_blocks, folds, config, partial_link_fn)
-            cavity_fills = _ordered_worker_results(
-                pool.imap_unordered(
-                    _preprocess_cavity_worker,
-                    tuple(enumerate(raw_panels)),
-                    chunksize=1,
-                ),
-                len(raw_panels),
-                "cavity",
-            )
-    finally:
-        core_parallel.close_shared_memory(handles, unlink=True)
+        ))
+        # The workers start up while the coordinator clones the blocks.
+        prepared = copy.deepcopy(raw_blocks)
+        (raw_panels, flags, wildcard_diagnostics, crossfit_blocks, partial_links,
+         cavity_fills, retained_bytes) = _stream_block_science(
+            pool, tuple(prepared), kept_sites, n_samples, config, worker_count)
+    except BaseException:
+        release()
+        raise
+    releaser = threading.Thread(
+        target=release, name="preprocess-release", daemon=True)
+    releaser.start()
+    try:
+        occupancy_gate = _occupancy_gate(
+            config, cavity_fills, crossfit_blocks,
+            tuple(_block_slab(focal, offsets, n_samples, block)
+                  for block in range(len(source))),
+            partial_links, flags)
+    except BaseException:
+        releaser.join()
+        raise
 
-    return crossfit_blocks, links, cavity_fills, shared_input_bytes
+    def join_release():
+        releaser.join()
+        if release_errors:
+            raise release_errors[0]
+
+    return (
+        prepared,
+        folds,
+        n_samples,
+        tuple(raw_panels),
+        tuple(flags),
+        tuple(wildcard_diagnostics),
+        tuple(crossfit_blocks),
+        tuple(partial_links),
+        tuple(cavity_fills),
+        occupancy_gate,
+        # Worker inputs: evidence and observed masks.
+        int(cells * 3 * np.dtype(np.float64).itemsize + cells),
+        retained_bytes,
+        join_release,
+    )
 
 
 def _validate_cavity_fill(
@@ -1154,6 +1387,24 @@ def _materialize_kept_fills(
     block.genotype_evidence_mode = "assembly_missing_aware_preprocessed"
 
 
+def _occupancy_gate(
+    config,
+    cavity_fills,
+    crossfit_blocks,
+    focal_masks,
+    partial_links,
+    block_underfit_flags,
+):
+    return assembly_occupancy.apply_variable_k_occupancy_gate(
+        tuple(np.asarray(value.filled, dtype=np.bool_) for value in cavity_fills),
+        tuple(value.profiles for value in crossfit_blocks),
+        focal_masks,
+        tuple(partial_links),
+        config.occupancy_rule,
+        block_underfit_flags=tuple(block_underfit_flags),
+    )
+
+
 def run_assembly_preprocess(
     raw_blocks: core_haplotypes.BlockResults,
     genotype_evidence: Sequence[np.ndarray],
@@ -1161,7 +1412,7 @@ def run_assembly_preprocess(
     *,
     fold_assignments: np.ndarray | None=None,
     config: CompletionConfig=CompletionConfig(),
-    num_processes: int=1,
+    num_processes: int | Callable[[], int]=1,
     diagnostics_mode: str="full",
     crossfit_fn: Callable[..., assembly_joint_completion.CrossFitBlock]=assembly_joint_completion.crossfit_block,
     cavity_fn: Callable[..., assembly_boundaries.CavityFillResult]=assembly_boundaries.cavity_fill_unknown_alleles,
@@ -1171,24 +1422,16 @@ def run_assembly_preprocess(
 
     Process parallelism is limited to independent block computations.  Every
     worker is restricted to one numerical thread, so the aggregate compute
-    budget is used-workers times one.
+    budget is used-workers times one. ``num_processes`` is an int or a live
+    budget (core.parallel.budget_value), read once: the pool cannot grow.
     """
 
     if not isinstance(config, CompletionConfig):
         raise TypeError("config must be a CompletionConfig")
-    prepared, evidence, observed, n_samples = _validate_and_clone_inputs(
-        raw_blocks, genotype_evidence, observed_masks, num_threads=num_processes
-    )
-    blocks = tuple(prepared)
-    block_underfit_flags, wildcard_diagnostics = _discovery_underfit_flags(
-        blocks,
-        n_samples,
-        config.maximum_discovery_wildcard_mass_for_fill_release,
-    )
-    raw_panels = tuple(_freeze_founder_panel(block) for block in blocks)
-    hard_panels = tuple(_hard_panel(panel) for panel in raw_panels)
-    folds = _validated_folds(n_samples, config, fold_assignments)
-
+    source, evidence_values, observed_values = _aligned_inputs(
+        raw_blocks, genotype_evidence, observed_masks)
+    if callable(num_processes):
+        num_processes = core_parallel.budget_value(num_processes)
     if (
             isinstance(num_processes, bool)
             or int(num_processes) != num_processes
@@ -1209,27 +1452,48 @@ def run_assembly_preprocess(
         and cavity_fn is assembly_boundaries.cavity_fill_unknown_alleles
         and partial_link_fn is assembly_partial_links.link_partial_profiles
     )
-    eligible_workers = min(requested_workers, len(blocks))
+    eligible_workers = min(requested_workers, len(source))
     if eligible_workers > 1 and production_callbacks:
         (
+            prepared,
+            folds,
+            n_samples,
+            raw_panels,
+            block_underfit_flags,
+            wildcard_diagnostics,
             crossfit_blocks,
             partial_links,
             cavity_fills,
+            occupancy_gate,
             shared_input_bytes,
+            retained_crossfit_bytes,
+            join_release,
         ) = _run_parallel_block_science(
-            raw_panels,
-            hard_panels,
-            evidence,
-            observed,
-            folds,
+            raw_blocks,
+            source,
+            evidence_values,
+            observed_values,
+            fold_assignments,
             config,
             diagnostics_mode,
             eligible_workers,
-            partial_link_fn,
         )
         used_workers = eligible_workers
         execution_backend = "forkserver_shared_arrays"
     else:
+        prepared, evidence, observed, n_samples = _validate_and_clone_inputs(
+            raw_blocks, genotype_evidence, observed_masks,
+            num_threads=requested_workers,
+        )
+        blocks = tuple(prepared)
+        block_underfit_flags, wildcard_diagnostics = _discovery_underfit_flags(
+            blocks,
+            n_samples,
+            config.maximum_discovery_wildcard_mass_for_fill_release,
+        )
+        raw_panels = tuple(_freeze_founder_panel(block) for block in blocks)
+        hard_panels = tuple(_hard_panel(panel) for panel in raw_panels)
+        folds = _validated_folds(n_samples, config, fold_assignments)
         crossfit_blocks, partial_links, cavity_fills = (
             _run_sequential_block_science(
                 raw_panels,
@@ -1244,8 +1508,19 @@ def run_assembly_preprocess(
                 partial_link_fn,
             )
         )
+        for index, (fill, panel, block) in enumerate(
+                zip(cavity_fills, raw_panels, blocks)):
+            _validate_cavity_fill(fill, panel, block, index)
+        with core_parallel.numba_thread_scope(requested_workers):
+            focal_masks = assembly_occupancy.focal_informative_masks(
+                evidence, observed, uniform_tolerance=_FOCAL_UNIFORM_TOLERANCE)
+        occupancy_gate = _occupancy_gate(
+            config, cavity_fills, crossfit_blocks, focal_masks, partial_links,
+            block_underfit_flags)
         used_workers = 1
         shared_input_bytes = 0
+        retained_crossfit_bytes = _retained_array_bytes(crossfit_blocks)
+        join_release = None
         if requested_workers == 1:
             execution_backend = "sequential_reference"
         elif not production_callbacks:
@@ -1253,9 +1528,7 @@ def run_assembly_preprocess(
         else:
             execution_backend = "sequential_insufficient_blocks"
 
-    for index, (fill, panel, block) in enumerate(
-            zip(cavity_fills, raw_panels, blocks)):
-        _validate_cavity_fill(fill, panel, block, index)
+    blocks = tuple(prepared)
     site_totals = _site_posterior_totals(crossfit_blocks, cavity_fills)
     if any(site_totals.values()):
         # Sites with more than MAX_EXACT_BITS unresolved founders (none at
@@ -1263,16 +1536,6 @@ def run_assembly_preprocess(
         print("[Preprocess] site posterior",
               " ".join(f"{key}={value}" for key, value in site_totals.items()), flush=True)
 
-    with core_parallel.numba_thread_scope(requested_workers):
-        focal_masks = assembly_occupancy.focal_informative_masks(evidence, observed)
-    occupancy_gate = assembly_occupancy.apply_variable_k_occupancy_gate(
-        tuple(np.asarray(value.filled, dtype=np.bool_) for value in cavity_fills),
-        tuple(value.profiles for value in crossfit_blocks),
-        focal_masks,
-        partial_links,
-        config.occupancy_rule,
-        block_underfit_flags=block_underfit_flags,
-    )
     diagnostics = _cavity_gate_diagnostics(cavity_fills, occupancy_gate)
     for block, panel, fill, diagnostic in zip(
             blocks, raw_panels, cavity_fills, diagnostics):
@@ -1314,6 +1577,8 @@ def run_assembly_preprocess(
         block.assembly_preprocess_identity = identity.record()
     for block in components:
         block.assembly_preprocess_identity = identity.record()
+    if join_release is not None:
+        join_release()
 
     return FounderCompletionResult(
         config_identity=identity,
@@ -1334,9 +1599,7 @@ def run_assembly_preprocess(
             backend=execution_backend,
             diagnostics_mode=diagnostics_mode,
             shared_input_bytes=shared_input_bytes,
-            retained_crossfit_array_bytes=_retained_array_bytes(
-                crossfit_blocks
-            ),
+            retained_crossfit_array_bytes=retained_crossfit_bytes,
         ),
     )
 

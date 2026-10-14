@@ -15,13 +15,38 @@ from haplotype_reconstruction.core import parallel
 from haplotype_reconstruction.core.haplotypes import BlockResult, BlockResults
 from haplotype_reconstruction.assembly import site_posterior
 
+# Per site, a copy state's allele probability q is 0 or 1 (a called founder) or the
+# site background (an uncalled founder or the background state): codes 0, 1, 2. The
+# emission term of a state pair depends only on its unordered code pair, terms 0-5
+# for (0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2), or, for a founder paired with
+# itself (both copies one founder), on its code: terms 6, 7, 8.
+_EMISSION_TERMS = 9
+_TERM_LOW = (0, 0, 0, 1, 1, 2)
+_TERM_HIGH = (0, 1, 2, 1, 2, 2)
+_CODE_PAIR_TERM = (0, 1, 2, 1, 3, 4, 2, 4, 5)
+
+
+@njit(cache=True, inline='always')
+def _code_probability(code, background):
+    return background if code == 2 else float(code)
+
+
 @njit(cache=True, parallel=True)
 def emission_grid(h, gl, observed, starts, stops, mix):
+    """Per sample and bin, the summed log emission of every copy-state pair.
+
+    A pair's term at an observed site with a called founder is the log of the
+    mix-robust genotype likelihood of its allele probabilities. Each sample
+    evaluates the _EMISSION_TERMS distinct terms of a site once and every
+    pair adds its term site by site in ascending order.
+    """
     n, length, _ = gl.shape
     k = len(h)
     s = k + 1
     emission = np.zeros((n, len(starts), s, s))
     background = np.empty(length)
+    informative = np.empty(length, dtype=np.bool_)
+    code = np.empty((s, length), dtype=np.int64)
     for site in range(length):
         called = 0
         alt = 0
@@ -29,38 +54,53 @@ def emission_grid(h, gl, observed, starts, stops, mix):
             if h[i, site] >= 0:
                 called += 1
                 alt += h[i, site]
+                code[i, site] = h[i, site]
+            else:
+                code[i, site] = 2
+        code[k, site] = 2
         background[site] = (1.0 + alt) / (2.0 + called)
+        informative[site] = called > 0
+    width = 0
+    for b in range(len(starts)):
+        width = max(width, stops[b] - starts[b])
+    pair_term = np.array(_CODE_PAIR_TERM)
     for sample in prange(n):
+        terms = np.empty((width, _EMISSION_TERMS))
         for b in range(len(starts)):
+            start, stop = starts[b], stops[b]
+            for site in range(start, stop):
+                if not observed[sample, site] or not informative[site]:
+                    continue
+                e = gl[sample, site]
+                total = e.sum()
+                for term in range(_EMISSION_TERMS):
+                    if term < 6:
+                        # Symmetric in the two copies (IEEE products commute).
+                        qi = _code_probability(_TERM_LOW[term], background[site])
+                        qj = _code_probability(_TERM_HIGH[term], background[site])
+                        p0 = (1 - qi) * (1 - qj)
+                        p2 = qi * qj
+                        p1 = 1 - p0 - p2
+                    else:
+                        qi = _code_probability(term - 6, background[site])
+                        p0 = 1 - qi
+                        p1 = 0.0
+                        p2 = qi
+                    likelihood = (e[0] * p0 + e[1] * p1 + e[2] * p2) / total if total > 0 else 1 / 3
+                    terms[site - start, term] = np.log((1 - mix) * likelihood + mix / 3)
             for i in range(s):
                 for j in range(i, s):
                     value = 0.0
-                    for site in range(starts[b], stops[b]):
-                        if not observed[sample, site]:
+                    for site in range(start, stop):
+                        if not observed[sample, site] or not informative[site]:
                             continue
-                        any_called = False
-                        for a in range(k):
-                            if h[a, site] >= 0:
-                                any_called = True
-                        if not any_called:
-                            continue
-                        qi = background[site] if i == k or h[i, site] < 0 else float(h[i, site])
-                        qj = background[site] if j == k or h[j, site] < 0 else float(h[j, site])
-                        if i == j and i < k:
-                            p0 = 1 - qi
-                            p1 = 0.0
-                            p2 = qi
-                        else:
-                            p0 = (1 - qi) * (1 - qj)
-                            p2 = qi * qj
-                            p1 = 1 - p0 - p2
-                        e = gl[sample, site]
-                        total = e.sum()
-                        likelihood = (e[0] * p0 + e[1] * p1 + e[2] * p2) / total if total > 0 else 1 / 3
-                        value += np.log((1 - mix) * likelihood + mix / 3)
+                        term = (6 + code[i, site] if i == j and i < k
+                                else pair_term[3 * code[i, site] + code[j, site]])
+                        value += terms[site - start, term]
                     emission[sample, b, i, j] = value
                     emission[sample, b, j, i] = value
     return emission, background
+
 
 @njit(cache=True)
 def refresh_forward(x, pi, r):
@@ -214,7 +254,13 @@ def worker(task):
 
 def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromosome_map=None,
            n_generations=3):
-    """Replace covered panels, exact-dedup; preserve unsupported template alleles."""
+    """Replace covered panels, exact-dedup; preserve unsupported template alleles.
+
+    ``cpus``: an int, or a callable live budget (a contig lane's growing lease):
+    the pool's process count follows its value at the start and the workers'
+    shared thread total its growth (core.parallel.live_total).
+    """
+    budget, cpus = cpus, parallel.budget_value(cpus)
     originals = list(raw_blocks)
     output = BlockResults(list(originals))
     observed = observed.copy()
@@ -285,8 +331,9 @@ def refine(raw_blocks, super_blocks, gl, sites, observed, cpus, options, chromos
         startup = {name: context.Value("i", value) for name, value in dict(
             started_counter=0, participant_counter=0, batch_generation=0,
             batch_task_count=len(tasks), startup_target=workers, startup_ready=0).items()}
-        with parallel.ForkserverPool(workers, initializer=initialize,
-                initargs=(metadata, cpus, active, extra, startup)) as pool:
+        with parallel.live_total(budget) as live, parallel.ForkserverPool(
+                workers, initializer=initialize,
+                initargs=(metadata, cpus, active, extra, dict(startup, live_total=live))) as pool:
             for index, result, q, support, wildcard, seconds, posterior_report in pool.imap_unordered(
                 worker,
                 tasks,

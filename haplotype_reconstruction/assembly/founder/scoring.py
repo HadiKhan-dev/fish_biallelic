@@ -18,6 +18,8 @@ import math
 import numpy as np
 from numba import njit, prange
 
+from ...core import parallel
+
 
 # Shared by refinement workspaces and standalone paired-exchange refits.
 # Growing this cost with component length can prefer a poorer founder phase
@@ -44,11 +46,16 @@ def _log_genotype_evidence(values):
 
 @njit(parallel=True, cache=True, nogil=True)
 def selected_alleles(leaves, offsets, selected):
+    # One task per block, which reads its leaf from the typed List once: a List element read
+    # inside a parallel loop updates a reference count shared by all threads, and a row copy
+    # is too little work to hide it (per-(founder, block) reads stopped the kernel scaling).
     founders, blocks = selected.shape
     result = np.empty((founders, offsets[-1]), np.int8)
-    for task in prange(founders * blocks):
-        founder, block = task // blocks, task % blocks
-        result[founder, offsets[block]:offsets[block + 1]] = leaves[block][selected[founder, block]]
+    for block_index in prange(blocks):
+        block = np.int64(block_index)
+        leaf = leaves[block]
+        for founder in range(founders):
+            result[founder, offsets[block]:offsets[block + 1]] = leaf[selected[founder, block]]
     return result
 
 
@@ -122,12 +129,23 @@ def _dosage_table(haplotypes):
     return prepare_dosages(haplotypes, first, second)
 
 
-def score_panel(haplotypes, evidence, complete, penalty, prepared=None):
-    """Canonical scores; share pair dosages without changing the observation model."""
+def score_panel(haplotypes, evidence, complete, penalty, prepared=None, ranges=None):
+    """Canonical scores; share pair dosages without changing the observation model.
+
+    ranges: consecutive sample ranges (s0, s1, threads) covering every sample
+    (workspace.sample_ranges); each is scored by its own call at its thread count (a
+    sample's score is its own recursion). None: one call at the current thread count, as
+    is the bounded-memory direct kernel."""
     from .site_kernels import score_dosages
     dosages = _dosage_table(haplotypes)
     if dosages is None:
         return _score_panel_direct(haplotypes, evidence, complete, penalty, prepared)
     logs = prepare_log_evidence(evidence, complete) if prepared is None else prepared
-    return score_dosages(dosages, logs, float(penalty))
+    if ranges is None:
+        return score_dosages(dosages, logs, float(penalty))
+    answer = np.empty(len(logs))
+    for s0, s1, threads in ranges:
+        with parallel.numba_thread_scope(threads):
+            answer[s0:s1] = score_dosages(dosages, logs[s0:s1], float(penalty))
+    return answer
 

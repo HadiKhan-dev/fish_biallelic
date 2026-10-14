@@ -11,7 +11,8 @@ from numba import njit, prange
 
 
 def _update_H(probs_k, H_k, A, lam, cost_WW=None, log_probs=None,
-              h_genotype_cost=None, h_wildcard_cost=None):
+              h_genotype_cost=None, h_wildcard_cost=None,
+              h_genotype_cost_sites=None, h_wildcard_cost_sites=None):
     """For each (founder, kept site), pick the binary value that minimises
     NLL contribution from samples carrying that founder.
 
@@ -34,6 +35,13 @@ def _update_H(probs_k, H_k, A, lam, cost_WW=None, log_probs=None,
                   log(max(probs_k[s, l, g], LOG_EPS_LOCAL)) (Tier 0).
                   When provided, the kernel uses it in place of every
                   inline log call.  Same caching pattern as cost_WW.
+        h_genotype_cost, h_wildcard_cost: optional (L_kept, N, 3) and
+                  (L_kept, N, 2) capped H-update costs read by the
+                  site-parallel sweep.
+        h_genotype_cost_sites, h_wildcard_cost_sites: optional (N, 3,
+                  L_kept) and (N, 2, L_kept) copies of the same costs read
+                  by the one-thread sweep.  Missing tables are derived
+                  here from cost_WW and log_probs.
 
     Returns:
         n_changes: int — number of (founder, site) bits that flipped
@@ -56,18 +64,25 @@ def _update_H(probs_k, H_k, A, lam, cost_WW=None, log_probs=None,
             discovery_objectives._maybe_c_contig(probs_k, np.float64)
         )
 
-    if h_genotype_cost is None or h_wildcard_cost is None:
-        (_, h_genotype_cost, h_wildcard_cost) = discovery_fitting._prepare_fit_cost_tables(
+    # One thread sweeps founder-outer over site-contiguous tables; more
+    # threads share each site's founder sweep in the site-parallel kernel.
+    one_thread = numba.get_num_threads() == 1
+    if one_thread:
+        genotype_cost = h_genotype_cost_sites
+        wildcard_cost = h_wildcard_cost_sites
+    else:
+        genotype_cost = h_genotype_cost
+        wildcard_cost = h_wildcard_cost
+    if genotype_cost is None or wildcard_cost is None:
+        (_, genotype_cost, wildcard_cost) = discovery_fitting._prepare_fit_cost_tables(
             discovery_objectives._maybe_c_contig(cost_WW, np.float64),
             discovery_objectives._maybe_c_contig(log_probs, np.float64),
             float(lam),
         )
-        h_genotype_cost = np.ascontiguousarray(
-            h_genotype_cost.transpose(1, 0, 2)
-        )
-        h_wildcard_cost = np.ascontiguousarray(
-            h_wildcard_cost.transpose(1, 0, 2)
-        )
+        # (N, L, c) -> (N, c, L) for one thread, (L, N, c) otherwise.
+        axes = (0, 2, 1) if one_thread else (1, 0, 2)
+        genotype_cost = np.ascontiguousarray(genotype_cost.transpose(axes))
+        wildcard_cost = np.ascontiguousarray(wildcard_cost.transpose(axes))
 
     # We update founders in decreasing order of usage.  Compute usage from A
     # via an njit kernel — the inner Python loop over K with two boolean-
@@ -80,20 +95,21 @@ def _update_H(probs_k, H_k, A, lam, cost_WW=None, log_probs=None,
     update_order = update_order[usage[update_order] > 0]
 
     # A full H sweep is Gauss-Seidel in founder order but independent across
-    # sites.  Run one parallel site kernel for the whole ordered sweep instead
-    # of launching and synchronising a separate prange kernel for every
-    # founder.  Within each site the kernel preserves the exact founder order,
-    # H/J/P bucket order, ascending sample order, cap, accumulation order, and
-    # tie rule of the historical per-founder path.
+    # sites.  Run one kernel for the whole ordered sweep instead of launching
+    # and synchronising a separate prange kernel for every founder.  Both
+    # kernels preserve, for every (founder, site), the exact founder order,
+    # H/J/P bucket order, ascending sample order, cap, accumulation order,
+    # and tie rule of the historical per-founder path.
     H_c = discovery_objectives._maybe_c_contig(H_k, np.int64)
-    sweep_kernel = _update_H_ordered_sweep_kernel
-    if numba.get_num_threads() == 1:
-        sweep_kernel = _update_H_ordered_sweep_kernel_serial
+    sweep_kernel = (
+        _update_H_site_sweep_kernel if one_thread
+        else _update_H_ordered_sweep_kernel
+    )
     n_changes = sweep_kernel(
         H_c, np.ascontiguousarray(update_order, dtype=np.int64),
         kk_idx, kj_idx, kW_idx, partner_J, n_kk, n_J, n_P,
-        discovery_objectives._maybe_c_contig(h_genotype_cost, np.float64),
-        discovery_objectives._maybe_c_contig(h_wildcard_cost, np.float64),
+        discovery_objectives._maybe_c_contig(genotype_cost, np.float64),
+        discovery_objectives._maybe_c_contig(wildcard_cost, np.float64),
     )
     if H_c is not H_k:
         H_k[...] = H_c
@@ -209,48 +225,78 @@ def _update_H_ordered_sweep_kernel(H_full, update_order,
 
 
 @njit(cache=True, parallel=False, fastmath=False, nogil=True)
-def _update_H_ordered_sweep_kernel_serial(H_full, update_order,
-                                           kk_idx, kj_idx, kW_idx, partner_J,
-                                           n_kk, n_J, n_P,
-                                           genotype_cost,
-                                           real_wildcard_cost):
-    """One-thread counterpart of `_update_H_ordered_sweep_kernel`."""
+def _update_H_site_sweep_kernel(H_full, update_order,
+                                kk_idx, kj_idx, kW_idx, partner_J,
+                                n_kk, n_J, n_P,
+                                genotype_cost_sites, wildcard_cost_sites):
+    """One-thread ordered founder sweep, founder-outer and site-inner.
+
+    Sites are independent and founders keep the stable usage order, so every
+    (founder, site) sum adds exactly the terms of the site-parallel kernel in
+    the same H/J/P bucket and sample order, and every partner allele is read
+    after exactly the same earlier founders were updated. The (N, 3, L) and
+    (N, 2, L) tables keep each sample's site costs contiguous, so the inner
+    loops run over sites with SIMD lanes holding independent sums.
+    """
     L = H_full.shape[1]
+    nll0 = np.empty(L, dtype=np.float64)
+    nll1 = np.empty(L, dtype=np.float64)
+    # A J-bucket term is the cost at the partner's allele h (nll0) or h + 1
+    # (nll1). It is selected on the float64 bit patterns with the mask -h
+    # (all ones for h = 1, zero for h = 0), which copies the chosen cost's
+    # bits unchanged and keeps the site loop branch-free: a per-site branch
+    # or float select is not if-converted on every CPU, and mispredicts.
+    cost_bits = genotype_cost_sites.view(np.int64)
+    pick0 = np.empty(L, dtype=np.int64)
+    pick1 = np.empty(L, dtype=np.int64)
+    picked0 = pick0.view(np.float64)
+    picked1 = pick1.view(np.float64)
     n_changes = 0
-    for l in range(L):
-        for order_position in range(update_order.shape[0]):
-            k = update_order[order_position]
-            cur_val = H_full[k, l]
-            nll0 = 0.0
-            nll1 = 0.0
-
-            for ii in range(n_kk[k]):
-                s = kk_idx[k, ii]
-                nll0 += genotype_cost[l, s, 0]
-                nll1 += genotype_cost[l, s, 2]
-
-            for ii in range(n_J[k]):
-                s = kj_idx[k, ii]
-                j = partner_J[k, ii]
-                partner_h = H_full[j, l]
-                nll0 += genotype_cost[l, s, partner_h]
-                nll1 += genotype_cost[l, s, partner_h + 1]
-
-            for ii in range(n_P[k]):
-                s = kW_idx[k, ii]
-                nll0 += real_wildcard_cost[l, s, 0]
-                nll1 += real_wildcard_cost[l, s, 1]
-
-            diff = nll0 - nll1
+    for order_position in range(update_order.shape[0]):
+        k = update_order[order_position]
+        for l in range(L):
+            nll0[l] = 0.0
+            nll1[l] = 0.0
+        for ii in range(n_kk[k]):
+            s = kk_idx[k, ii]
+            cost0 = genotype_cost_sites[s, 0]
+            cost2 = genotype_cost_sites[s, 2]
+            for l in range(L):
+                nll0[l] += cost0[l]
+                nll1[l] += cost2[l]
+        for ii in range(n_J[k]):
+            s = kj_idx[k, ii]
+            partner_h = H_full[partner_J[k, ii]]
+            bits0 = cost_bits[s, 0]
+            bits1 = cost_bits[s, 1]
+            bits2 = cost_bits[s, 2]
+            for l in range(L):
+                mask = -partner_h[l]
+                pick0[l] = (bits1[l] & mask) | (bits0[l] & ~mask)
+                pick1[l] = (bits2[l] & mask) | (bits1[l] & ~mask)
+            for l in range(L):
+                nll0[l] += picked0[l]
+                nll1[l] += picked1[l]
+        for ii in range(n_P[k]):
+            s = kW_idx[k, ii]
+            wildcard0 = wildcard_cost_sites[s, 0]
+            wildcard1 = wildcard_cost_sites[s, 1]
+            for l in range(L):
+                nll0[l] += wildcard0[l]
+                nll1[l] += wildcard1[l]
+        founder_h = H_full[k]
+        for l in range(L):
+            cur_val = founder_h[l]
+            diff = nll0[l] - nll1[l]
             if diff < 0.0:
                 diff = -diff
             if diff < 1e-9:
                 new_val = cur_val
-            elif nll0 < nll1:
+            elif nll0[l] < nll1[l]:
                 new_val = 0
             else:
                 new_val = 1
-            H_full[k, l] = new_val
+            founder_h[l] = new_val
             if new_val != cur_val:
                 n_changes += 1
     return n_changes
@@ -282,8 +328,13 @@ def _stable_descending_usage_order(usage):
 def _fixed_k_transition_batch_pattern_kernel(
         C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
         WW_bin_emis, WW_total_cost, rr_i, rr_j, penalty, snps_per_bin, n_bins,
-        h_genotype_cost, h_wildcard_cost, uninformative_samples, H_batch):
-    """Evaluate independent ordered-H coordinate transitions in parallel."""
+        h_genotype_cost_sites, h_wildcard_cost_sites, uninformative_samples,
+        H_batch, slot_of):
+    """Evaluate independent ordered-H coordinate transitions in parallel.
+
+    Contraction-table rows are addressed by slot: ``slot_of`` maps every
+    within-bin pattern of the batch (added by the caller) to its row.
+    """
     B = H_batch.shape[0]
     K = H_batch.shape[1]
     N = C0b.shape[0]
@@ -300,6 +351,12 @@ def _fixed_k_transition_batch_pattern_kernel(
         if not is_binary:
             h_changes[start] = -1
             continue
+        # Replace every pattern by its table slot.
+        for b in range(n_bins):
+            for k in range(K):
+                h_patterns[k, b] = slot_of[b, h_patterns[k, b]]
+            for p in range(pair_patterns.shape[0]):
+                pair_patterns[p, b] = slot_of[b, pair_patterns[p, b]]
         A, cost, wildcard = discovery_assignments._update_A_fused_pattern_kernel_serial(
             C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
             h_patterns, pair_patterns, WW_bin_emis, WW_total_cost,
@@ -321,11 +378,11 @@ def _fixed_k_transition_batch_pattern_kernel(
         (kk_idx, kj_idx, kW_idx, partner_J,
          n_kk, n_J, n_P, usage) = _classify_all_founder_buckets(A, K)
         update_order = _stable_descending_usage_order(usage)
-        changes = _update_H_ordered_sweep_kernel_serial(
+        changes = _update_H_site_sweep_kernel(
             H_work, update_order,
             kk_idx, kj_idx, kW_idx, partner_J,
             n_kk, n_J, n_P,
-            h_genotype_cost, h_wildcard_cost,
+            h_genotype_cost_sites, h_wildcard_cost_sites,
         )
         H_next[start] = H_work
         h_changes[start] = changes

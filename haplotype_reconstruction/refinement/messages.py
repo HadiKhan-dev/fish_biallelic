@@ -218,32 +218,38 @@ def add_unstable_clusters(messages, gp, ge, gc, node_group, delta, tolerance):
 
 @njit(cache=True)
 def paired_map(emission, theta):
+    # Viterbi over the two selector bits. A site's transition logs are taken
+    # once (the same libm values the pairwise loop used), and the two score
+    # rows are reused across sites.
     n = len(emission)
     score = np.zeros(4, dtype=np.float64)
+    new = np.empty(4, dtype=np.float64)
     back = np.zeros((n, 4), dtype=np.int8)
     for site in range(n):
-        new = np.empty(4, dtype=np.float64)
-        for state in range(4):
-            if site == 0:
+        if site == 0:
+            for state in range(4):
                 new[state] = math.log(max(1e-300, emission[site, state])) - math.log(4.)
-                continue
-            best = -np.inf
-            arg = 0
+        else:
             t = theta[site - 1]
-            for previous in range(4):
-                bits = previous ^ state
-                changes = (bits >> 1) + (bits & 1)
-                if changes and t == 0:
-                    continue
-                value = score[previous] + (2 - changes) * math.log(1 - t)
-                if changes:
-                    value += changes * math.log(t)
-                if value > best:
-                    best = value
-                    arg = previous
-            new[state] = best + math.log(max(1e-300, emission[site, state]))
-            back[site, state] = arg
-        score = new
+            stay = math.log(1 - t)
+            jump = math.log(t) if t != 0 else 0.
+            for state in range(4):
+                best = -np.inf
+                arg = 0
+                for previous in range(4):
+                    bits = previous ^ state
+                    changes = (bits >> 1) + (bits & 1)
+                    if changes and t == 0:
+                        continue
+                    value = score[previous] + (2 - changes) * stay
+                    if changes:
+                        value += changes * jump
+                    if value > best:
+                        best = value
+                        arg = previous
+                new[state] = best + math.log(max(1e-300, emission[site, state]))
+                back[site, state] = arg
+        score, new = new, score
     result = np.empty(n, dtype=np.int8)
     state = np.argmax(score)
     for site in range(n - 1, -1, -1):

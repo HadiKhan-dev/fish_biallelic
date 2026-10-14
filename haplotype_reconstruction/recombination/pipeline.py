@@ -131,15 +131,23 @@ def write_chromosome_outputs(result, output):
 def _read_depth_mask(store, contig, phase, common):
     """Positive-read-depth sample x site mask of the evidence behind final phase.
 
-    Only needed to exclude read-free tracts; the genotype likelihoods loaded
-    with it are released immediately.
+    Only needed to exclude read-free tracts: the compact evidence cache decodes
+    only the sites and the mask; genotype likelihoods loaded with a raw source
+    are released immediately.
     """
     if common["config"].read_free_tract_sites <= 0:
         return None
-    _, positions, observed, _, _ = pedigree_pipeline._load_raw_evidence(
-        store, contig, raw_gl_stage=common["raw_gl_stage"],
-        raw_sites_stage=common["raw_sites_stage"], raw_gl_key=common["raw_gl_key"],
-        raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
+    source = dict(raw_gl_stage=common["raw_gl_stage"], raw_sites_stage=common["raw_sites_stage"],
+                  raw_gl_key=common["raw_gl_key"], raw_sites_key="global_sites",
+                  raw_observed_mask_key="global_observed_mask")
+    cached = raw_evidence.load(store, contig, keys=(
+        "global_sites", "global_observed_mask", "genotype_evidence_mode",
+        "observed_call_mask_mode"), **source)
+    if cached is not None:
+        pedigree_pipeline._validate_source_modes(cached, raw_evidence.STAGE, contig)
+        positions, observed = cached["global_sites"], cached["global_observed_mask"]
+    else:
+        _, positions, observed, _, _ = pedigree_pipeline._load_raw_evidence(store, contig, **source)
     if not np.array_equal(positions, phase["positions"]):
         raise ValueError(f"{contig}: read-depth evidence and final phase sites differ")
     return np.array(observed, dtype=bool)
@@ -249,29 +257,35 @@ def _recombination_resources(store, contigs, workers, evidence_stages=()):
     A sixfold decoded-phase allowance covers retained phase arrays, working
     allele/gauge/run copies and per-meiosis HMM workspaces; add 2 GiB for
     compressed reads, Python/JIT and plotting. With read-free masking, a
-    chromosome still to be mapped also decodes its genotype evidence once for
-    the read-depth mask (compact cache when present, else the raw source).
+    chromosome still to be mapped also reads the read-depth mask of its
+    genotype evidence, bounded here by the decoded evidence (compact cache when
+    present, else the raw source).
     This is a conservative scheduling estimate, not a guaranteed RSS bound.
     Retain the existing serial path when even one estimated chromosome exceeds
     the available-memory allowance.
     """
+    resumed = {contig: store.contig_done(RECOMBINATION_STAGE, contig) for contig in contigs}
+    reads = {}
+    for contig in contigs:
+        if resumed[contig]:
+            reads[contig] = (RECOMBINATION_STAGE,)
+            continue
+        # The painting is decoded once for its bin edges, then released.
+        reads[contig] = (refinement_pipeline.FINAL_PHASE_STAGE,
+                         workflows_reconstruction.PAINTING_STAGE)
+        if evidence_stages:
+            reads[contig] += ((raw_evidence.STAGE,) if store.contig_done(raw_evidence.STAGE, contig)
+                              else tuple(dict.fromkeys(evidence_stages)))
+
+    def path(stage, contig):
+        return core_checkpoints.contig_path(store.root, stage, contig)
+
+    sizes = core_checkpoints.read_size_bytes_many(
+        path(stage, contig) for contig in contigs for stage in reads[contig])
     estimates = []
     for contig in contigs:
-        resumed = store.contig_done(RECOMBINATION_STAGE, contig)
-        stage = RECOMBINATION_STAGE if resumed else refinement_pipeline.FINAL_PHASE_STAGE
-        decoded = core_checkpoints.read_size_bytes(
-            core_checkpoints.contig_path(store.root, stage, contig))
-        estimate = decoded * (2 if resumed else 6) + (2 << 30)
-        if not resumed:
-            # The painting is decoded once for its bin edges, then released.
-            estimate += core_checkpoints.read_size_bytes(core_checkpoints.contig_path(
-                store.root, workflows_reconstruction.PAINTING_STAGE, contig))
-        if evidence_stages and not resumed:
-            sources = ((raw_evidence.STAGE,) if store.contig_done(raw_evidence.STAGE, contig)
-                       else dict.fromkeys(evidence_stages))
-            estimate += sum(core_checkpoints.read_size_bytes(
-                core_checkpoints.contig_path(store.root, source, contig)) for source in sources)
-        estimates.append(estimate)
+        decoded, *others = (sizes[path(stage, contig)] for stage in reads[contig])
+        estimates.append(decoded * (2 if resumed[contig] else 6) + (2 << 30) + sum(others))
     return estimates, memory_worker_limit(
         estimates, workers, core_runtime.available_memory_bytes(), label="RECOMBINATION")
 

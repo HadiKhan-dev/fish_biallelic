@@ -137,7 +137,13 @@ def pack_selected(emissions, selected, offsets, first, second):
 
 @njit(cache=True, parallel=True, nogil=True)
 def gather_macro(emissions, groups, rows_by_group):
-    """One parallel launch for all groups; fetch each source block once/task."""
+    """One parallel launch for all groups, one task per group.
+
+    A task reads each source block of its group from the typed List once and copies it for
+    every sample: every List element read updates a reference count shared by all threads,
+    including the window workers that gather their problems concurrently from the
+    workspace's one List, so reads per (group, sample, block) serialised them.
+    """
     outputs = List()
     for group in range(len(groups)):
         start, stop = groups[group]
@@ -147,19 +153,20 @@ def gather_macro(emissions, groups, rows_by_group):
         count = len(rows_by_group[group])
         outputs.append(np.empty((emissions[0].shape[0], count, count, bins)))
     samples = emissions[0].shape[0]
-    for task in prange(len(groups) * samples):
-        group, sample = task // samples, task % samples
+    for group_index in prange(len(groups)):
+        group = np.int64(group_index)
         rows, output = rows_by_group[group], outputs[group]
         start, stop = groups[group]
         offset = 0
         for block in range(start, stop):
             value = emissions[block]
-            for a in range(len(rows)):
-                aa = rows[a, block - start]
-                for b in range(len(rows)):
-                    bb = rows[b, block - start]
-                    for site in range(value.shape[3]):
-                        output[sample, a, b, offset + site] = value[sample, aa, bb, site]
+            for sample in range(samples):
+                for a in range(len(rows)):
+                    aa = rows[a, block - start]
+                    for b in range(len(rows)):
+                        bb = rows[b, block - start]
+                        for site in range(value.shape[3]):
+                            output[sample, a, b, offset + site] = value[sample, aa, bb, site]
             offset += value.shape[3]
     return outputs
 

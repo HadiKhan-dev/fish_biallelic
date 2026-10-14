@@ -145,6 +145,8 @@ class _FixedKFitWorkspace:
         "WW_total_cost",
         "h_genotype_cost",
         "h_wildcard_cost",
+        "h_genotype_cost_sites",
+        "h_wildcard_cost_sites",
         "blas_lp_cache",
         "binary_pattern_cache",
         "observed_mask",
@@ -166,6 +168,8 @@ class _FixedKFitWorkspace:
         WW_total_cost,
         h_genotype_cost,
         h_wildcard_cost,
+        h_genotype_cost_sites,
+        h_wildcard_cost_sites,
         blas_lp_cache,
         binary_pattern_cache,
         observed_mask,
@@ -188,8 +192,13 @@ class _FixedKFitWorkspace:
         self.log_probs = log_probs
         self.WW_bin_emis = WW_bin_emis
         self.WW_total_cost = WW_total_cost
+        # The same capped H-update costs in two layouts: (L, N, c) for the
+        # site-parallel sweep and site-contiguous (N, c, L) for the
+        # one-thread founder-outer sweep.
         self.h_genotype_cost = h_genotype_cost
         self.h_wildcard_cost = h_wildcard_cost
+        self.h_genotype_cost_sites = h_genotype_cost_sites
+        self.h_wildcard_cost_sites = h_wildcard_cost_sites
         self.blas_lp_cache = blas_lp_cache
         self.binary_pattern_cache = binary_pattern_cache
         # This cache is intentionally scoped to one exact evidence workspace.
@@ -345,14 +354,12 @@ class _FixedKFitWorkspace:
         try:
             (H_next, A_batch, cost_batch, wildcard_batch,
              h_changes) = discovery_frontier_emissions.transition_batch(
-                C0b,
-                cache.diff1_table, cache.w_table,
-                kW_Cb, cache.kWdiff_table,
+                C0b, cache, kW_Cb,
                 self.WW_bin_emis, self.WW_total_cost,
                 rr_i, rr_j,
                 float(core_config.VITERBI_SWITCH_PENALTY),
                 int(cache.snps_per_bin), int(cache.n_bins),
-                self.h_genotype_cost, self.h_wildcard_cost,
+                self.h_genotype_cost_sites, self.h_wildcard_cost_sites,
                 self.uninformative_samples, H_batch,
             )
         finally:
@@ -435,6 +442,8 @@ class _FixedKFitWorkspace:
             log_probs=self.log_probs,
             h_genotype_cost=self.h_genotype_cost,
             h_wildcard_cost=self.h_wildcard_cost,
+            h_genotype_cost_sites=self.h_genotype_cost_sites,
+            h_wildcard_cost_sites=self.h_wildcard_cost_sites,
         )
         assignment = self._store_assignment_record(
             A, cost, uncapped_cost, wildcard
@@ -565,6 +574,14 @@ def _prepare_fixed_k_fit_workspace(
             mask_value,
             float(lam),
         )
+    # (N, L, c) -> (N, c, L) for the one-thread sweep, (L, N, c) for the
+    # site-parallel sweep.
+    h_genotype_cost_sites = np.ascontiguousarray(
+        h_genotype_cost.transpose(0, 2, 1)
+    )
+    h_wildcard_cost_sites = np.ascontiguousarray(
+        h_wildcard_cost.transpose(0, 2, 1)
+    )
     h_genotype_cost = np.ascontiguousarray(
         h_genotype_cost.transpose(1, 0, 2)
     )
@@ -617,6 +634,8 @@ def _prepare_fixed_k_fit_workspace(
         WW_total_cost,
         h_genotype_cost,
         h_wildcard_cost,
+        h_genotype_cost_sites,
+        h_wildcard_cost_sites,
         blas_lp_cache,
         binary_pattern_cache,
         mask_value,
@@ -834,6 +853,8 @@ def _fit_at_fixed_K(
     WW_total_cost = workspace.WW_total_cost
     h_genotype_cost = workspace.h_genotype_cost
     h_wildcard_cost = workspace.h_wildcard_cost
+    h_genotype_cost_sites = workspace.h_genotype_cost_sites
+    h_wildcard_cost_sites = workspace.h_wildcard_cost_sites
     # K=0 never enters the BLAS founder-state path.
     _blas_lp_cache = (
         workspace.blas_lp_cache if H.shape[0] > 0 else None
@@ -936,7 +957,9 @@ def _fit_at_fixed_K(
         h_changes = discovery_founder_updates._update_H(probs_k, H, A, lam, cost_WW=cost_WW,
                               log_probs=log_probs,
                               h_genotype_cost=h_genotype_cost,
-                              h_wildcard_cost=h_wildcard_cost)
+                              h_wildcard_cost=h_wildcard_cost,
+                              h_genotype_cost_sites=h_genotype_cost_sites,
+                              h_wildcard_cost_sites=h_wildcard_cost_sites)
 
         n_iter = it + 1
         if h_changes == 0:

@@ -661,9 +661,9 @@ def _score_mode_cavity_kernel(
          diagnostics, spreads) = grouped_cavity_predictions(
             likelihood, log_likelihood, rw_log_likelihood, ww_log_emission,
             haplotypes, assignments, founder_support, unary, pair, edge_first,
-            edge_second, neighbours, neighbour_counts, mean_field_max_iter,
-            mean_field_tolerance, likelihood_floor, site_start, site_stop,
-            shared_triple,
+            edge_second, edge_lookup, neighbours, neighbour_counts,
+            mean_field_max_iter, mean_field_tolerance, likelihood_floor,
+            site_start, site_stop, shared_triple,
         )
         for heldout in prange(n_samples):
             heldout_iterations = iterations_by_heldout[heldout]

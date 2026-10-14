@@ -869,7 +869,7 @@ def assemble_chromosome(
             observed_by_block,
             fold_assignments=fold_assignments,
             config=config.preprocess_config,
-            num_processes=config.num_processes,
+            num_processes=_phase_lease(config, "preprocess"),
             diagnostics_mode=config.preprocess_diagnostics_mode,
         )
     effective_preprocess_diagnostics_mode = (
@@ -962,7 +962,7 @@ def assemble_chromosome(
                 n_generations=config.n_generations if level > 1 else None,
                 recomb_tolerance=config.recombination_tolerance,
                 cc_scale=config.cc_scale,
-                num_processes=config.num_processes,
+                num_processes=_phase_lease(config, phase, dynamic=True),
                 maxtasksperchild=config.maxtasksperchild,
                 min_gb_per_worker=config.min_gb_per_worker,
                 verbose=config.verbose,
@@ -1071,7 +1071,7 @@ def assemble_chromosome(
                 output, refinement_diagnostics = founder_refinement.refine_components(
                     preprocess_result.prepared_blocks, working, neutral_probs, sites,
                     config=active_refinement_config,
-                    num_threads=config.num_processes,
+                    num_threads=_phase_lease(config, phase, dynamic=True),
                     checkpoints=scoped_checkpoints(release_checkpoints, phase),
                     l1_blocks=refinement_context, cc_scale=config.cc_scale,
                     count_additions=(stopped is not None or level == config.max_level))
@@ -1213,8 +1213,26 @@ def assemble_chromosome(
         },
     }
 
+
+def _phase_lease(config, phase, dynamic=False):
+    """Core ceiling of one assembly phase (execution only: a runtime field).
+
+    config.num_processes, or in a contig lane the lane's lease, which may have
+    grown since the contig started (core/chromosome_parallel.lease_threads).
+    ``dynamic``: in a lane, a budget the phase re-reads as it runs (hierarchy
+    and component-refinement pools through core.parallel.live_total, the
+    founder refinement at every sweep allocation), so the lease can also grow
+    inside the phase (core/chromosome_parallel.lease_budget).
+    """
+    stage = "final" if config.max_level == 4 else f"feedback_l{config.max_level}"
+    lease = (core_chromosome_parallel.lease_budget if dynamic
+             else core_chromosome_parallel.lease_threads)
+    return lease(config.num_processes, f"{stage}_{phase}")
+
+
 import haplotype_reconstruction.assembly.checkpoints as assembly_checkpoints
 import haplotype_reconstruction.assembly.hierarchy as assembly_hierarchy
 import haplotype_reconstruction.assembly.linking as assembly_linking
+import haplotype_reconstruction.core.chromosome_parallel as core_chromosome_parallel
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.runtime as core_runtime

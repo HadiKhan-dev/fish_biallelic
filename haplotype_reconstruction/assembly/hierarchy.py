@@ -120,17 +120,23 @@ def _missing_aware_block_indices(block, global_sites, max_sites=None):
 
 @numba.njit(cache=True, parallel=True, fastmath=False)
 def _informative_samples_at_indices(probabilities, index_sets):
-    """Scan independent block/sample rows without gathering a GL tensor."""
+    """Scan independent block/sample rows without gathering a GL tensor.
+
+    One task per block: its site indices are read from the typed List once (a
+    List element read inside a parallel loop updates a reference count shared
+    by all threads, and a sample's scan usually stops at its first site).
+    """
     samples = probabilities.shape[0]
     result = np.zeros((len(index_sets), samples), np.bool_)
-    for task in numba.prange(len(index_sets) * samples):
-        block, sample = task // samples, task % samples
+    for block_index in numba.prange(len(index_sets)):
+        block = np.int64(block_index)
         indices = index_sets[block]
-        for site in indices:
-            a, b, c = probabilities[sample, site]
-            if (a + b) + c > 0.0 and (a != b or b != c):
-                result[block, sample] = True
-                break
+        for sample in range(samples):
+            for site in indices:
+                a, b, c = probabilities[sample, site]
+                if (a + b) + c > 0.0 and (a != b or b != c):
+                    result[block, sample] = True
+                    break
     return result
 
 
@@ -597,6 +603,12 @@ def compute_max_gap(blocks, recomb_rate, n_generations, recomb_tolerance,
     return max_gap
 
 
+# Position of inner_num_processes in a _process_single_batch task (unpacked
+# below). The cross-node transport (core/batch_tasks.py) replaces it with the
+# executing allocation's budget.
+_INNER_PROCESSES_FIELD = 9
+
+
 def _process_single_batch(args):
     """Worker function to process a single batch.
 
@@ -670,9 +682,8 @@ def _process_single_batch(args):
         all_positions = np.concatenate([b.positions for b in original_portion])
         batch_indices = np.searchsorted(global_sites, all_positions)
         idx_min, idx_max = batch_indices.min(), batch_indices.max()
-        batch_probs = np.ascontiguousarray(global_probs[:, idx_min:idx_max + 1,:])
         batch_sites = np.ascontiguousarray(global_sites[idx_min:idx_max + 1])
-        total_sample_count = batch_probs.shape[0]
+        total_sample_count = global_probs.shape[0]
         informative_sample_mask = np.asarray(
             precomputed_informative_sample_mask, dtype=np.bool_
         )
@@ -695,10 +706,6 @@ def _process_single_batch(args):
                 'informative_sample_count': 0,
                 'total_sample_count': total_sample_count,
             }
-        inference_batch_probs = np.ascontiguousarray(
-            batch_probs[informative_sample_mask]
-        )
-
         if len(original_portion) < 2:
             block = original_portion[0]
             block.hierarchy_informative_sample_count = informative_sample_count
@@ -711,6 +718,12 @@ def _process_single_batch(args):
                 'super_block': block,
                 'status': 'passthrough',
             }
+
+        # The informative samples' evidence over the batch span, copied in parallel from the
+        # shared evidence.
+        core_parallel.apply_dynamic_threads()
+        inference_batch_probs = assembly_chimera_kernels._gather_rows_numba(
+            global_probs, np.flatnonzero(informative_sample_mask), int(idx_min), int(idx_max) + 1)
 
         # 3. Compute max gap.
         if n_generations is not None and recomb_tolerance is not None:
@@ -822,10 +835,13 @@ def _process_single_batch(args):
         del resolved_beam, fast_mesh
         core_parallel.malloc_trim()
 
-        # 8. Package.
+        # 8. Package. The super-block carries no evidence array: every hierarchy level's output
+        # drops block evidence at once (pipeline: core_runtime.strip_block_evidence), so
+        # gathering it (N x sites x 3, a whole chromosome at L4) and pickling it back to the
+        # parent only cost time and memory.
         _t = time.perf_counter()
         super_block = convert_reconstruction_to_superblock(
-            reconstructed_data, original_portion, batch_probs, batch_sites,
+            reconstructed_data, original_portion,
         )
         if super_block is not None:
             super_block.hierarchy_informative_sample_count = (
@@ -841,7 +857,7 @@ def _process_single_batch(args):
             _acc('package', _t)
 
         del reconstructed_data, inference_batch_probs
-        del batch_probs, batch_sites, portion_proxy, proxy_list
+        del batch_sites, portion_proxy, proxy_list
         core_parallel.malloc_trim()
 
 
@@ -883,8 +899,10 @@ def _hmm_batch_memory_gb(input_blocks, batch_ranges, n_samples, max_sites,
                          global_sites, panel_search_config=None):
     """Budget the arrays one batch holds, in GB, for the largest batch.
 
-    The batch keeps two float32 genotype-probability slices over its site span
-    (all samples, then informative samples). Linker scans keep seven float32
+    The batch keeps a float32 genotype-probability slice of its informative
+    samples over its site span; as much again covers transient copies (the
+    panel search's flat emission layout while it is built, the working arrays
+    of concurrent duplicate-seed refits). Linker scans keep seven float32
     log emissions and seven float64 weights per sample and proxy site, plus
     uint8 pair lookups per proxy site. Panel search keeps float64 binned
     sub-emissions (S, K_b, K_b, m_b), with m_b = ceil(sites_b / spb) binned as
@@ -984,7 +1002,10 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
       num_processes: Maximum total cores.  Strict ceiling on both
           concurrent workers AND total thread allocation.  Function
           may use fewer workers if RAM is tight, but thread allocation
-          across workers will sum to at most num_processes.
+          across workers will sum to at most num_processes.  An int, or a
+          callable live budget (a contig lane's growing lease): the worker
+          count follows its value at the start, the workers' shared thread
+          total its growth (core.parallel.live_total).
       maxtasksperchild: Recycle workers after this many batches.  Set
           to 1 to prevent memory accumulation from glibc malloc
           fragmentation.
@@ -1006,6 +1027,7 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     IMPORTANT: The entry script must NOT be named main.py — otherwise
     forkserver workers will re-execute it.
     """
+    budget, num_processes = num_processes, core_parallel.budget_value(num_processes)
     total_blocks = len(input_blocks)
     with core_parallel.numba_thread_scope(num_processes):
         batch_ranges, block_informative_masks, boundary_joint_counts = (
@@ -1253,30 +1275,32 @@ def run_hierarchical_step(input_blocks, global_probs, global_sites,
     try:
         if num_processes > 1:
             t0 = time.time()
-            pool = core_parallel.NonDaemonicForkserverPool(
-                processes=outer_workers,
-                initializer=_init_worker_meta,
-                initargs=(shared_meta, total_cores, active_counter, extra_counter,
-                          startup_counters),
-                maxtasksperchild=maxtasksperchild
-            )
-            print(f"  Pool creation ({outer_workers} workers): {time.time()-t0:.1f}s")
+            # A growing lane lease raises the workers' shared total mid-level.
+            with core_parallel.live_total(budget) as live_cores:
+                pool = core_parallel.NonDaemonicForkserverPool(
+                    processes=outer_workers,
+                    initializer=_init_worker_meta,
+                    initargs=(shared_meta, total_cores, active_counter, extra_counter,
+                              dict(startup_counters, live_total=live_cores)),
+                    maxtasksperchild=maxtasksperchild
+                )
+                print(f"  Pool creation ({outer_workers} workers): {time.time()-t0:.1f}s")
 
-            t0 = time.time()
-            results = []
-            try:
-                for result in tqdm(
-                    pool.imap_unordered(_process_single_batch, worker_args),
-                    total=num_tasks,
-                    desc="Processing Batches"
-                ):
-                    results.append(result)
-                pool.close()
-            except (KeyboardInterrupt, SystemExit, Exception) as e:
-                pool.terminate()
-                raise
-            finally:
-                pool.join()
+                t0 = time.time()
+                results = []
+                try:
+                    for result in tqdm(
+                        pool.imap_unordered(_process_single_batch, worker_args),
+                        total=num_tasks,
+                        desc="Processing Batches"
+                    ):
+                        results.append(result)
+                    pool.close()
+                except (KeyboardInterrupt, SystemExit, Exception) as e:
+                    pool.terminate()
+                    raise
+                finally:
+                    pool.join()
             print(f"  Pool work + result collection: {time.time()-t0:.1f}s")
         else:
             # Sequential execution — for testing/debugging.  Set

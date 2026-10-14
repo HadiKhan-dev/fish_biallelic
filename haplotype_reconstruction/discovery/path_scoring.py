@@ -6,8 +6,8 @@ the independent unrepresented-allele state and likelihood normalization match
 path_model. No fastmath, state pruning, frequency tying or model approximation.
 """
 import numpy as np
-from numba import njit, prange, get_num_threads
-from . import path_model as reference
+from numba import njit, prange
+from . import path_model as reference, path_fitting
 
 
 @njit(cache=True, parallel=True)
@@ -45,59 +45,17 @@ def prepare_observations(gl, observed, positions, *, generations=3.,
                 positions=np.asarray(positions))
 
 
-@njit(cache=True, parallel=True)
-def _scores(alleles, pi, rates, emissions, workers):
-    n, length, s = len(emissions), len(alleles), len(pi)
-    result = np.empty(n)
-    for worker_index in prange(workers):
-        worker = np.int64(worker_index)
-        filtered = np.empty((s, s))
-        updated = np.empty((s, s))
-        row = np.empty(s)
-        for sample in range(worker, n, workers):
-            ll = 0.
-            for site in range(length):
-                if site:
-                    row[:] = 0.
-                    for a in range(s):
-                        for b in range(s):
-                            row[a] += filtered[a, b]
-                rate = rates[site-1] if site else 0.
-                stay = 1. - rate
-                scale = 0.
-                for a in range(s):
-                    ha = alleles[site, a]
-                    for b in range(a, s):
-                        hb = alleles[site, b]
-                        prior = (stay * stay * filtered[a, b]
-                            + stay * rate * (row[a] * pi[b] + pi[a] * row[b])
-                            + rate * rate * pi[a] * pi[b]) if site else pi[a] * pi[b]
-                        value = prior * emissions[sample, site, ha, hb]
-                        updated[a, b] = updated[b, a] = value
-                        scale += value if a == b else 2. * value
-                if scale <= 0:
-                    ll = -np.inf
-                    break
-                ll += np.log(scale)
-                for a in range(s):
-                    for b in range(s):
-                        filtered[a, b] = updated[a, b] / scale
-            result[sample] = ll
-    return result
-
-
 def score_prepared(panel, frequencies, prepared):
-    """Score a trusted binary panel against the same prepared block observations."""
-    k, length = panel.shape
+    """Score a trusted binary panel against the same prepared block observations.
+
+    The forward recursion is the fitter's (path_fitting lane kernels), without
+    its trajectory cache: the same per-sample operations in the same order.
+    """
     frequencies = np.asarray(frequencies, dtype=np.float64)
     frequencies = frequencies / frequencies.sum()
     pi = np.r_[(1-prepared['wildcard_mass'])*frequencies,
                prepared['wildcard_mass']]
-    alleles = np.empty((length, k+1), dtype=np.int64)
-    alleles[:, :k] = panel.T
-    alleles[:, k] = 2
-    values = _scores(alleles, pi, prepared['rates'], prepared['emissions'],
-                     min(len(prepared['emissions']), get_num_threads()))
+    values = path_fitting.score_lanes(np.ascontiguousarray(panel, dtype=np.int64), pi, prepared)
     return dict(log_likelihood=float(values.sum()), sample_log_likelihood=values,
                 state_prior=pi, redraw_probabilities=prepared['rates'])
 

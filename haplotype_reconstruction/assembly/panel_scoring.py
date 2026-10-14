@@ -1,10 +1,10 @@
 """Exact panel scores from existing block emissions, without a repainted tensor."""
 import numpy as np
 from numba import njit, prange
-from numba.typed import List
 
 @njit(cache=True, parallel=True, fastmath=True, nogil=True)
-def score_emissions(emissions, local_indices, penalty, samples):
+def score_emissions(flat, block_start, block_haps, block_bins, local_indices, penalty, samples):
+    """Each sample's join score (emissions: a chimera_scoring.EmissionLayout's arrays)."""
     k = local_indices.shape[1]
     # Unphased emissions and a uniform off-diagonal switch penalty are
     # exchange-symmetric. Max scores need one copy of each unordered state;
@@ -20,21 +20,21 @@ def score_emissions(emissions, local_indices, penalty, samples):
             first[index], second[index] = a, b
             index += 1
     widest = 1
-    for block in range(len(emissions)):
-        widest = max(widest, emissions[block].shape[3])
+    for block in range(len(block_start)):
+        widest = max(widest, block_bins[block])
     result = np.empty(samples, dtype=np.float64)
     for sample in prange(samples):
         scores = np.empty(pairs, dtype=np.float64)
         gathered = np.empty((widest, pairs))
         initialized = False
-        for block in range(len(emissions)):
-            values = emissions[block]
-            bins = values.shape[3]
+        for block in range(len(block_start)):
+            haps, bins = block_haps[block], block_bins[block]
+            base = block_start[block] + sample * haps * haps * bins
             for pair in range(pairs):
-                row = local_indices[block, first[pair]]
-                column = local_indices[block, second[pair]]
+                at = base + (local_indices[block, first[pair]] * haps
+                             + local_indices[block, second[pair]]) * bins
                 for marker in range(bins):
-                    gathered[marker, pair] = values[sample, row, column, marker]
+                    gathered[marker, pair] = flat[at + marker]
             for marker in range(bins):
                 if not initialized:
                     for pair in range(pairs):
@@ -57,28 +57,27 @@ def score_emissions(emissions, local_indices, penalty, samples):
     return result
 
 def panel_indices(paths, sub):
-    """The block emissions and each path's local row per block (blocks x paths)."""
-    arrays = List()
+    """Each path's local row per block (blocks x paths)."""
     indices = np.empty((len(sub), len(paths)), dtype=np.int64)
     for block, item in enumerate(sub):
-        arrays.append(item["bin_emissions"])
         lookup = item.get("key_to_local_idx")
         if lookup is None:
             lookup = {key: index for index, key in enumerate(item["hap_keys"])}
         for path, keys in enumerate(paths):
             indices[block, path] = lookup[keys[block]]
-    return arrays, indices
+    return indices
 
 
-def score_panel(paths, sub, penalty, samples):
-    arrays, indices = panel_indices(paths, sub)
-    return score_emissions(arrays, indices, float(penalty), samples)
+def score_panel(paths, sub, penalty, samples, layout):
+    """Per-sample join scores of a panel (layout: the EmissionLayout of sub)."""
+    return score_emissions(*layout.arrays(), panel_indices(paths, sub), float(penalty), samples)
 
 
-@njit(cache=True, parallel=True, fastmath=True)
-def paint_emissions(emissions, local_indices, penalty, start, stop):
+@njit(cache=True, parallel=True, fastmath=True, nogil=True)
+def paint_emissions(flat, block_start, block_haps, block_bins, local_indices, penalty, start, stop):
     """Viterbi painting of samples start..stop-1 (the join objective's traceback), reported per
-    bin as the ordered state a * k + b of panel paths a <= b.
+    bin as the ordered state a * k + b of panel paths a <= b (emissions: an EmissionLayout's
+    arrays).
 
     Unphased emissions and the uniform switch penalty make the ordered states (a, b) and (b, a)
     carry equal scores at every bin, so the ordered-pair programme's first maximiser and every
@@ -98,9 +97,9 @@ def paint_emissions(emissions, local_indices, penalty, start, stop):
             index += 1
     total = 0
     widest = 1
-    for block in range(len(emissions)):
-        total += emissions[block].shape[3]
-        widest = max(widest, emissions[block].shape[3])
+    for block in range(len(block_start)):
+        total += block_bins[block]
+        widest = max(widest, block_bins[block])
     sample_paths = np.zeros((stop - start, total), dtype=np.int32)
     for position in prange(stop - start):
         sample = start + position
@@ -109,14 +108,14 @@ def paint_emissions(emissions, local_indices, penalty, start, stop):
         backptrs = np.zeros((total, pairs), dtype=np.int32)
         gathered = np.empty((widest, pairs))
         t = 0
-        for block in range(len(emissions)):
-            values = emissions[block]
-            bins = values.shape[3]
+        for block in range(len(block_start)):
+            haps, bins = block_haps[block], block_bins[block]
+            base = block_start[block] + sample * haps * haps * bins
             for pair in range(pairs):
-                row = local_indices[block, first[pair]]
-                column = local_indices[block, second[pair]]
+                at = base + (local_indices[block, first[pair]] * haps
+                             + local_indices[block, second[pair]]) * bins
                 for marker in range(bins):
-                    gathered[marker, pair] = values[sample, row, column, marker]
+                    gathered[marker, pair] = flat[at + marker]
             for marker in range(bins):
                 if t == 0:
                     for pair in range(pairs):

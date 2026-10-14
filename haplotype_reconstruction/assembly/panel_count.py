@@ -34,6 +34,7 @@ plus exact scores restricted to the samples a bound cannot rule out.
 """
 from __future__ import annotations
 
+import threading
 import numpy as np
 from numba import njit, prange
 
@@ -211,9 +212,10 @@ def _max_range(values, lo, hi, initial):
     return m4 if m4 > m0 else m0
 
 
-@njit(cache=True, parallel=True)
-def score_samples(emissions, local_indices, penalty, sample_ids):
-    """``panel_scoring.score_emissions`` for a subset of samples (same recursion and order).
+@njit(cache=True, parallel=True, nogil=True)
+def score_samples(flat, block_start, block_haps, block_bins, local_indices, penalty, sample_ids):
+    """``panel_scoring.score_emissions`` for a subset of samples (same recursion and order;
+    emissions: a chimera_scoring.EmissionLayout's arrays).
 
     Each block's state emissions are first copied into one array, contiguous per bin."""
     k = local_indices.shape[1]
@@ -226,22 +228,22 @@ def score_samples(emissions, local_indices, penalty, sample_ids):
             first[index], second[index] = a, b
             index += 1
     widest = 1
-    for block in range(len(emissions)):
-        widest = max(widest, emissions[block].shape[3])
+    for block in range(len(block_start)):
+        widest = max(widest, block_bins[block])
     result = np.empty(len(sample_ids), dtype=np.float64)
     for position in prange(len(sample_ids)):
         sample = sample_ids[position]
         scores = np.empty(pairs, dtype=np.float64)
         gathered = np.empty((widest, pairs))
         initialized = False
-        for block in range(len(emissions)):
-            values = emissions[block]
-            bins = values.shape[3]
+        for block in range(len(block_start)):
+            haps, bins = block_haps[block], block_bins[block]
+            base = block_start[block] + sample * haps * haps * bins
             for pair in range(pairs):
-                row = local_indices[block, first[pair]]
-                column = local_indices[block, second[pair]]
+                at = base + (local_indices[block, first[pair]] * haps
+                             + local_indices[block, second[pair]]) * bins
                 for marker in range(bins):
-                    gathered[marker, pair] = values[sample, row, column, marker]
+                    gathered[marker, pair] = flat[at + marker]
             for marker in range(bins):
                 if not initialized:
                     for pair in range(pairs):
@@ -271,9 +273,9 @@ def main_coverer(panel, path):
 class CountStep:
     """One count decision at a panel certified for same-count moves (deaths first, then births)."""
 
-    def __init__(self, *, emissions, total_bins, offsets, penalty, cost, samples, geometry, to_local,
+    def __init__(self, *, layout, total_bins, offsets, penalty, cost, samples, geometry, to_local,
                  score):
-        self.emissions = emissions          # local-index emissions (panel_certify.emission_list)
+        self.layout = layout                # local-index emissions (chimera_scoring.EmissionLayout)
         self.total_bins = int(total_bins)
         self.offsets = np.ascontiguousarray(offsets, dtype=np.int64)
         self.penalty = float(penalty)
@@ -285,6 +287,12 @@ class CountStep:
         self.score = score                  # dense panel -> exact per-sample scores (evaluate_panel)
         self.exact_scores = 0
         self.exact_sample_scores = 0
+        self._counts = threading.Lock()     # concurrent seed refits settle on one CountStep
+
+    def _counted(self, scores=0, samples=0):
+        with self._counts:
+            self.exact_scores += scores
+            self.exact_sample_scores += samples
 
     def _sparse(self, panel, base, bound):
         """Exact V_s(panel) where the bound exceeds base (elsewhere V_s = base exactly)."""
@@ -292,9 +300,9 @@ class CountStep:
         values = base.copy()
         if len(need):
             rows = self.to_local(panel)
-            values[need] = score_samples(self.emissions, np.ascontiguousarray(rows.T), self.penalty,
-                                         need.astype(np.int64))
-            self.exact_sample_scores += len(need)
+            values[need] = score_samples(*self.layout.arrays(), np.ascontiguousarray(rows.T),
+                                         self.penalty, need.astype(np.int64))
+            self._counted(samples=len(need))
         return values
 
     def deletion(self, panel, forwards, base):
@@ -318,7 +326,7 @@ class CountStep:
             shadow_panel = list(panel)
             shadow_panel[founder] = shadow_founder
             shadow = self.score(shadow_panel)
-            self.exact_scores += 1
+            self._counted(scores=1)
         decision = _decision(base, smaller, shadow, self.cost, 'deletion', panel)
         record = dict(kind='death', founder=founder, pure_mosaic=bool(len(pure)), lost_cells=int(lost),
                       panel_size=k, deleted=not decision.accept_larger, margin=decision.margin,
@@ -391,7 +399,7 @@ class CountStep:
             shadow, lost = shadow_path(path, cover, self.geometry)
             shadow_bound = self._birth_bounds(forwards, self.to_local([shadow]))[:, 0]
             shadow_values = self._sparse(list(panel) + [shadow], base, shadow_bound)
-            self.exact_scores += 1
+            self._counted(scores=1)
             record['exact'] += 1
             decision = _decision(larger, base, shadow_values, self.cost, 'addition', larger_panel)
             if decision.accept_larger:
@@ -427,7 +435,7 @@ class CountStep:
             pure = np.flatnonzero(~novel_paths(panel, self.geometry))
             if not len(pure):
                 break
-            forwards = panel_certify.PanelForwards(self.emissions, self.to_local(panel), self.penalty,
+            forwards = panel_certify.PanelForwards(self.layout, self.to_local(panel), self.penalty,
                                                    self.total_bins)
             removal = forwards.removal_scores()
             totals = panel_certify.column_sums(np.ascontiguousarray(removal))
@@ -437,7 +445,7 @@ class CountStep:
             removed += 1
         if len(panel) < 2:
             return panel, scores, dict(removed_pure=removed, decided=None), True
-        forwards = panel_certify.PanelForwards(self.emissions, self.to_local(panel), self.penalty,
+        forwards = panel_certify.PanelForwards(self.layout, self.to_local(panel), self.penalty,
                                                self.total_bins)
         outcome = self.deletion(panel, forwards, scores)
         record = dict(removed_pure=removed, decided=None if outcome is None else outcome[0])

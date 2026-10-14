@@ -14,8 +14,11 @@ _LOG_TWO = math.log(2.0)
 def canonicalize_binary_panel(haplotypes, assignments):
     """Sort binary founder rows and remap diploid assignments consistently.
 
-    The wildcard sentinel is the input founder count and remains unchanged.
-    Returned assignments have each diploid pair ordered increasingly.
+    Rows are ordered by their int8 row bytes compared as unsigned values,
+    with equal rows kept in input order. The wildcard sentinel is the input
+    founder count and remains unchanged. Returned assignments have each
+    diploid pair ordered increasingly. Assignment entries must lie in
+    [0, K]; callers validate them first.
     """
 
     haps = np.asarray(haplotypes)
@@ -24,31 +27,68 @@ def canonicalize_binary_panel(haplotypes, assignments):
         raise ValueError("haplotypes must be a two-dimensional matrix")
     if assigned.ndim != 2 or assigned.shape[1] != 2:
         raise ValueError("assignments must have shape (samples, 2)")
-    k = len(haps)
-    byte_rows = np.ascontiguousarray(haps, dtype=np.int8)
-    if haps.shape[1] == 0:
-        order = np.arange(k, dtype=np.int64)
-    else:
-        row_keys = byte_rows.view(
-            np.dtype((np.void, haps.shape[1]))
-        ).reshape(-1)
-        order = np.argsort(row_keys, kind="stable")
-    inverse = np.empty(k, dtype=np.int64)
-    inverse[order] = np.arange(k, dtype=np.int64)
-    remapping = np.empty(k + 1, dtype=np.int64)
-    remapping[:k] = inverse
-    remapping[k] = k
-    canonical_assignments = remapping[assigned]
-    first = canonical_assignments[:, 0].copy()
-    np.minimum(
-        first, canonical_assignments[:, 1], out=canonical_assignments[:, 0]
+    (canonical_haplotypes, canonical_assignments, order, inverse,
+     canonical_bytes) = _canonical_binary_panel_kernel(
+        np.ascontiguousarray(haps, dtype=np.int64),
+        np.ascontiguousarray(assigned, dtype=np.int64),
     )
-    np.maximum(
-        first, canonical_assignments[:, 1], out=canonical_assignments[:, 1]
-    )
-    canonical_haplotypes = np.ascontiguousarray(haps[order])
-    canonical_key = np.ascontiguousarray(byte_rows[order]).tobytes()
+    canonical_key = canonical_bytes.tobytes()
     return canonical_haplotypes, canonical_assignments, order, inverse, canonical_key
+
+
+@njit(cache=True, nogil=True)
+def _canonical_binary_panel_kernel(haplotypes, assignments):
+    """Compiled row sort, assignment remap and canonical key bytes.
+
+    A stable insertion sort on the int8 row bytes compared as unsigned values
+    gives exactly the order of NumPy's stable sort of the rows' void keys
+    (memcmp order), at O(K^2 L) for the K <= 30 founder rows of a panel.
+    """
+    k = haplotypes.shape[0]
+    n_sites = haplotypes.shape[1]
+    byte_rows = np.empty((k, n_sites), dtype=np.int8)
+    for row in range(k):
+        for site in range(n_sites):
+            byte_rows[row, site] = np.int8(haplotypes[row, site] & 0xFF)
+    order = np.arange(k)
+    for index in range(1, k):
+        current = order[index]
+        position = index
+        while position > 0:
+            previous = order[position - 1]
+            less = False
+            for site in range(n_sites):
+                a = np.uint8(byte_rows[current, site])
+                b = np.uint8(byte_rows[previous, site])
+                if a != b:
+                    less = a < b
+                    break
+            if not less:
+                break
+            order[position] = previous
+            position -= 1
+        order[position] = current
+    inverse = np.empty(k, dtype=np.int64)
+    for index in range(k):
+        inverse[order[index]] = index
+    canonical_assignments = np.empty((assignments.shape[0], 2), dtype=np.int64)
+    for sample in range(assignments.shape[0]):
+        first = assignments[sample, 0]
+        second = assignments[sample, 1]
+        first = inverse[first] if first < k else k
+        second = inverse[second] if second < k else k
+        if second < first:
+            first, second = second, first
+        canonical_assignments[sample, 0] = first
+        canonical_assignments[sample, 1] = second
+    canonical_haplotypes = np.empty((k, n_sites), dtype=np.int64)
+    canonical_bytes = np.empty((k, n_sites), dtype=np.int8)
+    for index in range(k):
+        source = order[index]
+        for site in range(n_sites):
+            canonical_haplotypes[index, site] = haplotypes[source, site]
+            canonical_bytes[index, site] = byte_rows[source, site]
+    return canonical_haplotypes, canonical_assignments, order, inverse, canonical_bytes
 
 
 def compute_founder_complexity_cost(cc_scale, n_samples, n_sites, n_blocks=1):

@@ -7,9 +7,17 @@ late writers after a worker interruption. No scheduler submission happens here.
 Lifecycle: map_batches publishes inputs -> serve_one claims and executes a
 bundle -> the coordinator gathers results and publishes scientific checkpoints.
 batch_tasks owns array transport and the stage-specific callback adapters.
-A stage is active, complete or stopped; its bundles are ready, running, done or
-failed. Only the current claim token may publish a bundle's terminal result.
+A stage is active or stopped; its bundles are ready, running, done or failed.
+Only the current claim token may publish a bundle's terminal result.
+
+Transport files are temporary: a consumed bundle's input is deleted, and a
+completed stage leaves neither files nor records. Until then a keyed stage
+(named by an exact scientific checkpoint identity) keeps its results, and its
+failed bundles their inputs and tracebacks, for a later attempt, which retries
+those bundles. A stage without a key is removed as soon as its attempt stops:
+no other attempt can find it.
 """
+from collections import Counter
 from contextlib import contextmanager
 from functools import lru_cache
 import fcntl
@@ -17,6 +25,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import threading
 import time
@@ -74,36 +83,83 @@ def _state(root):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def _remove_stage(state, stage):
+    """Forget a stage and its bundles; return the removed bundle records."""
+    state['stages'].pop(stage, None)
+    keys = [key for key, record in state['bundles'].items() if record['stage'] == stage]
+    return [state['bundles'].pop(key) for key in keys]
+
+
 def _claim(root, stage=None):
-    """Claim ready work, or reclaim a bundle whose worker stopped heartbeating."""
+    """Claim ready work, or reclaim a bundle whose worker stopped heartbeating.
+
+    A stage whose coordinator's allocation has ended stops; without a key it is
+    removed with its files, as no later attempt can find it.
+    """
+    claim, ended = None, []
+    try:
+        with _state(root) as state:
+            now = time.time()
+            for name, parent in list(state['stages'].items()):
+                if parent.get('owner_expiry') and now > parent['owner_expiry']:
+                    parent['state'] = 'stopped'
+                    if not parent.get('resumable', True):
+                        _remove_stage(state, name)
+                        ended.append(name)
+            for key, record in state['bundles'].items():
+                if stage is not None and record['stage'] != stage:
+                    continue
+                parent = state['stages'][record['stage']]
+                if parent['state'] != 'active':
+                    continue
+                if record['state'] == 'running' and now - record['heartbeat'] > LEASE_SECONDS:
+                    record['state'] = 'ready'
+                if record['state'] != 'ready':
+                    continue
+                if parent['source'] != source_identity():
+                    raise RuntimeError('Batch worker source differs from its coordinator')
+                token = uuid.uuid4().hex
+                record.update(
+                    state='running', token=token, heartbeat=now,
+                    host=socket.gethostname(), pid=os.getpid(),
+                    job=os.environ.get('SLURM_JOB_ID'), started=now,
+                )
+                claim = key, dict(record)
+                break
+    finally:
+        for name in ended:
+            shutil.rmtree(root / name, ignore_errors=True)
+    return claim
+
+
+def _finish(root, key, token, result_path, outcome):
+    """Publish a claim's terminal state; return False if the claim was lost.
+
+    A claim is lost when its lease lapsed and the bundle was claimed again, or
+    when its coordinator removed the stage. Its executor publishes nothing and
+    removes its own result, and the stage directory too once the stage is gone
+    (writing the result can have recreated it).
+    """
     with _state(root) as state:
-        now = time.time()
-        for key, record in state['bundles'].items():
-            if stage is not None and record['stage'] != stage:
-                continue
-            parent = state['stages'][record['stage']]
-            if parent.get('owner_expiry') and now > parent['owner_expiry']:
-                parent['state'] = 'stopped'
-            if parent['state'] != 'active':
-                continue
-            if record['state'] == 'running' and now - record['heartbeat'] > LEASE_SECONDS:
-                record['state'] = 'ready'
-            if record['state'] != 'ready':
-                continue
-            if parent['source'] != source_identity():
-                raise RuntimeError('Batch worker source differs from its coordinator')
-            token = uuid.uuid4().hex
-            record.update(
-                state='running', token=token, heartbeat=now,
-                host=socket.gethostname(), pid=os.getpid(),
-                job=os.environ.get('SLURM_JOB_ID'), started=now,
-            )
-            return key, dict(record)
-    return None
+        current = state['bundles'].get(key)
+        if current is not None and current.get('token') == token:
+            current.update(outcome)
+            return True
+        result_path.unlink(missing_ok=True)
+        if result_path.parent.name not in state['stages']:
+            try:
+                result_path.parent.rmdir()
+            except OSError:
+                pass
+    return False
 
 
 def serve_one(root, cores, *, stage=None):
-    """Use this allocation for one ready bundle; return False when none exist."""
+    """Use this allocation for one ready bundle; return False when none exist.
+
+    A failure under a lost claim is not the bundle's failure (the current
+    claim or the coordinator decides it), so this allocation keeps serving.
+    """
     root = Path(root)
     claim = _claim(root, stage)
     if claim is None:
@@ -115,8 +171,8 @@ def serve_one(root, cores, *, stage=None):
     def heartbeat():
         while not stop.wait(20):
             with _state(root) as state:
-                current = state['bundles'][key]
-                if current.get('token') != token:
+                current = state['bundles'].get(key)
+                if current is None or current.get('token') != token:
                     return
                 current['heartbeat'] = time.time()
 
@@ -129,23 +185,19 @@ def serve_one(root, cores, *, stage=None):
         payload = checkpoints.read(str(root / record['input']), nthreads=cores)
         results = execute(payload, cores)
         checkpoints.write(str(result_path), results, nthreads=cores)
-        with _state(root) as state:
-            current = state['bundles'][key]
-            if current.get('token') == token:
-                current.update(
-                    state='done', result=str(result_path.relative_to(root)),
-                    seconds=time.monotonic() - started, cores=cores,
-                    finished=time.time(),
-                )
-    except BaseException:
-        with _state(root) as state:
-            current = state['bundles'][key]
-            if current.get('token') == token:
-                current.update(
-                    state='failed', error=traceback.format_exc(),
-                    seconds=time.monotonic() - started, cores=cores,
-                )
-        raise
+    except BaseException as error:
+        held = _finish(root, key, token, result_path, dict(
+            state='failed', error=traceback.format_exc(),
+            seconds=time.monotonic() - started, cores=cores,
+        ))
+        if held or not isinstance(error, Exception):
+            raise
+    else:
+        _finish(root, key, token, result_path, dict(
+            state='done', result=str(result_path.relative_to(root)),
+            seconds=time.monotonic() - started, cores=cores,
+            finished=time.time(),
+        ))
     finally:
         stop.set()
         thread.join()
@@ -158,6 +210,13 @@ def map_batches(kind, tasks, arrays, cores, *, key=None, worker_memory_gb=4.):
     Inputs are shipped as contiguous genomic slices, never reread as a whole
     chromosome per task. Bundle sizing is purely operational: task boundaries,
     observation masks, positions, model parameters and result IDs are preserved.
+
+    ``key`` names a stage that a later attempt can resume: its consumed results
+    stay until the stage completes, because the caller checkpoints them only
+    afterwards, and bundles that failed in an earlier attempt are published
+    afresh. A failure within this attempt still stops it. Without a key no
+    other attempt can find the stage: results go once consumed, and a stopped
+    stage at once; helpers still running its bundles then find their claims gone.
     """
     from .batch_tasks import bundles
     root = configured()
@@ -171,20 +230,22 @@ def map_batches(kind, tasks, arrays, cores, *, key=None, worker_memory_gb=4.):
         if existing and existing['source'] != source_identity():
             raise RuntimeError('Queued stage belongs to different source code')
         state['stages'][stage] = dict(
-            source=source_identity(), state='active', kind=kind,
+            source=source_identity(), state='active', kind=kind, resumable=key is not None,
             owner_job=os.environ.get('SLURM_JOB_ID'),
             owner_expiry=int(os.environ.get('SLURM_JOB_END_TIME', '0')),
             host=socket.gethostname(), pid=os.getpid(),
         )
-    keys = []
+    keys, retried = [], 0
     try:
         for number, payload in enumerate(bundles(kind, tasks, arrays, worker_memory_gb)):
             task_key = f'{stage}/{number:06d}'
             keys.append(task_key)
             with _state(root) as state:
-                exists = task_key in state['bundles']
-            if exists:
-                continue
+                record = state['bundles'].get(task_key)
+            if record is not None:
+                if record['state'] != 'failed':
+                    continue
+                retried += 1
             filename = directory / f'{number:06d}.input.p5.b2'
             checkpoints.write(str(filename), payload, nthreads=cores)
             with _state(root) as state:
@@ -192,7 +253,9 @@ def map_batches(kind, tasks, arrays, cores, *, key=None, worker_memory_gb=4.):
                     stage=stage, number=number, state='ready',
                     input=str(filename.relative_to(root)), tasks=len(payload['tasks']),
                 )
-        print(f'[Cross-node {kind}] published {len(keys)} bundles / {len(tasks)} tasks', flush=True)
+        print(f'[Cross-node {kind}] published {len(keys)} bundles / {len(tasks)} tasks'
+              + (f'; retrying {retried} that failed in an earlier attempt' if retried else ''),
+              flush=True)
         pending = set(keys)
         while pending:
             with _state(root) as state:
@@ -207,17 +270,32 @@ def map_batches(kind, tasks, arrays, cores, *, key=None, worker_memory_gb=4.):
                     for result in checkpoints.read(str(root / record['result']), nthreads=cores):
                         yield result
                     pending.remove(item)
+                    (root / record['input']).unlink(missing_ok=True)
+                    if key is None:
+                        (root / record['result']).unlink(missing_ok=True)
             if pending and not serve_one(root, cores, stage=stage):
                 # The coordinator can help another chromosome while its own
                 # final bundles are already running on other allocations.
                 if not serve_one(root, cores):
                     time.sleep(2)
-        with _state(root) as state:
-            state['stages'][stage]['state'] = 'complete'
     except BaseException:
         with _state(root) as state:
-            state['stages'][stage]['state'] = 'stopped'
+            if key is None:
+                _remove_stage(state, stage)
+            else:
+                state['stages'][stage]['state'] = 'stopped'
+        if key is None:
+            shutil.rmtree(directory, ignore_errors=True)
         raise
+    # Records go first: an interruption in between can leave files without
+    # records (a keyed stage's next attempt overwrites or removes them), never
+    # a done record without its result.
+    with _state(root) as state:
+        records = _remove_stage(state, stage)
+    shutil.rmtree(directory, ignore_errors=True)
+    executors = Counter(f'{record.get("host")}:{record.get("pid")}' for record in records)
+    print(f'[Cross-node {kind}] {len(records)} bundles complete, by {dict(executors)}; '
+          f'transport files removed', flush=True)
 
 
 def worker(root, cores, idle_seconds=120):

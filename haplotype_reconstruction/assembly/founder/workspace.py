@@ -16,8 +16,29 @@ from ...core import parallel
 from .evidence import gather_evidence, build_models
 
 
+# A search's messages and per-sample scores run over consecutive sample ranges and re-read
+# its thread share before each range (sample_ranges), so a search whose share grows while it
+# computes them (its peers finished) takes the freed threads within the phase. At most
+# SAMPLE_RANGES ranges per phase (each range builds the phase's shared pair-dosage tables
+# again) and at least SAMPLES_PER_THREAD samples per thread of a range (the static OpenMP
+# schedule gives every thread one contiguous slice), so a wide share runs one range.
+SAMPLE_RANGES = 8
+SAMPLES_PER_THREAD = 8
+
+
 def resolve_threads(budget):
     return budget() if callable(budget) else budget
+
+
+def sample_ranges(samples, threads):
+    """Consecutive ranges (s0, s1, n) covering samples 0 .. samples - 1; n is the share
+    ``threads`` (an int or a callable budget) read when the range starts."""
+    start = 0
+    while start < samples:
+        n = max(1, int(resolve_threads(threads)))
+        stop = min(samples, start + max(-(-samples // SAMPLE_RANGES), SAMPLES_PER_THREAD * n))
+        yield start, stop, n
+        start = stop
 
 
 class ComponentWorkspace:
@@ -30,11 +51,13 @@ class ComponentWorkspace:
         self.leaves = List([np.ascontiguousarray(getattr(
             b, "missing_aware_inference_discrete_haps", b.discrete_haps), np.int8)
             for b in batch])
+        # Every block's pre-fill inference panel, built once (the block models read them too).
+        self.panels = [observations.founder_inference_panel_from_block_result(b) for b in batch]
         self.complete = np.concatenate([
             (np.ones(len(b.positions), np.bool_) if b.keep_flags is None
              else np.asarray(b.keep_flags, np.bool_))
-            & np.all(observations.founder_inference_panel_from_block_result(b).called, axis=0)
-            for b in batch])
+            & np.all(panel.called, axis=0)
+            for b, panel in zip(batch, self.panels)])
         self.offsets = np.asarray([0, *np.cumsum([len(b.positions) for b in batch])], np.int64)
         self.penalty = founder_scoring.SWITCH_PENALTY
         self.bin_size = max(minimum_bin_size, chimera_scoring.compute_spb(batch),

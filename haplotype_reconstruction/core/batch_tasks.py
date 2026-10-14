@@ -101,10 +101,11 @@ def execute(payload, cores):
 
             initialize, function = hierarchy._init_worker_meta, hierarchy._process_single_batch
             shared = dict(probs=metadata[0], sites=metadata[1])
-            # Tuple field 15 is the existing hierarchy callback's thread budget.
-            # Never inherit the submitting node's process-by-thread allocation.
+            # Each task's inner process/thread budget is this allocation's
+            # share. Never inherit the submitting node's process-by-thread allocation.
+            field = hierarchy._INNER_PROCESSES_FIELD
             tasks = [
-                (*task[:15], max(1, cores // workers), *task[16:])
+                (*task[:field], max(1, cores // workers), *task[field + 1:])
                 for task in tasks
             ]
         else:

@@ -826,6 +826,7 @@ def _prepare_one_contig(
             founder_evidence_excluded=_founder_evidence_flags(
                 checkpoint_store, contig, sites_payload,
                 raw_sites_stage=raw_sites_stage),
+            recorded_digests=raw_evidence.recorded_digests(sites_payload),
         )
         checkpoint = PedigreeEvidenceCheckpoint(
             schema=PEDIGREE_PREPARATION_SCHEMA,
@@ -892,11 +893,13 @@ def preparation_memory_estimates(root, contigs, painting_stage, raw_stages, n_sa
     holds while the painting caches its symmetric emissions (at most 1 GiB per
     chromosome).
     """
+    raw_stages = tuple(dict.fromkeys(raw_stages))
+    sizes = pedigree_execution.decoded_sizes(
+        root, [(stage, contig) for contig in contigs for stage in (*raw_stages, painting_stage)])
     estimates = []
     for contig in contigs:
-        raw = sum(pedigree_execution.decoded_bytes(root, stage, contig)
-                  for stage in dict.fromkeys(raw_stages))
-        painting = pedigree_execution.decoded_bytes(root, painting_stage, contig)
+        raw = sum(sizes[stage, contig] for stage in raw_stages)
+        painting = sizes[painting_stage, contig]
         states = _painted_state_bytes(root, painting_stage, contig, n_samples)
         states = 2 * painting if states is None else states
         estimates.append(raw * 5 // 4 + painting + 3 * states + (2 << 30))

@@ -96,7 +96,7 @@ def _probability_sample_counts(a, b, log_t):
     return out
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def homologue_edge_log_counts(s, r, log_t):
     """O(N*(L^2 R + L R^2)) work; O(N L R) output workspace.
 

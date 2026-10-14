@@ -16,7 +16,7 @@ from haplotype_reconstruction.assembly import pipeline as assembly
 from haplotype_reconstruction.assembly.checkpoints import (
     AssemblyCheckpointStore, AssemblyWorkCheckpoint, ASSEMBLY_RELEASE_CHECKPOINT_SCHEMA)
 from haplotype_reconstruction.assembly.founder_refinement import FounderRefinementConfig
-from haplotype_reconstruction.core import parallel, runtime
+from haplotype_reconstruction.core import chromosome_parallel, parallel, runtime
 from haplotype_reconstruction.core.config import PathSelectionConfig
 from haplotype_reconstruction.discovery import feedback, search, cavity
 from haplotype_reconstruction.discovery.candidate_selection import CandidateSelectionConfig
@@ -201,8 +201,13 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
                         # Joins of the previous context assembly with identical inputs are reused.
                         earlier_joins=assembly.earlier_join_results(store, contig,
                             [f"feedback_path_l{j}_assembly" for j in range(1, level)]))
+                # In a contig lane the lease may grow at each phase start and while the
+                # phase's pool runs (execution only).
+                budget = chromosome_parallel.lease_budget(cpus, f"feedback_l{level}_refine")
+                cpus = parallel.budget_value(budget)
+                with parallel.numba_thread_scope(cpus):
                     proposed, diagnostic = feedback.refine(current, context["components"],
-                        gl, sites, observed, cpus, options, chromosome_map=chromosome_map,
+                        gl, sites, observed, budget, options, chromosome_map=chromosome_map,
                         n_generations=assembly_config.n_generations)
                 proposed = feedback.BlockResults([copy.copy(block) for block in proposed])
                 runtime.strip_block_evidence(proposed)
@@ -212,9 +217,11 @@ def _run_path_feedback(store, contig, originals, gl, sites, observed, sample_ids
                 gc.collect()
                 parallel.malloc_trim()
             proposed = saved_proposals["blocks"]
+        budget = chromosome_parallel.lease_budget(cpus, f"feedback_round{level}")
+        cpus = parallel.budget_value(budget)
         with parallel.numba_thread_scope(cpus):
             current, diagnostic, memos = path_blocks.select_blocks(originals,
-                [*selected_rounds, proposed] if level else [], gl, sites, observed, cpus,
+                [*selected_rounds, proposed] if level else [], gl, sites, observed, budget,
                 selection_config, config.path_search, selection_io, memo_states=memos,
                 keep_memo=level < 2, **model_options)
         # Founder-independent likelihood memos only accelerate the next round,

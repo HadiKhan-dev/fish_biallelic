@@ -20,11 +20,15 @@ switches). They never change F.
 
 Memory layout of the recursions: a state's pair dosage haps[first[q], j] +
 haps[second[q], j] is the same for every sample, so the message kernels read it from a
-site-major int8 table built once per call (shared by all samples) and read a site's
-three emissions once per sample; the chromosome-wide kernels build the table per
-segment of whole blocks of at most DOSAGE_BYTES, so it stays small at large K. Per-site
-chain leaders are stored sample-major, the order the per-sample loops write and read
-them. The arithmetic is unchanged operation for operation (bitwise the same values).
+site-major int8 table built once per call (shared by all samples; the candidate kernels
+build one per candidate, with its moved founder's new rows) and read a site's three
+emissions once per sample; the chromosome-wide kernels and the candidate kernels build
+the table per segment of whole blocks of at most DOSAGE_BYTES, so it stays small at
+large K. Per-site chain leaders are stored sample-major, the order the per-sample loops
+write and read them. The arithmetic is unchanged operation for operation (bitwise the
+same values). The chromosome-wide message kernels compute the samples of a range [s0, s1)
+into arrays the caller allocates: every sample's recursion is its own, so a search can
+run them range by range, re-reading its thread share between ranges.
 """
 import math
 
@@ -35,7 +39,7 @@ from .scoring import _unordered_pairs
 
 CENTER = math.log(1.0 / 3.0)
 # Largest pair-dosage table (sites x states int8) of one segment of a chromosome-wide
-# message kernel; a block larger than this forms its own segment.
+# message kernel or of a candidate's blocks; a block larger than this forms its own segment.
 DOSAGE_BYTES = 32 * 1024 ** 2
 
 
@@ -113,27 +117,24 @@ def _segments(offsets, states):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def messages(haps, logs, offsets, penalty):
-    """Normalised forward (carried) and backward (stored) messages at every block boundary.
+def messages(haps, logs, offsets, penalty, s0, s1, fwd, bwd, fscale, bscale):
+    """Normalised forward (carried) and backward (stored) messages at every block boundary,
+    of the samples [s0, s1).
 
-    Returns fwd, bwd with shape (B + 1, S, Q) and the per-block normalisers fscale,
-    bscale with shape (B, S): fwd[b + 1] = (fwd[b] processed over block b) - fscale[b] and
+    Written into fwd, bwd with shape (B + 1, S, Q) and the per-block normalisers fscale,
+    bscale with shape (B, S), all zero on entry (allocate them with message_arrays):
+    fwd[b + 1] = (fwd[b] processed over block b) - fscale[b] and
     bwd[b] = (bwd[b + 1] processed backwards over block b) - bscale[b], so the
     unnormalised backward message at x is bwd[x] + sum_{b >= x} bscale[b].
     """
     first, second = _unordered_pairs(len(haps))
     states = len(first)
-    samples, blocks = logs.shape[0], len(offsets) - 1
-    fwd = np.zeros((blocks + 1, samples, states))
-    bwd = np.zeros((blocks + 1, samples, states))
-    fscale = np.zeros((blocks, samples))
-    bscale = np.zeros((blocks, samples))
     bounds = _segments(offsets, states)
     for t in range(len(bounds) - 1):
         b0, b1 = bounds[t], bounds[t + 1]
         lo = offsets[b0]
         dos = _pair_dosages(haps, first, second, lo, offsets[b1])
-        for s in prange(samples):
+        for s in prange(s0, s1):
             row = fwd[b0, s].copy()
             for b in range(b0, b1):
                 for j in range(offsets[b], offsets[b + 1]):
@@ -152,7 +153,7 @@ def messages(haps, logs, offsets, penalty):
         b0, b1 = bounds[t], bounds[t + 1]
         lo = offsets[b0]
         dos = _pair_dosages(haps, first, second, lo, offsets[b1])
-        for s in prange(samples):
+        for s in prange(s0, s1):
             row = bwd[b1, s].copy()
             for b in range(b1 - 1, b0 - 1, -1):
                 for j in range(offsets[b + 1] - 1, offsets[b] - 1, -1):
@@ -169,7 +170,29 @@ def messages(haps, logs, offsets, penalty):
                 for q in range(states):
                     row[q] -= m
                     bwd[b, s, q] = row[q]
-    return fwd, bwd, fscale, bscale
+
+
+def message_arrays(founders, blocks, samples, lex):
+    """Zeroed message arrays of messages() (lex: messages_lex(), with switch counts):
+    (fwd, bwd, fcnt, bcnt, fscale, bscale); the counts are None without lex."""
+    states = founders * (founders + 1) // 2
+    counts = ((np.zeros((blocks + 1, samples, states), np.int64),
+               np.zeros((blocks + 1, samples, states), np.int64)) if lex else (None, None))
+    return (np.zeros((blocks + 1, samples, states)), np.zeros((blocks + 1, samples, states)),
+            *counts, np.zeros((blocks, samples)), np.zeros((blocks, samples)))
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def reverse_sites(logs):
+    """A C-contiguous copy of logs (samples x sites x 3) with the site axis reversed (the
+    reversed orientation of a search), copied in parallel over samples."""
+    samples, sites, genotypes = logs.shape
+    out = np.empty_like(logs)
+    for s in prange(samples):
+        for j in range(sites):
+            for g in range(genotypes):
+                out[s, sites - 1 - j, g] = logs[s, j, g]
+    return out
 
 
 @njit(inline="always")
@@ -185,23 +208,17 @@ def _lex_best(row, cnt):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def messages_lex(haps, logs, offsets, penalty):
-    """messages() plus the switch counts of the lexicographic (score, -switches) maxima."""
+def messages_lex(haps, logs, offsets, penalty, s0, s1, fwd, bwd, fcnt, bcnt, fscale, bscale):
+    """messages() plus the switch counts of the lexicographic (score, -switches) maxima, of
+    the samples [s0, s1), into zeroed arrays (message_arrays(..., lex=True))."""
     first, second = _unordered_pairs(len(haps))
     states = len(first)
-    samples, blocks = logs.shape[0], len(offsets) - 1
-    fwd = np.zeros((blocks + 1, samples, states))
-    bwd = np.zeros((blocks + 1, samples, states))
-    fcnt = np.zeros((blocks + 1, samples, states), np.int64)
-    bcnt = np.zeros((blocks + 1, samples, states), np.int64)
-    fscale = np.zeros((blocks, samples))
-    bscale = np.zeros((blocks, samples))
     bounds = _segments(offsets, states)
     for t in range(len(bounds) - 1):
         b0, b1 = bounds[t], bounds[t + 1]
         lo = offsets[b0]
         dos = _pair_dosages(haps, first, second, lo, offsets[b1])
-        for s in prange(samples):
+        for s in prange(s0, s1):
             row = fwd[b0, s].copy()
             cnt = fcnt[b0, s].copy()
             for b in range(b0, b1):
@@ -226,7 +243,7 @@ def messages_lex(haps, logs, offsets, penalty):
         b0, b1 = bounds[t], bounds[t + 1]
         lo = offsets[b0]
         dos = _pair_dosages(haps, first, second, lo, offsets[b1])
-        for s in prange(samples):
+        for s in prange(s0, s1):
             row = bwd[b1, s].copy()
             cnt = bcnt[b1, s].copy()
             for b in range(b1 - 1, b0 - 1, -1):
@@ -248,7 +265,168 @@ def messages_lex(haps, logs, offsets, penalty):
                     row[q] -= m
                     bwd[b, s, q] = row[q]
                     bcnt[b, s, q] = cnt[q]
-    return fwd, bwd, fcnt, bcnt, fscale, bscale
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def update_messages(haps, logs, offsets, penalty, changed, fwd, bwd, fscale, bscale, backward_known,
+                    s0, s1):
+    """messages() of the current panel (haps) for the samples [s0, s1), in place on those of
+    an earlier panel whose alleles differ only on the blocks where changed[b]: fwd, fscale
+    always, bwd, bscale when backward_known (otherwise every block is computed into them;
+    bwd[B] must hold zeros).
+
+    A block's forward step reads only the message at its start and the block's alleles, so
+    a sample's messages over an unchanged block whose start message is unchanged are the
+    earlier ones. Per sample, a block is recomputed (messages()' recursion, operation for
+    operation, from the stored start message) only if it changed or its start message did;
+    a recomputed end message that equals the earlier one ends the run. Likewise backwards.
+    Normalised messages hold no negative zero (x - x = +0), so equal values are equal bits.
+    Bitwise messages() of the current panel.
+    """
+    first, second = _unordered_pairs(len(haps))
+    states = len(first)
+    bounds = _segments(offsets, states)
+    # dirty[s - s0]: sample s's message at the current segment boundary changed.
+    dirty = np.zeros(s1 - s0, np.bool_)
+    for t in range(len(bounds) - 1):
+        b0, b1 = bounds[t], bounds[t + 1]
+        if not (dirty.any() or changed[b0:b1].any()):
+            continue
+        lo = offsets[b0]
+        dos = _pair_dosages(haps, first, second, lo, offsets[b1])
+        for s in prange(s0, s1):
+            row = np.empty(states)
+            for b in range(b0, b1):
+                if not (dirty[s - s0] or changed[b]):
+                    continue
+                row[:] = fwd[b, s]
+                for j in range(offsets[b], offsets[b + 1]):
+                    if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
+                        continue
+                    e0, e1, e2 = _site_emissions(logs, s, j)
+                    sw = np.max(row) - penalty
+                    for q in range(states):
+                        row[q] = max(row[q], sw) + _pick(dos[j - lo, q], e0, e1, e2)
+                m = np.max(row)
+                fscale[b, s] = m
+                same = True
+                for q in range(states):
+                    row[q] -= m
+                    same = same and row[q] == fwd[b + 1, s, q]
+                    fwd[b + 1, s, q] = row[q]
+                dirty[s - s0] = not same
+    dirty[:] = not backward_known
+    for t in range(len(bounds) - 2, -1, -1):
+        b0, b1 = bounds[t], bounds[t + 1]
+        if not (dirty.any() or changed[b0:b1].any()):
+            continue
+        lo = offsets[b0]
+        dos = _pair_dosages(haps, first, second, lo, offsets[b1])
+        for s in prange(s0, s1):
+            row = np.empty(states)
+            for b in range(b1 - 1, b0 - 1, -1):
+                if not (dirty[s - s0] or changed[b]):
+                    continue
+                row[:] = bwd[b + 1, s]
+                for j in range(offsets[b + 1] - 1, offsets[b] - 1, -1):
+                    if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
+                        continue
+                    e0, e1, e2 = _site_emissions(logs, s, j)
+                    for q in range(states):
+                        row[q] += _pick(dos[j - lo, q], e0, e1, e2)
+                    sw = np.max(row) - penalty
+                    for q in range(states):
+                        row[q] = max(row[q], sw)
+                m = np.max(row)
+                bscale[b, s] = m
+                same = backward_known
+                for q in range(states):
+                    row[q] -= m
+                    same = same and row[q] == bwd[b, s, q]
+                    bwd[b, s, q] = row[q]
+                dirty[s - s0] = not same
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def update_messages_lex(haps, logs, offsets, penalty, changed, fwd, bwd, fcnt, bcnt, fscale, bscale,
+                        backward_known, s0, s1):
+    """update_messages() for messages_lex(): the messages and their switch counts (a run ends
+    where both equal the earlier ones), samples [s0, s1). Bitwise messages_lex() of the
+    current panel."""
+    first, second = _unordered_pairs(len(haps))
+    states = len(first)
+    bounds = _segments(offsets, states)
+    dirty = np.zeros(s1 - s0, np.bool_)
+    for t in range(len(bounds) - 1):
+        b0, b1 = bounds[t], bounds[t + 1]
+        if not (dirty.any() or changed[b0:b1].any()):
+            continue
+        lo = offsets[b0]
+        dos = _pair_dosages(haps, first, second, lo, offsets[b1])
+        for s in prange(s0, s1):
+            row = np.empty(states)
+            cnt = np.empty(states, np.int64)
+            for b in range(b0, b1):
+                if not (dirty[s - s0] or changed[b]):
+                    continue
+                row[:] = fwd[b, s]
+                cnt[:] = fcnt[b, s]
+                for j in range(offsets[b], offsets[b + 1]):
+                    if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
+                        continue
+                    e0, e1, e2 = _site_emissions(logs, s, j)
+                    m, c = _lex_best(row, cnt)
+                    sw = m - penalty
+                    for q in range(states):
+                        if sw > row[q] or (sw == row[q] and c + 1 < cnt[q]):
+                            row[q] = sw
+                            cnt[q] = c + 1
+                        row[q] += _pick(dos[j - lo, q], e0, e1, e2)
+                m = np.max(row)
+                fscale[b, s] = m
+                same = True
+                for q in range(states):
+                    row[q] -= m
+                    same = same and row[q] == fwd[b + 1, s, q] and cnt[q] == fcnt[b + 1, s, q]
+                    fwd[b + 1, s, q] = row[q]
+                    fcnt[b + 1, s, q] = cnt[q]
+                dirty[s - s0] = not same
+    dirty[:] = not backward_known
+    for t in range(len(bounds) - 2, -1, -1):
+        b0, b1 = bounds[t], bounds[t + 1]
+        if not (dirty.any() or changed[b0:b1].any()):
+            continue
+        lo = offsets[b0]
+        dos = _pair_dosages(haps, first, second, lo, offsets[b1])
+        for s in prange(s0, s1):
+            row = np.empty(states)
+            cnt = np.empty(states, np.int64)
+            for b in range(b1 - 1, b0 - 1, -1):
+                if not (dirty[s - s0] or changed[b]):
+                    continue
+                row[:] = bwd[b + 1, s]
+                cnt[:] = bcnt[b + 1, s]
+                for j in range(offsets[b + 1] - 1, offsets[b] - 1, -1):
+                    if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
+                        continue
+                    e0, e1, e2 = _site_emissions(logs, s, j)
+                    for q in range(states):
+                        row[q] += _pick(dos[j - lo, q], e0, e1, e2)
+                    m, c = _lex_best(row, cnt)
+                    sw = m - penalty
+                    for q in range(states):
+                        if sw > row[q] or (sw == row[q] and c + 1 < cnt[q]):
+                            row[q] = sw
+                            cnt[q] = c + 1
+                m = np.max(row)
+                bscale[b, s] = m
+                same = backward_known
+                for q in range(states):
+                    row[q] -= m
+                    same = same and row[q] == bwd[b, s, q] and cnt[q] == bcnt[b, s, q]
+                    bwd[b, s, q] = row[q]
+                    bcnt[b, s, q] = cnt[q]
+                dirty[s - s0] = not same
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -643,21 +821,63 @@ def _candidate_dense(haps, leaves, logs, offsets, penalty, f_start, g_start, foc
 
 @njit(cache=True, nogil=True)
 def _focal_states(first, second, founders):
-    """focal_states[k]: the K states containing founder k (in state order); other[k, t]: the
-    other founder of state focal_states[k, t] (k itself for the homozygous state)."""
+    """focal_states[k]: the K states containing founder k (in state order)."""
     focal_states = np.empty((founders, founders), np.int64)
-    other = np.empty((founders, founders), np.int64)
     filled = np.zeros(founders, np.int64)
     for q in range(len(first)):
         a, b = first[q], second[q]
         focal_states[a, filled[a]] = q
-        other[a, filled[a]] = b
         filled[a] += 1
         if b != a:
             focal_states[b, filled[b]] = q
-            other[b, filled[b]] = a
             filled[b] += 1
-    return focal_states, other
+    return focal_states
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _item_dosages(haps, leaves, offsets, k, rows, row_start, b0, b1, first, second):
+    """Site-major pair dosages of one candidate on blocks [b0, b1): founder k's rows replaced
+    by rows[row_start + b - b0] on block b, the other founders' current alleles (haps);
+    out[j - offsets[b0], q] = allele of first[q] + allele of second[q] at site j."""
+    states = len(first)
+    lo = offsets[b0]
+    hi = offsets[b1]
+    allele = np.empty(hi - lo, np.int8)
+    for b in range(b0, b1):
+        r = rows[row_start + b - b0]
+        leaf = leaves[b]
+        base = offsets[b]
+        for j in range(base, offsets[b + 1]):
+            allele[j - lo] = leaf[r, j - base]
+    out = np.empty((hi - lo, states), np.int8)
+    for j in prange(lo, hi):
+        for q in range(states):
+            a = first[q]
+            e = second[q]
+            out[j - lo, q] = ((allele[j - lo] if a == k else haps[a, j])
+                              + (allele[j - lo] if e == k else haps[e, j]))
+    return out
+
+
+@njit(cache=True, nogil=True)
+def _dense_tab(dos, lo, logs, offsets, penalty, row, b0, b1, s, scale):
+    """_candidate_dense_blocks on a candidate's dosage table (dos[j - lo, q], _item_dosages):
+    the all-state recursion of sample s over blocks [b0, b1), in place on row; returns scale
+    plus the blocks' normalisers, added in block order (the same arithmetic)."""
+    states = len(row)
+    for b in range(b0, b1):
+        for j in range(offsets[b], offsets[b + 1]):
+            if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
+                continue
+            e0, e1, e2 = _site_emissions(logs, s, j)
+            sw = np.max(row) - penalty
+            for q in range(states):
+                row[q] = max(row[q], sw) + _pick(dos[j - lo, q], e0, e1, e2)
+        m = np.max(row)
+        scale += m
+        for q in range(states):
+            row[q] -= m
+    return scale
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -686,77 +906,109 @@ def candidate_gains(haps, leaves, logs, offsets, penalty, f_start, g_start, foca
     would lead, inside block b, the dense recursion (candidate_gains_reference) resumes
     at boundary b from the chain's background states and the focal states held there.
     Bitwise the reference's gains.
+
+    Candidates are scored one after another, their samples in parallel: a candidate's
+    pair dosages (the moved founder's new rows with the others' current alleles) are the
+    same for every sample, so they are read from one site-major table built per segment
+    of whole blocks of at most DOSAGE_BYTES (_segments; a window candidate is normally
+    one segment), with a site's three emissions read once per sample. Each sample's
+    state (focal states, or every state once the dense recursion has taken over, and
+    the normalisers added so far) carries from segment to segment.
     """
     first, second = _unordered_pairs(len(haps))
     founders = len(haps)
+    states = len(first)
     samples = logs.shape[0]
     count = len(focal)
     gains = np.empty((count, samples))
-    focal_states, _ = _focal_states(first, second, founders)
+    focal_states = _focal_states(first, second, founders)
     site_base = offsets[chain_block]
-    for task in prange(count * samples):
-        i, s = task // samples, task % samples
+    focal_all = np.empty((samples, founders))
+    held_all = np.empty((samples, founders))
+    row_all = np.empty((samples, states))
+    scale_all = np.empty(samples)
+    dense_all = np.zeros(samples, np.bool_)
+    for i in range(count):
         k = focal[i]
         fs = focal_states[k]
-        xf = np.empty(founders)
-        for t in range(founders):
-            xf[t] = f_start[i, s, fs[t]]
-        held = xf.copy()
-        scale = 0.0
         start, stop = first_block[i], end_block[i]
-        b = start
-        while b < stop:
-            held[:] = xf
-            fast = True
-            r = rows[row_offsets[i] + b - start]
-            leaf = leaves[b]
-            base = offsets[b]
-            for j in range(offsets[b], offsets[b + 1]):
-                if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
-                    continue
-                lead = site_lead[s, j - site_base]
-                top = site_max[s, j - site_base]
-                if first[lead] == k or second[lead] == k:
-                    fast = False
-                    break
-                for t in range(founders):
-                    if xf[t] > top:
-                        fast = False
-                if not fast:
-                    break
-                sw = top - penalty
-                for t in range(founders):
-                    q = fs[t]
-                    a = first[q]
-                    e = second[q]
-                    d = ((leaf[r, j - base] if a == k else haps[a, j])
-                         + (leaf[r, j - base] if e == k else haps[e, j]))
-                    xf[t] = max(xf[t], sw) + _emission(logs, s, j, d)
-            m = 0.0
-            if fast:
-                lead = block_lead[b - chain_block, s]
-                m = block_max[b - chain_block, s]
-                if first[lead] == k or second[lead] == k:
-                    fast = False
-                for t in range(founders):
-                    if xf[t] > m:
-                        fast = False
-            if not fast:
-                xf[:] = held
-                break
-            scale += m
-            for t in range(founders):
-                xf[t] -= m
-            b += 1
-        old = _max_close(f_start[i, s], g_start[i, s])
-        # The candidate's states at boundary b: background from the chain, focal held.
-        row = f_start[i, s].copy() if b == start else chain_values[b - chain_block, s].copy()
-        for t in range(founders):
-            row[fs[t]] = xf[t]
-        if b < stop:
-            scale = _candidate_dense_blocks(haps, leaves, logs, offsets, penalty, row, k, rows,
-                                            row_offsets[i], start, b, stop, s, scale, first, second)
-        gains[i, s] = _max_close(row, g_end[i, s]) + scale - old - scale_sum[i, s]
+        bounds = _segments(offsets[start:stop + 1], states)
+        for u in range(len(bounds) - 1):
+            b0, b1 = start + bounds[u], start + bounds[u + 1]
+            lo = offsets[b0]
+            dos = _item_dosages(haps, leaves, offsets, k, rows, row_offsets[i] + b0 - start, b0, b1,
+                                first, second)
+            for s in prange(samples):
+                xf = focal_all[s]
+                held = held_all[s]
+                row = row_all[s]
+                if b0 == start:
+                    for t in range(founders):
+                        xf[t] = f_start[i, s, fs[t]]
+                    scale = 0.0
+                    dense = False
+                else:
+                    scale = scale_all[s]
+                    dense = dense_all[s]
+                b = b0
+                if not dense:
+                    while b < b1:
+                        held[:] = xf
+                        fast = True
+                        for j in range(offsets[b], offsets[b + 1]):
+                            if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
+                                continue
+                            lead = site_lead[s, j - site_base]
+                            top = site_max[s, j - site_base]
+                            if first[lead] == k or second[lead] == k:
+                                fast = False
+                                break
+                            for t in range(founders):
+                                if xf[t] > top:
+                                    fast = False
+                            if not fast:
+                                break
+                            sw = top - penalty
+                            e0, e1, e2 = _site_emissions(logs, s, j)
+                            for t in range(founders):
+                                xf[t] = max(xf[t], sw) + _pick(dos[j - lo, fs[t]], e0, e1, e2)
+                        m = 0.0
+                        if fast:
+                            lead = block_lead[b - chain_block, s]
+                            m = block_max[b - chain_block, s]
+                            if first[lead] == k or second[lead] == k:
+                                fast = False
+                            for t in range(founders):
+                                if xf[t] > m:
+                                    fast = False
+                        if not fast:
+                            xf[:] = held
+                            break
+                        scale += m
+                        for t in range(founders):
+                            xf[t] -= m
+                        b += 1
+                    if b < b1:
+                        # The candidate's states at boundary b: background from the chain,
+                        # focal held; the dense recursion takes over from there.
+                        if b == start:
+                            row[:] = f_start[i, s]
+                        else:
+                            row[:] = chain_values[b - chain_block, s]
+                        for t in range(founders):
+                            row[fs[t]] = xf[t]
+                        dense = True
+                if dense:
+                    scale = _dense_tab(dos, lo, logs, offsets, penalty, row, b, b1, s, scale)
+                scale_all[s] = scale
+                dense_all[s] = dense
+                if b1 == stop:
+                    old = _max_close(f_start[i, s], g_start[i, s])
+                    if not dense:
+                        row[:] = chain_values[stop - chain_block, s]
+                        for t in range(founders):
+                            row[fs[t]] = xf[t]
+                    gains[i, s] = _max_close(row, g_end[i, s]) + scale - old - scale_sum[i, s]
     return gains
 
 
@@ -845,6 +1097,32 @@ def candidate_gains_lex_reference(haps, leaves, logs, offsets, penalty, f_start,
     return gains, switches
 
 
+@njit(cache=True, nogil=True)
+def _dense_lex_tab(dos, lo, logs, offsets, penalty, row, cnt, b0, b1, s, scale):
+    """_candidate_dense_lex on a candidate's dosage table (dos[j - lo, q], _item_dosages):
+    the all-state lexicographic recursion of sample s over blocks [b0, b1), in place on
+    (row, cnt); returns scale plus the blocks' normalisers, added in block order (the same
+    arithmetic)."""
+    states = len(row)
+    for b in range(b0, b1):
+        for j in range(offsets[b], offsets[b + 1]):
+            if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
+                continue
+            e0, e1, e2 = _site_emissions(logs, s, j)
+            m, c = _lex_best(row, cnt)
+            sw = m - penalty
+            for q in range(states):
+                if sw > row[q] or (sw == row[q] and c + 1 < cnt[q]):
+                    row[q] = sw
+                    cnt[q] = c + 1
+                row[q] += _pick(dos[j - lo, q], e0, e1, e2)
+        m = np.max(row)
+        scale += m
+        for q in range(states):
+            row[q] -= m
+    return scale
+
+
 @njit(cache=True, parallel=True, nogil=True)
 def candidate_gains_lex(haps, leaves, logs, offsets, penalty, f_start, fcnt_start, g_start,
                         gcnt_start, focal, first_block, end_block, rows, row_offsets, g_end,
@@ -866,98 +1144,124 @@ def candidate_gains_lex(haps, leaves, logs, offsets, penalty, f_start, fcnt_star
     Where this fails inside block b (or the chain ends at b), the all-state recursion
     resumes at boundary b from the chain's background states and the focal states held
     there. Every value is the all-state recursion's: bitwise candidate_gains_lex_reference.
+    Candidates one after another, their samples in parallel, on per-segment dosage tables
+    as candidate_gains.
     """
     first, second = _unordered_pairs(len(haps))
     founders = len(haps)
+    states = len(first)
     samples = logs.shape[0]
     count = len(focal)
     gains = np.empty((count, samples))
     switches = np.empty((count, samples), np.int64)
-    focal_states, other = _focal_states(first, second, founders)
+    focal_states = _focal_states(first, second, founders)
     site_base = offsets[chain_block]
-    for task in prange(count * samples):
-        i, s = task // samples, task % samples
+    focal_all = np.empty((samples, founders))
+    focal_cnt_all = np.empty((samples, founders), np.int64)
+    held_all = np.empty((samples, founders))
+    held_cnt_all = np.empty((samples, founders), np.int64)
+    row_all = np.empty((samples, states))
+    cnt_all = np.empty((samples, states), np.int64)
+    scale_all = np.empty(samples)
+    dense_all = np.zeros(samples, np.bool_)
+    for i in range(count):
         k = focal[i]
-        old, old_cnt = _lex_old(f_start[i, s], fcnt_start[i, s], g_start[i, s], gcnt_start[i, s])
+        fs = focal_states[k]
         start, stop = first_block[i], end_block[i]
-        xf = np.empty(founders)
-        xc = np.empty(founders, np.int64)
-        for t in range(founders):
-            xf[t] = f_start[i, s, focal_states[k, t]]
-            xc[t] = fcnt_start[i, s, focal_states[k, t]]
-        held_f = xf.copy()
-        held_c = xc.copy()
-        scale = 0.0
-        b = start
-        while b < min(stop, chain_end):
-            held_f[:] = xf
-            held_c[:] = xc
-            r = rows[row_offsets[i] + b - start]
-            leaf = leaves[b]
-            base = offsets[b]
-            fast = True
-            for j in range(offsets[b], offsets[b + 1]):
-                if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
-                    continue
-                lead = site_lead[s, j - site_base]
-                if first[lead] == k or second[lead] == k:
-                    fast = False
-                    break
-                m = site_max[s, j - site_base]
-                c = site_cnt[s, j - site_base]
-                for t in range(founders):
-                    if xf[t] > m or (xf[t] == m and xc[t] < c):
-                        fast = False
-                if not fast:
-                    break
-                sw = m - penalty
-                allele = leaf[r, j - base]
-                for t in range(founders):
-                    if sw > xf[t] or (sw == xf[t] and c + 1 < xc[t]):
-                        xf[t] = sw
-                        xc[t] = c + 1
-                    o = other[k, t]
-                    xf[t] += _emission(logs, s, j, allele + (allele if o == k else haps[o, j]))
-            m = 0.0
-            if fast:
-                lead = block_lead[b - chain_block, s]
-                m = block_max[b - chain_block, s]
-                if first[lead] == k or second[lead] == k:
-                    fast = False
-                for t in range(founders):
-                    if xf[t] > m:
-                        fast = False
-            if not fast:
-                xf[:] = held_f
-                xc[:] = held_c
-                break
-            scale += m
-            for t in range(founders):
-                xf[t] -= m
-            b += 1
-        if b < stop:
-            # The all-state recursion from boundary b: background states from the chain.
-            if b == start:
-                row = f_start[i, s].copy()
-                cnt = fcnt_start[i, s].copy()
-            else:
-                row = chain_values[b - chain_block, s].copy()
-                cnt = chain_counts[b - chain_block, s].copy()
-            for t in range(founders):
-                row[focal_states[k, t]] = xf[t]
-                cnt[focal_states[k, t]] = xc[t]
-            scale = _candidate_dense_lex(haps, leaves, logs, offsets, penalty, row, cnt, k, rows,
-                                         row_offsets[i], start, b, stop, s, scale, first, second)
-            best, best_cnt = _lex_close(row, cnt, g_end[i, s], gcnt_end[i, s])
-        else:
-            row = chain_values[stop - chain_block, s].copy()
-            cnt = chain_counts[stop - chain_block, s].copy()
-            for t in range(founders):
-                row[focal_states[k, t]] = xf[t]
-                cnt[focal_states[k, t]] = xc[t]
-            best, best_cnt = _lex_close(row, cnt, g_end[i, s], gcnt_end[i, s])
-        gains[i, s] = best + scale - old - scale_sum[i, s]
-        switches[i, s] = best_cnt - old_cnt
+        bounds = _segments(offsets[start:stop + 1], states)
+        for u in range(len(bounds) - 1):
+            b0, b1 = start + bounds[u], start + bounds[u + 1]
+            lo = offsets[b0]
+            dos = _item_dosages(haps, leaves, offsets, k, rows, row_offsets[i] + b0 - start, b0, b1,
+                                first, second)
+            for s in prange(samples):
+                xf = focal_all[s]
+                xc = focal_cnt_all[s]
+                held_f = held_all[s]
+                held_c = held_cnt_all[s]
+                row = row_all[s]
+                cnt = cnt_all[s]
+                if b0 == start:
+                    for t in range(founders):
+                        xf[t] = f_start[i, s, fs[t]]
+                        xc[t] = fcnt_start[i, s, fs[t]]
+                    scale = 0.0
+                    dense = False
+                else:
+                    scale = scale_all[s]
+                    dense = dense_all[s]
+                b = b0
+                if not dense:
+                    while b < min(b1, chain_end):
+                        held_f[:] = xf
+                        held_c[:] = xc
+                        fast = True
+                        for j in range(offsets[b], offsets[b + 1]):
+                            if logs[s, j, 0] == 0.0 and logs[s, j, 1] == 0.0 and logs[s, j, 2] == 0.0:
+                                continue
+                            lead = site_lead[s, j - site_base]
+                            if first[lead] == k or second[lead] == k:
+                                fast = False
+                                break
+                            m = site_max[s, j - site_base]
+                            c = site_cnt[s, j - site_base]
+                            for t in range(founders):
+                                if xf[t] > m or (xf[t] == m and xc[t] < c):
+                                    fast = False
+                            if not fast:
+                                break
+                            sw = m - penalty
+                            e0, e1, e2 = _site_emissions(logs, s, j)
+                            for t in range(founders):
+                                if sw > xf[t] or (sw == xf[t] and c + 1 < xc[t]):
+                                    xf[t] = sw
+                                    xc[t] = c + 1
+                                xf[t] += _pick(dos[j - lo, fs[t]], e0, e1, e2)
+                        m = 0.0
+                        if fast:
+                            lead = block_lead[b - chain_block, s]
+                            m = block_max[b - chain_block, s]
+                            if first[lead] == k or second[lead] == k:
+                                fast = False
+                            for t in range(founders):
+                                if xf[t] > m:
+                                    fast = False
+                        if not fast:
+                            xf[:] = held_f
+                            xc[:] = held_c
+                            break
+                        scale += m
+                        for t in range(founders):
+                            xf[t] -= m
+                        b += 1
+                    if b < b1:
+                        # The all-state recursion from boundary b: background states from the chain.
+                        if b == start:
+                            row[:] = f_start[i, s]
+                            cnt[:] = fcnt_start[i, s]
+                        else:
+                            row[:] = chain_values[b - chain_block, s]
+                            cnt[:] = chain_counts[b - chain_block, s]
+                        for t in range(founders):
+                            row[fs[t]] = xf[t]
+                            cnt[fs[t]] = xc[t]
+                        dense = True
+                if dense:
+                    scale = _dense_lex_tab(dos, lo, logs, offsets, penalty, row, cnt, b, b1, s, scale)
+                scale_all[s] = scale
+                dense_all[s] = dense
+                if b1 == stop:
+                    old, old_cnt = _lex_old(f_start[i, s], fcnt_start[i, s], g_start[i, s],
+                                            gcnt_start[i, s])
+                    if not dense:
+                        row[:] = chain_values[stop - chain_block, s]
+                        cnt[:] = chain_counts[stop - chain_block, s]
+                        for t in range(founders):
+                            row[fs[t]] = xf[t]
+                            cnt[fs[t]] = xc[t]
+                    best, best_cnt = _lex_close(row, cnt, g_end[i, s], gcnt_end[i, s])
+                    gains[i, s] = best + scale - old - scale_sum[i, s]
+                    switches[i, s] = best_cnt - old_cnt
     return gains, switches
 
 
@@ -1142,66 +1446,6 @@ def exchange_gains(f, g, gperm, perms):
     return out
 
 
-@njit(cache=True, nogil=True)
-def _exchange_sample(f, g, gperm, first, second, index, founders, out):
-    """Per-sample exchange gains of every pair (the body of exchange_gains)."""
-    states = len(f)
-    terms = np.empty(states)
-    base = -np.inf
-    for q in range(states):
-        terms[q] = f[q] + g[gperm[q]]
-        base = max(base, terms[q])
-    order = np.argsort(-terms)
-    p = 0
-    for a in range(founders):
-        for b in range(a + 1, founders):
-            best = -np.inf
-            for position in range(states):
-                q = order[position]
-                i = first[q]
-                j = second[q]
-                if (i != a and i != b and j != a and j != b) or (i == a and j == b):
-                    best = terms[q]
-                    break
-            best = max(best, f[index[a, a]] + g[gperm[index[b, b]]])
-            best = max(best, f[index[b, b]] + g[gperm[index[a, a]]])
-            for c in range(founders):
-                if c != a and c != b:
-                    best = max(best, f[index[a, c]] + g[gperm[index[b, c]]])
-                    best = max(best, f[index[b, c]] + g[gperm[index[a, c]]])
-            out[p] = best - base
-            p += 1
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def exchange_gains_batch(f, g, perms):
-    """exchange_gains at several junctions at once: f, g of shape (J, S, Q), g already
-    relabelled. Row j equals exchange_gains(f[j], g[j], identity, perms) bitwise (the same
-    per-sample values, summed over samples in the same order)."""
-    junctions, samples, states = f.shape
-    npairs = perms.shape[0]
-    founders = 1
-    while founders * (founders + 1) // 2 < states:
-        founders += 1
-    first, second = _unordered_pairs(founders)
-    index = np.empty((founders, founders), np.int64)
-    for q in range(states):
-        index[first[q], second[q]] = q
-        index[second[q], first[q]] = q
-    ident = np.arange(states)
-    per = np.zeros((junctions, samples, npairs))
-    for task in prange(junctions * samples):
-        j = task // samples
-        s = task % samples
-        _exchange_sample(f[j, s], g[j, s], ident, first, second, index, founders, per[j, s])
-    out = np.zeros((junctions, npairs))
-    for j in range(junctions):
-        for p in range(npairs):
-            for s in range(samples):
-                out[j, p] += per[j, s, p]
-    return out
-
-
 @njit(cache=True, parallel=True, nogil=True)
 def exchange_gains_reference(f, g, gperm, perms):
     """The direct O(S K^4) all-state scan (validation reference of exchange_gains)."""
@@ -1267,9 +1511,9 @@ def clamp_reverse_lex(carried, carried_cnt, penalty):
 # nogil calls of gs_pass_chunk: the junction loop, exchange scoring and application,
 # candidate bookkeeping, ranking, the coarse-move guard (incl. the shared-junction test),
 # the lookahead forward chain and the backward chain from the frontier. It calls the
-# kernels above (per-sample / per-(candidate, sample) parallel tasks); its own arithmetic
-# is the former Python-driven pass's operation for operation, including NumPy's pairwise
-# summation of per-sample gains (_numpy_sum), so its decisions are bitwise identical.
+# kernels above (per-sample parallel tasks); its own arithmetic is the former
+# Python-driven pass's operation for operation, including NumPy's pairwise summation of
+# per-sample gains (_numpy_sum), so its decisions are bitwise identical.
 ACC_KEYS = ("fine", "coarse", "exchange", "fine_gain", "coarse_gain", "exchange_gain", "evaluated",
             "false_positive", "guard_rejected", "guard_shared_tests", "guard_relaxed",
             "guard_shared_switches", "guard_traced_blocks", "chain_blocks", "ahead_blocks",
@@ -1522,18 +1766,73 @@ def _ensure_chain(chain, frontier, p, haps, logs, offsets, penalty, stored, stor
                   lexmode, acc):
     """Exact current backward messages (counts, normalisers) on boundaries [p, frontier]
     (the backward chain from the frontier); chain = (ok, start, end, values, counts,
-    scales)."""
+    scales), exact on boundaries [start, end] when ok. A chain that still ends at the
+    frontier but starts right of p is extended over blocks [p, start) from its exact value
+    at start (the recursion from the frontier passes through that value), otherwise the
+    chain is recomputed from the frontier."""
     ok, start, end, values, counts, scales = chain
-    if (not ok) or end != frontier or p < start:
+    if ok and end == frontier and p >= start:
+        return chain
+    if ok and end == frontier:
+        ident = np.arange(values.shape[2])
         if lexmode:
-            values, counts, scales = backward_chain_lex(haps, logs, offsets, penalty, stored[frontier],
-                                                        stored_cnt[frontier], gperm, p, frontier)
+            head, head_cnt, head_scales = backward_chain_lex(haps, logs, offsets, penalty, values[0],
+                                                             counts[0], ident, p, start)
+            counts = np.concatenate((head_cnt[:-1], counts))
         else:
-            values, scales = backward_chain(haps, logs, offsets, penalty, stored[frontier], gperm, p,
-                                            frontier)
-        acc[_A_CHAIN] += frontier - p
-        return (True, p, frontier, values, counts, scales)
-    return chain
+            head, head_scales = backward_chain(haps, logs, offsets, penalty, values[0], ident, p, start)
+        acc[_A_CHAIN] += start - p
+        return (True, p, end, np.concatenate((head[:-1], values)), counts,
+                np.concatenate((head_scales, scales)))
+    if lexmode:
+        values, counts, scales = backward_chain_lex(haps, logs, offsets, penalty, stored[frontier],
+                                                    stored_cnt[frontier], gperm, p, frontier)
+    else:
+        values, scales = backward_chain(haps, logs, offsets, penalty, stored[frontier], gperm, p,
+                                        frontier)
+    acc[_A_CHAIN] += frontier - p
+    return (True, p, frontier, values, counts, scales)
+
+
+@njit(cache=True, nogil=True)
+def _chain_from(chain, x, lexmode):
+    """The backward chain after an edit of blocks left of boundary x that leaves the frontier
+    in place: its values and counts at boundaries >= x and the normalisers of blocks >= x
+    depend only on blocks >= x and stay exact; boundaries left of x are dropped
+    (_ensure_chain extends the chain from x when they are needed)."""
+    ok, start, end, values, counts, scales = chain
+    if not (ok and start <= x <= end):
+        return (False, start, end, values, counts, scales)
+    k = x - start
+    return (True, x, end, values[k:], counts[k:] if lexmode else counts, scales[k:])
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _relabel_chain(chain, p, perm, lexmode):
+    """The backward chain after the suffix exchange perm at junction p: on every block from p
+    on two founders' rows are swapped, so state q there now holds the pair dosages of the
+    former state perm[q]; the backward recursion is the same up to that state order (its
+    maxima and lexicographic maxima are order-free), so the exact messages and switch counts
+    at boundaries >= p are the former ones with their states relabelled and the block
+    normalisers are unchanged. Boundaries left of p are dropped (the pass never reads them
+    again)."""
+    ok, start, end, values, counts, scales = chain
+    if not (ok and start <= p <= end):
+        return (False, start, end, values, counts, scales)
+    k = p - start
+    boundaries, samples, states = end - p + 1, values.shape[1], values.shape[2]
+    relabelled = np.empty((boundaries, samples, states))
+    relabelled_cnt = counts
+    if lexmode:
+        relabelled_cnt = np.empty((boundaries, samples, states), np.int64)
+    for task in prange(boundaries * samples):
+        x, s = task // samples, task % samples
+        for q in range(states):
+            relabelled[x, s, q] = values[k + x, s, perm[q]]
+        if lexmode:
+            for q in range(states):
+                relabelled_cnt[x, s, q] = counts[k + x, s, perm[q]]
+    return (True, p, end, relabelled, relabelled_cnt, scales[k:])
 
 
 @njit(cache=True, nogil=True)
@@ -1680,12 +1979,13 @@ def _grow_moves(moves, move_gain, n_moves):
 
 @njit(cache=True, nogil=True)
 def _active_items(q, X, lab, cand_start, cand_kind, cand_end, cand_k0, cand_row_start, cand_rows,
-                  accepted, it_cand, it_kind, it_k, it_p1, it_p2, it_rs, n_items):
-    """Append the candidates anchored at junction q that differ from the current panel
-    (skipping accepted[i] of the junction's i-th candidate) to the
-    item arrays from position n_items; returns the new count."""
+                  accepted, it_cand, it_kind, it_k, it_p1, it_p2, it_rs):
+    """Write the candidates anchored at junction q that differ from the current panel
+    (skipping the junction's i-th candidate where accepted[i]) to the item arrays;
+    returns how many."""
+    n_items = 0
     for i in range(cand_start[q + 1] - cand_start[q]):
-        if len(accepted) and accepted[i]:
+        if accepted[i]:
             continue
         cand = cand_start[q] + i
         k = lab[cand_k0[cand]]
@@ -1818,7 +2118,7 @@ def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, fron
 def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, fcnt0, local, local_cnt,
                   stored, stored_cnt, stored_scale, gperm0, lab, cand_start, cand_kind, cand_end, cand_k0,
                   cand_row_start, cand_rows, perms, pa, pb, guard, exchanges, ahead_blocks, tol,
-                  guard_tolerance, chunk, acc, ahead0, chain0, start_fwd, start_fcnt, pristine0):
+                  guard_tolerance, acc, ahead0, chain0, start_fwd, start_fcnt, pristine0):
     """Junctions [j0, j1) of one exact Gauss-Seidel acceptance pass (converged_sweep._gs_pass),
     compiled: exchanges, then the content candidates anchored at every junction, the
     coarse-move guard, the lookahead forward chain and the backward chain from the
@@ -1836,17 +2136,12 @@ def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0
     MOVE_FINE / MOVE_COARSE, end block, founder label, rows cand_rows[cand_row_start[i]:]
     over [q, end)). guard: GUARD_NONE /
     GUARD_GENOTYPE_FIT / GUARD_SHARED_JUNCTION; arrays of switch counts are one-element
-    placeholders when unused. acc (ACC_KEYS) is accumulated in place.
-    chunk > 0 (a speculative chunk of j1 - j0 junctions): the first look at every junction
-    (its exchange gains and its candidates' gains) depends only on the panel at j0 until
-    something is accepted, so it is computed for all of them at once by the same kernels
-    on the same messages (bitwise the junction-by-junction values); the call returns after
-    the first junction that accepts a move (the rest of the chunk is discarded). chunk = 0:
-    the junctions are evaluated one by one.
+    placeholders when unused. acc (ACC_KEYS) is accumulated in place. The junctions are
+    evaluated one by one.
     Returns (moves (n, 8) int64 rows (kind, p, index, row, p1, p2, a, b), move gains,
-    junction_gain and junction_pair of the junctions done, gperm, the forward message and
-    counts at the next junction, frontier, the next junction, whether a move was accepted,
-    the lookahead and backward-chain caches)."""
+    junction_gain and junction_pair of the junctions, gperm, the forward message and
+    counts at j1, frontier, whether a move was accepted, the lookahead and backward-chain
+    caches)."""
     founders, blocks = X.shape
     samples, states = stored.shape[1], stored.shape[2]
     first, second = _unordered_pairs(founders)
@@ -1868,85 +2163,22 @@ def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0
     chain = chain0
     ahead = ahead0
     pristine = pristine0
-    # speculative chunk: junctions [spec_q0, spec_q1); exchange gains of junctions
-    # max(spec_q0, 1) .. spec_q1 - 1; candidate values by slot cand - cand_start[spec_q0]
-    spec_ok = False
-    spec_q0 = 0
-    spec_q1 = 0
-    spec_exch = np.zeros((1, 1))
-    spec_gain = np.zeros(1)
-    spec_switch = np.zeros(1)
-    spec_gains_s = np.zeros((1, 1))
-    spec_switches_s = np.zeros((1, 1), np.int64)
     f = f0
     fcnt = fcnt0
-    empty_flags = np.zeros(0, np.bool_)
     placeholder = np.zeros((1, 1, 1))
     placeholder_cnt = np.zeros((1, 1, 1), np.int64)
-    p_next = j1
     accepted_any = False
     for p in range(j0, j1):
         if shared_guard:
             local[p] = f
             local_cnt[p] = fcnt
         accepted_here = False
-        if chunk > 0 and p == j0:
-            # first looks of junctions [p, q1) against the current panel
-            q1 = j1
-            n_tot = cand_start[q1] - cand_start[p]
-            it_cand = np.empty(n_tot, np.int64)
-            it_kind = np.empty(n_tot, np.int64)
-            it_k = np.empty(n_tot, np.int64)
-            it_p1 = np.empty(n_tot, np.int64)
-            it_p2 = np.empty(n_tot, np.int64)
-            it_rs = np.empty(n_tot, np.int64)
-            n_items = 0
-            for q in range(p, q1):
-                n_items = _active_items(q, X, lab, cand_start, cand_kind, cand_end, cand_k0,
-                                        cand_row_start, cand_rows, empty_flags, it_cand, it_kind, it_k,
-                                        it_p1, it_p2, it_rs, n_items)
-            need = q1
-            for i in range(n_items):
-                need = max(need, it_p1[i])
-            ahead = _forward_to(ahead, p, min(blocks, need), f, fcnt, haps, logs, offsets, penalty,
-                                lexmode, ahead_blocks, acc)
-            if exchanges and q1 > max(p, 1):
-                jq0 = max(p, 1)
-                fb = np.empty((q1 - jq0, samples, states))
-                gb = np.empty((q1 - jq0, samples, states))
-                for q in range(jq0, q1):
-                    fb[q - jq0] = ahead[3][q - ahead[1]]
-                    g, gc, chain = _g_at(chain, q, p, frontier, haps, logs, offsets, penalty, stored,
-                                         stored_cnt, gperm, permuted, lexmode, acc)
-                    gb[q - jq0] = g
-                spec_exch = exchange_gains_batch(fb, gb, perms)
-            if n_items:
-                g1, s1, gs1, ss1, chain, ahead = _score_items(
-                    n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, frontier, haps, leaves,
-                    logs, offsets, penalty, stored, stored_cnt, stored_scale, gperm, permuted, lexmode, f,
-                    fcnt, chain, ahead, acc, ahead_blocks)
-                spec_gain = np.zeros(max(1, n_tot))
-                spec_switch = np.zeros(max(1, n_tot))
-                spec_gains_s = np.zeros((max(1, n_tot), samples))
-                spec_switches_s = np.zeros((max(1, n_tot), samples), np.int64)
-                for i in range(n_items):
-                    slot = it_cand[i] - cand_start[p]
-                    spec_gain[slot] = g1[i]
-                    spec_switch[slot] = s1[i]
-                    spec_gains_s[slot] = gs1[i]
-                    spec_switches_s[slot] = ss1[i]
-            spec_ok = True
-            spec_q0 = p
-            spec_q1 = q1
         if p >= 1 and exchanges:
             first_look = True
             while True:
-                if first_look and spec_ok:
-                    gains = spec_exch[p - max(spec_q0, 1)].copy()
-                else:
-                    g, _, chain = _g_at(chain, p, p, frontier, haps, logs, offsets, penalty, stored,
-                                        stored_cnt, gperm, permuted, lexmode, acc)
-                    gains = exchange_gains(f, np.ascontiguousarray(g), ident, perms)
+                g, _, chain = _g_at(chain, p, p, frontier, haps, logs, offsets, penalty, stored,
+                                    stored_cnt, gperm, permuted, lexmode, acc)
+                gains = exchange_gains(f, np.ascontiguousarray(g), ident, perms)
                 best = int(np.argmax(gains))
                 if first_look:
                     junction_gain[p - j0] = gains[best]
@@ -1971,7 +2203,7 @@ def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0
                         lab[m] = b
                     elif lab[m] == b:
                         lab[m] = a
-                chain = (False, chain[1], chain[2], chain[3], chain[4], chain[5])
+                chain = _relabel_chain(chain, p, perms[best], lexmode)
                 ahead = (ahead[0], ahead[1], min(ahead[2], p), ahead[3], ahead[4], ahead[5], ahead[6],
                          ahead[7], ahead[8], ahead[9])
                 acc[_A_EXCHANGE] += 1
@@ -1983,14 +2215,12 @@ def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0
                 moves[n_moves, 7] = b
                 move_gain[n_moves] = gains[best]
                 n_moves += 1
-                spec_ok = False
                 accepted_here = True
         c0, c1 = cand_start[p], cand_start[p + 1]
         if c1 > c0:
             n_here = c1 - c0
             accepted = np.zeros(n_here, np.bool_)
             evaluated = np.zeros(n_here, np.bool_)
-            first_eval = True
             while True:
                 it_cand = np.empty(n_here, np.int64)
                 it_kind = np.empty(n_here, np.int64)
@@ -2000,26 +2230,13 @@ def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0
                 it_rs = np.empty(n_here, np.int64)
                 n_act = _active_items(p, X, lab, cand_start, cand_kind, cand_end, cand_k0,
                                       cand_row_start, cand_rows, accepted, it_cand, it_kind, it_k,
-                                      it_p1, it_p2, it_rs, 0)
+                                      it_p1, it_p2, it_rs)
                 if n_act == 0:
                     break
-                if first_eval and spec_ok:
-                    act_gain = np.empty(n_act)
-                    act_switch = np.empty(n_act)
-                    act_gains_s = np.empty((n_act, samples))
-                    act_switches_s = np.empty((n_act, samples), np.int64)
-                    for i in range(n_act):
-                        slot = it_cand[i] - cand_start[spec_q0]
-                        act_gain[i] = spec_gain[slot]
-                        act_switch[i] = spec_switch[slot]
-                        act_gains_s[i] = spec_gains_s[slot]
-                        act_switches_s[i] = spec_switches_s[slot]
-                else:
-                    act_gain, act_switch, act_gains_s, act_switches_s, chain, ahead = _score_items(
-                        n_act, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, frontier, haps, leaves,
-                        logs, offsets, penalty, stored, stored_cnt, stored_scale, gperm, permuted, lexmode,
-                        f, fcnt, chain, ahead, acc, ahead_blocks)
-                first_eval = False
+                act_gain, act_switch, act_gains_s, act_switches_s, chain, ahead = _score_items(
+                    n_act, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, frontier, haps, leaves,
+                    logs, offsets, penalty, stored, stored_cnt, stored_scale, gperm, permuted, lexmode,
+                    f, fcnt, chain, ahead, acc, ahead_blocks)
                 # the best guard-passing candidate: decreasing gain, earliest on ties
                 order = np.empty(n_act, np.int64)
                 n_ranked = 0
@@ -2072,8 +2289,11 @@ def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0
                 for x in range(p1, p2):
                     X[k, x] = cand_rows[it_rs[i] + x - p1]
                 _set_rows(haps, leaves, offsets, k, p1, cand_rows, it_rs[i], it_rs[i] + p2 - p1)
-                frontier = max(frontier, p2)
-                chain = (False, chain[1], chain[2], chain[3], chain[4], chain[5])
+                if p2 <= frontier:
+                    chain = _chain_from(chain, p2, lexmode)
+                else:
+                    frontier = p2
+                    chain = (False, chain[1], chain[2], chain[3], chain[4], chain[5])
                 ahead = (ahead[0], ahead[1], min(ahead[2], p1), ahead[3], ahead[4], ahead[5], ahead[6],
                          ahead[7], ahead[8], ahead[9])
                 if it_kind[i] == MOVE_COARSE:
@@ -2092,7 +2312,6 @@ def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0
                 moves[n_moves, 5] = p2
                 move_gain[n_moves] = gain
                 n_moves += 1
-                spec_ok = False
                 accepted_here = True
             for i in range(n_here):
                 if evaluated[i] and not accepted[i]:
@@ -2114,10 +2333,5 @@ def gs_pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0
                 f = advance(haps, logs, offsets, penalty, f, p, p + 1)
         if accepted_here:
             accepted_any = True
-            if chunk > 0:
-                p_next = p + 1
-                break
-    done = p_next - j0
-    return (moves[:n_moves].copy(), move_gain[:n_moves].copy(), junction_gain[:done].copy(),
-            junction_pair[:done].copy(), gperm, np.ascontiguousarray(f), np.ascontiguousarray(fcnt),
-            frontier, p_next, accepted_any, ahead, chain)
+    return (moves[:n_moves].copy(), move_gain[:n_moves].copy(), junction_gain, junction_pair, gperm,
+            np.ascontiguousarray(f), np.ascontiguousarray(fcnt), frontier, accepted_any, ahead, chain)

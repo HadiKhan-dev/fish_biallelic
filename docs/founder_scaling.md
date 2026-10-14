@@ -48,6 +48,17 @@ rung accepted a move can reach). In all
 current simulations and the real cross (K <= 9, N <= 120) the 4 GB floor sets
 the budget.
 
+Inside a join, work that depends on no other work runs concurrently: the
+mesh's gap fits, forward and backward passes and block preparation, and panel
+selection's duplicate-seed refits (in lockstep rounds whose birth bounds are
+first computed with all threads). Each gets a live share of the worker's
+threads, so the last joins of a level use the threads their finished peers
+freed. Panel kernels read one flat emission layout rather than a typed list,
+whose shared reference count serialises parallel readers. Results return in
+their sequential order, so none depends on the thread count. Concurrent kernels
+in one process need Numba's omp or tbb threading layer (the default choice);
+the workqueue layer is not supported.
+
 ## Algorithm and complexity
 
 Here K means the largest *working* founder panel, including temporary panels,
@@ -157,16 +168,23 @@ Window proposals use bins of at least 200 SNPs, targeting 2,000 bins per
 component; L1/L2 share a chromosome-derived minimum. Acceptance always uses
 individual SNPs.
 
-Independent components run in forkserver worker processes with private evidence
-slices and workspaces; each worker's Numba threads are the budget divided by the
-active workers, re-read at every sweep, so stragglers take over freed cores.
-Inside a component, window programmes (one nogil kernel per window), a fit's two
-searches, a round's refits and an addition round's seeds run concurrently, each
-with its share of the budget among the work still running. The acceptance pass
+Independent components run in forkserver worker processes that read the
+evidence and sites from shared memory and build their workspaces inside their
+thread share; each worker's Numba threads are the budget divided by the active
+workers, re-read at every sweep, so stragglers take over freed cores. Inside a
+component, a fit's two searches, a round's refits and an addition round's seeds
+run concurrently, each with its share of the budget among the work still
+running; a round admits all its starting candidates before any starts, so the
+first do not take inflated shares. Within a search, window programmes (one nogil
+kernel per window) run on a small thread pool that grows and shrinks with the
+search's live share, and messages and per-sample scores run over at most eight
+sample ranges, re-reading the share before each, so a search left running alone
+widens within its sweep. The acceptance pass
 is compiled (successive nogil calls); its per-sample and per-candidate kernels
-use the search's current share, re-read before every call, and evaluate the
-first look of a chunk of junctions at once (chunks double while nothing is
-accepted; an acceptance discards the rest). Running kernels cannot resize mid-call.
+use the search's current share, re-read before every call, and visit junctions
+one at a time, updating the backward chain and the next sweep's messages only
+where they change. A queued refit, search direction or copy response starts as
+soon as the live budget frees a thread. Running kernels cannot resize mid-call.
 Scientific selection retains the original candidate order; no decision depends
 on the thread count.
 

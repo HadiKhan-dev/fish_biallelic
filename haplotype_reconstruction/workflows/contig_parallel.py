@@ -9,8 +9,14 @@ checkpoint core ceilings to its lease. Pools, Numba teams and compression teams
 inside a contig stay within its lease, so concurrent contigs never exceed the
 run's ceiling. Leases start in proportion to each coordinator's work. A
 coordinator that has finished its contigs returns its lease; the others claim
-it, in proportion to their remaining work, at their next contig boundary, never
-inside a contig.
+it, in proportion to their remaining work, at their next contig or phase start
+(block-feedback round, context refinement, assembly preprocess, hierarchy and
+refinement level, painting), while their pool phases run (path-selection
+rounds, context refinements, hierarchy and component-refinement levels: the
+coordinator raises the pool's shared thread total every second, and workers
+take the threads at their next dynamic-thread boundary; the process count
+stays) and at every sweep allocation of the founder refinement, never inside a
+running kernel.
 
 A contig's computation does not read other contigs' work in progress, and core
 ceilings are execution choices outside every scientific identity. Each
@@ -70,6 +76,24 @@ CONTIG_WORKER_CORES = 16
 SOURCE_MEMORY_FACTOR = 3
 CONTIG_MEMORY_BYTES = 16 << 30
 CORE_MEMORY_BYTES = 3 << 28
+
+# Fraction of a contig's reconstruction done when each phase that re-reads its
+# lane's lease starts (core/chromosome_parallel.lease_threads; phase names as
+# passed by block_feedback, assembly.pipeline and reconstruction): lane-minutes
+# summed over the 22 contigs of the N=320 live-head host run (285283b, 18-21
+# threads per lane). Operational only: leases follow each lane's remaining work.
+RECONSTRUCTION_PHASE_PROGRESS = {
+    "feedback_round0": 0.0,
+    "feedback_l1_preprocess": 0.258, "feedback_l1_hierarchy_l1": 0.269,
+    "feedback_l1_refine": 0.350, "feedback_round1": 0.363,
+    "feedback_l2_preprocess": 0.407, "feedback_l2_hierarchy_l1": 0.418,
+    "feedback_l2_hierarchy_l2": 0.454, "feedback_l2_refine": 0.494, "feedback_round2": 0.513,
+    "final_preprocess": 0.532, "final_hierarchy_l1": 0.543, "final_refinement_l1": 0.555,
+    "final_hierarchy_l2": 0.590, "final_refinement_l2": 0.614,
+    "final_hierarchy_l3": 0.736, "final_refinement_l3": 0.745,
+    "final_hierarchy_l4": 0.892, "final_refinement_l4": 0.896,
+    "painting": 0.989,
+}
 
 # Decoded-size scans of the source checkpoints only read chunk headers, so
 # they wait on shared-filesystem latency: 22 N=320 discovery checkpoints took
@@ -189,7 +213,8 @@ def run_reconstruction(checkpoint_store, contigs, sample_ids, *, discovery_ident
     if workers > 1:
         executor = core_chromosome_parallel.ChromosomeExecutor(
             contigs, _reconstruct_contig, n_workers=cores, weights=weights,
-            max_workers=workers, label="RECONSTRUCTION")
+            max_workers=workers, label="RECONSTRUCTION",
+            phase_progress=RECONSTRUCTION_PHASE_PROGRESS)
         if executor.worker_count > 1:
             return _run_concurrently(
                 checkpoint_store, contigs, sample_ids, executor, all_contigs=all_contigs,
@@ -243,7 +268,7 @@ def _run_concurrently(checkpoint_store, contigs, sample_ids, executor, *, all_co
     partitions = [[contig for _, contig in partition] for partition in executor.partitions]
     print(f"  Contigs: {executor.worker_count} concurrent coordinators share "
           f"{executor.cpu_budget} cores (leases in proportion to work, growing at "
-          "contig boundaries); "
+          "contig and phase starts and inside pool phases); "
           "longest first per coordinator: "
           + "; ".join(", ".join(partition) for partition in partitions), flush=True)
     for contig in contigs:
@@ -416,7 +441,8 @@ def _reconstruct_contig(contig, state, phase, common):
     try:
         with core_runtime.run_log(log), core_run_record.worker_stages() as stages:
             print(f"[{contig}] contig coordinator pid {os.getpid()}: {threads}-core "
-                  "ceiling for release, painting and checkpoint I/O", flush=True)
+                  "lease for release, painting and checkpoint I/O (phases may grow it)",
+                  flush=True)
             try:
                 summary, = reconstruction.run_reconstruction(
                     store, (contig,), common["sample_ids"], **arguments)

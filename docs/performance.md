@@ -32,8 +32,12 @@ IDs stay unchanged. Only the chromosome coordinator writes ordinary pipeline
 checkpoints; helpers publish attempt-specific results. Results are gathered in
 genomic order before dependent levels proceed. Claims have renewable leases;
 late results cannot overwrite a reassigned claim. Completed hierarchy bundles
-can resume under the existing scientific checkpoint identity. Local fitting
-retains its ordinary block checkpoints (written in chunks of 64 blocks).
+can resume under the existing scientific checkpoint identity, and a resumed
+coordinator retries bundles that failed. Local fitting retains its ordinary
+block checkpoints (written in chunks of 64 blocks). Transport files are deleted
+once consumed and leave nothing behind a completed stage; see the
+[running guide](running.md#optional-cross-node-batches). Helpers use the
+persistent kernel store below.
 
 Without this option, execution stays node-local. Discovery, chromosome-wide
 founder refinement and downstream inference are not distributed by this queue.
@@ -83,11 +87,19 @@ block-discovery sizes), so the longest contig starts with its share. Each
 contig runs the unchanged sequential route with its lease as release, painting
 and checkpoint-compression ceiling; a coordinator that has finished its contigs
 returns its lease, and the others take it, in proportion to their remaining
-work, at their next contig boundary, not inside a contig. `--contig-workers 1`
+work, at the start of their next phase (each block-feedback round and context
+refine, each assembly level and painting). Pool phases that are already running
+(path-selection rounds, context refines, hierarchy levels and the founder
+refinement component pools) also take their share within about a second, as
+more threads for their existing workers; founder refinement re-reads its share
+at every sweep, so the last contigs grow into the freed cores. `--contig-workers 1`
 keeps the sequential route; an integer sets the maximum explicitly. A memory
 estimate (three times the decoded block-discovery checkpoint plus 16 GiB, and
 768 MiB per core; fitted to node memory sampled every 10 s in an N=320 run) can
-lower the number of concurrent contigs, never the core budget. Narrow lanes are
+lower the number of concurrent contigs, never the core budget. Available memory
+counts the cgroup's working set: reclaimable inactive file cache (recently read
+checkpoints) is not treated as used, so the plan does not depend on what the
+page cache happens to hold. Narrow lanes are
 more efficient: a contig at 16 threads used about 7% fewer core-seconds than at
 32-37 (hierarchy, refinement tails and serial checkpoint phases scale poorly).
 
@@ -163,9 +175,12 @@ Publication is an atomic rename, so concurrent runs on several hosts read only
 complete snapshots (the last publication of a key wins). The six most recently
 used keys are kept. Store failures (no writable home, full quota) only cost
 compilation time and are reported in the run log; the run record times the
-`numba_warmup` and `numba_publish` stages. Other commands (`evaluate`,
-`recombination`, `export`, `batch-worker`) use their run-local cache without
-the store.
+`numba_warmup` and `numba_publish` stages. `evaluate` and `batch-worker`
+helpers use the store in the same way; `recombination` and `export` use their
+run-local cache without it. Warm-up workers start Numba's threading layer before
+compiling: a kernel compiled against a parallel callee loaded from the cache is
+stored without that callee's parallel-runtime hook, and loading it in a process
+without a running threading layer aborts.
 
 These disposable files are separate from pipeline checkpoints and do not need
 to be retained to resume scientific work. Scratch cleanup follows the site's

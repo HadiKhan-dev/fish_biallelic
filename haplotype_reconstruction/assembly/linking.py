@@ -81,70 +81,49 @@ class TransitionMesh:
             yield gap, [self.forward[gap], self.backward[gap]]
 
 
-def initial_transition_probabilities(haps_data, space_gap=1):
+def _uniform_transitions(hap_keys, space_gap):
+    """Uniform initial transitions as arrays (rows: haplotypes in sorted key order).
+
+    forward[i][u, v] links block i to i + space_gap and reverse[i][u, v]
+    block i to i - space_gap: every haplotype connects to every haplotype of
+    the linked block with probability 1 / (its haplotype count).
     """
-    Creates a dictionary of initial transition probabilities assuming a Uniform Prior.
-    Connects every haplotype in Block N to every haplotype in Block N + space_gap.
+    forward = {i: np.full((len(hap_keys[i]), len(hap_keys[i + space_gap])),
+                          1 / len(hap_keys[i + space_gap]))
+               for i in range(len(hap_keys) - space_gap)}
+    reverse = {i: np.full((len(hap_keys[i]), len(hap_keys[i - space_gap])),
+                          1 / len(hap_keys[i - space_gap]))
+               for i in range(len(hap_keys) - 1, space_gap - 1, -1)}
+    return forward, reverse
 
-    Args:
-        haps_data (list): List of BlockResult objects.
-        space_gap (int): The distance (stride) between blocks to link.
 
-    Returns:
-        list: [forward_dict, backward_dict] containing uniform probabilities.
+def _entrywise_log(probabilities):
+    """math.log of every transition probability (scalar libm logs)."""
+    return np.array([math.log(value) for value in probabilities.ravel().tolist()],
+                    dtype=np.float64).reshape(probabilities.shape)
+
+
+def _transition_dicts(forward, reverse, hap_keys, space_gap):
+    """The mesh's [forward, reverse] dicts of fitted transition arrays.
+
+    forward: {i: {((i, src), (i + space_gap, dst)): probability}};
+    reverse: {i + space_gap: {((i + space_gap, dst), (i, src)): summary}}.
     """
-    transition_dict_forward = {}
-    transition_dict_reverse = {}
-
-    # Forward Pass initialization
-    for i in range(0, len(haps_data) - space_gap):
-        transition_dict_forward[i] = {}
-
-        these_haps = haps_data[i].haplotypes
-        next_haps = haps_data[i + space_gap].haplotypes
-
-        for first_idx in these_haps.keys():
-            first_hap_name = (i, first_idx)
-            for second_idx in next_haps.keys():
-                second_hap_name = (i + space_gap, second_idx)
-                transition_dict_forward[i][(first_hap_name, second_hap_name)] = 1
-
-    # Backward Pass initialization
-    for i in range(len(haps_data) - 1, space_gap - 1, -1):
-        transition_dict_reverse[i] = {}
-
-        these_haps = haps_data[i].haplotypes
-        next_haps = haps_data[i - space_gap].haplotypes
-
-        for first_idx in these_haps.keys():
-            first_hap_name = (i, first_idx)
-            for second_idx in next_haps.keys():
-                second_hap_name = (i - space_gap, second_idx)
-                transition_dict_reverse[i][(first_hap_name, second_hap_name)] = 1
-
-    # Normalize Forward
-    scaled_dict_forward = {}
-    for idx in transition_dict_forward.keys():
-        scaled_dict_forward[idx] = {}
-        start_dict = {}
-        for s in transition_dict_forward[idx].keys():
-            start_dict[s[0]] = start_dict.get(s[0], 0) + transition_dict_forward[idx][s]
-
-        for s in transition_dict_forward[idx].keys():
-            scaled_dict_forward[idx][s] = transition_dict_forward[idx][s] / start_dict[s[0]]
-
-    # Normalize Backward
-    scaled_dict_reverse = {}
-    for idx in transition_dict_reverse.keys():
-        scaled_dict_reverse[idx] = {}
-        start_dict = {}
-        for s in transition_dict_reverse[idx].keys():
-            start_dict[s[0]] = start_dict.get(s[0], 0) + transition_dict_reverse[idx][s]
-
-        for s in transition_dict_reverse[idx].keys():
-            scaled_dict_reverse[idx][s] = transition_dict_reverse[idx][s] / start_dict[s[0]]
-
-    return [scaled_dict_forward, scaled_dict_reverse]
+    forward_dicts, reverse_dicts = {}, {}
+    for i in range(len(hap_keys) - space_gap):
+        next_idx = i + space_gap
+        curr_keys, next_keys = hap_keys[i], hap_keys[next_idx]
+        values = reverse[next_idx].tolist()
+        reverse_dicts[next_idx] = {
+            ((next_idx, next_keys[v]), (i, curr_keys[u])): values[v][u]
+            for v in range(len(next_keys)) for u in range(len(curr_keys))
+        }
+        values = forward[i].tolist()
+        forward_dicts[i] = {
+            ((i, curr_keys[u]), (next_idx, next_keys[v])): values[u][v]
+            for u in range(len(curr_keys)) for v in range(len(next_keys))
+        }
+    return [forward_dicts, reverse_dicts]
 
 
 class ViterbiBlockLikelihood:
@@ -302,39 +281,42 @@ def generate_viterbi_block_emissions(
 
 def _prepare_block_scans(raw_blocks, recomb_rate, chromosome_map=None,
                          dynamic_cores_fn=None):
+    """Fixed scan data of every block; blocks are independent and prepared concurrently
+    (assembly_chimera_kernels.concurrent_map) when dynamic_cores_fn gives several threads."""
     if chromosome_map is not None:
         recomb_rate = chromosome_map.fallback_rate_per_bp
-    prepared = []
-    for block in raw_blocks:
-        if dynamic_cores_fn is not None:
-            numba.set_num_threads(dynamic_cores_fn())
+
+    def prepare(block, threads):
+        if threads is not None:
+            numba.set_num_threads(threads())
         distances = None
         if chromosome_map is not None and chromosome_map.has_map:
             distances = np.ascontiguousarray(chromosome_map.interval_morgans(
                 block.positions[:-1], block.positions[1:]))
-        prepared.append(PreparedBlockScans(
+        return PreparedBlockScans(
             block.log_emissions, block.positions, recomb_rate, block.state_defs,
-            block.num_haps, distances, dosages=block.dosages))
-    return prepared
+            block.num_haps, distances, dosages=block.dosages)
+    return assembly_chimera_kernels.concurrent_map(prepare, raw_blocks, dynamic_cores_fn)
 
 
-def global_forward_backward_pass(raw_blocks, block_results, transition_probs,
-                                 space_gap, recomb_rate, hap_keys_cache=None,
+def global_forward_backward_pass(raw_blocks, log_transitions, space_gap, recomb_rate,
                                  genetic_distances_by_block=None,
                                  prepared_scans=None, dynamic_cores_fn=None,
                                  edge_messages_only=False):
     """Propagate through gap-residue chains with fixed block scans reused.
 
+    ``log_transitions[i]`` is the log forward transition matrix from block i to
+    block i + space_gap (rows and columns: haplotypes in sorted key order).
     Boundary priors are exactly uniform and their scan results are cached.
     State-dependent interior priors depend on the current fitted transitions.
     Forward and backward likelihoods use the same forward transition factors.
     Reverse mesh summaries are not backward likelihood operators.
     With edge_messages_only, omit terminal S and initial R messages unused by
     transition fitting and return None for the uncomputed likelihood diagnostic.
+    The forward and backward recursions read only the fixed transitions, so they
+    run concurrently, each with a share of dynamic_cores_fn's threads.
     """
     num_blocks = len(raw_blocks)
-    if hap_keys_cache is None:
-        hap_keys_cache = [sorted(b.haplotypes) for b in block_results]
     if prepared_scans is None:
         prepared_scans = [
             PreparedBlockScans(
@@ -344,26 +326,43 @@ def global_forward_backward_pass(raw_blocks, block_results, transition_probs,
                 else genetic_distances_by_block[i], dosages=block.dosages)
             for i, block in enumerate(raw_blocks)
         ]
-    S_results = [None] * num_blocks
-    R_results = [None] * num_blocks
     forward_stop = num_blocks - space_gap if edge_messages_only else num_blocks
-    for i in range(forward_stop):
-        if dynamic_cores_fn is not None:
-            numba.set_num_threads(dynamic_cores_fn())
-        priors = None
-        if i >= space_gap:
-            previous = i - space_gap
-            hap_log_T = core_numerics._build_haploid_log_T_from_dict(
-                transition_probs[0][previous], hap_keys_cache[previous],
-                hap_keys_cache[i], previous, i)
-            priors = propagate_homologue_priors(
-                S_results[previous], np.ascontiguousarray(hap_log_T))
-        if priors is None:
-            # Normalized initial diploid prior for each independent chain.
-            k = raw_blocks[i].num_haps
-            priors = np.full((raw_blocks[i].log_emissions.shape[0], k * k),
-                             -2.0 * math.log(k))
-        S_results[i] = prepared_scans[i].scan(priors)
+    backward_stop = space_gap - 1 if edge_messages_only else -1
+
+    def forward(threads):
+        S_results = [None] * num_blocks
+        for i in range(forward_stop):
+            if threads is not None:
+                numba.set_num_threads(threads())
+            priors = None
+            if i >= space_gap:
+                previous = i - space_gap
+                priors = propagate_homologue_priors(
+                    S_results[previous], np.ascontiguousarray(log_transitions[previous]))
+            if priors is None:
+                # Normalized initial diploid prior for each independent chain.
+                k = raw_blocks[i].num_haps
+                priors = np.full((raw_blocks[i].log_emissions.shape[0], k * k),
+                                 -2.0 * math.log(k))
+            S_results[i] = prepared_scans[i].scan(priors)
+        return S_results
+
+    def backward(threads):
+        R_results = [None] * num_blocks
+        for i in range(num_blocks - 1, backward_stop, -1):
+            if threads is not None:
+                numba.set_num_threads(threads())
+            priors = None
+            if i < num_blocks - space_gap:
+                following = i + space_gap
+                # Transpose for the contraction, NOT a reverse conditional.
+                priors = propagate_homologue_priors(
+                    R_results[following], np.ascontiguousarray(log_transitions[i].T))
+            R_results[i] = prepared_scans[i].scan(priors, backward=True)
+        return R_results
+
+    S_results, R_results = assembly_chimera_kernels.concurrent_map(
+        lambda recursion, threads: recursion(threads), (forward, backward), dynamic_cores_fn)
 
     # The gap partitions the batch into independent residue-class chains.
     total_ll = None
@@ -371,25 +370,10 @@ def global_forward_backward_pass(raw_blocks, block_results, transition_probs,
         total_ll = 0.0
         for terminal in range(max(0, num_blocks - space_gap), num_blocks):
             total_ll += float(np.sum(core_numerics.lse_axis_last(S_results[terminal])))
-
-    backward_stop = space_gap - 1 if edge_messages_only else -1
-    for i in range(num_blocks - 1, backward_stop, -1):
-        if dynamic_cores_fn is not None:
-            numba.set_num_threads(dynamic_cores_fn())
-        priors = None
-        if i < num_blocks - space_gap:
-            following = i + space_gap
-            # Transpose for the contraction, NOT a reverse conditional.
-            hap_log_T = core_numerics._build_haploid_log_T_from_dict(
-                transition_probs[0][i], hap_keys_cache[i],
-                hap_keys_cache[following], i, following).T
-            priors = propagate_homologue_priors(
-                R_results[following], np.ascontiguousarray(hap_log_T))
-        R_results[i] = prepared_scans[i].scan(priors, backward=True)
     return S_results, R_results, total_ll
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _smooth_normalize_kernel(data_log_count, log_pseudo, min_log_prob, mix_rate):
     """Per-row smoothing + normalize + robust-mixture kernel.
 
@@ -496,8 +480,7 @@ def _smooth_normalize_kernel(data_log_count, log_pseudo, min_log_prob, mix_rate)
     return final_p
 
 
-def update_transitions_layered_hmm(S_results, R_results, block_results, current_trans,
-                                   space_gap, hap_keys_cache=None,
+def update_transitions_layered_hmm(S_results, R_results, log_transitions, space_gap,
                                    dynamic_cores_fn=None, learning_rate=1.0):
     """Fit forward transitions from posterior homologue counts once per edge.
 
@@ -507,6 +490,10 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
     Reverse mesh summaries are column-normalizations of this shared regularized
     edge evidence; their source masses are posterior-support summaries, not
     unconditional chain-state marginals. They are never used as beta operators.
+    ``log_transitions[i]`` holds the current log forward transitions from
+    block i to i + space_gap. Returns (forward, reverse): forward[i] the new
+    (n_i, n_{i+gap}) transition probabilities and reverse[i + gap] the
+    (n_{i+gap}, n_i) reverse summaries, rows and columns in sorted key order.
 
     dynamic_cores_fn refreshes the numerical thread allocation before each
     edge, allowing this M-step to use cores released by peer batch workers.
@@ -514,10 +501,6 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
     new_trans_fwd = {}
     new_trans_bwd = {}
     num_blocks = len(S_results)
-
-    # Fix A: Use cached keys if provided
-    if hap_keys_cache is None:
-        hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in block_results]
 
     MIN_LOG_PROB = -10.0
     PSEUDO_COUNT = 0.1
@@ -536,17 +519,9 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
                 pass
 
         next_idx = i + space_gap
-        S_earlier = S_results[i]
-        R_later = R_results[next_idx]
-
-        curr_keys = hap_keys_cache[i]
-        next_keys = hap_keys_cache[next_idx]
-
-        n_c, n_n = len(curr_keys), len(next_keys)
-        hap_log_t = core_numerics._build_haploid_log_T_from_dict(
-            current_trans[0][i], curr_keys, next_keys, i, next_idx)
+        hap_log_t = log_transitions[i]
         data_log_count = homologue_edge_log_counts(
-            np.ascontiguousarray(S_earlier), np.ascontiguousarray(R_later),
+            np.ascontiguousarray(S_results[i]), np.ascontiguousarray(R_results[next_idx]),
             np.ascontiguousarray(hap_log_t))
 
         # Smoothing + per-row normalize + robust-mixture, delegated to a
@@ -567,36 +542,21 @@ def update_transitions_layered_hmm(S_results, R_results, block_results, current_
         log_row_mass = np.logaddexp.reduce(
             np.logaddexp(data_log_count, LOG_PSEUDO), axis=1)
         log_joint = log_row_mass[:, None] + np.log(final_p_mat)
-        reverse = np.exp((log_joint - np.logaddexp.reduce(
+        new_trans_bwd[next_idx] = np.exp((log_joint - np.logaddexp.reduce(
             log_joint, axis=0)[None,:]).T)
-        new_trans_bwd[next_idx] = {
-            ((next_idx, next_keys[v]), (i, curr_keys[u])): float(reverse[v, u])
-            for v in range(n_n) for u in range(n_c)
-        }
+        new_trans_fwd[i] = final_p_mat
 
-        # Dict-write back to {((i, src), (next_idx, dst)): final_p}.
-        # Keys are arbitrary tuples that numba can't construct, so this
-        # stays in Python; per-cell work is just a dict insertion.
-        final_fwd = {}
-        for u_i in range(n_c):
-            src = curr_keys[u_i]
-            for v_i in range(n_n):
-                key = ((i, src), (next_idx, next_keys[v_i]))
-                final_fwd[key] = float(final_p_mat[u_i, v_i])
-
-        new_trans_fwd[i] = final_fwd
-
-    return [new_trans_fwd, new_trans_bwd]
+    return new_trans_fwd, new_trans_bwd
 
 
 def _max_transition_probability_change(old_probs, new_probs):
-    """Return the largest absolute change across transition entries."""
+    """Return the largest absolute change across transition entries (finite
+    probabilities, so the maximum does not depend on the entry order)."""
     max_change = 0.0
-    for direction_idx in (0, 1):
-        for block_idx, new_block in new_probs[direction_idx].items():
-            old_block = old_probs[direction_idx][block_idx]
-            for transition_key, new_value in new_block.items():
-                change = abs(new_value - old_block[transition_key])
+    for old_tables, new_tables in zip(old_probs, new_probs):
+        for block_idx, new_table in new_tables.items():
+            if new_table.size:
+                change = float(np.max(np.abs(new_table - old_tables[block_idx])))
                 if change > max_change:
                     max_change = change
     return max_change
@@ -640,10 +600,12 @@ def calculate_hap_transition_probabilities(haps_data,
         prepared_scans = _prepare_block_scans(
             raw_blocks, recomb_rate, chromosome_map, dynamic_cores_fn)
 
-    # Cache sorted hap keys once (never change across EM iterations).
+    # Cache sorted hap keys once (never change across EM iterations). The
+    # transitions stay arrays in this key order during the EM; the mesh
+    # dicts are built once from the final fit.
     hap_keys_cache = [sorted(list(b.haplotypes.keys())) for b in haps_data]
 
-    current_trans = initial_transition_probabilities(haps_data, space_gap)
+    current_trans = _uniform_transitions(hap_keys_cache, space_gap)
 
     for it in range(max_num_iterations):
         # Dynamic thread rescaling: pick up freed cores from peer
@@ -659,19 +621,18 @@ def calculate_hap_transition_probabilities(haps_data,
         # Match decay schedule
         effective_lr = learning_rate * (0.9 ** it)
         effective_lr = max(effective_lr, 0.1)
+        log_transitions = {i: _entrywise_log(value) for i, value in current_trans[0].items()}
 
         # E-Step
         S_res, R_res, _current_ll = global_forward_backward_pass(
-            raw_blocks, haps_data, current_trans, space_gap, recomb_rate,
-            hap_keys_cache=hap_keys_cache,
+            raw_blocks, log_transitions, space_gap, recomb_rate,
             prepared_scans=prepared_scans, dynamic_cores_fn=dynamic_cores_fn,
             edge_messages_only=diagnostics is None,
         )
 
         # M-Step
         next_trans = update_transitions_layered_hmm(
-            S_res, R_res, haps_data, current_trans, space_gap,
-            hap_keys_cache=hap_keys_cache,
+            S_res, R_res, log_transitions, space_gap,
             dynamic_cores_fn=dynamic_cores_fn,
             learning_rate=effective_lr,
         )
@@ -687,7 +648,7 @@ def calculate_hap_transition_probabilities(haps_data,
         if max_transition_change <= min_cutoff_change:
             break
 
-    return current_trans
+    return _transition_dicts(*current_trans, hap_keys_cache, space_gap)
 
 
 def generate_transition_probability_mesh(
@@ -698,28 +659,31 @@ def generate_transition_probability_mesh(
     """Fit consumed gaps, reusing fixed emissions/zero-prior scans within this mesh.
 
     Gaps retain independent EM fits and the original convergence settings.
-    Process parallelism belongs to the outer batch pool; numerical thread
-    allocation is refreshed at each gap, EM iteration and block boundary.
+    Process parallelism belongs to the outer batch pool. Inside a batch the gap
+    fits share only the fixed block scans, so they run concurrently, each with a
+    share of dynamic_cores_fn's threads (assembly_chimera_kernels.concurrent_map;
+    a fit that converges leaves its threads to the rest); numerical thread
+    allocation is refreshed at each EM iteration and block boundary.
     """
     if precalculated_viterbi_emissions is None:
         raise ValueError("precalculated_viterbi_emissions is required")
     prepared = _prepare_block_scans(
         precalculated_viterbi_emissions, recomb_rate, chromosome_map,
         dynamic_cores_fn)
-    results = {}
     last_gap = len(haps_data) - 1
     if max_gap is not None:
         last_gap = min(last_gap, max_gap)
-    for gap in range(1, last_gap + 1):
-        if dynamic_cores_fn is not None:
-            numba.set_num_threads(dynamic_cores_fn())
-        results[gap] = calculate_hap_transition_probabilities(
+    gaps = range(1, last_gap + 1)
+
+    def fit(gap, threads):
+        return calculate_hap_transition_probabilities(
             haps_data, max_num_iterations=max_num_iterations,
             space_gap=gap, recomb_rate=recomb_rate,
             precalculated_viterbi_emissions=precalculated_viterbi_emissions,
-            dynamic_cores_fn=dynamic_cores_fn, chromosome_map=chromosome_map,
+            dynamic_cores_fn=threads, chromosome_map=chromosome_map,
             prepared_scans=prepared)
-        core_parallel.malloc_trim()
+    results = dict(zip(gaps, assembly_chimera_kernels.concurrent_map(fit, gaps, dynamic_cores_fn)))
+    core_parallel.malloc_trim()
     mesh = TransitionMesh(results)
     mesh.scan_diagnostics = {
         "computed_scans": sum(block.scan_calls for block in prepared),
@@ -729,6 +693,7 @@ def generate_transition_probability_mesh(
     return mesh
 
 
+import haplotype_reconstruction.assembly.chimera_kernels as assembly_chimera_kernels
 import haplotype_reconstruction.assembly.observations as assembly_observations
 import haplotype_reconstruction.core.numerics as core_numerics
 import haplotype_reconstruction.core.parallel as core_parallel

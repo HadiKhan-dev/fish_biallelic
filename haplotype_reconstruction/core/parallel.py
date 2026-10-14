@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 import numba
 import ctypes
@@ -62,6 +63,8 @@ os.environ.setdefault("NUMBA_NUM_THREADS", str(os.cpu_count() or 1))
 
 
 _TOTAL_CORES = None
+# A pool's shared, growing CPU total (live_total), or None for the fixed _TOTAL_CORES.
+_LIVE_TOTAL = None
 
 
 def malloc_trim():
@@ -424,6 +427,55 @@ def _counter_read(counter):
     return obj.value
 
 
+# Seconds between a pool phase's re-reads of its growing CPU budget (live_total).
+LIVE_TOTAL_SECONDS = 1.0
+
+
+def budget_value(budget):
+    """Current CPUs of a budget: an int, or a callable live budget (a lane's lease)."""
+    return int(budget() if callable(budget) else budget)
+
+
+@contextmanager
+def live_total(budget):
+    """Shared CPU total for a pool phase whose budget may grow while it runs.
+
+    ``budget`` is an int or a callable live budget, such as a contig lane's lease
+    (core/chromosome_parallel.lease_budget). An int yields None: the pool keeps its
+    fixed total. A callable yields a shared value, passed to the workers as
+    set_dynamic_thread_state(live_total=...), that a thread of this process raises
+    to the budget every LIVE_TOTAL_SECONDS until the phase ends. CPUs that reach
+    the budget mid-phase (released by finished lanes) then enlarge the workers'
+    shares at their next get_dynamic_threads; the pool's process count stays as
+    created. The value never falls, and process x thread totals stay within the
+    budget, as with a fixed total. Thread counts never change results.
+    """
+    if not callable(budget):
+        yield None
+        return
+    total = forkserver_context.Value('i', budget_value(budget))
+    stop = threading.Event()
+
+    def refresh():
+        while not stop.wait(LIVE_TOTAL_SECONDS):
+            cores = budget_value(budget)
+            if cores > _counter_read(total):
+                total.value = cores
+
+    thread = threading.Thread(target=refresh, name="live-pool-total", daemon=True)
+    thread.start()
+    try:
+        yield total
+    finally:
+        stop.set()
+        thread.join()
+
+
+def _pool_total():
+    """This worker's pool total: the live shared value if wired, else the fixed one."""
+    return _TOTAL_CORES if _LIVE_TOTAL is None else _counter_read(_LIVE_TOTAL)
+
+
 def set_dynamic_thread_state(
     total_cores,
     active_counter,
@@ -434,20 +486,24 @@ def set_dynamic_thread_state(
     batch_task_count=None,
     startup_target=None,
     startup_ready=None,
+    live_total=None,
 ):
     """Wire this worker process to the pool-wide counters.  Call once from the
     pool initializer.  Resets the per-worker extra-claim flag (essential when a
     Pool recycles workers — a respawned worker must not inherit a stale claim).
 
     active_counter may be None for the single-process sequential path: then
-    every helper returns threads = 1 regardless of total_cores.
+    every helper returns threads = 1 regardless of total_cores. live_total, the
+    shared value of core.parallel.live_total, replaces the fixed total_cores
+    (its value at the phase start) when the pool's budget can grow.
     """
-    global _ACTIVE_COUNTER, _TOTAL_CORES, _EXTRA_COUNTER
+    global _ACTIVE_COUNTER, _TOTAL_CORES, _EXTRA_COUNTER, _LIVE_TOTAL
     global _STARTED_COUNTER, _PARTICIPANT_COUNTER, _BATCH_GENERATION
     global _BATCH_TASK_COUNT, _STARTUP_TARGET, _STARTUP_READY
     global _I_HAVE_EXTRA, _LAST_SEEN_GENERATION, _LAST_APPLIED_THREADS
     _ACTIVE_COUNTER = active_counter
     _TOTAL_CORES = total_cores
+    _LIVE_TOTAL = live_total
     _EXTRA_COUNTER = extra_counter
     _STARTED_COUNTER = started_counter
     _PARTICIPANT_COUNTER = participant_counter
@@ -598,7 +654,8 @@ def _validated_thread_limit(max_threads):
 def get_dynamic_threads(max_threads=None):
     """Compute this worker's thread count from the live active-peer count:
     floor(total_cores / active) + (1 if this worker holds an extra), clamped
-    to >= 1.  floor+extra is always <= total_cores.
+    to >= 1.  floor+extra is always <= total_cores.  total_cores is the pool's
+    live total if it has one (live_total), re-read here.
 
     The counter reads are lock-free (via _counter_read) — a slightly stale
     count is fine since we recheck at every phase, and at high call rates a
@@ -624,8 +681,9 @@ def get_dynamic_threads(max_threads=None):
         return 1
 
     active = max(_counter_read(_ACTIVE_COUNTER), 1)
-    floor = _TOTAL_CORES // active
-    remainder = _TOTAL_CORES - floor * active
+    total = _pool_total()
+    floor = total // active
+    remainder = total - floor * active
 
     if thread_limit is not None and thread_limit <= floor:
         _try_release_extra()
@@ -685,11 +743,12 @@ def _log_alloc(n):
     try:
         active = _counter_read(_ACTIVE_COUNTER) if _ACTIVE_COUNTER is not None else 1
         extras = _counter_read(_EXTRA_COUNTER) if _EXTRA_COUNTER is not None else 0
-        floor = (_TOTAL_CORES // max(active, 1)) if _TOTAL_CORES else 1
-        rem = (_TOTAL_CORES - floor * max(active, 1)) if _TOTAL_CORES else 0
+        total = _pool_total()
+        floor = (total // max(active, 1)) if total else 1
+        rem = (total - floor * max(active, 1)) if total else 0
         print("[dynthreads pid=%d t=%.1f] active=%d total=%s floor=%d rem=%d "
               "extras=%d mine=%s -> threads=%d"
-              % (os.getpid(), time.monotonic(), active, _TOTAL_CORES, floor,
+              % (os.getpid(), time.monotonic(), active, total, floor,
                  rem, extras, _I_HAVE_EXTRA, n),
               file=sys.stderr, flush=True)
     except Exception:

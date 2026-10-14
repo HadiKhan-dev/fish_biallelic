@@ -199,6 +199,20 @@ def _read_manifest(store):
         return {}, {}
 
 
+def _start_threading_layer():
+    """Warm-up pool initializer: start Numba's threading layer before any linking.
+
+    Numba (0.64) caches a kernel compiled against a parallel callee loaded from
+    the cache without that callee's reload hook for the parallel runtime, so a
+    process that loads it before its threading layer runs cannot link it (the
+    process aborts: "Symbol not found: allocate_sched"). Concurrent warm-up
+    tasks create such entries; workflow and batch pools start the layer in
+    their initializers (set_num_threads).
+    """
+    import numba
+    numba.get_num_threads()
+
+
 def _compile_function(task):
     """Pool task: compile one function's signatures into the run-local cache.
 
@@ -234,7 +248,7 @@ def _warm_up(missing, seconds, cores):
                    key=lambda task: (-seconds.get(task[:2], 0.0), -len(task[2]), task[:2]))
     processes = max(1, min(cores, len(tasks)))
     compiled, timings = 0, {}
-    with parallel.safe_forkserver_pool(processes) as pool:
+    with parallel.safe_forkserver_pool(processes, initializer=_start_threading_layer) as pool:
         for module, function, count, elapsed in pool.imap_unordered(
                 _compile_function, tasks, chunksize=1):
             compiled += count

@@ -190,13 +190,16 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
                       contig, config=model.FamilyRefinementConfig(), phase_config=None,
                       identity=None, work_path=None, checkpoint_threads=1,
                       checkpoint_min_seconds=120., progress_callback=None, chromosome_map=None,
-                      refit_panel=None, founder_evidence_excluded=None, protected_intervals=None):
+                      refit_panel=None, founder_evidence_excluded=None, protected_intervals=None,
+                      recorded_digests=None):
     """Refine frozen painting/pedigree; ``checkpoint_threads=None`` uses the live CPU lease.
 
     ``refit_panel`` (the allele refit of this painting) supplies the scaffold
     founder alleles; without it the frozen assembly snapshot is decoded.
-    ``founder_evidence_excluded`` loads the contig's sample-quality flags for
-    the release-identity check only; every sample's evidence is decoded.
+    ``founder_evidence_excluded`` loads the contig's sample-quality flags and
+    ``recorded_digests`` are the compact evidence cache's identities of these
+    arrays, both for the release-identity check only; every sample's evidence
+    is decoded.
     ``protected_intervals`` (closed bp intervals, shape (n, 2)) are reference
     order breakpoints where no root frame repair is made.
     """
@@ -204,7 +207,7 @@ def refine_chromosome(painting_checkpoint, gl, positions, observed, relationship
     painting_checkpoint = painting_checkpoints.validate_painting_checkpoint(painting_checkpoint, expected_sample_ids=names)
     pedigree_components._validate_release_array_identity(
         painting_checkpoint, np.asarray(gl), np.asarray(positions), np.asarray(observed),
-        founder_evidence_excluded)
+        founder_evidence_excluded, recorded_digests)
     if chromosome_map is not None:
         if chromosome_map.contig != str(contig):
             raise ValueError("Family phase chromosome map name differs from input contig")
@@ -335,6 +338,7 @@ def _refine_contig(contig, state, phase_name, common):
             raw_sites_key="global_sites", raw_observed_mask_key="global_observed_mask")
         flags = pedigree_pipeline._founder_evidence_flags(
             store, contig, sites_payload, raw_sites_stage=common["raw_sites_stage"])
+        digests = raw_evidence.recorded_digests(sites_payload)
         del gl_payload, sites_payload
         maps = common["genetic_maps"]
         chromosome_map = None if maps is None else maps.for_contig(contig)
@@ -345,7 +349,7 @@ def _refine_contig(contig, state, phase_name, common):
             contig=contig, config=common["config"], identity=identity,
             work_path=Path(store.stage_dir(FINAL_PHASE_STAGE)) / f"{contig}.iterations.p5.b2",
             checkpoint_threads=None, chromosome_map=chromosome_map, refit_panel=refit,
-            founder_evidence_excluded=flags,
+            founder_evidence_excluded=flags, recorded_digests=digests,
             protected_intervals=None if protected is None else protected.get(contig, ()))
         checkpoints.write(checkpoints.contig_path(store.root, FINAL_PHASE_STAGE, contig),
                           result, nthreads=current_threads())
@@ -373,21 +377,26 @@ def _refinement_resources(store, contigs, workers, raw_gl_stage, raw_sites_stage
     estimate, not an RSS guarantee. Already completed chromosomes need only a
     decoded product and read buffers.
     """
+    sources = tuple(dict.fromkeys((raw_gl_stage, raw_sites_stage)))
+    resumed = {contig: store.contig_done(FINAL_PHASE_STAGE, contig) for contig in contigs}
+    compact = {contig: store.contig_done(raw_evidence.STAGE, contig) for contig in contigs}
+
+    def path(stage, contig):
+        return checkpoints.contig_path(store.root, stage, contig)
+
+    sizes = checkpoints.read_size_bytes_many(
+        path(stage, contig) for contig in contigs
+        for stage in ((FINAL_PHASE_STAGE,) if resumed[contig] else
+                      (*sources, *((raw_evidence.STAGE,) if compact[contig] else ()), PAINTING_STAGE)))
     estimates = []
     for contig in contigs:
-        resumed = store.contig_done(FINAL_PHASE_STAGE, contig)
-        if resumed:
-            estimate = 2 * checkpoints.read_size_bytes(
-                checkpoints.contig_path(store.root, FINAL_PHASE_STAGE, contig))
+        if resumed[contig]:
+            estimate = 2 * sizes[path(FINAL_PHASE_STAGE, contig)]
         else:
-            source_bytes = sum(checkpoints.read_size_bytes(
-                checkpoints.contig_path(store.root, stage, contig))
-                for stage in dict.fromkeys((raw_gl_stage, raw_sites_stage)))
-            evidence_bytes = (checkpoints.read_size_bytes(checkpoints.contig_path(
-                store.root, raw_evidence.STAGE, contig))
-                if store.contig_done(raw_evidence.STAGE, contig) else source_bytes)
-            painting_bytes = checkpoints.read_size_bytes(
-                checkpoints.contig_path(store.root, PAINTING_STAGE, contig))
+            source_bytes = sum(sizes[path(stage, contig)] for stage in sources)
+            evidence_bytes = (sizes[path(raw_evidence.STAGE, contig)] if compact[contig]
+                              else source_bytes)
+            painting_bytes = sizes[path(PAINTING_STAGE, contig)]
             # Also allow loading the original source if the compact cache is
             # unavailable to the reader; it validates ordinary source changes.
             estimate = max(source_bytes, 9 * evidence_bytes) + 2 * painting_bytes

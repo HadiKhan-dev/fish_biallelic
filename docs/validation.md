@@ -10,6 +10,77 @@ and 20/100/200 sample cohorts. The 22 template contigs are chr1–20, chr22 and 
 Seeds400–402 are development data; seed401 was held out specifically when
 choosing the family phase stopping rule, not from all project development.
 
+## Faster defaults against `285283b` — 13–14 October 2026
+
+These defaults again compute the same results, about 27% faster than `285283b`.
+The changes are computational: the local path fits and the linker scans evaluate
+blocks of samples in vectorizable loops (each sample's arithmetic and summation
+order unchanged); the feedback site posterior evaluates nine emission terms per
+sample and site whatever the founder count; founder refinement shares dosage
+tables in its candidate kernels, updates its backward chain and messages
+incrementally, starts queued refits as soon as a thread is free, builds
+component workspaces inside their thread share and lets a search left running
+alone use the threads its peers freed; block discovery reorganises its frontier
+sweep, builds each site's cavity potentials once and fills pattern tables on
+first use; the assembly preprocessing streams blocks through one worker pool as
+their inputs become ready, from one validated copy of the evidence in shared
+memory; joins run their independent steps concurrently and their panel kernels
+read one flat emission layout (parallel kernels read each block's arrays from a
+typed list once, not in every iteration); the painting emission kernel computes
+each unordered diplotype once; genotype-likelihood digests are recorded with the
+evidence instead of being recomputed downstream; contig lanes take freed threads
+at the start of each phase and, in pool phases, within about a second; memory
+planning counts only the cgroup's working set. The opt-in batch queue, which
+failed at the first multi-batch hierarchy step since `7f2abc5`, works again: it
+deletes transport files once their results are used, retries bundles that failed
+in an earlier attempt when a run resumes, and its helpers load compiled kernels
+from the store.
+
+Default design, seed 10000, one 112-CPU Sapphire Rapids node, simulation through
+truth evaluation, compiled kernels available (`285283b` from the persistent
+store; the intermediate version compiled its 514 kernels in a 38-s parallel
+warm-up), seven contig lanes in both runs. The second column is an intermediate
+version of 13 October (everything above except the in-phase thread growth, the
+batch-queue clean-up and the preprocessing, join and refinement parallelism):
+
+| Phase | `285283b` | 13 October |
+| --- | ---: | ---: |
+| Founder templates and read simulation | 1.3 min | 1.9 min (incl. warm-up) |
+| Block discovery | 18.4 min | 15.9 min |
+| Reconstruction | 2 h 24 min | 1 h 41 min |
+| Pedigree, allele refit, family phase and recombination maps | 15.2 min | 14.1 min |
+| Truth evaluation | 1.1 min | 1.8 min |
+| Total | **3 h 00 min** | **2 h 14 min** |
+
+A second node of the same type then ran the intermediate version and these
+defaults one after the other, kernels compiled in advance: 2 h 29.7 min and
+2 h 25.7 min from simulation to recombination maps (reconstruction 1 h 54.0 min
+and 1 h 50.6 min; idle CPU time inside reconstruction 25.2 and 19.1 CPU-hours).
+That node ran the same code about 13% slower than the first, so only runs on
+one node are compared. The reconstruction span is set by the busiest lane, whose
+largest contig (chr7, with an unusually expensive refinement) gained least.
+The first run of `285283b` with an empty kernel store and six lanes (the earlier
+memory plan counted cached checkpoint data as used) took 3 h 06 min. On 48-CPU
+Ice Lake pieces, seed10001 used 329 CPU-hours with the intermediate version
+instead of 443 with `285283b`, genome-wide steps included; its chromosome pieces
+used 300 CPU-hours with the intermediate version and 288 with these defaults
+(pieces ran on different nodes).
+
+Every result matched `285283b`'s: truth metrics, pedigrees and every checkpoint
+of every chromosome and genome-wide stage for seeds 10000 and 10001 (apart from
+timings, recorded code and identity hashes, execution counters and the new
+recorded digests), and the published outputs of the real Tropheops cross (with
+identical benchmark scorecards on all 22 chromosomes) and the three simulated
+confirmation designs, each run from scratch. These defaults were checked the
+same way against the intermediate version: every checkpoint of every chromosome
+and genome-wide stage for both seeds (family-phase iteration snapshots, saved on
+a timer, aside), two- and seven-lane runs, the sequential route, and the four
+confirmation designs' published outputs were identical. The batch queue was run
+on chr8, plainly and with a helper failing and the run resuming, with results
+identical to the default path and no transport files left. The typed-list reads,
+added last, were checked on their own: their kernels bitwise at 1 to 48 threads,
+refinement replays and chr8 and chr19 identical.
+
 ## Faster defaults against `7f2abc5` — 13 October 2026
 
 The defaults committed on 13 October 2026 compute the same results as `7f2abc5`

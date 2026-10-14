@@ -411,24 +411,38 @@ def _state_definitions(n_states: int) -> np.ndarray:
 def _ragged_binned_emission_kernel(
         evidence, observed, named_q, background_q, active,
         bin_starts, bin_stops, robustness_epsilon, log_floor):
-    """Direct parallel sample-by-diplotype binned emission kernel."""
+    """Direct parallel sample-by-diplotype binned emission kernel.
+
+    The ordered diplotypes (first, second) and (second, first) have bitwise
+    equal emissions (the genotype law is symmetric in the two homologues and
+    IEEE products commute), so each unordered pair is evaluated once and
+    stored at both ordered states.
+    """
 
     n_samples, _, _ = evidence.shape
     n_named, _ = named_q.shape
     n_states = n_named + 1
     n_diplotypes = n_states * n_states
+    n_pairs = n_states * (n_states + 1) // 2
     n_bins = len(bin_starts)
     result = np.empty((n_samples, n_diplotypes, n_bins), dtype=np.float64)
     uniform_log = max(math.log(1.0 / 3.0), log_floor)
-    for task in prange(n_samples * n_diplotypes):
-        sample = task // n_diplotypes
-        state = task % n_diplotypes
-        first = state // n_states
-        second = state % n_states
+    for task in prange(n_samples * n_pairs):
+        sample = task // n_pairs
+        # Unordered pairs first <= second in row-major upper-triangle order.
+        pair = task % n_pairs
+        first = 0
+        while pair >= n_states - first:
+            pair -= n_states - first
+            first += 1
+        second = first + pair
+        state = first * n_states + second
+        mirror = second * n_states + first
         for bin_index in range(n_bins):
             if ((first < n_named and not active[first, bin_index])
                     or (second < n_named and not active[second, bin_index])):
                 result[sample, state, bin_index] = -np.inf
+                result[sample, mirror, bin_index] = -np.inf
                 continue
             score = 0.0
             for site in range(bin_starts[bin_index], bin_stops[bin_index]):
@@ -467,6 +481,7 @@ def _ragged_binned_emission_kernel(
                         log_probability = log_floor
                 score += log_probability - uniform_log
             result[sample, state, bin_index] = score
+            result[sample, mirror, bin_index] = score
     return result
 
 
@@ -477,8 +492,15 @@ def calculate_ragged_binned_emissions(
         binning: RaggedBinning,
         *, robustness_epsilon: float=0.01,
         log_floor: float=-50.0,
+        sample_block: int=0,
+        before_block=None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute exact emissions in O(N*S²*L) with sample×state parallelism."""
+    """Compute exact emissions in O(N*S²*L) with sample×state parallelism.
+
+    ``sample_block`` > 0 evaluates the kernel for that many samples at a time
+    (samples are independent: values are identical) and calls ``before_block()``
+    before each block, e.g. to let a chromosome worker's CPU lease grow.
+    """
 
     if not 0.0 <= robustness_epsilon <= 1.0:
         raise ValueError("robustness_epsilon must lie in [0, 1]")
@@ -504,17 +526,23 @@ def calculate_ragged_binned_emissions(
         bin_starts[bin_index] = start
         bin_stops[bin_index] = stop
         active[:, bin_index] = state_space.active[:, start]
-    result = _ragged_binned_emission_kernel(
-        np.ascontiguousarray(evidence),
-        np.ascontiguousarray(observed),
-        np.ascontiguousarray(state_space.q),
-        np.ascontiguousarray(state_space.background_alt_probability),
-        active,
-        bin_starts,
-        bin_stops,
-        float(robustness_epsilon),
-        float(log_floor),
-    )
+    evidence = np.ascontiguousarray(evidence)
+    observed = np.ascontiguousarray(observed)
+    arguments = (np.ascontiguousarray(state_space.q),
+                 np.ascontiguousarray(state_space.background_alt_probability),
+                 active, bin_starts, bin_stops, float(robustness_epsilon), float(log_floor))
+    n_samples = evidence.shape[0]
+    if sample_block <= 0 or sample_block >= n_samples:
+        result = _ragged_binned_emission_kernel(evidence, observed, *arguments)
+    else:
+        n_states = state_space.q.shape[0] + 1
+        result = np.empty((n_samples, n_states * n_states, len(bin_starts)), dtype=np.float64)
+        for start in range(0, n_samples, sample_block):
+            if before_block is not None:
+                before_block()
+            stop = min(start + sample_block, n_samples)
+            result[start:stop] = _ragged_binned_emission_kernel(
+                evidence[start:stop], observed[start:stop], *arguments)
     return result, _state_definitions(state_space.q.shape[0] + 1)
 
 

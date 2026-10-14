@@ -333,7 +333,9 @@ class _Chains:
             a, b = map(int, cluster.groups)
             cluster_of[a] = (index, 2)
             cluster_of[b] = (index, 0)
-        self.arrays, self.bits = [], []
+        # Ordinary chains are views of ``emissions`` (relabel edits them in place).
+        self.emissions = emissions
+        self.arrays, self.bits, self.groups = [], [], []
         keys = {}
         edges = len(workspace.parents)
         self.chain = np.empty(edges, dtype=np.int64)
@@ -351,8 +353,27 @@ class _Chains:
                 keys[key] = len(self.arrays)
                 self.arrays.append(array)
                 self.bits.append(bits)
+                self.groups.append(group)
             self.chain[edge] = keys[key]
             self.mask[edge] = mask
+
+    def prefetch(self, edges, theta, cache):
+        """Put the MAP paths of these edges' chains in ``cache``, as bit_path would.
+
+        The ordinary chains are independent and run concurrently.
+        """
+        chains = sorted({int(self.chain[edge]) for edge in edges} - set(cache))
+        ordinary = [chain for chain in chains if self.bits[chain] == 2]
+        if ordinary:
+            groups = np.asarray([self.groups[chain] for chain in ordinary], dtype=np.int64)
+            # Only the requested rows are written and read (as in selector_maps).
+            paths = np.empty(self.emissions.shape[:2], dtype=np.int8)
+            refinement_messages.joint_selector_maps(self.emissions, theta, groups, paths)
+            for chain, group in zip(ordinary, groups):
+                cache[chain] = paths[group]
+        for chain in chains:
+            if self.bits[chain] != 2:
+                cache[chain] = refinement_messages.branch_map(self.arrays[chain], theta)
 
     def bit_path(self, edge, theta, cache):
         chain = int(self.chain[edge])
@@ -568,6 +589,8 @@ def repair_root_frames(workspace, messages, inferred_phase_map, config, *,
     done = set()
     for round_index in range(int(cfg.root_frame_max_rounds)):
         cache, paths, switches = {}, {}, {}
+        # A round relabels chains only after all its paths are taken.
+        chains.prefetch([edge for root in roots for edge in edges_of[root]], theta, paths)
         for root in roots:
             for edge in edges_of[root]:
                 bits = chains.bit_path(edge, theta, paths)

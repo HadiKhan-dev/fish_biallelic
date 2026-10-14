@@ -187,8 +187,12 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
     writes do not spawn a node-wide compression team while numerical workers
     run. ``memo_states`` are the previous round's likelihood memos by block
     (LikelihoodMemo states); with ``keep_memo`` the updated ones are returned
-    as the third value for the next round, else Nones.
+    as the third value for the next round, else Nones. ``cpus``: an int, or a
+    callable live budget (a contig lane's growing lease): the pool's process
+    count follows its value at the start, the workers' shared thread total its
+    growth (core.parallel.live_total).
     """
+    budget, cpus = cpus, parallel.budget_value(cpus)
     output = BlockResults(list(originals))
     diagnostics, memos, tasks = [None]*len(originals), [None]*len(originals), []
     chunks = _BlockChunks(checkpoint_io)
@@ -270,9 +274,11 @@ def select_blocks(originals, proposal_sets, gl, sites, observed, cpus, config,
             started_counter=0, participant_counter=0, batch_generation=0,
             batch_task_count=len(tasks), startup_target=workers, startup_ready=0).items()}
         print(f'[Path selection] {len(tasks)} blocks; {workers} workers, '
-              f'one initial thread each, dynamic ceiling {cpus}', flush=True)
-        with parallel.ForkserverPool(workers, initializer=feedback.initialize,
-                initargs=(metadata, cpus, active, extra, startup)) as pool:
+              f'one initial thread each, dynamic ceiling {cpus}'
+              + (' (grows with the lease)' if callable(budget) else ''), flush=True)
+        with parallel.live_total(budget) as live, parallel.ForkserverPool(
+                workers, initializer=feedback.initialize,
+                initargs=(metadata, cpus, active, extra, dict(startup, live_total=live))) as pool:
             for done, (index, result) in enumerate(pool.imap_unordered(worker, tasks, chunksize=1), 1):
                 completed(index, result)
                 if done % 20 == 0 or done == len(tasks):

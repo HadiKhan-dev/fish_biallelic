@@ -21,7 +21,7 @@ def _row_exclusions(values, out):
             suffix = np.logaddexp(suffix, values[row, col])
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def scan_sum_product(tensor, error_logs, stay, switch, quality, priors, haps, backward,
                      emission_indices, error_fraction):
     samples, sites, _ = tensor.shape

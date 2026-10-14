@@ -6,6 +6,14 @@ a frequency update, compute only the necessary frequency statistics. State
 trajectories store only the upper triangle; homologue-exchange symmetry avoids
 duplicate storage and work without changing the model or enabling fastmath.
 
+Samples are processed in lane blocks of _LANE_WIDTH: data tables and
+trajectories hold the samples of a block side by side, and every inner loop
+runs over the lanes of one block, so the compiler vectorizes the per-sample
+recursions across samples. Each sample's floating-point operations, operands
+and their order do not depend on its lane, block or the thread count, and
+totals over samples add the samples one by one in ascending order, so every
+result is the same for any thread count.
+
 Workspace memory is O(N*L*S**2), where S=K+1 includes the unknown state;
 predicted priors use S*(S+1)/2 entries per sample/marker, not S*S. The
 cached trajectories avoid repeated forward/prediction work within a fit.
@@ -18,10 +26,10 @@ import math
 from . import path_model as reference
 from .objectives import log_binary_haplotype_set_count
 
-# Samples per parallel E-step batch (memory bound only: sums are sequential in
-# sample order for any width) and elements per combine tile (work split only).
-_E_STEP_SAMPLE_BATCH = 256
-_COMBINE_TILE = 4096
+# Samples per lane block. A work split only: results do not depend on it.
+# Wide blocks amortize the per-loop overhead of the lane loops (16 lanes gave
+# 1.1x over one sample at a time, 32 1.5-1.9x, 64 2.0-2.2x, 128 no more).
+_LANE_WIDTH = 64
 
 
 def canonical(panel, frequencies=None):
@@ -68,31 +76,6 @@ def _table(gl, observed, emission):
 
 
 @njit(cache=True)
-def _outside_into(matrix, prefix, suffix, tail, output):
-    # Positive upper-triangle prefix/suffix sums avoid subtracting a nearly
-    # complete carrier mass from the total. Symmetry counts each edge twice.
-    s = len(matrix)
-    tail[s] = 0.
-    for a in range(s - 1, -1, -1):
-        left = matrix[a, a]
-        for b in range(a + 1, s):
-            prefix[a, b] = left
-            left += 2. * matrix[a, b]
-        prefix[a, s] = left
-        right = 0.
-        suffix[a, s] = 0.
-        for b in range(s - 1, a, -1):
-            right += 2. * matrix[a, b]
-            suffix[a, b] = right
-        tail[a] = tail[a + 1] + left
-    for a in range(s):
-        value = tail[a + 1]
-        for b in range(a):
-            value += prefix[b, a] + suffix[b, a + 1]
-        output[a] = value
-
-
-@njit(cache=True)
 def _prepare_emissions(gl, observed):
     n, length = observed.shape
     emissions = np.empty((n, length, 3, 3))
@@ -125,253 +108,524 @@ def _prepare_ratios(emissions, observed):
     return ratios, self_ratios
 
 
-@njit(cache=True, parallel=True)
-def _forward_samples(panel, emissions, pi, rates, priors, rows, workers):
-    """Cache triangular P_t and the common row/column marginal of F_t.
-
-    Each stored off-diagonal entry represents one ordered state, not their
-    combined mass; normalizers count it twice. The two homologues share priors
-    and unphased emissions, so their messages remain symmetric.
-    """
-    n, length, s = len(emissions), emissions.shape[1], len(pi)
-    k = s - 1
-    pairs = s * (s + 1) // 2
-    likelihoods = np.empty(n)
-    for wi in prange(workers):
-        worker = np.int64(wi)
-        filtered = np.empty(pairs)
-        for sample in range(worker, n, workers):
-            ll = 0.
-            for site in range(length):
-                prior = priors[sample, site]
-                scale = 0.
-                rate = rates[site-1] if site else 0.
-                stay = 1. - rate
-                index = 0
-                for a in range(s):
-                    ha = panel[a, site] if a < k else 2
-                    for b in range(a, s):
-                        hb = panel[b, site] if b < k else 2
-                        predicted = (stay * stay * filtered[index]
-                            + stay * rate * (rows[sample, site-1, a] * pi[b]
-                                            + pi[a] * rows[sample, site-1, b])
-                            + rate * rate * pi[a] * pi[b]) if site else pi[a] * pi[b]
-                        prior[index] = predicted
-                        value = predicted * emissions[sample, site, ha, hb]
-                        filtered[index] = value
-                        scale += value if a == b else 2. * value
-                        index += 1
-                if scale <= 0:
-                    ll = -np.inf
-                    break
-                ll += np.log(scale)
-                rows[sample, site, :] = 0.
-                index = 0
-                for a in range(s):
-                    for b in range(a, s):
-                        value = filtered[index] / scale
-                        filtered[index] = value
-                        rows[sample, site, a] += value
-                        if b != a:
-                            rows[sample, site, b] += value
-                        index += 1
-
-            likelihoods[sample] = ll
-    return likelihoods
+# ---------------------------------------------------------------------------
+# Sample-lane kernels. Layouts: et[block, site, ha, hb, lane] emissions,
+# rt[block, site, h, partner, lane] and st[block, site, h, lane] Q log ratios,
+# ot[block, site, lane] observed; trajectories pt[block, site, pair, lane]
+# (predicted priors, upper-triangle pair order) and wt[block, site, state,
+# lane] (filtered row marginals). The lane loops vectorize because their trip
+# counts are runtime values, no loop updates two rows of one array, no array
+# views are made inside loops, and error_model='numpy' removes Python's
+# ZeroDivisionError branch (an early exit). Only finite-likelihood samples are
+# read; their divisors are positive except a backward normaliser that
+# underflows to zero, which _Workspace.state reports as ZeroDivisionError.
+# Logarithms stay scalar libm calls.
+# ---------------------------------------------------------------------------
+@njit(cache=True)
+def _emission_lanes(emissions, width):
+    """Lane layout et of a block's emissions; padding lanes are never read."""
+    n, length = emissions.shape[:2]
+    blocks = (n + width - 1) // width
+    et = np.ones((blocks, length, 3, 3, width))
+    for sample in range(n):
+        block, lane = sample // width, sample % width
+        for site in range(length):
+            for a in range(3):
+                for b in range(3):
+                    et[block, site, a, b, lane] = emissions[sample, site, a, b]
+    return et
 
 
 @njit(cache=True)
-def _backward_sample(sample, panel, emissions, ratios, self_ratios, observed, pi, rates,
-                     priors, rows, full_statistics, gains, occupancy, initial, destinations):
-    """One sample's backward pass over its cached forward trajectory.
+def _ratio_lanes(observed, ratios, self_ratios, width):
+    """Lane layouts rt, st, ot of a block's Q log ratios and observed mask."""
+    n, length = observed.shape
+    blocks = (n + width - 1) // width
+    rt = np.zeros((blocks, length, 2, 3, width))
+    st = np.zeros((blocks, length, 2, width))
+    ot = np.zeros((blocks, length, width), dtype=np.bool_)
+    for sample in range(n):
+        block, lane = sample // width, sample % width
+        for site in range(length):
+            for h in range(2):
+                st[block, site, h, lane] = self_ratios[sample, site, h]
+                for p in range(3):
+                    rt[block, site, h, p, lane] = ratios[sample, site, h, p]
+            ot[block, site, lane] = observed[sample, site]
+    return rt, st, ot
 
-    Adds the sample's flip gains (observed sites only) and copy occupancy to
-    ``gains`` and ``occupancy``; writes its initial copies and its redraw
-    destinations summed over sites to ``initial`` and ``destinations``.
-    Both homologues have the same copying prior/transition and genotype
-    emissions are unordered. Thus all messages are symmetric even when the
-    founder frequencies are unequal. Evaluate each unordered cell once and
-    store what is read later: weights and posteriors in full, mass, future
-    and backward messages as upper triangles.
+
+@njit(cache=True, inline='always')
+def _pair(a, b, s):
+    """Upper-triangle pair index of the states (min(a, b), max(a, b))."""
+    if a > b:
+        a, b = b, a
+    return a * s - a * (a - 1) // 2 + (b - a)
+
+
+@njit(cache=True, error_model='numpy')
+def _forward_block(block, lanes, panel, et, pi, rates, pt, wt, slot, filtered, scale, ll, alive):
+    """Scaled forward pass of the first ``lanes`` samples of one lane block.
+
+    Writes the triangular predicted priors P_t to pt[slot] and the common
+    row/column marginal of the filtered F_t to wt[slot], site t at index
+    t % (their site length): a fit keeps every site, a score keeps one prior
+    and the two latest marginals (the recursion reads only the previous one).
+    Each stored off-diagonal entry represents one ordered state, not their
+    combined mass; normalizers count it twice. The two homologues share
+    priors and unphased emissions, so their messages remain symmetric. A
+    sample stops adding to its likelihood at its first non-positive scale
+    (likelihood -inf); the E-step refuses such a fit, so the rest of that
+    lane's trajectory is never read.
     """
-    length, k = emissions.shape[1], len(panel)
-    s = k + 1
-    backward = np.empty((s, s))
-    weights = np.empty((s, s))
-    mass = np.empty((s, s))
-    posterior = np.empty((s, s))
-    future = np.empty((s, s))
-    row, previous = np.empty(s), np.empty(s)
-    copies, redraw = np.empty(s), np.empty(s)
-    outside = np.empty(s)
-    prefix = np.empty((s, s+1))
-    suffix = np.empty((s, s+1))
-    tail = np.empty(s+1)
-    destinations[:] = 0.
-    # Defined before the site loop; every use at site > 0 follows the
-    # assignment for that site.
-    rate, stay = 0., 1.
-    backward[:, :] = 1.
-    for site in range(length-1, -1, -1):
-        emission = emissions[sample, site]
-        denominator = 0.
-        row[:] = 0.
-        redraw[:] = 0.
-        if site:
-            rate = rates[site-1]
-            stay = 1. - rate
-            for b in range(s):
-                previous[b] = stay * rows[sample, site-1, b] + rate * pi[b]
+    length, s = et.shape[1], len(pi)
+    k = s - 1
+    pairs = s * (s + 1) // 2
+    prior_period, row_period = pt.shape[1], wt.shape[1]
+    for j in range(lanes):
+        ll[j] = 0.
+        alive[j] = True
+    for site in range(length):
+        ps, ws, wp = site % prior_period, site % row_period, (site - 1) % row_period
+        rate = rates[site - 1] if site else 0.
+        stay = 1. - rate
+        # Hoisted products keep their operands and order: stay*stay*x is
+        # (stay*stay)*x and rate*rate*pi[a]*pi[b] is ((rate*rate)*pi[a])*pi[b].
+        ss, sr, rr = stay * stay, stay * rate, rate * rate
+        for j in range(lanes):
+            scale[j] = 0.
         index = 0
         for a in range(s):
             ha = panel[a, site] if a < k else 2
             for b in range(a, s):
                 hb = panel[b, site] if b < k else 2
-                weight = priors[sample, site, index] * backward[a, b]
-                index += 1
-                value = weight * emission[ha, hb]
-                weighted_future = emission[ha, hb] * backward[a, b]
-                if full_statistics:
-                    weights[a, b] = weights[b, a] = weight
-                if full_statistics or site == 0:
-                    mass[a, b] = value
-                future[a, b] = weighted_future
                 if site:
-                    row[a] += weighted_future * pi[b]
-                    redraw[a] += weighted_future * previous[b]
-                    if b != a:
-                        row[b] += weighted_future * pi[a]
-                        redraw[b] += weighted_future * previous[a]
-                denominator += value if a == b else 2. * value
-        if full_statistics or site == 0:
-            copies[:] = 0.
-            for a in range(s):
-                for b in range(a, s):
-                    prob = mass[a, b] / denominator
-                    posterior[a, b] = posterior[b, a] = prob
-                    copies[a] += 2. * prob
-                    if b != a:
-                        copies[b] += 2. * prob
+                    pa, pb = pi[a], pi[b]
+                    c3 = rr * pa * pb
+                    if a == b:
+                        for j in range(lanes):
+                            predicted = (ss * filtered[index, j]
+                                         + sr * (wt[slot, wp, a, j] * pb + pa * wt[slot, wp, b, j]) + c3)
+                            pt[slot, ps, index, j] = predicted
+                            value = predicted * et[block, site, ha, hb, j]
+                            filtered[index, j] = value
+                            scale[j] += value
+                    else:
+                        for j in range(lanes):
+                            predicted = (ss * filtered[index, j]
+                                         + sr * (wt[slot, wp, a, j] * pb + pa * wt[slot, wp, b, j]) + c3)
+                            pt[slot, ps, index, j] = predicted
+                            value = predicted * et[block, site, ha, hb, j]
+                            filtered[index, j] = value
+                            scale[j] += 2. * value
+                else:
+                    predicted = pi[a] * pi[b]
+                    if a == b:
+                        for j in range(lanes):
+                            pt[slot, ps, index, j] = predicted
+                            value = predicted * et[block, site, ha, hb, j]
+                            filtered[index, j] = value
+                            scale[j] += value
+                    else:
+                        for j in range(lanes):
+                            pt[slot, ps, index, j] = predicted
+                            value = predicted * et[block, site, ha, hb, j]
+                            filtered[index, j] = value
+                            scale[j] += 2. * value
+                index += 1
+        for j in range(lanes):
+            if alive[j]:
+                if scale[j] <= 0:
+                    ll[j] = -np.inf
+                    alive[j] = False
+                else:
+                    ll[j] += np.log(scale[j])
+        for index in range(pairs):
+            for j in range(lanes):
+                filtered[index, j] = filtered[index, j] / scale[j]
+        # A row marginal adds its pairs in the order (0, r), ..., (r - 1, r),
+        # (r, r), ..., (r, s - 1), as a sweep over the upper triangle does.
+        for r in range(s):
+            for j in range(lanes):
+                wt[slot, ws, r, j] = 0.
+            for a in range(r):
+                p = _pair(a, r, s)
+                for j in range(lanes):
+                    wt[slot, ws, r, j] += filtered[p, j]
+            for b in range(r, s):
+                p = _pair(r, b, s)
+                for j in range(lanes):
+                    wt[slot, ws, r, j] += filtered[p, j]
+
+
+@njit(cache=True, parallel=True, error_model='numpy')
+def _forward_lanes(panel, et, pi, rates, pt, wt, n, workers):
+    """Per-sample log likelihoods; caches the trajectories pt and wt."""
+    blocks, width = et.shape[0], et.shape[4]
+    s = len(pi)
+    pairs = s * (s + 1) // 2
+    likelihoods = np.empty(n)
+    for wi in prange(workers):
+        worker = np.int64(wi)
+        filtered = np.empty((pairs, width))
+        scale, ll = np.empty(width), np.empty(width)
+        alive = np.empty(width, dtype=np.bool_)
+        for block in range(worker, blocks, workers):
+            lanes = min(width, n - block * width)
+            _forward_block(block, lanes, panel, et, pi, rates, pt, wt, block, filtered, scale, ll, alive)
+            for j in range(lanes):
+                likelihoods[block * width + j] = ll[j]
+    return likelihoods
+
+
+@njit(cache=True, parallel=True, error_model='numpy')
+def _score_lanes(panel, et, pi, rates, n, workers):
+    """Per-sample log likelihoods without trajectories: the same forward
+    recursion, each worker keeping one prior and two row marginals."""
+    blocks, width = et.shape[0], et.shape[4]
+    s = len(pi)
+    pairs = s * (s + 1) // 2
+    likelihoods = np.empty(n)
+    for wi in prange(workers):
+        worker = np.int64(wi)
+        filtered = np.empty((pairs, width))
+        scale, ll = np.empty(width), np.empty(width)
+        alive = np.empty(width, dtype=np.bool_)
+        pt, wt = np.empty((1, 1, pairs, width)), np.empty((1, 2, s, width))
+        for block in range(worker, blocks, workers):
+            lanes = min(width, n - block * width)
+            _forward_block(block, lanes, panel, et, pi, rates, pt, wt, 0, filtered, scale, ll, alive)
+            for j in range(lanes):
+                likelihoods[block * width + j] = ll[j]
+    return likelihoods
+
+
+@njit(cache=True, error_model='numpy')
+def _backward_block(block, lanes, panel, et, rt, st, ot, pi, rates, pt, wt, full_statistics, direct,
+                    gains, occupancy, lane_gains, lane_occupancy, initial, destinations, work):
+    """Backward pass of the first ``lanes`` samples of one lane block over
+    their cached forward trajectories.
+
+    Both homologues have the same copying prior/transition and genotype
+    emissions are unordered, so all messages are symmetric even when the
+    founder frequencies are unequal: each unordered cell is evaluated once,
+    and the backward messages, weights, masses, posteriors and futures are
+    kept as upper triangles. A sample's flip gains (observed sites only) and
+    copy occupancy go, with ``direct``, into the totals ``gains`` and
+    ``occupancy`` in lane (= sample) order; otherwise into
+    ``lane_gains[2, k, L, lane]`` and ``lane_occupancy[s, L, lane]`` (+0 where
+    a sample adds nothing) for an ordered combine. ``initial[a, lane]`` and
+    ``destinations[a, lane]`` receive each sample's initial copies and its
+    redraw destinations summed over sites. ``work`` holds the scratch arrays.
+    """
+    (backward, weights, mass, posterior, future, row, redraw, previous, copies, outside, qgain, alt,
+     vec, prefix, suffix, tail, quotient, branch, log_old, have_log_old) = work
+    length, k = et.shape[1], len(panel)
+    s = k + 1
+    pairs = s * (s + 1) // 2
+    for a in range(s):
+        for j in range(lanes):
+            destinations[a, j] = 0.
+    for index in range(pairs):
+        for j in range(lanes):
+            backward[index, j] = 1.
+    # Defined before the site loop; every use at site > 0 follows the
+    # assignment for that site.
+    rate, stay = 0., 1.
+    for site in range(length - 1, -1, -1):
+        # vec rows: 0 denominator, 1 total, 2 maximum, 3 left, 4 right.
+        for j in range(lanes):
+            vec[0, j] = 0.
+        if site:
+            rate = rates[site - 1]
+            stay = 1. - rate
+            for b in range(s):
+                c = rate * pi[b]
+                for j in range(lanes):
+                    previous[b, j] = stay * wt[block, site - 1, b, j] + c
+        store_mass = full_statistics or site == 0
+        index = 0
+        for a in range(s):
+            ha = panel[a, site] if a < k else 2
+            for b in range(a, s):
+                hb = panel[b, site] if b < k else 2
+                twice = 1. if a == b else 2.
+                if full_statistics:
+                    for j in range(lanes):
+                        weight = pt[block, site, index, j] * backward[index, j]
+                        value = weight * et[block, site, ha, hb, j]
+                        future[index, j] = et[block, site, ha, hb, j] * backward[index, j]
+                        weights[index, j] = weight
+                        mass[index, j] = value
+                        vec[0, j] += value if a == b else twice * value
+                elif store_mass:
+                    for j in range(lanes):
+                        value = pt[block, site, index, j] * backward[index, j] * et[block, site, ha, hb, j]
+                        future[index, j] = et[block, site, ha, hb, j] * backward[index, j]
+                        mass[index, j] = value
+                        vec[0, j] += value if a == b else twice * value
+                else:
+                    for j in range(lanes):
+                        value = pt[block, site, index, j] * backward[index, j] * et[block, site, ha, hb, j]
+                        future[index, j] = et[block, site, ha, hb, j] * backward[index, j]
+                        vec[0, j] += value if a == b else twice * value
+                index += 1
+        if site:
+            # row[r] = sum future * pi[other] and redraw[r] = sum future *
+            # previous[other] over the pairs holding r, in sweep order.
+            for r in range(s):
+                for j in range(lanes):
+                    row[r, j] = 0.
+                    redraw[r, j] = 0.
+                for a in range(r):
+                    p, pa = _pair(a, r, s), pi[a]
+                    for j in range(lanes):
+                        row[r, j] += future[p, j] * pa
+                        redraw[r, j] += future[p, j] * previous[a, j]
+                for b in range(r, s):
+                    p, pb = _pair(r, b, s), pi[b]
+                    for j in range(lanes):
+                        row[r, j] += future[p, j] * pb
+                        redraw[r, j] += future[p, j] * previous[b, j]
+        if store_mass:
+            for index in range(pairs):
+                for j in range(lanes):
+                    posterior[index, j] = mass[index, j] / vec[0, j]
+            for r in range(s):
+                for j in range(lanes):
+                    copies[r, j] = 0.
+                for a in range(r):
+                    p = _pair(a, r, s)
+                    for j in range(lanes):
+                        copies[r, j] += 2. * posterior[p, j]
+                for b in range(r, s):
+                    p = _pair(r, b, s)
+                    for j in range(lanes):
+                        copies[r, j] += 2. * posterior[p, j]
             for a in range(s):
                 if full_statistics:
-                    occupancy[a, site] += copies[a]
+                    if direct:
+                        total = occupancy[a, site]
+                        for j in range(lanes):
+                            total += copies[a, j]
+                        occupancy[a, site] = total
+                    else:
+                        for j in range(lanes):
+                            lane_occupancy[a, site, j] = copies[a, j]
                 if site == 0:
-                    initial[a] = copies[a]
-        if full_statistics and observed[sample, site]:
-            _outside_into(mass, prefix, suffix, tail, outside)
+                    for j in range(lanes):
+                        initial[a, j] = copies[a, j]
+        any_observed = False
+        for j in range(lanes):
+            any_observed |= ot[block, site, j]
+        if full_statistics and not direct:
+            for a in range(k):
+                for j in range(lanes):
+                    lane_gains[0, a, site, j] = 0.
+                    lane_gains[1, a, site, j] = 0.
+        if full_statistics and any_observed:
+            for j in range(lanes):
+                have_log_old[j] = False
+            # Carrier-excluded mass outside[a] from positive upper-triangle
+            # prefix/suffix sums, which avoid subtracting a nearly complete
+            # carrier mass from the total. Symmetry counts each edge twice.
+            for j in range(lanes):
+                tail[s, j] = 0.
+            for a in range(s - 1, -1, -1):
+                p = _pair(a, a, s)
+                for j in range(lanes):
+                    vec[3, j] = mass[p, j]
+                for b in range(a + 1, s):
+                    p = _pair(a, b, s)
+                    for j in range(lanes):
+                        prefix[a, b, j] = vec[3, j]
+                        vec[3, j] += 2. * mass[p, j]
+                for j in range(lanes):
+                    prefix[a, s, j] = vec[3, j]
+                    vec[4, j] = 0.
+                    suffix[a, s, j] = 0.
+                for b in range(s - 1, a, -1):
+                    p = _pair(a, b, s)
+                    for j in range(lanes):
+                        vec[4, j] += 2. * mass[p, j]
+                        suffix[a, b, j] = vec[4, j]
+                for j in range(lanes):
+                    tail[a, j] = tail[a + 1, j] + vec[3, j]
+            for a in range(s):
+                for j in range(lanes):
+                    outside[a, j] = tail[a + 1, j]
+                for b in range(a):
+                    for j in range(lanes):
+                        outside[a, j] += prefix[b, a, j] + suffix[b, a + 1, j]
             for a in range(k):
                 ha = panel[a, site]
-                qgain, alt_mass = 0., 0.
+                for j in range(lanes):
+                    qgain[a, j] = 0.
+                    alt[a, j] = 0.
                 for b in range(s):
                     hb = panel[b, site] if b < k else 2
+                    p = _pair(a, b, s)
                     if a == b:
-                        prob, weight = posterior[a, b], weights[a, b]
-                        alternative = emission[1-ha, 1-ha]
-                        delta = self_ratios[sample, site, ha]
+                        for j in range(lanes):
+                            alt[a, j] += weights[p, j] * et[block, site, 1 - ha, 1 - ha, j]
+                        for j in range(lanes):
+                            prob, q = posterior[p, j], qgain[a, j]
+                            qgain[a, j] = q + prob * st[block, site, ha, j] if prob > 0 else q
                     else:
-                        prob = 2. * posterior[a, b]
-                        weight = 2. * weights[a, b]
-                        alternative = emission[1-ha, hb]
-                        delta = ratios[sample, site, ha, hb]
-                    alt_mass += weight * alternative
-                    if prob > 0:
-                        qgain += prob * delta
-                gains[0, a, site] += qgain
-                gains[1, a, site] += reference._log_ratio(outside[a] + alt_mass, denominator)
+                        for j in range(lanes):
+                            weight = 2. * weights[p, j]
+                            alt[a, j] += weight * et[block, site, 1 - ha, hb, j]
+                        for j in range(lanes):
+                            prob, q = 2. * posterior[p, j], qgain[a, j]
+                            qgain[a, j] = q + prob * rt[block, site, ha, hb, j] if prob > 0 else q
+                # The exact flip gain path_model._log_ratio(outside + alt,
+                # denominator): its near-branch quotient for every lane, and
+                # log(denominator) at most once per lane and site (the same
+                # libm value whenever it is evaluated).
+                for j in range(lanes):
+                    new = outside[a, j] + alt[a, j]
+                    old = vec[0, j]
+                    alt[a, j] = new
+                    difference = new - old
+                    quotient[j] = difference / old
+                    branch[j] = 0 if new == 0 else (1 if abs(difference) <= .5 * old else 2)
+                if direct:
+                    g0, g1 = gains[0, a, site], gains[1, a, site]
+                for j in range(lanes):
+                    if ot[block, site, j]:
+                        kind = branch[j]
+                        if kind == 0:
+                            ratio = -np.inf
+                        elif kind == 1:
+                            ratio = np.log1p(quotient[j])
+                        else:
+                            if not have_log_old[j]:
+                                log_old[j] = np.log(vec[0, j])
+                                have_log_old[j] = True
+                            ratio = np.log(alt[a, j]) - log_old[j]
+                        if direct:
+                            g0 += qgain[a, j]
+                            g1 += ratio
+                        else:
+                            lane_gains[0, a, site, j] = qgain[a, j]
+                            lane_gains[1, a, site, j] = ratio
+                if direct:
+                    gains[0, a, site], gains[1, a, site] = g0, g1
         if site > 0:
-            total = 0.
+            for j in range(lanes):
+                vec[1, j] = 0.
             for a in range(s):
-                destinations[a] += 2. * rate * pi[a] * redraw[a] / denominator
-                total += pi[a] * row[a]
-            maximum = 0.
+                c, pa = 2. * rate * pi[a], pi[a]
+                for j in range(lanes):
+                    destinations[a, j] += c * redraw[a, j] / vec[0, j]
+                    vec[1, j] += pa * row[a, j]
+            ss, sr, rr = stay * stay, stay * rate, rate * rate
+            for j in range(lanes):
+                vec[2, j] = 0.
+            index = 0
             for a in range(s):
                 for b in range(a, s):
-                    value = (stay * stay * future[a, b]
-                             + stay * rate * (row[a] + row[b]) + rate * rate * total)
-                    backward[a, b] = value
-                    maximum = max(maximum, value)
-            if maximum > 0:
-                for a in range(s):
-                    for b in range(a, s):
-                        backward[a, b] /= maximum
+                    for j in range(lanes):
+                        value = ss * future[index, j] + sr * (row[a, j] + row[b, j]) + rr * vec[1, j]
+                        backward[index, j] = value
+                        # numba's max(largest, value), a select.
+                        largest = vec[2, j]
+                        vec[2, j] = value if value > largest else largest
+                    index += 1
+            for index in range(pairs):
+                for j in range(lanes):
+                    largest = vec[2, j]
+                    backward[index, j] = backward[index, j] / largest if largest > 0 else backward[index, j]
 
 
-@njit(cache=True, parallel=True)
-def _backward_samples(panel, emissions, ratios, self_ratios, observed, pi, rates,
-                      priors, rows, full_statistics, batch, serial):
+@njit(cache=True)
+def _backward_work(s, width):
+    """Scratch arrays of one _backward_block call: O(S**2 * width)."""
+    pairs = s * (s + 1) // 2
+    return (np.empty((pairs, width)), np.empty((pairs, width)), np.empty((pairs, width)),
+            np.empty((pairs, width)), np.empty((pairs, width)),
+            np.empty((s, width)), np.empty((s, width)), np.empty((s, width)), np.empty((s, width)),
+            np.empty((s, width)), np.empty((s, width)), np.empty((s, width)),
+            np.empty((5, width)), np.empty((s, s + 1, width)), np.empty((s, s + 1, width)),
+            np.empty((s + 1, width)), np.empty(width), np.empty(width, dtype=np.int64),
+            np.empty(width), np.empty(width, dtype=np.bool_))
+
+
+@njit(cache=True, parallel=True, error_model='numpy')
+def _backward_lanes(panel, et, rt, st, ot, pi, rates, pt, wt, full_statistics, n, workers):
     """Sufficient statistics summed over samples in ascending sample order.
 
-    With ``serial`` (one thread) the samples add their statistics to the
-    totals directly, one after another. Otherwise samples run in parallel
-    batches of at most ``batch``; each writes its own statistics row, and
-    every output element then adds the rows of the batch one by one in sample
-    order. Every sum is therefore the same sequential chain over samples
-    0..N-1 for any thread count or batch width: a sample's zero row at an
-    unobserved site adds nothing, as the totals start at +0 and so never
-    hold -0.
+    With one worker the blocks run in order and add their lanes to the
+    totals directly, one after another. Otherwise waves of ``workers`` blocks
+    run in parallel and store per-lane statistics, and every total element
+    then adds the wave's lanes one by one in sample order. Every sum is
+    therefore the same sequential chain over samples 0..N-1 for any thread
+    count: a sample's +0 at an unobserved site adds nothing, as the totals
+    start at +0 and so never hold -0.
     """
-    n, length, k = len(emissions), emissions.shape[1], len(panel)
+    blocks, length, width = et.shape[0], et.shape[1], et.shape[4]
+    k = len(panel)
     s = k + 1
     gains = np.zeros((2, k, length))
     occupancy = np.zeros((s, length))
     initial = np.zeros(s)
     destinations = np.zeros(s)
-    if serial:
-        sample_initial, sample_destinations = np.empty(s), np.empty(s)
-        for sample in range(n):
-            _backward_sample(sample, panel, emissions, ratios, self_ratios, observed, pi, rates,
-                             priors, rows, full_statistics, gains, occupancy,
-                             sample_initial, sample_destinations)
-            for a in range(s):
-                initial[a] += sample_initial[a]
-                destinations[a] += sample_destinations[a]
+    if workers <= 1:
+        work = _backward_work(s, width)
+        lane_initial, lane_destinations = np.empty((s, width)), np.empty((s, width))
+        no_gains, no_occupancy = np.empty((2, k, 0, 0)), np.empty((s, 0, 0))
+        for block in range(blocks):
+            lanes = min(width, n - block * width)
+            _backward_block(block, lanes, panel, et, rt, st, ot, pi, rates, pt, wt, full_statistics, True,
+                            gains, occupancy, no_gains, no_occupancy, lane_initial, lane_destinations, work)
+            for j in range(lanes):
+                for a in range(s):
+                    initial[a] += lane_initial[a, j]
+                    destinations[a] += lane_destinations[a, j]
         return gains, occupancy, initial, destinations
-    width = max(1, min(batch, n))
-    sample_gains = np.empty((width if full_statistics else 0, 2, k, length))
-    sample_occupancy = np.empty((width if full_statistics else 0, s, length))
-    sample_initial = np.empty((width, s))
-    sample_destinations = np.empty((width, s))
-    gain_size, occupancy_size = 2 * k * length, s * length
-    for start in range(0, n, width):
-        count = min(width, n - start)
+    wave = min(workers, blocks)
+    lane_gains = np.empty((wave, 2, k, length if full_statistics else 0, width))
+    lane_occupancy = np.empty((wave, s, length if full_statistics else 0, width))
+    lane_initial = np.empty((wave, s, width))
+    lane_destinations = np.empty((wave, s, width))
+    for first in range(0, blocks, wave):
+        count = min(wave, blocks - first)
         for slot_index in prange(count):
-            row_slot = np.int64(slot_index)
-            if full_statistics:
-                sample_gains[row_slot] = 0.
-                sample_occupancy[row_slot] = 0.
-                _backward_sample(start + row_slot, panel, emissions, ratios, self_ratios, observed,
-                                 pi, rates, priors, rows, True, sample_gains[row_slot],
-                                 sample_occupancy[row_slot], sample_initial[row_slot],
-                                 sample_destinations[row_slot])
-            else:
-                # Without full statistics no gain or occupancy is written.
-                _backward_sample(start + row_slot, panel, emissions, ratios, self_ratios, observed,
-                                 pi, rates, priors, rows, False, gains, occupancy,
-                                 sample_initial[row_slot], sample_destinations[row_slot])
-        # Fixed-order combine: each element adds this batch's rows in sample
-        # order; tiles only distribute elements, never change an addition.
+            slot = np.int64(slot_index)
+            block = first + slot
+            lanes = min(width, n - block * width)
+            work = _backward_work(s, width)
+            _backward_block(block, lanes, panel, et, rt, st, ot, pi, rates, pt, wt, full_statistics, False,
+                            gains, occupancy, lane_gains[slot], lane_occupancy[slot], lane_initial[slot],
+                            lane_destinations[slot], work)
+        # Fixed-order combine: each element adds this wave's lanes in sample
+        # order; the founder rows only distribute elements over threads.
         if full_statistics:
-            gain_rows = sample_gains.reshape((width, gain_size))
-            gain_total = gains.reshape(gain_size)
-            for gain_tile in prange((gain_size + _COMBINE_TILE - 1) // _COMBINE_TILE):
-                low = np.int64(gain_tile) * _COMBINE_TILE
-                high = min(gain_size, low + _COMBINE_TILE)
-                for gain_row in range(count):
-                    for element in range(low, high):
-                        gain_total[element] += gain_rows[gain_row, element]
-            occupancy_rows = sample_occupancy.reshape((width, occupancy_size))
-            occupancy_total = occupancy.reshape(occupancy_size)
-            for occupancy_tile in prange((occupancy_size + _COMBINE_TILE - 1) // _COMBINE_TILE):
-                low_cell = np.int64(occupancy_tile) * _COMBINE_TILE
-                high_cell = min(occupancy_size, low_cell + _COMBINE_TILE)
-                for occupancy_row in range(count):
-                    for cell in range(low_cell, high_cell):
-                        occupancy_total[cell] += occupancy_rows[occupancy_row, cell]
-        for sample_row in range(count):
-            for a in range(s):
-                initial[a] += sample_initial[sample_row, a]
-                destinations[a] += sample_destinations[sample_row, a]
-
+            for a_index in prange(k):
+                a = np.int64(a_index)
+                for site in range(length):
+                    g0, g1 = gains[0, a, site], gains[1, a, site]
+                    for slot in range(count):
+                        lanes = min(width, n - (first + slot) * width)
+                        for j in range(lanes):
+                            g0 += lane_gains[slot, 0, a, site, j]
+                            g1 += lane_gains[slot, 1, a, site, j]
+                    gains[0, a, site], gains[1, a, site] = g0, g1
+            for a_index in prange(s):
+                a = np.int64(a_index)
+                for site in range(length):
+                    total = occupancy[a, site]
+                    for slot in range(count):
+                        lanes = min(width, n - (first + slot) * width)
+                        for j in range(lanes):
+                            total += lane_occupancy[slot, a, site, j]
+                    occupancy[a, site] = total
+        for slot in range(count):
+            lanes = min(width, n - (first + slot) * width)
+            for j in range(lanes):
+                for a in range(s):
+                    initial[a] += lane_initial[slot, a, j]
+                    destinations[a] += lane_destinations[slot, a, j]
     return gains, occupancy, initial, destinations
 
 
@@ -383,6 +637,32 @@ def prepare_fit_observations(prepared):
     return dict(prepared, fit_ratios=ratios, fit_self_ratios=self_ratios)
 
 
+def lane_emissions(prepared):
+    """Lane layout of a prepared block's emissions, built on first use and
+    kept in ``prepared`` (a block search's scores and fits share it)."""
+    et = prepared.get('lane_emissions')
+    if et is None:
+        et = prepared['lane_emissions'] = _emission_lanes(prepared['emissions'], _LANE_WIDTH)
+    return et
+
+
+def _fit_lanes(prepared):
+    """Lane layouts (et, rt, st, ot) of a prepared block's tables, built on
+    first use and kept in ``prepared``."""
+    lanes = prepared.get('fit_lanes')
+    if lanes is None:
+        lanes = prepared['fit_lanes'] = _ratio_lanes(prepared['observed'], prepared['fit_ratios'],
+                                                      prepared['fit_self_ratios'], _LANE_WIDTH)
+    return (lane_emissions(prepared), *lanes)
+
+
+def score_lanes(panel, pi, prepared):
+    """Per-sample forward log likelihoods of a trusted panel on a prepared block."""
+    et = lane_emissions(prepared)
+    return _score_lanes(panel, et, pi, prepared['rates'], len(prepared['emissions']),
+                        min(len(et), get_num_threads()))
+
+
 class _Workspace:
     """One fixed-K fit owns data tables and the latest parameter trajectory."""
 
@@ -390,29 +670,34 @@ class _Workspace:
                  recombination_rate_per_bp=5e-8, wildcard_mass=.01,
                  interval_morgans=None, founder_frequencies=None, prepared=None):
         if prepared is None:
-            panel, gl, self.observed, pi, self.rates = reference._prepare(
+            panel, gl, observed, pi, self.rates = reference._prepare(
                 panel, gl, positions, observed, generations, recombination_rate_per_bp,
                 wildcard_mass, interval_morgans, founder_frequencies)
-            self.emissions, self.ratios, self.self_ratios = _prepare_emissions(gl, self.observed)
+            emissions, ratios, self_ratios = _prepare_emissions(gl, observed)
+            self.lanes = (_emission_lanes(emissions, _LANE_WIDTH),
+                          *_ratio_lanes(observed, ratios, self_ratios, _LANE_WIDTH))
         else:
             # The outer scorer validated these observations once for this exact
             # block. Read-only data tables can be shared, trajectories cannot.
-            self.observed, self.rates = prepared['observed'], prepared['rates']
-            self.emissions = prepared['emissions']
+            self.rates = prepared['rates']
             assert prepared['wildcard_mass'] == wildcard_mass
-            assert gl.shape[:2] == self.observed.shape
+            assert gl.shape[:2] == prepared['observed'].shape
             assert np.array_equal(positions, prepared['positions'])
             intervals = (np.diff(np.asarray(positions, dtype=np.float64)) * recombination_rate_per_bp
                          if interval_morgans is None else np.asarray(interval_morgans))
             assert np.array_equal(self.rates, -np.expm1(-generations * intervals))
-            fitted_prepared = prepare_fit_observations(prepared)
-            self.ratios, self.self_ratios = fitted_prepared['fit_ratios'], fitted_prepared['fit_self_ratios']
-        n, length, s = len(gl), gl.shape[1], len(panel)+1
-        self.priors = np.empty((n, length, s * (s + 1) // 2))
-        self.rows = np.empty((n, length, s))
+            self.lanes = _fit_lanes(prepare_fit_observations(prepared))
+        self.n, length, s = len(gl), gl.shape[1], len(panel)+1
+        blocks, width = self.lanes[0].shape[0], self.lanes[0].shape[4]
+        self.priors = np.empty((blocks, length, s * (s + 1) // 2, width))
+        self.rows = np.empty((blocks, length, s, width))
         self.wildcard_mass = wildcard_mass
         self.panel = self.frequencies = self.state_cache = None
         self.state_is_full = False
+
+    def _workers(self):
+        """Lane blocks run in parallel; at most one thread per block."""
+        return min(len(self.lanes[0]), get_num_threads())
 
     def score(self, panel, frequencies):
         frequencies = np.asarray(frequencies, dtype=np.float64)
@@ -420,8 +705,8 @@ class _Workspace:
                 and np.array_equal(frequencies, self.frequencies)):
             return float(self.likelihoods.sum())
         pi = np.r_[(1-self.wildcard_mass) * (frequencies / frequencies.sum()), self.wildcard_mass]
-        values = _forward_samples(panel, self.emissions, pi, self.rates,
-            self.priors, self.rows, min(len(self.observed), get_num_threads()))
+        values = _forward_lanes(panel, self.lanes[0], pi, self.rates, self.priors, self.rows,
+                                self.n, self._workers())
         self.panel, self.frequencies = panel.copy(), frequencies.copy()
         self.pi, self.likelihoods = pi, values
         self.state_cache, self.state_is_full = None, False
@@ -435,9 +720,18 @@ class _Workspace:
             raise ValueError('E-step undefined for a sample with zero panel likelihood')
         if self.state_cache is not None and (self.state_is_full or not full_statistics):
             return self.state_cache
-        gains, occ, initial, dest = _backward_samples(panel, self.emissions, self.ratios,
-            self.self_ratios, self.observed, self.pi, self.rates, self.priors,
-            self.rows, full_statistics, _E_STEP_SAMPLE_BATCH, get_num_threads() == 1)
+        et, rt, st, ot = self.lanes
+        gains, occ, initial, dest = _backward_lanes(panel, et, rt, st, ot, self.pi, self.rates,
+            self.priors, self.rows, full_statistics, self.n, self._workers())
+        # Every site divides by its posterior normaliser (posteriors at site 0
+        # or with full statistics, redraw destinations at the other sites). A
+        # zero normaliser of a finite-likelihood sample (underflow of its
+        # forward-backward overlap) leaves NaN or +inf in that sample's initial
+        # or destination counts, hence in their nonnegative ascending totals,
+        # which are finite otherwise: fail as a per-sample division would.
+        if not (np.isfinite(initial).all() and np.isfinite(dest).all()):
+            raise ZeroDivisionError('E-step: zero posterior normaliser at a site of a sample '
+                                    'with a finite likelihood')
         self.state_cache = dict(log_likelihood=float(self.likelihoods.sum()),
             sample_log_likelihood=self.likelihoods, state_prior=self.pi,
             redraw_probabilities=self.rates, flip_gains=gains[0],

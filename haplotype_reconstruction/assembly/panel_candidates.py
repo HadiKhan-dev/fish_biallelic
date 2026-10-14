@@ -41,40 +41,43 @@ def _max_range(values, lo, hi, initial):
     return m4 if m4 > m0 else m0
 
 
-@njit(cache=True, parallel=True)
-def prefix_scores(emissions, local, candidates, order, common_prefix, penalty, samples):
+@njit(cache=True, parallel=True, nogil=True)
+def prefix_scores(flat, block_start, block_haps, block_bins, local, candidates, order,
+                  common_prefix, penalty, samples):
+    """Per-sample scores of the candidates in ``order`` (one strand on the candidate, the other
+    on a panel path or the candidate), the DP rows of a shared prefix reused; emissions: a
+    chimera_scoring.EmissionLayout's arrays."""
     m, blocks = candidates.shape
     k = len(local)
     result = np.empty((samples, m))
     starts = np.zeros(blocks + 1, np.bool_)
     for b in range(blocks):
-        starts[b + 1] = starts[b] or emissions[b].shape[3] > 0
+        starts[b + 1] = starts[b] or block_bins[b] > 0
     for sample in prange(samples):
         # The row after block b remains valid while that prefix is shared.
         prefix_dp = np.zeros((blocks + 1, k + 1))
         for index in range(m):
             candidate = order[index]
             for b in range(common_prefix[index], blocks):
-                block = emissions[b]
+                haps, bins = block_haps[b], block_bins[b]
                 c = candidates[candidate, b]
+                row = block_start[b] + (sample * haps + c) * haps * bins
                 dp = prefix_dp[b + 1]
                 dp[:] = prefix_dp[b]
                 started = starts[b]
-                for site in range(block.shape[3]):
+                for site in range(bins):
                     switch_base = _max_range(dp, 0, k + 1, -np.inf) - penalty
                     for mate in range(k + 1):
                         partner = local[mate, b] if mate < k else c
-                        e = block[sample, c, partner, site]
+                        e = flat[row + partner * bins + site]
                         dp[mate] = (max(dp[mate], switch_base) if started else 0.) + e
                     started = True
             result[sample, candidate] = _max_range(prefix_dp[blocks], 0, k + 1, -np.inf)
     return result
 
-def prepare_candidate_scores(sub, candidates):
-    """Immutable emission/prefix metadata reused throughout one search."""
-    emissions = List()
-    for item in sub:
-        emissions.append(np.ascontiguousarray(item["bin_emissions"]))
+def prepare_candidate_scores(layout, candidates):
+    """Immutable emission/prefix metadata reused throughout one search (layout: the search's
+    chimera_scoring.EmissionLayout)."""
     # lexsort's final key is primary: first block first, without changing
     # candidate output order or the forward floating-point operation order.
     order = np.lexsort(candidates[:,::-1].T)
@@ -85,36 +88,37 @@ def prepare_candidate_scores(sub, candidates):
         while length < candidates.shape[1] and prior[length] == current[length]:
             length += 1
         common[index] = length
-    return emissions, order, common
+    return layout, order, common
 
 
-@njit(cache=True, parallel=True)
-def block_restart_scores(emissions, local, penalty, samples):
+@njit(cache=True, parallel=True, nogil=True)
+def block_restart_scores(flat, block_start, block_haps, block_bins, local, penalty, samples):
     """W[s, b, r]: prefix_scores' recursion over block b alone for candidate row r, started
     afresh at the block's first bin (-inf for rows a block does not have).
 
     Any state sequence restricted to one block is a sequence of that block alone, and the
     switches at block starts are free here, so sum_b W[s, b, c_b] >= the candidate's score."""
     k = local.shape[0]
-    blocks = len(emissions)
+    blocks = len(block_start)
     widest = 1
     for b in range(blocks):
-        widest = max(widest, emissions[b].shape[1])
+        widest = max(widest, block_haps[b])
     result = np.full((samples, blocks, widest), -np.inf)
     for task in prange(samples * blocks):
         sample = task // blocks
         b = task % blocks
-        block = emissions[b]
+        haps, bins = block_haps[b], block_bins[b]
         dp = np.empty(k + 1)
-        for c in range(block.shape[1]):
-            if block.shape[3] == 0:
+        for c in range(haps):
+            if bins == 0:
                 result[sample, b, c] = 0.
                 continue
-            for site in range(block.shape[3]):
+            row = block_start[b] + (sample * haps + c) * haps * bins
+            for site in range(bins):
                 switch_base = _max_range(dp, 0, k + 1, -np.inf) - penalty if site else 0.
                 for mate in range(k + 1):
                     partner = local[mate, b] if mate < k else c
-                    e = block[sample, c, partner, site]
+                    e = flat[row + partner * bins + site]
                     dp[mate] = (max(dp[mate], switch_base) if site else 0.) + e
             result[sample, b, c] = _max_range(dp, 0, k + 1, -np.inf)
     return result
@@ -146,9 +150,9 @@ def candidate_novelty(local, candidates, penalty, panel_scores, eligible, *, wor
     candidate with score_s(c) > V_s(P) in some sample, even by rounding, is scored). Exact scores
     reuse DP prefixes shared by consecutive scored candidates in sorted order, so every scored
     value equals the all-candidate computation. Returns (novelty, candidates scored exactly)."""
-    emissions, order, _ = workspace
-    samples = emissions[0].shape[0]
-    restart = block_restart_scores(emissions, local, float(penalty), samples)
+    layout, order, _ = workspace
+    samples = layout.samples
+    restart = block_restart_scores(*layout.arrays(), local, float(penalty), samples)
     margin = panel_scores - 1e-9 * (1.0 + np.abs(panel_scores))
     possible = _possibly_novel(restart, candidates, margin) & eligible
     novelty = np.zeros(len(candidates))
@@ -160,8 +164,8 @@ def candidate_novelty(local, candidates, penalty, panel_scores, eligible, *, wor
     if len(chosen) > 1:
         equal = paths[1:] == paths[:-1]
         common[1:] = np.where(equal.all(axis=1), paths.shape[1], np.argmin(equal, axis=1))
-    scores = prefix_scores(emissions, local, paths, np.arange(len(chosen)), common, float(penalty),
-                           samples)
+    scores = prefix_scores(*layout.arrays(), local, paths, np.arange(len(chosen)), common,
+                           float(penalty), samples)
     novelty[chosen] = np.maximum(scores - panel_scores[:, None], 0.).sum(axis=0)
     return novelty, len(chosen)
 

@@ -60,18 +60,20 @@ def _row_patterns(rows, snps_per_bin, n_bins):
 @njit(cache=True, parallel=True, fastmath=False, nogil=True)
 def _assign_frontier(
         C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
-        WW_bin_emis, WW_total_cost, patterns, pair_i, pair_j,
+        WW_bin_emis, WW_total_cost, row_slots, pair_i, pair_j, pair_slots,
         state_indices, rr_i, rr_j, penalty, K, n_bins, tile_width):
     """Share immutable emissions, retaining panel-local argmin and Viterbi.
 
     Tile columns are contiguous samples in the evidence pattern tables. The
     bin reduction for every sample/state remains strictly ascending, as does
     the state traversal within every baseline argmin and Viterbi step.
+    ``row_slots`` and ``pair_slots`` are the table slots of every row's and
+    every pair's (bitwise AND) within-bin pattern.
     """
     N = C0b.shape[0]
     B = state_indices.shape[0]
     n_pairs = pair_i.shape[0]
-    n_rows = patterns.shape[0]
+    n_rows = row_slots.shape[0]
     n_shared = n_pairs + n_rows
     n_rr = rr_i.shape[0]
     n_states = n_rr + K + 1
@@ -87,22 +89,23 @@ def _assign_frontier(
             i = pair_i[p]
             j = pair_j[p]
             for b in range(n_bins):
-                pi = patterns[i, b]
-                pj = patterns[j, b]
+                si = row_slots[i, b]
+                sj = row_slots[j, b]
+                sij = pair_slots[p, b]
                 for t in range(width):
                     s = first + t
                     # Preserve the ordered left-associated scalar expression.
-                    e = (C0b[s, b] + diff1_table[b, pi, s]
-                         + diff1_table[b, pj, s] + w_table[b, pi & pj, s])
+                    e = (C0b[s, b] + diff1_table[b, si, s]
+                         + diff1_table[b, sj, s] + w_table[b, sij, s])
                     emissions[p, b, t] = e
                     totals[p, t] += e
         for row in range(n_rows):
             state = n_pairs + row
             for b in range(n_bins):
-                pattern = patterns[row, b]
+                slot = row_slots[row, b]
                 for t in range(width):
                     s = first + t
-                    e = kW_Cb[s, b] + kWdiff_table[b, pattern, s]
+                    e = kW_Cb[s, b] + kWdiff_table[b, slot, s]
                     emissions[state, b, t] = e
                     totals[state, t] += e
 
@@ -177,7 +180,7 @@ def _assign_frontier(
 @njit(cache=True, parallel=True, fastmath=False, nogil=True)
 def _update_frontier_H(
         H_batch, A, wildcard, uninformative_samples,
-        h_genotype_cost, h_wildcard_cost):
+        h_genotype_cost_sites, h_wildcard_cost_sites):
     """Apply the established missing policy and exact panel-local H sweep."""
     H_next = H_batch.copy()
     changes = np.empty(H_batch.shape[0], dtype=np.int64)
@@ -194,41 +197,50 @@ def _update_frontier_H(
             discovery_founder_updates._classify_all_founder_buckets(A[start], K)
         )
         order = discovery_founder_updates._stable_descending_usage_order(usage)
-        changes[start] = discovery_founder_updates._update_H_ordered_sweep_kernel_serial(
+        changes[start] = discovery_founder_updates._update_H_site_sweep_kernel(
             H_next[start], order, kk_idx, kj_idx, kW_idx, partner_J,
-            n_kk, n_J, n_P, h_genotype_cost, h_wildcard_cost,
+            n_kk, n_J, n_P, h_genotype_cost_sites, h_wildcard_cost_sites,
         )
     return H_next, changes
 
 
 def transition_batch(
-        C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
+        C0b, pattern_cache, kW_Cb,
         WW_bin_emis, WW_total_cost, rr_i, rr_j, penalty, snps_per_bin,
-        n_bins, h_genotype_cost, h_wildcard_cost, uninformative_samples,
-        H_batch):
-    """Evaluate a frontier with bounded emission reuse or the original kernel."""
+        n_bins, h_genotype_cost_sites, h_wildcard_cost_sites,
+        uninformative_samples, H_batch):
+    """Evaluate a frontier with bounded emission reuse or the original kernel.
+
+    ``pattern_cache`` is the evidence's binary-pattern contraction workspace.
+    The within-bin patterns of every frontier row and of every pair AND are
+    added to it first; both kernels then read its table rows by slot.
+    """
     rows, pair_i, pair_j, state_indices = prepare_frontier(H_batch, rr_i, rr_j)
+    patterns = _row_patterns(rows, snps_per_bin, n_bins)
+    row_slots = pattern_cache.slots(patterns)
+    pair_slots = pattern_cache.slots(patterns[pair_i] & patterns[pair_j])
     n_shared = len(pair_i) + len(rows)
     bytes_per_sample = 8 * (n_shared * (n_bins + 1)
                             + len(rr_i) + H_batch.shape[1] + 4)
     tile_width = min(_SAMPLE_TILE_WIDTH, _EMISSION_TILE_BYTES // bytes_per_sample)
     if tile_width < 1:
         return discovery_founder_updates._fixed_k_transition_batch_pattern_kernel(
-            C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
+            C0b, pattern_cache.diff1_table, pattern_cache.w_table, kW_Cb,
+            pattern_cache.kWdiff_table,
             WW_bin_emis, WW_total_cost, rr_i, rr_j, penalty,
-            snps_per_bin, n_bins, h_genotype_cost, h_wildcard_cost,
-            uninformative_samples, H_batch,
+            snps_per_bin, n_bins, h_genotype_cost_sites, h_wildcard_cost_sites,
+            uninformative_samples, H_batch, pattern_cache.slot_of,
         )
-    patterns = _row_patterns(rows, snps_per_bin, n_bins)
     A, cost, wildcard = _assign_frontier(
-        C0b, diff1_table, w_table, kW_Cb, kWdiff_table,
-        WW_bin_emis, WW_total_cost, patterns, pair_i, pair_j,
+        C0b, pattern_cache.diff1_table, pattern_cache.w_table, kW_Cb,
+        pattern_cache.kWdiff_table,
+        WW_bin_emis, WW_total_cost, row_slots, pair_i, pair_j, pair_slots,
         state_indices, rr_i, rr_j, penalty, H_batch.shape[1], n_bins,
         tile_width,
     )
     H_next, changes = _update_frontier_H(
         H_batch, A, wildcard, uninformative_samples,
-        h_genotype_cost, h_wildcard_cost,
+        h_genotype_cost_sites, h_wildcard_cost_sites,
     )
     return H_next, A, cost, wildcard, changes
 

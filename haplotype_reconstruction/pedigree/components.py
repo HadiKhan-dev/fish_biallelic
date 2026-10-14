@@ -22,6 +22,11 @@ _HARD_PAINTED_MODE = "hard_painted"
 _PAINTING_LOG_FLOOR = -50.0
 
 
+# Samples per block of a recomputed painting emission array: each block
+# boundary lets this chromosome worker's CPU lease grow (no value changes).
+_EMISSION_SAMPLE_BLOCK = 16
+
+
 _EVIDENCE_SCORE_IDENTITY_SCHEMA = "pedigree_result-parent-state-score-identity-v1"
 
 
@@ -728,6 +733,7 @@ def _validate_release_array_identity(
         positions: np.ndarray,
         observed: np.ndarray,
         founder_evidence_excluded: Callable[[], Any] | None=None,
+        recorded_digests: Mapping[str, str] | None=None,
 ) -> np.ndarray | None:
     """Check raw evidence against the release's input-array digests.
 
@@ -739,6 +745,10 @@ def _validate_release_array_identity(
     called only when the raw arrays differ from the release input. Returns
     the flags that reconcile the digests, or None when the raw arrays match
     as they are. Callers keep using the raw arrays.
+
+    ``recorded_digests`` are the identities that the compact evidence cache
+    recorded for exactly these arrays (core.raw_evidence.recorded_digests):
+    when all three equal the release's, the arrays match without hashing.
     """
     release = checkpoint.release_identity.record()
     expected = release.get("input_array_sha256")
@@ -749,6 +759,10 @@ def _validate_release_array_identity(
         raise pedigree_models.PedigreeEvidenceError(
             "painting release lacks the exact three-array input identity"
         )
+    if recorded_digests is not None and all(
+            isinstance(digest, str) and recorded_digests.get(name) == digest
+            for name, digest in expected.items()):
+        return None
 
     def mismatch(probabilities, mask):
         arrays = {
@@ -814,6 +828,7 @@ def _validated_raw_evidence(
         raw_observed_mask: Any,
         raw_sample_ids: Sequence[Any],
         founder_evidence_excluded: Callable[[], Any] | None=None,
+        recorded_digests: Mapping[str, str] | None=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     expected_ids = checkpoint.sample_ids
     if isinstance(raw_sample_ids, (str, bytes)):
@@ -879,6 +894,7 @@ def _validated_raw_evidence(
         raw_position_values,
         observed,
         founder_evidence_excluded,
+        recorded_digests,
     )
     observed = np.ascontiguousarray(observed, dtype=np.bool_)
     return normalized, positions, observed
@@ -1202,9 +1218,13 @@ def _prepare_component(
     if source_emissions is None:
         source_gl, source_observed, informative_counts = painting_evidence.gather_component_evidence(
             raw_gl, raw_observed, all_raw_indices, raw_gl.dtype.type(1e-12))
+        # Sample blocks let this recomputation (chromosomes beyond the
+        # painting's emission cache, e.g. the largest) use CPUs that other
+        # chromosome workers release.
         source_emissions, _ = module_painting_model.calculate_ragged_binned_emissions(
             source_gl, source_observed, state, binning,
-            robustness_epsilon=painting_config["robustness_epsilon"], log_floor=_PAINTING_LOG_FLOOR)
+            robustness_epsilon=painting_config["robustness_epsilon"], log_floor=_PAINTING_LOG_FLOOR,
+            sample_block=_EMISSION_SAMPLE_BLOCK, before_block=current_threads)
         del source_gl, source_observed
     else:
         states = state.background_index + 1
@@ -1354,12 +1374,15 @@ def prepare_painted_chromosome_components(
         candidate_source_mode: str=pedigree_models.RAGGED_QUADRATIC_MODEL,
         chromosome_map=None,
         founder_evidence_excluded: Callable[[], Any] | None=None,
+        recorded_digests: Mapping[str, str] | None=None,
 ) -> PreparedChromosome:
     """Validate and prepare independently rooted component HMM inputs.
 
-    ``founder_evidence_excluded`` loads the contig's sample-quality flags for
-    the release-identity check only (``_validate_release_array_identity``);
-    every sample's raw evidence is prepared.
+    ``founder_evidence_excluded`` loads the contig's sample-quality flags and
+    ``recorded_digests`` are the compact evidence cache's identities of these
+    raw arrays, both for the release-identity check only
+    (``_validate_release_array_identity``); every sample's raw evidence is
+    prepared.
     """
     from ..core.chromosome_parallel import current_threads
     current_threads()
@@ -1404,6 +1427,7 @@ def prepare_painted_chromosome_components(
         raw_observed_mask,
         raw_sample_ids,
         founder_evidence_excluded,
+        recorded_digests,
     )
 
     prepared = []

@@ -5,7 +5,7 @@ from haplotype_reconstruction import PACKAGE_ROOT
 
 import copy
 import gc
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import math
@@ -616,21 +616,27 @@ def _run_or_resume_loaded_contig(
             expected_sample_ids=ordered_ids,
         )
     )
-    if raw_evidence_source is not None:
-        raw_evidence.save(checkpoint_store, contig, probabilities, sites, observed,
-                          source, **raw_evidence_source)
     # Feedback and assembly work checkpoints only serve resume: they are
     # written at the fast work compression level (the genotype evidence, read
     # by every downstream stage, compresses 25% worse at that level).
     work_store = checkpoint_store.work_store()
     # Samples flagged by the sample-quality QC do not inform founder
     # construction (feedback, assembly, founder refinement); painting and the
-    # raw evidence above keep every sample's full evidence.
+    # raw evidence below keep every sample's full evidence.
     founder_probabilities, founder_observed = core_sample_quality.founder_evidence(
         probabilities, observed, source.get("founder_evidence_excluded"))
     with core_parallel.numba_thread_scope(config.release_config.num_processes):
         chromosome_evidence = assembly_pipeline.prepare_chromosome_evidence(
             blocks, founder_probabilities, sites, founder_observed)
+    if raw_evidence_source is not None:
+        # The release hashed these very arrays unless the QC replaced the
+        # founder evidence; consumers compare the recorded digests.
+        hashed = (chromosome_evidence.probabilities is probabilities
+                  and chromosome_evidence.sites is sites
+                  and chromosome_evidence.observed is observed)
+        raw_evidence.save(checkpoint_store, contig, probabilities, sites, observed, source,
+                          digests=chromosome_evidence.digests if hashed else None,
+                          **raw_evidence_source)
     blocks, feedback_identity = block_feedback.run_block_feedback(
         work_store, contig, blocks, founder_probabilities, sites, founder_observed, ordered_ids,
         discovery_identity=discovery_identity, assembly_config=config.release_config,
@@ -709,6 +715,9 @@ def _run_or_resume_loaded_contig(
         raise RuntimeError(
             f"{contig}: component manifest differs from release output"
         )
+    # In a contig lane the lease may have grown since the contig started (execution only).
+    config = replace(config, paint_cores=core_chromosome_parallel.lease_threads(
+        config.paint_cores, "painting"))
     if config.paint_label_continuity:
         # Painting product, not release: relabel row suffixes the painted
         # samples read as continuous; the release checkpoints stay unchanged.
@@ -897,6 +906,7 @@ def run_reconstruction(
     return summaries
 
 import haplotype_reconstruction.assembly.checkpoints as assembly_checkpoints
+import haplotype_reconstruction.core.chromosome_parallel as core_chromosome_parallel
 import haplotype_reconstruction.core.haplotypes as core_haplotypes
 import haplotype_reconstruction.core.parallel as core_parallel
 import haplotype_reconstruction.core.runtime as core_runtime

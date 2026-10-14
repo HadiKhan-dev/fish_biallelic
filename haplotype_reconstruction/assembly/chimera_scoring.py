@@ -7,6 +7,34 @@ import math
 from . import partial_emissions
 
 
+class EmissionLayout:
+    """The binned block emissions of one join (compute_subblock_emissions) in one flat array:
+    element (s, a, c, t) of block b is flat[start[b] + ((s * K_b + a) * K_b + c) * bins_b + t],
+    and each block's (samples, K_b, K_b, bins_b) array is a view of it. The panel search's
+    kernels read the flat array: kernels that took a block's array out of a typed List in their
+    inner loops updated that array's reference count, an atomic shared by all threads, which
+    stopped them scaling with threads."""
+
+    def __init__(self, samples, haps, bins):
+        self.samples = int(samples)
+        self.haps = np.asarray(haps, dtype=np.int64)
+        self.bins = np.asarray(bins, dtype=np.int64)
+        sizes = self.samples * self.haps ** 2 * self.bins
+        self.start = np.zeros(len(sizes), dtype=np.int64)
+        self.start[1:] = np.cumsum(sizes)[:-1]
+        self.flat = np.empty(int(sizes.sum()))
+
+    def block(self, b):
+        """Block b's (samples, K_b, K_b, bins_b) view."""
+        haps, bins = int(self.haps[b]), int(self.bins[b])
+        start = int(self.start[b])
+        return self.flat[start:start + self.samples * haps * haps * bins].reshape(
+            (self.samples, haps, haps, bins))
+
+    def arrays(self):
+        return self.flat, self.start, self.haps, self.bins
+
+
 def compute_penalty(batch_blocks):
     """Compute switching penalty based on block sizes.
 
@@ -59,11 +87,15 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites,
     Partial founder observations use the same predictive distributions as the
     linker. All-unknown sites and uniform sample observations remain neutral.
 
-    Returns list of dicts with keys: 'hap_keys', 'bin_emissions', 'n_bins'.
-    bin_emissions shape: (num_samples, n_haps, n_haps, n_bins)
+    Returns (list of dicts with keys 'hap_keys', 'bin_emissions', 'n_bins', 'key_to_local_idx',
+    EmissionLayout): bin_emissions (num_samples, n_haps, n_haps, n_bins) is a view of the layout,
+    filled block by block (one copy of the emissions).
     """
     all_emissions = []
-    for block in input_blocks:
+    layout = EmissionLayout(global_probs.shape[0],
+                            [len(block.haplotypes) for block in input_blocks],
+                            [math.ceil(len(block.positions) / snps_per_bin) for block in input_blocks])
+    for b, block in enumerate(input_blocks):
         positions = block.positions
         n_sites = len(positions)
         n_bins = math.ceil(n_sites / snps_per_bin)
@@ -104,6 +136,9 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites,
                 block_samples, alleles, partial_emissions.source_row_ids(block),
                 usable, snps_per_bin)
         del block_samples, usable, panel
+        emissions = layout.block(b)
+        emissions[...] = bin_emissions
+        del bin_emissions
         # Precompute a {hap_key: local_index_in_hap_keys} dict so downstream
         # call sites that map path entries → local hap indices can use an
         # O(1) lookup instead of repeating list.index() (O(n_haps) per call);
@@ -113,12 +148,12 @@ def compute_subblock_emissions(input_blocks, global_probs, global_sites,
         key_to_local_idx = {k: i for i, k in enumerate(hap_keys)}
         all_emissions.append({
             'hap_keys': hap_keys,
-            'bin_emissions': bin_emissions,
+            'bin_emissions': emissions,
             'n_bins': n_bins,
             'key_to_local_idx': key_to_local_idx,
         })
     core_parallel.malloc_trim()
-    return all_emissions
+    return all_emissions, layout
 
 
 def boundary_vote_matrix(sample_paths, boundary_bin, K):

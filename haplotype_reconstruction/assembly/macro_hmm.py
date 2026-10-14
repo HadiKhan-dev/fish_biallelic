@@ -4,7 +4,7 @@ from numba import njit, prange
 from .edge_counts import _log_matmul, _MAX_PRODUCT_LOG_RANGE
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _log_propagation(scores, hap_log_transition):
     """Compute log(T.T @ exp(scores[s]) @ T) in two stable contractions.
 
@@ -47,7 +47,7 @@ def _log_propagation(scores, hap_log_transition):
     return result
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _scaled_propagation(scores, hap_log_transition):
     """Same dense contraction with a range-guarded positive BLAS path."""
     n_samples = scores.shape[0]
@@ -73,7 +73,7 @@ def _scaled_propagation(scores, hap_log_transition):
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def propagate_homologue_priors(scores, hap_log_transition):
     """Exact dense O(N*(L²R + LR²)) propagation with quadratic workspace.
 

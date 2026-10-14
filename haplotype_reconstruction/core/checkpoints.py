@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 
+import bisect
 import os
 import pickle
 import struct
@@ -656,6 +657,90 @@ def read(path, nthreads=1):
                 raise ValueError("corrupt checkpoint: invalid pickle metadata") from error
 
 
+def _plain_arrays(value):
+    """The arrays inside plain data (arrays, dicts, lists, tuples, scalars, strings)."""
+    if isinstance(value, np.ndarray) and not value.dtype.hasobject:
+        return [value]
+    if isinstance(value, dict):
+        return [array for item in value.values() for array in _plain_arrays(item)]
+    if isinstance(value, (list, tuple)):
+        return [array for item in value for array in _plain_arrays(item)]
+    if value is None or isinstance(value, (str, bytes, int, float, complex, np.generic)):
+        return []
+    raise TypeError(f"read_items selects plain data, not {type(value).__name__}")
+
+
+def read_items(path, keys, nthreads=1):
+    """Selected top-level entries of a dict checkpoint, decoding only their arrays.
+
+    Entries must be plain data. The metadata is first unpickled against
+    untouched placeholder buffers (an unwritten allocation holds no memory) to
+    find which buffers the selected arrays use; only the buffer groups holding
+    those are read, checked and decoded, and the metadata is unpickled again
+    with them. Missing keys are omitted.
+    """
+    nthreads = max(1, int(nthreads))
+    if hasattr(os, "sched_getaffinity"):
+        nthreads = min(nthreads, len(os.sched_getaffinity(0)))
+    with open(path, "rb") as handle:
+        file_size, metadata_offset, expected_buffers = _read_header(handle, path)
+        groups = []
+        for descriptors, offsets, total, n_chunks in _buffer_group_headers(
+                handle, metadata_offset, expected_buffers):
+            groups.append((descriptors, offsets, total, n_chunks, handle.tell()))
+            _chunk_layout(handle, total, n_chunks, metadata_offset, "buffer group")
+        metadata_size, = _U64.unpack(_read_exact(handle, _U64.size, "metadata size"))
+        n_metadata_chunks, = _U32.unpack(_read_exact(handle, _U32.size, "metadata chunk count"))
+        if metadata_size > sys.maxsize:
+            raise ValueError("corrupt checkpoint: metadata is too large")
+        with tempfile.SpooledTemporaryFile(
+            max_size=_METADATA_SPOOL_BYTES, mode="w+b"
+        ) as metadata:
+            _read_chunks_to_file(handle, metadata_size, n_metadata_chunks, file_size,
+                                 nthreads, "metadata", metadata)
+            if handle.tell() != file_size:
+                raise ValueError("corrupt checkpoint: trailing data")
+
+            def selected(buffers):
+                metadata.seek(0)
+                try:
+                    payload = pickle.Unpickler(metadata, buffers=buffers).load()
+                except (EOFError, pickle.UnpicklingError) as error:
+                    raise ValueError("corrupt checkpoint: invalid pickle metadata") from error
+                if not isinstance(payload, dict):
+                    raise TypeError(f"{path}: read_items needs a dict checkpoint")
+                return {key: payload[key] for key in keys if key in payload}
+
+            buffers = [np.empty(size, dtype=np.uint8)
+                       for descriptors, *_ in groups for size, _readonly in descriptors]
+            items = selected(buffers)
+            spans = sorted((buffer.ctypes.data, buffer.nbytes, index)
+                           for index, buffer in enumerate(buffers) if buffer.nbytes)
+            starts = [start for start, _, _ in spans]
+            needed = set()
+            for array in _plain_arrays(items):
+                if array.nbytes:
+                    address = array.ctypes.data
+                    position = bisect.bisect_right(starts, address) - 1
+                    if position >= 0 and address < spans[position][0] + spans[position][1]:
+                        needed.add(spans[position][2])
+            if not needed:
+                return items
+            first = 0
+            for descriptors, offsets, total, n_chunks, chunk_list in groups:
+                indices = range(first, first + len(descriptors))
+                first += len(descriptors)
+                if needed.isdisjoint(indices):
+                    continue
+                handle.seek(chunk_list)
+                backing = memoryview(_read_chunks(
+                    handle, total, n_chunks, metadata_offset, nthreads, "buffer group"))
+                for index, (size, readonly), offset in zip(indices, descriptors, offsets):
+                    view = backing[offset:offset + size]
+                    buffers[index] = view.toreadonly() if readonly else view
+            return selected(buffers)
+
+
 def _buffer_group_headers(handle, metadata_offset, expected_buffers):
     """Yield descriptors; the consumer must advance over each chunk list."""
     buffer_count = 0
@@ -727,6 +812,21 @@ def read_size_bytes(path):
         if handle.tell() != file_size:
             raise ValueError("corrupt checkpoint: trailing data")
         return total_bytes + metadata_size
+
+
+# A decoded-size scan is a chain of small dependent header reads, so scanning
+# many checkpoints one after another waits on shared-filesystem latency (cold
+# Lustre: 143 N = 320 files 20.1 s serially, 2.7 s with 16 threads).
+SIZE_SCAN_THREADS = 16
+
+
+def read_size_bytes_many(paths):
+    """{path: read_size_bytes(path)} for the given paths, scanned concurrently."""
+    paths = list(dict.fromkeys(paths))
+    if len(paths) < 2:
+        return {path: read_size_bytes(path) for path in paths}
+    with ThreadPoolExecutor(min(SIZE_SCAN_THREADS, len(paths))) as scanner:
+        return dict(zip(paths, scanner.map(read_size_bytes, paths)))
 
 
 def _read_header(handle, path):

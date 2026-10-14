@@ -23,11 +23,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from heapq import nsmallest
 import math
+import threading
 import time
 import numba
 import numpy as np
 from numba import njit, prange
-from numba.typed import List
 
 from . import panel_certify
 from . import panel_count
@@ -141,15 +141,19 @@ def _exclusion_scores(current):
 
 
 @njit(cache=True, parallel=True)
-def _stream_static_gains(totals, local, candidates, order, common, best, excluded, chunks):
+def _stream_static_gains(flat, start, haps, local, candidates, order, common, best, excluded,
+                         chunks):
     """Accumulate blocks before mate maxima; retain only a K-vector per task.
 
     Candidates are visited in sorted order (order, common = leading blocks shared with the
     previous one) in contiguous chunks, one task each: the block sums of a shared prefix are
     reused, accumulated in block order as before; per candidate the samples are summed in order.
+    Each task sums into rows of its own (the same chain per cell, from zero) and copies them
+    out at the end: rows of tasks interleaved in candidate order would share cache lines.
+    Block b's totals are flat[start[b] + (sample * K_b + a) * K_b + c] (K_b = haps[b]).
     """
     samples, k = excluded.shape
-    blocks = len(totals)
+    blocks = len(start)
     gains = np.zeros((len(candidates), k))
     count = len(order)
     for chunk in prange(chunks):
@@ -159,6 +163,7 @@ def _stream_static_gains(totals, local, candidates, order, common, best, exclude
             continue
         cross = np.empty((blocks + 1, k))
         diagonal = np.empty(blocks + 1)
+        own = np.zeros((hi - lo, k))
         for sample in range(samples):
             for position in range(lo, hi):
                 candidate = order[position]
@@ -167,12 +172,14 @@ def _stream_static_gains(totals, local, candidates, order, common, best, exclude
                     cross[0, :] = 0.
                     diagonal[0] = 0.
                 for block in range(shared, blocks):
-                    total = totals[block]
+                    kb = haps[block]
+                    base = start[block] + sample * kb * kb
                     c = candidates[candidate, block]
-                    diagonal[block + 1] = diagonal[block] + np.float64(total[sample, c, c])
+                    diagonal[block + 1] = diagonal[block] + np.float64(flat[base + c * kb + c])
                     for partner in range(k):
-                        cross[block + 1, partner] = (cross[block, partner]
-                                                     + np.float64(total[sample, c, local[partner, block]]))
+                        cross[block + 1, partner] = (
+                            cross[block, partner]
+                            + np.float64(flat[base + c * kb + local[partner, block]]))
                 row = cross[blocks]
                 winner = np.argmax(row)
                 first = row[winner]
@@ -183,11 +190,14 @@ def _stream_static_gains(totals, local, candidates, order, common, best, exclude
                 for removed in range(k):
                     retained = second if removed == winner else first
                     score = max(excluded[sample, removed], retained, diagonal[blocks])
-                    gains[candidate, removed] += score - best[sample]
+                    own[position - lo, removed] += score - best[sample]
+        for position in range(lo, hi):
+            for removed in range(k):
+                gains[order[position], removed] = own[position - lo, removed]
     return gains.T
 
 
-def static_replacement_gains(sub, local, candidates, *, totals=None, workspace=None):
+def static_replacement_gains(local, candidates, *, totals, workspace):
     """Exact all-replacement gains in the *no-switch* proposal objective.
 
     This allows pair reassignment, unlike fixed-painting deltas. Only two
@@ -197,24 +207,26 @@ def static_replacement_gains(sub, local, candidates, *, totals=None, workspace=N
     The N*M*K candidate/mate tensor is streamed in native code, preserving
     float64 block accumulation and the sample-reduction order; candidates
     sharing a prefix (workspace: prepare_candidate_scores' sorted order) share
-    its block sums.
+    its block sums; totals: the blocks' bin-summed emissions.
     """
-    if totals is None:
-        totals = [item['bin_emissions'].sum(axis=3) for item in sub]
     samples = totals[0].shape[0]
     k = len(local)
     current = np.zeros((samples, k, k))
-    arrays = List()
     for b, total in enumerate(totals):
         a = local[:, b]
         current += total[:, a[:, None], a[None,:]]
-        arrays.append(total)
     best, excluded = _exclusion_scores(current)
-    if workspace is None:
-        workspace = prepare_candidate_scores(sub, candidates)
     _, order, common = workspace
     chunks = max(1, min(len(order), 4 * max(1, numba.get_num_threads())))
-    return _stream_static_gains(arrays, local, candidates, order, common, best, excluded, chunks)
+    # The kernel reads the block totals as one flat array: taking a block's array out of a
+    # typed List in its inner loop would update that array's reference count, an atomic shared
+    # by all threads, which made the kernel slower with more threads than with one.
+    haps = np.asarray([total.shape[1] for total in totals], dtype=np.int64)
+    start = np.zeros(len(totals), dtype=np.int64)
+    start[1:] = np.cumsum([total.size for total in totals])[:-1]
+    flat = np.concatenate([np.ascontiguousarray(total).ravel() for total in totals])
+    return _stream_static_gains(flat, start, haps, local, candidates, order, common, best,
+                                excluded, chunks)
 
 
 def _cycle_permutation(preference):
@@ -367,11 +379,12 @@ def search_summary(records_per_block):
     return summary
 
 
-def evaluate_panel(paths, sub, penalty, samples, *, paint=False, per_sample=False,
+def evaluate_panel(paths, sub, penalty, samples, *, layout, paint=False, per_sample=False,
                    tensor_budget_mb=256, num_threads=None):
     """Same objective/traceback; score directly or paint (Viterbi traceback).
 
-    Samples factor independently. Scores stream existing block emissions; the
+    Samples factor independently. Scores stream existing block emissions (layout: the
+    chimera_scoring.EmissionLayout of sub); the
     painting runs over unordered path pairs (panel_scoring.paint_emissions) in
     sample chunks whose back pointers (int32, bins x pairs per sample) fit in
     tensor_budget_mb. Neither path prunes states or changes an individual's
@@ -379,9 +392,9 @@ def evaluate_panel(paths, sub, penalty, samples, *, paint=False, per_sample=Fals
     """
     kernels._resolve_threads(num_threads)
     if not paint:
-        result = panel_scoring.score_panel(paths, sub, penalty, samples)
+        result = panel_scoring.score_panel(paths, sub, penalty, samples, layout)
         return result if per_sample else float(result.sum())
-    arrays, indices = panel_scoring.panel_indices(paths, sub)
+    indices = panel_scoring.panel_indices(paths, sub)
     bins = sum(item['n_bins'] for item in sub)
     bytes_per_sample = max(1, len(paths) * (len(paths) + 1) // 2 * bins * 4)
     chunk = max(1, min(samples, int(tensor_budget_mb * 1024 ** 2) // bytes_per_sample))
@@ -389,8 +402,8 @@ def evaluate_panel(paths, sub, penalty, samples, *, paint=False, per_sample=Fals
     for start in range(0, samples, chunk):
         stop = min(samples, start + chunk)
         kernels._resolve_threads(num_threads)
-        result[start:stop] = panel_scoring.paint_emissions(arrays, indices, float(penalty),
-                                                           start, stop)
+        result[start:stop] = panel_scoring.paint_emissions(*layout.arrays(), indices,
+                                                           float(penalty), start, stop)
     return result
 
 def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, global_sites,
@@ -411,7 +424,18 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
     are tested the same way, up to quota 256, or up to 1024 once a move was accepted
     at the 256 rung. The panel size follows from the count rule; the pool,
     not a cap, bounds it. A reported backstop never decides a normal result.
+
+    The duplicate-seed refits of one count step are independent searches from the same
+    panel: they run concurrently (chimera_kernels.concurrent_map), each with a share of
+    num_threads, and are evaluated in seed order as before.
     """
+    # A thread running one of the concurrent refits takes its share of the join's threads
+    # (refit_threads.share) wherever the search resolves its thread count.
+    join_threads, refit_threads = num_threads, threading.local()
+    if callable(join_threads):
+        def num_threads():
+            share = getattr(refit_threads, 'share', None)
+            return join_threads() if share is None else share()
     samples = global_probs.shape[0]
     blocks = len(batch_blocks)
     candidates = list(dict.fromkeys(tuple(path) for path, _ in beam_results))
@@ -421,7 +445,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
     spb = max(scoring.compute_spb(batch_blocks),
             math.ceil(sum(len(b.positions) for b in batch_blocks) / config.max_bins))
     cc = scoring.compute_cc(batch_blocks, samples, cc_scale)
-    sub = scoring.compute_subblock_emissions(
+    sub, layout = scoring.compute_subblock_emissions(
         batch_blocks,
         global_probs,
         global_sites,
@@ -432,10 +456,12 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
     def keys(paths):
         return [[fast_mesh.reverse_mappings[b][h] for b, h in enumerate(path)] for path in paths]
     evaluations = 0
+    evaluations_lock = threading.Lock()
     def score(paths):
         nonlocal evaluations
-        evaluations += 1
-        return evaluate_panel(keys(paths), sub, pen, samples, num_threads=num_threads,
+        with evaluations_lock:
+            evaluations += 1
+        return evaluate_panel(keys(paths), sub, pen, samples, layout=layout, num_threads=num_threads,
             tensor_budget_mb=config.tensor_budget_mb, per_sample=True)
     # Start: the anchor-covering panel of largest likelihood. It only seeds the
     # search; the count rule decides the panel size.
@@ -470,7 +496,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         nonlocal candidates, candidate_array, candidate_workspace, capacity
         candidates = pool
         candidate_array = np.asarray(candidates, dtype=np.int64)
-        candidate_workspace = prepare_candidate_scores(sub, candidate_array)
+        candidate_workspace = prepare_candidate_scores(layout, candidate_array)
         capacity = len(candidates)
     candidate_array = candidate_workspace = capacity = None
     set_pool(original_pool)
@@ -497,7 +523,6 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             beam_seconds[0] += time.perf_counter() - started
         return beam_cache[key]
 
-    emissions = panel_certify.emission_list(sub)
     total_bins = int(bin_offsets[-1])
     block_offsets = np.ascontiguousarray(bin_offsets[:-1], dtype=np.int64)
     block_sizes = [len(item['hap_keys']) for item in sub]
@@ -516,6 +541,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
 
     forwards_cache = {}
     births_by_set = {}
+    birth_sets = [BIRTH_SETS]       # raised while the seed refits of a count step run
+    cache_lock = threading.Lock()   # concurrent seed refits share both caches
 
     def panel_forwards(panel):
         """Exclusion forwards of a panel (row order matters), kept for the last few panels: a
@@ -527,24 +554,30 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         the last BIRTH_SETS sets), above all the duplicate-seed refits of a count step, whose
         panels start as P plus a copy and mostly continue through the same accepted moves."""
         key = tuple(map(tuple, panel))
-        found = forwards_cache.get(key)
+        with cache_lock:
+            found = forwards_cache.get(key)
         if found is None:
             kernels._resolve_threads(num_threads)
-            found = panel_certify.PanelForwards(emissions, to_local(np.asarray(panel)), pen,
-                                                total_bins)
-            if len(forwards_cache) >= 3:
-                forwards_cache.pop(next(iter(forwards_cache)))
-            forwards_cache[key] = found
+            computed = panel_certify.PanelForwards(layout, to_local(np.asarray(panel)), pen,
+                                                   total_bins)
+            with cache_lock:
+                found = forwards_cache.get(key)
+                if found is None:
+                    found = computed
+                    if len(forwards_cache) >= 3:
+                        forwards_cache.pop(next(iter(forwards_cache)))
+                    forwards_cache[key] = found
         path_set = tuple(sorted(set(key)))
-        shared = births_by_set.pop(path_set, None)
-        if shared is None:
-            shared = found.births
-        elif shared is not found.births:
-            shared.update(found.births)
-            found.births = shared
-        births_by_set[path_set] = shared
-        if len(births_by_set) > BIRTH_SETS:
-            births_by_set.pop(next(iter(births_by_set)))
+        with cache_lock:
+            shared = births_by_set.pop(path_set, None)
+            if shared is None:
+                shared = found.births
+            elif shared is not found.births:
+                shared.update(found.births)
+                found.births = shared
+            births_by_set[path_set] = shared
+            while len(births_by_set) > birth_sets[0]:
+                births_by_set.pop(next(iter(births_by_set)))
         return found
 
     def certify(panel, pool, pool_offset, structural, pool_capacity, panel_ll=None, slots=None,
@@ -624,7 +657,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         return best_move, record, forwards
 
     geometry = panel_count.RowGeometry(batch_blocks)
-    counter = panel_count.CountStep(emissions=emissions, total_bins=total_bins,
+    counter = panel_count.CountStep(layout=layout, total_bins=total_bins,
                                     offsets=block_offsets, penalty=pen,
                                     cost=cc, samples=samples, geometry=geometry, to_local=to_local,
                                     score=score)
@@ -682,7 +715,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             return values
 
         kernels._resolve_threads(num_threads)
-        painted = evaluate_panel(keys(panel), sub, pen, samples, paint=True,
+        painted = evaluate_panel(keys(panel), sub, pen, samples, layout=layout, paint=True,
             num_threads=num_threads, tensor_budget_mb=config.tensor_budget_mb)
         local = np.asarray(panel, dtype=np.int64)
         fields = []
@@ -708,7 +741,7 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             for founder in np.argsort(-similarity, kind='stable')[:2]:
                 proposals['novel_replace'].append((float(novelty[c] * (.5 + similarity[founder])),
                     ('replace', int(founder), int(c))))
-        static_gains = static_replacement_gains(sub, local, candidate_array, totals=static_totals,
+        static_gains = static_replacement_gains(local, candidate_array, totals=static_totals,
                                                 workspace=candidate_workspace)
         gains = np.zeros((k, len(candidates)))
         for b in range(blocks):
@@ -725,7 +758,8 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
         proposal_counts['switch_splice'] = proposal_counts['splice']
         # A lower-penalty painting reveals coordinated apparent switches.
         # It generates proposals only; acceptance uses the join score at pen.
-        exploratory = evaluate_panel(keys(panel), sub, min(pen, 10.), samples, paint=True,
+        exploratory = evaluate_panel(keys(panel), sub, min(pen, 10.), samples, layout=layout,
+            paint=True,
             num_threads=num_threads, tensor_budget_mb=config.tensor_budget_mb)
         preference = np.zeros((k, k))
         pair_gain = np.zeros((k, k))
@@ -802,21 +836,64 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
             seconds=time.perf_counter() - started)
         return best, record
 
-    def refit_seed(panel, panel_scores, panel_ll, slots, refit_scores):
-        """The duplicate-seed refit: certified best-improvement over the same-count moves that
-        change the seed or its copy (both exempt from the novelty rule meanwhile)."""
-        moves = []
+    def share_threads(function):
+        """function(item) run as an item of kernels.concurrent_map: the search's thread
+        resolution in this thread takes the item's share."""
+        def run(item, threads):
+            refit_threads.share = threads if callable(join_threads) else None
+            try:
+                return function(item)
+            finally:
+                refit_threads.share = None
+        return run
+
+    def refit_seeds(seeds, refit_scores):
+        """The duplicate-seed refits: for each seed, certified best-improvement from P plus a copy
+        of the seed over the same-count moves that change the seed or its copy (both exempt from
+        the novelty rule meanwhile). Returns (panel, scores, likelihood, passes) per seed.
+
+        The refits are independent searches, advanced together one certify pass at a time: the
+        passes of one round run concurrently (each refit with a share of the threads); before
+        them, the pool's birth bounds of every path set the round meets are computed once with
+        all threads (they depend on the path set alone, and the refits mostly reach the same
+        sets), and the caches keep all of them through the round."""
+        states = [[selected + [selected[seed]], baseline_scores, likelihood,
+                   frozenset((seed, len(selected))), []] for seed in seeds]
+        active = list(range(len(states)))
+
+        def certify_pass(index):
+            panel, _, panel_ll, slots, _ = states[index]
+            return certify(panel, candidates, 0, True, len(candidates) + 1, panel_ll=panel_ll,
+                           slots=slots, refit_scores=refit_scores)[:2]
         for _ in range(sweep_backstop):
-            best_move, record, _ = certify(panel, candidates, 0, True, len(candidates) + 1,
-                                           panel_ll=panel_ll, slots=slots,
-                                           refit_scores=refit_scores)
-            moves.append(dict(accepted=record['accepted'], survivors=record['survivors'],
-                              exact=record['exact_scores'],
-                              change=record['accepted_likelihood_change']))
-            if best_move is None:
+            if not active:
                 break
-            panel, panel_ll, panel_scores = list(best_move[3]), best_move[4][0], best_move[4][1]
-        return panel, panel_scores, panel_ll, moves
+            panels = {}
+            for index in active:
+                panel = states[index][0]
+                panels.setdefault(tuple(sorted(set(map(tuple, panel)))), panel)
+            birth_sets[0] = max(BIRTH_SETS, len(panels))
+            for path_set, panel in panels.items():
+                members = set(path_set)
+                outside = [path for path in candidates if path not in members]
+                forwards = panel_forwards(panel)
+                if outside:
+                    kernels._resolve_threads(num_threads)
+                    forwards.birth_values(to_local(outside), block_offsets)
+            moved = []
+            outcomes = kernels.concurrent_map(share_threads(certify_pass), active, join_threads)
+            for index, (best_move, record) in zip(active, outcomes):
+                state = states[index]
+                state[4].append(dict(accepted=record['accepted'], survivors=record['survivors'],
+                                     exact=record['exact_scores'],
+                                     change=record['accepted_likelihood_change']))
+                if best_move is not None:
+                    state[0], state[2], state[1] = (list(best_move[3]), best_move[4][0],
+                                                    best_move[4][1])
+                    moved.append(index)
+            active = moved
+        birth_sets[0] = BIRTH_SETS
+        return [(state[0], state[1], state[2], state[4]) for state in states]
 
     def deaths(forwards):
         """Deaths by the count rule; True if any path died.
@@ -913,14 +990,15 @@ def select_and_resolve(beam_results, fast_mesh, batch_blocks, global_probs, glob
                         break
             seed_started = time.perf_counter()
             # Every refit starts from P plus a copy, so the refits of one count step reach many of
-            # the same one-path moves (above all replace(seed, c) = P + c): each is scored once.
+            # the same one-path moves (above all replace(seed, c) = P + c): each is scored once
+            # (its value does not depend on the refit that scored it).
             shared_scores = {}
-            for seed in chosen:
-                seeded = selected + [selected[seed]]
-                refit, refit_scores, refit_ll, used = refit_seed(
-                    seeded, baseline_scores, likelihood, frozenset((seed, len(selected))),
-                    shared_scores)
-                settled, settled_scores, settle_record, survives = counter.settle(refit, refit_scores)
+            refits = refit_seeds(chosen, shared_scores)
+            settles = kernels.concurrent_map(
+                share_threads(lambda refit: counter.settle(refit[0], refit[1])), refits,
+                join_threads)
+            for seed, (_, _, _, used), (settled, settled_scores, settle_record, survives) in zip(
+                    chosen, refits, settles):
                 count['seed_refits'] += 1
                 settled_ll = float(settled_scores.sum())
                 seed_record = dict(kind='seed_birth', seed=seed, refit_passes=len(used), refit=used,

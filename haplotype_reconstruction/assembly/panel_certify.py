@@ -37,7 +37,6 @@ sum_b K_b)).
 import numba
 import numpy as np
 from numba import njit, prange
-from numba.typed import List
 
 # Same-count moves; birth(c) is bounded alongside replace(f, c) (pool_bounds) but never
 # accepted here: count changes are decided by panel_count.
@@ -172,9 +171,10 @@ def _record_covers(scores, best, first, second, singles, pairs, record_pairs):
 
 
 @njit(cache=True)
-def _forward(emissions, rows, first, second, penalty, sample, out, singles, pairs,
-             record, record_pairs, gathered):
-    """Forward maxima of one sample over the given unordered states.
+def _forward(flat, block_start, block_haps, block_bins, rows, first, second, penalty, sample, out,
+             singles, pairs, record, record_pairs, gathered):
+    """Forward maxima of one sample over the given unordered states (emissions: an
+    EmissionLayout's arrays).
 
     The recursion and its operation order are the production scorer's. Each block's state
     emissions are first copied into gathered (bins x states), contiguous per bin.
@@ -183,14 +183,13 @@ def _forward(emissions, rows, first, second, penalty, sample, out, singles, pair
     scores = np.empty(n)
     best = -np.inf
     t = 0
-    for block in range(len(emissions)):
-        values = emissions[block]
-        bins = values.shape[3]
+    for block in range(len(block_start)):
+        haps, bins = block_haps[block], block_bins[block]
+        base = block_start[block] + sample * haps * haps * bins
         for z in range(n):
-            row = rows[first[z], block]
-            column = rows[second[z], block]
+            at = base + (rows[first[z], block] * haps + rows[second[z], block]) * bins
             for marker in range(bins):
-                gathered[marker, z] = values[sample, row, column, marker]
+                gathered[marker, z] = flat[at + marker]
         for marker in range(bins):
             if t == 0:
                 for z in range(n):
@@ -210,32 +209,32 @@ def _forward(emissions, rows, first, second, penalty, sample, out, singles, pair
 
 
 @njit(cache=True)
-def _widest(emissions):
+def _widest(block_bins):
     widest = 1
-    for block in range(len(emissions)):
-        widest = max(widest, emissions[block].shape[3])
+    for block in range(len(block_bins)):
+        widest = max(widest, block_bins[block])
     return widest
 
 
-@njit(cache=True, parallel=True)
-def forward_covers(emissions, rows, penalty, total_bins):
+@njit(cache=True, parallel=True, nogil=True)
+def forward_covers(flat, block_start, block_haps, block_bins, rows, penalty, total_bins, samples):
     """G[s, t] and the per-sample single covers and disjoint pair covers."""
     k = rows.shape[0]
-    samples = emissions[0].shape[0]
     forward = np.empty((samples, total_bins))
     singles = np.zeros((samples, k), np.bool_)
     pairs = np.zeros((samples, k, k), np.bool_)
     first, second = _pair_lists(np.ones(k, np.bool_))
-    widest = _widest(emissions)
+    widest = _widest(block_bins)
     for sample in prange(samples):
         gathered = np.empty((widest, len(first)))
-        _forward(emissions, rows, first, second, penalty, sample, forward[sample],
-                 singles[sample], pairs[sample], True, True, gathered)
+        _forward(flat, block_start, block_haps, block_bins, rows, first, second, penalty, sample,
+                 forward[sample], singles[sample], pairs[sample], True, True, gathered)
     return forward, singles, pairs
 
 
-@njit(cache=True, parallel=True)
-def single_exclusions(emissions, rows, penalty, total_bins, index, slots):
+@njit(cache=True, parallel=True, nogil=True)
+def single_exclusions(flat, block_start, block_haps, block_bins, rows, penalty, total_bins, index,
+                      slots):
     """G^{-f} for every (sample, f) with index >= 0, and the single covers of
     each such forward (second[s, f, j]: j covers a maximiser set of P \\ f)."""
     k = rows.shape[0]
@@ -243,7 +242,7 @@ def single_exclusions(emissions, rows, penalty, total_bins, index, slots):
     excluded = np.empty((slots, total_bins))
     second = np.zeros((samples, k, k), np.bool_)
     unused = np.zeros((1, 1), np.bool_)
-    widest = _widest(emissions)
+    widest = _widest(block_bins)
     for sample in prange(samples):
         allowed = np.ones(k, np.bool_)
         gathered = np.empty((widest, k * (k + 1) // 2))
@@ -253,8 +252,9 @@ def single_exclusions(emissions, rows, penalty, total_bins, index, slots):
                 continue
             allowed[founder] = False
             first, other = _pair_lists(allowed)
-            _forward(emissions, rows, first, other, penalty, sample, excluded[slot],
-                     second[sample, founder], unused, True, False, gathered)
+            _forward(flat, block_start, block_haps, block_bins, rows, first, other, penalty,
+                     sample, excluded[slot], second[sample, founder], unused, True, False,
+                     gathered)
             allowed[founder] = True
     return excluded, second
 
@@ -284,49 +284,56 @@ def region_source(index, second, pairs, sample, a, b, k):
 
 
 @njit(cache=True)
-def _gather_move(values, sample, r1, r2, pair, rows, block, removed_a, removed_b, gathered):
+def _gather_move(flat, base, haps, bins, r1, r2, pair, rows, block, removed_a, removed_b,
+                 gathered):
     """gathered[t, z]: the emissions of a move's new states at every bin t of one block, in
     _two_region's state order: (r1, x) [and (r2, x)] for every retained row x, then (r1, r1)
-    [, (r1, r2), (r2, r2)]. Returns the number of new states."""
+    [, (r1, r2), (r2, r2)] (EmissionLayout values, base: the block's first value of the sample).
+    Returns the number of new states."""
     k = rows.shape[0]
-    bins = values.shape[3]
     z = 0
     for x in range(k):
         if x == removed_a or x == removed_b:
             continue
         source = rows[x, block]
+        at = base + (r1 * haps + source) * bins
         for marker in range(bins):
-            gathered[marker, z] = values[sample, r1, source, marker]
+            gathered[marker, z] = flat[at + marker]
         z += 1
         if pair:
+            at = base + (r2 * haps + source) * bins
             for marker in range(bins):
-                gathered[marker, z] = values[sample, r2, source, marker]
+                gathered[marker, z] = flat[at + marker]
             z += 1
+    at = base + (r1 * haps + r1) * bins
     for marker in range(bins):
-        gathered[marker, z] = values[sample, r1, r1, marker]
+        gathered[marker, z] = flat[at + marker]
     z += 1
     if pair:
+        at = base + (r1 * haps + r2) * bins
+        other = base + (r2 * haps + r2) * bins
         for marker in range(bins):
-            gathered[marker, z] = values[sample, r1, r2, marker]
-            gathered[marker, z + 1] = values[sample, r2, r2, marker]
+            gathered[marker, z] = flat[at + marker]
+            gathered[marker, z + 1] = flat[other + marker]
         z += 2
     return z
 
 
 @njit(cache=True)
-def _two_region(emissions, rows, penalty, sample, region, has_region, removed_a,
-                removed_b, new_paths, new_first, new_second, values_buffer, gathered):
+def _two_region(flat, block_start, block_haps, block_bins, rows, penalty, sample, region,
+                has_region, removed_a, removed_b, new_paths, new_first, new_second, values_buffer,
+                gathered):
     pair = new_second >= 0
     a_value = -np.inf
     count = 0
     t = 0
-    for block in range(len(emissions)):
-        values = emissions[block]
+    for block in range(len(block_start)):
+        haps, bins = block_haps[block], block_bins[block]
         r1 = new_paths[new_first, block]
         r2 = new_paths[new_second, block] if pair else r1
-        count = _gather_move(values, sample, r1, r2, pair, rows, block, removed_a, removed_b,
-                             gathered)
-        for marker in range(values.shape[3]):
+        count = _gather_move(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+                             r1, r2, pair, rows, block, removed_a, removed_b, gathered)
+        for marker in range(bins):
             if t == 0:
                 a_value = region[0] if has_region else -np.inf
                 for z in range(count):
@@ -343,9 +350,10 @@ def _two_region(emissions, rows, penalty, sample, region, has_region, removed_a,
     return _max_range(values_buffer, 0, count, a_value)
 
 
-@njit(cache=True, parallel=True)
-def move_bounds(emissions, rows, penalty, total_bins, forward, index, excluded, second,
-                pairs, new_rows, first_removed, second_removed, sample_ids):
+@njit(cache=True, parallel=True, nogil=True)
+def move_bounds(flat, block_start, block_haps, block_bins, rows, penalty, total_bins, forward,
+                index, excluded, second, pairs, new_rows, first_removed, second_removed,
+                sample_ids):
     """Per-sample two-region bounds of one move, for the samples sample_ids.
 
     The move replaces the panel rows first_removed < second_removed (or -1) by the
@@ -356,7 +364,7 @@ def move_bounds(emissions, rows, penalty, total_bins, forward, index, excluded, 
     b = second_removed
     second_new = 1 if new_rows.shape[0] > 1 else -1
     result = np.empty(len(sample_ids))
-    widest = _widest(emissions)
+    widest = _widest(block_bins)
     for position in prange(len(sample_ids)):
         sample = sample_ids[position]
         values_buffer = np.empty(2 * k + 3)
@@ -370,25 +378,27 @@ def move_bounds(emissions, rows, penalty, total_bins, forward, index, excluded, 
             allowed[a] = False
             allowed[b] = False
             first, other = _pair_lists(allowed)
-            _forward(emissions, rows, first, other, penalty, sample, region,
-                     np.zeros(1, np.bool_), np.zeros((1, 1), np.bool_), False, False,
-                     np.empty((_widest(emissions), len(first))))
+            _forward(flat, block_start, block_haps, block_bins, rows, first, other, penalty,
+                     sample, region, np.zeros(1, np.bool_), np.zeros((1, 1), np.bool_), False,
+                     False, np.empty((widest, len(first))))
         else:
             region = forward[sample]
         result[position] = _two_region(
-            emissions, rows, penalty, sample, region, source != 3, a, b,
-            new_rows, 0, second_new, values_buffer, gathered)
+            flat, block_start, block_haps, block_bins, rows, penalty, sample, region, source != 3,
+            a, b, new_rows, 0, second_new, values_buffer, gathered)
     return result
 
 
 @njit(cache=True)
-def _advance_block(values, sample, r1, r2, pair, rows, block, removed_a, removed_b, region,
-                   has_region, t0, penalty, state, count, gathered):
+def _advance_block(flat, base, haps, bins, r1, r2, pair, rows, block, removed_a, removed_b,
+                   region, has_region, t0, penalty, state, count, gathered):
     """Advance a move's two-region DP over the bins of one block (_two_region's operations in
     the same order). state[0]: the bound on the retained states; state[1:count + 1]: the new
-    states; t0: global index of the block's first bin."""
-    _gather_move(values, sample, r1, r2, pair, rows, block, removed_a, removed_b, gathered)
-    for marker in range(values.shape[3]):
+    states; t0: global index of the block's first bin; base: the block's first value of the
+    sample in the EmissionLayout."""
+    _gather_move(flat, base, haps, bins, r1, r2, pair, rows, block, removed_a, removed_b,
+                 gathered)
+    for marker in range(bins):
         t = t0 + marker
         if t == 0:
             state[0] = region[0] if has_region else -np.inf
@@ -405,16 +415,17 @@ def _advance_block(values, sample, r1, r2, pair, rows, block, removed_a, removed
 
 
 @njit(cache=True)
-def _retreat_block(values, sample, r1, r2, pair, rows, block, removed_a, removed_b, region,
-                   has_region, t0, penalty, beta, count, gathered, work):
+def _retreat_block(flat, base, haps, bins, r1, r2, pair, rows, block, removed_a, removed_b,
+                   region, has_region, t0, penalty, beta, count, gathered, work):
     """Carry the DP's backward vector over the bins of one block, last bin first.
 
     The two-region DP is max-plus linear in its state v, so the value over the remaining bins
     is max_j v[j] + beta[j]. On entry beta applies to the state after the block's last bin, on
     exit to the state before its first bin: beta'[0] = c, beta'[z] = max(c, e_z + beta[z]) with
     c = max(region increment + beta[0], max_z (e_z + beta[z]) - penalty)."""
-    _gather_move(values, sample, r1, r2, pair, rows, block, removed_a, removed_b, gathered)
-    for marker in range(values.shape[3] - 1, -1, -1):
+    _gather_move(flat, base, haps, bins, r1, r2, pair, rows, block, removed_a, removed_b,
+                 gathered)
+    for marker in range(bins - 1, -1, -1):
         t = t0 + marker
         if t == 0:
             break
@@ -442,9 +453,10 @@ def _meet(state, beta, count):
     return best
 
 
-@njit(cache=True, parallel=True)
-def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excluded, second,
-                      pairs, offsets, active, local_moves, onesided_table, splice_table, columns):
+@njit(cache=True, parallel=True, nogil=True)
+def structural_bounds(flat, block_start, block_haps, block_bins, rows, penalty, total_bins,
+                      forward, index, excluded, second, pairs, offsets, active, local_moves,
+                      onesided_table, splice_table, columns):
     """Per-sample two-region bounds of the local, onesided and splice moves (samples x columns).
 
     Each value is move_bounds' recursion evaluated in two halves: the DP is max-plus linear in
@@ -474,7 +486,7 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
                 if splice_table[f, g, t] >= 0:
                     splice_any[f, g] = True
     width = 2 * k + 2
-    widest = _widest(emissions)
+    widest = _widest(block_bins)
     for sample in prange(samples):
         gathered = np.empty((widest, width))
         work = np.empty(width)
@@ -484,7 +496,11 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
         suffix = np.empty((k, blocks, k + 1))
         pair_prefix = np.empty((blocks, width))
         pair_region = np.empty(total_bins)
-        pair_gathered = np.empty((_widest(emissions), k * (k + 1) // 2))
+        pair_gathered = np.empty((widest, k * (k + 1) // 2))
+        # The sample's first value of every block in the EmissionLayout.
+        base = np.empty(blocks, np.int64)
+        for block in range(blocks):
+            base[block] = block_start[block] + sample * block_haps[block] ** 2 * block_bins[block]
         allowed = np.ones(k, np.bool_)
         unused_singles = np.zeros(1, np.bool_)
         unused_pairs = np.zeros((1, 1), np.bool_)
@@ -495,9 +511,9 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
             slot = index[sample, f]
             region = excluded[slot] if slot >= 0 else forward[sample]
             for block in range(blocks):
-                _advance_block(emissions[block], sample, rows[f, block], rows[f, block], False,
-                               rows, block, f, -1, region, has_single, offsets[block], penalty,
-                               state, k, gathered)
+                _advance_block(flat, base[block], block_haps[block], block_bins[block],
+                               rows[f, block], rows[f, block], False, rows, block, f, -1, region,
+                               has_single, offsets[block], penalty, state, k, gathered)
                 for z in range(k + 1):
                     prefix[f, block, z] = state[z]
             for z in range(k + 1):
@@ -507,9 +523,9 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
             for z in range(k + 1):
                 suffix[f, blocks - 1, z] = beta[z]
             for block in range(blocks - 1, 0, -1):
-                _retreat_block(emissions[block], sample, rows[f, block], rows[f, block], False,
-                               rows, block, f, -1, region, has_single, offsets[block], penalty,
-                               beta, k, gathered, work)
+                _retreat_block(flat, base[block], block_haps[block], block_bins[block],
+                               rows[f, block], rows[f, block], False, rows, block, f, -1, region,
+                               has_single, offsets[block], penalty, beta, k, gathered, work)
                 for z in range(k + 1):
                     suffix[f, block - 1, z] = beta[z]
         for i in range(local_moves.shape[0]):
@@ -522,8 +538,9 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
             if block > 0:
                 for z in range(k + 1):
                     state[z] = prefix[f, block - 1, z]
-            _advance_block(emissions[block], sample, row, row, False, rows, block, f, -1, region,
-                           has_single, offsets[block], penalty, state, k, gathered)
+            _advance_block(flat, base[block], block_haps[block], block_bins[block], row, row,
+                           False, rows, block, f, -1, region, has_single, offsets[block], penalty,
+                           state, k, gathered)
             result[sample, column] = _meet(state, suffix[f, block], k)
         for f in range(k):
             slot = index[sample, f]
@@ -536,9 +553,10 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
                 if not has_single:
                     beta[0] = -np.inf
                 for block in range(blocks - 1, 0, -1):
-                    _retreat_block(emissions[block], sample, rows[g, block], rows[g, block],
-                                   False, rows, block, f, -1, region, has_single, offsets[block],
-                                   penalty, beta, k, gathered, work)
+                    _retreat_block(flat, base[block], block_haps[block], block_bins[block],
+                                   rows[g, block], rows[g, block], False, rows, block, f, -1,
+                                   region, has_single, offsets[block], penalty, beta, k, gathered,
+                                   work)
                     column = onesided_table[f, g, block]
                     if column >= 0:
                         result[sample, column] = _meet(prefix[f, block - 1], beta, k)
@@ -555,17 +573,18 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
                     allowed[f] = False
                     allowed[g] = False
                     first, other = _pair_lists(allowed)
-                    _forward(emissions, rows, first, other, penalty, sample, pair_region,
-                             unused_singles, unused_pairs, False, False, pair_gathered)
+                    _forward(flat, block_start, block_haps, block_bins, rows, first, other,
+                             penalty, sample, pair_region, unused_singles, unused_pairs, False,
+                             False, pair_gathered)
                     allowed[f] = True
                     allowed[g] = True
                     region = pair_region
                 else:
                     region = forward[sample]
                 for block in range(blocks - 1):
-                    _advance_block(emissions[block], sample, rows[f, block], rows[g, block], True,
-                                   rows, block, f, g, region, has_pair, offsets[block], penalty,
-                                   state, count, gathered)
+                    _advance_block(flat, base[block], block_haps[block], block_bins[block],
+                                   rows[f, block], rows[g, block], True, rows, block, f, g, region,
+                                   has_pair, offsets[block], penalty, state, count, gathered)
                     for z in range(count + 1):
                         pair_prefix[block, z] = state[z]
                 for z in range(count + 1):
@@ -573,9 +592,9 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
                 if not has_pair:
                     beta[0] = -np.inf
                 for block in range(blocks - 1, 0, -1):
-                    _retreat_block(emissions[block], sample, rows[g, block], rows[f, block], True,
-                                   rows, block, f, g, region, has_pair, offsets[block], penalty,
-                                   beta, count, gathered, work)
+                    _retreat_block(flat, base[block], block_haps[block], block_bins[block],
+                                   rows[g, block], rows[f, block], True, rows, block, f, g, region,
+                                   has_pair, offsets[block], penalty, beta, count, gathered, work)
                     column = splice_table[f, g, block]
                     if column >= 0:
                         result[sample, column] = _meet(pair_prefix[block - 1], beta, count)
@@ -583,25 +602,11 @@ def structural_bounds(emissions, rows, penalty, total_bins, forward, index, excl
 
 
 @njit(cache=True)
-def _gather_block(values, sample, r1, rows, block, gathered):
-    """gathered[t, x] = emission of (r1, panel row x) and gathered[t, k] = (r1, r1)
-    for every bin t of one block: the new states' emissions, contiguous per bin."""
-    k = rows.shape[0]
-    bins = values.shape[3]
-    for x in range(k):
-        source = rows[x, block]
-        for marker in range(bins):
-            gathered[marker, x] = values[sample, r1, source, marker]
-    for marker in range(bins):
-        gathered[marker, k] = values[sample, r1, r1, marker]
-
-
-@njit(cache=True)
 def _region_block(gathered, bins, removed, has_region, region, t0, penalty, a_value, state):
     """Advance one single-path two-region DP over the bins of one block.
 
     The operations are _two_region's, in the same order. state[x]: the new state of the path
-    with panel row x, state[k]: with itself (emissions from _gather_block); a removed row's
+    with panel row x, state[k]: with itself (emissions from _gather_flat); a removed row's
     state does not exist and is held at -inf, so it never reaches a maximum.
     """
     width = gathered.shape[1]
@@ -624,10 +629,26 @@ def _region_block(gathered, bins, removed, has_region, region, t0, penalty, a_va
     return a_value
 
 
-@njit(cache=True, parallel=True)
-def birth_bounds(emissions, rows, penalty, forward, paths, common, offsets, start, stop, parts):
+@njit(cache=True)
+def _gather_flat(flat, base, haps, bins, r1, rows, block, gathered):
+    """gathered[t, x] = emission of (r1, panel row x) and gathered[t, k] = (r1, r1) for every bin t
+    of one block (EmissionLayout values, base: the block's first value of the sample): the new
+    states' emissions, contiguous per bin."""
+    k = rows.shape[0]
+    for x in range(k):
+        at = base + (r1 * haps + rows[x, block]) * bins
+        for marker in range(bins):
+            gathered[marker, x] = flat[at + marker]
+    at = base + (r1 * haps + r1) * bins
+    for marker in range(bins):
+        gathered[marker, k] = flat[at + marker]
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def birth_bounds(flat, block_start, block_haps, block_bins, rows, penalty, forward, paths, common,
+                 offsets, start, stop, parts):
     """Per-sample upper bounds on V_s(P + c) (the two-region bound of birth(c), F empty) for the
-    sorted paths start..stop-1.
+    sorted paths start..stop-1 (emissions: an EmissionLayout's arrays).
 
     common[i] counts the leading blocks path i shares with path i-1: the DP state after a
     shared prefix is reused (as in panel_candidates.prefix_scores), so the work follows the
@@ -639,7 +660,7 @@ def birth_bounds(emissions, rows, penalty, forward, paths, common, offsets, star
     count = stop - start
     widest = 1
     for block in range(blocks):
-        widest = max(widest, emissions[block].shape[3])
+        widest = max(widest, block_bins[block])
     result = np.empty((samples, count))
     for task in prange(samples * parts):
         sample = task // parts
@@ -656,15 +677,16 @@ def birth_bounds(emissions, rows, penalty, forward, paths, common, offsets, star
         for i in range(lo, hi):
             shared = 0 if i == lo else min(common[i], blocks - 1)
             for block in range(shared, blocks):
-                values = emissions[block]
-                _gather_block(values, sample, paths[i, block], rows, block, gathered)
+                haps, bins = block_haps[block], block_bins[block]
+                _gather_flat(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+                             paths[i, block], rows, block, gathered)
                 if block == 0:
                     a_value = -np.inf
                 else:
                     a_value = prefix_a[block]
                     for z in range(k + 1):
                         buffer[z] = prefix_v[block, z]
-                a_value = _region_block(gathered, values.shape[3], -1, True, region,
+                a_value = _region_block(gathered, bins, -1, True, region,
                                         offsets[block], penalty, a_value, buffer)
                 prefix_a[block + 1] = a_value
                 for z in range(k + 1):
@@ -699,9 +721,10 @@ def _region_retreat(gathered, bins, removed, has_region, region, t0, penalty, be
             beta[1 + z] = value if value > carry else carry
 
 
-@njit(cache=True, parallel=True)
-def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, prefixes,
-                   prefix_common, prefix_of, suffixes, suffix_common, suffix_of, width, wanted):
+@njit(cache=True, parallel=True, nogil=True)
+def replace_bounds(flat, block_start, block_haps, block_bins, rows, penalty, index, excluded,
+                   offsets, split, prefixes, prefix_common, prefix_of, suffixes, suffix_common,
+                   suffix_of, width, wanted):
     """Per-sample two-region bounds of replace(f, c) for every row f with a single cover in the
     sample (index >= 0) and every path c of one group: out[s, i, j] for the j-th such row of
     sample s (rows in increasing order).
@@ -715,13 +738,14 @@ def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, pr
     _two_region's recursion in exact arithmetic; float rounding differs by the summation order.
     Only the rows with wanted[f] are bounded: each row's DP is independent of the others, so
     their values are unchanged, and the other rows get -inf (their replacements are not searched).
+    Emissions: an EmissionLayout's arrays.
     """
     k, blocks = rows.shape
     samples = index.shape[0]
     count = len(prefix_of)
     widest = 1
     for block in range(blocks):
-        widest = max(widest, emissions[block].shape[3])
+        widest = max(widest, block_bins[block])
     out = np.empty((samples, count, width))
     has_region = k > 1
     for sample in prange(samples):
@@ -750,8 +774,9 @@ def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, pr
         for p in range(prefixes.shape[0]):
             shared = 0 if p == 0 else prefix_common[p]
             for block in range(shared, split):
-                values = emissions[block]
-                _gather_block(values, sample, prefixes[p, block], rows, block, gathered)
+                haps, bins = block_haps[block], block_bins[block]
+                _gather_flat(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+                             prefixes[p, block], rows, block, gathered)
                 for rg in range(nreg):
                     region = excluded[index[sample, regions[rg]]]
                     a_value = -np.inf
@@ -759,7 +784,7 @@ def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, pr
                         a_value = stack[block, rg, 0]
                         for z in range(k + 1):
                             buffer[z] = stack[block, rg, 1 + z]
-                    a_value = _region_block(gathered, values.shape[3], regions[rg], has_region,
+                    a_value = _region_block(gathered, bins, regions[rg], has_region,
                                             region, offsets[block], penalty, a_value, buffer)
                     stack[block + 1, rg, 0] = a_value
                     for z in range(k + 1):
@@ -776,13 +801,14 @@ def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, pr
         for q in range(suffixes.shape[0]):
             shared = 0 if q == 0 else suffix_common[q]
             for block in range(blocks - 1 - shared, split - 1, -1):
-                values = emissions[block]
-                _gather_block(values, sample, suffixes[q, block - split], rows, block, gathered)
+                haps, bins = block_haps[block], block_bins[block]
+                _gather_flat(flat, block_start[block] + sample * haps * haps * bins, haps, bins,
+                             suffixes[q, block - split], rows, block, gathered)
                 for rg in range(nreg):
                     region = excluded[index[sample, regions[rg]]]
                     for z in range(size):
                         buffer[z] = after[block - split + 1, rg, z]
-                    _region_retreat(gathered, values.shape[3], regions[rg], has_region, region,
+                    _region_retreat(gathered, bins, regions[rg], has_region, region,
                                     offsets[block], penalty, buffer, work)
                     for z in range(size):
                         after[block - split, rg, z] = buffer[z]
@@ -800,7 +826,7 @@ def replace_bounds(emissions, rows, penalty, index, excluded, offsets, split, pr
     return out
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def pool_sums(out, births, index):
     """Summed bounds [birth(c), replace(0, c) .. replace(k-1, c)] per path, summed over samples
     in sample order (one thread per path): replace(f, c) takes birth(c)'s value where f has no
@@ -825,7 +851,7 @@ def pool_sums(out, births, index):
     return result
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, nogil=True)
 def column_sums(values):
     """Sum each column in sample order (one thread per column)."""
     samples, count = values.shape
@@ -839,21 +865,22 @@ def column_sums(values):
 
 
 class PanelForwards:
-    """Exclusion forwards of one panel; shared by every bound of one pass."""
+    """Exclusion forwards of one panel; shared by every bound of one pass. layout: the search's
+    EmissionLayout."""
 
-    def __init__(self, emissions, rows, penalty, total_bins):
-        self.emissions = emissions
+    def __init__(self, layout, rows, penalty, total_bins):
+        self.layout = layout
         self.rows = np.ascontiguousarray(rows, dtype=np.int64)
         self.penalty = float(penalty)
         self.total_bins = int(total_bins)
         self.forward, singles, self.pairs = forward_covers(
-            emissions, self.rows, self.penalty, self.total_bins)
+            *layout.arrays(), self.rows, self.penalty, self.total_bins, layout.samples)
         index = np.full(singles.shape, -1, dtype=np.int64)
         flat = np.flatnonzero(singles.ravel())
         index.ravel()[flat] = np.arange(len(flat))
         self.index = index
         self.excluded, self.second = single_exclusions(
-            emissions, self.rows, self.penalty, self.total_bins, index, len(flat))
+            *layout.arrays(), self.rows, self.penalty, self.total_bins, index, len(flat))
         # Mean number of rows per sample whose exclusion was recomputed.
         self.recomputed_per_sample = len(flat) / max(1, singles.shape[0])
         # Per-sample birth bounds by local path (bytes): panel_count's count step and the
@@ -914,9 +941,9 @@ class PanelForwards:
             mask = group_kind == SPLICE
             splice[founder[chosen][mask], partner[chosen][mask], position[chosen][mask]] = columns[mask]
             values = structural_bounds(
-                self.emissions, self.rows, self.penalty, self.total_bins, self.forward, self.index,
-                self.excluded, self.second, self.pairs, offsets, active, moves_local, onesided,
-                splice, len(chosen))
+                *self.layout.arrays(), self.rows, self.penalty, self.total_bins, self.forward,
+                self.index, self.excluded, self.second, self.pairs, offsets, active, moves_local,
+                onesided, splice, len(chosen))
             sums = column_sums(values)
             result[chosen] = sums
             for column in np.flatnonzero(keep(sums)).tolist():
@@ -946,8 +973,8 @@ class PanelForwards:
             for start in range(0, count, _BIRTH_CHUNK):
                 stop = min(count, start + _BIRTH_CHUNK)
                 parts = max(1, min(stop - start, -(-2 * threads // samples)))
-                values = birth_bounds(self.emissions, self.rows, self.penalty, self.forward,
-                                      ordered, common, offsets, start, stop, parts)
+                values = birth_bounds(*self.layout.arrays(), self.rows, self.penalty,
+                                      self.forward, ordered, common, offsets, start, stop, parts)
                 for column, position in enumerate(order[start:stop].tolist()):
                     self.births[missing[position]] = values[:, column].copy()
         if not keys:
@@ -985,15 +1012,15 @@ class PanelForwards:
         for start in range(0, len(paths), step):
             group = paths[start:start + step]
             split = _best_split(group)
-            prefixes, prefix_of = np.unique(group[:, :split], axis=0, return_inverse=True)
+            prefixes, prefix_of = _unique_rows(group[:, :split])
             prefix_common = _leading_shared(prefixes)
-            tails, suffix_of = np.unique(group[:, split:][:, ::-1], axis=0, return_inverse=True)
+            tails, suffix_of = _unique_rows(group[:, split:][:, ::-1])
             suffix_common = _leading_shared(tails)
             suffixes = np.ascontiguousarray(tails[:, ::-1])
-            out = replace_bounds(self.emissions, self.rows, self.penalty, self.index,
+            out = replace_bounds(*self.layout.arrays(), self.rows, self.penalty, self.index,
                                  self.excluded, offsets, split, np.ascontiguousarray(prefixes),
-                                 prefix_common, prefix_of.ravel().astype(np.int64), suffixes,
-                                 suffix_common, suffix_of.ravel().astype(np.int64), width, wanted)
+                                 prefix_common, prefix_of, suffixes, suffix_common, suffix_of,
+                                 width, wanted)
             part = np.ascontiguousarray(births[:, start:start + len(group)])
             sums = pool_sums(out, part, self.index)
             result[start:start + len(group)] = sums
@@ -1016,12 +1043,41 @@ def _leading_shared(rows):
     return shared
 
 
+def _sorted_rows(rows):
+    """Lexicographic order of integer rows (first column first), the sorted rows, and for each
+    sorted row the number of leading columns it shares with the previous one (all if equal)."""
+    order = np.lexsort(rows.T[::-1]) if rows.shape[1] else np.arange(len(rows))
+    ordered = rows[order]
+    shared = np.zeros(len(rows), dtype=np.int64)
+    if len(rows) > 1 and rows.shape[1]:
+        equal = ordered[1:] == ordered[:-1]
+        shared[1:] = np.where(equal.all(axis=1), rows.shape[1], np.argmin(equal, axis=1))
+    return order, ordered, shared
+
+
+def _unique_rows(rows):
+    """np.unique(rows, axis=0, return_inverse=True) for integer rows by one lexicographic sort:
+    the distinct rows in lexicographic order and each row's index among them (int64)."""
+    order, ordered, shared = _sorted_rows(rows)
+    first = shared < rows.shape[1]
+    first[:1] = True
+    inverse = np.empty(len(rows), dtype=np.int64)
+    inverse[order] = np.cumsum(first) - 1
+    return np.ascontiguousarray(ordered[first]), inverse
+
+
 def _best_split(paths):
     """The block split t (1 <= t <= B) with the fewest distinct prefixes of lengths 1..t plus
-    distinct suffixes of lengths 1..B - t: the block passes of replace_bounds."""
+    distinct suffixes of lengths 1..B - t: the block passes of replace_bounds.
+
+    In lexicographic order the rows sharing a prefix of length d are consecutive, so the number
+    of distinct prefixes of length d is 1 plus the number of sorted rows that share fewer than
+    d leading columns with their predecessor (suffixes: the same on the reversed rows)."""
     blocks = paths.shape[1]
-    prefixes = [len(np.unique(paths[:, :depth], axis=0)) for depth in range(1, blocks + 1)]
-    suffixes = [len(np.unique(paths[:, blocks - depth:], axis=0)) for depth in range(1, blocks)]
+    shared = _sorted_rows(paths)[2][1:]
+    prefixes = [1 + int(np.count_nonzero(shared < depth)) for depth in range(1, blocks + 1)]
+    shared = _sorted_rows(paths[:, ::-1])[2][1:]
+    suffixes = [1 + int(np.count_nonzero(shared < depth)) for depth in range(1, blocks)]
     costs = [sum(prefixes[:split]) + sum(suffixes[:blocks - split]) for split in range(1, blocks + 1)]
     return 1 + int(np.argmin(costs))
 
@@ -1051,14 +1107,15 @@ def _sparse_scores(forwards, lower, founder, new_row, trial_rows, score_samples,
     values = lower.copy()
     if not len(candidates):
         return values, 0
-    upper = move_bounds(forwards.emissions, forwards.rows, forwards.penalty, forwards.total_bins,
+    upper = move_bounds(*forwards.layout.arrays(), forwards.rows, forwards.penalty,
+                        forwards.total_bins,
                         forwards.forward, forwards.index, forwards.excluded, forwards.second,
                         forwards.pairs, np.ascontiguousarray(np.reshape(new_row, (1, -1)),
                                                              dtype=np.int64),
                         int(founder), -1, candidates)
     need = candidates[upper > tolerance[candidates]]
     if len(need):
-        values[need] = score_samples(forwards.emissions, np.ascontiguousarray(trial_rows.T),
+        values[need] = score_samples(*forwards.layout.arrays(), np.ascontiguousarray(trial_rows.T),
                                      forwards.penalty, need)
     return values, len(need)
 
@@ -1088,11 +1145,6 @@ def replacement_scores(forwards, removal, founder, new_row, trial_rows, score_sa
     return _sparse_scores(forwards, removal[:, founder], founder, new_row, trial_rows, score_samples)
 
 
-def emission_list(sub):
-    arrays = List()
-    for item in sub:
-        arrays.append(np.ascontiguousarray(item['bin_emissions']))
-    return arrays
 
 
 

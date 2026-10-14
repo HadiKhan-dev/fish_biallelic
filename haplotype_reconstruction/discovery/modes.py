@@ -31,6 +31,61 @@ _MAX_CUT_CACHE: OrderedDict[
 ] = OrderedDict()
 
 
+@njit(cache=True, nogil=True)
+def _binary_matrix(values):
+    """Return whether every entry is 0 or 1 (an empty matrix is binary)."""
+    for row in range(values.shape[0]):
+        for column in range(values.shape[1]):
+            value = values[row, column]
+            if value < 0 or value > 1:
+                return False
+    return True
+
+
+@njit(cache=True, nogil=True)
+def _assignment_status(assignments, slot_values, slots_per_sample, k):
+    """Return the first failing mode assignment check, in check order.
+
+    0: valid; 1: an index lies outside [0, K]; 2: an unsorted pair; 3: a
+    wildcard slot count outside [0, 2]; 4: the slot counts differ from the
+    numbers of K sentinels. ``slot_values`` holds every wildcard-slot entry
+    and ``slots_per_sample`` says whether they form one entry per sample;
+    otherwise their shape alone makes check 4 fail.
+    """
+    outside = False
+    unsorted = False
+    slot_range = False
+    disagree = not slots_per_sample
+    for sample in range(assignments.shape[0]):
+        first = assignments[sample, 0]
+        second = assignments[sample, 1]
+        if first < 0 or first > k or second < 0 or second > k:
+            outside = True
+        if first > second:
+            unsorted = True
+        if slots_per_sample:
+            expected = 0
+            if first == k:
+                expected += 1
+            if second == k:
+                expected += 1
+            if slot_values[sample] != expected:
+                disagree = True
+    for index in range(slot_values.shape[0]):
+        value = slot_values[index]
+        if value < 0 or value > 2:
+            slot_range = True
+    if outside:
+        return 1
+    if unsorted:
+        return 2
+    if slot_range:
+        return 3
+    if disagree:
+        return 4
+    return 0
+
+
 @dataclass(frozen=True)
 class _CanonicalMode:
     """Canonical probability-panel identity used by scientific scorers."""
@@ -204,9 +259,9 @@ class FactorizationMode:
     ) -> None:
         if haplotypes.ndim != 2 or len(haplotypes) < 1:
             raise ValueError("haplotypes must have shape (K, sites), K >= 1")
-        if haplotypes.size and (
-            int(np.min(haplotypes)) < 0 or int(np.max(haplotypes)) > 1
-        ):
+        # The data checks run in compiled passes instead of a dozen small
+        # NumPy reductions per mode; checks, order and messages are unchanged.
+        if not _binary_matrix(haplotypes):
             raise ValueError("haplotypes must be binary")
         if assignments.ndim != 2 or assignments.shape[1] != 2:
             raise ValueError("assignments must have shape (samples, 2)")
@@ -214,22 +269,19 @@ class FactorizationMode:
             assignments
         ):
             raise ValueError("sample-level arrays have inconsistent lengths")
-        if assignments.size and (
-            int(np.min(assignments)) < 0
-            or int(np.max(assignments)) > len(haplotypes)
-        ):
-            raise ValueError("assignment index lies outside [0, K]")
-        if np.any(assignments[:, 0] > assignments[:, 1]):
-            raise ValueError("assignment pairs must be sorted")
-        if wildcard_slots.size and (
-            int(np.min(wildcard_slots)) < 0
-            or int(np.max(wildcard_slots)) > 2
-        ):
-            raise ValueError("wildcard slot counts must lie in [0, 2]")
-        expected_wildcard_slots = np.count_nonzero(
-            assignments == len(haplotypes), axis=1
+        status = _assignment_status(
+            assignments,
+            np.ravel(wildcard_slots),
+            wildcard_slots.ndim == 1,
+            len(haplotypes),
         )
-        if not np.array_equal(wildcard_slots, expected_wildcard_slots):
+        if status == 1:
+            raise ValueError("assignment index lies outside [0, K]")
+        if status == 2:
+            raise ValueError("assignment pairs must be sorted")
+        if status == 3:
+            raise ValueError("wildcard slot counts must lie in [0, 2]")
+        if status == 4:
             raise ValueError("wildcard_slots disagree with assignment sentinels")
         if n_iter < 0:
             raise ValueError("n_iter must be non-negative")

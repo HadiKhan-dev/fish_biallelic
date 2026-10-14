@@ -10,7 +10,7 @@ import math
 import numpy as np
 from numba import njit, prange
 from numba.typed import List
-from .. import observations, partial_emissions
+from .. import partial_emissions
 from .packing import PreparedModels
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -85,8 +85,7 @@ def build_models(workspace):
     outputs = List()
     full = []
     keys = []
-    for block in workspace.batch:
-        panel = observations.founder_inference_panel_from_block_result(block)
+    for block, panel in zip(workspace.batch, workspace.panels):
         flags = np.ones(len(block.positions), bool) if block.keep_flags is None else np.asarray(block.keep_flags, bool)
         complete = bool(np.all(panel.called[:, flags]))
         full.append(complete)

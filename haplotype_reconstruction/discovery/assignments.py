@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 
+from threading import Lock
+
 import numpy as np
 import math
 import numba
@@ -73,14 +75,14 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
                   them through; standalone callers leave this None and
                   it is computed internally.  Consulted only on the
                   K > 0 production path; ignored at K = 0.
-        binary_pattern_cache: optional immutable evidence-local contraction
-                  tables prepared by `_prepare_fixed_k_fit_workspace`.  For
-                  exactly binary H with K >= 1, all possible within-bin
-                  binary patterns were contracted by the same BLAS operation
-                  once, so per-fit H-dependent GEMMs become exact table
-                  lookups.  K=0, non-integer/nonbinary H, incompatible
-                  tables, and standalone calls fall back to the existing
-                  GEMM path.
+        binary_pattern_cache: optional evidence-local contraction
+                  workspace prepared by `_prepare_fixed_k_fit_workspace`.
+                  For exactly binary H with K >= 1, every within-bin binary
+                  pattern is contracted once, with one fixed reduction, when
+                  a panel first uses it, so per-fit H-dependent GEMMs become
+                  exact table lookups.  K=0, non-integer/nonbinary H,
+                  incompatible tables, and standalone calls fall back to the
+                  existing GEMM path.
 
     Returns:
         A: (N, 2) int array — A[s, *] in {0..K-1, K} where K = wildcard
@@ -175,7 +177,7 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
         rr_i, rr_j = _pair_indices_for_K(K)
 
         # Exact binary-pattern path.  The table workspace is tied by object
-        # identity to this evidence's BLAS precompute and is never mutated.
+        # identity to this evidence's BLAS precompute and only ever adds rows.
         # Restrict the shortcut to integer/bool binary H with K>=1. The
         # canonical recurrence is deliberately independent of BLAS row shape;
         # general/nonbinary callers retain the established GEMM behaviour.
@@ -204,6 +206,10 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
                 pattern_kernel = _update_A_fused_pattern_kernel
                 if numba.get_num_threads() == 1:
                     pattern_kernel = _update_A_fused_pattern_kernel_serial
+                # The kernels read table rows by slot; take the slots (adding
+                # unseen patterns) before reading the tables.
+                h_slots = binary_pattern_cache.slots(h_patterns)
+                pair_slots = binary_pattern_cache.slots(pair_patterns)
                 A, per_sample_cost, wildcard_slots = (
                     pattern_kernel(
                         C0b,
@@ -211,8 +217,8 @@ def _update_A(probs_k, H_k, lam, cost_WW=None, WW_bin_emis=None, log_probs=None,
                         binary_pattern_cache.w_table,
                         kW_Cb,
                         binary_pattern_cache.kWdiff_table,
-                        h_patterns,
-                        pair_patterns,
+                        h_slots,
+                        pair_slots,
                         WW_bin_emis_c,
                         WW_total_cost_c,
                         rr_i,
@@ -599,15 +605,23 @@ def _update_A_blas_lp_precompute_depth_mask(
 
 
 _BINARY_PATTERN_MAX_SNPS_PER_BIN = 10
+# Initial slots per bin of the lazily filled pattern tables (doubled on
+# demand; a block uses 40-130 of the 1,024 patterns of a ten-site bin).
+_BINARY_PATTERN_INITIAL_SLOTS = 64
 
 
 class _BinaryPatternContractionWorkspace:
-    """Read-only evidence-local contractions for every binary bin pattern.
+    """Evidence-local contractions of the binary within-bin patterns in use.
 
-    For production N=116, L=200, and ten sites per bin, each of the three
-    arrays has shape ``(20, 1024, 116)`` and occupies 18.125 MiB; retained
-    table storage is therefore exactly 54.375 MiB (57,016,320 bytes).  Storage
-    is fixed at construction and never grows with the number of fits.
+    A search visits only a few dozen of the ``2**snps_per_bin`` patterns of
+    each bin (40-130 of 1,024 at N=320 and ten sites per bin), so the three
+    contraction rows of a (bin, pattern) are computed when a panel first uses
+    it. Rows are stored by slot: axis 1 of ``diff1_table``, ``w_table`` and
+    ``kWdiff_table`` is a slot, ``slot_of[b, pattern]`` maps a pattern to its
+    slot, and kernels index the tables with slots from :meth:`slots`. Every
+    row is the canonical ascending set-bit float64 sum, so each value read is
+    the one the complete pattern table held. Rows are only ever added; the
+    slot capacity doubles as needed and never exceeds the number of patterns.
     """
 
     __slots__ = (
@@ -616,30 +630,85 @@ class _BinaryPatternContractionWorkspace:
         "n_bins",
         "n_samples",
         "n_patterns",
-        "diff1_table",
-        "w_table",
-        "kWdiff_table",
-        "nbytes",
+        "diff1_bt",
+        "w_bt",
+        "kWdiff_bt",
+        "slot_of",
+        "_n_used",
+        "_tables",
+        "_lock",
     )
 
     def __init__(self, blas_lp_reference, snps_per_bin, n_bins,
-                 diff1_table, w_table, kWdiff_table):
+                 diff1_bt, w_bt, kWdiff_bt):
         self.blas_lp_reference = blas_lp_reference
         self.snps_per_bin = int(snps_per_bin)
         self.n_bins = int(n_bins)
-        self.n_samples = int(diff1_table.shape[2])
-        self.n_patterns = int(diff1_table.shape[1])
-        self.diff1_table = diff1_table
-        self.w_table = w_table
-        self.kWdiff_table = kWdiff_table
-        self.nbytes = int(
-            diff1_table.nbytes + w_table.nbytes + kWdiff_table.nbytes
+        self.n_samples = int(diff1_bt.shape[2])
+        self.n_patterns = 1 << self.snps_per_bin
+        self.diff1_bt = diff1_bt
+        self.w_bt = w_bt
+        self.kWdiff_bt = kWdiff_bt
+        self.slot_of = np.full(
+            (self.n_bins, self.n_patterns), -1, dtype=np.int64
         )
+        self._n_used = np.zeros(self.n_bins, dtype=np.int64)
+        capacity = min(_BINARY_PATTERN_INITIAL_SLOTS, self.n_patterns)
+        # [diff1_table, w_table, kWdiff_table]; replaced when they grow.
+        self._tables = [
+            np.empty((self.n_bins, capacity, self.n_samples), dtype=np.float64)
+            for _ in range(3)
+        ]
+        self._lock = Lock()
 
     def __setattr__(self, name, value):
         if hasattr(self, name):
             raise AttributeError("binary-pattern workspace is immutable")
         object.__setattr__(self, name, value)
+
+    @property
+    def diff1_table(self):
+        return self._tables[0]
+
+    @property
+    def w_table(self):
+        return self._tables[1]
+
+    @property
+    def kWdiff_table(self):
+        return self._tables[2]
+
+    def slots(self, patterns):
+        """Return the slots of within-bin patterns (last axis = bin).
+
+        Patterns seen for the first time are contracted into new rows. Read
+        the tables after this call: adding rows can replace them.
+        """
+        values = np.ascontiguousarray(patterns, dtype=np.int64)
+        flat = values.reshape(-1, self.n_bins)
+        with self._lock:
+            new_bins, new_patterns, new_slots, needed = _assign_pattern_slots(
+                flat, self.slot_of, self._n_used
+            )
+            if len(new_bins):
+                tables = self._tables
+                capacity = tables[0].shape[1]
+                if needed > capacity:
+                    while capacity < needed:
+                        capacity *= 2
+                    for index, table in enumerate(tables):
+                        grown = np.empty(
+                            (self.n_bins, capacity, self.n_samples),
+                            dtype=np.float64,
+                        )
+                        grown[:, :table.shape[1]] = table
+                        tables[index] = grown
+                _fill_pattern_rows(
+                    self.diff1_bt, self.w_bt, self.kWdiff_bt,
+                    new_bins, new_patterns, new_slots, *tables,
+                )
+            slots = _lookup_pattern_slots(flat, self.slot_of)
+        return slots.reshape(values.shape)
 
     def supports_k(self, k):
         """Return whether the canonical contraction supports this K.
@@ -656,62 +725,88 @@ class _BinaryPatternContractionWorkspace:
         return int(k) >= 1
 
 
-@njit(cache=True, parallel=True, fastmath=False, nogil=True)
-def _canonical_binary_pattern_contractions(
-        diff1_bt, w_bt, kWdiff_bt, previous_pattern, added_bit):
-    """Build all binary contractions with one K-independent reduction.
+@njit(cache=True, nogil=True)
+def _assign_pattern_slots(patterns, slot_of, n_used):
+    """Give every new (bin, pattern) the next free slot of its bin.
 
-    For each pattern, the highest set bit extends the already-computed lower
-    prefix. This is the ascending-set-bit sum for that pattern, costs one
-    addition per output rather than a dense ten-term dot product, and is
-    independent of BLAS microkernels, thread count, and the K search route.
+    Returns the new (bin, pattern, slot) entries in first-use order and the
+    largest number of slots any bin now uses.
     """
-    n_bins, snps_per_bin, n_samples = diff1_bt.shape
-    n_patterns = 1 << snps_per_bin
-    diff1_table = np.empty(
-        (n_bins, n_patterns, n_samples), dtype=np.float64
-    )
-    w_table = np.empty_like(diff1_table)
-    kWdiff_table = np.empty_like(diff1_table)
-    # Traverse contiguous sample tiles instead of striding over the full
-    # pattern table for each sample. Every output retains its exact ascending
-    # set-bit recurrence; tiles are independent and cache-line aligned.
-    tile_width = 16
-    n_tiles = (n_samples + tile_width - 1) // tile_width
-    for flat_index in prange(n_bins * n_tiles):
-        b = flat_index // n_tiles
-        first = (flat_index - b * n_tiles) * tile_width
-        last = min(first + tile_width, n_samples)
-        for s in range(first, last):
-            diff1_table[b, 0, s] = 0.0
-            w_table[b, 0, s] = 0.0
-            kWdiff_table[b, 0, s] = 0.0
-        for pattern in range(1, n_patterns):
-            highest_bit = added_bit[pattern]
-            previous = previous_pattern[pattern]
-            for s in range(first, last):
-                diff1_table[b, pattern, s] = (
-                    diff1_table[b, previous, s]
-                    + diff1_bt[b, highest_bit, s]
-                )
-                w_table[b, pattern, s] = (
-                    w_table[b, previous, s]
-                    + w_bt[b, highest_bit, s]
-                )
-                kWdiff_table[b, pattern, s] = (
-                    kWdiff_table[b, previous, s]
-                    + kWdiff_bt[b, highest_bit, s]
-                )
-    return diff1_table, w_table, kWdiff_table
+    n_rows, n_bins = patterns.shape
+    new_bins = np.empty(n_rows * n_bins, dtype=np.int64)
+    new_patterns = np.empty(n_rows * n_bins, dtype=np.int64)
+    new_slots = np.empty(n_rows * n_bins, dtype=np.int64)
+    count = 0
+    for row in range(n_rows):
+        for b in range(n_bins):
+            pattern = patterns[row, b]
+            if slot_of[b, pattern] < 0:
+                slot = n_used[b]
+                slot_of[b, pattern] = slot
+                n_used[b] = slot + 1
+                new_bins[count] = b
+                new_patterns[count] = pattern
+                new_slots[count] = slot
+                count += 1
+    needed = 0
+    for b in range(n_bins):
+        if n_used[b] > needed:
+            needed = n_used[b]
+    return new_bins[:count], new_patterns[:count], new_slots[:count], needed
+
+
+@njit(cache=True, nogil=True)
+def _lookup_pattern_slots(patterns, slot_of):
+    """Map (row, bin) patterns to their table slots."""
+    n_rows, n_bins = patterns.shape
+    slots = np.empty((n_rows, n_bins), dtype=np.int64)
+    for row in range(n_rows):
+        for b in range(n_bins):
+            slots[row, b] = slot_of[b, patterns[row, b]]
+    return slots
+
+
+@njit(cache=True, nogil=True)
+def _fill_pattern_rows(diff1_bt, w_bt, kWdiff_bt, new_bins, new_patterns,
+                       new_slots, diff1_table, w_table, kWdiff_table):
+    """Contract new patterns with the canonical ascending set-bit sum.
+
+    A row is 0.0 plus the per-site terms of the pattern's set bits, added in
+    ascending bit order. This is exactly the complete table's recurrence
+    (pattern p = p without its highest bit, plus that bit's term, from
+    pattern 0 = 0.0), so every row holds the same float64 values.
+    """
+    n_samples = diff1_bt.shape[2]
+    snps_per_bin = diff1_bt.shape[1]
+    for index in range(new_bins.shape[0]):
+        b = new_bins[index]
+        pattern = new_patterns[index]
+        slot = new_slots[index]
+        diff1_row = diff1_table[b, slot]
+        w_row = w_table[b, slot]
+        kWdiff_row = kWdiff_table[b, slot]
+        for s in range(n_samples):
+            diff1_row[s] = 0.0
+            w_row[s] = 0.0
+            kWdiff_row[s] = 0.0
+        for bit in range(snps_per_bin):
+            if (pattern >> bit) & 1:
+                diff1_bit = diff1_bt[b, bit]
+                w_bit = w_bt[b, bit]
+                kWdiff_bit = kWdiff_bt[b, bit]
+                for s in range(n_samples):
+                    diff1_row[s] = diff1_row[s] + diff1_bit[s]
+                    w_row[s] = w_row[s] + w_bit[s]
+                    kWdiff_row[s] = kWdiff_row[s] + kWdiff_bit[s]
 
 
 def _prepare_binary_pattern_contractions(blas_lp_cache, snps_per_bin, n_bins):
-    """Contract every supported binary within-bin pattern exactly once.
+    """Prepare on-demand contractions of the binary within-bin patterns.
 
-    A compiled subset recurrence gives every pattern one fixed ascending-bit
-    float64 reduction, independent of K, BLAS implementation, and thread
-    allocation. Wider bins would grow exponentially and deliberately fall
-    back to the existing direct path.
+    Each pattern a panel uses gets one fixed ascending-bit float64
+    reduction, independent of K, BLAS implementation, and thread allocation.
+    Wider bins would grow exponentially and deliberately fall back to the
+    existing direct path.
     """
     spb = int(snps_per_bin)
     bins = int(n_bins)
@@ -731,43 +826,13 @@ def _prepare_binary_pattern_contractions(blas_lp_cache, snps_per_bin, n_bins):
         or kWdiff_bt.dtype != np.float64
     ):
         return None
-
-    n_patterns = 1 << spb
-    previous_pattern = np.zeros(n_patterns, dtype=np.int64)
-    added_bit = np.zeros(n_patterns, dtype=np.int64)
-    for pattern in range(1, n_patterns):
-        highest_bit = int(pattern).bit_length() - 1
-        added_bit[pattern] = highest_bit
-        previous_pattern[pattern] = pattern ^ (1 << highest_bit)
-    diff1_table, w_table, kWdiff_table = (
-        _canonical_binary_pattern_contractions(
-            np.ascontiguousarray(diff1_bt),
-            np.ascontiguousarray(w_bt),
-            np.ascontiguousarray(kWdiff_bt),
-            previous_pattern,
-            added_bit,
-        )
-    )
-    for table in (diff1_table, w_table, kWdiff_table):
-        table.setflags(write=False)
-
-
-    expected_nbytes = (
-        3 * bins * n_patterns * int(diff1_bt.shape[2])
-        * np.dtype(np.float64).itemsize
-    )
-    actual_nbytes = int(
-        diff1_table.nbytes + w_table.nbytes + kWdiff_table.nbytes
-    )
-    if actual_nbytes != expected_nbytes:
-        raise AssertionError("binary-pattern table byte accounting mismatch")
     return _BinaryPatternContractionWorkspace(
         blas_lp_cache,
         spb,
         bins,
-        diff1_table,
-        w_table,
-        kWdiff_table,
+        np.ascontiguousarray(diff1_bt),
+        np.ascontiguousarray(w_bt),
+        np.ascontiguousarray(kWdiff_bt),
     )
 
 
@@ -962,18 +1027,20 @@ def _update_A_fused_blas_kernel(C0b, Ub, Mb, kW_Cb, kW_Ub,
 @njit(cache=True, parallel=True, fastmath=False, nogil=True)
 def _update_A_fused_pattern_kernel(C0b, diff1_table, w_table,
                                     kW_Cb, kWdiff_table,
-                                    h_patterns, pair_patterns,
+                                    h_slots, pair_slots,
                                     WW_bin_emis, WW_total_cost,
                                     rr_i, rr_j, penalty, K, n_bins):
     """Exact table-fed counterpart of `_update_A_fused_blas_kernel`.
 
     Table entries are the same float64 BLAS contractions formerly supplied as
-    Ub, Mb, and kW_Ub.  State order, emission-expression order, baseline
-    argmin, Viterbi forward pass, strict tie rules, WW summation, and returned
-    arrays are otherwise identical to the established kernel.
+    Ub, Mb, and kW_Ub; ``h_slots`` and ``pair_slots`` are the table slots of
+    every founder's and every rr pair's (bitwise AND) within-bin pattern.
+    State order, emission-expression order, baseline argmin, Viterbi forward
+    pass, strict tie rules, WW summation, and returned arrays are otherwise
+    identical to the established kernel.
     """
     N = C0b.shape[0]
-    n_rr = pair_patterns.shape[0]
+    n_rr = pair_slots.shape[0]
     K_states = n_rr + K + 1
     W = K  # wildcard sentinel
 
@@ -995,7 +1062,7 @@ def _update_A_fused_pattern_kernel(C0b, diff1_table, w_table,
             for k in range(K):
                 for b in range(n_bins):
                     founder_diff1[k, b] = diff1_table[
-                        b, h_patterns[k, b], s
+                        b, h_slots[k, b], s
                     ]
 
         bin_emis = np.empty((K_states, n_bins), dtype=np.float64)
@@ -1016,14 +1083,14 @@ def _update_A_fused_pattern_kernel(C0b, diff1_table, w_table,
                         C0b[s, b]
                         + founder_diff1[i, b]
                         + founder_diff1[j, b]
-                        + w_table[b, pair_patterns[p, b], s]
+                        + w_table[b, pair_slots[p, b], s]
                     )
                 else:
                     e = (
                         C0b[s, b]
-                        + diff1_table[b, h_patterns[i, b], s]
-                        + diff1_table[b, h_patterns[j, b], s]
-                        + w_table[b, pair_patterns[p, b], s]
+                        + diff1_table[b, h_slots[i, b], s]
+                        + diff1_table[b, h_slots[j, b], s]
+                        + w_table[b, pair_slots[p, b], s]
                     )
                 bin_emis[st, b] = e
                 cost_total += e
@@ -1039,7 +1106,7 @@ def _update_A_fused_pattern_kernel(C0b, diff1_table, w_table,
             for b in range(n_bins):
                 e = (
                     kW_Cb[s, b]
-                    + kWdiff_table[b, h_patterns[k, b], s]
+                    + kWdiff_table[b, h_slots[k, b], s]
                 )
                 bin_emis[st, b] = e
                 cost_total += e
@@ -1099,18 +1166,20 @@ def _update_A_fused_pattern_kernel(C0b, diff1_table, w_table,
 @njit(cache=True, parallel=False, fastmath=False, nogil=True)
 def _update_A_fused_pattern_kernel_serial(C0b, diff1_table, w_table,
                                            kW_Cb, kWdiff_table,
-                                           h_patterns, pair_patterns,
+                                           h_slots, pair_slots,
                                            WW_bin_emis, WW_total_cost,
                                            rr_i, rr_j, penalty, K, n_bins):
     """Serial one-thread clone of `_update_A_fused_pattern_kernel`.
 
     Table entries are the same float64 BLAS contractions formerly supplied as
-    Ub, Mb, and kW_Ub.  State order, emission-expression order, baseline
-    argmin, Viterbi forward pass, strict tie rules, WW summation, and returned
-    arrays are otherwise identical to the established kernel.
+    Ub, Mb, and kW_Ub; ``h_slots`` and ``pair_slots`` are the table slots of
+    every founder's and every rr pair's (bitwise AND) within-bin pattern.
+    State order, emission-expression order, baseline argmin, Viterbi forward
+    pass, strict tie rules, WW summation, and returned arrays are otherwise
+    identical to the established kernel.
     """
     N = C0b.shape[0]
-    n_rr = pair_patterns.shape[0]
+    n_rr = pair_slots.shape[0]
     K_states = n_rr + K + 1
     W = K  # wildcard sentinel
 
@@ -1137,7 +1206,7 @@ def _update_A_fused_pattern_kernel_serial(C0b, diff1_table, w_table,
             for k in range(K):
                 for b in range(n_bins):
                     founder_diff1[k, b] = diff1_table[
-                        b, h_patterns[k, b], s
+                        b, h_slots[k, b], s
                     ]
 
         best_cost = np.inf
@@ -1157,14 +1226,14 @@ def _update_A_fused_pattern_kernel_serial(C0b, diff1_table, w_table,
                         C0b[s, b]
                         + founder_diff1[i, b]
                         + founder_diff1[j, b]
-                        + w_table[b, pair_patterns[p, b], s]
+                        + w_table[b, pair_slots[p, b], s]
                     )
                 else:
                     e = (
                         C0b[s, b]
-                        + diff1_table[b, h_patterns[i, b], s]
-                        + diff1_table[b, h_patterns[j, b], s]
-                        + w_table[b, pair_patterns[p, b], s]
+                        + diff1_table[b, h_slots[i, b], s]
+                        + diff1_table[b, h_slots[j, b], s]
+                        + w_table[b, pair_slots[p, b], s]
                     )
                 bin_emis[st, b] = e
                 cost_total += e
@@ -1180,7 +1249,7 @@ def _update_A_fused_pattern_kernel_serial(C0b, diff1_table, w_table,
             for b in range(n_bins):
                 e = (
                     kW_Cb[s, b]
-                    + kWdiff_table[b, h_patterns[k, b], s]
+                    + kWdiff_table[b, h_slots[k, b], s]
                 )
                 bin_emis[st, b] = e
                 cost_total += e

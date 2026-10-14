@@ -13,7 +13,7 @@ from ..core.products import FOUNDER_STAGES, load_panels, panel_location
 from ..core.chromosome_parallel import (
     ChromosomeExecutor, current_threads, memory_worker_limit,
 )
-from ..core.checkpoints import contig_path, read_size_bytes
+from ..core.checkpoints import contig_path, read_size_bytes_many
 from ..core.parallel import malloc_trim
 from .founder_metrics import evaluate_founders, represented_ancestry
 from .metrics import long_switch_counts, phase_counts
@@ -199,11 +199,11 @@ def _evaluation_resources(store, tasks, requested, workers, sample_ids, truth_ca
     state. Reserve another 10% (at least 4 GiB, at most half) of available memory.
     """
     automatic = requested in (("available",), ("all",))
-    estimates = []
+    plans = []
     for contig, founder_stages in tasks:
         compact, _identity = truth_location(store, contig, sample_ids, truth_cache_root)
-        source = read_size_bytes(compact if compact is not None else
-                                 contig_path(store.root, "simulated_reads", contig))
+        source = (compact if compact is not None else
+                  contig_path(store.root, "simulated_reads", contig))
         paths = set() if compact is not None else {
             contig_path(store.root, "founder_templates", contig)}
         for stage in founder_stages:
@@ -211,8 +211,10 @@ def _evaluation_resources(store, tasks, requested, workers, sample_ids, truth_ca
         for stage in ("family_phase", "recombination"):
             if (automatic or stage in requested) and store.contig_done(stage, contig):
                 paths.add(contig_path(store.root, stage, contig))
-        other = max((read_size_bytes(path) for path in paths), default=0)
-        estimates.append((source + other) * 5 // 4 + (2 << 30))
+        plans.append((source, paths))
+    sizes = read_size_bytes_many(path for source, paths in plans for path in (source, *paths))
+    estimates = [(sizes[source] + max((sizes[path] for path in paths), default=0)) * 5 // 4
+                 + (2 << 30) for source, paths in plans]
     return estimates, memory_worker_limit(
         estimates, workers, available_memory_bytes(), label="EVALUATION")
 

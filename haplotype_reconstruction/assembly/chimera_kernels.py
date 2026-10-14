@@ -2,10 +2,85 @@
 from __future__ import annotations
 
 
+from concurrent.futures import ThreadPoolExecutor
+import functools
+import threading
 import numpy as np
 import math
 import numba
 from numba import njit, prange
+
+
+def _thread_budget(num_threads):
+    """Current value of a thread budget (an int, a callable, or None when unmanaged)."""
+    return num_threads() if callable(num_threads) else num_threads
+
+
+class _ThreadShares:
+    """Equal shares of a live thread budget among the running items of one concurrent_map.
+
+    The budget is read under the lock, so concurrent items never call it at once (a worker's
+    core.parallel.get_dynamic_threads claims its remainder thread for the whole process).
+    """
+
+    def __init__(self, num_threads):
+        self.num_threads = num_threads
+        self.lock = threading.Lock()
+        self.running = []
+
+    def start(self, index):
+        with self.lock:
+            self.running.append(index)
+        return functools.partial(self.threads, index)
+
+    def finish(self, index):
+        with self.lock:
+            self.running.remove(index)
+
+    def threads(self, index):
+        with self.lock:
+            total = max(1, int(_thread_budget(self.num_threads)))
+            running = len(self.running)
+            rank = self.running.index(index)
+        return max(1, total // running + (rank < total % running))
+
+
+def concurrent_map(function, items, num_threads):
+    """[function(item, threads) for item in items], the items running concurrently.
+
+    For independent calls whose heavy work runs in nogil kernels. Each item runs in a thread
+    with an equal share of the caller's live thread budget (num_threads: an int or a callable,
+    as _resolve_threads takes); ``threads`` is the item's share as a callable, which the item
+    passes on as its own budget and re-reads at its thread boundaries: floor(total / running)
+    plus one for the first total % running of the running items, so the threads of finished
+    items go to the rest. The first item runs in the calling thread. Results come back in item
+    order, so callers combine them exactly as their sequential loop did; the calls share no
+    floating-point work, so neither the concurrency nor the thread counts change a result.
+    With fewer than two items or threads (or an unmanaged budget, None) the items run in order
+    in the calling thread with num_threads itself.
+    """
+    items = list(items)
+    total = _thread_budget(num_threads)
+    if len(items) < 2 or total is None or total < 2:
+        return [function(item, num_threads) for item in items]
+    shares = _ThreadShares(num_threads)
+
+    def run(index):
+        threads = shares.start(index)
+        try:
+            numba.set_num_threads(threads())
+            return function(items[index], threads)
+        finally:
+            shares.finish(index)
+
+    caller_threads = numba.get_num_threads()
+    with ThreadPoolExecutor(max_workers=min(len(items), total) - 1) as executor:
+        others = [executor.submit(run, index) for index in range(1, len(items))]
+        try:
+            first = run(0)
+        finally:
+            numba.set_num_threads(caller_threads)
+        return [first] + [future.result() for future in others]
 
 
 def _resolve_threads(num_threads):
@@ -90,6 +165,23 @@ def _gather_samples_numba(probs, indices):
             out[s, t, 0] = probs[s, g, 0]
             out[s, t, 1] = probs[s, g, 1]
             out[s, t, 2] = probs[s, g, 2]
+    return out
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _gather_rows_numba(probs, rows, start, stop):
+    """np.ascontiguousarray(probs[rows, start:stop, :]) (a pure copy) spread over the rows.
+
+    A join's evidence slice of its informative samples over its site span: at L4 a whole
+    chromosome, several GB, which numpy copies on one core.
+    """
+    sites = stop - start
+    out = np.empty((len(rows), sites, probs.shape[2]), dtype=probs.dtype)
+    for r in prange(len(rows)):
+        source = rows[r]
+        for t in range(sites):
+            for c in range(probs.shape[2]):
+                out[r, t, c] = probs[source, start + t, c]
     return out
 
 

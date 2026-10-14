@@ -64,8 +64,11 @@ class ScreenSummary:
     checkpoint_source_identity: str | None
 
 
-def decoded_bytes(root, stage, contig):
-    return core_checkpoints.read_size_bytes(core_checkpoints.contig_path(root, stage, contig))
+def decoded_sizes(root, stage_contigs):
+    """{(stage, contig): decoded checkpoint bytes}, scanned concurrently."""
+    paths = {key: core_checkpoints.contig_path(root, *key) for key in stage_contigs}
+    sizes = core_checkpoints.read_size_bytes_many(paths.values())
+    return {key: sizes[path] for key, path in paths.items()}
 
 
 def scoring_memory_estimates(tasks):
@@ -77,11 +80,15 @@ def scoring_memory_estimates(tasks):
     K = 30 audit benchmark (b7, N 116, chr7 scale). A screened chromosome keeps
     them until its score phase, so concurrent workers hold them together.
     """
+    path = core_checkpoints.contig_path
+    sizes = core_checkpoints.read_size_bytes_many(
+        path(task.root, stage, task.contig) for task in tasks if isinstance(task, StoredChromosome)
+        for stage in (task.painting_stage, task.preparation_stage))
     estimates = []
     for task in tasks:
         if isinstance(task, StoredChromosome):
-            painting = decoded_bytes(task.root, task.painting_stage, task.contig)
-            prepared = decoded_bytes(task.root, task.preparation_stage, task.contig)
+            painting = sizes[path(task.root, task.painting_stage, task.contig)]
+            prepared = sizes[path(task.root, task.preparation_stage, task.contig)]
         else:
             painting = 0
             prepared = sum(component.ragged_source_factors.right_weight.nbytes

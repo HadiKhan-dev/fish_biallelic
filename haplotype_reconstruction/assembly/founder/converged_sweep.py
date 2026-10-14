@@ -6,7 +6,10 @@ SWITCH_PENALTY. Count decisions use the existing per-founder cost through the pi
 count rule, count_criterion.decide_with_sequence (the assembly join's rule).
 
 Fixed-K fit C(X): repeat sweeps of
-  (i) exact normalised forward/backward block messages of the panel (O(S n Q));
+  (i) exact normalised forward/backward block messages of the panel (O(S n Q); a search
+      updates its previous sweep's messages in place, recomputing per sample only the
+      blocks the last pass changed and those whose start message changed; computed over
+      consecutive sample ranges);
   (ii) proposals computed from the panel at the start of the sweep, independently and
       in parallel (a pure function of the panel; a window whose inputs are unchanged since
       the search last solved it reuses that solve): for every founder and every 8-block
@@ -96,7 +99,6 @@ the upper bound is a reported backstop).
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 import warnings
@@ -107,9 +109,9 @@ from numba.typed import List
 from . import (count_bound as founder_count_bound, count_criterion, scoring as founder_scoring,
                sweep_kernels as kernels, window_dp)
 from .. import panel_count
-from .candidates import completed_candidates
+from .candidates import POLL_SECONDS, completed_candidates
 from .packing import emission_arrays, gather_macro
-from .workspace import resolve_threads
+from .workspace import resolve_threads, sample_ranges
 from ...core import parallel
 
 TOL = 1e-4
@@ -121,15 +123,8 @@ GUARD_TOLERANCE = 1e-6
 WEAK_JUNCTION_MARGIN = founder_scoring.SWITCH_PENALTY
 # Forward messages of the current panel computed ahead of the pass position at a time.
 AHEAD_BLOCKS = 16
-# The compiled acceptance pass (_gs_pass) runs in nogil calls and re-reads its thread
-# budget before each: with more than BULK_MIN_THREADS threads a call computes one
-# speculative first-look chunk (first BULK_CHUNK junctions, doubling while nothing is
-# accepted, at most BULK_CHUNK_MAX and the memory bound BULK_CHUNK_BYTES), otherwise it
-# evaluates JUNCTION_BATCH junctions one by one.
-BULK_MIN_THREADS = 8
-BULK_CHUNK = 16
-BULK_CHUNK_MAX = 512
-BULK_CHUNK_BYTES = 256 * 1024 ** 2
+# The compiled acceptance pass (_gs_pass) runs in nogil calls of JUNCTION_BATCH junctions,
+# evaluated one by one, and re-reads its thread budget before each call.
 JUNCTION_BATCH = 16
 
 
@@ -159,7 +154,7 @@ class Orientation:
         sites = int(workspace.offsets[-1])
         self.reverse = reverse
         if reverse:
-            self.logs = np.ascontiguousarray(workspace.logs[:, ::-1, :])
+            self.logs = kernels.reverse_sites(workspace.logs)
             self.offsets = np.ascontiguousarray(sites - workspace.offsets[::-1], np.int64)
             self.leaves = List([np.ascontiguousarray(leaf[:, ::-1])
                                 for leaf in list(workspace.leaves)[::-1]])
@@ -223,7 +218,9 @@ def _gs_pass(o, X, stored, stored_cnt, stored_scale, props, penalty, perms, pa, 
     where sigma is the composition of the accepted suffix exchanges; the stored backward
     messages (and their per-block normalisers) read through gperm are therefore exact
     there, and an exact backward chain from the frontier is recomputed from the current
-    alleles before it is needed; (ii) the carried forward message f is exact at every
+    alleles before it is needed (only where an edit changed it: after a content move left
+    of the frontier the chain right of the move's end stays exact, after a suffix exchange
+    its states are relabelled); (ii) the carried forward message f is exact at every
     junction because blocks behind it never change again in this pass, and a lookahead of
     current forward messages is kept only up to the first block a later edit touched.
     At every junction every founder-pair suffix exchange is scored exactly and the best
@@ -236,20 +233,14 @@ def _gs_pass(o, X, stored, stored_cnt, stored_scale, props, penalty, perms, pa, 
     SweepEngine), whose shared-junction test traces sample paths left of a candidate from
     the carried forward messages of the junctions already passed.
 
-    Compiled (kernels.gs_pass_chunk): the pass runs as successive nogil calls; before every
-    call its Numba threads are re-read from `threads` (an int, or a callable budget whose
-    share grows as other fits finish, candidates.SlotBudget), so finished work's cores
-    flow to the running fits. With more than BULK_MIN_THREADS threads a call computes one
-    speculative chunk: the first look at every junction of the chunk (its exchange gains
-    and its candidates' gains) depends only on the panel at the chunk's start until
-    something is accepted, so it is computed for the whole chunk at once by the same
-    kernels on the same messages (bitwise the junction-by-junction values); the call ends
-    at the first junction that accepts a move; chunks start at BULK_CHUNK junctions and
-    double while nothing is accepted. Otherwise a call evaluates JUNCTION_BATCH junctions
-    one by one. The lookahead and backward-chain caches carry over from call to call
-    (they hold exact current messages over the ranges they mark valid). Decisions, order
-    and results never depend on the thread count or the chunking. Returns (acc,
-    junction_gain, junction_pair).
+    Compiled (kernels.gs_pass_chunk): the pass runs as successive nogil calls of
+    JUNCTION_BATCH junctions; before every call its Numba threads are re-read from
+    `threads` (an int, or a callable budget whose share grows as other fits finish,
+    candidates.SlotBudget), so finished work's cores flow to the running fits. The
+    lookahead and backward-chain caches carry over from call to call (they hold exact
+    current messages over the ranges they mark valid). Decisions, order and results never
+    depend on the thread count or the batching. Returns (acc, junction_gain,
+    junction_pair).
     """
     founders, blocks = X.shape
     samples, states = stored.shape[1], stored.shape[2]
@@ -280,30 +271,23 @@ def _gs_pass(o, X, stored, stored_cnt, stored_scale, props, penalty, perms, pa, 
         start_fwd = np.zeros((1, 1, 1))
     if start_fcnt is None:
         start_fcnt = count3
-    chunk_max = max(BULK_CHUNK, min(BULK_CHUNK_MAX, BULK_CHUNK_BYTES // (
-        8 * samples * max(states, len(pa)) * 3)))
     junction_gain = np.full(blocks + 1, -np.inf)
     junction_pair = np.zeros((blocks + 1, 2), np.int64)
-    frontier, p, chunk = 0, 0, BULK_CHUNK
+    frontier, p = 0, 0
     restore = parallel._numba.get_num_threads()
     try:
         while p < blocks:
-            n = max(1, int(resolve_threads(threads)))
-            parallel._numba.set_num_threads(n)
-            size = chunk if n > BULK_MIN_THREADS else 0
-            stop = min(blocks, p + (size if size else JUNCTION_BATCH))
-            (moves, gains, jg, jp, gperm, f, fcnt, frontier, nxt, accepted, ahead,
-             chain) = kernels.gs_pass_chunk(
+            parallel._numba.set_num_threads(max(1, int(resolve_threads(threads))))
+            stop = min(blocks, p + JUNCTION_BATCH)
+            (_, _, jg, jp, gperm, f, fcnt, frontier, accepted, ahead, chain) = kernels.gs_pass_chunk(
                 haps, X, o.leaves, o.logs, o.offsets, float(penalty), p, stop, frontier, f, fcnt,
                 local, local_cnt, stored, stored_cnt if lexmode else count3, stored_scale, gperm,
                 lab, *cands, perms, pa, pb, _GUARD_CODES[guard], bool(exchanges), AHEAD_BLOCKS, TOL,
-                GUARD_TOLERANCE, int(size), acc, ahead, chain, start_fwd, start_fcnt, pristine)
+                GUARD_TOLERANCE, acc, ahead, chain, start_fwd, start_fcnt, pristine)
             pristine = pristine and not accepted
-            junction_gain[p:nxt] = jg
-            junction_pair[p:nxt] = jp
-            if size:
-                chunk = BULK_CHUNK if accepted else min(2 * chunk, chunk_max)
-            p = nxt
+            junction_gain[p:stop] = jg
+            junction_pair[p:stop] = jp
+            p = stop
     finally:
         parallel._numba.set_num_threads(restore)
     record = {key: (int(round(value)) if key in _INT_ACC else float(value))
@@ -397,15 +381,19 @@ class SweepEngine:
         if self.checkpoints is not None:
             self.checkpoints.save(f"{self.prefix}.{label}", payload)
 
-    def per_sample(self, panel):
+    def per_sample(self, panel, threads):
+        """Per-sample canonical scores of panel, scored over consecutive sample ranges at the
+        share ``threads`` (an int or a callable budget) re-read before each range."""
         ws = self.workspace
-        alleles = founder_scoring.selected_alleles(ws.leaves, ws.offsets,
-                                                   np.ascontiguousarray(panel, np.int64))
-        return np.asarray(founder_scoring.score_panel(alleles, ws.evidence, ws.complete,
-                                                      ws.penalty, ws.logs))
+        with parallel.numba_thread_scope(int(resolve_threads(threads))):
+            alleles = founder_scoring.selected_alleles(ws.leaves, ws.offsets,
+                                                       np.ascontiguousarray(panel, np.int64))
+            return np.asarray(founder_scoring.score_panel(
+                alleles, ws.evidence, ws.complete, ws.penalty, ws.logs,
+                ranges=sample_ranges(len(ws.evidence), threads)))
 
-    def score(self, panel):
-        return float(self.per_sample(panel).sum())
+    def score(self, panel, threads):
+        return float(self.per_sample(panel, threads).sum())
 
     def fit_scores(self, label, panel, threads):
         """Per-sample scores of the converged fit `label` (whose panel is `panel`): the scores
@@ -413,8 +401,7 @@ class SweepEngine:
         checkpoint)."""
         scores = self._fit_scores.pop(label, None)
         if scores is None:
-            with parallel.numba_thread_scope(int(resolve_threads(threads))):
-                scores = self.per_sample(panel)
+            scores = self.per_sample(panel, threads)
         return scores
 
     def fit_bytes(self, founders):
@@ -547,26 +534,22 @@ class SweepEngine:
         ends, and normalised max-plus messages of panels that differ only further away are
         often bitwise equal, so a template whose three inputs equal the cached ones bitwise
         takes its cached result (the same proposals and diagnostics) instead of a solve.
+        The templates to solve run one thread each, as many at once as the share
+        ``threads`` (an int or a callable budget) allows (_one_thread_map).
         """
         def run(index):
             kind, a, c = self.templates[index]
-            with parallel.numba_thread_scope(1):
-                started = time.thread_time()
-                if kind == "fine":
-                    result = self._fine(X, fwd, bwd, a, c)
-                else:
-                    result = self._coarse(X, fwd, bwd, a, c)
-                return result, time.thread_time() - started
+            started = time.thread_time()
+            if kind == "fine":
+                result = self._fine(X, fwd, bwd, a, c)
+            else:
+                result = self._coarse(X, fwd, bwd, a, c)
+            return result, time.thread_time() - started
 
         results = [None] * len(self.templates)
         todo = list(range(len(self.templates))) if cache is None else cache.lookup(self, X, fwd, bwd,
                                                                                  results)
-        workers = max(1, min(int(threads), len(todo)))
-        if workers == 1:
-            computed = [run(index) for index in todo]
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                computed = list(executor.map(run, todo))
+        computed = _one_thread_map(run, todo, threads)
         for index, value in zip(todo, computed):
             results[index] = value
         if cache is not None:
@@ -597,22 +580,13 @@ class SweepEngine:
         (exact gains above TOL, no exchanges). Returns (gain, record).
         """
         copy = len(Y) - 1
-        n = int(resolve_threads(threads))
-        with parallel.numba_thread_scope(n):
-            haps = self.forward.haps(Y)
-            fwd, bwd, _, bscale = kernels.messages(haps, self.workspace.logs, self.forward.offsets,
-                                                   self.penalty)
+        fwd, bwd, _, _, _, bscale = self._full_messages(Y, False, threads)
+
         def run(template):
-            with parallel.numba_thread_scope(1):
-                return self._fine(Y, fwd, bwd, template[1], template[2], focals=(copy,))
+            return self._fine(Y, fwd, bwd, template[1], template[2], focals=(copy,))
 
         fine = [template for template in self.templates if template[0] == "fine"]
-        workers = max(1, min(n, len(fine)))
-        if workers == 1:
-            solved = [run(template) for template in fine]
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                solved = list(executor.map(run, fine))
+        solved = _one_thread_map(run, fine, threads)
         props, windows = {}, 0
         for result in solved:
             for _, a, c, _, rows, _ in result:
@@ -620,7 +594,7 @@ class SweepEngine:
                 if rows is not None:
                     props.setdefault(a, []).append(("fine", c, copy, np.asarray(rows, np.int64)))
         perms, pa, pb = kernels.swap_permutations(len(Y))
-        with parallel.numba_thread_scope(n):
+        with parallel.numba_thread_scope(int(resolve_threads(threads))):
             acc, _, _ = _gs_pass(self.forward, np.ascontiguousarray(Y, np.int64).copy(), bwd, None,
                                  bscale, props, self.penalty, perms, pa, pb, None, threads,
                                  exchanges=False, start_fwd=fwd)
@@ -631,29 +605,29 @@ class SweepEngine:
     def converge(self, start, label, threads):
         """C(start): the better of the forward-first and the reverse-first search.
 
-        Both run concurrently, each with its share of the thread budget (re-read at every
-        sweep and acceptance-pass call, so the survivor takes over the finished one's
-        cores). The higher exact F is kept (exact ties: forward-first); the record is the
-        kept search's, with both searches' CPU and record["best_of_two"].
+        Both run concurrently, each with its share of the thread budget (re-read before every
+        sample range of its messages and scores, window programme and acceptance-pass call,
+        so the survivor takes over the finished one's cores within its current phase). The
+        higher exact F is kept (exact ties: forward-first); the record is the kept search's,
+        with both searches' CPU and record["best_of_two"].
         """
         done = self._load(f"{label}.done")
         if done is not None:
             return np.asarray(done["rows"], np.int64).copy(), done["record"]
         started = time.perf_counter()
-        # Both searches start from the same panel, so the F, messages and window proposals
-        # of their sweep 0 (pure functions of the panel) are computed once, with the fit's
-        # whole thread budget, and shared; only their acceptance passes differ. A search
-        # that resumes from its own checkpoints computes its sweeps itself.
+        # Both searches start from the same panel, so the F (and per-sample scores), messages
+        # and window proposals of their sweep 0 (pure functions of the panel) are computed
+        # once, with the fit's whole thread budget, and shared; only their acceptance passes
+        # differ. A search that resumes from its own checkpoints computes its sweeps itself.
         shared = None
         if all(self._load(f"{label}.{first}.{stage}") is None
                for first in ("fwd", "rev") for stage in ("done", "sweep0")):
             X = np.ascontiguousarray(start, np.int64)
-            n = int(resolve_threads(threads))
-            with parallel.numba_thread_scope(n):
-                F0 = self.score(X)
+            scores0 = self.per_sample(X, threads)
             cache = ProposalCache()
-            shared = dict(F0=F0, inputs=self._sweep_inputs(X, n, cache), cache=cache,
-                          waiting={"fwd", "rev"}, lock=threading.Lock())
+            shared = dict(F0=float(scores0.sum()), scores0=scores0,
+                          inputs=self._sweep_inputs(X, threads, cache), cache=cache,
+                          waiting={"fwd", "rev"}, readers=set(), lock=threading.Lock())
         (X_fwd, fwd), (X_rev, rev) = _parallel_map(
             [lambda budget, first=first: self._converge_direction(start, label, first,
                                                                   budget or threads, shared)
@@ -676,23 +650,58 @@ class SweepEngine:
         self._save(f"{label}.done", dict(rows=X, record=record))
         return X, record
 
-    def _messages(self, X, threads):
-        """The messages of panel X (with switch counts under a guard) and their wall time."""
-        started = time.perf_counter()
-        with parallel.numba_thread_scope(threads):
+    def _full_messages(self, X, lex, threads):
+        """messages(_lex) of panel X: (fwd, bwd, fcnt, bcnt, fscale, bscale), the counts None
+        without lex; computed over consecutive sample ranges at the share ``threads`` (an int or
+        a callable budget) re-read before each range (every sample's recursion is its own)."""
+        logs, offsets = self.workspace.logs, self.forward.offsets
+        with parallel.numba_thread_scope(int(resolve_threads(threads))):
             haps = self.forward.haps(X)
-            if self.guard:
-                messages = kernels.messages_lex(haps, self.workspace.logs, self.forward.offsets,
-                                                self.penalty)
-            else:
-                fwd, bwd, fscale, bscale = kernels.messages(haps, self.workspace.logs,
-                                                            self.forward.offsets, self.penalty)
-                messages = (fwd, bwd, None, None, fscale, bscale)
-        return messages, time.perf_counter() - started
+        messages = kernels.message_arrays(len(X), self.blocks, len(logs), lex)
+        fwd, bwd, fcnt, bcnt, fscale, bscale = messages
+        for s0, s1, n in sample_ranges(len(logs), threads):
+            with parallel.numba_thread_scope(n):
+                if lex:
+                    kernels.messages_lex(haps, logs, offsets, self.penalty, s0, s1, fwd, bwd, fcnt,
+                                         bcnt, fscale, bscale)
+                else:
+                    kernels.messages(haps, logs, offsets, self.penalty, s0, s1, fwd, bwd, fscale,
+                                     bscale)
+        return messages
 
-    def _sweep_inputs(self, X, threads, cache):
+    def _messages(self, X, threads, held=None):
+        """The messages of panel X (with switch counts under a guard) and their wall time.
+
+        held: (panel, messages) of an earlier panel, owned by the caller: they are updated in
+        place to X's where X differs from that panel (kernels.update_messages(_lex), bitwise
+        the full computation); a held backward half of None is computed whole. Computed over
+        consecutive sample ranges at the share ``threads`` re-read before each range.
+        """
+        started = time.perf_counter()
+        if held is None:
+            return self._full_messages(X, bool(self.guard), threads), time.perf_counter() - started
+        logs, offsets = self.workspace.logs, self.forward.offsets
+        with parallel.numba_thread_scope(int(resolve_threads(threads))):
+            haps = self.forward.haps(X)
+        panel, (fwd, bwd, fcnt, bcnt, fscale, bscale) = held
+        known = bwd is not None
+        if not known:
+            bwd, bscale = np.zeros_like(fwd), np.zeros_like(fscale)
+            bcnt = None if fcnt is None else np.zeros_like(fcnt)
+        changed = np.any(panel != X, axis=0)
+        for s0, s1, n in sample_ranges(len(logs), threads):
+            with parallel.numba_thread_scope(n):
+                if self.guard:
+                    kernels.update_messages_lex(haps, logs, offsets, self.penalty, changed, fwd, bwd,
+                                                fcnt, bcnt, fscale, bscale, known, s0, s1)
+                else:
+                    kernels.update_messages(haps, logs, offsets, self.penalty, changed, fwd, bwd,
+                                            fscale, bscale, known, s0, s1)
+        return (fwd, bwd, fcnt, bcnt, fscale, bscale), time.perf_counter() - started
+
+    def _sweep_inputs(self, X, threads, cache, held=None):
         """The messages of panel X and its window proposals (pure functions of the panel)."""
-        messages, message_wall = self._messages(X, threads)
+        messages, message_wall = self._messages(X, threads, held)
         started = time.perf_counter()
         proposals, stats = self.proposals(X, messages[0], messages[1], threads, cache)
         return dict(messages=messages, proposals=proposals, stats=stats, message_wall=message_wall,
@@ -711,14 +720,20 @@ class SweepEngine:
         X = np.ascontiguousarray(start, np.int64).copy()
         founders, blocks = X.shape
         perms, pa, pb = kernels.swap_permutations(founders)
+        # Per-sample scores of the current panel X, while known: a pass that accepts nothing
+        # leaves the panel, hence its scores, unchanged.
         if shared is not None:
-            F0 = shared["F0"]
+            F0, current = shared["F0"], shared["scores0"]
         else:
-            with parallel.numba_thread_scope(int(resolve_threads(threads))):
-                F0 = self.score(X)
+            current = self.per_sample(X, threads)
+            F0 = float(current.sum())
         F, history, junctions, converged, sweep = F0, [], None, False, 0
         # The search's proposal cache (seeded by the shared sweep 0).
         cache = ProposalCache(None if shared is None else shared["cache"])
+        # This search's own messages of the panel its last sweep started from, updated in place
+        # by the next sweep (_messages): (panel, messages); a reversed pass keeps their forward
+        # half only, so the search holds no more message arrays than its forward passes do.
+        held = None
         backstop = self.config.sweep_backstop
         resumed = 0
         while sweep < backstop:
@@ -727,29 +742,35 @@ class SweepEngine:
                 break
             X = np.asarray(saved["rows"], np.int64).copy()
             F, history, junctions = saved["F"], list(saved["history"]), saved["junctions"]
+            current = None
             sweep += 1
             resumed += 1
             if saved["accepted"] == 0:
                 converged = True
                 break
         while not converged and sweep < backstop:
-            n = int(resolve_threads(threads))
             sweep_started = time.perf_counter()
+            owned = True
             if sweep == 0 and shared is not None:
                 with shared["lock"]:
                     inputs = shared["inputs"]
                     shared["waiting"].discard(first)
                     if not shared["waiting"]:
                         shared["inputs"] = None
+                    if inputs["messages"] is not None:
+                        shared["readers"].add(first)
                 if first == "rev":
                     # The shared proposals' CPU is reported once, by the forward-first search.
                     inputs = dict(inputs, stats=dict(inputs["stats"], worker_cpu=0.0))
                 if inputs["messages"] is None:
                     # The other search ran first and released them (see below).
-                    messages, message_wall = self._messages(X, n)
+                    messages, message_wall = self._messages(X, threads)
                     inputs = dict(inputs, messages=messages, message_wall=message_wall)
+                else:
+                    owned = False
             else:
-                inputs = self._sweep_inputs(X, n, cache)
+                inputs = self._sweep_inputs(X, threads, cache, held)
+            held = None
             fwd, bwd, fcnt, bcnt, fscale, bscale = inputs["messages"]
             proposals, stats = inputs["proposals"], inputs["stats"]
             message_wall, proposal_wall = inputs["message_wall"], inputs["proposal_wall"]
@@ -762,7 +783,7 @@ class SweepEngine:
                 else:
                     props.setdefault(a, []).append((kind, c, k, rows))
             pass_started = time.perf_counter()
-            with parallel.numba_thread_scope(n):
+            with parallel.numba_thread_scope(int(resolve_threads(threads))):
                 if reverse:
                     # The reversed pass stores the clamped forward messages; their per-block
                     # normalisers are the forward ones in reversed block order.
@@ -774,9 +795,11 @@ class SweepEngine:
                     stored_scale = np.ascontiguousarray(fscale[::-1])
                     Xo = np.ascontiguousarray(X[:, ::-1])
                     start_fwd = start_fcnt = None
+                    kept = (fwd, None, fcnt, None, fscale, None)
                 else:
                     o, stored, stored_cnt, stored_scale, Xo = self.forward, bwd, bcnt, bscale, X.copy()
                     start_fwd, start_fcnt = fwd, fcnt
+                    kept = (fwd, bwd, fcnt, bcnt, fscale, bscale)
                 del fwd, bwd, fcnt, bcnt, fscale, bscale
                 acc, gains, pairs = _gs_pass(o, Xo, stored, stored_cnt, stored_scale, props,
                                              self.penalty, perms, pa, pb, self.guard, threads,
@@ -785,13 +808,23 @@ class SweepEngine:
             if sweep == 0 and shared is not None:
                 # Run one after the other (a one-thread or memory-limited budget), the other
                 # search has not started: its message arrays are not kept alive through this
-                # whole search; it recomputes them and keeps the shared proposals.
+                # whole search; it recomputes them and keeps the shared proposals. The shared
+                # messages become this search's own once no other search reads them (the last
+                # one to finish its sweep-0 pass).
                 with shared["lock"]:
                     if shared["inputs"] is not None:
                         shared["inputs"] = dict(shared["inputs"], messages=None)
+                    if not owned:
+                        shared["readers"].discard(first)
+                        owned = not shared["readers"]
+            if owned:
+                held = (X, kept)
+            del kept
             X = np.ascontiguousarray(Xo[:, ::-1]) if reverse else Xo
-            with parallel.numba_thread_scope(n):
-                scores = self.per_sample(X)
+            accepted = acc["fine"] + acc["coarse"] + acc["exchange"]
+            if accepted or current is None:
+                current = self.per_sample(X, threads)
+            scores = current
             F_new = float(scores.sum())
             pass_wall = time.perf_counter() - pass_started
             accounted = acc["fine_gain"] + acc["coarse_gain"] + acc["exchange_gain"]
@@ -800,7 +833,6 @@ class SweepEngine:
                 raise RuntimeError(
                     f"converged sweep {self.prefix}.{label}:{sweep}: canonical F changed by "
                     f"{F_new - F}, accepted local gains {accounted}")
-            accepted = acc["fine"] + acc["coarse"] + acc["exchange"]
             junctions = _weak_junctions(gains, pairs, reverse, blocks)
             history.append(dict(sweep=sweep, reverse=bool(reverse), F=float(F_new),
                                 dF=float(F_new - F), dF_accounted=float(accounted),
@@ -909,8 +941,7 @@ def _sequence_scores(engine, geometry, larger, larger_scores, reference, threads
     record["shadow_cells"] = int(replaced)
     if not replaced:
         return larger_scores, record
-    with parallel.numba_thread_scope(int(resolve_threads(threads))):
-        return engine.per_sample(shadow), record
+    return engine.per_sample(shadow, threads), record
 
 
 def _loso_margin(diagnostics):
@@ -923,9 +954,65 @@ def _death_candidate(engine, geometry, rows, threads):
     cell first, then the largest unrefitted F(rows minus f) (ties: lower founder)."""
     owns = _own_sequence(rows)
     pool = np.flatnonzero(~owns) if not owns.all() else np.arange(len(rows))
-    with parallel.numba_thread_scope(int(resolve_threads(threads))):
-        totals = [engine.score(np.delete(rows, f, axis=0)) for f in pool.tolist()]
+    totals = [engine.score(np.delete(rows, f, axis=0), threads) for f in pool.tolist()]
     return int(pool[max(range(len(pool)), key=lambda i: (totals[i], -i))])
+
+
+def _one_thread_map(function, items, threads):
+    """[function(item) for item in items] in input order, each call on one Numba thread, with as
+    many calls running at once as the share ``threads`` (an int or a callable budget) allows.
+
+    Worker threads take the items in order. The caller starts another worker whenever the share,
+    re-read at every completion and every POLL_SECONDS, exceeds the workers, and a worker stops
+    after an item while the workers exceed the share: a search whose share grows while its window
+    programmes run takes the freed threads within the phase, and never runs more threads than its
+    share (each worker serves many items, so the threads and their allocator arenas stay few).
+    """
+    results = [None] * len(items)
+    state = dict(taken=0, finished=0, workers=0, error=None)
+    changed = threading.Condition()
+
+    def share():
+        return max(1, int(resolve_threads(threads)))
+
+    def work():
+        with parallel.numba_thread_scope(1):
+            while True:
+                with changed:
+                    if (state["error"] is not None or state["taken"] == len(items)
+                            or state["workers"] > share()):
+                        state["workers"] -= 1
+                        changed.notify()
+                        return
+                    index = state["taken"]
+                    state["taken"] += 1
+                try:
+                    results[index] = function(items[index])
+                except BaseException as error:
+                    with changed:
+                        if state["error"] is None:
+                            state["error"] = error
+                with changed:
+                    state["finished"] += 1
+                    changed.notify()
+
+    started = []
+    with changed:
+        try:
+            while state["finished"] < len(items) and state["error"] is None:
+                while state["workers"] < min(share(), len(items) - state["taken"]):
+                    state["workers"] += 1
+                    started.append(threading.Thread(target=work, daemon=True))
+                    started[-1].start()
+                changed.wait(POLL_SECONDS)
+        except BaseException as error:
+            if state["error"] is None:
+                state["error"] = error
+    for worker in started:
+        worker.join()
+    if state["error"] is not None:
+        raise state["error"]
+    return results
 
 
 def _parallel_map(functions, threads, bytes_per_task):
@@ -940,8 +1027,9 @@ def _fit_many(engine, starts, labels, threads):
     """Converge several independent starts concurrently; results in input order.
 
     Each fit's Numba threads are its share of the budget among the fits still running
-    (re-read at every sweep, so the last fits take over the finished ones' cores); a
-    fit's share is split between its two concurrent searches (SweepEngine.converge).
+    (re-read within every phase of its searches, so the last fits take over the finished
+    ones' cores); a fit's share is split between its two concurrent searches
+    (SweepEngine.converge).
     """
     per_fit = 2 * engine.fit_bytes(max(len(start) for start in starts))
     return _parallel_map([lambda budget, start=start, label=label: engine.converge(
@@ -1121,10 +1209,9 @@ def count_pass(engine, start, cost, threads, seed_key, additions=True):
             # Exact unrefitted per-sample scores of every candidate's deletion, ranked by the
             # point margin of the total gain (ties: lower founder index); the top r are converged.
             keys = [None] * K
-            with parallel.numba_thread_scope(int(resolve_threads(threads))):
-                for d in candidates:
-                    keys[d] = min(_point_margins(scores, engine.per_sample(np.delete(X, d, axis=0)),
-                                                 cost))
+            for d in candidates:
+                unrefitted = engine.per_sample(np.delete(X, d, axis=0), threads)
+                keys[d] = min(_point_margins(scores, unrefitted, cost))
             chosen = sorted(candidates, key=lambda d: (keys[d], d))[:ranked_refits]
             ranking = "unrefitted_point_margin"
         else:
@@ -1366,10 +1453,13 @@ def refine_components(prepared_blocks, components, neutral_probs, global_sites, 
             diagnostics.append(dict(component=number, changed=False,
                                     reason="single_block_or_founder", search="converged_sweep"))
             continue
-        workspace = component_workspace(workspaces, batch, neutral_probs, global_sites,
-                                        config.proposal_max_bins, num_threads,
-                                        minimum_bin_size=config.proposal_min_sites_per_bin)
+        # The component's set-up kernels (evidence gathering and emissions, block models, the
+        # reversed orientation) run on its whole share, also in a pool worker (whose Numba
+        # threads stay at one between tasks).
         with parallel.numba_thread_scope(int(resolve_threads(num_threads))):
+            workspace = component_workspace(workspaces, batch, neutral_probs, global_sites,
+                                            config.proposal_max_bins, num_threads,
+                                            minimum_bin_size=config.proposal_min_sites_per_bin)
             context = refiner._macro_context(batch, l1_blocks)
             engine = SweepEngine(workspace, context, config, checkpoints, token)
         cost = float(chimera_scoring.compute_cc(batch, len(neutral_probs), cc_scale))

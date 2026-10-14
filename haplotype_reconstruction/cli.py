@@ -264,7 +264,11 @@ def main(argv=None):
             parser.error('worker cores must fit affinity and idle-seconds must be positive')
         os.environ['NUMBA_NUM_THREADS'] = str(cores)
         from .core.batch_queue import worker
-        worker(args.queue.resolve(), cores, args.idle_seconds)
+        from .core.numba_warmup import persistent_numba_cache
+        # Helpers install the workflows' stored kernels (or compile the
+        # manifest up front) instead of compiling in every bundle's workers.
+        with persistent_numba_cache(cores):
+            worker(args.queue.resolve(), cores, args.idle_seconds)
         return 0
     if args.command == 'example':
         from .simulation.example import create_example
@@ -287,9 +291,13 @@ def main(argv=None):
         os.environ.setdefault('MPLCONFIGDIR', str(PROJECT_ROOT / 'work' / 'cache' / 'matplotlib'))
         if args.cores is not None:
             os.environ['NUMBA_NUM_THREADS'] = str(args.cores)
+        from .core.numba_warmup import persistent_numba_cache
         from .simulation.evaluation import evaluate_run
-        report = evaluate_run(args.output, checkpoints=args.checkpoints, cores=args.cores,
-                              stages=args.stages, contigs=args.contigs)
+        # Evaluation kernels come from, and are published to, the workflows'
+        # persistent kernel store instead of compiling in every worker.
+        with persistent_numba_cache(len(os.sched_getaffinity(0)) if args.cores is None else args.cores):
+            report = evaluate_run(args.output, checkpoints=args.checkpoints, cores=args.cores,
+                                  stages=args.stages, contigs=args.contigs)
         print(json.dumps(report['pedigree'], indent=2))
         return 0
     config = {}

@@ -1,18 +1,18 @@
 """Independent complete founder refinements in forkserver worker processes.
 
 All passes for one component stay on the same worker process with a private
-workspace (its own evidence slice, models and messages). No component can change
-another's objective or candidates. Results are restored to genomic order;
+workspace (its own evidence columns, gathered from the chromosome's evidence in a
+shared segment, models and messages). No component can change another's objective
+or candidates. Results are restored to genomic order;
 completion order affects only the available CPU budget: each worker's Numba thread
 count is the node budget divided by the active workers (core.parallel's dynamic
 threads, re-read at every sweep), so the tail components of a level take over the
-cores of finished ones. Process x thread <= the budget.
+cores of finished ones; a growing budget (a contig lane's lease) raises the shared
+total while the level runs (core.parallel.live_total). Process x thread <= the budget.
 """
 import copy
 import gc
 from functools import partial
-
-import numpy as np
 
 from ..checkpoints import AssemblyCheckpointStore
 from .candidates import completed_candidates
@@ -60,11 +60,14 @@ def _refine_one(batch, component, neutral, sites, options, budget):
 
 
 def _init_component_worker(total_cores, active_counter, extra_counter, startup_counters):
-    """Pool initializer: one Numba thread until the shared dynamic budget is read."""
+    """Pool initializer: one Numba thread until the shared dynamic budget is read. The
+    refinement modules are imported here, while the parent is still sending the tasks."""
     import numba
     numba.set_num_threads(1)
     parallel.set_dynamic_thread_state(total_cores, active_counter, extra_counter,
                                       **startup_counters)
+    from .. import founder_refinement  # noqa: F401
+    from . import checkpoints, converged_sweep  # noqa: F401
 
 
 def _dynamic_budget():
@@ -74,23 +77,20 @@ def _dynamic_budget():
 
 def _component_task(payload):
     """One component's converged refinement and count decisions, in a pool worker."""
-    number, batch, component, neutral, sites, options = payload
+    number, batch, component, shared, options = payload
     gc.collect()
     parallel.malloc_trim()
+    # The chromosome's evidence and sites, attached from the parent's shared segments (no
+    # copy); the component's workspace gathers its own columns from them.
+    (evidence_handle, neutral), (sites_handle, sites) = map(parallel.attach_shared_array, shared)
     parallel.increment_active()
     try:
         return number, _refine_one(batch, component, neutral, sites, options, _dynamic_budget)
     finally:
         parallel.decrement_active()
         parallel.release_dynamic_extra()
-
-
-def _evidence_slice(neutral, sites, component):
-    """The component's columns of the chromosome evidence (the workspace gathers the same
-    values from them)."""
-    lo = int(np.searchsorted(sites, component.positions[0]))
-    hi = int(np.searchsorted(sites, component.positions[-1])) + 1
-    return np.ascontiguousarray(neutral[:, lo:hi]), np.ascontiguousarray(sites[lo:hi])
+        del neutral, sites
+        parallel.close_shared_memory([evidence_handle, sites_handle])
 
 
 def refine_independent_components(prepared, components, neutral, sites, *,
@@ -145,38 +145,53 @@ def refine_independent_components(prepared, components, neutral, sites, *,
             for index, result in completed_candidates(functions, num_threads, per_component):
                 record(indices[index], result)
     else:
-        payloads = []
-        for index, number in enumerate(indices):
-            batch, block, _, _, options = functions[index].args
-            payloads.append((number, batch, block, *_evidence_slice(neutral, sites, block), options))
-        context = parallel.forkserver_context
-        active, extra = context.Value('i', 0), context.Value('i', 0)
-        # Distinct-worker startup gate (as the hierarchy pools): no early worker takes
-        # the whole node while its peers are still starting.
-        startup = dict(started_counter=context.Value('i', 0),
-                       participant_counter=context.Value('i', 0),
-                       batch_generation=context.Value('i', 0),
-                       batch_task_count=context.Value('i', len(payloads)),
-                       startup_target=context.Value('i', workers),
-                       startup_ready=context.Value('i', 0))
-        # Largest components first: the level's tail is the smallest work.
-        order = sorted(range(len(payloads)), key=lambda i: -len(payloads[i][2].positions))
-        with parallel.main_module_guard():
-            pool = parallel.NonDaemonicForkserverPool(
-                processes=workers, initializer=_init_component_worker,
-                initargs=(total, active, extra, startup))
-            try:
-                for number, result in pool.imap_unordered(
-                        _component_task, [payloads[i] for i in order]):
-                    record(number, result)
-                pool.close()
-            except BaseException:
-                pool.terminate()
-                raise
-            finally:
-                pool.join()
+        # The chromosome's evidence and sites reach the workers through shared segments (copied
+        # once, in parallel) instead of a pickled copy of every component's columns sent one
+        # task after another through the pool's task pipe.
+        handles, shared = [], []
+        with parallel.shared_memory_cleanup(handles):
+            for array in (neutral, sites):
+                handle, metadata = parallel.create_shared_array(array, copy_threads=total)
+                handles.append(handle)
+                shared.append(metadata)
+            payloads = []
+            for index, number in enumerate(indices):
+                batch, block, _, _, options = functions[index].args
+                payloads.append((number, batch, block, shared, options))
+            _run_pool(payloads, workers, total, num_threads, record)
     output = haplotypes.BlockResults([result[0][0] for result in answers])
     diagnostics = dict(answers[0][1], components=[
         _renumber(result[1]["components"][0], number)
         for number, result in enumerate(answers)])
     return output, diagnostics
+
+
+def _run_pool(payloads, workers, total, num_threads, record):
+    """The component tasks in a forkserver pool of ``workers`` processes (dynamic thread shares of
+    the budget ``total``, live in a lane), largest component first; record(number, result)."""
+    context = parallel.forkserver_context
+    active, extra = context.Value('i', 0), context.Value('i', 0)
+    # Distinct-worker startup gate (as the hierarchy pools): no early worker takes
+    # the whole node while its peers are still starting.
+    startup = dict(started_counter=context.Value('i', 0),
+                   participant_counter=context.Value('i', 0),
+                   batch_generation=context.Value('i', 0),
+                   batch_task_count=context.Value('i', len(payloads)),
+                   startup_target=context.Value('i', workers),
+                   startup_ready=context.Value('i', 0))
+    # Largest components first: the level's tail is the smallest work.
+    order = sorted(range(len(payloads)), key=lambda i: -len(payloads[i][2].positions))
+    with parallel.live_total(num_threads) as live, parallel.main_module_guard():
+        pool = parallel.NonDaemonicForkserverPool(
+            processes=workers, initializer=_init_component_worker,
+            initargs=(total, active, extra, dict(startup, live_total=live)))
+        try:
+            for number, result in pool.imap_unordered(
+                    _component_task, [payloads[i] for i in order]):
+                record(number, result)
+            pool.close()
+        except BaseException:
+            pool.terminate()
+            raise
+        finally:
+            pool.join()
