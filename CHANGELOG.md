@@ -1,0 +1,125 @@
+# Changelog
+
+## 2.0.0 (unreleased)
+
+The package is rebuilt from release 1.0 (commit 92b3daf) as one pipeline of typed stage packages joined through the
+checkpoint store, with one driver, one configuration and one execution layer. The science is that of 1.0: the
+algorithms, models, thresholds, release and tie rules are unchanged, apart from the fixes below. Accepted on
+18 October 2026 against 1.0 in the same environment on nine reference scenarios
+([validation](docs/validation.md#results)): every difference is attributed to a documented fix or to rounding and
+ties, the pedigree truth metrics are identical on all seven simulations, the whole-genome simulations run 3-5% faster
+with a 27-34% smaller largest process, and TroMau takes the same wall time (41:10 against 41:00) with a 16% lower
+node peak. [Migration](docs/migration.md) maps every old command, setting and output name to the new one.
+
+### Incompatible changes
+
+- One command, `haplotypes run`, replaces `simulate`, `reconstruct`, `tropheops` and `astcal`; the crosses are the
+  presets `tromau` and `aulstu`. `run.py` is removed. `evaluate`, `export`, `status`, `example`, `recombination` and
+  `batch-worker` take run directories and destinations as positional arguments.
+- The configuration has new sections (`[execution]`, `[input]`, `[samples]`, `[quality]`, `[genetic_map]`,
+  `[pedigree.eligibility]`, `[family_phase]`, `[simulation.reads]`, `[reports]`). Unknown keys and sections are errors
+  (1.0 ignored them). Scientific switches are `--set SECTION.KEY=VALUE` instead of one flag each. `[input] contigs` is
+  required for VCF input unless a preset lists them.
+- No setting is read from environment variables any more (`HAPLOTYPES_*`, `BHD_*`, `HAPREC_COARSE_MOVE_GUARD`).
+- One stage vocabulary: `block_discovery` is `discovery`, the feedback rounds are `local_selection`
+  (`local_selection_initial`, `_l1`, `_l2` in evaluation), `allele_refit` is `founder_refit`, family refinement is
+  `family_phase`. Output directories are named after the stages (`quality/`, `painting/`, `founder_refit/`,
+  `family_phase/`, `recombination/`, `simulation/`); `pedigree/scientific_relationships.csv` (a copy of
+  `tier_b_relationships.csv`) and constant diagnostics columns are removed.
+- Checkpoints written by 1.0 are not read: the container format is unchanged, but record keys and identities are new.
+  A stage's identity covers the source of the packages it runs (computed automatically), its configuration and the
+  record identities of its inputs.
+- Removed alternative modes: founder refinement always runs (`--founder-refinement off` is gone) and its coarse-move
+  guard is fixed to the shared-junction guard; the pedigree direction alternatives (cluster, continuous-only and
+  family-only) and their internal ablation switches are gone; the pedigree keeps one current record per product
+  instead of versioned decision replays, so a changed pedigree setting needs a new output root.
+- Python callers: `core/` and `workflows/` are replaced by `config/`, `store/`, `execution/`, `pipeline/` and one
+  package per stage (`evidence/`, `discovery/`, `local_selection/`, `assembly/`, `painting/`, `pedigree/`,
+  `founder_refit/`, `family_phase/`, `recombination/`), with `evaluation/`, `reports/`, `export/` and `templates/`.
+
+### Input and checks
+
+- One record policy for every VCF/BCF: records that are not biallelic SNPs are dropped and counted (`not_snp`,
+  `multiallelic`), every record at a position with two or more biallelic SNP records is dropped
+  (`duplicate_position`), and I/O or format errors stop the run. Real BCFs with indels are accepted. Results are
+  unchanged wherever 1.0's site filter ran (its rule r0 removed the same records); 1.0's cross route truncated
+  multiallelic depths to the first ALT and could swallow read errors, its generic route rejected any file with an
+  indel, and runs without the site filter read indels as SNPs.
+- Everything that can be checked runs before any computation: configuration consistency, the variant header (AD,
+  samples, contigs present and populated), the workbook, sheet, columns and sample list, and the eligibility policy
+  (1.0 read the cross workbooks only after painting). Runs reaching the genome-wide stages need at least three
+  contigs; a run with fewer than five contigs warns at the start that Tier-B calls are unreachable, and the pedigree
+  states its count of informative chromosomes and whether each tier was reachable.
+- Genotype likelihoods of every read model come from one emission kernel; values change at rounding level only.
+- Read model: the shared homozygote-overdispersion candidate and its null refit are removed (homozygote kernels are
+  binomial); held-out selection scores within one nat of the best are ties and the simplest candidate is applied;
+  optimiser stop reasons do not decide which fit is used (heldout-read-model-v6).
+- A run marks its checkpoint directory with the release layout before writing anything and refuses a directory
+  holding checkpoints without the mark (an earlier release) or with other subdirectories. A shard of a simulation is
+  refused until the simulated inputs of every contig are recorded.
+
+### Scientific fixes
+
+Each was measured on the bounded references against the unfixed tree; [validation](docs/validation.md) has the
+acceptance evidence.
+
+- Discovery: a cycling fixed-K fit returns the cycle's lowest-NLL state, reports the iteration limit and is never
+  certified as a fixed point (1.0 returned the state the iteration limit landed on, which depended on the limit's
+  parity). Cyclic-fit endpoints changed; no block outcome changed on the references.
+- Assembly count rule: the row geometry (nearest rows, shadows, near-identity and novelty tests) reads the pre-fill
+  calls, so a completion fill never decides a count (1.0 measured on the published calls). Founder refinement's count
+  rule counts S as the component's informative samples (1.0 counted every evidence row, founder-excluded samples
+  included), and a deletion round is skipped by its bound only when the bound also proves the bootstrap band (1.0
+  recorded such rounds as not ambiguous without evaluating the band).
+- Painting: bin-to-bin switch probabilities use Haldane's map function (1.0: min(1/2, d)); release status changed in
+  a handful of track bins with posteriors within 1e-3 of the 0.9 threshold.
+- Founder refit: two-row moves are only swaps of different alleles of rows painted together at the site, accepted
+  at twice the per-allele prior (10 nats); 1.0 flipped any pair of called rows on a summed 5 nats.
+- Family phase: the polish never switches phase inside the first painting bin of a chromosome or component (1.0 gave
+  those intervals the switch probability of a bin edge).
+- Pedigree: the weakest-link tie tolerance of acyclic graph selection is 512 machine epsilons of the scores the
+  margins come from (1.0 took 512 epsilons of the margins themselves, below their rounding).
+
+### Fixes and other changes
+
+- New export stage: every complete run writes a founder VCF and the phased sample VCF per contig to
+  `OUTPUT/export/` (`[export] enabled`, `[export] full_length`); `haplotypes export` writes the same files, with
+  per-component founder-track TSVs as the optional product `tracks`.
+- New memory governor: parallel work is admitted by estimated peak bytes and waits when memory is tight instead of
+  failing; `[execution] memory_limit` (`--memory-limit`) caps it, nested work keeps headroom for its sub-tasks, and a
+  new run removes the shared-memory segments of dead runs. Pacing never changes results.
+- Large founder counts: local selection, discovery, assembly and painting keep their working memory per task and
+  reserve calibrated estimates (lane-block path kernels, bit-packed discovery caches, shared assembly evidence,
+  batched label continuity); results are identical. Founder refinement's window programmes run faster with identical
+  results.
+- One CPU-lease tree and one process-pool type replace the separate redistribution mechanisms; the Numba threading
+  layer is OpenMP explicitly (the `tbb` dependency is dropped).
+- The resolved configuration is written to `OUTPUT/config.toml` and into every run record; stage timings include
+  helper threads.
+- Discovery's checkpoint chunk counter advances only after a successful write, so a failed write can no longer make
+  an incomplete contig look complete. Maximum cuts above `DiscoveryConfig.search.exact_cut_max_k = 12` founders are
+  reported as heuristic cuts instead of a search limit (diagnostics only).
+- Assembly levels continue past L4 while a boundary that is not a phase break remains (no change at the reference
+  sizes); final and context assemblies are distinguished explicitly; joined batches are keyed by their typed inputs,
+  so identical joins are reused across a contig's assemblies more often.
+- Founder refinement's window frontier has a fixed cap (`AssemblyConfig.refinement.frontier_bytes`, 128 GiB) with
+  each fallback reported, instead of an error above a fixed entry count; sweep histories are stored once per fit.
+- The painting stage owns its configuration and release rule, computed once when it is written; its memory budget
+  reads the job's memory (cgroup-aware) rather than the node's.
+- Pedigree identities are per contig, the evidence calibration comes from the configuration, memory planning reads
+  the records instead of a published table, and the two roles of the former parent-state contamination constant are
+  separate fields (same values). `OUTPUT/pedigree/summary.json` publishes the informative contigs, the
+  chromosome-count statement (whether Tier A and Tier B were reachable), the family solve and the exclusion and
+  eligibility summaries.
+- Founder refit binds its identity before reusing a recorded contig, as every other stage does.
+- Recombination's shared-orientation fit no longer fails on genetic maps with zero-rate stretches.
+- Family phase releases after at most 25 belief-propagation iterations (earlier when converged). 1.0's stability
+  checks after 20 iterations could not fail under the scaffold polish, so outputs are unchanged; the retry ladder,
+  the 520-iteration limit and the switches restoring older behaviour are gone. Protected intervals
+  (`[family_phase] protected_intervals`) and order breakpoints share one reader that requires the header line; the
+  tables' content, not their path, enters the identities.
+- The reference-consistency report uses the run's calibrated genotype likelihoods (descriptive report only).
+- `painting/<contig>/founder_counts.tsv` and `assembly_search.tsv` count each join search once, at the level where
+  it ran; the genome-wide `recombination/junctions.csv` is built from the records at full precision; the simulation
+  truth pedigree table is also written on resume (columns `sample`, `cohort`, `parent1`, `parent2`).
+- Export takes the biallelic SNP record at positions with several records.

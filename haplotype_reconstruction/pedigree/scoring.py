@@ -1,0 +1,105 @@
+"""Per-chromosome screen (M0 + all-pairs M1) and score (M2 for the fixed panel, exposure, junctions).
+
+The screen and the score of a chromosome share each component's exact source pair masses,
+projection and child terms: a chromosome worker keeps them resident across the genome-wide panel barrier (they
+are rebuilt from the prepared record only after an interruption). The score phase reuses the
+screen's M0/M1 values, so both phases agree exactly. A chromosome's evidence is the sum over its
+components (in component order).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from . import exposure, forward, junctions, projection, sources
+from .config import PedigreeConfig
+from .eligibility import ParentEligibility
+from .records import (ChromosomeScores, ChromosomeScreen, ComponentScreen, PreparedChromosome,
+                      PreparedComponent)
+
+
+@dataclass
+class ResidentComponent:
+    """Worker-resident scoring state of one prepared component (not a record)."""
+
+    pair_masses: np.ndarray          # float64 [N, B, S (S + 1) / 2] unordered source pair masses
+    projection: projection.Projection
+    terms: forward.ChildTerms
+
+
+def resident(component: PreparedComponent, config: PedigreeConfig,
+             claim_threads=lambda: None) -> ResidentComponent:
+    """Exact source pair masses, projection and child terms of one component."""
+    claim_threads()
+    marginals = sources.marginals(component.factors, component.transition)
+    claim_threads()
+    # Exposure needs only the unordered pair masses (half the size of the ordered marginals); the
+    # projection then consumes the marginals in place.
+    masses = exposure.pair_masses(marginals)
+    claim_threads()
+    projected = projection.project(
+        component, marginals, source_gap_support_sites=config.scoring.source_gap_support_sites,
+        bridge_tolerance=config.scoring.bridge_tolerance,
+        bridge_max_iterations=config.scoring.bridge_max_iterations)
+    del marginals
+    transition = component.transition
+    terms = forward.ChildTerms(projected, component.genotype_likelihoods, component.observed,
+                               component.information_exponent,
+                               component.selector_switch_probability, transition.same,
+                               transition.one_change, transition.two_changes,
+                               config.scoring.mismatch_probability)
+    return ResidentComponent(masses, projected, terms)
+
+
+def screen_chromosome(prepared: PreparedChromosome, eligibility: ParentEligibility,
+                      config: PedigreeConfig, claim_threads=lambda: None,
+                      ) -> tuple[ChromosomeScreen, list[ResidentComponent]]:
+    """M0 and all-pairs M1 of every component, plus the resident state for the score phase."""
+    screens, states = [], []
+    for component in prepared.components:
+        state = resident(component, config, claim_threads)
+        zero, one = forward.screen(state.projection, state.terms, eligibility.children,
+                                   eligibility.parents, claim_threads)
+        screens.append(ComponentScreen(zero, one))
+        states.append(state)
+    return ChromosomeScreen(prepared.contig, tuple(screens), prepared.informative_markers), states
+
+
+def score_chromosome(prepared: PreparedChromosome, screen: ChromosomeScreen,
+                     states: list[ResidentComponent] | None, trios: np.ndarray,
+                     eligibility: ParentEligibility, config: PedigreeConfig,
+                     claim_threads=lambda: None) -> ChromosomeScores:
+    """M2, exposure and junction evidence for the panel ``trios``; M0/M1 from ``screen``."""
+    required = eligibility.parents | eligibility.parents.T
+    np.fill_diagonal(required, True)
+    parts = []
+    for index, (component, component_screen) in enumerate(zip(prepared.components,
+                                                              screen.components)):
+        state = states[index] if states is not None else resident(component, config, claim_threads)
+        two = forward.score_pairs(state.projection, state.terms, trios, component_screen.zero,
+                                  component_screen.one, claim_threads)
+        claim_threads()
+        counts, callable_bins = junctions.junction_counts(component.state_classes,
+                                                          component.named_alleles,
+                                                          component.bin_sizes)
+        structure = exposure.expected_structure(state.pair_masses, component.anchored_states,
+                                                required, trios, component.factors.available,
+                                                claim_threads)
+        parts.append((component_screen.zero, component_screen.one, two, *structure, counts,
+                      callable_bins))
+        if states is not None:
+            states[index] = None    # release the component's resident arrays
+        del state
+
+    def total(position):
+        return np.sum(np.stack([part[position] for part in parts]), axis=0)
+
+    return ChromosomeScores(
+        contig=prepared.contig, zero=total(0), one=total(1), two=total(2), edge_matched=total(3),
+        edge_exposed=total(4), pair_explained=total(5), pair_exposed=total(6),
+        total_bins=float(sum(component.n_bins for component in prepared.components)),
+        junctions=total(7), callable_bins=total(8),
+        informative_markers=prepared.informative_markers,
+        component_count=prepared.component_count,
+        scored_component_count=len(prepared.components))

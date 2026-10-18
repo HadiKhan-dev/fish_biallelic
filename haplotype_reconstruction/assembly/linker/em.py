@@ -1,0 +1,247 @@
+"""The linker: dense haploid founder transitions between the input components of one joined batch (base
+linking.py).
+
+For every gap g = 1 .. G (G = n - 1, or the beam's maximum gap), the batch's blocks split into g independent
+residue-class chains (blocks i, i + g, i + 2g, ...). Each chain is a hidden Markov model of a sample's ordered
+founder pair: within a block the normal/error-tract scan (``linker.scan``), between consecutive blocks of the
+chain both homologues move independently through one haploid transition matrix T_i (K_i x K_{i+g}). EM fits
+every T_i of the gap from the posterior homologue edge counts (``linker.kernels``) with pseudocounts, a log
+floor and a robust uniform mixture, damping each update toward the previous transitions at a decaying rate.
+Each gap is its own EM; all gaps of a batch share the blocks' emissions and cached zero-prior scans.
+
+Inputs are the batch's input components (their linking proxies: at most ``LinkerConfig.max_sites`` sites per
+component) and the informative samples' neutral float32 genotype likelihoods. A block's emission sites are its
+proxy sites that are kept and called by at least one founder in the pre-fill calls; unknown alleles are
+integrated predictively (``linker.emissions``).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import partial
+import math
+
+import numba
+import numpy as np
+
+from ...execution.memory import malloc_trim
+from ...maths.emissions import GENOTYPE_CODES, PREDICTIVE_CODES
+from ..config import LinkerConfig
+from ..join.inputs import JoinInputs
+from .emissions import log_emissions, pair_codes
+from .kernels import edge_log_counts, entrywise_log, propagate_pair_priors, regularised_rows
+from .proxies import proxy_indices
+from .scan import BlockScans
+
+
+@dataclass(frozen=True)
+class Transitions:
+    """The fitted forward transitions of one batch: what the endpoint beam reads.
+
+    founders: int64[n] K_j, the founders of each of the batch's n input blocks.
+    log_forward: for each fitted gap g = 1 .. G (index g - 1), for each block i = 0 .. n - 1 - g, the float32
+        matrix [K_i, K_{i+g}] of log P(founder v at block i + g | founder u at block i): the natural log
+        (computed in float64) of the fitted probability, rounded to float32 (base FastMesh). Rows sum to 1 in
+        probability; every entry is finite (the uniform mixture keeps probabilities positive).
+    """
+
+    founders: np.ndarray
+    log_forward: tuple[tuple[np.ndarray, ...], ...]
+
+    @property
+    def blocks(self) -> int:
+        """n, the batch's input blocks."""
+        return int(len(self.founders))
+
+    @property
+    def gaps(self) -> int:
+        """G, the largest fitted gap."""
+        return len(self.log_forward)
+
+    def matrix(self, past: int, current: int) -> np.ndarray | None:
+        """The float32 log transition matrix from block ``past`` to block ``current`` > past, or None when
+        their gap was not fitted."""
+        gap = current - past
+        if 1 <= gap <= len(self.log_forward):
+            return self.log_forward[gap - 1][past]
+        return None
+
+
+@dataclass(frozen=True)
+class _BlockData:
+    """One block's linker inputs: log emissions float32[S, E, 3|7] at its E emission sites, pair codes
+    uint8[E, K * K], the sites' positions int64[E], founders K."""
+
+    log_emissions: np.ndarray
+    codes: np.ndarray
+    positions: np.ndarray
+    founders: int
+
+
+def _apply_threads(budget) -> int:
+    """Re-read the live budget and size the calling thread's Numba team (capped by Numba's pool size)."""
+    threads = max(1, min(int(budget.threads()), numba.config.NUMBA_NUM_THREADS))
+    numba.set_num_threads(threads)
+    return threads
+
+
+def _block_data(inputs: JoinInputs, config: LinkerConfig, index: int) -> _BlockData:
+    """Emission data of block ``index``: proxy sites kept and called by some founder (pre-fill calls)."""
+    block = inputs.blocks[index]
+    proxy = proxy_indices(block.inference, block.kept, config.max_sites)
+    called = block.inference[:, proxy] >= 0
+    sites = proxy[block.kept[proxy] & np.any(called, axis=0)]
+    alleles = np.ascontiguousarray(block.inference[:, sites])
+    # The prepared-panel row each founder copies at each emission site (copies of one row share an allele).
+    spans = np.searchsorted(block.atomic_offsets, sites, side="right") - 1
+    source_rows = np.ascontiguousarray(block.rows[:, spans])
+    codes = pair_codes(alleles, source_rows)
+    classes = GENOTYPE_CODES if np.all(alleles >= 0) else PREDICTIVE_CODES
+    likelihoods = np.ascontiguousarray(inputs.gl[:, inputs.offsets[index] + sites])
+    return _BlockData(log_emissions(likelihoods, float(config.robustness), classes), codes,
+                      np.ascontiguousarray(block.positions[sites], dtype=np.int64), int(block.founders))
+
+
+def _block_scans(data: _BlockData, genetic_map, config: LinkerConfig, budget) -> BlockScans:
+    _apply_threads(budget)
+    morgans = None
+    if genetic_map.has_map:
+        morgans = np.ascontiguousarray(genetic_map.interval_morgans(data.positions[:-1], data.positions[1:]),
+                                       dtype=np.float64)
+    return BlockScans(data.log_emissions, data.codes, data.positions, data.founders,
+                      genetic_map.fallback_rate_per_bp, morgans, config.error_fraction, config.error_tract_bp)
+
+
+def _messages(scans, founders, log_forward, gap, budget):
+    """Forward scores S[i] (i < n - gap) and backward scores R[i] (i >= gap) of the gap's chains under the
+    current log transitions; terminal messages the M-step does not read are not computed. The two recursions
+    read only the fixed transitions and run concurrently on shares of the budget (one thread runs them in
+    order); concurrent scans re-read their share between rounds of lane blocks, so the recursion still running
+    takes up the threads of the one that finished."""
+    n = len(scans)
+    samples = scans[0].samples
+
+    def forward(child, rounds=None):
+        scores = [None] * n
+        for i in range(n - gap):
+            _apply_threads(child)
+            if i >= gap:
+                priors = propagate_pair_priors(scores[i - gap], np.ascontiguousarray(log_forward[i - gap]))
+            else:
+                # Normalised initial pair prior of each independent chain.
+                k = founders[i]
+                priors = np.full((samples, k * k), -2.0 * math.log(k))
+            scores[i] = scans[i].scan(priors, threads=rounds)
+        return scores
+
+    def backward(child, rounds=None):
+        scores = [None] * n
+        for i in range(n - 1, gap - 1, -1):
+            _apply_threads(child)
+            priors = None
+            if i < n - gap:
+                # The transpose for the contraction, NOT a reverse conditional.
+                priors = propagate_pair_priors(scores[i + gap], np.ascontiguousarray(log_forward[i].T))
+            scores[i] = scans[i].scan(priors, backward=True, threads=rounds)
+        return scores
+
+    if budget.threads() < 2:
+        # One thread runs the recursions in order (no helper threads: this runs every EM iteration).
+        return forward(budget), backward(budget)
+    tasks = (lambda child: forward(child, partial(_apply_threads, child)),
+             lambda child: backward(child, partial(_apply_threads, child)))
+    # No reservation: the join batch's reservation (hierarchy.level.batch_memory_bytes) covers the linker.
+    results = dict(budget.concurrent(tasks, 0, label="linker messages"))
+    return results[0], results[1]
+
+
+def _m_step(forward_scores, backward_scores, log_forward, gap, learning_rate, config, budget):
+    """Damped regularised transitions of every edge of the gap from the posterior homologue edge counts.
+
+    Returns (forward, reverse): forward[i] the new (K_i, K_{i+g}) transition probabilities, reverse[i] the
+    (K_{i+g}, K_i) column-normalised summaries of the same regularised edge evidence at block i + g. The reverse
+    summaries are not backward operators; they enter only the EM stop rule (base behaviour, owner question B6).
+    """
+    log_pseudo = math.log(config.pseudo_count)
+    forward, reverse = [], []
+    for i, log_t in enumerate(log_forward):
+        _apply_threads(budget)
+        log_counts = edge_log_counts(np.ascontiguousarray(forward_scores[i]),
+                                     np.ascontiguousarray(backward_scores[i + gap]), np.ascontiguousarray(log_t))
+        target = regularised_rows(log_counts, log_pseudo, config.min_log_probability, config.uniform_mix)
+        # Damping toward the previous forward transitions (base schedule).
+        probabilities = (1.0 - learning_rate) * np.exp(log_t) + learning_rate * target
+        log_row_mass = np.logaddexp.reduce(np.logaddexp(log_counts, log_pseudo), axis=1)
+        log_joint = log_row_mass[:, None] + np.log(probabilities)
+        reverse.append(np.exp((log_joint - np.logaddexp.reduce(log_joint, axis=0)[None, :]).T))
+        forward.append(probabilities)
+    return forward, reverse
+
+
+def _largest_change(old, new):
+    """Largest absolute change over the entries of corresponding tables (all finite: order-free)."""
+    change = 0.0
+    for before, after in zip(old, new):
+        if after.size:
+            value = float(np.max(np.abs(after - before)))
+            if value > change:
+                change = value
+    return change
+
+
+def _fit_gap(scans, founders, gap, config: LinkerConfig, budget):
+    """EM of one gap's transitions; returns the fitted forward probabilities float64[K_i, K_{i+g}] per edge.
+
+    Starts from uniform transitions; each iteration runs the E-step under the current transitions, the damped
+    M-step at rate max(decay^iteration, minimum) and stops when no forward transition or reverse summary moved
+    by more than ``min_change`` (Class-B note (assembly B6): the stop rule sees damped steps and the otherwise
+    unused reverse summaries; ported as base).
+    """
+    n = len(scans)
+    forward = [np.full((founders[i], founders[i + gap]), 1 / founders[i + gap]) for i in range(n - gap)]
+    reverse = [np.full((founders[i + gap], founders[i]), 1 / founders[i]) for i in range(n - gap)]
+    for iteration in range(config.max_iterations):
+        _apply_threads(budget)
+        learning_rate = max(config.learning_rate_decay ** iteration, config.minimum_learning_rate)
+        log_forward = [entrywise_log(table) for table in forward]
+        forward_scores, backward_scores = _messages(scans, founders, log_forward, gap, budget)
+        new_forward, new_reverse = _m_step(forward_scores, backward_scores, log_forward, gap, learning_rate,
+                                           config, budget)
+        change = max(_largest_change(forward, new_forward), _largest_change(reverse, new_reverse))
+        forward, reverse = new_forward, new_reverse
+        if change <= config.min_change:
+            break
+    return forward
+
+
+def fit_transitions(inputs: JoinInputs, genetic_map, *, max_gap: int | None, config: LinkerConfig,
+                    budget) -> Transitions:
+    """Fit the forward transitions of every gap 1 .. min(n - 1, max_gap) of one batch (max_gap None: all).
+
+    inputs: the batch (n >= 2 input components, informative samples' float32 neutral likelihoods).
+    genetic_map: the contig's ``model.genetic_map.ChromosomeGeneticMap``: within-block switch probabilities use
+        its interval distances when it has a map, else max(1, bp) x ``fallback_rate_per_bp``.
+    budget: the batch's CPU budget (re-read at every block, edge and EM iteration). Block emissions run one
+        Numba thread per block concurrently; block scans, gap fits and each fit's forward/backward recursions
+        run concurrently with shares of the live budget. Results do not depend on the thread counts.
+    """
+    n = len(inputs.blocks)
+    last_gap = n - 1 if max_gap is None else min(n - 1, int(max_gap))
+    founders = [int(block.founders) for block in inputs.blocks]
+    # The linker's arrays (emission data, block scans, gap fits and their messages) are inside the join
+    # batch's reservation (hierarchy.level.batch_memory_bytes), so its concurrent steps reserve nothing more.
+    blocks = budget.thread_map(partial(_block_data, inputs, config), range(n), label="linker emissions")
+    malloc_trim()
+    scans = [None] * n
+    tasks = [partial(_block_scans, data, genetic_map, config) for data in blocks]
+    for index, block_scans in budget.concurrent(tasks, 0, label="linker scans"):
+        scans[index] = block_scans
+    del blocks, tasks
+    fits = [partial(_fit_gap, scans, founders, gap, config) for gap in range(1, last_gap + 1)]
+    fitted = [None] * len(fits)
+    for index, forward in budget.concurrent(fits, 0, label="linker fits"):
+        fitted[index] = forward
+    malloc_trim()
+    return Transitions(
+        founders=np.asarray(founders, dtype=np.int64),
+        log_forward=tuple(tuple(entrywise_log(table).astype(np.float32) for table in forward)
+                          for forward in fitted))

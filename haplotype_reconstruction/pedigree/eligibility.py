@@ -1,346 +1,261 @@
-"""Explicit child, parent and parent-pair eligibility rules."""
+"""Candidate universe of observed-parent inference: a parent mask plus a pair rule.
+
+Eligibility encodes design assumptions supplied by the caller: which samples are inference targets,
+which samples are legitimate observed-parent candidates of each target, which unordered parent pairs
+are admissible together (for example one recorded female and one recorded male), and which
+child <- parent edges have a known design chronology (exempt from the inferred-direction terms).
+It never asserts individual parentage. The stage reads no metadata: dataset adapters build the
+record (``from_cohorts``, ``from_constraints``); simulations use ``unrestricted``.
+
+The M2 universe of a child c is {a < b : parents[c, a] and parents[c, b] and compatible_pairs[a, b]}
+(``compatible_pairs`` None admits every pair), so no N x N x N cube is ever formed.
+"""
 from __future__ import annotations
 
-
-from dataclasses import dataclass, field
-
-
-from typing import Any, Mapping, Optional, Sequence
-
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
 
 import numpy as np
+
+UNRESTRICTED_POLICY = "unrestricted_no_metadata"
+CONSTRAINTS_POLICY = "explicit_sample_constraints"
+CONSTRAINT_KEYS = frozenset(
+    ("candidate_parents", "excluded_samples", "ineligible_children", "direction_supported_edges"))
+
+
+def _bool_matrix(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
+    array = np.asarray(value)
+    if array.shape != shape or array.dtype != np.bool_:
+        raise ValueError(f"{name} must be a boolean array with shape {shape}")
+    array = np.array(array, dtype=np.bool_, order="C", copy=True)
+    array.setflags(write=False)
+    return array
 
 
 @dataclass(frozen=True)
 class ParentEligibility:
-    """Versioned caller-supplied child and observed-parent candidate universe.
+    """Caller design assumptions over the ordered sample axis (never parentage truth).
 
-    Sample order must exactly match inference ``sample_ids``. The optional M2
-    mask is derived from M1 eligibility when omitted and otherwise must be
-    symmetric in its final two axes. Smart never derives masks from metadata.
+    sample_ids:       ordered sample IDs, identical to the run's sample axis (N).
+    children:         bool [N]; samples whose observed parents are inferred.
+    parents:          bool [N, N]; [child, parent] admissible M1 edges. False on the diagonal and on
+                      rows of non-target samples.
+    compatible_pairs: bool [N, N] symmetric with a False diagonal, or None (every pair); an unordered
+                      M2 pair {a, b} of child c needs parents[c, a], parents[c, b] and this entry.
+    chronology:       bool [N, N]; [child, parent] edges whose direction the design fixes (subset of
+                      ``parents``). Such edges are exempt from inferred orientation and family terms.
+    policy:           short policy name recorded in reports.
+    assumptions:      plain-language statements of what the policy assumes.
+    source_fields:    metadata fields the adapter read to build the policy.
     """
 
-    format_version: int
-    sample_ids: Sequence[Any]
-    eligible_children: np.ndarray
-    eligible_parents: np.ndarray
-    eligible_parent_pairs: Optional[np.ndarray] = None
-    policy_name: str = "caller_supplied_parent_eligibility_v1"
-    source_fields: Sequence[str] = ()
-    assumptions: Sequence[str] = ()
-    individual_parentage_ground_truth: bool = False
+    sample_ids: tuple[str, ...]
+    children: np.ndarray
+    parents: np.ndarray
+    compatible_pairs: np.ndarray | None
+    chronology: np.ndarray
+    policy: str
+    assumptions: tuple[str, ...] = ()
+    source_fields: tuple[str, ...] = ()
 
-    direction_supported_parents: Optional[np.ndarray] = None
-
-
-@dataclass(frozen=True)
-class _ResolvedParentEligibility:
-    supplied: bool
-    format_version: int
-    sample_ids: tuple[Any, ...]
-    eligible_children: np.ndarray
-    eligible_parents: np.ndarray
-    eligible_parent_pairs: Optional[np.ndarray]
-    direction_supported_parents: np.ndarray
-    policy_name: str
-    source_fields: tuple[str, ...]
-    assumptions: tuple[str, ...]
-    individual_parentage_ground_truth: bool
-    pair_policy: str
-
-
-def _parent_eligibility_text_tuple(value: Any, field: str) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes)):
-        raise pedigree_models.PedigreeEvidenceError(f"parent eligibility {field} must be a sequence")
-    try:
-        values = tuple(value)
-    except TypeError as exc:
-        raise pedigree_models.PedigreeEvidenceError(
-            f"parent eligibility {field} must be a sequence"
-        ) from exc
-    if any(not isinstance(item, str) for item in values):
-        raise pedigree_models.PedigreeEvidenceError(
-            f"parent eligibility {field} entries must be strings"
-        )
-    return values
-
-
-def _resolve_parent_eligibility(
-    value: Optional[ParentEligibility | Mapping[str, Any]],
-    sample_ids: Sequence[Any],
-) -> _ResolvedParentEligibility:
-    """Validate eligibility without expanding derived parent-pair policies."""
-    samples = tuple(sample_ids)
-    n_samples = len(samples)
-    diagonal = np.arange(n_samples)
-    if value is None:
-        children = np.ones(n_samples, dtype=np.bool_)
-        parents = np.ones((n_samples, n_samples), dtype=np.bool_)
-        np.fill_diagonal(parents, False)
-        return _ResolvedParentEligibility(
-            supplied=False,
-            format_version=pedigree_models.PARENT_ELIGIBILITY_FORMAT_VERSION,
-            sample_ids=samples,
-            eligible_children=children,
-            eligible_parents=parents,
-            eligible_parent_pairs=None,
-            direction_supported_parents=np.zeros_like(parents),
-            policy_name="all_samples_eligible_default_v1",
-            source_fields=(),
-            assumptions=(),
-            individual_parentage_ground_truth=False,
-            pair_policy="all_unordered_pairs_of_eligible_parents",
-        )
-
-    if isinstance(value, _ResolvedParentEligibility):
-        if value.sample_ids != samples:
-            raise pedigree_models.PedigreeEvidenceError(
-                "parent eligibility sample_ids must exactly match inference sample order"
-            )
-        return value
-    if isinstance(value, ParentEligibility):
-        record = value
-    elif isinstance(value, Mapping):
-        required = (
-            "format_version", "sample_ids", "eligible_children",
-            "eligible_parents",
-        )
-        missing = [field for field in required if field not in value]
-        if missing:
-            raise pedigree_models.PedigreeEvidenceError(
-                f"parent eligibility is missing required field {missing[0]!r}"
-            )
-        record = ParentEligibility(
-            format_version=value["format_version"],
-            sample_ids=value["sample_ids"],
-            eligible_children=value["eligible_children"],
-            eligible_parents=value["eligible_parents"],
-            eligible_parent_pairs=value.get("eligible_parent_pairs"),
-            direction_supported_parents=value.get(
-                "direction_supported_parents"
-            ),
-            policy_name=value.get(
-                "policy_name", "caller_supplied_parent_eligibility_v1"
-            ),
-            source_fields=value.get("source_fields", ()),
-            assumptions=value.get("assumptions", ()),
-            individual_parentage_ground_truth=value.get(
-                "individual_parentage_ground_truth", False
-            ),
-        )
-    else:
-        raise pedigree_models.PedigreeEvidenceError(
-            "parent_eligibility must be SmartParentEligibility or a mapping"
-        )
-    if (
-        isinstance(record.format_version, (bool, np.bool_))
-        or record.format_version != pedigree_models.PARENT_ELIGIBILITY_FORMAT_VERSION
-    ):
-        raise pedigree_models.PedigreeEvidenceError("unsupported parent eligibility format_version")
-    try:
-        record_samples = tuple(record.sample_ids)
-    except TypeError as exc:
-        raise pedigree_models.PedigreeEvidenceError(
-            "parent eligibility sample_ids must be an ordered sequence"
-        ) from exc
-    if len(record_samples) != n_samples or any(
-        observed != expected
-        for observed, expected in zip(record_samples, samples)
-    ):
-        raise pedigree_models.PedigreeEvidenceError(
-            "parent eligibility sample_ids must exactly match inference sample order"
-        )
-
-    children_raw = np.asarray(record.eligible_children)
-    parents_raw = np.asarray(record.eligible_parents)
-    if children_raw.shape != (n_samples,) or children_raw.dtype != np.bool_:
-        raise pedigree_models.PedigreeEvidenceError(
-            "eligible_children must be a boolean array with shape (samples,)"
-        )
-    if (
-        parents_raw.shape != (n_samples, n_samples)
-        or parents_raw.dtype != np.bool_
-    ):
-        raise pedigree_models.PedigreeEvidenceError(
-            "eligible_parents must be a boolean array with shape "
-            "(samples, samples)"
-        )
-    children = np.ascontiguousarray(children_raw)
-    parents = np.ascontiguousarray(parents_raw)
-    if np.any(parents[diagonal, diagonal]):
-        raise pedigree_models.PedigreeEvidenceError("eligible_parents cannot admit self-parenting")
-    if np.any(parents[~children]):
-        raise pedigree_models.PedigreeEvidenceError(
-            "excluded children cannot have eligible parent identities"
-        )
-
-    if record.direction_supported_parents is None:
-        direction_supported = np.zeros_like(parents)
-    else:
-        direction_raw = np.asarray(record.direction_supported_parents)
-        if (
-            direction_raw.shape != (n_samples, n_samples)
-            or direction_raw.dtype != np.bool_
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "direction_supported_parents must be a boolean array with "
-                "shape (samples, samples)"
-            )
-        direction_supported = np.ascontiguousarray(direction_raw)
-        if np.any(direction_supported[diagonal, diagonal]):
-            raise pedigree_models.PedigreeEvidenceError(
-                "direction_supported_parents cannot admit self-parenting"
-            )
-        if np.any(direction_supported[~children]):
-            raise pedigree_models.PedigreeEvidenceError(
-                "excluded children cannot have explicitly direction-supported "
-                "parents"
-            )
-        if np.any(direction_supported & ~parents):
-            raise pedigree_models.PedigreeEvidenceError(
-                "direction_supported_parents must be a subset of "
-                "eligible_parents"
-            )
-
-    if record.eligible_parent_pairs is None:
+    def __post_init__(self) -> None:
+        # Real boundary: adapters build this record from user metadata or JSON constraints.
+        samples = tuple(str(value) for value in self.sample_ids)
+        if len(samples) != len(set(samples)):
+            raise ValueError("parent eligibility sample IDs must be unique")
+        n = len(samples)
+        children = _bool_matrix(self.children, (n,), "eligible children")
+        parents = _bool_matrix(self.parents, (n, n), "eligible parents")
+        chronology = _bool_matrix(self.chronology, (n, n), "chronology")
+        diagonal = np.arange(n)
+        if np.any(parents[diagonal, diagonal]) or np.any(chronology[diagonal, diagonal]):
+            raise ValueError("eligibility cannot admit self-parenting")
+        if np.any(parents[~children]):
+            raise ValueError("non-target samples cannot have eligible parents")
+        if np.any(chronology & ~parents):
+            raise ValueError("chronology edges must be eligible parent edges")
         pairs = None
-        pair_policy = "all_unordered_pairs_of_eligible_parents"
-    else:
-        pair_raw = np.asarray(record.eligible_parent_pairs)
-        if (
-            pair_raw.shape != (n_samples, n_samples, n_samples)
-            or pair_raw.dtype != np.bool_
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "eligible_parent_pairs must be a boolean array with shape "
-                "(samples, samples, samples)"
-            )
-        pairs = np.ascontiguousarray(pair_raw)
-        if not np.array_equal(pairs, np.swapaxes(pairs, 1, 2)):
-            raise pedigree_models.PedigreeEvidenceError(
-                "eligible_parent_pairs must be symmetric in the parent axes"
-            )
-        if np.any(pairs[:, diagonal, diagonal]):
-            raise pedigree_models.PedigreeEvidenceError(
-                "eligible_parent_pairs cannot contain duplicate parents"
-            )
-        for child in range(n_samples):
-            child_allowed = (
-                parents[child,:, None] & parents[child, None,:]
-            )
-            if np.any(pairs[child] & ~child_allowed):
-                raise pedigree_models.PedigreeEvidenceError(
-                    "eligible_parent_pairs may contain only eligible parent identities"
-                )
-        pair_policy = "explicit_symmetric_pair_mask"
+        if self.compatible_pairs is not None:
+            pairs = _bool_matrix(self.compatible_pairs, (n, n), "compatible parent pairs")
+            if not np.array_equal(pairs, pairs.T) or np.any(pairs[diagonal, diagonal]):
+                raise ValueError("compatible parent pairs must be symmetric with a False diagonal")
+        if not isinstance(self.policy, str) or not self.policy:
+            raise ValueError("eligibility policy must be a non-empty string")
+        object.__setattr__(self, "sample_ids", samples)
+        object.__setattr__(self, "children", children)
+        object.__setattr__(self, "parents", parents)
+        object.__setattr__(self, "compatible_pairs", pairs)
+        object.__setattr__(self, "chronology", chronology)
+        object.__setattr__(self, "assumptions", tuple(str(value) for value in self.assumptions))
+        object.__setattr__(self, "source_fields", tuple(str(value) for value in self.source_fields))
 
-    if not isinstance(record.policy_name, str) or not record.policy_name:
-        raise pedigree_models.PedigreeEvidenceError(
-            "parent eligibility policy_name must be a non-empty string"
-        )
-    source_fields = _parent_eligibility_text_tuple(
-        record.source_fields, "source_fields"
-    )
-    assumptions = _parent_eligibility_text_tuple(
-        record.assumptions, "assumptions"
-    )
-    if not isinstance(record.individual_parentage_ground_truth, (bool, np.bool_)):
-        raise pedigree_models.PedigreeEvidenceError(
-            "individual_parentage_ground_truth must be boolean"
-        )
-    return _ResolvedParentEligibility(
-        True, pedigree_models.PARENT_ELIGIBILITY_FORMAT_VERSION, samples,
-        children.copy(), parents.copy(), (
-            None if pairs is None else np.ascontiguousarray(pairs).copy()
-        ),
-        direction_supported.copy(),
-        record.policy_name, source_fields, assumptions,
-        bool(record.individual_parentage_ground_truth), pair_policy,
-    )
+    # ---------------------------------------------------------------- construction
+    @classmethod
+    def unrestricted(cls, sample_ids: Sequence[str]) -> "ParentEligibility":
+        """Every sample is a target and every other sample a candidate; no chronology."""
+        n = len(sample_ids)
+        parents = ~np.eye(n, dtype=np.bool_)
+        return cls(tuple(sample_ids), np.ones(n, dtype=np.bool_), parents, None,
+                   np.zeros((n, n), dtype=np.bool_), UNRESTRICTED_POLICY,
+                   ("No metadata eligibility or simulated parentage truth enters inference.",))
 
+    @classmethod
+    def from_cohorts(
+            cls, sample_ids: Sequence[str], cohorts: Sequence[str],
+            parent_cohort_of: Mapping[str, str], *, sexes: Sequence[str] | None = None,
+            require_opposite_sex_pairs: bool = False, policy: str,
+            assumptions: Sequence[str] = (), source_fields: Sequence[str] = (),
+    ) -> "ParentEligibility":
+        """Generation steps, e.g. {"F2": "F1", "F3": "F2"}: cohort labels constrain, never assign.
 
-def _eligible_parent_pair(
-    eligibility: _ResolvedParentEligibility,
-    child: int,
-    first_parent: int,
-    second_parent: int,
-) -> bool:
-    """Return exact M2 membership for one unordered parent pair."""
-    if first_parent == second_parent:
-        return False
-    pairs = eligibility.eligible_parent_pairs
-    if pairs is not None:
-        return bool(pairs[child, first_parent, second_parent])
-    parents = eligibility.eligible_parents
-    return bool(
-        parents[child, first_parent] and parents[child, second_parent]
-    )
+        Targets are samples whose cohort is a key; a target's candidates are the samples of its
+        parent cohort. Every eligible edge is design-ordered (chronology). With
+        ``require_opposite_sex_pairs`` an M2 pair needs one recorded "F" and one recorded "M"
+        sample (other sex labels pair with nobody); the parent order stays arbitrary.
+        """
+        labels = np.asarray([str(value) for value in cohorts])
+        n = len(sample_ids)
+        if labels.shape != (n,):
+            raise ValueError("one cohort label is required per sample")
+        children = np.isin(labels, list(parent_cohort_of))
+        parents = np.zeros((n, n), dtype=np.bool_)
+        for child_cohort, parent_cohort in parent_cohort_of.items():
+            parents[labels == child_cohort, :] = labels == parent_cohort
+        np.fill_diagonal(parents, False)
+        pairs = None
+        if require_opposite_sex_pairs:
+            if sexes is None:
+                raise ValueError("opposite-sex pairs need one recorded sex per sample")
+            sex = np.asarray([str(value).upper() for value in sexes])
+            if sex.shape != (n,):
+                raise ValueError("one sex label is required per sample")
+            female, male = sex == "F", sex == "M"
+            pairs = (female[:, None] & male[None, :]) | (male[:, None] & female[None, :])
+        return cls(tuple(sample_ids), children, parents, pairs, parents.copy(), policy,
+                   tuple(assumptions), tuple(source_fields))
 
+    @classmethod
+    def from_constraints(cls, sample_ids: Sequence[str],
+                         constraints: Mapping[str, Any]) -> "ParentEligibility":
+        """Sample-name constraints (the parsed eligibility JSON of a generic VCF run).
 
-def _eligible_parent_pair_mask(
-    eligibility: _ResolvedParentEligibility,
-    children: np.ndarray | int,
-    first_parents: np.ndarray,
-    second_parents: np.ndarray,
-) -> np.ndarray:
-    """Vectorized exact M2 membership without deriving a dense pair cube."""
-    pairs = eligibility.eligible_parent_pairs
-    if pairs is not None:
-        return pairs[children, first_parents, second_parents]
-    parents = eligibility.eligible_parents
-    return (
-        (first_parents != second_parents)
-        & parents[children, first_parents]
-        & parents[children, second_parents]
-    )
+        ``candidate_parents`` {child: [parents]} replaces that child's candidates ([] allows none;
+        unlisted children keep every other sample); ``excluded_samples`` are neither targets nor
+        candidates; ``ineligible_children`` are candidates only; ``direction_supported_edges``
+        [[parent, child], ...] mark independently known design order, not parentage.
+        """
+        if not isinstance(constraints, Mapping) or set(constraints) - CONSTRAINT_KEYS:
+            raise ValueError("eligibility constraints may contain only "
+                             + ", ".join(sorted(CONSTRAINT_KEYS)))
+        index = {name: position for position, name in enumerate(sample_ids)}
 
+        def position(name: str) -> int:
+            if name not in index:
+                raise ValueError(f"unknown eligibility sample {name!r}")
+            return index[name]
 
-def _eligible_parent_pair_counts(
-    eligibility: _ResolvedParentEligibility,
-) -> np.ndarray:
-    """Count each child's unordered M2 universe without implicit expansion."""
-    pairs = eligibility.eligible_parent_pairs
-    if pairs is None:
-        parent_counts = np.count_nonzero(
-            eligibility.eligible_parents, axis=1
-        ).astype(np.int64)
-        return parent_counts * (parent_counts - 1) // 2
+        n = len(sample_ids)
+        children = np.ones(n, dtype=np.bool_)
+        parents = ~np.eye(n, dtype=np.bool_)
+        for child, candidates in constraints.get("candidate_parents", {}).items():
+            if not isinstance(candidates, list):
+                raise ValueError("candidate_parents values must be lists of sample IDs")
+            child_index = position(child)
+            selected = [position(name) for name in candidates]
+            if child_index in selected:
+                raise ValueError("a sample cannot be its own parent")
+            parents[child_index] = False
+            parents[child_index, selected] = True
+        for name in constraints.get("excluded_samples", []):
+            excluded = position(name)
+            children[excluded] = False
+            parents[excluded] = False
+            parents[:, excluded] = False
+        for name in constraints.get("ineligible_children", []):
+            target = position(name)
+            children[target] = False
+            parents[target] = False
+        chronology = np.zeros((n, n), dtype=np.bool_)
+        for edge in constraints.get("direction_supported_edges", []):
+            if not isinstance(edge, list) or len(edge) != 2:
+                raise ValueError("direction_supported_edges entries must be [parent, child]")
+            parent, child = (position(name) for name in edge)
+            if not parents[child, parent]:
+                raise ValueError("direction support names an ineligible parent/child edge")
+            chronology[child, parent] = True
+        return cls(tuple(sample_ids), children, parents, None, chronology, CONSTRAINTS_POLICY,
+                   ("Caller constraints are eligibility/chronology, not known individual parentage.",),
+                   tuple(sorted(constraints)))
 
-    n_samples = len(eligibility.sample_ids)
-    counts = np.empty(n_samples, dtype=np.int64)
-    for child in range(n_samples):
-        counts[child] = np.count_nonzero(np.triu(pairs[child], k=1))
-    return counts
+    # ---------------------------------------------------------------- queries
+    @property
+    def supplied(self) -> bool:
+        """Whether the caller restricted the universe (False for ``unrestricted``)."""
+        return self.policy != UNRESTRICTED_POLICY
 
+    def pair_allowed(self, child: int, first: int, second: int) -> bool:
+        """Exact M2 membership of one unordered pair."""
+        if first == second or not (self.parents[child, first] and self.parents[child, second]):
+            return False
+        return self.compatible_pairs is None or bool(self.compatible_pairs[first, second])
 
-def _parent_eligibility_result_record(
-    eligibility: _ResolvedParentEligibility,
-) -> dict[str, Any]:
-    """Serialize resolved eligibility without expanding an implicit policy."""
-    pairs = eligibility.eligible_parent_pairs
-    record = {
-        "format_version": eligibility.format_version,
-        "policy_name": eligibility.policy_name,
-        "sample_ids": eligibility.sample_ids,
-        "eligible_children": eligibility.eligible_children.copy(),
-        "eligible_parents": eligibility.eligible_parents.copy(),
-        "eligible_parent_pairs": None if pairs is None else pairs.copy(),
-        "direction_supported_parents": (
-            eligibility.direction_supported_parents.copy()
-        ),
-        "pair_policy": eligibility.pair_policy,
-        "source_fields": eligibility.source_fields,
-        "assumptions": eligibility.assumptions,
-        "individual_parentage_ground_truth": (
-            eligibility.individual_parentage_ground_truth
-        ),
-    }
+    def pair_mask(self, child: int | np.ndarray, first: np.ndarray, second: np.ndarray) -> np.ndarray:
+        """Vectorised ``pair_allowed``."""
+        allowed = (first != second) & self.parents[child, first] & self.parents[child, second]
+        if self.compatible_pairs is not None:
+            allowed &= self.compatible_pairs[first, second]
+        return allowed
 
-    if pairs is None:
-        record["eligible_parent_pair_counts"] = (
-            _eligible_parent_pair_counts(eligibility)
-        )
+    def parent_counts(self) -> np.ndarray:
+        """int64 [N]: eligible M1 candidates per sample."""
+        return np.count_nonzero(self.parents, axis=1).astype(np.int64)
 
-    return record
+    def pair_counts(self) -> np.ndarray:
+        """int64 [N]: size of each sample's unordered M2 universe (the identity-prior denominator)."""
+        counts = self.parent_counts()
+        if self.compatible_pairs is None:
+            return counts * (counts - 1) // 2
+        candidates = self.parents.astype(np.int64)
+        within = (candidates @ self.compatible_pairs.astype(np.int64)) * candidates
+        return np.sum(within, axis=1) // 2
 
-import haplotype_reconstruction.pedigree.models as pedigree_models
+    def identity(self) -> str:
+        """SHA-256 of the policy text and every mask (a cache identity, not an integrity check)."""
+        # DEDUP(T0): use store/identity's canonical digest once it exists.
+        digest = hashlib.sha256(json.dumps({
+            "sample_ids": list(self.sample_ids), "policy": self.policy,
+            "assumptions": list(self.assumptions), "source_fields": list(self.source_fields),
+        }, sort_keys=True, separators=(",", ":")).encode())
+        arrays = (("children", self.children), ("parents", self.parents),
+                  ("compatible_pairs", self.compatible_pairs), ("chronology", self.chronology))
+        for name, array in arrays:
+            digest.update(name.encode())
+            if array is None:
+                digest.update(b"any")
+            else:
+                digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+                digest.update(array.tobytes())
+        return digest.hexdigest()
+
+    def summary(self) -> dict[str, Any]:
+        """Small JSON-safe counts for the product and reports."""
+        targets = np.flatnonzero(self.children)
+        parent_counts = self.parent_counts()[targets]
+        pair_counts = self.pair_counts()[targets]
+        return {
+            "policy": self.policy,
+            "supplied": self.supplied,
+            "sample_count": len(self.sample_ids),
+            "eligible_child_count": int(len(targets)),
+            "candidate_parent_sample_count": int(np.count_nonzero(np.any(self.parents, axis=0))),
+            "chronology_edge_count": int(np.count_nonzero(self.chronology)),
+            "minimum_parent_candidates_per_target": int(parent_counts.min()) if len(targets) else 0,
+            "maximum_parent_candidates_per_target": int(parent_counts.max(initial=0)),
+            "minimum_parent_pairs_per_target": int(pair_counts.min()) if len(targets) else 0,
+            "maximum_parent_pairs_per_target": int(pair_counts.max(initial=0)),
+            "individual_parentage_ground_truth": False,
+            "assumptions": list(self.assumptions),
+            "source_fields": list(self.source_fields),
+        }

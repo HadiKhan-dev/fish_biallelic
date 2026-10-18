@@ -1,0 +1,336 @@
+"""`haplotypes export RUN DEST`: the founder VCF and phased sample VCF of a finished run, one chromosome per task.
+
+The same files as the run's export stage (OUTPUT/export, export.stage), written to DEST, which must be new or empty
+(an export never overwrites). Per chromosome, by default: the founder VCF (one haploid column c<C>_H<k> per founder
+row k of every component C; founder-refit panels when recorded, else the painted panels) and the family-phase
+calls, full length (every input biallelic SNP that reached the site filter, FILTER PASS or the rules that removed
+it), each with its index; optionally the per-component founder-track TSVs. DEST/manifest.json describes every file.
+The products are read through their stages' records APIs; nothing is recomputed or recorded.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from urllib.parse import quote
+
+import numpy as np
+
+from .config import FORMATS, PRODUCTS, ExportConfig
+from .founders import component_record, write_founder_tracks, write_founder_vcf
+from .samples import write_sample_phase
+from .sites import COMMON_ALLELE_RULE, RULE_DESCRIPTIONS, R5_ONLY, build_site_table, evidence_sites, kept_site_table
+from .vcf import place, suffix
+
+DEFAULT_PRODUCTS = ExportConfig().products
+SCHEMA_V1 = "released-allele-export-v1"     # founder tracks and kept-site sample phase only (export_contig API)
+SCHEMA = "released-allele-export-v2"
+# Per-task allowance besides the decoded records: htslib and gzip buffers, record formatting and the fixed-size
+# text chunks (founders.CHUNK_SITES, samples.CHUNK_SITES). With SITE_ROW_BYTES, calibrated on the a90 integration
+# runs (18 Oct): measured task peak / estimate 0.74-0.79 (reconstruct_actm3 0.14 of 0.18 GiB, std_n80 0.19 of
+# 0.27 GiB, full length or kept sites); TroMau chr7 (422,133 rows, 116 samples) 0.24 GiB process RSS of 0.25.
+TASK_ALLOWANCE_BYTES = 128 << 20
+# Per written VCF row: decoded input/kept positions, masks, rule bits, REF/ALT, read totals, the row and FILTER
+# lists the writers hold (Python ints and references) and the row -> kept-site index.
+SITE_ROW_BYTES = 128
+
+
+def _released_alleles(calls: np.ndarray) -> bool:
+    """Every entry is -1 (unknown), 0 or 1 (min/max: no temporaries the size of the calls)."""
+    return calls.size == 0 or (int(calls.min()) >= -1 and int(calls.max()) <= 1)
+
+
+def founder_panels(file) -> tuple[str, list[tuple[np.ndarray, np.ndarray]]]:
+    """(founder stage, [(positions, released calls)]) of a contig: founder refit when recorded, else painting."""
+    from ..founder_refit import records as refit_records
+    from ..painting import records as painting_records
+    if refit_records.complete(file):
+        stage, panels = "founder_refit", refit_records.founder_panels(file)
+    elif painting_records.complete(file):
+        stage, panels = "painting", painting_records.founder_panels(file)
+    else:
+        raise FileNotFoundError(f"{file.label}: no painted founder panels")
+    return stage, [(panel.positions, panel.released) for panel in panels]
+
+
+def founder_source_key(file) -> str:
+    """The record the founder panels are read from (founder refit when recorded, else painting)."""
+    from ..founder_refit import records as refit_records
+    from ..painting import records as painting_records
+    if refit_records.complete(file):
+        return refit_records.KEY
+    if painting_records.complete(file):
+        return painting_records.KEY
+    raise FileNotFoundError(f"{file.label}: no painted founder panels")
+
+
+def contig_bytes(file, products, *, full_length: bool = False, synthetic: bool = False, evidence=None) -> int:
+    """Planned peak bytes of exporting one contig, from the store index's decoded record sizes: the founder
+    panels' source (the founder-refit record; else the painting record and, twice, the final assembly's prepared
+    panels the painted panels are materialised from) and, for the founder VCF, its allele blocks (the panels
+    widened to the written rows); the family-phase record (the calls, positions and components decoded are about
+    two thirds of it); SITE_ROW_BYTES per written row of a VCF product (``evidence``: evidence_sites(file), decoded
+    when not given); a simulation's reads record when sites removed by r5 alone need read totals; and
+    TASK_ALLOWANCE_BYTES."""
+    from ..assembly import records as assembly_records
+    from ..family_phase import records as phase_records
+    from ..founder_refit import records as refit_records
+    from ..painting import records as painting_records
+    from ..simulation import truth
+    total = TASK_ALLOWANCE_BYTES
+    source = 0
+    if "founders" in products or "tracks" in products:
+        if refit_records.complete(file):
+            source = file.info(refit_records.KEY).decoded_bytes
+        elif painting_records.complete(file):
+            completion = file.info(f"{assembly_records.FINAL_PREFIX}/{assembly_records.COMPLETION}")
+            source = file.info(painting_records.KEY).decoded_bytes + 2 * completion.decoded_bytes
+    total += source
+    if "samples" in products and phase_records.complete(file):
+        total += file.info(phase_records.KEY).decoded_bytes
+    if "founders" in products or "samples" in products:
+        evidence = evidence_sites(file) if evidence is None else evidence
+        rows = len(evidence["input_positions"] if full_length else evidence["kept_positions"])
+        total += SITE_ROW_BYTES * rows
+        if "founders" in products:
+            total += int(source * max(1.0, rows / max(1, len(evidence["kept_positions"]))))
+        if (synthetic and full_length and file.has(truth.READS)
+                and bool(np.any(evidence["removed_bits"] == R5_ONLY))):
+            total += file.info(truth.READS).decoded_bytes
+    return total
+
+
+def export_contig(destination: Path, contig: str, *, products, founders=None, phase=None, reference=None,
+                  synthetic=False, file_format="bcf", sites=None, index=False) -> dict:
+    """Write one chromosome's files; returns its manifest entry.
+
+    ``founders``: (stage, [(positions int64 [L], released int8 [K, L])]) in component order; ``phase``:
+    (sample_ids, positions, component_ids, calls int8 [N, L, 2]) as family_phase.records.load_calls returns;
+    ``sites``: the export.sites table of the VCF rows (default: the phase positions as kept sites, REF/ALT from
+    ``reference``); ``index``: write each VCF/BCF's index (.tbi / .csi).
+    """
+    destination = Path(destination)
+    stem = quote(contig, safe="")
+    products = tuple(products)
+    files, components = [], []
+    summarise_sites = sites is not None      # a caller's site table (CLI, export stage) enters the manifest entry
+    if sites is None and ("samples" in products or "founders" in products):
+        if phase is None:
+            raise ValueError(f"{contig}: VCF rows need the export site table or the final phase sites")
+        sites = kept_site_table(contig, phase[1], reference=reference, synthetic=synthetic,
+                                sample_ids=tuple(phase[0]))
+    stage = panels = None
+    if "founders" in products or "tracks" in products:
+        stage, raw = founders
+        panels = []
+        for positions, calls in raw:
+            positions = np.asarray(positions, dtype=np.int64)
+            calls = np.asarray(calls, dtype=np.int8)
+            if calls.ndim != 2 or calls.shape[1] != len(positions) or not _released_alleles(calls):
+                raise ValueError(f"{contig}: founder call/position axes are inconsistent")
+            panels.append((positions, calls))
+    vcf_name = None
+    if "founders" in products:
+        vcf_name = stem + ".founders" + suffix(file_format)
+        temporary = destination / f".{vcf_name}.tmp"
+        write_founder_vcf(temporary, sites, panels, stage, synthetic=synthetic, file_format=file_format)
+        files.extend(place(temporary, destination / vcf_name, file_format=file_format,
+                           last_position=int(sites.positions[-1]), index=index))
+    for component, (positions, calls) in enumerate(panels or ()):
+        filename = None
+        if "tracks" in products:
+            filename = f"{stem}.component{component:04d}.founders.tsv.gz"
+            write_founder_tracks(destination / filename, contig, positions, calls)
+            files.append(filename)
+        components.append(component_record(contig, component, positions, calls, stage, filename, vcf_name))
+    if "samples" in products:
+        sample_ids, positions, component_ids, calls = phase
+        calls = np.asarray(calls)
+        if not _released_alleles(calls):
+            raise ValueError("unexpected final allele encoding")
+        filename = stem + ".samples" + suffix(file_format)
+        temporary = destination / f".{filename}.tmp"
+        write_sample_phase(temporary, sites, np.asarray(positions), calls, np.asarray(component_ids),
+                           tuple(sample_ids), synthetic=synthetic, file_format=file_format)
+        files.extend(place(temporary, destination / filename, file_format=file_format,
+                           last_position=int(sites.positions[-1]), index=index))
+    entry = dict(contig=contig, files=files, founder_components=components)
+    if summarise_sites:
+        entry["sites"] = sites.summary()
+    return entry
+
+
+def _export_task(task, shared, budget):
+    """Pool task: read one chromosome's products and write its files (and, for the export stage, its record)."""
+    from ..family_phase import records as phase_records
+    from ..store import CheckpointStore
+    file = CheckpointStore(task["checkpoints"], nthreads=max(1, int(budget.threads()))).contig(task["contig"])
+    products = task["products"]
+    if "samples" in products and not phase_records.complete(file):
+        raise FileNotFoundError(f"{file.label}: no family phase (export --products founders for founders only)")
+    sites = None
+    if "founders" in products or "samples" in products:
+        sites = build_site_table(file, task["contig"], full_length=task["full_length"],
+                                 reference=task["reference"], synthetic=task["synthetic"])
+    founders = founder_panels(file) if ("founders" in products or "tracks" in products) else None
+    phase = phase_records.load_calls(file) if "samples" in products else None
+    destination = Path(task["destination"])
+    entry = export_contig(destination, task["contig"], products=products, founders=founders, phase=phase,
+                          reference=task["reference"], synthetic=task["synthetic"],
+                          file_format=task["file_format"], sites=sites, index=True)
+    if task.get("record") is not None:
+        from . import records
+        for name in set(task.get("previous_files", ())) - set(entry["files"]):
+            (destination / name).unlink(missing_ok=True)     # files of an earlier export of this contig
+        records.write(file, task["record"], entry)
+    return entry
+
+
+def write_manifest(destination: Path, checkpoint_root, *, synthetic: bool, reference: str | None,
+                   contigs: list[dict], settings: ExportConfig | None = None) -> dict:
+    """DEST/manifest.json (written last, atomically); returns the manifest. ``settings`` (the CLI and the export
+    stage) describe the VCF products (schema v2); without them the manifest is the v1 one of founder tracks and
+    kept-site sample phase."""
+    manifest = dict(schema=SCHEMA_V1 if settings is None else SCHEMA,
+                    checkpoint_root=str(Path(checkpoint_root).resolve()),
+                    coordinate_system="1-based input SNP positions", unknown_allele=".",
+                    founder_identity="chromosome AND component local; H0 across components is not an identity",
+                    sample_phase="PS resets at supported component boundaries; no invented phase qualities",
+                    synthetic_alleles=synthetic, reference_vcf=reference, contigs=contigs)
+    if settings is not None:
+        manifest.update(
+            products=list(settings.products), format=settings.file_format,
+            site_set=("full length: every input biallelic SNP that reached the site-quality filter (FILTER PASS = "
+                      "kept, else the applied rules that removed the site)" if settings.full_length
+                      else "the sites the site-quality filter kept (FILTER '.')"),
+            omitted_records=("records the loader drops never reach the site filter and are not written: "
+                             "non-biallelic records (r0) and biallelic SNPs sharing a position"),
+            founder_columns=("cC_Hk = founder row k of component C of the chromosome (component-local labels); a "
+                             "column has calls only inside its component's span and is '.' outside it"))
+        if settings.full_length:
+            manifest["filters"] = dict(PASS="kept by the site-quality filter", **RULE_DESCRIPTIONS)
+            manifest["common_allele"] = COMMON_ALLELE_RULE
+    temporary = Path(destination) / ".manifest.json.tmp"
+    temporary.write_text(json.dumps(manifest, indent=2) + "\n")
+    temporary.replace(Path(destination) / "manifest.json")
+    return manifest
+
+
+def reference_vcf(store, run_directory, supplied) -> str:
+    """The input VCF whose alleles name 0/1 at every exported site.
+
+    The run's recorded source identity (path, size, modification time) when present: a supplied path must be
+    that file, unchanged. Otherwise the supplied path, else [input] vcf of RUN/config.toml.
+    """
+    recorded = (store.manifest("run") or {}).get("source") or {}
+    if recorded.get("vcf"):
+        path = Path(supplied or recorded["vcf"]).resolve()
+        status = path.stat()
+        if (str(path) != recorded["vcf"] or status.st_size != recorded["size"]
+                or status.st_mtime_ns != recorded["mtime_ns"]):
+            raise ValueError("reference VCF does not match the recorded reconstruction input")
+        return str(path)
+    if supplied is None:
+        config = Path(run_directory) / "config.toml"
+        if config.is_file():
+            import tomllib
+            with open(config, "rb") as handle:
+                supplied = tomllib.load(handle).get("input", {}).get("vcf") or None
+    if supplied is None:
+        raise ValueError("this run records no input VCF: give --vcf")
+    return str(Path(supplied).resolve())
+
+
+def is_simulation(store) -> bool:
+    """A simulated run: its alleles are abstract 0/1, exported as A/C."""
+    from ..simulation import truth as truth_records
+    return store.run.has(truth_records.MANIFEST)
+
+
+def run_tasks(tasks: list[dict], estimates: list[int], workers: int, *, label: str = "export") -> list[dict]:
+    """Run export tasks with ``workers`` CPUs: min(workers, tasks) chromosome processes, each holding its planned
+    peak of the run's memory while it runs (it waits until it fits); returns their manifest entries in order."""
+    from .. import execution
+    if not tasks:
+        return []
+    processes = min(workers, len(tasks))
+    threads = max(1, workers // processes)
+    print(f"Export: {len(tasks)} chromosomes, {processes} processes x {threads} I/O threads; record formatting is "
+          "serial within a chromosome", flush=True)
+    if processes == 1:
+        budget = execution.CpuBudget.fixed(workers)
+        results = []
+        for task, estimate in zip(tasks, estimates):
+            with execution.reserve_memory(estimate, label=label):
+                results.append(_export_task(task, {}, budget))
+        return results
+    with execution.BudgetedPool(execution.CpuBudget.fixed(workers), processes=processes, label=label) as pool:
+        return pool.map(_export_task, tasks, task_bytes=estimates)
+
+
+def export_run(run_directory, destination, *, checkpoints=None, contigs=None, products=DEFAULT_PRODUCTS,
+               file_format="vcf", vcf=None, full_length=True, cores=None) -> dict:
+    """Export each chromosome independently (see the module docstring); returns the manifest.
+
+    ``contigs`` default to the run's contigs; ``cores`` (default: the CPU affinity) bounds the chromosome
+    processes and their checkpoint-decoding threads (record formatting is serial within a chromosome). A
+    simulation's abstract alleles are written as A (0) and C (1).
+    """
+    from .. import execution
+    from ..store import CheckpointStore
+    available = execution.affinity_cpus()
+    workers = available if cores is None else int(cores)
+    if not 1 <= workers <= available:
+        raise ValueError("export cores must fit the current CPU affinity")
+    products = tuple(dict.fromkeys(products))
+    if not products or set(products) - set(PRODUCTS):
+        raise ValueError(f"export products must be among {', '.join(PRODUCTS)}")
+    if file_format not in FORMATS:
+        raise ValueError(f"export format must be one of {', '.join(FORMATS)}")
+    settings = ExportConfig(full_length=bool(full_length), file_format=file_format, products=products)
+    store = CheckpointStore(checkpoints or Path(run_directory) / "checkpoints")
+    if contigs is None:
+        contigs = (store.manifest("run") or {}).get("contigs")
+        if not contigs:
+            raise ValueError(f"{store.root}: no run manifest; give the contigs to export")
+    contigs = tuple(contigs)
+    if not contigs or len(set(contigs)) != len(contigs):
+        raise ValueError("export requires unique contigs")
+    synthetic = is_simulation(store)
+    if synthetic and vcf is not None:
+        raise ValueError("a simulation's alleles are abstract (written as A/C): --vcf is for VCF input runs")
+    reference = (None if synthetic or not ({"founders", "samples"} & set(products))
+                 else reference_vcf(store, run_directory, vcf))
+    destination = Path(destination).resolve()
+    if destination.exists() and any(destination.iterdir()):
+        raise FileExistsError("export destination must be new or empty")
+    destination.mkdir(parents=True, exist_ok=True)
+    tasks = [dict(checkpoints=str(store.root), destination=str(destination), contig=contig, products=products,
+                  file_format=file_format, reference=reference, synthetic=synthetic, full_length=settings.full_length)
+             for contig in contigs]
+    estimates = [contig_bytes(store.contig(contig), products, full_length=settings.full_length, synthetic=synthetic)
+                 for contig in contigs]
+    results = run_tasks(tasks, estimates, workers)
+    return write_manifest(destination, store.root, synthetic=synthetic, reference=reference, contigs=list(results),
+                          settings=settings)
+
+
+def export_command(args) -> int:
+    """`haplotypes export RUN DEST [--products ...] [--format vcf|bcf] [--[no-]full-length] [--vcf FILE]
+    [--contigs ...] [--cores N]`."""
+    from .. import execution
+    available = execution.affinity_cpus()
+    cores = available if args.cores is None else int(args.cores)
+    if not 1 <= cores <= available:
+        raise SystemExit(f"export: --cores must be between 1 and the CPU affinity ({available})")
+    from ..pipeline.driver import RunPaths
+    execution.start_run(cores, preload=(__name__,))
+    manifest = export_run(args.run_directory, args.destination,
+                          checkpoints=RunPaths.from_directory(args.run_directory).checkpoints,
+                          contigs=None if args.contigs is None else tuple(args.contigs),
+                          products=tuple(args.products), file_format=args.format, vcf=args.vcf,
+                          full_length=args.full_length, cores=cores)
+    print(f"Export: {len(manifest['contigs'])} chromosomes written to {Path(args.destination).resolve()}",
+          flush=True)
+    for line in execution.memory_governor().summary_lines():
+        print(line, flush=True)
+    return 0

@@ -1,19 +1,29 @@
+# AulStu cross (AsAc BCF), whole genome: `haplotypes run configs/astcal.toml`.
+# The aulstu preset supplies the 22 autosomes, the workbook columns and cohort eligibility (F2 <- F1, F3 <- F2,
+# opposite-sex parent pairs). Paths are relative to the working directory. Large-K data: expect long, memory-paced
+# runs; use full nodes and resume from checkpoints.
+preset = "aulstu"
+
 [run]
-cores = "auto"
-# batch_queue = "/shared/run/batches" # Optional helpers: haplotypes batch-worker --queue PATH
-# serial_contigs = true # One contig at a time, each checkpointed; for short allocations.
-# max_contigs = 2 # Finish at most 2 more contigs per invocation; implies serial_contigs.
-# read_calibration = true # Default: fit the observation model from allele depths.
-# pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
-founder_refinement = "on" # Final chromosome paths; "off" is a controlled comparison.
 output = "work/runs/astcal"
 
-[inputs]
+[input]
+kind = "vcf"
 vcf = "work/data/fish_vcf_restriped/AsAc.AulStuGenome.biallelic.bcf.gz"
+
+[samples]
 metadata = "work/data/fish_vcf_restriped/X_AsAc_metafile.xlsx"
-metadata_sheet = "main_data"
+sheet = "main_data"
+
+# [execution]
+# cores = "auto"
+# memory_limit = "auto"
+# serial = true
+# max_contigs = 2
+
+[genetic_map]
+rate_cm_per_mb = 5.0
+# file = "work/data/cross.map"
 
 [recombination]
-rate_cm_per_mb = 5.0
 shared_family_evidence = true
-# recombination_map = "work/data/cross.map"

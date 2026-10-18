@@ -1,343 +1,177 @@
-"""Scientific configuration for parent-count, identity and direction inference."""
-from __future__ import annotations
+"""Pedigree stage settings.
 
+Every default is the production value of 92b3daf. Only ``evidence_calibration`` is a user setting
+(TOML ``[pedigree] evidence_calibration``); the groups below are internal model constants, documented
+here and in docs/configuration.md. Each group is bound into the identity of exactly the records it
+affects: ``preparation`` into prepared factors, ``scoring`` into screens and scores, ``panel`` into the
+M2 candidate panel, the rest into the genome-wide decision.
+
+Thresholds label evidence tiers; they are not biological acceptance probabilities.
+"""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import operator
-import os
+EVIDENCE_CALIBRATION_MODES = ("off", "predictive")
 
-
-import numpy as np
-
-import haplotype_reconstruction.pedigree.models as pedigree_models
 
 @dataclass(frozen=True)
-class PedigreeConfig:
-    """Numerical and reporting policy for metadata-free inference.
+class PreparationConfig:
+    """Marker subsampling and information tempering of the prepared painting components."""
 
-    Thresholds label evidence tiers; they are not biological acceptance
-    probabilities. Defaults deliberately require evidence from at least
-    three independently aggregated contigs.
-    """
-
-    bootstrap_replicates: int = 1000
-    bootstrap_seed: int = 20260725
+    # At most this many evenly spaced selected markers per painting bin enter the transmission model.
+    markers_per_bin: int = 10
+    # Chromosome-wide groups of at least this many selected markers share one information exponent.
     markers_per_information_block: int = 100
+    # The tempered view raises a bin's emission to min(this, n) / n for n informative markers in its group.
+    effective_markers_per_information_block: float = 3.0
+
+
+@dataclass(frozen=True)
+class ScoringConfig:
+    """Projected transmission model and forward scoring of M0/M1/M2 configurations."""
+
+    # Probability that an inherited allele is read as the other allele (child emission).
+    mismatch_probability: float = 0.01
+    # A candidate-parent bridge mixes in the uniform selector kernel with weight
+    # switch probability x (1 - min(1, n / N)), n = the smaller informative selected-marker count of
+    # the two adjacent parent bins, N = this value; 0 keeps the painter-interpolated chain.
+    source_gap_support_sites: int = 1
+    # Maximum-entropy bridge: root-finding tolerance and bisection budget.
+    bridge_tolerance: float = 2e-13
+    bridge_max_iterations: int = 128
+
+
+@dataclass(frozen=True)
+class PanelConfig:
+    """Genome-wide robust parent screen and the fixed M2 candidate panel."""
+
+    # M2 is scored for all eligible unordered pairs among each child's top-ranked screen parents.
+    parents_per_child: int = 20
+    # Per-chromosome softmax temperature = (ceil(markers / markers_per_information_block)) ** power.
     information_tempering_power: float = 0.5
+    # Chromosome weights sqrt(markers) / median are clipped to [1 / ratio, ratio].
     maximum_contig_weight_ratio: float = 4.0
+    # Utility = rank_weight x tied rank evidence + (1 - rank_weight) x contaminated softmax.
     rank_weight: float = 0.35
+    # Softmax mixed with the uniform distribution over eligible parents at this weight.
     chromosome_contamination: float = 0.02
-    linked_evidence_weight: float = 0.65
-    genotype_evidence_weight: float = 0.35
-    minimum_informative_contigs: int = 3
-    tier_a_pair_bootstrap: float = 0.95
-    tier_a_parent_bootstrap: float = 0.95
-    tier_a_loco_fraction: float = 0.95
-    tier_b_pair_bootstrap: float = 0.70
-    tier_b_parent_bootstrap: float = 0.70
-    tier_b_loco_fraction: float = 0.80
-    # A released (Tier A/B or partial) inferred edge also needs its full-data
-    # reciprocal comparison to give the reverse orientation at most this
-    # probability (orientation log odds >= log(0.98/0.02) = 3.9 nats). Pairs
-    # whose junction counts and genetics cannot orient them stay unreleased
-    # instead of passing a near-tie on to family phase. Caller chronology is
-    # exempt.
-    orientation_release_reversal_probability: float = 0.02
-    support_set_coverage: float = 0.95
-    primary_view: str = "tier_b"
-    # Learn a conditional predictive weight; uninformative fits retain scale 1.
-    evidence_calibration: str = "predictive"
-    # Persisted provenance identities, deliberately excluded from __init__ so
-    # callers cannot select the retired unscreened or prototype engines.
-    parent_state_algorithm_mode: str = field(
-        default=pedigree_models._PARENT_STATE_LIKELIHOOD, init=False
-    )
-    parent_state_structure_mode: str = field(
-        default=pedigree_models._PARENT_STATE_METHOD, init=False
-    )
-    parent_state_minimum_edge_coverage: float = 0.95
-    parent_state_minimum_pair_explainability: float = 0.95
-    parent_state_minimum_edge_exposed_bins: float = 1.0
-    parent_state_minimum_pair_exposed_bins: float = 1.0
-    parent_state_minimum_exposed_fraction: float = 0.10
-    parent_state_minimum_exposed_contigs: int = 3
-    parent_state_minimum_direction_probability: float = 0.01
-    # Finite orientation, reciprocal messages, and joint short-ancestry paths.
-    # "cluster" retains the previous policy for controlled comparisons.
-    parent_state_direction_model: str = "continuous_family"
-    # Probability that one chromosome's painted junction-count comparison of a
-    # pair is dominated by painting failure and carries no orientation
-    # evidence; bounds each chromosome's orientation log odds by
-    # log(2/e - 1) (3.7 nats). Gross painted-vs-true junction discrepancies
-    # (>= 3 on a chromosome in either sample) affected 0.6-8% of pair-
-    # chromosomes in the std, stress and real-axis simulations (Oct 2026).
-    parent_state_direction_chromosome_error_probability: float = 0.05
-    # Bounded preparation of the one-way path factor; the final solve converges.
-    parent_state_family_message_passes: int = 4
-    # Slow monotone modes converge undamped (a std_n80 six-chromosome resample
-    # at scale 1 needed 4,489 iterations) and damping halves their rate; the
-    # damped retry is kept for genuine oscillation.
-    parent_state_family_final_max_iterations: int = 8192
-    parent_state_family_final_tolerance: float = 1e-8
-    parent_state_family_retry_iterations: int = 4096
-    parent_state_family_retry_damping: float = 0.5
-    # Fixed-observed-genome M0/M1 release; resampling diagnostics stay separate.
-    full_marker_exclusion: bool = True
-    mendelian_exclusion_alpha: float = 0.01
-    mendelian_genotype_replacement_probability: float = 0.01
-    # Bounded joint configuration marginalization; zero is a path-only ablation.
-    parent_state_ancestry_path_budget: int = 16
-    parent_state_direction_state_policy: str = field(default="strict_gate", init=False)
-    parent_state_candidate_source_mode: str = field(
-        default=pedigree_models.RAGGED_QUADRATIC_MODEL, init=False
-    )
-    parent_state_cx_veto_policy: str = field(default="source_default", init=False)
-    parent_state_candidate_source_path_switch_probability: float | None = None
-    # Candidate-parent transmitted chains mix each bridge with the uniform
-    # selector kernel at the boundary's meiotic switch probability, weighted by
-    # 1 - min(1, n/N), where n is the smaller informative selected-marker count
-    # of the parent's two adjacent bins. The painter's switch penalty then no
-    # longer acts as certainty where the parent has no data. N=1 acts only next
-    # to data-free parent bins; N=3 is the graded form; N=0 keeps the
-    # painter-interpolated chain unchanged.
-    parent_state_source_gap_support_sites: int = 1
-    dag_local_search_passes: int = 3
-    parent_state_mismatch_probability: float = 0.01
-    parent_state_phase_switch_probability: float = 0.01
-    parent_state_contamination_probability: float = 0.02
-    parent_state_effective_markers_per_information_block: float = 3.0
-    parent_state_external_state_pseudocount: float = 1.0
-    parent_state_external_transition_pseudocount: float = 20.0
-    parent_state_priors: tuple[float, float, float] = (
-        1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0
-    )
-    parent_state_prior_sensitivity: tuple[
-        tuple[float, float, float], ...
-    ] = (
+
+
+@dataclass(frozen=True)
+class ExposureConfig:
+    """Hard exposure gate: a configuration is testable only on enough exposed evidence."""
+
+    minimum_edge_exposed_bins: float = 1.0
+    minimum_pair_exposed_bins: float = 1.0
+    # Exposed bins / total painting bins of the selected chromosomes.
+    minimum_exposed_fraction: float = 0.10
+    # Distinct exposed chromosomes in a fit (bootstrap draws count once). With the resampling
+    # thresholds this makes Tier B unreachable below 5 informative chromosomes (see resampling.reach).
+    minimum_exposed_contigs: int = 3
+    # Report-only thresholds of the C/X compatibility diagnostics (never gate a decision).
+    report_edge_coverage: float = 0.95
+    report_pair_explainability: float = 0.95
+
+
+@dataclass(frozen=True)
+class DirectionConfig:
+    """Junction-count orientation and the reciprocal / short-ancestry family factors."""
+
+    # Probability that one chromosome's junction comparison of a pair is painting failure.
+    chromosome_error_probability: float = 0.05
+    # Pair-level painting-failure mixture bounding the orientation correction to
+    # [log(epsilon), log(2 - epsilon)]. Base shared this value with the M0 contamination
+    # (parent_state_contamination_probability); the two roles are now separate settings.
+    pair_failure_probability: float = 0.02
+    # Synchronous cavity-message passes preparing the frozen short-ancestry path factor.
+    message_passes: int = 4
+    # Final reciprocal solve: undamped, then a damped retry; residual measured before damping.
+    final_max_iterations: int = 8192
+    final_tolerance: float = 1e-8
+    retry_iterations: int = 4096
+    retry_damping: float = 0.5
+    # Top joint configurations per sample in the reverse two-edge path factor.
+    ancestry_path_budget: int = 16
+
+
+@dataclass(frozen=True)
+class SelectionConfig:
+    """Marginal parent-state priors, M0 contamination and acyclic graph search."""
+
+    state_priors: tuple[float, float, float] = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+    # Alternative fixed priors; an M0 call must survive all of them to be released.
+    prior_sensitivity: tuple[tuple[float, float, float], ...] = (
         (0.50, 0.30, 0.20),
         (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
         (0.20, 0.30, 0.50),
     )
-    parent_state_prior_strength: float = 3.0
-    parent_state_prior_max_iterations: int = 100
-    parent_state_prior_tolerance: float = 1e-10
-
-    def validated(self) -> "PedigreeConfig":
-        if self.evidence_calibration not in {"off", "predictive"}:
-            raise pedigree_models.PedigreeEvidenceError("unknown pedigree evidence calibration")
-        if self.parent_state_direction_model not in {
-            "cluster", "continuous", "family", "continuous_family"
-        }:
-            raise pedigree_models.PedigreeEvidenceError("unknown direction model")
-        def require_integer(name: str, minimum: int) -> None:
-            raw_value = getattr(self, name)
-            if isinstance(raw_value, (bool, np.bool_)):
-                raise pedigree_models.PedigreeEvidenceError(
-                    f"{name} must be an integer of at least {minimum}"
-                )
-            try:
-                value = operator.index(raw_value)
-            except TypeError as exc:
-                raise pedigree_models.PedigreeEvidenceError(
-                    f"{name} must be an integer of at least {minimum}"
-                ) from exc
-            if value < minimum:
-                raise pedigree_models.PedigreeEvidenceError(
-                    f"{name} must be an integer of at least {minimum}"
-                )
-
-        for integer_name, minimum in (
-            ("parent_state_family_message_passes", 1),
-            ("parent_state_family_final_max_iterations", 1),
-            ("parent_state_family_retry_iterations", 1),
-            ("parent_state_ancestry_path_budget", 0),
-            ("parent_state_source_gap_support_sites", 0),
-            ("bootstrap_replicates", 1),
-            ("bootstrap_seed", 0),
-            ("markers_per_information_block", 1),
-            ("minimum_informative_contigs", 1),
-            ("parent_state_minimum_exposed_contigs", 1),
-            ("dag_local_search_passes", 0),
-            ("parent_state_prior_max_iterations", 1),
-        ):
-            require_integer(integer_name, minimum)
-        if not isinstance(self.full_marker_exclusion, bool):
-            raise pedigree_models.PedigreeEvidenceError("full_marker_exclusion must be boolean")
-        for name in ("parent_state_family_final_tolerance", "parent_state_family_retry_damping",
-                     "mendelian_exclusion_alpha",
-                     "parent_state_direction_chromosome_error_probability",
-                     "orientation_release_reversal_probability"):
-            if not np.isfinite(getattr(self, name)) or not 0 < getattr(self, name) < 1:
-                raise pedigree_models.PedigreeEvidenceError(f"{name} must lie in (0, 1)")
-        if (not np.isfinite(self.mendelian_genotype_replacement_probability)
-                or not 0 <= self.mendelian_genotype_replacement_probability < 1):
-            raise pedigree_models.PedigreeEvidenceError(
-                "mendelian_genotype_replacement_probability must lie in [0, 1)")
-        if (
-            not np.isfinite(self.maximum_contig_weight_ratio)
-            or self.maximum_contig_weight_ratio < 1.0
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "maximum_contig_weight_ratio must be finite and at least one"
-            )
-        for name in (
-            "information_tempering_power",
-            "rank_weight",
-            "chromosome_contamination",
-            "linked_evidence_weight",
-            "genotype_evidence_weight",
-            "tier_a_pair_bootstrap",
-            "tier_a_parent_bootstrap",
-            "tier_a_loco_fraction",
-            "tier_b_pair_bootstrap",
-            "tier_b_parent_bootstrap",
-            "tier_b_loco_fraction",
-            "support_set_coverage",
-        ):
-            value = float(getattr(self, name))
-            if not np.isfinite(value):
-                raise pedigree_models.PedigreeEvidenceError(f"{name} must be finite")
-        if not 0.0 <= self.rank_weight <= 1.0:
-            raise pedigree_models.PedigreeEvidenceError("rank_weight must lie in [0, 1]")
-        if not 0.0 <= self.chromosome_contamination < 1.0:
-            raise pedigree_models.PedigreeEvidenceError(
-                "chromosome_contamination must lie in [0, 1)"
-            )
-        for name in (
-            "tier_a_pair_bootstrap",
-            "tier_a_parent_bootstrap",
-            "tier_a_loco_fraction",
-            "tier_b_pair_bootstrap",
-            "tier_b_parent_bootstrap",
-            "tier_b_loco_fraction",
-            "support_set_coverage",
-        ):
-            if not 0.0 <= getattr(self, name) <= 1.0:
-                raise pedigree_models.PedigreeEvidenceError(f"{name} must lie in [0, 1]")
-        if self.linked_evidence_weight < 0.0 or self.genotype_evidence_weight < 0.0:
-            raise pedigree_models.PedigreeEvidenceError("evidence weights must be non-negative")
-        if self.linked_evidence_weight + self.genotype_evidence_weight <= 0.0:
-            raise pedigree_models.PedigreeEvidenceError("at least one evidence weight must be positive")
-        if self.primary_view not in {"tier_a", "tier_b", "complete"}:
-            raise pedigree_models.PedigreeEvidenceError(
-                "primary_view must be 'tier_a', 'tier_b', or 'complete'"
-            )
-        # Old pickles can carry values for init=False fields. Reject them
-        # explicitly rather than silently treating a retired configuration as
-        # the combined method.
-        if self.parent_state_algorithm_mode != pedigree_models._PARENT_STATE_LIKELIHOOD:
-            raise pedigree_models.PedigreeEvidenceError(
-                "only the combined_v1 pedigree method with internal B1 "
-                "likelihood evidence is supported"
-            )
-        if self.parent_state_structure_mode != pedigree_models._PARENT_STATE_METHOD:
-            raise pedigree_models.PedigreeEvidenceError(
-                "the retired unscreened pedigree method is not supported"
-            )
-        for name in (
-            "parent_state_minimum_edge_coverage",
-            "parent_state_minimum_pair_explainability",
-            "parent_state_minimum_direction_probability",
-            "parent_state_minimum_exposed_fraction",
-        ):
-            value = float(getattr(self, name))
-            if not np.isfinite(value) or not 0.0 <= value <= 1.0:
-                raise pedigree_models.PedigreeEvidenceError(f"{name} must lie in [0, 1]")
-        for name in (
-            "parent_state_minimum_edge_exposed_bins",
-            "parent_state_minimum_pair_exposed_bins",
-        ):
-            value = float(getattr(self, name))
-            if not np.isfinite(value) or value < 0.0:
-                raise pedigree_models.PedigreeEvidenceError(
-                    f"{name} must be finite and non-negative"
-                )
+    # Each aggregated M1/M2 likelihood is mixed with the child's M0 likelihood at this weight.
+    m0_contamination_probability: float = 0.02
+    graph_local_search_passes: int = 3
 
 
-        if (
-            not np.isfinite(self.parent_state_mismatch_probability)
-            or not 0.0 < self.parent_state_mismatch_probability < 0.5
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "parent_state_mismatch_probability must lie in (0, 0.5)"
-            )
-        if (
-            not np.isfinite(self.parent_state_phase_switch_probability)
-            or not 0.0 <= self.parent_state_phase_switch_probability <= 0.5
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "parent_state_phase_switch_probability must lie in [0, 0.5]"
-            )
-        if (
-            not np.isfinite(self.parent_state_contamination_probability)
-            or not 0.0 <= self.parent_state_contamination_probability < 1.0
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "parent_state_contamination_probability must lie in [0, 1)"
-            )
-        for name in (
-            "parent_state_effective_markers_per_information_block",
-            "parent_state_external_state_pseudocount",
-            "parent_state_external_transition_pseudocount",
-        ):
-            value = float(getattr(self, name))
-            if not np.isfinite(value) or value <= 0.0:
-                raise pedigree_models.PedigreeEvidenceError(f"{name} must be finite and positive")
-        priors = np.asarray(self.parent_state_priors, dtype=np.float64)
-        if (
-            priors.shape != (3,)
-            or np.any(~np.isfinite(priors))
-            or np.any(priors <= 0.0)
-            or not np.isclose(np.sum(priors), 1.0, rtol=0.0, atol=1e-12)
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "parent_state_priors must be three positive probabilities "
-                "summing to one"
-            )
-        if (
-            not np.isfinite(self.parent_state_prior_strength)
-            or self.parent_state_prior_strength <= 0.0
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "parent_state_prior_strength must be finite and positive"
-            )
-        if (
-            not np.isfinite(self.parent_state_prior_tolerance)
-            or self.parent_state_prior_tolerance <= 0.0
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "parent_state_prior_tolerance must be finite and positive"
-            )
-        sensitivity = np.asarray(
-            self.parent_state_prior_sensitivity, dtype=np.float64
-        )
-        if (
-            sensitivity.ndim != 2
-            or sensitivity.shape[1] != 3
-            or len(sensitivity) == 0
-            or np.any(~np.isfinite(sensitivity))
-            or np.any(sensitivity <= 0.0)
-            or np.any(~np.isclose(
-                np.sum(sensitivity, axis=1), 1.0, rtol=0.0, atol=1e-12
-            ))
-        ):
-            raise pedigree_models.PedigreeEvidenceError(
-                "parent_state_prior_sensitivity must contain positive "
-                "probability triples summing to one"
-            )
-        return self
+@dataclass(frozen=True)
+class ResamplingConfig:
+    """Chromosome bootstrap (seeded) and leave-one-chromosome-out refits."""
+
+    bootstrap_replicates: int = 1000
+    bootstrap_seed: int = 20260725
 
 
-def config_from_environment(*, bootstrap_replicates=1000, evidence_calibration=None):
-    """Use the canonical model defaults, with the workflow calibration override.
+@dataclass(frozen=True)
+class TierThresholds:
+    """Release cut-offs of one evidence tier (fractions of resampled fits)."""
 
-    Metadata adapters decide eligibility, not model defaults. Keep the latter
-    in PedigreeConfig so CLI and direct workflow calls cannot drift apart.
-    """
-    if evidence_calibration is None:
-        evidence_calibration = os.environ.get("HAPLOTYPES_PEDIGREE_CALIBRATION", "predictive")
-    return PedigreeConfig(
-        bootstrap_replicates=bootstrap_replicates,
-        evidence_calibration=evidence_calibration,
-    ).validated()
+    configuration_bootstrap: float
+    parent_bootstrap: float
+    loco_fraction: float
+
+
+@dataclass(frozen=True)
+class ReleaseConfig:
+    """Tier A / Tier B release rules (Tier B is the primary product)."""
+
+    minimum_informative_contigs: int = 3
+    tier_a: TierThresholds = field(default_factory=lambda: TierThresholds(0.95, 0.95, 0.95))
+    tier_b: TierThresholds = field(default_factory=lambda: TierThresholds(0.70, 0.70, 0.80))
+    # A released inferred edge needs full-data orientation log odds >= log((1 - p) / p) (3.9 nats);
+    # caller chronology is exempt.
+    orientation_reversal_probability: float = 0.02
+    # Candidate sets carry this much configuration probability mass.
+    support_set_coverage: float = 0.95
+
+
+@dataclass(frozen=True)
+class ExclusionConfig:
+    """Full-marker Mendelian exclusion releasing M0/M1 counts without new edges."""
+
+    alpha: float = 0.01
+    genotype_replacement_probability: float = 0.01
+    bet_sizes: tuple[float, ...] = (1 / 1024, 1 / 256, 1 / 64, 1 / 16, 1 / 4, 1.0)
+    # Half-overlapping physical windows (bp), plus the whole chromosome.
+    window_widths_bp: tuple[int, ...] = (1_000_000, 5_000_000, 20_000_000)
+
+
+@dataclass(frozen=True)
+class PedigreeConfig:
+    """All pedigree settings; ``evidence_calibration`` is the only user-visible field."""
+
+    # "predictive": one cross-chromosome evidence scale fitted on held-out chromosomes (<= 1);
+    # "off": unscaled composite evidence.
+    evidence_calibration: str = "predictive"
+    preparation: PreparationConfig = field(default_factory=PreparationConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    panel: PanelConfig = field(default_factory=PanelConfig)
+    exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    direction: DirectionConfig = field(default_factory=DirectionConfig)
+    selection: SelectionConfig = field(default_factory=SelectionConfig)
+    resampling: ResamplingConfig = field(default_factory=ResamplingConfig)
+    release: ReleaseConfig = field(default_factory=ReleaseConfig)
+    exclusion: ExclusionConfig = field(default_factory=ExclusionConfig)
+
+    def __post_init__(self) -> None:
+        if self.evidence_calibration not in EVIDENCE_CALIBRATION_MODES:
+            raise ValueError(
+                f"pedigree evidence_calibration must be one of {EVIDENCE_CALIBRATION_MODES}, "
+                f"not {self.evidence_calibration!r}")

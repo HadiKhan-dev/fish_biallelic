@@ -1,283 +1,201 @@
-# Code map and development guide
+# Development guide
 
-Start with [running the pipeline](running.md) for commands and outputs, or
-[methods](methods.md) for the statistical models. This guide explains where
-the implementation lives and how its parts fit together.
+How the package is organised, the contract every stage follows, the checkpoint store, the execution layer, and
+the rules for changing the code. Paths are relative to the package `haplotype_reconstruction/`.
 
-## Follow one run
+## Layout
 
-`run.py`, `python -m haplotype_reconstruction`, and the installed `haplotypes`
-command all enter `haplotype_reconstruction/cli.py`. The CLI resolves run
-settings before importing the selected workflow. `build_parser()` describes
-commands; the inference and simulation setup functions keep model settings
-separate from generating parameters. This ordering matters:
-workflow configuration and numerical-library limits are read during import.
-
-The four reconstruction drivers live in `workflows/`: `variants.py` provides
-the general AD-VCF/BCF route, `simulation.py` generates known-pedigree data, and
-`astcal.py` / `tropheops.py` apply their dataset-specific sample policies.
-All share `reconstruction.py` for local feedback, assembly and painting, then
-`downstream.py` for the one-way pedigree → family phase → recombination handoff.
-Simulation truth is retained for evaluation and never supplied to inference.
-Plotting libraries are imported at output boundaries (simulation pedigree
-plots and recombination reports); painting types, checkpoint readers and
-export do not initialize graphics or font caches.
-
-`reports.py` holds discovery-search summaries and observed-reference
-consistency reports. Reporting neither selects haplotypes nor establishes
-individual parentage. G0 reference agreement is explicitly distinguished from
-known-truth simulation validation.
-
-| Step | Start reading here | Main responsibility |
-| --- | --- | --- |
-| Input and observations | `core/variants.py`, `core/genotypes.py` | Marker blocks, allele depths and genotype likelihoods |
-| Observation calibration | `core/read_calibration.py`, `core/read_model.py`, `core/read_homozygote_model.py` | Fit nested read models, including pooled homozygote overdispersion; kernels and matching GL application live in `read_kernels.py` and `read_likelihoods.py` |
-| Local discovery | `discovery/blocks.py`, `discovery/search.py` | Missing-aware reversible search for 200-SNP panels |
-| Local path selection | `discovery/path_model.py`, `path_scoring.py`, `path_fitting.py`, `path_selection.py` | Normalized diploid-path objective, prepared scoring, fixed-K fitting and drop/merge/add search to convergence |
-| Feedback orchestration | `workflows/block_feedback.py`, `discovery/path_blocks.py` | Initial path selection, L1 and rebuilt L1+L2 feedback, block materialization and checkpointed parallel work |
-| Candidate banks | `discovery/candidate_selection.py` | Partial-row completion and BIC/source-endpoint starts |
-| Context refit and completion site posterior | `discovery/feedback.py`, `assembly/site_posterior.py` | Cavity carrier weights; shared founder-allele site posterior (exact for ≤ 10 bits, uncertain core above) |
-| Founder completion | `assembly/completion.py`, `assembly/joint_completion.py` | Evidence-supported local completion and frozen inference panels |
-| L1–L4 assembly | `assembly/pipeline.py`, `assembly/hierarchy.py` | Checkpointed hierarchy, component boundaries and scheduling |
-| Founder-path refinement | `assembly/founder_refinement.py` | Coordinate the refinement passes after each final hierarchy level |
-| Sample painting | `painting/model.py`, `painting/components.py` | Component-local ragged founder mosaics, including unknown states |
-| Pedigree inference | `pedigree/pipeline.py`, `pedigree/inference.py` | Aggregate chromosome evidence and infer observed-parent states and identities |
-| Family phase correction | `refinement/pipeline.py`, `refinement/polish.py` | Pedigree-conditioned, genotype-preserving final phase |
-| Recombination maps | `recombination/pipeline.py`, `recombination/model.py` | Conditional rates, crossover intervals and observable exposure |
-| Truth evaluation | `simulation/evaluation.py`, `simulation/founder_metrics.py`, `simulation/metrics.py`, `simulation/truth.py` | Parallel founder/sample/pedigree metrics from each chromosome's truth record, never inference inputs |
-| Portable simulation controls | `simulation/designs.py`, `simulation/example.py` | Backcrosses, observed-only sampling, read perturbations and generated examples |
-| Interoperable export | `workflows/export.py`, `core/products.py` | Lossless component-local founder tracks and final sample GT/PS |
-| Checkpoints | `core/checkpoints.py`, `core/runtime.py`, `core/products.py` | One append-only record file per chromosome plus the run file; reading evidence and every founder stage back |
-| Run provenance and timing | `core/run_record.py` | Coordinator records, non-overlapping wall times and `status` |
-
-Paths in this table are relative to `haplotype_reconstruction/`.
-
-Local path selection consumes the original calibrated GLs; assembly panels
-only propose starts. The path modules contain no workflow paths,
-simulation truth or private-pilot imports. `path_blocks.py` preserves kept-marker
-axes, ALT probabilities, fractional support and spatial MAP unknown counts.
-`PathSelectionConfig` in `core/config.py` owns the eight refits per proposal
-kind and the reported backstops (rounds 10 + 2K, fixed-K updates 20 + 4K);
-rounds and fits stop naturally. Drops and adds are screened by exact forward
-scores, merges by the larger of two EM lower bounds from the drop panels'
-forward-backward statistics (O(N L K^3) per round). Ordinary search reuses
-prepared observations and exact panel-plus-frequency score/fit results within
-one block. Discovery (`discovery/search.py`) likewise stops when the incumbent's
-generated neighbourhood is exhausted; its expansion (32 + 8 K_rep) and exact-
-score (96 + 12 K_rep) limits are reported backstops.
-
-## Assembly: keep the different problems separate
-
-The linker and founder refiner solve different problems. `linking.py`,
-`micro_hmm.py`, `macro_hmm.py` and `edge_counts.py` estimate linkage between
-blocks. `paths.py` constructs paths and reconstructs their alleles.
-`paths.py` runs the endpoint beam and `panel_search.py` owns the bounded
-panel selection; this is the single join route at every level.
-
-`founder_refinement.py` is the coordinator for the next layer. Its numerical
-and execution helpers are grouped in `assembly/founder/`:
-
-| Modules | Responsibility |
+| package | responsibility |
 | --- | --- |
-| `converged_sweep`, `sweep_kernels` | Converged fixed-K fits (Gauss-Seidel window/suffix-exchange sweeps), count passes, best-F panel, reconstruction of refined panels and their diagnostics |
-| `window_dp`, `dual_search`, `dual_short`, `sparse` | Exact binned window programmes (shared-background frontier programme, box screen, lexicographic ties) and their dual/suffix kernels |
-| `count_criterion`, `count_bound` | Effective-carrier count decisions and optimistic count bounds |
-| `scoring`, `evidence`, `site_kernels` | Cohort likelihoods and model preparation |
-| `workspace`, `packing` | Reusable arrays, packed emissions and cached panel scores |
-| `candidates`, `components` | Level components in worker processes, bounded concurrent work and straggler thread reallocation |
-| `checkpoints` | Resume records |
+| `cli.py`, `__main__.py` | argument parsing only; builds the configuration and calls the commands |
+| `config/` | the run configuration: `config/schema.py` (typed sections, defaults, descriptions), `config/load.py` (preset + TOML + options + `--set`, strict validation, resolved TOML), `config/presets/` (`tromau.toml`, `aulstu.toml`), `config/stages.py` (run configuration -> each stage's config, genetic maps) |
+| `store/` | the checkpoint store: `store/codec.py` (payload encoding), `store/container.py` (append-only files), `store/store.py` (run file, contig files, work states, record scopes), `store/identity.py` (canonical digests, code and stage identities), `store/registry.py` (stage names in pipeline order) |
+| `execution/` | process set-up and parallel work: `execution/bootstrap.py`, `execution/resources.py`, `execution/budget.py` (CPU leases), `execution/pools.py`, `execution/shared_arrays.py`, `execution/chromosome_workers.py`, `execution/contig_lanes.py`, `execution/memory.py` (memory governor, heap trimming), `execution/kernel_cache.py`, `execution/batch_queue.py`, `execution/run_record.py`, `execution/run_log.py` |
+| `model/` | types shared by several stages: `model/evidence.py` (ContigReads, ContigEvidence), `model/local_panels.py` (LocalPanel), `model/components.py` (prepared panels, founder components, component panels, count calls), `model/genetic_map.py` |
+| `maths/` | numerical kernels shared by stages: `maths/logspace.py` (log-space sums), `maths/chains.py` (binary-hypercube chain kernels: two-state and two-bit four-state forward-backward and Viterbi, the max-product butterfly step, run contraction; family phase and recombination), `maths/emissions.py` (founder-pair genotype classes and the robust log emission with its normalisation and skip rule; the linker, the joins and founder refinement) |
+| `evidence/` ... `recombination/`, `export/` | the ten stages (below) |
+| `simulation/` | generating code only: design, pedigree and meiosis, reads, the observation source, truth records |
+| `pipeline/` | the driver (`pipeline/driver.py`), observation sources, the sample table and eligibility, one contig's work (`pipeline/contig_work.py`), status, published-table hook |
+| `reports/`, `evaluation/`, `templates/` | published tables, evaluation against simulation truth, template building and the example |
 
-The budgeted refiner is deleted: its modules (`search`, `global_search`,
-`search_ranking`, `proxy_primary`, `sparse_primary`, `path_search`, `beam`,
-`beam_kernels`, `beam_wide_kernels`, `windows`, `queries`,
-`conditional_messages`, `background`, `predictive`, `delta`), the path-proposal
-helpers of `founder_refinement.py` and of the remaining modules, the old
-deep-deletion count module (`count`) and its guarded exchange pass
-(`exchanges`, `exchange_bounds`, `exchange_cache`, `count_workers`). The
-converged sweep (exact window programmes, all-pair suffix exchanges and its
-count pass) replaces them. `FounderRefinementConfig` still carries the removed
-refiner's budget fields (`beam_width`, `branch_cap`, `window_blocks` and
-others): the assembly configuration records and identities include them, and
-only their validation reads them.
+Dependencies point one way. Infrastructure (`config/`, `store/`, `execution/`) is below the shared types
+(`model/`, `maths/`), which are below the stages; the stages import in pipeline order (evidence < discovery <
+assembly < local_selection < painting < pedigree < founder_refit < family_phase < recombination: local selection
+calls assembly for its context assemblies, and the final assembly is wrapped by `pipeline/contig_work.py`, so
+assembly never imports local selection). The export stage reads the other stages' records only. `pipeline/`,
+`cli.py`, `reports/`, `export/`, `evaluation/` and `templates/` sit on top. A stage never imports a later stage, the driver, the CLI, `config/` or `os.environ`.
+Importing the package configures the numerical libraries (one thread per BLAS/OpenMP pool, Numba's threading layer
+and cache directory) and does nothing else; no module has other import-time effects.
 
-These helpers do not use pedigree truth or replace sample painting. Their
-internal sample fits score founder proposals. The separate top-level
-`refinement/` package performs **family phase correction after pedigree
-inference**. Keeping these two meanings of refinement distinct is important.
+## Stages
 
-## Pedigree evidence and decisions
+`store/registry.py` lists the stages in pipeline order with the packages whose code each executes:
 
-`pedigree/components.py` prepares ragged painting evidence and source inputs.
-`sources.py` represents candidate ancestry; `transmission.py` validates and
-coordinates the projected M0/M1/M2 likelihood calculation. Its public model
-and score types remain there, while the numerical work is separated into:
+| stage | scope | code identity covers | entry point |
+| --- | --- | --- | --- |
+| `evidence` | contig | `evidence` | `evidence.run_contig(store, source, contig, config, budget)` |
+| `discovery` | contig | `discovery` | `discovery.run(store, contigs, config, budget, prepare=...)` |
+| `local_selection` | contig | `local_selection`, `discovery`, `assembly` | `local_selection.run_contig(store, contig, config, assembly_config, genetic_map, budget, ...)` |
+| `assembly` | contig | `assembly` | `assembly.assemble(inputs, config, role=..., records=..., budget=...)` |
+| `painting` | contig | `painting` | `painting.run_contig(store, contig, config, genetic_map, budget)` |
+| `pedigree` | genome | `pedigree`, `painting` | `pedigree.run(store, contigs, sample_ids, eligibility, config, genetic_maps, budget)` |
+| `founder_refit` | contig | `founder_refit`, `painting` | `founder_refit.run(store, contigs, config, budget)` |
+| `family_phase` | contig | `family_phase` | `family_phase.stage.run(store, contigs, edges, config, genetic_maps, budget)` |
+| `recombination` | contig | `recombination`, `family_phase` | `recombination.stage.run(store, contigs, edges, config, genetic_maps, budget)` |
+| `export` | contig | `export` | `export.stage.run(store, contigs, config, output, budget, synthetic=..., reference=...)` |
 
-- `transmission_projection.py`: transmitted-source marginals and
-  persistence-constrained bridges;
-- `transmission_scoring.py`: quadratic forward scoring kernels.
+One name per stage is used everywhere: record prefix, `identity/<stage>`, `complete/<stage>`, output directory
+`OUTPUT/<stage>/`, stop point and evaluation stage. Simulated inputs use the prefix `simulation/` (an input step,
+not a stage).
 
-`cache.py` independently versions preparation, genetic scores and decisions;
-`explanations.py` separates score contributions and release/ambiguity summaries.
-`execution.py` keeps chromosome tensors and reusable projections in persistent
-workers; `inference.py` combines their scores and applies the decision procedure.
-`direction.py`, `eligibility.py`, `states.py`, `bootstrap.py` and `graph.py`
-separate chronology/eligibility, parent-count evidence, resampling and acyclic
-graph selection. `calibration.py` learns the conditional predictive evidence
-scale; `exclusion.py` and `exclusion_patterns.py` supply raw-GL Mendelian
-exclusion; `release.py` reconciles released parent-count states without
-introducing new edges. `results.py` produces the output tables. Generation labels
-and real-data candidate eligibility must not be confused with known parentage.
+Every stage package has the same parts:
 
-## Where CPU allocation lives
+- one public entry point taking typed inputs (frozen dataclasses of NumPy arrays whose docstrings give units,
+  shapes, dtypes and meaning) and reading upstream products through the upstream stage's `records` API, never
+  through published files;
+- `<stage>/config.py`: a frozen dataclass whose defaults are the production values. These are model constants; only the
+  fields the run configuration maps in `config/stages.py` are user settings
+  ([configuration.md](configuration.md#internal-model-constants) lists both);
+- `<stage>/records.py`: the stage's record keys, typed encode/decode (records are plain dicts of arrays and builtins, not
+  pickled classes), its identity, and the readers other code uses: `complete(file)`, `progress(file)` (record keys
+  and small plans only, for `haplotypes status`), and for founder stages `founder_panels(file)` (positions, calls
+  per component or block, for evaluation and export).
 
-`core/environment.py` sets numerical-library limits before heavy imports.
-`core/parallel.py` owns shared arrays, forkserver pools, Numba thread scopes
-and the dynamic worker counter. Its `get_dynamic_threads()` and
-`apply_dynamic_threads()` redistribute the existing core budget as workers
-finish. An already-running kernel cannot absorb new threads mid-call.
+The driver (`pipeline/driver.py`) runs: checks -> run start (cores, memory governor, kernel cache, log, run record,
+`config.toml`) -> simulated inputs -> evidence and discovery (one block pool for all pending contigs, the next
+contig's evidence prepared on a helper thread) -> per contig in lanes: local selection -> final assembly ->
+painting -> pedigree -> founder refit -> family phase -> recombination -> export (`[export] enabled`). The reports
+layer writes the published tables at fixed points (`pipeline/outputs.py`); nothing reads them back. The export's
+files are derived from the records: a changed export identity re-exports a contig (removing its earlier files)
+instead of refusing the run, and no stage reads the export record.
 
-`core/chromosome_parallel.py` supplies persistent chromosome workers and bounded
-thread leases for pedigree preparation/scoring, family phase, recombination
-and evaluation.
-Its `current_threads()` lets surviving workers claim released cores at explicit
-numerical boundaries. Genome-wide candidate selection remains a barrier between
-pedigree screening and detailed scoring; parallelism does not change that model.
-Pedigree preparation and scoring, family phase, recombination and evaluation
-supply their decoded workspace estimates to `memory_worker_limit()` in that
-same module. It applies one
-memory-headroom policy using `core/runtime.py` memory accounting, without
-reducing the shared CPU ceiling. Stage-specific array-size estimates stay
-beside the stages that own those arrays.
+## Checkpoint store
 
-Assembly scheduling is in `assembly/hierarchy.py`; refinement candidate
-scheduling is in `assembly/founder/candidates.py`. Process count and threads
-per process share one ceiling. Do not add independent thread pools or reorder
-environment-sensitive imports merely to satisfy a style rule. Checkpoint I/O,
-memory bandwidth and ordered acceptance steps can still limit utilization.
+A checkpoint directory holds `run.ckpt` (genome-wide records), one `contigs/<contig>.ckpt` per contig, and
+`work/` only while transient resume state is live.
 
-### Optional work sharing between allocations
+**Container** (`store/container.py`). One file is a header (magic, format version, kind, name, file identity, CRC)
+followed by records, each a header (magic, sequence, write time, stored and decoded sizes, payload layout, record
+identity, key, CRC), a payload (`store/codec.py`: pickle protocol 5 with out-of-band buffers compressed by Blosc2
+in chunks) and a trailer (magic, sequence, length, CRCs). Committed bytes are never modified; the latest complete
+record of a key wins. A record counts only once its trailer is complete, so an interrupted writer leaves at most
+an incomplete last record, which readers skip and the next writer truncates. Appends are serialised by a
+per-process thread lock and `flock` on the file (coherent across nodes on the cluster file system) and fsynced;
+readers take no lock and index record headers and trailers without decoding payloads. Each committed record has a
+unique `identity` (32 hex digits in its `RecordInfo`): the value downstream stages bind as their upstream identity.
 
-`core/batch_queue.py` owns the shared-filesystem queue, claims, progress and
-result publication. `core/batch_tasks.py` packs bounded evidence slices and
-dispatches the **existing** local-fit or hierarchy callbacks. It is a transport
-adapter, not a second scientific implementation. The CLI's `--batch-queue`
-enables publication; `batch-worker` consumes work on an already allocated
-node. With no queue configured, the ordinary node-local path remains active.
+**Store** (`store/store.py`). `CheckpointStore(root)` gives `.run`, `.contig(name)`, `.contig_names()`,
+`bind_identity(file, section, identity)` (put-once of `identity/<section>`; a different identity raises
+`CheckpointMismatch`: "use a new output root"), `bind_manifest`, `mark_stage_complete`, `require(key, contigs)` and
+`work(contig, name)` (atomic resume-only state under `work/`). `RecordScope(file, prefix)` is a picklable view of
+one section that pool workers can write through. A directory holding other subdirectories than `contigs/` and
+`work/` is refused.
 
-| Boundary | Owner | What crosses it |
-| --- | --- | --- |
-| Independent batches between allocations | `core/batch_queue.py`, `batch_tasks.py` | Bounded evidence slices and task results |
-| Chromosomes within one allocation | `core/chromosome_parallel.py` | Small task descriptors, configuration and summaries |
-| Numerical work within a chromosome/batch | `core/parallel.py` and stage-owned schedulers | Shared arrays and a bounded process/thread budget |
-| Scientific stage completion | Stage coordinator and checkpoint store | Ordered, identity-checked products |
+**Identities** (`store/identity.py`). A stage's identity is `stage_identity(stage, schema=, config=, upstream=)`:
+the stage name, its record schema version, its config (`asdict`), the record identities of the upstream records it
+read, and the code identity (SHA-256 of the `.py` sources of the stage's packages plus `model/` and `maths/`,
+computed once per process). Execution, store, pipeline and reporting code never enters a scientific identity, so
+changing them never invalidates results; changing a stage's code does. The run record holds one digest of the
+whole package source for provenance.
 
-Only a chromosome coordinator publishes its scientific checkpoints; helpers
-publish attempt-specific queue results. Dependent assembly levels still wait
-for their inputs. The queue does not distribute pedigree, family phase,
-recombination or chromosome-coupled founder refinement; their node-local
-parallelism is separate. External allocation launchers are operational tools,
-not required imports of the public package.
+**Record keys.** Contig files:
 
-Use a shared queue only with identical frozen source on its coordinators and
-helpers. Follow the [running guide](running.md#optional-cross-node-batches)
-for the public commands and restart rules. Queue work records are not a full
-scheduler bill: coordinator timers omit helpers, while helper allocations can
-include idle time. Use scheduler allocated-CPU seconds for total resource cost.
+| stage | keys |
+| --- | --- |
+| simulation | `simulation/reads` (simulated allele depths), `simulation/truth` (founders, alleles, painting, crossovers; read only by evaluation) |
+| evidence | `evidence` (positions, counts, likelihoods, observed mask, discovery sites, founder exclusion, blocks, report) |
+| discovery | `discovery/plan`, `discovery/blocks/<n:06d>` (chunks of 64 blocks in completion order) |
+| local_selection | `local_selection/<round>/blocks/<n:06d>`, `.../memos/<n:06d>`, `.../proposals`, `.../selected`, `.../assembly/...` for rounds `initial`, `l1`, `l2` |
+| assembly | `assembly/completion`, `assembly/l<k>/plan`, `assembly/l<k>/join`, `assembly/l<k>/refine/...`, `assembly/l<k>/refined`, `assembly/final`; `joins/<digest>` shared by every assembly of the contig |
+| painting | `painting/summary`, `painting` |
+| pedigree | `pedigree/prepared`, `pedigree/screen`, `pedigree/scores`, `pedigree/exclusion` |
+| founder_refit | `founder_refit` |
+| family_phase | `family_phase` (resume state `work/<contig>/family_phase.p5.b2` while solving) |
+| recombination | `recombination` |
+| export | `export` (the contig's exported files: identity and manifest entry) |
 
-## Configuration, types and checkpoints
+Each contig file also holds the `identity/<section>` records of its stages. `run.ckpt` holds `manifest/run`
+(input kind, contigs, sample axis, source identity), `simulation/manifest` (simulations: seeds, contigs, the
+observed and generated pedigrees), `complete/<stage>`, the pedigree product `pedigree` and the summaries
+`family_phase` and `recombination`, with their identities.
 
-Run examples live in `configs/`. `cli.py` resolves command-line, TOML and
-supported environment settings. Stage-owned configuration classes live beside
-their implementation; `core/config.py` contains shared scientific constants.
-`pedigree/config.py` owns both `PedigreeConfig` and its environment adapter;
-`workflows/design.py` only supplies real-cross eligibility and chronology,
-not a second copy of the model defaults. `core/environment.py` supplies the
-shared boolean parser used by the CLI, read calibration and recombination.
-The two cichlid adapters and empirical-template simulation share their
-reference chromosome order in `workflows/__init__.py`; general VCF
-reconstruction takes its contigs from the input header or explicit CLI list.
+## Execution
 
-The [running guide](running.md) distinguishes broad-only assembly controls
-from bounded-search budgets.
+- **Process set-up** (`execution/bootstrap.py`). At import: one thread per numerical-library pool, Numba's
+  threading layer `omp` with passive waiting, a kernel cache directory per code version. At run start
+  (`start_run`): the Numba pool size (the run's cores), the forkserver preload list (every stage's modules), the
+  profiling flag and the memory governor. Workers inherit these settings.
+- **CPU leases** (`execution/budget.py`). One `CpuBudget` tree (run -> lane -> pool -> worker): a lane's lease grows
+  toward its share of the remaining work at phase starts (`budget.phase(name)`); pool tasks claim
+  `floor(total / active) + remainder` threads at numerical boundaries (`claim_threads()`); a start-up gate gives
+  one thread per worker until the batch's workers have started. A running kernel never changes its team.
+- **Pools and executors.** `BudgetedPool` is the one process pool (forkserver, non-daemonic so tasks may open
+  pools; shared arrays copied once into shared memory and attached by every worker). `ChromosomeExecutor` runs one
+  task per chromosome in persistent workers that keep per-chromosome state across phases. `execution/contig_lanes.py`
+  runs concurrent contig lanes on top of it.
+- **Memory** (`execution/memory.py`). One governor per run keeps a ledger of the planned peak bytes of all running
+  work in every process; constructs reserve their tasks' bytes and wait while they do not fit, so memory paces work
+  instead of ending the run ([performance.md](performance.md#memory)). Stage code that allocates large memory
+  outside the constructs wraps it in `reserve_memory(nbytes)`; kernels with large temporaries tile under fixed byte
+  budgets, so results never depend on free memory. `release_memory()` (garbage collection and `malloc_trim`) runs
+  at phase boundaries.
+- **Kernel cache** (`execution/kernel_cache.py`): every `@njit(cache=True)` kernel is found automatically, kept
+  between runs and compiled ahead of the first pool for a new code version.
+- **Batch queue** (`execution/batch_queue.py`): stages describe independent batches as a `BatchKind`; helpers
+  started with `haplotypes batch-worker` execute bundles; only the coordinator writes records.
+- **Run records** (`execution/run_record.py`): per invocation, the resolved configuration, provenance, exclusive
+  stage timings (helper threads included), per-contig product summaries and memory statistics.
 
-`core/haplotypes.py` owns shared block types. `core/checkpoints.py` implements
-the checkpoint container: an append-only file of immutable, checksummed
-records, each appended under an exclusive `flock` and flushed to disk before it
-counts, whose payloads use compressed protocol-5 serialization with rolling
-chunk reads and ordered pipelined writes. `core/runtime.py` owns the
-`CheckpointStore` (`run.ckpt`, one `contigs/<contig>.ckpt` per chromosome and
-transient `work/` states) and scoped logging. Each workflow restores stdout and
-closes its log on normal return, interruption or failure.
-Each stage owns its record keys and scientific identities
-(`discovery/checkpoints.py`, `assembly/checkpoints.py`,
-`painting/checkpoints.py`, `pedigree/cache.py` and the stage pipelines);
-`core/products.py` reads evidence and founder panels back for downstream
-stages, evaluation and export. A chromosome worker writes only its own
-chromosome's file; genome-wide records come from the coordinator. Downstream
-stages bind the record identities (`RecordInfo.identity`) of the upstream
-records they read, never file paths or modification times. Keep public
-serialized types at stable module paths when possible.
+## Rules for changes
 
-Moving a numerical helper requires updating its imports **and** every relevant
-source-dependency list used for checkpoint identity. Source changes can make
-old work incompatible even when mathematical behavior is unchanged. Never
-relabel a stored identity to force reuse. Frozen campaign source and its
-checkpoints should remain together when development continues in the main
-checkout. For an isolated campaign, launch from the frozen source directory
-with `PYTHONPATH` pointing there; `PYTHONSAFEPATH=1` also prevents the child
-interpreter's current-directory entry from taking precedence. Verify the
-package path in a forkserver worker as well as in the parent: a frozen entry
-script alone does not isolate preloaded worker imports.
+- Scientific correctness first: models, thresholds, priors, release and tie rules change only to fix a
+  demonstrated defect or to compute the same quantity correctly, with the effect measured and recorded in the
+  changelog. A numerically small difference that changes a discrete outcome (a founder count, a pedigree call, a
+  phase switch) is a behavioural change and must be explained.
+- Results never depend on thread counts, lanes, memory pacing or completion order. Parallel kernels reduce
+  per-sample (or per-site) rows in a fixed order; do not introduce team-size-dependent reductions or let results
+  depend on which worker computed them. Byte budgets that bound a computation are fixed constants or come from the
+  task's own reservation, never from the memory that happens to be free.
+- Performance and memory are acceptance criteria: keep the algorithmic shortcuts of the hot kernels; supply
+  byte estimates for new parallel work; tile large temporaries under fixed budgets. Nothing may scale exponentially
+  in the founder count K (up to 30 per block); see the cost sections of the [methods](methods/README.md).
+- Checks belong at real boundaries (inputs, decoded records); trusted internal objects are not re-validated.
+  Internal invariants live in tests.
+- Settings: a new user setting is a field of `config/schema.py` (kind, default, one-line description) mapped in
+  `config/stages.py`; model constants are fields of the stage's `<stage>/config.py` with a description in its docstring or a
+  comment above the field. Regenerate the reference with `python docs/generate_configuration.py`. Nothing is read
+  from the environment.
+- A changed record layout bumps the stage's schema version in its `<stage>/records.py`; identities then keep old and new
+  results apart.
 
-Package startup configures disposable Numba caches in `core/environment.py`
-before numerical imports. Run/job, hostname and a key of the package source
-isolate automatic caches; workers in that scope reuse them, and
-`core/numba_warmup.py` keeps them between runs per source key. An explicit
-`NUMBA_CACHE_DIR` replaces the automatic base. Native caches, batch-transport results and scientific checkpoints
-have different lifetimes: neither a native cache nor a queue directory replaces
-the checkpoint store. See [cache policy](performance.md#native-compilation-caches).
+## Documentation
 
-For numerical comparisons, copy a kernel module into an isolated source tree
-or use a separate `NUMBA_CACHE_DIR`. Do not import a canonical `@njit(cache=True)`
-source file under a temporary module alias: the generated cache can retain
-that alias and fail to load in ordinary production imports. Experimental source,
-compiled caches and scientific checkpoints are separate kinds of artifact.
+`docs/configuration.md` is generated from the code (`python docs/generate_configuration.py`). `python
+docs/check_docs.py` checks every page against the code: links and anchors, configuration keys and values,
+command lines and options, the defaults stated for internal constants (written as `RootConfig.path = value`, for
+example `PaintingConfig.minimum_release_posterior = 0.9`), module paths, that the generated reference is current
+and that every environment variable the code reads is documented. Run both after changing settings, commands,
+constants or pages. Pages describe the code as it is; history belongs in the changelog and the migration guide.
 
-## Source control and local artifacts
+## Stopping processes safely
 
-Keep production modules, CLI/configuration examples, documentation, dependency
-specifications, source tools and their maintained checks in Git. New imported
-helpers belong in the same commit as their callers; do not hide unfinished
-production dependencies with ignore rules. The curated readable real-data
-handoffs under `deliverables/` remain tracked, including their CSV/PED files.
+On shared or allocated nodes, stop only processes you started. A user-wide kill command can end the allocation
+itself, and with it every job and session running there.
 
-Root `.gitignore` keeps runs and experiment archives (`work/`, `.work/`),
-the private `manuscript/`, the external `claude_lab` symlink, genomic data and
-indexes, NumPy arrays, build/native caches, local environment files and editor
-artifacts outside commits. The native disk-usage binary has a scoped ignore
-in `tools/.gitignore`; its C source and focused tests remain tracked.
-Ignoring a path does not remove an already-tracked file.
+- Never build a list of processes to signal from a user-wide selection: no `ps -u "$USER"`, `pgrep -u`,
+  `pkill -u`, `killall` or `kill -1`. `procps` combines selection options as a union, so `ps -u "$USER" --ppid PID`
+  lists every process of the user, not the children of `PID`. Use `kill 0` or `kill -- -PGID` only for a process
+  group you created yourself (for example with `setsid`) and whose ID you have checked.
+- Do not use `pkill`: `pkill -f PATTERN` also matches the shell running it and any unrelated process whose
+  command line contains the pattern. List candidates with `pgrep -f PATTERN` or `ps -o pid,ppid,args -p PIDS`,
+  check them, and signal only the verified PIDs.
+- Record the PID (or a dedicated process group) of background work when you start it, and stop it through that
+  identity. To stop a process tree, start from a verified PID and walk its descendants through parent links
+  (`/proc/PID/stat` or `pgrep -P PID`, recursively), excluding your own shell and its ancestors.
+- Never signal session infrastructure: `screen` or `tmux` sessions, `sshd`, `slurmstepd`, `systemd`, an
+  allocation's login shell, or a runner hosting other work. Ending any of them ends the Slurm job.
+- Print and inspect a computed kill list before sending the signal; if it holds anything but your own processes,
+  do not send it.
 
-Paused scientific prototypes belong in ignored experiment storage, not inside
-the installable Python package: setuptools can package Python files even when
-Git ignores them. Archive them with their original paths and restoration notes
-before removal from the package. Preserve checkpoints, manuscripts and
-accepted results during commit preparation.
-
-## Making a behavior-preserving cleanup
-
-1. Preserve a source snapshot and inspect existing working-tree changes.
-2. Move cohesive responsibilities, not arbitrary line-count slices. Keep
-   numerical loops intact and multiprocessing workers at module scope.
-3. Verify executable syntax-tree equivalence for formatting and mechanical
-   moves; check imports and relocated source-dependency paths separately.
-4. Exercise the affected public entry paths, serialization and small numerical
-   fixtures. Run scientific comparisons when a model or decision changes.
-5. Keep validation scripts and generated artifacts under ignored work storage.
-   Record what was tested and what was not.
-
-See [validation](validation.md) for scientific evidence and known limitations,
-and [performance](performance.md) for measured timings rather than assumptions
-about parallelism. `deliverables/` contains preserved readable real-data
-handoffs; `manuscript/` is private and ignored. Neither belongs in a code-style
-cleanup or generated-data purge.
+Signalling a run's main process is enough to stop it (Ctrl-C, or SIGTERM to its PID): contig lanes stop with it,
+pool workers end after their current task, and every record already written is kept for the resume.

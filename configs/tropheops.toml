@@ -1,19 +1,33 @@
-[run]
-cores = "auto"
-# batch_queue = "/shared/run/batches" # Optional helpers: haplotypes batch-worker --queue PATH
-# serial_contigs = true # One contig at a time, each checkpointed; for short allocations.
-# max_contigs = 2 # Finish at most 2 more contigs per invocation; implies serial_contigs.
-# read_calibration = true # Default: fit the observation model from allele depths.
-# pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
-founder_refinement = "on" # Final chromosome paths; "off" is a controlled comparison.
-output = "work/runs/tropheops"
+# TroMau cross (AcTm BCF), whole genome: `haplotypes run configs/tropheops.toml`.
+# The tromau preset supplies the 22 autosomes, the workbook columns, cohort eligibility (F2 <- F1, opposite-sex
+# parent pairs) and the reference-consistency report. Paths are relative to the working directory.
+preset = "tromau"
 
-[inputs]
+[run]
+output = "work/runs/tropheops"
+# stop_after = "painting"           # or "discovery"; remove to continue downstream
+
+[input]
+kind = "vcf"
 vcf = "work/data/fish_vcf_restriped/AcTm.biallelic.bcf.gz"
+
+[samples]
 metadata = "work/data/fish_vcf_restriped/X_AcTm_metadata.xlsx"
-metadata_sheet = "main_data"
+sheet = "main_data"
+
+# [execution]
+# cores = "auto"                    # total CPU ceiling; auto = CPU affinity
+# memory_limit = "auto"             # e.g. "200G"; the memory governor slows work down to fit
+# serial = true                     # one contig at a time, each recorded (short allocations)
+# max_contigs = 2                   # finish at most 2 more contigs per invocation; implies serial
+# batch_queue = "/shared/run/batches"  # helpers: haplotypes batch-worker QUEUE
+
+[genetic_map]
+rate_cm_per_mb = 5.0
+# file = "work/data/cross.map"
 
 [recombination]
-rate_cm_per_mb = 5.0
 shared_family_evidence = true
-# recombination_map = "work/data/cross.map"
+
+# [export]                          # founder + phased sample VCFs in OUTPUT/export (on by default)
+# full_length = true                # every input SNP, FILTER = PASS or the site-filter rule

@@ -1,37 +1,34 @@
-[run]
-cores = "auto"
-# batch_queue = "/shared/run/batches" # Optional helpers: haplotypes batch-worker --queue PATH
-# serial_contigs = true # One contig at a time, each checkpointed; for short allocations.
-# max_contigs = 2 # Finish at most 2 more contigs per invocation; implies serial_contigs.
-# read_calibration = true # Default: fit the observation model from allele depths.
-# pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
-founder_refinement = "on" # Final chromosome paths; "off" is a controlled comparison.
-# Output defaults to work/runs/seed_<seed>; each seed has isolated checkpoints.
-# Optional execution controls; shards require globally completed simulation inputs.
-# process_contigs = ["chr1", "chr2"]
-# stop_after_stage = "painting" # or "block_discovery"; remove to continue downstream.
-
-[inputs]
-templates = "work/data/simulation_templates"
+# Simulated cross with known truth: `haplotypes run configs/simulation.toml`, then `haplotypes evaluate RUN`.
+# Output defaults to work/runs/simulation_seed<seed>; each seed has its own checkpoints.
+[input]
+kind = "simulation"
 contigs = ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr22", "chr23"]
 
 [simulation]
+templates = "work/data/simulation_templates"
 seed = 400
 depth = 5.0
-generations = [20, 100, 200]
+cohorts = [20, 100, 200]
 generating_rate_cm_per_mb = 5.0
 # generating_map = "work/data/generating.map"
 # Optional data-generation controls, independent of inference:
 # backcross_fraction = 0.5
-# backcross_start_generation = 3
-# observe_generations = [4, 5, 6] # Requires at least six generated cohorts.
+# backcross_start_cohort = 3
+# observe_cohorts = [4, 5, 6]
 # observed_fraction = 0.8
-# generating_error_rate = 0.04
+
+# [simulation.reads]
+# error_rate = 0.04
 # depth_cv = 0.6
 # heterozygote_alt_probability = 0.6
 # dropout_fraction = 0.1
 
-[recombination]
+# [execution]
+# process_contigs = ["chr1", "chr2"]   # shard: these contigs through painting only
+
+[genetic_map]
 rate_cm_per_mb = 5.0
+# file = "work/data/inference.map"
+
+[recombination]
 shared_family_evidence = true
-# recombination_map = "work/data/inference.map"

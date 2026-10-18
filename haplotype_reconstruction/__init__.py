@@ -1,14 +1,11 @@
-"""Founder-haplotype reconstruction from low-coverage experimental crosses."""
-from pathlib import Path
+"""Founder-haplotype reconstruction from low-coverage sequencing of experimental crosses.
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
-__version__ = "1.0.0"
+One pipeline: evidence -> discovery -> local selection -> assembly -> painting -> pedigree -> founder refit ->
+family phase -> recombination (see docs/). Importing the package configures the numerical libraries before any
+numerical module loads (execution.bootstrap.configure_imports); nothing else happens at import.
+"""
+from .execution.bootstrap import configure_imports as _configure_imports
 
-# Set native-library limits before any numerical submodule is imported.
-from .core.environment import (
-    configure_numba_cache,
-    force_single_threaded_numeric_libraries,
-)
+__version__ = "2.0.0"
 
-force_single_threaded_numeric_libraries()
-configure_numba_cache()
+_configure_imports()

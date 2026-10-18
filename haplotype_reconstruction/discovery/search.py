@@ -1,1370 +1,312 @@
-"""Reversible cavity-guided growth, replacement and reduction of local panels."""
+"""Adaptive reversible search over complete panels of one block.
+
+The archive ranks every fitted complete panel (one per canonical key, the lowest-NLL fit) and
+keeps, per K, the panels the search reads: the ``beam_width`` lowest; the minimum-NLL panel of
+each represented K is its *representative* and is cavity-scored (score
+cached by key; at most ``exact_score_backstop(K_rep)`` scores, K_rep the largest represented K).
+The selected panel is the representative with the best score (ties: smaller K, then key).
+
+Each expansion takes the selected K's beam (its ``beam_width`` lowest-NLL archived panels): the
+first panel not yet expanded ordinarily gets the ordinary moves (deaths, gauge rewires, data
+births; then, if the score did not improve, birth-delete replacements); once every beam panel
+was expanded ordinarily, the first not yet expanded in the residual phase gets soft-residual
+births (then replacements, then, if still no improvement, a K + 2 bridge: data and soft births
+of the K + 1 representative). The search stops when the beam is exhausted in both phases, or at
+the reported expansion backstop. There is no K grid and no K cap besides the identifiability
+ceiling min(2 N_active, 2^L).
+"""
 from __future__ import annotations
 
+from dataclasses import dataclass
 
-from dataclasses import dataclass, replace
-import math
-from typing import Any, Sequence
 import numpy as np
-import haplotype_reconstruction.core.config as core_config
-import haplotype_reconstruction.discovery.cavity as discovery_cavity
-import haplotype_reconstruction.discovery.modes as discovery_modes
 
-_SCORE_TOLERANCE = 1e-9
+from .cavity import CavityWorkspace, score_solutions
+from .fixed_k.fit import prepare_workspace
+from .moves import (MaximumCuts, SoftBirths, data_births, growth_inputs, initial_solutions,
+                    ordinary_moves, replacements, soft_births)
+from .panel import FixedKSolution, deduplicate
+from .residual_births import ResidualInputs
 
-
-_SUPPORTED_MOVE_OFFSETS = (-1, 0, 1, 2)
-
-
-@dataclass(frozen=True)
-class _GrowthInputs:
-    oracle_nll: np.ndarray
-    decisiveness: np.ndarray
-    dosage_by_sample: np.ndarray
-    seed_haplotypes_by_sample: np.ndarray
-    active_sample_mask: np.ndarray
+# Relative K of the moves a search step generates (death, same-K, birth, bridge).
+_MOVE_OFFSETS = (-1, 0, 1, 2)
 
 
 @dataclass(frozen=True)
-class ReversibleCavitySearchConfig:
-    """Numerical settings, generator sizes and K-scaled search backstops.
+class SearchSummary:
+    """What one block's search did (diagnostics; nothing downstream decides on it).
 
-    None of these fields is a scientific upper bound on K.  The search stops
-    when the incumbent's generated neighbourhood is exhausted.  The expansion
-    and exact-score limits, ``base + per_founder * K_rep`` with K_rep the
-    largest K represented in the archive (recomputed at each use), are
-    reported backstops ("expansion_backstop", "exact_score_backstop"), not
-    budgets.  ``beam_width`` controls how many deterministic low-NLL basins
-    at the currently selected K may be expanded.  Basin companions are
-    evaluated only after the minimum-NLL representative's ordinary route
-    stalls.  The proposal-generator sizes stay fixed and their truncation is
-    reported.
+    k_values: int16[R] represented K values, ascending; k_log_scores: float64[R] the cavity
+        log score (leave-one-out predictive + telescoping K prior + unordered set code) of each
+        K's representative. The selected K maximises it.
+    natural_k_ceiling: identifiability ceiling min(2 N_active, 2^L).
+    expansions, data_starts, exact_scores, exact_score_cache_hits: work counts.
+    residual_calls, residual_rows: soft-residual birth calls and the novel rows they emitted.
+    limits: reported search limitations in first-occurrence order, from
+        "expansion_backstop", "exact_score_backstop", "proposal_budget",
+        "replacement_proposal_budget", "soft_residual_proposal_budget",
+        "gauge_max_cut_ties_truncated", "mean_field_nonconvergence".
+    heuristic_gauge_cuts: some expanded panel had K > exact_cut_max_k, so its gauge rewires came
+        from the degree-ordered local-search maximum cut (reported here, not as a limit).
+    stop_reason: "generated_neighbourhood_local_optimum", "incumbent_neighbourhood_search_limited"
+        or "expansion_backstop".
+    certified: the selected panel's generated neighbourhood was completely generated and scored
+        without improvement (a local certificate, not a global one).
     """
 
-    beam_width: int = 3
-    expansion_backstop_base: int = 32
-    expansion_backstop_per_founder: int = 8
-    exact_score_backstop_base: int = 96
-    exact_score_backstop_per_founder: int = 12
-    max_proposals_per_expansion: int = 128
-    data_start_beam_width: int = 6
-    n_data_seed_modes: int = 8
-    max_replacement_children_per_mode: int = 24
-    lambda_wildcard_penalty: float = 0.5
-    read_error_probability: float = core_config.DEFAULT_READ_ERROR_PROBABILITY
-    min_soft_unique_sample_support: int = 2
-    min_directional_supporters: int = 2
-    min_hard_call_pseudo_probability: float = 0.85
-    coordinate_descent_max_iter: int = 50
-    soft_seed_min_cluster_size: int = 2
-    apply_gauge_rewire: bool = True
-    exact_cut_max_k: int = 12
-    max_cut_ties: int = 4
-    score_tolerance: float = _SCORE_TOLERANCE
-    cavity: discovery_cavity.HybridCavitySelectionConfig = discovery_cavity.HybridCavitySelectionConfig()
-
-    def __post_init__(self) -> None:
-        for name in (
-            "beam_width",
-            "expansion_backstop_base",
-            "expansion_backstop_per_founder",
-            "exact_score_backstop_base",
-            "exact_score_backstop_per_founder",
-            "max_proposals_per_expansion",
-            "data_start_beam_width",
-            "n_data_seed_modes",
-            "max_replacement_children_per_mode",
-            "min_soft_unique_sample_support",
-            "min_directional_supporters",
-            "coordinate_descent_max_iter",
-            "soft_seed_min_cluster_size",
-            "exact_cut_max_k",
-            "max_cut_ties",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or int(value) < 1:
-                raise ValueError(f"{name} must be a positive integer")
-        if (
-            not math.isfinite(self.lambda_wildcard_penalty)
-            or self.lambda_wildcard_penalty < 0.0
-        ):
-            raise ValueError(
-                "lambda_wildcard_penalty must be finite and non-negative"
-            )
-        if not 0.0 < self.read_error_probability < 0.5:
-            raise ValueError(
-                "read_error_probability must lie strictly in (0, 0.5)"
-            )
-        if not 0.5 < self.min_hard_call_pseudo_probability < 1.0:
-            raise ValueError(
-                "min_hard_call_pseudo_probability must lie strictly in "
-                "(0.5, 1)"
-            )
-        if not math.isfinite(self.score_tolerance) or self.score_tolerance < 0:
-            raise ValueError("score_tolerance must be finite and non-negative")
-        if not isinstance(self.apply_gauge_rewire, bool):
-            raise TypeError("apply_gauge_rewire must be boolean")
-        if not isinstance(self.cavity, discovery_cavity.HybridCavitySelectionConfig):
-            raise TypeError("cavity must be a HybridCavitySelectionConfig")
-
-
-@dataclass(frozen=True)
-class ReversibleModeScore:
-    """Cached full mean-field regularized score for one visited panel."""
-
-    mode: discovery_modes.FactorizationMode
-    mode_digest: str
-    cavity_log_predictive: float
-    log_k_prior: float
-    log_haplotype_set_prior: float
-    log_score: float
-    mean_field_diagnostic: discovery_cavity.CavityModeDiagnostic
-
-    @property
-    def k(self) -> int:
-        return self.mode.k
-
-
-@dataclass(frozen=True)
-class MoveScore:
-    """Best exact-scored generated neighbour at one relative K."""
-
-    offset: int
-    k: int
-    mode_digest: str
-    log_score: float
-
-
-@dataclass(frozen=True)
-class SearchStepDiagnostic:
-    """One best-first expansion and its operational accounting."""
-
-    expansion: int
-    round_index: int
-    expanded_k: int
-    expanded_mode_digest: str
-    expanded_log_score: float
-    proposed_by_offset: tuple[tuple[int, int], ...]
-    proposals_after_budget: int
-    proposal_budget_omissions: int
-    exact_cache_hits: int
-    exact_scores_computed: int
-    exact_backstop_omissions: int
-    improving_exact_neighbours: int
-    incumbent_k: int
-    incumbent_mode_digest: str
-    incumbent_log_score: float
-    proposal_generation_complete: bool
-    all_generated_neighbours_exact_scored: bool
-    best_exact_neighbours: tuple[MoveScore, ...]
-    limitation_reasons: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class LocalSearchCertificate:
-    """Certificate over the selected panel's generated local neighbourhood."""
-
-    incumbent_k: int
-    incumbent_mode_digest: str
-    incumbent_log_score: float
-    incumbent_was_expanded: bool
-    generated_move_offsets: tuple[int, ...]
-    exact_scored_move_offsets: tuple[int, ...]
-    best_exact_neighbours: tuple[MoveScore, ...]
-    proposal_generation_complete: bool
-    all_generated_neighbours_exact_scored: bool
-    no_improving_generated_neighbour: bool | None
-    certified_generated_neighbourhood_local_optimum: bool
-    limitation_reasons: tuple[str, ...]
-    scope: str
-
-
-@dataclass(frozen=True)
-class ReversibleCavitySearchResult:
-    """Visited support and selected complete panel from reversible search."""
-
-    selected: ReversibleModeScore
-    runner_up: ReversibleModeScore | None
-    visited_scores: tuple[ReversibleModeScore, ...]
-    visited_modes_by_k: tuple[tuple[int, tuple[discovery_modes.FactorizationMode, ...]], ...]
-    best_score_by_k: tuple[tuple[int, float], ...]
-    pseudo_probability_by_k: tuple[tuple[int, float], ...]
-    search_steps: tuple[SearchStepDiagnostic, ...]
-    local_certificate: LocalSearchCertificate
+    k_values: np.ndarray
+    k_log_scores: np.ndarray
     natural_k_ceiling: int
-    n_input_samples: int
-    n_scored_samples: int
-    search_limited: bool
-    search_limit_reasons: tuple[str, ...]
-    boundary_limited: bool
-    stop_reason: str
-    expansion_count: int
-    data_start_count: int
-    overcomplete_data_start_count: int
-    exact_score_evaluations: int
+    expansions: int
+    data_starts: int
+    exact_scores: int
     exact_score_cache_hits: int
-    high_k_tail_mass_upper_bound: float
-    high_k_tail_log_mass_upper_bound: float
-    high_k_tail_pseudo_probability_upper_bound: float
-    high_k_tail_bound_interpretation: str
-    objective_interpretation: str
-    search_interpretation: str
-
-    @property
-    def selected_mode(self) -> discovery_modes.FactorizationMode:
-        return self.selected.mode
-
-    @property
-    def selected_k(self) -> int:
-        return self.selected.k
-
-    def modes(self, k: int) -> tuple[discovery_modes.FactorizationMode, ...]:
-        for represented_k, modes in self.visited_modes_by_k:
-            if represented_k == k:
-                return modes
-        raise KeyError(k)
+    residual_calls: int
+    residual_rows: int
+    limits: tuple[str, ...]
+    heuristic_gauge_cuts: bool
+    stop_reason: str
+    certified: bool
 
 
 @dataclass(frozen=True)
-class _StageModeScore:
-    mode: discovery_modes.FactorizationMode
-    digest: str
-    cavity_log_predictive: float
-    log_k_prior: float
-    log_haplotype_set_prior: float
-    log_score: float
-    diagnostic: discovery_cavity.CavityModeDiagnostic
+class BlockSearch:
+    """The selected solution of a block search and its summary."""
+
+    selected: FixedKSolution
+    summary: SearchSummary
 
 
-def _natural_k_ceiling(n_samples: int, n_sites: int) -> int:
+def natural_k_ceiling(n_samples: int, n_sites: int) -> int:
+    """The largest identifiable K: 2 copies per sample with depth, at most 2^L rows."""
     sample_ceiling = 2 * int(n_samples)
     if n_sites < sample_ceiling.bit_length():
         return min(sample_ceiling, 1 << int(n_sites))
     return sample_ceiling
 
 
-def _stage_config(
-    settings: discovery_cavity.HybridCavitySelectionConfig,
-) -> discovery_cavity.CavitySelectionConfig:
-    """Construct the uncapped regularized mean-field stage of this search."""
-
-    return discovery_cavity.CavitySelectionConfig(
-        state_concentration=settings.state_concentration,
-        wildcard_prior_mass=settings.wildcard_prior_mass,
-        double_wildcard_fraction=settings.double_wildcard_fraction,
-        mean_field_max_iter=settings.mean_field_max_iter,
-        mean_field_tolerance=settings.mean_field_tolerance,
-        likelihood_floor=settings.likelihood_floor,
-        max_modes_per_k=None,
-        apply_unordered_haplotype_set_code=True,
-    )
+def _score_key(score):
+    return (-score.log_score, score.k, score.solution.key)
 
 
-def _score_stage(
-    evidence: np.ndarray,
-    modes: Sequence[discovery_modes.FactorizationMode],
-    config: discovery_cavity.CavitySelectionConfig,
-    cavity_workspace: Any | None=None,
-    active_sample_mask: np.ndarray | None=None,
-) -> tuple[_StageModeScore, ...]:
-    # Refresh the shared block-pool allocation immediately before the
-    # parallel held-out cavity kernel, so late stragglers can claim cores
-    # released since their preceding proposal fit.
+def search_block(likelihoods, observed, config) -> BlockSearch:
+    """Search the panel of one block's discovery sites.
 
-    core_parallel.apply_dynamic_threads()
-    if not modes:
-        return ()
-
-    score_evidence = evidence
-    score_modes: Sequence[discovery_modes.FactorizationMode] = modes
-    if active_sample_mask is not None:
-        active = np.asarray(active_sample_mask, dtype=np.bool_)
-        if active.shape != (len(evidence),) or not np.any(active):
-            raise ValueError("active_sample_mask must retain an evidence sample")
-        if not np.all(active):
-            score_evidence = (
-                cavity_workspace.evidence_reference
-                if cavity_workspace is not None
-                else np.ascontiguousarray(evidence[active])
-            )
-            score_modes = tuple(
-                discovery_modes.FactorizationMode(
-                    mode.haplotypes,
-                    mode.assignments[active],
-                    mode.per_sample_cost[active],
-                    mode.wildcard_slots[active],
-                    mode.n_iter,
-                    float(np.sum(mode.per_sample_cost[active])),
-                    mode.fixed_point_certified,
-                )
-                for mode in modes
-            )
-
-    grouped: dict[int, list[discovery_modes.FactorizationMode]] = {}
-    for mode in score_modes:
-        grouped.setdefault(mode.k, []).append(mode)
-    selection = discovery_cavity.select_cavity_predictive_k(
-        score_evidence, grouped, config=config, _workspace=cavity_workspace
-    )
-    diagnostics = {
-        (item.k, item.mode_digest): item
-        for item in selection.mode_diagnostics
-    }
-    k_components = {
-        item.k: (item.log_k_prior, item.log_haplotype_set_prior)
-        for item in selection.k_diagnostics
-    }
-    scored: list[_StageModeScore] = []
-    for mode in modes:
-        digest = discovery_modes._canonicalize_mode(mode, mode.k).digest
-        diagnostic = diagnostics[(mode.k, digest)]
-        log_k_prior, log_set_prior = k_components[mode.k]
-        scored.append(_StageModeScore(
-            mode=mode,
-            digest=digest,
-            cavity_log_predictive=diagnostic.cavity_log_predictive,
-            log_k_prior=log_k_prior,
-            log_haplotype_set_prior=log_set_prior,
-            log_score=(
-                diagnostic.cavity_log_predictive
-                + log_k_prior
-                + log_set_prior
-            ),
-            diagnostic=diagnostic,
-        ))
-    return tuple(scored)
-
-
-def _mode_order(mode: discovery_modes.FactorizationMode) -> tuple[float, int, bytes]:
-    return (mode.total_nll, mode.k, mode.canonical_key)
-
-
-def _deduplicate(modes: Sequence[discovery_modes.FactorizationMode]) -> tuple[discovery_modes.FactorizationMode, ...]:
-
-
-    return discovery_modes._deduplicate_modes(modes)
-
-
-def _internal_move_config(
-    config: ReversibleCavitySearchConfig,
-) -> discovery_modes.FixedKPanelFitConfig:
-    return discovery_modes.FixedKPanelFitConfig(
-        lambda_wildcard_penalty=config.lambda_wildcard_penalty,
-        coordinate_descent_max_iter=config.coordinate_descent_max_iter,
-    )
-
-
-def _prepare_growth_inputs(
-        evidence: np.ndarray,
-        observed_mask: np.ndarray | None=None,
-) -> _GrowthInputs:
-    """Prepare evidence-only K-growth quantities once per search."""
-
-    max_genotype_probability = np.max(evidence, axis=2)
-    dosage_by_sample = np.argmax(evidence, axis=2)
-    if observed_mask is None:
-        oracle_nll = -np.sum(
-            np.log(np.maximum(
-                max_genotype_probability, np.finfo(np.float64).tiny
-            )),
-            axis=1,
-        )
-        decisiveness = np.sum(max_genotype_probability, axis=1)
-        active_sample_mask = np.ones(len(evidence), dtype=np.bool_)
-        population_alt_frequency = (
-            evidence[..., 1].mean(axis=0) * 0.5
-            + evidence[..., 2].mean(axis=0)
-        )
-        seed_haplotypes_by_sample = np.zeros_like(dosage_by_sample)
-        seed_haplotypes_by_sample[dosage_by_sample == 2] = 1
-        heterozygous = dosage_by_sample == 1
-        seed_haplotypes_by_sample[
-            heterozygous & (population_alt_frequency[None,:] > 0.5)
-        ] = 1
-    else:
-        observed = np.asarray(observed_mask, dtype=np.bool_)
-        if observed.shape != evidence.shape[:2]:
-            raise ValueError("observed_mask must match growth evidence")
-        active_sample_mask = np.any(observed, axis=1)
-        if not np.any(active_sample_mask):
-            raise ValueError("observed_mask must retain an evidence sample")
-        oracle_nll = -np.sum(
-            np.where(
-                observed,
-                np.log(np.maximum(
-                    max_genotype_probability, np.finfo(np.float64).tiny
-                )),
-                0.0,
-            ),
-            axis=1,
-        )
-        decisiveness = np.sum(
-            np.where(observed, max_genotype_probability, 0.0), axis=1
-        )
-        alt_fraction = 0.5 * evidence[..., 1] + evidence[..., 2]
-        observed_count = np.sum(observed, axis=0)
-        population_alt_frequency = np.divide(
-            np.sum(np.where(observed, alt_fraction, 0.0), axis=0),
-            observed_count,
-            out=np.full(evidence.shape[1], 0.5, dtype=np.float64),
-            where=observed_count > 0,
-        )
-        seed_haplotypes_by_sample = np.zeros_like(dosage_by_sample)
-        seed_haplotypes_by_sample[observed & (dosage_by_sample == 2)] = 1
-        ambiguous = (~observed) | (dosage_by_sample == 1)
-        seed_haplotypes_by_sample[
-            ambiguous & (population_alt_frequency[None,:] > 0.5)
-        ] = 1
-    for value in (
-        oracle_nll, decisiveness, dosage_by_sample, seed_haplotypes_by_sample,
-        active_sample_mask,
-    ):
-        value.setflags(write=False)
-    return _GrowthInputs(
-        oracle_nll=oracle_nll,
-        decisiveness=decisiveness,
-        dosage_by_sample=dosage_by_sample,
-        seed_haplotypes_by_sample=seed_haplotypes_by_sample,
-        active_sample_mask=active_sample_mask,
-    )
-
-
-def _fit_panel_starts(
-    evidence: np.ndarray,
-    starts: Sequence[np.ndarray],
-    move_config: discovery_modes.FixedKPanelFitConfig,
-    workspace: Any,
-) -> tuple[discovery_modes.FactorizationMode, ...]:
-    if not starts:
-        return ()
-    raw, refitted = discovery_modes._fit_starts_with_synchronized_endpoints(
-        evidence, starts, move_config, workspace
-    )
-    return _deduplicate((*raw, *refitted))
-
-
-def _ordered_binary_candidate_rows(
-    candidates: np.ndarray, evidence: np.ndarray
-) -> tuple[np.ndarray, ...]:
-    """Harden soft candidates without discarding their support-ranked order."""
-
-    soft = np.asarray(candidates, dtype=np.float64)
-    if soft.ndim != 2 or soft.shape[1] != evidence.shape[1]:
-        raise ValueError("soft residual candidates must match evidence sites")
-    marginal = np.mean(
-        0.5 * evidence[:,:, 1] + evidence[:,:, 2], axis=0
-    )
-    binary = soft > 0.5
-    ties = np.isclose(soft, 0.5, rtol=0.0, atol=1e-12)
-    binary[ties] = np.broadcast_to(marginal >= 0.5, binary.shape)[ties]
-    unique: dict[bytes, np.ndarray] = {}
-    for row in np.asarray(binary, dtype=np.int64):
-        contiguous = np.ascontiguousarray(row, dtype=np.int64)
-        unique.setdefault(
-            contiguous.astype(np.int8, copy=False).tobytes(), contiguous
-        )
-    return tuple(unique.values())
-
-
-def _birth_delete_replacements(
-    parent: discovery_modes.FactorizationMode,
-    births: Sequence[discovery_modes.FactorizationMode],
-    evidence: np.ndarray,
-    settings: ReversibleCavitySearchConfig,
-    move_config: Any,
-    workspace: Any,
-) -> tuple[tuple[discovery_modes.FactorizationMode, ...], int]:
-    """Fit same-K panels obtained by adding a row and deleting any row.
-
-    These moves make a birth reversible even when the useful proposal must
-    replace, rather than merely augment, an incumbent row.  They are called
-    only after a direct upward move fails to improve the regularized score.
+    likelihoods: float64[N, L, 3] normalised GLs; observed: bool[N, L] (at least one True).
+    Unobserved cells are set to exactly 1/3 before any seed, fit or score.
     """
+    observed = np.ascontiguousarray(observed, dtype=np.bool_)
+    likelihood = np.array(likelihoods, dtype=np.float64, order="C", copy=True)
+    likelihood[~observed] = 1.0 / 3.0
+    active = np.ascontiguousarray(observed.any(axis=1))
+    n_sites = likelihood.shape[1]
+    ceiling = natural_k_ceiling(int(active.sum()), n_sites)
+    search = config.search
+    tolerance = search.score_tolerance
+    max_iterations = config.model.max_iterations
 
-    row_width = parent.n_sites
-    descriptors = []
-    seen: set[bytes] = set()
-    for birth in sorted(_deduplicate(births), key=_mode_order):
-        if birth.k != parent.k + 1:
-            continue
-        for deleted in range(birth.k):
-            offset = deleted * row_width
-            key = (
-                birth.canonical_key[:offset]
-                + birth.canonical_key[offset + row_width:]
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            descriptors.append((birth, deleted))
-    limit = settings.max_replacement_children_per_mode
-    omitted = max(0, len(descriptors) - limit)
-    starts = [
-        np.ascontiguousarray(
-            np.delete(birth.haplotypes, deleted, axis=0), dtype=np.int64
-        )
-        for birth, deleted in descriptors[:limit]
-    ]
-    fitted = _fit_panel_starts(evidence, starts, move_config, workspace)
-    return tuple(mode for mode in fitted if mode.k == parent.k), omitted
+    workspace = prepare_workspace(likelihood, observed, config.model)
+    growth = growth_inputs(likelihood, observed)
+    residual_inputs = ResidualInputs(likelihood, observed)
+    cuts = MaximumCuts(search.exact_cut_max_k, search.max_cut_ties)
+    data_solutions = initial_solutions(workspace, likelihood, active, config)
+    cavity_workspace = CavityWorkspace(
+        likelihood if bool(active.all()) else likelihood[active], config.cavity)
 
-
-def _v2_soft_births(
-    mode: discovery_modes.FactorizationMode,
-    evidence: np.ndarray,
-    reads: np.ndarray,
-    ceiling: int,
-    settings: ReversibleCavitySearchConfig,
-    move_config: Any,
-    workspace: Any,
-    residual_input_workspace: Any,
-    soft_cache: dict[tuple[bytes, bytes], Any] | None=None,
-) -> tuple[tuple[discovery_modes.FactorizationMode, ...], int, int, tuple[str, ...]]:
-    """Batch-fit proposal-D/base-plus-soft residual rows for one mode."""
-
-    if mode.k >= ceiling:
-        return (), 0, 0, ()
-    cache_key = (mode.canonical_key, mode.assignments.tobytes())
-    if soft_cache is not None:
-        cached = soft_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-    def finish(value):
-        if soft_cache is not None:
-            soft_cache[cache_key] = value
-        return value
-
-    from types import SimpleNamespace
-
-
-    adapter = SimpleNamespace(
-        discrete_haps=mode.haplotypes,
-        pair_assignments=mode.assignments,
-        K_final=mode.k,
-        keep_flags=np.ones(mode.n_sites, dtype=np.int8),
-        precleanup_candidate_discrete_haps=mode.haplotypes,
-        precleanup_candidate_k=mode.k,
-        haplotypes={},
-    )
-    augmented = discovery_candidates.augment_combined_soft_candidates(
-        adapter,
-        reads,
-        base_candidates=mode.haplotypes.astype(float),
-        read_error_probability=settings.read_error_probability,
-        minimum_soft_unique_sample_support=(
-            settings.min_soft_unique_sample_support
-        ),
-        residual_input_workspace=residual_input_workspace,
-        binary_panel_fast_path=True,
-    )
-    soft = np.asarray(
-        augmented.candidates[augmented.n_base_candidates:], dtype=np.float64
-    )
-    if len(soft) == 0:
-        return finish(((), 0, 0, ()))
-    rows = _ordered_binary_candidate_rows(soft, evidence)
-    existing = {
-        np.asarray(row, dtype=np.int8).tobytes() for row in mode.haplotypes
-    }
-    starts = [
-        np.vstack((mode.haplotypes, row[None,:]))
-        for row in rows
-        if np.asarray(row, dtype=np.int8).tobytes() not in existing
-    ]
-    emitted = len(starts)
-    omitted = max(0, emitted - settings.max_proposals_per_expansion)
-    retained = starts[:settings.max_proposals_per_expansion]
-    fitted = _fit_panel_starts(evidence, retained, move_config, workspace)
-    limits = ("soft_residual_proposal_budget",) if omitted else ()
-    return finish((
-        tuple(child for child in fitted if child.k == mode.k + 1),
-        emitted,
-        omitted,
-        limits,
-    ))
-
-
-def _v2_ordinary_moves(
-    mode: discovery_modes.FactorizationMode,
-    evidence: np.ndarray,
-    ceiling: int,
-    settings: ReversibleCavitySearchConfig,
-    move_config: Any,
-    workspace: Any,
-    growth_inputs: _GrowthInputs,
-) -> tuple[
-    tuple[discovery_modes.FactorizationMode, ...],
-    tuple[discovery_modes.FactorizationMode, ...],
-    tuple[tuple[int, int], ...],
-    int,
-    tuple[str, ...],
-]:
-    """Generate synchronized/refitted K-1, K and K+1 ordinary moves.
-
-    Deaths and gauge rewires are fitted from enumerated starts; births come
-    from the data-derived complete-mode expansion below.
-    """
-
-    buckets: dict[int, list[np.ndarray]] = {-1: [], 0: []}
-    limitations: list[str] = []
-    if mode.k > 1:
-        buckets[-1].extend(discovery_modes._death_starts(mode))
-    if settings.apply_gauge_rewire and mode.k > 1:
-        weights = discovery_modes.assignment_graph(mode)
-        partitions = discovery_modes.maximum_cut_partitions(
-            weights,
-            exact_max_k=settings.exact_cut_max_k,
-            max_ties=settings.max_cut_ties + 1,
-        )
-        if len(partitions) > settings.max_cut_ties:
-            limitations.append("gauge_max_cut_ties_truncated")
-        if mode.k > settings.exact_cut_max_k:
-            limitations.append("gauge_cut_heuristic")
-        buckets[0].extend(
-            proposal.haplotypes
-            for proposal in discovery_modes._propose_bipartite_gauge_starts(
-                mode,
-                evidence,
-                exact_cut_max_k=settings.exact_cut_max_k,
-                max_cut_ties=settings.max_cut_ties,
-                assignment_weights=weights,
-                cut_partitions=partitions,
-            )
-        )
-
-    unique: dict[int, list[np.ndarray]] = {}
-    for offset, starts in buckets.items():
-        by_key: dict[tuple[tuple[int, int], bytes], np.ndarray] = {}
-        for start in starts:
-            value = np.ascontiguousarray(start, dtype=np.int64)
-            key = (tuple(int(item) for item in value.shape), value.tobytes())
-            by_key.setdefault(key, value)
-        unique[offset] = [by_key[key] for key in sorted(by_key)]
-    total = sum(len(starts) for starts in unique.values())
-    retained: list[np.ndarray] = []
-    index = 0
-    while len(retained) < min(total, settings.max_proposals_per_expansion):
-        added = False
-        for offset in (-1, 0):
-            if index < len(unique[offset]):
-                retained.append(unique[offset][index])
-                added = True
-                if len(retained) == settings.max_proposals_per_expansion:
-                    break
-        if not added:
-            break
-        index += 1
-    omitted = total - len(retained)
-    if omitted:
-        limitations.append("proposal_budget")
-
-    modes = list(_fit_panel_starts(evidence, retained, move_config, workspace))
-    if mode.k < ceiling:
-        data_births, _attempts, _fallbacks = discovery_modes._expand_one_complete_mode(
-            mode,
-            evidence,
-            settings.lambda_wildcard_penalty,
-            settings.coordinate_descent_max_iter,
-            fit_workspace=workspace,
-            oracle_nll=growth_inputs.oracle_nll,
-            decisiveness=growth_inputs.decisiveness,
-            dosage_by_sample=growth_inputs.dosage_by_sample,
-            seed_haplotypes_by_sample=growth_inputs.seed_haplotypes_by_sample,
-            active_sample_mask=growth_inputs.active_sample_mask,
-        )
-        modes.extend(child for child in data_births if child.k == mode.k + 1)
-    modes = list(_deduplicate(modes))
-    births = tuple(child for child in modes if child.k == mode.k + 1)
-    counts = tuple(
-        (
-            offset,
-            sum(child.k - mode.k == offset for child in modes),
-        )
-        for offset in _SUPPORTED_MOVE_OFFSETS
-    )
-    return (
-        tuple(modes),
-        births,
-        counts,
-        omitted,
-        tuple(dict.fromkeys(limitations)),
-    )
-
-
-def _score_sort_key(score: ReversibleModeScore) -> tuple[float, int, bytes]:
-    return (-score.log_score, score.k, score.mode.canonical_key)
-
-
-def search_reversible_cavity(
-    evidence: np.ndarray,
-    *,
-    allele_depths: np.ndarray,
-    config: ReversibleCavitySearchConfig | None=None,
-) -> ReversibleCavitySearchResult:
-    """Run adaptive reversible search without an enumerated K grid.
-
-    Full mean-field cavity scoring is applied only to the deterministic
-    minimum-full-data-NLL representative at each represented K.  Up to
-    ``beam_width`` low-NLL basins at the selected K are nevertheless expanded:
-    the representative first, companions only after its ordinary route stalls,
-    and residual/paired rescue only after every ordinary beam route stalls.
-    The search stops when that neighbourhood is exhausted; the K-scaled
-    expansion and exact-score backstops are reported when hit.
-    """
-
-    settings = ReversibleCavitySearchConfig() if config is None else config
-
-    likelihood = discovery_modes._validate_evidence(evidence)
-    n_samples, n_sites, _ = likelihood.shape
-    reads = np.asarray(allele_depths)
-    if reads.shape != (n_samples, n_sites, 2):
-        raise ValueError("allele_depths must match evidence samples/sites")
-    if np.any(~np.isfinite(reads)) or np.any(reads < 0):
-        raise ValueError("allele_depths must be finite and non-negative")
-    observed_mask = np.ascontiguousarray(np.sum(reads, axis=2) > 0)
-    # The allele-depth mask is authoritative. Normalize every missing cell to
-    # neutral evidence before any seed, proposal, fit, or cavity calculation.
-    likelihood = np.array(likelihood, dtype=np.float64, order="C", copy=True)
-    likelihood[~observed_mask] = 1.0 / 3.0
-    active_sample_mask = np.ascontiguousarray(
-        np.any(observed_mask, axis=1)
-    )
-    active_sample_count = int(np.sum(active_sample_mask))
-    if active_sample_count < 1:
-        raise ValueError("discovery requires at least one informative sample")
-    ceiling = _natural_k_ceiling(active_sample_count, n_sites)
-
-    move_config = _internal_move_config(settings)
-    workspace = discovery_fitting._prepare_fixed_k_fit_workspace(
-        likelihood,
-        settings.lambda_wildcard_penalty,
-        observed_mask=observed_mask,
-    )
-    growth_inputs = _prepare_growth_inputs(likelihood, observed_mask)
-    residual_input_workspace = discovery_residuals.prepare_residual_inputs(
-        reads, settings.read_error_probability,
-        likelihood=likelihood,
-    )
-    data_modes = discovery_modes._initial_complete_modes(
-        likelihood,
-        settings.data_start_beam_width,
-        settings.n_data_seed_modes,
-        settings.soft_seed_min_cluster_size,
-        settings.lambda_wildcard_penalty,
-        settings.coordinate_descent_max_iter,
-        fit_workspace=workspace,
-        seed_sample_mask=active_sample_mask,
-    )
-    if any(mode.k != 1 for mode in data_modes):
-        raise AssertionError("data-derived starts must remain independent K=1 fits")
-
+    # Per canonical key the order of its lowest-NLL fit; per K only the beam_width best fits (the
+    # first is the representative): the search reads nothing else of the thousands of panels a
+    # large-K block fits, so the archive's memory stays bounded.
+    archive_order: dict[bytes, tuple] = {}
+    archive_beams: dict[int, list] = {}
+    represented = dict(k=0)
+    representatives: dict[int, FixedKSolution] = {}
+    score_cache: dict = {}
+    scores: dict = {}
+    soft_cache: dict = {}
     limits: list[str] = []
-    archive: dict[bytes, discovery_modes.FactorizationMode] = {}
-    representatives: dict[int, discovery_modes.FactorizationMode] = {}
-    score_cache: dict[bytes, ReversibleModeScore] = {}
-    scores: dict[int, ReversibleModeScore] = {}
-    exact_evaluations = 0
-    exact_cache_hits = 0
-    mean_field_nonconvergence = False
-    soft_birth_cache: dict[tuple[bytes, bytes], Any] = {}
+    state = dict(exact_scores=0, cache_hits=0, mean_field_failed=False)
 
-    def add_modes(values: Sequence[discovery_modes.FactorizationMode]) -> None:
-        for mode in values:
-            if mode.k > ceiling:
-                raise AssertionError("proposal exceeded natural K ceiling")
-            previous = archive.get(mode.canonical_key)
-            if previous is None or _mode_order(mode) < _mode_order(previous):
-                archive[mode.canonical_key] = mode
-
-    add_modes(data_modes)
-    if not archive:
-        raise RuntimeError("reversible search produced no initial complete mode")
+    def add(solutions):
+        width = search.beam_width
+        for solution in solutions:
+            order = solution.order()
+            previous = archive_order.get(solution.key)
+            if previous is not None and not order < previous:
+                continue
+            archive_order[solution.key] = order
+            represented["k"] = max(represented["k"], solution.k)
+            panels = archive_beams.setdefault(solution.k, [])
+            if previous is not None:
+                panels[:] = [entry for entry in panels if entry.key != solution.key]
+            if len(panels) < width or order < panels[-1].order():
+                panels.append(solution)
+                panels.sort(key=FixedKSolution.order)
+                del panels[width:]
 
     def represented_k() -> int:
-        """Largest K represented in the archive (the backstops' K_rep)."""
-        return max(mode.k for mode in archive.values())
-
-    exact_config = _stage_config(settings.cavity)
-    cavity_evidence = (
-        np.ascontiguousarray(likelihood[active_sample_mask])
-        if not np.all(active_sample_mask)
-        else likelihood
-    )
-    cavity_workspace = discovery_cavity._prepare_cavity_scoring_workspace(
-        cavity_evidence, exact_config
-    )
-
+        return represented["k"]
 
     def refresh(preferred_k: int) -> bool:
-        """Score changed minimum-NLL representatives; True if the backstop omitted any."""
-
-        nonlocal exact_evaluations, exact_cache_hits, mean_field_nonconvergence
-        grouped: dict[int, list[discovery_modes.FactorizationMode]] = {}
-        for mode in archive.values():
-            grouped.setdefault(mode.k, []).append(mode)
-        changed: list[discovery_modes.FactorizationMode] = []
-        for k in sorted(grouped):
-            representative = min(grouped[k], key=_mode_order)
+        """Score changed representatives (nearest K first); True if the backstop omitted any."""
+        changed = []
+        for k in sorted(archive_beams):
+            representative = archive_beams[k][0]
             previous = representatives.get(k)
-            if previous is None or previous.canonical_key != representative.canonical_key:
+            if previous is None or previous.key != representative.key:
                 changed.append(representative)
-        changed.sort(
-            key=lambda mode: (
-                abs(mode.k - preferred_k),
-                mode.k,
-                mode.total_nll,
-                mode.canonical_key,
-            )
-        )
-        novel: list[discovery_modes.FactorizationMode] = []
-        for mode in changed:
-            cached = score_cache.get(mode.canonical_key)
+        changed.sort(key=lambda solution: (abs(solution.k - preferred_k), solution.k, solution.nll,
+                                           solution.key))
+        novel = []
+        for solution in changed:
+            cached = score_cache.get(solution.key)
             if cached is None:
-                novel.append(mode)
+                novel.append(solution)
             else:
-                exact_cache_hits += 1
-                representatives[mode.k] = mode
-                scores[mode.k] = cached
-        backstop = (
-            settings.exact_score_backstop_base
-            + settings.exact_score_backstop_per_founder * represented_k()
-        )
-        room = max(0, backstop - exact_evaluations)
+                state["cache_hits"] += 1
+                representatives[solution.k] = solution
+                scores[solution.k] = cached
+        room = max(0, search.exact_score_backstop(represented_k()) - state["exact_scores"])
         retained = novel[:room]
-        omitted = novel[room:]
-        for stage in _score_stage(
-            likelihood, retained, exact_config, cavity_workspace,
-            active_sample_mask=active_sample_mask,
-        ):
-            score = ReversibleModeScore(
-                mode=stage.mode,
-                mode_digest=stage.digest,
-                cavity_log_predictive=stage.cavity_log_predictive,
-                log_k_prior=stage.log_k_prior,
-                log_haplotype_set_prior=stage.log_haplotype_set_prior,
-                log_score=stage.log_score,
-                mean_field_diagnostic=stage.diagnostic,
-            )
-            score_cache[stage.mode.canonical_key] = score
-            representatives[stage.mode.k] = stage.mode
-            scores[stage.mode.k] = score
-            if stage.diagnostic.n_mean_field_not_converged:
-                mean_field_nonconvergence = True
-        exact_evaluations += len(retained)
-        return bool(omitted)
+        for score in score_solutions(cavity_workspace, retained, active):
+            score_cache[score.solution.key] = score
+            representatives[score.k] = score.solution
+            scores[score.k] = score
+            if score.mean_field_failures:
+                state["mean_field_failed"] = True
+        state["exact_scores"] += len(retained)
+        return len(novel) > room
 
+    def selected():
+        return min(scores.values(), key=_score_key)
+
+    def beam(k: int):
+        return list(archive_beams.get(k, ()))[:search.beam_width]
+
+    def soft(solution) -> SoftBirths:
+        if solution.k >= ceiling:
+            return SoftBirths((), 0, 0)
+        return soft_births(workspace, solution, likelihood, residual_inputs, config, soft_cache)
+
+    add(data_solutions)
     if refresh(1):
         limits.append("exact_score_backstop")
-    if mean_field_nonconvergence:
+    if state["mean_field_failed"]:
         limits.append("mean_field_nonconvergence")
-
     ordinary_expanded: set[bytes] = set()
     residual_expanded: set[bytes] = set()
     ordinary_complete: dict[bytes, bool] = {}
     residual_complete: dict[bytes, bool] = {}
-    generated_offsets: dict[bytes, set[int]] = {}
-    audit_no_improvement: set[bytes] = set()
-    search_steps: list[SearchStepDiagnostic] = []
-    residual_calls = 0
-    residual_candidates = 0
+    generated_offsets: dict[bytes, set] = {}
+    no_improvement: set[bytes] = set()
+    residual_calls = residual_rows = 0
+    heuristic_cuts = False
     stop_reason = ""
-
-    def selected_score() -> ReversibleModeScore:
-        return min(scores.values(), key=_score_sort_key)
-
-    def selected_beam(k: int) -> tuple[discovery_modes.FactorizationMode, ...]:
-        modes = sorted(
-            (mode for mode in archive.values() if mode.k == k),
-            key=_mode_order,
-        )
-        return tuple(modes[:settings.beam_width])
-
     expansion = 0
     while True:
-        expansion_backstop = (
-            settings.expansion_backstop_base
-            + settings.expansion_backstop_per_founder * represented_k()
-        )
-        if expansion >= expansion_backstop:
+        if expansion >= search.expansion_backstop(represented_k()):
             limits.append("expansion_backstop")
             stop_reason = "expansion_backstop"
             break
-        before = selected_score()
-        beam = selected_beam(before.k)
-        parent = next(
-            (mode for mode in beam if mode.canonical_key not in ordinary_expanded),
-            None,
-        )
+        before = selected()
+        candidates = beam(before.k)
+        parent = next((solution for solution in candidates
+                       if solution.key not in ordinary_expanded), None)
         phase = "ordinary"
         if parent is None:
-            parent = next(
-                (mode for mode in beam if mode.canonical_key not in residual_expanded),
-                None,
-            )
+            parent = next((solution for solution in candidates
+                           if solution.key not in residual_expanded), None)
             phase = "residual"
         if parent is None:
-            stop_reason = (
-                "generated_neighbourhood_local_optimum"
-                if not limits
-                else "incumbent_neighbourhood_search_limited"
-            )
+            stop_reason = ("generated_neighbourhood_local_optimum" if not limits
+                           else "incumbent_neighbourhood_search_limited")
             break
-
         local_limits: list[str] = []
-        exact_before = exact_evaluations
-        cache_before = exact_cache_hits
-        proposed_counts: tuple[tuple[int, int], ...] = ()
-        generated: list[discovery_modes.FactorizationMode] = []
-        proposal_omissions = 0
-
+        generated: list = []
         if phase == "ordinary":
-            ordinary_expanded.add(parent.canonical_key)
-            (
-                ordinary_modes,
-                ordinary_births,
-                proposed_counts,
-                proposal_omissions,
-                move_limits,
-            ) = _v2_ordinary_moves(
-                parent,
-                likelihood,
-                ceiling,
-                settings,
-                move_config,
-                workspace,
-                growth_inputs,
-            )
-            generated.extend(ordinary_modes)
-            local_limits.extend(move_limits)
-            add_modes(ordinary_modes)
+            ordinary_expanded.add(parent.key)
+            moves = ordinary_moves(workspace, parent, likelihood, growth, ceiling, cuts, config)
+            if parent.k > 1 and cuts.heuristic(parent.k):
+                heuristic_cuts = True
+            generated.extend(moves.children)
+            local_limits.extend(moves.limits)
+            add(moves.children)
             if refresh(parent.k):
                 local_limits.append("exact_score_backstop")
-            after_direct = selected_score()
-            direct_improved = (
-                after_direct.log_score
-                > before.log_score + settings.score_tolerance
-            )
-            if not direct_improved:
-                replacements, replacement_omissions = _birth_delete_replacements(
-                    parent,
-                    ordinary_births,
-                    likelihood,
-                    settings,
-                    move_config,
-                    workspace,
-                )
-                generated.extend(replacements)
-                proposal_omissions += replacement_omissions
-                if replacement_omissions:
+            if not selected().log_score > before.log_score + tolerance:
+                children, omitted = replacements(workspace, parent, moves.births, config)
+                generated.extend(children)
+                if omitted:
                     local_limits.append("replacement_proposal_budget")
-                add_modes(replacements)
+                add(children)
                 if refresh(parent.k):
                     local_limits.append("exact_score_backstop")
-            ordinary_complete[parent.canonical_key] = not local_limits
+            ordinary_complete[parent.key] = not local_limits
         else:
-            residual_expanded.add(parent.canonical_key)
-            soft_births, emitted, omitted, soft_limits = _v2_soft_births(
-                parent,
-                likelihood,
-                reads,
-                ceiling,
-                settings,
-                move_config,
-                workspace,
-                residual_input_workspace,
-                soft_birth_cache,
-            )
+            residual_expanded.add(parent.key)
+            births = soft(parent)
             residual_calls += 1
-            residual_candidates += emitted
-            proposal_omissions += omitted
-            local_limits.extend(soft_limits)
-            generated.extend(soft_births)
-            add_modes(soft_births)
-            # Refresh is deliberately unconditional: a retained soft proposal
-            # must be considered even when other proposals were capped.
+            residual_rows += births.emitted
+            if births.omitted:
+                local_limits.append("soft_residual_proposal_budget")
+            generated.extend(births.children)
+            add(births.children)
+            # Refresh unconditionally: a retained soft proposal counts even if others were capped.
             if refresh(parent.k):
                 local_limits.append("exact_score_backstop")
-            after_soft = selected_score()
-            soft_improved = (
-                after_soft.log_score
-                > before.log_score + settings.score_tolerance
-            )
-            if not soft_improved:
-                replacements, replacement_omissions = _birth_delete_replacements(
-                    parent,
-                    soft_births,
-                    likelihood,
-                    settings,
-                    move_config,
-                    workspace,
-                )
-                generated.extend(replacements)
-                proposal_omissions += replacement_omissions
-                if replacement_omissions:
+            if not selected().log_score > before.log_score + tolerance:
+                children, omitted = replacements(workspace, parent, births.children, config)
+                generated.extend(children)
+                if omitted:
                     local_limits.append("replacement_proposal_budget")
-                add_modes(replacements)
+                add(children)
                 if refresh(parent.k):
                     local_limits.append("exact_score_backstop")
-
-            after_replacement = selected_score()
-            if (
-                after_replacement.log_score
-                <= before.log_score + settings.score_tolerance
-                and parent.k + 2 <= ceiling
-                and parent.k + 1 in representatives
-            ):
+            if (selected().log_score <= before.log_score + tolerance
+                    and parent.k + 2 <= ceiling and parent.k + 1 in representatives):
                 bridge = representatives[parent.k + 1]
-                bridge_children, _attempts, _fallbacks = discovery_modes._expand_one_complete_mode(
-                    bridge,
-                    likelihood,
-                    settings.lambda_wildcard_penalty,
-                    settings.coordinate_descent_max_iter,
-                    fit_workspace=workspace,
-                    oracle_nll=growth_inputs.oracle_nll,
-                    decisiveness=growth_inputs.decisiveness,
-                    dosage_by_sample=growth_inputs.dosage_by_sample,
-                    seed_haplotypes_by_sample=growth_inputs.seed_haplotypes_by_sample,
-                    active_sample_mask=growth_inputs.active_sample_mask,
-                )
-                paired = [
-                    mode for mode in bridge_children
-                    if mode.k == parent.k + 2
-                ]
-                bridge_soft, emitted, omitted, bridge_limits = _v2_soft_births(
-                    bridge,
-                    likelihood,
-                    reads,
-                    ceiling,
-                    settings,
-                    move_config,
-                    workspace,
-                    residual_input_workspace,
-                    soft_birth_cache,
-                )
+                paired = [child for child in data_births(workspace, bridge, growth, max_iterations)
+                          if child.k == parent.k + 2]
+                bridge_births = soft(bridge)
                 residual_calls += 1
-                residual_candidates += emitted
-                proposal_omissions += omitted
-                local_limits.extend(bridge_limits)
-                paired.extend(
-                    mode for mode in bridge_soft if mode.k == parent.k + 2
-                )
-                paired_modes = _deduplicate(paired)
-                generated.extend(paired_modes)
-                add_modes(paired_modes)
+                residual_rows += bridge_births.emitted
+                if bridge_births.omitted:
+                    local_limits.append("soft_residual_proposal_budget")
+                paired.extend(child for child in bridge_births.children
+                              if child.k == parent.k + 2)
+                paired = deduplicate(paired)
+                generated.extend(paired)
+                add(paired)
                 if refresh(parent.k):
                     local_limits.append("exact_score_backstop")
-
-            residual_complete[parent.canonical_key] = not local_limits
-            after = selected_score()
-            if (
-                after.mode.canonical_key == parent.canonical_key
-                and after.log_score
-                <= before.log_score + settings.score_tolerance
-            ):
-                audit_no_improvement.add(parent.canonical_key)
-
+            residual_complete[parent.key] = not local_limits
+            after = selected()
+            if after.solution.key == parent.key and after.log_score <= before.log_score + tolerance:
+                no_improvement.add(parent.key)
         limits.extend(local_limits)
-        if mean_field_nonconvergence:
+        if state["mean_field_failed"]:
             limits.append("mean_field_nonconvergence")
-        offsets = generated_offsets.setdefault(parent.canonical_key, set())
-        offsets.update(
-            mode.k - parent.k
-            for mode in generated
-            if mode.k - parent.k in _SUPPORTED_MOVE_OFFSETS
-        )
-        after = selected_score()
-        best_neighbours = tuple(
-            MoveScore(
-                offset=offset,
-                k=parent.k + offset,
-                mode_digest=scores[parent.k + offset].mode_digest,
-                log_score=scores[parent.k + offset].log_score,
-            )
-            for offset in sorted(offsets)
-            if parent.k + offset in scores
-        )
-        search_steps.append(SearchStepDiagnostic(
-            expansion=expansion,
-            round_index=expansion,
-            expanded_k=parent.k,
-            expanded_mode_digest=discovery_modes._canonicalize_mode(parent, parent.k).digest,
-            expanded_log_score=before.log_score,
-            proposed_by_offset=proposed_counts,
-            proposals_after_budget=len(generated),
-            proposal_budget_omissions=proposal_omissions,
-            exact_cache_hits=exact_cache_hits - cache_before,
-            exact_scores_computed=exact_evaluations - exact_before,
-            exact_backstop_omissions=int("exact_score_backstop" in local_limits),
-            improving_exact_neighbours=sum(
-                item.log_score > before.log_score + settings.score_tolerance
-                for item in best_neighbours
-            ),
-            incumbent_k=after.k,
-            incumbent_mode_digest=after.mode_digest,
-            incumbent_log_score=after.log_score,
-            proposal_generation_complete=not local_limits,
-            all_generated_neighbours_exact_scored=(
-                "exact_score_backstop" not in local_limits
-            ),
-            best_exact_neighbours=best_neighbours,
-            limitation_reasons=tuple(dict.fromkeys(local_limits)),
-        ))
+        generated_offsets.setdefault(parent.key, set()).update(
+            child.k - parent.k for child in generated if child.k - parent.k in _MOVE_OFFSETS)
         expansion += 1
 
-    if mean_field_nonconvergence:
+    if state["mean_field_failed"]:
         limits.append("mean_field_nonconvergence")
     unique_limits = tuple(dict.fromkeys(limits))
-    ordered = tuple(sorted(scores.values(), key=_score_sort_key))
-    selected = ordered[0]
-    _log_weights, probabilities = discovery_cavity._normalized_log_weights(
-        tuple(score.log_score for score in ordered)
-    )
-    by_k = tuple(sorted((score.k, score.log_score) for score in ordered))
-    probability_by_score_k = {
-        score.k: probability for score, probability in zip(ordered, probabilities)
-    }
-    pseudo = tuple(
-        (k, probability_by_score_k[k]) for k, _score in by_k
-    )
-    grouped: dict[int, list[discovery_modes.FactorizationMode]] = {}
-    for mode in archive.values():
-        grouped.setdefault(mode.k, []).append(mode)
-
-    search_interpretation = (
-        "Cap-free-in-K adaptive reversible search with lazy basin, "
-        "replacement, proposal-D residual and paired-bridge expansion "
-        f"({residual_calls} residual calls, {residual_candidates} emitted "
-        "novel rows), stopped when the incumbent's generated neighbourhood "
-        "was exhausted. Generator truncations and K-scaled expansion/"
-        "exact-score backstop hits are operational limitations; the natural "
-        "identifiable ceiling alone sets boundary_limited."
-    )
-    selected_key = selected.mode.canonical_key
-    selected_offsets = tuple(sorted(generated_offsets.get(selected_key, set())))
-    exact_offsets = tuple(
-        offset
-        for offset in selected_offsets
-        if selected.k + offset in scores
-    )
-    best_exact = tuple(
-        MoveScore(
-            offset=offset,
-            k=selected.k + offset,
-            mode_digest=scores[selected.k + offset].mode_digest,
-            log_score=scores[selected.k + offset].log_score,
-        )
-        for offset in exact_offsets
-    )
-    incumbent_expanded = (
-        selected_key in ordinary_expanded and selected_key in residual_expanded
-    )
-    generation_complete = (
-        ordinary_complete.get(selected_key, False)
-        and residual_complete.get(selected_key, False)
-    )
-    all_exact = all(selected.k + offset in scores for offset in selected_offsets)
-    no_improvement = (
-        True if selected_key in audit_no_improvement else None
-    )
+    best = selected()
+    key = best.solution.key
+    offsets = generated_offsets.get(key, set())
     certified = bool(
-        incumbent_expanded
-        and generation_complete
-        and all_exact
-        and no_improvement
-        and not unique_limits
-        and not mean_field_nonconvergence
-    )
-    certificate = LocalSearchCertificate(
-        incumbent_k=selected.k,
-        incumbent_mode_digest=selected.mode_digest,
-        incumbent_log_score=selected.log_score,
-        incumbent_was_expanded=incumbent_expanded,
-        generated_move_offsets=selected_offsets,
-        exact_scored_move_offsets=exact_offsets,
-        best_exact_neighbours=best_exact,
-        proposal_generation_complete=generation_complete,
-        all_generated_neighbours_exact_scored=all_exact,
-        no_improving_generated_neighbour=no_improvement,
-        certified_generated_neighbourhood_local_optimum=certified,
-        limitation_reasons=unique_limits,
-        scope=(
-            "Configured low-NLL beam at the selected K, with death, gauge, "
-            "ordinary and proposal-D soft births, lazy birth-delete "
-            "replacements, and a minimum-NLL K+1 paired bridge. This is not "
-            "a global certificate over all binary panels."
-        ),
-    )
-    at_ceiling = selected.k == ceiling
-    return ReversibleCavitySearchResult(
-        selected=selected,
-        runner_up=ordered[1] if len(ordered) > 1 else None,
-        visited_scores=tuple(sorted(ordered, key=lambda item: item.k)),
-        visited_modes_by_k=tuple(
-            (k, tuple(sorted(grouped[k], key=_mode_order)))
-            for k in sorted(grouped)
-        ),
-        best_score_by_k=by_k,
-        pseudo_probability_by_k=pseudo,
-        search_steps=tuple(search_steps),
-        local_certificate=certificate,
-        natural_k_ceiling=ceiling,
-        n_input_samples=n_samples,
-        n_scored_samples=active_sample_count,
-        search_limited=bool(unique_limits),
-        search_limit_reasons=unique_limits,
-        boundary_limited=at_ceiling,
-        stop_reason=stop_reason,
-        expansion_count=expansion,
-        data_start_count=len(data_modes),
-        overcomplete_data_start_count=0,
-        exact_score_evaluations=exact_evaluations,
-        exact_score_cache_hits=exact_cache_hits,
-        high_k_tail_mass_upper_bound=math.nan,
-        high_k_tail_log_mass_upper_bound=math.nan,
-        high_k_tail_pseudo_probability_upper_bound=math.nan,
-        high_k_tail_bound_interpretation=(
-            "No tail bound: adaptive support is not an enumerated K prefix."
-        ),
-        objective_interpretation=(
-            "Only the deterministic minimum-full-data-NLL representative per "
-            "represented K is mean-field cavity-scored. Scores retain "
-            "full-data selection leakage and normalized values are "
-            "uncalibrated pseudo-weights."
-        ),
-        search_interpretation=search_interpretation,
-    )
-
-
-def as_cavity_selection(
-    result: ReversibleCavitySearchResult,
-) -> discovery_cavity.CavitySelection:
-    """Build the existing cavity-selection schema from cached exact scores."""
-
-    if not isinstance(result, ReversibleCavitySearchResult):
-        raise TypeError("result must be a ReversibleCavitySearchResult")
-    scores_by_k: dict[int, list[ReversibleModeScore]] = {}
-    for score in result.visited_scores:
-        scores_by_k.setdefault(score.k, []).append(score)
-    probability_by_k = dict(result.pseudo_probability_by_k)
-    normalized_logs, _probabilities = discovery_cavity._normalized_log_weights(
-        tuple(score.log_score for score in result.visited_scores)
-    )
-    log_weight_by_k = {
-        score.k: log_weight
-        for score, log_weight in zip(result.visited_scores, normalized_logs)
-    }
-    best_by_k = {
-        k: min(
-            scores,
-            key=lambda item: (
-                -item.log_score, item.mode.canonical_key
-            ),
-        )
-        for k, scores in scores_by_k.items()
-    }
-    ranked_k = sorted(
-        best_by_k,
-        key=lambda k: (-best_by_k[k].log_score, k),
-    )
-    k_diagnostics: list[discovery_cavity.CavityKDiagnostic] = []
-    mode_diagnostics: list[discovery_cavity.CavityModeDiagnostic] = []
-    full_n_samples = len(result.selected.mode.assignments)
-    if result.n_input_samples != full_n_samples:
-        raise AssertionError("search sample count and assignments disagree")
-    n_samples = int(result.n_scored_samples)
-    if n_samples < 1 or n_samples > full_n_samples:
-        raise AssertionError("invalid scored-sample count on search result")
-    for k in sorted(scores_by_k):
-        scores = scores_by_k[k]
-        best = best_by_k[k]
-        values = [score.cavity_log_predictive for score in scores]
-        maximum = max(values)
-        uniform_log_mean_exp = (
-            maximum
-            + math.log(math.fsum(math.exp(value - maximum) for value in values))
-            - math.log(len(values))
-        )
-        diagnostic = best.mean_field_diagnostic
-        probability = probability_by_k[k]
-        k_diagnostics.append(discovery_cavity.CavityKDiagnostic(
-            k=k,
-            cavity_log_predictive=best.cavity_log_predictive,
-            mean_sample_log_predictive=best.cavity_log_predictive / n_samples,
-            log_k_prior=best.log_k_prior,
-            log_haplotype_set_prior=best.log_haplotype_set_prior,
-            log_score=best.log_score,
-            log_weight=log_weight_by_k[k],
-            pseudo_probability=probability,
-            best_total_nll=best.mode.total_nll,
-            best_mode_digest=best.mode_digest,
-            n_input_modes=len(result.modes(k)),
-            n_unique_modes=len(result.modes(k)),
-            n_duplicate_modes_removed=0,
-            n_mean_field_site_fits=diagnostic.n_mean_field_site_fits,
-            n_mean_field_not_converged=diagnostic.n_mean_field_not_converged,
-            mean_mean_field_iterations=diagnostic.mean_mean_field_iterations,
-            n_zero_support_founder_cavities=(
-                diagnostic.n_zero_support_founder_cavities
-            ),
-            mean_founder_allele_entropy_nats=(
-                diagnostic.mean_founder_allele_entropy_nats
-            ),
-            n_alternate_initialization_wins=(
-                diagnostic.n_alternate_initialization_wins
-            ),
-            mean_initialization_elbo_spread=(
-                diagnostic.mean_initialization_elbo_spread
-            ),
-            uniform_mode_log_mean_exp=uniform_log_mean_exp,
-            n_modes_scored=len(scores),
-            n_modes_omitted_by_cap=max(0, len(result.modes(k)) - 1),
-        ))
-        for score in scores:
-            mode_diagnostics.append(replace(
-                score.mean_field_diagnostic,
-                selected_within_k=(score.mode_digest == best.mode_digest),
-            ))
-    return discovery_cavity.CavitySelection(
-        method="reversible_regularized_fixed_assignment_cavity",
-        map_k=result.selected_k,
-        runner_up_k=None if len(ranked_k) == 1 else ranked_k[1],
-        selected_mode_digest=result.selected.mode_digest,
-        k_diagnostics=tuple(k_diagnostics),
-        mode_diagnostics=tuple(mode_diagnostics),
-        support_selected_from_full_data=True,
-        assignments_selected_from_full_data=True,
-        selection_leakage=True,
-        weights_are_calibrated=False,
-        k_prior="telescoping_1_over_k_k_plus_1_applied_once",
-        boundary_limited=result.boundary_limited,
-        founder_inference="mean_field",
-        apply_unordered_haplotype_set_code=True,
-        mode_cap_per_k=1,
-        mode_cap_applied=any(
-            len(modes) > 1 for _k, modes in result.visited_modes_by_k
-        ),
-        all_mean_field_converged=all(
-            item.n_mean_field_not_converged == 0
-            for item in mode_diagnostics
-        ),
-        interpretation=(
-            "Cached full mean-field fixed-assignment cavity scores from "
-            "deterministic reversible complete-panel search. The telescoping "
-            "K prior and unordered binary-haplotype-set code are applied once. "
-            "Mode support and assignments used full data; normalized values "
-            "are uncalibrated selection-leakage-affected pseudo-weights. "
-            "The deterministic minimum-full-data-NLL representative is the "
-            "single scored mode at each represented K; archived alternatives "
-            "are reported as per-K cap omissions in the selection record. "
-            "Operational search limits are recorded on the source "
-            "result and are not represented as a K boundary."
-        ),
-        n_samples=n_samples,
-        n_sites=result.selected.mode.n_sites,
-    )
-
-import haplotype_reconstruction.core.parallel as core_parallel
-import haplotype_reconstruction.discovery.candidates as discovery_candidates
-import haplotype_reconstruction.discovery.fitting as discovery_fitting
-import haplotype_reconstruction.discovery.residuals as discovery_residuals
+        key in ordinary_expanded and key in residual_expanded
+        and ordinary_complete.get(key, False) and residual_complete.get(key, False)
+        and all(best.k + offset in scores for offset in offsets)
+        and key in no_improvement and not unique_limits and not state["mean_field_failed"])
+    k_values = np.array(sorted(scores), dtype=np.int16)
+    summary = SearchSummary(
+        k_values=k_values,
+        k_log_scores=np.array([scores[int(k)].log_score for k in k_values], dtype=np.float64),
+        natural_k_ceiling=int(ceiling), expansions=int(expansion),
+        data_starts=len(data_solutions), exact_scores=int(state["exact_scores"]),
+        exact_score_cache_hits=int(state["cache_hits"]), residual_calls=int(residual_calls),
+        residual_rows=int(residual_rows), limits=unique_limits,
+        heuristic_gauge_cuts=bool(heuristic_cuts), stop_reason=stop_reason, certified=certified)
+    return BlockSearch(selected=best.solution, summary=summary)

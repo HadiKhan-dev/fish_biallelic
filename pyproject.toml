@@ -4,11 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haplotype-reconstruction"
-version = "1.0.0"
-description = "Missing-aware founder-haplotype reconstruction for experimental crosses"
+version = "2.0.0"
+description = "Founder-haplotype reconstruction, pedigree, phase and recombination maps for experimental crosses"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
 authors = [{name = "Hadi Khan"}]
 requires-python = ">=3.11"
 dependencies = [
@@ -16,14 +15,11 @@ dependencies = [
   "numba>=0.61",
   "scipy>=1.13",
   "pandas>=2.2",
-  "hdbscan>=0.8.40",
+  "openpyxl>=3.1",
   "cyvcf2>=0.31",
   "blosc2>=4.0",
   "matplotlib>=3.9",
-  "networkx>=3.3",
-  "tqdm>=4.66",
-  "openpyxl>=3.1",
-  "tbb>=2021.13",
+  "hdbscan>=0.8.40",
 ]
 
 [project.urls]
@@ -37,5 +33,5 @@ where = ["."]
 include = ["haplotype_reconstruction*"]
 namespaces = false
 
-[tool.setuptools]
-include-package-data = false
+[tool.setuptools.package-data]
+"haplotype_reconstruction.config" = ["presets/*.toml"]

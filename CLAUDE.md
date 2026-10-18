@@ -54,6 +54,20 @@ the two-hour idle rule, and applies to Claude's allocation management too.
 Identify the protected hosting job before releasing any worker allocation;
 leave potentially hosting allocations untouched if that identity is unclear.
 
+**Never stop processes through a user-wide selection.** On 15 October 2026 a
+Claude subagent's cleanup loop over `ps -u "$USER" -o pid= --ppid PID` killed
+every process the user owned on the hosting node (procps ORs `ps` selection
+options). That included the interactive allocation's `screen` session, so the
+protected hosting job and all agents ended. Follow AGENTS.md's **Stopping
+processes safely**:
+- No `pkill`, `killall` or `kill -1`, and no kill list derived from
+  `ps -u`/`pgrep -u`.
+- Signal only PIDs the task started, or verified descendants of them.
+- Never signal `screen`, `tmux`, `sshd`, `slurmstepd`, `systemd`, an
+  allocation's login shell, or the runner: ending them ends the job like
+  `scancel`.
+- Give delegated agents this rule in their briefs.
+
 **Whole-genome runs require at least a full node**, including validation,
 merge-correctness checks, checkpoint resume tests, canaries, and delegated
 checkers. Follow AGENTS.md's **Full-node allocations for whole-genome runs**:

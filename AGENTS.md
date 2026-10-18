@@ -31,6 +31,12 @@ allocation untouched until it is identified. Its existing scheduler expiry
 still applies; this rule does not authorize extending it or changing the
 runner setup.
 
+Killing the processes that keep an allocation alive ends the job exactly as
+`scancel` does. For an interactive allocation these include its `screen` or
+`tmux` session and its login shell, and for any hosting allocation the runner
+itself. Never signal them; follow **Stopping processes safely** under
+Shell-command rules.
+
 ### Account and partition selection
 
 - Reuse suitable available resources in an allocation already assigned to the
@@ -459,9 +465,9 @@ This repository implements a scientific bioinformatics pipeline for founder-hapl
 
 Given a multi-sample VCF or BCF, the pipeline discovers founder haplotypes within marker blocks, assembles them across chromosomes, paints offspring as diploid mosaics of founder haplotypes, infers pedigree relationships, corrects phase, and derives recombination maps.
 
-The codebase includes the `haplotype_reconstruction/discovery/` modules and several pipeline entry points. Statistical and biological correctness remain paramount, while material runtime, memory, I/O, and scaling constraints are first-class requirements for the real workflow and may justify localized, validated complexity.
+The package is one pipeline of stage packages (evidence, discovery, local_selection, assembly, painting, pedigree, founder_refit, family_phase, recombination, export) driven by a single `haplotypes` command line. Statistical and biological correctness remain paramount, while material runtime, memory, I/O, and scaling constraints are first-class requirements for the real workflow and may justify localized, validated complexity.
 
-The current primary real-data workflow is associated with the cichlid pipeline in `haplotype_reconstruction/workflows/tropheops.py`. Verify this against the current repository before assuming it remains the primary entry point.
+The current primary real-data workflow is the TroMau cichlid cross, run as `haplotypes run CONFIG` with `preset = "tromau"` (built-in preset `haplotype_reconstruction/config/presets/tromau.toml`; example configuration `configs/tropheops.toml`). Verify this against the current repository before assuming it remains the primary entry point.
 
 ## Task contract and scope control
 
@@ -651,21 +657,31 @@ found; it does not prove that the implementation is bug-free.
 
 Important entry points currently include:
 
-- `haplotype_reconstruction/workflows/tropheops.py` — primary real cichlid-cross workflow.
-- `haplotype_reconstruction/workflows/astcal.py` — another real-cross workflow.
-- `haplotype_reconstruction/workflows/simulation.py` — broader or simulation-oriented pipeline driver.
-- `run.py simulate` — simulated end-to-end validation against known truth.
-- `haplotype_reconstruction/simulation/pedigree.py` — sequence or read simulation.
-- `haplotype_reconstruction/recombination/pipeline.py` — downstream recombination-map generation and CLI.
+- `haplotypes` (`haplotype_reconstruction/cli.py`, also `python -m haplotype_reconstruction`) — commands `run`,
+  `status`, `recombination`, `evaluate`, `export`, `example`, `templates` and `batch-worker`.
+- `haplotype_reconstruction/pipeline/driver.py` — the pipeline driver: fail-fast checks, stage order, resume and
+  shards.
+- `haplotype_reconstruction/config/presets/{tromau,aulstu}.toml` — built-in presets for the two real crosses;
+  `configs/*.toml` — example configurations (TroMau, AulStu, generic VCF, simulations).
+- `haplotypes run CONFIG` with `[input] kind = "simulation"`, then `haplotypes evaluate RUN` — simulated end-to-end
+  validation against known truth (`haplotype_reconstruction/simulation/`).
+- `haplotype_reconstruction/recombination/` — recombination maps; `haplotypes recombination RUN` reruns the stage.
+- `haplotype_reconstruction/export/` — the final founder and phased-sample VCFs (default last stage;
+  `haplotypes export RUN DEST` re-exports a finished run).
 
 Important infrastructure currently includes:
 
-- `haplotype_reconstruction/core/config.py` — shared model and algorithm configuration.
-- `haplotype_reconstruction/core/parallel.py` — process pools, numerical-library limits and dynamic Numba allocation.
-- `haplotype_reconstruction/core/checkpoints.py` — compressed checkpoint I/O.
-- `haplotype_reconstruction/core/variants.py` — VCF/BCF loading and genotype-likelihood preparation.
+- `haplotype_reconstruction/config/` — the user-facing TOML schema (`schema.py`), the loader and presets
+  (`load.py`), and the mapping into each stage's frozen config (`stages.py`).
+- `haplotype_reconstruction/execution/` — CPU budget, process pools, numerical-library and Numba set-up
+  (`bootstrap.py`), the memory governor (`memory.py`) and run records.
+- `haplotype_reconstruction/store/` — checkpoint store, codecs and code identities; each stage's `records.py` owns
+  its checkpoint keys.
+- `haplotype_reconstruction/evidence/` — VCF/BCF loading, site and sample quality filters, the read model and
+  genotype likelihoods.
 
 The current supported route performs missing-aware block-haplotype discovery,
+local path selection with assembly feedback contexts,
 joint founder completion, component-preserving L1-L4 hierarchical assembly, and
 component-local sample painting through typed painting checkpoints. Pedigree inference consumes
 those paintings plus raw genotype likelihoods with ragged quadratic scoring,
@@ -680,6 +696,8 @@ Family phase performs pedigree-conditioned refinement and genotype-preserving fi
 phase polishing. Recombination inference consumes final phase for missing-aware, conditional
 recombination maps, with separate posterior-mean rates, called crossover
 intervals, and observable meiosis exposure. Neither stage feeds back upstream.
+A final export stage writes per-chromosome founder and phased-sample VCFs
+(`OUTPUT/export/`).
 The direction/family approximation remains painting-dependent; ambiguous,
 missing-parent and highly structured-missingness crosses require validation.
 
@@ -687,14 +705,18 @@ This is a guide, not an authoritative inventory. Inspect the current repository 
 
 ## Configuration
 
-Shared tunable model thresholds and feature flags generally belong in `haplotype_reconstruction/core/config.py`.
+Tunable model thresholds belong in the owning stage's frozen config dataclass (`<stage>/config.py`).
+User-facing settings belong in the TOML schema (`haplotype_reconstruction/config/schema.py`) and are mapped into
+the stage configs in `haplotype_reconstruction/config/stages.py`. Internal model constants are listed in
+`docs/configuration.md`.
 
 Before adding a constant:
 
 1. Search for an existing equivalent.
 2. Check how related parameters are organised.
 3. Confirm it is shared rather than entry-point-specific.
-4. Preserve `haplotype_reconstruction/core/config.py` as logic-free if that remains the convention.
+4. Keep configuration modules logic-free, and regenerate `docs/configuration.md` with
+   `docs/generate_configuration.py` whenever the schema, CLI, presets or a stage config change.
 
 Dataset paths, output paths, and experiment-specific selections should remain in the appropriate entry-point configuration unless the existing architecture indicates otherwise.
 
@@ -804,8 +826,11 @@ casually.
   worker functions inside `if __name__ == "__main__":` or inside another
   function unless the current execution model explicitly supports it.
 - Preserve safeguards against BLAS, OpenMP, MKL, and Numba oversubscription.
-- In new entry points, inspect existing entry points to determine where
-  `core.environment` and `core.parallel` must be imported relative to NumPy and Numba.
+- Numerical-library and Numba set-up happens once at package import
+  (`execution/bootstrap.py`, before NumPy and Numba load) and run settings at run
+  start (`execution.bootstrap.start_run`). New entry points must import through the
+  package so this ordering holds, and use the `execution` pools and CPU budget
+  rather than ad hoc pools.
 - For CPU-bound work that can safely parallelize, target the complete verified
   Slurm CPU affinity. Increase process or thread counts when a larger
   allocation provides useful parallel capacity.
@@ -1169,8 +1194,8 @@ Match surrounding code.
 
 ## Validation
 
-The supported simulation CLI provides cached known-truth validation through
-`python run.py simulate` and `python run.py evaluate`. Historical focused tests
+The supported simulation route provides cached known-truth validation through
+`haplotypes run CONFIG` (`[input] kind = "simulation"`) and `haplotypes evaluate RUN`. Historical focused tests
 and development fixtures are archived locally, not part of the public package.
 Other validation mechanisms include bounded synthetic inputs, held-out founder
 comparisons, pair-reconstruction recall, phase/genotype error counts, and
@@ -1248,6 +1273,40 @@ sed -n 'START,ENDp' FILE
 ```
 
 Do not expose secrets, credentials, tokens, private keys, or unrelated environment variables.
+
+### Stopping processes safely
+
+Stop only processes that the current task started. On 15 October 2026 an
+agent's cleanup loop, `for p in $(ps -u "$USER" -o pid= --ppid PID) ...; do
+kill $p; done`, sent SIGTERM to every process the user owned on the node
+hosting the agents. procps `ps` combines selection options as a union, so
+`-u "$USER" --ppid PID` selects all of the user's processes, not the children
+of `PID`. The signal reached the interactive allocation's `screen` session,
+whose exit ended the protected hosting job and every agent running in it.
+
+- Never build a list of signal targets from a user-wide selection. Do not use
+  `ps -u`, `pgrep -u`, or `pkill -u` to choose targets, nor `killall` or
+  `kill -1`. Use `kill 0` or `kill -- -PGID` only for a process group the task
+  created itself (for example with `setsid`) and whose ID it has checked. Do not
+  combine `ps` selection options expecting an intersection.
+- Do not use `pkill`. `pkill -f PATTERN` also matches the shell running it and
+  any unrelated process whose command line contains the pattern. List
+  candidates with `pgrep -f PATTERN` or `ps -o pid,ppid,args -p PIDS`, check
+  them, and signal only the verified PIDs.
+- Record the PIDs, or a dedicated process group, of background work when
+  starting it, and stop it through those identities. To stop a process tree,
+  start from a verified PID and walk its descendants through parent links
+  (`pgrep -P PID` recursively, or `/proc/PID/stat`), excluding the calling
+  shell and its ancestors.
+- Never signal session infrastructure: `screen` or `tmux` sessions, `sshd`,
+  `slurmstepd`, `systemd`, an allocation's login shell, or the Codex or Claude
+  runner. Ending any of them ends that Slurm job, so the protected-hosting rule
+  applies to them.
+- When a kill command's target list is computed, print and inspect it first.
+  If the list holds anything other than the task's own processes, do not send
+  the signal.
+- Include these rules when briefing delegated agents that may start or stop
+  processes.
 
 ## Completion report
 

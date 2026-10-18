@@ -1,137 +1,81 @@
 """Reference-order junctions in the recombination map.
 
-The pipeline assumes that reference order is meiotic order. Where it is not
-(misplaced or misassembled contigs, inversions), about half of all meioses
-change transmitted homologue at the junction, and the map reports these real
-transmission changes as crossover pile-ups. This module adds three things to
-the recombination stage; without a breakpoint file no call, exposure or map
-value changes.
+The pipeline assumes that reference order is meiotic order. Where it is not (misplaced or misassembled contigs,
+inversions), about half of all meioses change transmitted homologue at the junction, and the map reports these
+real transmission changes as crossover pile-ups. Without a breakpoint table no call, exposure or map value
+changes; this module adds:
 
-* Supplied order breakpoints (optional TSV ``chrom start end reason``, 1-based
-  inclusive bp; ``#`` comments). The reference-order discontinuity lies
-  somewhere inside each interval. Painting and phase are rigid inside a ragged
-  painting bin, so a change at the discontinuity is placed at an edge of the
-  bin that contains it: the sites of every painting bin overlapping the
-  interval leave the map axis, and the assembly component is split there.
-  Every reset rule of the map keys on component changes, so no
-  shared-orientation tract, exposure or call crosses the interval and the
-  decoder restarts beyond it. A row whose reason starts with
-  ``reversed_segment`` declares an inverted reference segment: its two ends are
-  breakpoints, and calls inside it are flagged. Positions stay in reference
-  coordinates throughout.
-* Bin-honest call intervals. A call whose flanking supported markers straddle
-  a painting-bin edge is reported with the two bins that share the edge (a
-  change inside either bin is placed at that edge). Calls, counts and the map
-  are unchanged; only the reported interval widens.
-* A truth-free junction detector, reported as a table; it never masks.
-  Calls are grouped into loci by overlapping reported intervals. For each
-  meiosis that is decidable across a locus, y = parity of its calls there.
-  The model is y = s XOR f: s ~ Bernoulli(q) is a real change of transmitted
-  homologue across the locus, f (prior 1/2, one per parent) is a frame flip of
-  the parent shared by all its children (crossed panel rows, scaffold or
-  decoder frame errors). Ordinary recombination, hotspots included, bounds q
-  by a ceiling h (a point hotspot plus the background map rate across the
-  locus); a junction does not (q = 1/2 for unlinked sides, 1/2(1 - e^-2d) at
-  the ends of an inverted segment of genetic length d). The mixing statistic is
-  log sup_q L(q) - log sup_{q<=h} L(q): all-or-none patterns are explained by
-  f and give no evidence, nor do hotspot-like single calls below h. The two
-  ends of a displaced or inverted segment switch in the same meioses: the
-  pairing statistic compares y at a second locus predicted from the first
-  (up to a discordance probability e) with independent switching there, takes
-  the smaller of the two directions and subtracts log(number of locus pairs
-  tested on the chromosome). Loci are assumed independent across meioses
-  given the parents' flips; likelihood ratios are conditional on the calls,
-  not calibrated posterior odds.
+* Supplied order breakpoints (family_phase.breakpoints; 1-based inclusive bp). The discontinuity lies somewhere
+  inside each interval. Painting and phase are rigid inside a painting bin, so the sites of every painting bin
+  overlapping the interval leave the map axis and the component is split there: every reset rule keys on
+  component changes, so no shared-orientation tract, exposure or call crosses the interval. A reversed segment's
+  two ends are breakpoints and calls inside it are flagged. Positions stay in reference coordinates.
+* Bin-honest call intervals: a call whose flanking supported markers straddle a painting-bin edge is reported
+  with the two bins that share the edge (a change inside either bin is placed at that edge). Calls, counts and
+  the map are unchanged.
+* A truth-free junction detector, reported as a table; it never masks. Calls are grouped into loci by
+  overlapping reported intervals. For each meiosis decidable across a locus, y = parity of its calls there.
+  y = s XOR f: s ~ Bernoulli(q) is a real change of transmitted homologue across the locus, f (prior 1/2, one per
+  parent) a frame flip of the parent shared by all its children. Ordinary recombination, hotspots included,
+  bounds q by a ceiling h (a point hotspot plus the background map rate across the locus); a junction does not.
+  Mixing statistic: log sup_q L(q) - log sup_{q<=h} L(q) (all-or-none patterns are explained by f). The two
+  ends of a displaced or inverted segment switch in the same meioses: the pairing statistic compares y at a
+  second locus predicted from the first (up to a discordance probability e) with independent switching there,
+  takes the smaller of the two directions and subtracts log(number of locus pairs tested on the chromosome).
+  Likelihood ratios are conditional on the calls, not calibrated posterior odds.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
 
-from numba import njit
 import numpy as np
-import pandas as pd
+from numba import njit
 
-# Profile grids. The flip symmetry makes q and 1 - q equivalent, so q <= 1/2.
-# The discordance floor (0.5%) keeps one discordant meiosis (a call error or a
-# crossover inside a displaced segment) from erasing pairing evidence.
-_SWITCH_GRID = np.linspace(.001, .5, 500)
-_DISCORDANCE_GRID = np.linspace(.005, .25, 50)
-REVERSED_SEGMENT = "reversed_segment"
-LOCUS_COLUMNS = (
-    "contig", "locus", "left_bp", "right_bp", "calls_left_bp", "calls_right_bp", "calls",
-    "parents_with_calls", "odd_meioses", "decidable_meioses", "switch_fraction",
-    "flip_adjusted_switch_fraction", "hotspot_ceiling", "mixed_parents", "all_or_none_parents",
-    "parents", "children", "mixing_log_lr", "paired_locus", "paired_odd_meioses",
-    "pairing_log_lr", "pairing_tests", "junction_log_lr", "flagged", "interpretation",
-    "nearest_supplied_breakpoint", "breakpoint_distance_bp")
+from ..model.genetic_map import haldane_fraction
+
+
+# Profile grids. The flip symmetry makes q and 1 - q equivalent, so q <= 1/2. The discordance floor (0.5%) keeps
+# one discordant meiosis (a call error or a crossover inside a displaced segment) from erasing pairing evidence.
+SWITCH_GRID = np.linspace(.001, .5, 500)
+DISCORDANCE_GRID = np.linspace(.005, .25, 50)
 
 
 @dataclass(frozen=True)
-class JunctionReportConfig:
-    """Interval reporting and junction-detector controls (bp, probabilities, nats)."""
-    # Report the two bins around a straddled bin edge when they span at least
-    # this many bp; 0 widens every straddled call.
-    snapped_bin_minimum_bp: int = 0
-    minimum_parents: int = 3
-    # Point-hotspot part of the ceiling: no single locus gives a real
-    # crossover in more than 5% of meioses (5 cM) beyond the background rate.
-    hotspot_switch_probability: float = .05
-    # Flag at 100:1. A whole genome has about 30 candidate loci; a likelihood
-    # ratio reaches c under its null with probability about 1/c or less, so
-    # fewer than one false flag per genome is expected.
-    flag_log_likelihood_ratio: float = math.log(100.)
+class JunctionLocus:
+    """One row of the junction table (a locus of overlapping reported call intervals)."""
 
-    def validated(self):
-        if self.snapped_bin_minimum_bp < 0 or self.minimum_parents < 2:
-            raise ValueError("invalid junction interval/parent thresholds")
-        if not 0 <= self.hotspot_switch_probability < .5 or not self.flag_log_likelihood_ratio > 0:
-            raise ValueError("invalid junction hotspot ceiling or flag threshold")
-        return self
-
-
-def read_order_breakpoints(path):
-    """{contig: (breakpoints (k, 2), reversed segments (j, 2), reasons)}; 1-based inclusive bp."""
-    table = pd.read_csv(path, sep="\t", comment="#", dtype={"chrom": str, "reason": str})
-    if list(table.columns[:4]) != ["chrom", "start", "end", "reason"]:
-        raise ValueError("order breakpoint file needs the columns chrom, start, end, reason")
-    starts = table["start"].to_numpy(dtype=np.int64)
-    ends = table["end"].to_numpy(dtype=np.int64)
-    if np.any(starts < 1) or np.any(ends < starts):
-        raise ValueError("order breakpoint intervals need 1 <= start <= end")
-    reasons = table["reason"].fillna("").astype(str).str.strip()
-    result = {}
-    for contig in dict.fromkeys(table["chrom"].astype(str)):
-        rows = np.flatnonzero(table["chrom"].astype(str).to_numpy() == contig)
-        reversed_rows = rows[reasons.iloc[rows].str.startswith(REVERSED_SEGMENT).to_numpy()]
-        order_rows = np.setdiff1d(rows, reversed_rows)
-        result[contig] = (np.stack((starts[order_rows], ends[order_rows]), axis=1),
-                          np.stack((starts[reversed_rows], ends[reversed_rows]), axis=1),
-                          tuple(reasons.iloc[rows]))
-    return result
+    contig: str
+    locus: str
+    left_bp: int
+    right_bp: int
+    calls_left_bp: int
+    calls_right_bp: int
+    calls: int
+    parents_with_calls: int
+    odd_meioses: int
+    decidable_meioses: int
+    switch_fraction: float
+    flip_adjusted_switch_fraction: float
+    hotspot_ceiling: float
+    mixed_parents: int
+    all_or_none_parents: int
+    parents: str
+    children: str
+    mixing_log_lr: float
+    paired_locus: str
+    paired_odd_meioses: int
+    pairing_log_lr: float
+    pairing_tests: int
+    junction_log_lr: float
+    flagged: bool
+    interpretation: str
+    nearest_supplied_breakpoint: str
+    breakpoint_distance_bp: float
 
 
-def component_bin_edges(painting_checkpoint):
-    """Ragged painting/phase bin edges per component, as family phase uses them.
-
-    Same rule as ``refinement.conditioning.prepare_phase_scaffold``: the ragged
-    diagnostics' half-open bp edges, or 100-site bins for complete or empty
-    components.
-    """
-    blocks = core_runtime.validate_phase_component_manifest(painting_checkpoint.component_manifest)
-    edges = []
-    for block, component in zip(blocks, painting_checkpoint.painting_bundle.components):
-        diagnostic = component.ragged_diagnostics
-        if diagnostic is not None:
-            edges.append(np.asarray(diagnostic.bin_edges, dtype=np.int64))
-        else:
-            source = np.asarray(block.positions, dtype=np.int64)
-            edges.append(np.unique(np.r_[source[::100], source[-1] + 1]))
-    return tuple(edges)
-
-
-def _breakpoint_intervals(breakpoints):
-    """Supplied breakpoint intervals plus both ends of every inverted segment."""
+def breakpoint_intervals(breakpoints):
+    """Supplied breakpoint intervals plus both ends of every reversed segment."""
     order, reversed_segments, _ = breakpoints
     intervals = [(int(start), int(end)) for start, end in order]
     for start, end in reversed_segments:
@@ -139,16 +83,13 @@ def _breakpoint_intervals(breakpoints):
     return intervals
 
 
-def apply_order_breakpoints(product, breakpoints, bin_edges):
-    """Return a final-phase view split at supplied breakpoints and its segment origins.
+def split_at_breakpoints(positions, components, breakpoints, bin_edges):
+    """(segment ids int32 [L], segment -> component int32, masked sites) of the axis split at breakpoints.
 
-    Sites inside a breakpoint interval, or inside a painting bin overlapping it,
-    get component -1; a new segment starts after each excluded zone. Segment ids
-    are consecutive in axis order; ``origin[segment]`` is the assembly component.
+    Sites inside a breakpoint interval, or inside a painting bin overlapping it, get segment -1; a new segment
+    starts after each excluded zone. Segment ids are consecutive in axis order.
     """
-    positions = np.asarray(product["positions"], dtype=np.int64)
-    components = np.asarray(product["component_ids"], dtype=np.int32)
-    intervals = _breakpoint_intervals(breakpoints)
+    intervals = breakpoint_intervals(breakpoints)
     excluded = np.zeros(len(positions), dtype=bool)
     cuts = []
     for start, end in intervals:
@@ -171,17 +112,7 @@ def apply_order_breakpoints(product, breakpoints, bin_edges):
             previous = key[index]
             origin.append(int(components[index]))
         segments[index] = len(origin) - 1
-    view = dict(product)
-    view["component_ids"] = segments
-    return view, np.asarray(origin, dtype=np.int32), int(excluded.sum())
-
-
-def restore_component_ids(result, origin):
-    """Report assembly components again on calls and spans decoded per segment."""
-    for key, column in (("crossover_intervals", 4), ("callable_spans", 2), ("informative_spans", 2)):
-        for rows in result[key]:
-            if len(rows):
-                rows[:, column] = origin[rows[:, column].astype(np.int64)]
+    return segments, np.asarray(origin, dtype=np.int32), int(excluded.sum())
 
 
 def _segment_limits(positions, segments):
@@ -196,44 +127,37 @@ def _segment_limits(positions, segments):
     return limits
 
 
-def reported_intervals(result, positions, segments, bin_edges, config):
-    """Per edge, (n, 2) int64 reported call intervals in bp (inclusive).
+def reported_intervals(crossovers, positions, segments, bin_edges, config):
+    """int64 (n, 2) reported intervals in bp (inclusive) of called crossovers (n, 5) carrying assembly components.
 
-    Where the decoder's flanking markers straddle painting-bin edges, the
-    interval also covers the bins on both sides of those edges, clipped to the
-    call's segment of the decoded axis ``segments`` (the assembly components
-    when no breakpoints were supplied). Call rows carry assembly components.
+    Where the decoder's flanking markers straddle painting-bin edges, the interval also covers the bins on both
+    sides of those edges, clipped to the call's segment of the decoded axis ``segments``.
     """
-    positions = np.asarray(positions, dtype=np.int64)
-    limits = _segment_limits(positions, np.asarray(segments))
-    output = []
-    for rows in result["crossover_intervals"]:
-        intervals = np.empty((len(rows), 2), dtype=np.int64)
-        for index, (left, right, _, _, component) in enumerate(rows):
-            lo, hi = int(left), int(right)
-            edges = bin_edges[int(component)]
-            inside = np.flatnonzero((edges > left) & (edges <= right))
-            if len(inside):
-                first = int(edges[max(inside[0] - 1, 0)])
-                last = int(edges[min(inside[-1] + 1, len(edges) - 1)]) - 1
-                if last - first + 1 >= config.snapped_bin_minimum_bp:
-                    segment = segments[np.searchsorted(positions, left)]
-                    lo = max(min(lo, first), int(limits[segment, 0]))
-                    hi = min(max(hi, last), int(limits[segment, 1]))
-            intervals[index] = lo, hi
-        output.append(intervals)
-    return output
+    limits = _segment_limits(positions, segments)
+    intervals = np.empty((len(crossovers), 2), dtype=np.int64)
+    for index, (left, right, _, _, component) in enumerate(crossovers):
+        lo, hi = int(left), int(right)
+        edges = bin_edges[int(component)]
+        inside = np.flatnonzero((edges > left) & (edges <= right))
+        if len(inside):
+            first = int(edges[max(inside[0] - 1, 0)])
+            last = int(edges[min(inside[-1] + 1, len(edges) - 1)]) - 1
+            if last - first + 1 >= config.snapped_bin_minimum_bp:
+                segment = segments[np.searchsorted(positions, left)]
+                lo = max(min(lo, first), int(limits[segment, 0]))
+                hi = min(max(hi, last), int(limits[segment, 1]))
+        intervals[index] = lo, hi
+    return intervals
 
 
-def reversed_segment_calls(result, breakpoints):
-    """Per edge, whether each call lies inside a supplied reversed segment."""
-    reversed_segments = np.zeros((0, 2), dtype=np.int64) if breakpoints is None else breakpoints[1]
-    return [np.asarray([bool(np.any((reversed_segments[:, 0] <= left) & (right <= reversed_segments[:, 1])))
-                        for left, right, *_ in rows], dtype=bool)
-            for rows in result["crossover_intervals"]]
+def in_reversed_segment(crossovers, breakpoints):
+    """bool (n,): whether each called crossover lies inside a supplied reversed segment."""
+    segments = np.zeros((0, 2), dtype=np.int64) if breakpoints is None else breakpoints[1]
+    return np.asarray([bool(np.any((segments[:, 0] <= left) & (right <= segments[:, 1])))
+                       for left, right, *_ in crossovers], dtype=bool)
 
 
-def _mixture_terms(counts, grid):
+def mixture_terms(counts, grid):
     """(grid, rows) terms log(1/2 p^k (1-p)^(n-k) + 1/2 p^(n-k) (1-p)^k) for (k, n) rows."""
     counts = np.asarray(counts, dtype=np.float64).reshape(-1, 2)
     p = np.asarray(grid, dtype=np.float64)[:, None]
@@ -243,18 +167,8 @@ def _mixture_terms(counts, grid):
     return np.logaddexp(same, flipped) - math.log(2.)
 
 
-def _flip_mixture(counts, grid):
-    """Grid of sum_p log(1/2 p^k (1-p)^(n-k) + 1/2 p^(n-k) (1-p)^k) for (k, n) rows."""
-    return _mixture_terms(counts, grid).sum(axis=1)
-
-
-# Pairing statistic for every locus pair. Each parent decidable at both loci
-# contributes the term of its (k, n) count to three flip mixtures; a (k, n)
-# count is stored as the code n (n + 1) / 2 + k. The terms are tabulated once by
-# _mixture_terms (identical elementwise arithmetic), and each mixture adds its
-# parents' terms in parent order as numpy's pairwise summation adds a row of
-# that (grid, parents) matrix, so every score equals the numpy reduction
-# exactly.
+# The pairing statistic of every locus pair: each parent decidable at both loci contributes the term of its
+# (k, n) count to three flip mixtures. A (k, n) count is coded n (n + 1) / 2 + k and its terms are tabulated once.
 @njit(cache=True)
 def _pair_codes(decidable, odd, parent_offsets, parent_edges, first, second, here, there, discordance):
     """Count codes per parent with edges decidable at both loci; returns the number of parents."""
@@ -297,94 +211,14 @@ def _used_pair_codes(decidable, odd, parent_offsets, parent_edges, codes):
 
 
 @njit(cache=True)
-def _pairwise_block(table, rows, codes, start, count, partial, out):
-    """out[g] = sum of table[rows[codes[start:start + count]], g] for count <= 128, in numpy's order.
-
-    numpy sums fewer than 8 values left to right; otherwise eight interleaved
-    partial sums combined as a balanced tree, then the remainder.
-    """
-    grid = table.shape[1]
-    if count < 8:
-        for g in range(grid):
-            out[g] = 0.
-        for index in range(start, start + count):
-            row = rows[codes[index]]
-            for g in range(grid):
-                out[g] += table[row, g]
-        return
-    for lane in range(8):
-        row = rows[codes[start + lane]]
-        for g in range(grid):
-            partial[lane, g] = table[row, g]
-    index = 8
-    while index < count - count % 8:
-        for lane in range(8):
-            row = rows[codes[start + index + lane]]
-            for g in range(grid):
-                partial[lane, g] += table[row, g]
-        index += 8
-    for g in range(grid):
-        out[g] = (((partial[0, g] + partial[1, g]) + (partial[2, g] + partial[3, g]))
-                  + ((partial[4, g] + partial[5, g]) + (partial[6, g] + partial[7, g])))
-    while index < count:
-        row = rows[codes[start + index]]
-        for g in range(grid):
-            out[g] += table[row, g]
-        index += 1
-
-
-@njit(cache=True)
-def _pairwise_rows(table, rows, codes, count, partial, out):
-    """out[g] = sum of table[rows[codes[:count]], g] exactly as numpy's pairwise row sum.
-
-    numpy splits runs longer than 128 values into two halves (the first a
-    multiple of 8 long) and adds the halves' sums. That recursion is walked
-    with explicit stacks (numba's cache does not support recursive kernels);
-    each level at least halves the run, so 64 levels cover any count.
-    """
-    if count <= 128:
-        _pairwise_block(table, rows, codes, 0, count, partial, out)
-        return
-    starts, lengths = np.zeros(64, dtype=np.int64), np.zeros(64, dtype=np.int64)
-    visits = np.zeros(64, dtype=np.int64)
-    sums = np.empty((64, table.shape[1]))
-    lengths[0] = count
-    nodes, results = 1, 0
-    while nodes:
-        node = nodes - 1
-        start, length = starts[node], lengths[node]
-        if length <= 128:
-            _pairwise_block(table, rows, codes, start, length, partial, sums[results])
-            results += 1
-            nodes -= 1
-            continue
-        half = length // 2
-        half -= half % 8
-        if visits[node] < 2:
-            # Descend into the first, then the second half.
-            first = visits[node] == 0
-            starts[nodes] = start if first else start + half
-            lengths[nodes] = half if first else length - half
-            visits[nodes] = 0
-            visits[node] += 1
-            nodes += 1
-        else:
-            sums[results - 2] += sums[results - 1]
-            results -= 1
-            nodes -= 1
-    out[:] = sums[0]
-
-
-@njit(cache=True)
-def _mixture_maximum(table, rows, codes, count, partial, sums):
-    """Maximum over the grid of the parents' summed mixture terms (numpy's reduction plus its zero start)."""
-    _pairwise_rows(table, rows, codes, count, partial, sums)
-    best = -np.inf
-    for g in range(len(sums)):
-        total = 0. + sums[g]
-        if total > best:
-            best = total
-    return best
+def _mixture_maximum(table, rows, codes, count, sums):
+    """Maximum over the grid of the parents' summed mixture terms (summed in parent order)."""
+    sums[:] = 0.
+    for index in range(count):
+        row = rows[codes[index]]
+        for g in range(len(sums)):
+            sums[g] += table[row, g]
+    return np.max(sums)
 
 
 @njit(cache=True)
@@ -395,25 +229,21 @@ def _pairing_scores(decidable, odd, parent_offsets, parent_edges, switch_table, 
     scores = np.full((loci, loci), -np.inf)
     here, there = np.empty(parents, dtype=np.int64), np.empty(parents, dtype=np.int64)
     discordance = np.empty(parents, dtype=np.int64)
-    switch_sums, switch_partial = np.empty(switch_table.shape[1]), np.empty((8, switch_table.shape[1]))
+    switch_sums = np.empty(switch_table.shape[1])
     discordance_sums = np.empty(discordance_table.shape[1])
-    discordance_partial = np.empty((8, discordance_table.shape[1]))
     for first in range(loci):
         for second in range(first + 1, loci):
-            rows = _pair_codes(decidable, odd, parent_offsets, parent_edges, first, second,
-                               here, there, discordance)
+            rows = _pair_codes(decidable, odd, parent_offsets, parent_edges, first, second, here, there, discordance)
             if rows:
-                paired = _mixture_maximum(discordance_table, discordance_rows, discordance, rows,
-                                          discordance_partial, discordance_sums)
-                independent = max(
-                    _mixture_maximum(switch_table, switch_rows, here, rows, switch_partial, switch_sums),
-                    _mixture_maximum(switch_table, switch_rows, there, rows, switch_partial, switch_sums))
+                paired = _mixture_maximum(discordance_table, discordance_rows, discordance, rows, discordance_sums)
+                independent = max(_mixture_maximum(switch_table, switch_rows, here, rows, switch_sums),
+                                  _mixture_maximum(switch_table, switch_rows, there, rows, switch_sums))
                 scores[first, second] = scores[second, first] = paired - independent
     return scores
 
 
 def _pairing_log_lr(loci, parents):
-    """Pairing statistic of every locus pair (the pair loop of detect_junctions, all pairs at once)."""
+    """Pairing statistic of every locus pair."""
     decidable = np.ascontiguousarray([locus["decidable"] for locus in loci], dtype=np.bool_)
     odd = np.ascontiguousarray([locus["odd"] for locus in loci], dtype=np.int64)
     order = np.argsort(parents, kind="stable")
@@ -423,35 +253,31 @@ def _pairing_log_lr(loci, parents):
     count_k = np.arange(len(count_n)) - count_n * (count_n + 1) // 2
     tables = []
     for used, grid in zip(_used_pair_codes(decidable, odd, parent_offsets, order, len(count_n)),
-                          (_SWITCH_GRID, _DISCORDANCE_GRID)):
+                          (SWITCH_GRID, DISCORDANCE_GRID)):
         rows = np.full(len(count_n), -1, dtype=np.int64)
         rows[used] = np.arange(int(used.sum()))
-        terms = _mixture_terms(np.stack((count_k[used], count_n[used]), axis=1), grid)
+        terms = mixture_terms(np.stack((count_k[used], count_n[used]), axis=1), grid)
         tables += [np.ascontiguousarray(terms.T), rows]
     return _pairing_scores(decidable, odd, parent_offsets, order, *tables)
 
 
-def _hotspot_ceiling(left, right, config, rate, chromosome_map):
+def _hotspot_ceiling(left, right, config, chromosome_map):
     """Point hotspot XOR background parity across the locus (Haldane)."""
-    if chromosome_map is not None and chromosome_map.has_map:
-        morgans = float(np.diff(chromosome_map.cumulative_morgans(np.asarray([left, right], dtype=float)))[0])
-    else:
-        morgans = rate * (right - left)
-    background = -.5 * math.expm1(-2. * max(morgans, 0.))
+    morgans = float(np.diff(chromosome_map.cumulative_morgans(np.asarray([left, right], dtype=float)))[0]) \
+        if chromosome_map.has_map else chromosome_map.fallback_rate_per_bp * (right - left)
+    background = haldane_fraction(max(morgans, 0.))
     point = config.hotspot_switch_probability
     return point + background - 2. * point * background
 
 
-def detect_junctions(result, reported, *, config, rate, chromosome_map=None,
-                     breakpoints=None):
-    """Junction loci of one chromosome as a list of table rows (see module docstring)."""
-    names = result["sample_ids"]
-    parents = np.asarray(result["edge_parent"], dtype=np.int64)
-    children = np.asarray(result["edge_child"], dtype=np.int64)
-    calls = sorted((int(lo), int(hi), edge, index)
-                   for edge, rows in enumerate(reported) for index, (lo, hi) in enumerate(rows))
+def detect_junctions(contig, names, parents, children, crossovers, crossover_offsets, reported, callable_spans,
+                     callable_offsets, config, chromosome_map, breakpoints=None):
+    """Junction loci of one chromosome (module docstring); per-edge tables are packed with offsets."""
+    edges = len(parents)
+    members_of = sorted((int(reported[index, 0]), int(reported[index, 1]), edge, index)
+                        for edge in range(edges) for index in range(crossover_offsets[edge], crossover_offsets[edge + 1]))
     groups = []
-    for lo, hi, edge, index in calls:
+    for lo, hi, edge, index in members_of:
         if groups and lo <= groups[-1][1]:
             groups[-1][1] = max(groups[-1][1], hi)
             groups[-1][2].append((edge, index))
@@ -461,15 +287,16 @@ def detect_junctions(result, reported, *, config, rate, chromosome_map=None,
     for left, right, members in groups:
         if len({int(parents[edge]) for edge, _ in members}) < config.minimum_parents:
             continue
-        decoded = np.asarray([result["crossover_intervals"][edge][index, :2] for edge, index in members])
+        decoded = np.asarray([crossovers[index, :2] for _, index in members])
         first, last = float(decoded[:, 0].min()), float(decoded[:, 1].max())
-        odd = np.zeros(len(parents), dtype=np.int64)
+        odd = np.zeros(edges, dtype=np.int64)
         for edge, _ in members:
             odd[edge] ^= 1
         with_calls = {edge for edge, _ in members}
         decidable = np.asarray([edge in with_calls or any(
             span_left <= first and span_right >= last
-            for span_left, span_right, _ in result["callable_spans"][edge]) for edge in range(len(parents))])
+            for span_left, span_right, _ in callable_spans[callable_offsets[edge]:callable_offsets[edge + 1]])
+            for edge in range(edges)])
         loci.append(dict(left=left, right=right, first=first, last=last, members=members,
                          odd=odd, decidable=decidable))
     rows = []
@@ -477,40 +304,39 @@ def detect_junctions(result, reported, *, config, rate, chromosome_map=None,
         counts, parent_text, children_text = [], [], []
         mixed = all_or_none = 0
         for parent in np.unique(parents):
-            edges = np.flatnonzero((parents == parent) & locus["decidable"])
-            if not len(edges):
+            parent_edges = np.flatnonzero((parents == parent) & locus["decidable"])
+            if not len(parent_edges):
                 continue
-            k, n = int(locus["odd"][edges].sum()), len(edges)
+            k, n = int(locus["odd"][parent_edges].sum()), len(parent_edges)
             counts.append((k, n))
             if k:
                 parent_text.append(f"{names[parent]}:{k}/{n}")
-                children_text.extend(names[child] for child in children[edges[locus["odd"][edges] == 1]])
+                children_text.extend(names[child] for child in children[parent_edges[locus["odd"][parent_edges] == 1]])
                 mixed += k < n
                 all_or_none += k == n and n >= 2
         counts = np.asarray(counts, dtype=np.int64).reshape(-1, 2)
-        ceiling = _hotspot_ceiling(locus["left"], locus["right"], config, rate, chromosome_map)
-        mixture = _flip_mixture(counts, _SWITCH_GRID)
-        bounded = _flip_mixture(counts, np.r_[_SWITCH_GRID[_SWITCH_GRID < ceiling],
-                                              max(ceiling, _SWITCH_GRID[0])])
+        ceiling = _hotspot_ceiling(locus["left"], locus["right"], config, chromosome_map)
+        mixture = mixture_terms(counts, SWITCH_GRID).sum(axis=1)
+        bounded = mixture_terms(counts, np.r_[SWITCH_GRID[SWITCH_GRID < ceiling],
+                                              max(ceiling, SWITCH_GRID[0])]).sum(axis=1)
         nearest, distance = "", np.nan
         if breakpoints is not None:
-            for start, end in _breakpoint_intervals(breakpoints):
+            for start, end in breakpoint_intervals(breakpoints):
                 gap = max(int(start) - locus["right"], locus["left"] - int(end), 0)
                 if not gap >= distance:
                     nearest, distance = f"{start}-{end}", gap
-        rows.append({
-            "contig": result["contig"], "locus": f"{result['contig']}:{number}",
-            "left_bp": int(locus["left"]), "right_bp": int(locus["right"]),
-            "calls_left_bp": int(locus["first"]), "calls_right_bp": int(locus["last"]),
-            "calls": len(locus["members"]), "parents_with_calls": len(parent_text),
-            "odd_meioses": int(counts[:, 0].sum()), "decidable_meioses": int(counts[:, 1].sum()),
-            "switch_fraction": float(counts[:, 0].sum() / max(counts[:, 1].sum(), 1)),
-            "flip_adjusted_switch_fraction": float(_SWITCH_GRID[np.argmax(mixture)]),
-            "hotspot_ceiling": ceiling, "mixed_parents": mixed, "all_or_none_parents": all_or_none,
-            "parents": ";".join(parent_text), "children": ";".join(children_text),
-            "mixing_log_lr": max(float(mixture.max() - bounded.max()), 0.),
-            "paired_locus": "", "paired_odd_meioses": 0, "pairing_log_lr": 0., "pairing_tests": 0,
-            "nearest_supplied_breakpoint": nearest, "breakpoint_distance_bp": distance})
+        rows.append(dict(
+            contig=contig, locus=f"{contig}:{number}", left_bp=int(locus["left"]), right_bp=int(locus["right"]),
+            calls_left_bp=int(locus["first"]), calls_right_bp=int(locus["last"]), calls=len(locus["members"]),
+            parents_with_calls=len(parent_text), odd_meioses=int(counts[:, 0].sum()),
+            decidable_meioses=int(counts[:, 1].sum()),
+            switch_fraction=float(counts[:, 0].sum() / max(counts[:, 1].sum(), 1)),
+            flip_adjusted_switch_fraction=float(SWITCH_GRID[np.argmax(mixture)]),
+            hotspot_ceiling=ceiling, mixed_parents=mixed, all_or_none_parents=all_or_none,
+            parents=";".join(parent_text), children=";".join(children_text),
+            mixing_log_lr=max(float(mixture.max() - bounded.max()), 0.),
+            paired_locus="", paired_odd_meioses=0, pairing_log_lr=0., pairing_tests=0,
+            nearest_supplied_breakpoint=nearest, breakpoint_distance_bp=float(distance)))
     tests = len(loci) * (len(loci) - 1) // 2
     scores = _pairing_log_lr(loci, parents) if len(loci) > 1 else None
     for i, locus in enumerate(loci):
@@ -523,6 +349,7 @@ def detect_junctions(result, reported, *, config, rate, chromosome_map=None,
                            paired_odd_meioses=int(((locus["odd"] == 1) & (other["odd"] == 1) & both).sum()),
                            pairing_log_lr=float(scores[i, j]))
         rows[i]["pairing_tests"] = tests
+    result = []
     for row in rows:
         adjusted = row["pairing_log_lr"] - (math.log(row["pairing_tests"]) if row["pairing_tests"] else 0.)
         row["junction_log_lr"] = max(row["mixing_log_lr"], adjusted, 0.)
@@ -533,7 +360,5 @@ def detect_junctions(result, reported, *, config, rate, chromosome_map=None,
             row["interpretation"] = "parent_frame_flips"
         else:
             row["interpretation"] = "recombination_or_unresolved"
-    return [{column: row[column] for column in LOCUS_COLUMNS} for row in rows]
-
-
-import haplotype_reconstruction.core.runtime as core_runtime
+        result.append(JunctionLocus(**row))
+    return tuple(result)

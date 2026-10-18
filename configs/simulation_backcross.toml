@@ -1,20 +1,18 @@
-# Replace input paths as needed. All inference remains metadata-free.
+# Simulated backcross with known truth: `haplotypes run configs/simulation_backcross.toml`.
 [run]
-cores = "auto"
-# read_calibration = true # Default: fit the observation model from allele depths.
-# pedigree_calibration = "predictive" # Default: learn the chromosome-evidence scale.
 output = "work/runs/backcross_seed6202"
 
-[inputs]
-templates = "work/data/simulation_templates"
+[input]
+kind = "simulation"
 contigs = ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr22", "chr23"]
 
 [simulation]
+templates = "work/data/simulation_templates"
 seed = 6202
 depth = 5.0
-generations = [20, 30, 30]
+cohorts = [20, 30, 30]
 backcross_fraction = 0.5
-backcross_start_generation = 3
+backcross_start_cohort = 3
 
-[recombination]
+[genetic_map]
 rate_cm_per_mb = 5.0

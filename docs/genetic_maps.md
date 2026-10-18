@@ -1,15 +1,15 @@
-# Input and inferred recombination maps
+# Genetic maps
 
-The fallback is a float-valued **5.0 cM/Mb**, equivalent to `5e-8` Morgans/bp.
-Supply `--rate-cm-per-mb` or TOML `[recombination].rate_cm_per_mb` to change it.
-A supplied map replaces that rate between its first and last knot on each
-named chromosome. Missing chromosomes and tails beyond the knots use the
-fallback; the cumulative map remains continuous at both ends.
+Inference uses one genetic map for every stage: a fallback rate, `[genetic_map] rate_cm_per_mb` (5.0 cM/Mb, that
+is 5e-8 Morgans per bp), and optionally a cumulative map, `[genetic_map] file`. A supplied map replaces the
+fallback between its first and last knot on each chromosome it names; chromosomes it does not name, and the tails
+beyond its knots, use the fallback rate, and the cumulative map stays continuous at both ends. Simulations configure
+their generating map separately (`[simulation] generating_map`, `generating_rate_cm_per_mb`; see
+[simulation.md](simulation.md)), so generating and inference maps never mix.
 
-## Combined input files
+## Map files
 
-The preferred interchange is a headerless whitespace-separated PLINK/Beagle
-four-column `.map` file:
+The preferred format is a headerless, whitespace-separated PLINK/Beagle four-column `.map` file:
 
 ```text
 chr1 marker1 0.0 1
@@ -19,12 +19,9 @@ chr2 marker1 0.0 1
 chr2 marker2 2.5 1000001
 ```
 
-Columns are `chromosome marker_id cumulative_cM position_bp`. Marker IDs are
-ignored. The cumulative column must be **centimorgans**, not Morgans. Files
-using Morgans must be converted first. An all-zero cumulative map explicitly
-means zero recombination between knots, not an absent map.
-
-A headed three-column table is also accepted:
+The columns are `chromosome marker_id cumulative_cM position_bp`; marker IDs are ignored. The cumulative column is
+in **centimorgans**: convert Morgans first. A headed three-column table is also accepted (header names are not
+case-sensitive):
 
 ```text
 chromosome position_bp map_cM
@@ -32,59 +29,59 @@ chr1 1 0.0
 chr1 1000001 5.0
 ```
 
-Chromosome names must match input variants exactly (`chr1` and `1` differ).
-Use the same physical-coordinate convention/reference assembly as the VCF/BCF;
-coordinates are not shifted. Zero can represent a boundary knot. Within each
-chromosome, at least two positions must be strictly increasing and cumulative
-cM finite and nondecreasing. Blank/comment lines are ignored, but reversed
-records and duplicate positions are not silently sorted or repaired.
+Chromosome names must match the variant file exactly (`chr1` and `1` differ), and positions must use the same
+reference assembly and coordinates as the variant file; nothing is shifted. Within a chromosome, positions must be
+strictly increasing (at least two knots) and cumulative cM finite and nondecreasing; zero may be a boundary knot.
+Blank and `#` lines are ignored; reversed rows and duplicate positions are errors, never sorted or repaired. An
+all-zero cumulative map means no recombination between its knots, not an absent map.
 
-```bash
-python run.py tropheops --config configs/tropheops.toml \
-  --recombination-map work/data/cross.map --rate-cm-per-mb 5.0
+```toml
+[genetic_map]
+file = "data/cross.map"
+rate_cm_per_mb = 5.0
 ```
 
-## Python API and separate chromosome files
+From Python, `load_genetic_maps` also takes a mapping from exact chromosome name to a single-chromosome file,
+which may be a SHAPEIT-style table with one of the headers `position COMBINED_rate(cM/Mb) Genetic_Map(cM)`,
+`position rate(cM/Mb) map(cM)` or `physical_bp rate_cM/Mb cumulative_cM`; the cumulative column is authoritative
+and the local rate is only checked:
 
 ```python
-from haplotype_reconstruction.core.genetic_map import load_genetic_maps
+from haplotype_reconstruction.model.genetic_map import load_genetic_maps
 
 maps = load_genetic_maps("cross.map", default_rate_cm_per_mb=5.0)
 chromosome = maps.for_contig("chr1")
-distance = chromosome.interval_morgans(500001, 1500001)  # 0.075 Morgans
+distance = chromosome.interval_morgans(500001, 1500001)   # 0.075 Morgans for the example above
 ```
 
-A mapping of exact chromosome name to filename also accepts headed SHAPEIT
-tables with columns `position COMBINED_rate(cM/Mb) Genetic_Map(cM)`. The
-cumulative column is authoritative; the local-rate column is checked but not
-used for integration. `load_genetic_maps(None)` gives scalar-only behavior.
+## How the stages use the map
 
-The map is piecewise linear in cumulative distance. Every transition uses
-`G(right)-G(left)`, not one endpoint's rate times the interval length. Each
-stage retains its own established mapping function and generation/meiosis
-multiplier. Equal cumulative knots define a cold interval. Sparse knots imply
-interpolation through their entire gap, not an unspecified internal interval.
+The map is piecewise linear in cumulative distance: a genetic distance is always G(right) - G(left), never one
+endpoint's rate times the interval length. Equal knots define a cold interval, and sparse knots interpolate
+linearly through their whole gap. Each model turns distances d (Morgans) into probabilities with one of two forms
+(`model/genetic_map.py`):
 
-Map contents and fallback rate are part of affected checkpoint identities.
-Painting checkpoints retain the resolved map so downstream scoring can
-reconstruct the painting law. This does not merge disconnected phase components.
+| form | used by |
+| --- | --- |
+| Haldane's recombination fraction of one meiosis, (1 - e^(-2d)) / 2 (`haldane_fraction`) | painting's switches between bins (at least 1e-15), family phase and phase polishing, the recombination decoder, its shared-orientation screening and the junction detector's hotspot ceiling |
+| the probability of at least one event of a Poisson process, 1 - e^(-d) | pedigree's selector switches (`poisson_switch_stay_terms`, which also returns the log switch and stay costs) and local selection's copying path model, with d multiplied by the number of generations |
+
+Family phase evaluates the Haldane fraction of its marker intervals with NumPy's vectorised `expm1`, which can
+differ from the compiled kernels' scalar `expm1` in the last bit.
+
+Assembly's linker and endpoint beam use genetic distances between blocks the same way (the beam's maximum
+transition gap comes from the map and the number of generations). The map's knots and fallback rate are part of the
+identities of every stage that uses them, so a changed map gives new results in a new output root rather than
+reusing old ones.
 
 ## What an inferred map means
 
-The input map is a process prior, not ground truth. recombination estimates rates
-conditional on the final phase and fixed inferred pedigree. Informative data
-can support spatial departures from a positive input prior; unobserved regions
-remain prior-sensitive, and a zero prior forbids crossover mass in that interval.
-Posterior event mass within a marker interval is allocated using the input
-map's integrated genetic mass, so structure entirely between uninformative
-markers is not independently learned.
-
-Shared-family orientation-error evidence is on by default; disable it with
-`--no-shared-family-evidence`. This affects recombination's conditional decoding and does
-not overwrite upstream phase. Expected crossover counts, high-confidence
-interval calls and observable meiosis exposure are separate outputs. Unknown
-gaps are not reported as measured zero-recombination regions.
-
-For simulations, use `--generating-map` and `--generating-rate-cm-per-mb` to set
-the generating process independently of the inference settings. Neither an
-estimated map nor family refinement is automatically fed back upstream.
+The input map is a prior for the recombination process, not ground truth. The recombination stage estimates rates
+conditional on the final phase and the fixed inferred pedigree ([recombination](methods/recombination.md)).
+Informative data can support departures from a positive prior; regions without informative meioses stay
+prior-sensitive, and a zero prior forbids crossover mass in its interval. Posterior event mass inside a marker
+interval is allocated by the prior's integrated genetic mass, so structure entirely between uninformative markers
+is not learned. Expected crossover counts, called crossover intervals and observable meiosis exposure are separate
+outputs; unobserved gaps are not reported as measured regions without recombination. Shared-family
+orientation-error evidence (`[recombination] shared_family_evidence`, on by default) changes only the recombination
+stage's decoding, never the published phase. Neither an inferred map nor family phase feeds back upstream.

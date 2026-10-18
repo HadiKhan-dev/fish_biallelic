@@ -1,922 +1,189 @@
 # Performance and resource use
 
-The supported pipeline uses missing-aware block discovery, local selection
-after each feedback round, L1–L4 assembly with progressive founder refinement, ragged
-painting and pedigree inference, family phase correction, and conditional
-recombination maps. See [model choices](founder_scaling.md) and
-[scientific validation](validation.md).
-
-Timings below use different inputs, CPU counts and cache states. Do not
-multiply their speedups or add them into a fresh end-to-end runtime. First-use
-compilation, shared-filesystem I/O, founder ambiguity and chromosome length
-matter. Configured threads are not a measure of sustained CPU utilization.
-
-## Opt-in cross-node batch scheduling
-
-Use `--batch-queue /shared/run/batches` (or `[run].batch_queue` in TOML) to
-publish independent local-refit and hierarchical assembly batches. Helpers on
-other allocated nodes run:
-
-```bash
-python run.py batch-worker --queue /shared/run/batches --cores 48
-```
-
-Both sides must use the same source snapshot and shared filesystem. The helper
-uses only its verified allocation; it does not request scheduler resources.
-Chromosome coordinators execute queued work too. Each executing node retains
-the existing dynamic process/thread allocation as local tasks finish.
-
-Evidence travels in bounded contiguous genomic slices, not whole chromosomes
-per worker. Scientific batch boundaries, masks, positions, parameters and task
-IDs stay unchanged. Only the chromosome coordinator writes ordinary pipeline
-checkpoints; helpers publish attempt-specific results. Results are gathered in
-genomic order before dependent levels proceed. Claims have renewable leases;
-late results cannot overwrite a reassigned claim. Completed hierarchy bundles
-can resume under the existing scientific checkpoint identity, and a resumed
-coordinator retries bundles that failed. Local fitting retains its ordinary
-block checkpoints (written in chunks of 64 blocks). Transport files are deleted
-once consumed and leave nothing behind a completed stage; see the
-[running guide](running.md#optional-cross-node-batches). Helpers use the
-persistent kernel store below.
-
-Without this option, execution stays node-local. Discovery, chromosome-wide
-founder refinement and downstream inference are not distributed by this queue.
-Single-batch hierarchy steps also stay local. Coupled stages and shared-storage
-traffic limit scaling; this is not a promise that every chromosome can use
-arbitrarily many nodes. Helpers exit after a bounded idle interval (120 seconds
-by default). Interrupted coordinator jobs should be confirmed terminal before
-resuming them; expired Slurm coordinators no longer offer new work.
-
-A focused 260-block missing-observation check on two Ice Lake nodes preserved
-all local-fit and hierarchy calls, numerical scores within tolerance, and
-hierarchy resume results. The full N320 seed8003 campaign subsequently
-completed all 22 chromosomes: 1,618 bundles completed, 449 on helpers outside
-their publishing allocation. Scientific results are recorded in
-[validation](validation.md#variable-recombination-map-campaigns--27-september-2026).
-
-| Full-density N320, 5× run | Inference wall time | Allocated 76-core node-hours, including evaluation |
-| --- | ---: | ---: |
-| Seed8002, chromosome shards without batch helpers | 1h51m23s | 6.412 |
-| Seed8003, chromosome shards plus cross-node batch helpers | 2h01m14s | 8.358 |
-
-Seed8003 finished evaluation and map reporting after about 2h02m36s overall.
-The resource total includes worker startup, bounded helper idleness and
-cleanup; it excludes the pre-existing interactive runner and separate
-development validations. It is normalized allocated CPU time, **not** a
-measured runtime on one 76-core node. Coordinator stage timers exclude
-remote work, so they cannot be summed into complete per-stage allocation
-costs. The recorded 0.694 remote execution node-hours are already inside the
-8.358 total and must not be added again.
-
-These are different seeds and allocation schedules, not a controlled
-speedup comparison. The distributed run cost more here; the measurements
-establish working cross-node execution, not a performance win. Both campaigns
-kept their frozen executor, including sequential family-phase orchestration;
-the newer chromosome-parallel family scheduler was validated separately below.
-
-## Concurrent contig reconstruction
-
-Block feedback, final assembly and painting of different contigs are
-independent, and one contig keeps only part of a large allocation busy. By
-default (`--contig-workers auto`, TOML `[run].contig_workers`, environment
-`HAPLOTYPES_CONTIG_WORKERS`) the workflows reconstruct up to one contig per
-sixteen `--cores` concurrently, in persistent contig coordinators that share
-`--cores` as leases (the chromosome scheduler used downstream). Larger contigs
-start first. Leases start in proportion to each coordinator's work (decoded
-block-discovery sizes), so the longest contig starts with its share. Each
-contig runs the unchanged sequential route with its lease as release, painting
-and checkpoint-compression ceiling; a coordinator that has finished its contigs
-returns its lease, and the others take it, in proportion to their remaining
-work, at the start of their next phase (each block-feedback round and context
-refine, each assembly level and painting). Pool phases that are already running
-(path-selection rounds, context refines, hierarchy levels and the founder
-refinement component pools) also take their share within about a second, as
-more threads for their existing workers; founder refinement re-reads its share
-at every sweep, so the last contigs grow into the freed cores. `--contig-workers 1`
-keeps the sequential route; an integer sets the maximum explicitly. A memory
-estimate (three times the decoded block-discovery checkpoint plus 16 GiB, and
-768 MiB per core; fitted to node memory sampled every 10 s in an N=320 run) can
-lower the number of concurrent contigs, never the core budget. Available memory
-counts the cgroup's working set: reclaimable inactive file cache (recently read
-checkpoints) is not treated as used, so the plan does not depend on what the
-page cache happens to hold. Narrow lanes are
-more efficient: a contig at 16 threads used about 7% fewer core-seconds than at
-32-37 (hierarchy, refinement tails and serial checkpoint phases scale poorly).
-
-Core ceilings are excluded from every scientific identity, so checkpoints,
-stage identities and resume are unchanged; painting checkpoints record the
-contig's actual ceilings as runtime provenance. Each contig writes only its own
-checkpoints, and only the parent publishes stage completion. Each contig's
-output goes to `logs/reconstruction_<contig>_<stamp>_<pid>.log`; the run record
-keeps one `reconstruction` stage for the concurrent section and per-contig
-timings under `products.reconstruction`. The first failing contig stops the run
-and is named with its log; the other contigs are stopped and resume from their
-own checkpoints. The contigs also stop in this way when the workflow's main
-process exits for any reason, such as a signal sent to that process alone, so
-none continues without an owner. Block discovery still processes contigs one
-after another: its discovery step already uses the whole allocation through one
-persistent worker pool, while helper threads prepare the next contig (loading,
-site quality, read calibration) and save the previous one.
-
-On 7 October 2026, sequential and concurrent runs from the same
-block-discovery checkpoints (76-CPU Ice Lake nodes; three simulations and the
-whole TroMau genome) gave identical published outputs: pedigree, phase,
-recombination-map and evaluation tables, and benchmark scorecards. Checkpoints
-differed only in timings, recorded core ceilings, execution counters, search
-traces and tolerance-level values of a few continuous path fits (up to about
-5e-7 relative). Two sequential runs differ in the same way, because the
-path-fitting thread team grows dynamically. On the real genome the
-reconstruction section took 4,927 s instead of 7,411 s (CPU busy 0.84 instead
-of 0.65), and the whole run 5,309 s instead of 7,803 s; the simulations took
-23-38% less reconstruction time. Each coordinator keeps a static, longest-first
-list of contigs, and a contig keeps its lease until it finishes, so a long
-contig late in a list can leave a tail.
-
-## Native compilation caches
-
-Package startup gives Numba a run-local cache directory for exactly the current
-compiled code, `<base>/<code key>`. The code key hashes the whole package
-source and its location, the Python, NumPy, Numba and llvmlite versions, the
-code-generation `NUMBA_*` settings and the host CPU model. Any edit therefore
-selects a new, empty directory, including an edited constant or callee in
-another file, which Numba's own per-file timestamp check would miss. The base
-isolates automatic caches by **run/job and hostname**, on both local machines
-and clusters. Slurm, PBS/Torque, LSF and SGE job IDs (including array-task
-identifiers) allow reuse between commands in the same job. Otherwise, each
-independent invocation creates a run ID inherited by its subprocesses. No
-scheduler-specific wrapper is needed.
-
-Parallel workers on the same host within that run/job reuse compiled kernels.
-The program recognizes its own inherited cache setting and recalculates it on
-startup: another hostname or recognized batch job gets a different path even when the
-parent's environment was forwarded. This does not serialize chromosome work
-or change the scientific model or checkpoints.
-
-The base lives below `SLURM_TMPDIR` within Slurm when supplied, otherwise
-Python's temporary directory (`TMPDIR` where configured). Even when that
-storage is shared, run/job/host-specific paths separate independent writers.
-No writable source checkout or administrator privileges are required.
-An explicit, nonempty `NUMBA_CACHE_DIR` replaces the base; the code-key
-directory is created inside it.
-
-Compiled kernels persist between runs in a store under
-`$XDG_CACHE_HOME/haplotype-reconstruction/numba` (by default
-`~/.cache/haplotype-reconstruction/numba`; on a cluster, a home directory that
-every node shares). It holds one directory per code key with a single
-`cache.tar` snapshot of a run-local cache (about 60-100 MB), and
-`manifest.pkl`, the compiled signatures and compile times of the latest
-publication. The `simulate`, `reconstruct`, `tropheops` and `astcal` workflows
-first install their key's snapshot, then compile the manifest overloads that
-the run-local cache still lacks (all of them for a new key) in a pool of the
-run's `--cores`, one function per task and longest first, before the workflow
-starts its own pools. When the workflow ends, also after a failure, it
-publishes the run-local cache as its key's snapshot if anything was compiled.
-Publication is an atomic rename, so concurrent runs on several hosts read only
-complete snapshots (the last publication of a key wins). The six most recently
-used keys are kept. Store failures (no writable home, full quota) only cost
-compilation time and are reported in the run log; the run record times the
-`numba_warmup` and `numba_publish` stages. `evaluate` and `batch-worker`
-helpers use the store in the same way; `recombination` and `export` use their
-run-local cache without it. Warm-up workers start Numba's threading layer before
-compiling: a kernel compiled against a parallel callee loaded from the cache is
-stored without that callee's parallel-runtime hook, and loading it in a process
-without a running threading layer aborts.
-
-These disposable files are separate from pipeline checkpoints and do not need
-to be retained to resume scientific work. Scratch cleanup follows the site's
-normal policy; the program does not delete caches that workers may still use.
-Isolation reduces accidental cross-run/node sharing, not every possible
-filesystem, compiler or hardware failure. Within-run sharing still requires
-the filesystem's normal atomic file replacement semantics; see
-[Numba's cache-sharing notes](https://numba.readthedocs.io/en/stable/developer/caching.html#cache-sharing).
-
-## Local feedback and assembly — 27 September 2026
-
-A matched seed8001 chr1 comparison (N=320, calibrated 5×, dense/bounded
-assembly, 48 Icelake CPUs) reduced both feedback rounds plus final L1–L4 and
-progressive refinement from **1,071.03 to 628.48 seconds**: **41.3% less wall
-time**. The baseline reused its initial local-fit checkpoint, so this comparison
-excludes that step. Fresh initial fitting took another 225.69 seconds; the
-optimized path from discovered blocks took **854.17 seconds (14m14s)** in total.
-Raw checkpoint loading and subsequent truth evaluation are outside these timers.
-These are individual runs, not a guaranteed speedup or a 76-core measurement.
-
-The optimized reconstruction had identical ordered allele arrays: six
-chromosome-length rows, 1,976,346 called alleles, zero missing and 38 allele
-errors. A saved TroMau chr1 first-L3 control also retained identical paths,
-likelihood and BIC. Focused fixtures covered missing observations, unequal
-founder frequencies, map intervals and thread counts; no new genome-wide
-downstream validation was run.
-
-The implementation reuses exact-input local searches and their release results,
-uses homologue symmetry without discarding probability mass, deduplicates local
-birth scoring and computes hard-call dosage emissions once per sample/site.
-Search budgets, calling rules and the 100-sweep panel-search limit are unchanged.
-The final benchmark step averaged about 38.7 busy cores out of 48, with 37.3 GiB
-peak RSS; I/O, startup and straggler tails prevent continuous full occupancy.
-
-Reference source, focused checks and isolated checkpoints remain locally in
-`work/runs/real_crosses_20260926_10815bb/qc/assembly_speed_20260927/`.
-See [the model and checkpoint rules](methods.md).
-
-## Observation fitting and count-up screening — 25 September 2026
-
-These are matched cached-input comparisons on one 112-core Sapphire Rapids
-allocation, split into four disjoint 28-core tasks. Native kernels were warm;
-fresh count-search checkpoints were used. They are not complete workflow timings.
-
-| Operation | Previous (s) | Current (s) |
-| --- | ---: | ---: |
-| Fit nested read models, Tropheops histogram (116 samples) | 8.45 | 0.53 |
-| Fit nested read models, Astcal histogram (290 samples) | 19.39 | 1.13 |
-| Final count-up/refit, seed7004 full chr10 | 58.20 | 10.61 |
-| Final count-up/refit, seed7019 full chr7 | 97.02 | 14.46 |
-
-Compiled analytic gradients and EM sufficient statistics replace temporary
-sample/count/genotype tensors without changing the fitted likelihood or
-optimizer settings. Histogram extraction, GL application and downstream
-inference are excluded from these fitting times. Each compared real-data fit
-selected the same model; normalized GL differences were below 3.2e-9, with no
-genotype-argmax changes in the application control.
-
-The count-up screen reuses the optimistic free-block-boundary score to exclude
-only provably losing additions, retaining the incumbent repair. All nine
-matched controls produced identical called panels and selected paths. Eight
-became faster; the remaining seed7010 regional control could not be screened
-and took 48.49 versus 51.75 seconds. Thus this is not a uniform speedup.
-The full-chromosome rows above measure only the final count-up pass, not L1–L4
-assembly or all progressive refinement.
-
-Two further family-message prototypes were not promoted. On the 112-core
-seed7010 continuation, 20 actual iterations took 9.67 seconds unchanged,
-9.71 with fused branch scheduling and 9.36 with a fixed-homozygote shortcut.
-Calls and messages matched, but these small differences did not justify
-additional implementation complexity. Cold compilation is excluded.
-
-Artifacts and frozen pre-change source:
-`.work/pipeline_polish_20260925.6STDyVgq/`.
-See [validation](validation.md#numerical-performance-and-product-checks--25-september-2026)
-for scope and the separate no-training-read correction.
-
-## Complete workflow timing
-
-### Fresh seed3000, N320 and 5×
-
-The implementation as of that date completed a fresh 22-chromosome run through recombination on
-17 September 2026, using five 76-core Ice Lake allocations and one 66-core
-allocation. Measured multi-node elapsed time was **93.67 minutes**, excluding
-the subsequent truth evaluation. This includes shared initialization,
-synchronization and a deliberate finish-controller restart to distribute family phase.
-
-Summing disjoint measured work gives a **single-76-core estimate of about
-5 hours 10 minutes** (roughly 5–5¼ hours), not a measured continuous one-node
-runtime. The design uses 20/100/200 cohorts and 8,956,852 markers.
-
-| Portion | Estimated 76-core minutes from measured work |
-| --- | ---: |
-| Shared templates, simulation and read preparation | 10.1 |
-| Initial 200-SNP discovery | 39.5 |
-| Both feedback rounds, including balanced selection | 88.4 |
-| Final L1–L4 assembly and progressive founder refinement | 112.4 |
-| Painting computation | 2.6 |
-| Pedigree evidence preparation | 3.8 |
-| Genome-wide pedigree inference, including prepared-input loading | 15.8 |
-| Family refinement and final phase | 19.7 |
-| Recombination maps | 3.0 |
-| Remaining per-chromosome startup, I/O and bookkeeping | 12.3 |
-| **Total, before rounding individual rows** | **307.5** |
-
-The estimate counts shared initialization once, sums independent chromosome
-work, and does not add nested timers or multiply six-node elapsed time by six.
-It assumes ideal 66-to-76-core scaling only for work executed with 66 cores;
-without that normalization the sum is 313.8 minutes. Repeated cold compilation,
-process/cache loading, shared-filesystem contention and continuous-process
-reuse contribute uncertainty. The interrupted first finish attempt, repeated
-cached-stage verification and final truth evaluation are excluded from this
-fresh-work estimate.
-
-Independent chromosomes ran with each node's full CPU ceiling and existing
-dynamic allocation; this does not imply sustained full utilization. pedigree ran
-genome-wide on one 76-core node. Once parentage was fixed, a **run-local** family phase
-scheduler called the unchanged chromosome solver concurrently, retaining the
-full stage identity and canonical global completion checks. This scheduler is
-not a new production CLI feature. Its 4.35-minute parallel wall time is not the
-single-node family phase estimate: the latter sums chromosome solves. A separate chr8
-replay matched every final allele call and its 25-iteration stopping point.
-
-See [scientific outcomes and limitations](validation.md#fresh-seed3000-end-to-end-validation).
-Detailed timings and frozen source remain in
-`.work/seed3000_full_20260917_cFrnkNJ8/`; the readable run report and checkpoints
-remain under `work/runs/seed_3000/`, outside Git.
-
-### Earlier workflow measurements
-
-There is still no measured fresh-seed, full-genome runtime for this complete
-implementation on a 112-core node. The earlier seed403 comparison took 204.03
-minutes from cached block discovery on 76-core Ice Lake hardware. Adding its unchanged
-input/discovery durations gives a 252.53-minute estimate, not a measured fresh
-run. It predates the expanded and subsequently accelerated founder refiner.
-The [recorded stage breakdown](validation.md#seed403-end-to-end-performance-comparison)
-must not be presented as timings of the current full pipeline.
-
-Earlier N80 downstream replays on 76 cores took 244–267 seconds for pedigree,
-259–263 for family phase and 42–43 for recombination. They used completed upstream products and
-different seeds, not a matched scaling or fresh whole-pipeline experiment.
-Discovery, both feedback rounds and final assembly must be included in any
-fresh-run measurement.
-
-## Final founder refinement
-
-Progressive refinement runs after each executed level of final L1–L4
-assembly, never in the two local-feedback passes. Since 6 October 2026 it is
-the converged search with effective-carrier count decisions (see
-[methods](methods.md#final-founder-path-refinement) and the
-[work analysis](founder_scaling.md#final-founder-refinement-explicit-work-and-parallelism)):
-every count decision refits each candidate panel to convergence, with no
-deficit screen. Small components run concurrently and share a
-chromosome-derived early proposal resolution; late levels retain
-component-specific resolution. Independent candidates share the verified CPU
-budget; freed threads become available at numerical boundaries.
-
-The timing tables below were measured with the earlier budgeted sparse
-refiner and its separate final count-up/refit, both since removed; they are
-historical records, not timings of the current search.
-
-### Progressive final assembly at N80
-
-Matched-input 5× controls on 76-core allocations give the following warm-native
-measurements. These include preprocessing, **all final hierarchy levels and
-their refinement**, and assembly checkpoint writes. They exclude initial input
-loading, truth evaluation, complete-resume verification, discovery, both local
-feedback rounds and downstream stages.
-
-| Control | Earlier final-only schedule (s) | Progressive schedule (s) |
-| --- | ---: | ---: |
-| Seed2005 chr6 | 68.08 | 101.48 |
-| Seed2006 chr20 | 64.24 | 99.98 |
-| Seed2006 chr3, 1,505,847 markers | 190.90 | 321.39 |
-
-These controls cost approximately 1.5–1.7× the previous final-only schedule,
-not four times as much. Seed2006 chr13 takes 81.23 seconds in the progressive
-implementation; its stored original comparison includes cold compilation, so
-it is not used as a warm speed ratio. Runs were not alternating repetitions;
-chr20 uses the same node, while chr6/chr3 compare different 76-core nodes.
-First-use native compilation added roughly 170 seconds in these experiments.
-
-The initial naive progressive chr3 run took 970.5 seconds, with approximately
-426 GiB of observed parent-process RSS. Sharing early proposal resolution,
-parallelizing complete independent components, reusing identical searches and
-accelerating metadata validation reduced the current run to 321.4 seconds and
-35.2 GiB peak parent RSS, with the same 145 called-allele errors. Parent RSS is
-not a node-wide peak-memory measurement. The new primary-preserving tie search
-retains the cubic founder-count bound.
-
-The validation used five 76-core allocations and one 66-core allocation
-(446 CPUs), with one full-node chromosome stream per allocation. Component and
-candidate teams subdivide each node's verified budget and grow at numerical
-boundaries. Compilation, metadata checks and I/O still contain serial work;
-configured cores must not be interpreted as sustained 100% utilization.
-The 66-core timings are kept separate from the table above.
-
-### Earlier final-only N80 warm-cache measurements
-
-These isolate one post-L4 refiner invocation. They predate the progressive
-schedule and partial-evidence tie search and are **not** current total
-L1–L4-plus-refinement timings.
-
-| Complete final-only refiner replay, 5x, 76 CPUs | Starting implementation (s) | Optimized, unscreened count (s) | Optimized final-only (s) |
-| --- | ---: | ---: | ---: |
-| Seed2006 chr11 | 114.60 | 47.34 | 20.50–20.62 |
-| Seed2006 chr20 | 110.22 | 41.25 | 25.17–25.46 |
-
-Elapsed-time reductions are approximately 82% and 77%. These warm-native-cache
-runs include fresh refinement checkpoints but exclude initial input loading,
-truth evaluation, discovery, hierarchy and downstream stages. Starting
-measurements used the same fixtures and 76-core hardware, not alternating
-same-node repetitions. The first integrated chr20 call took 44.05 seconds
-including native compilation/cache loading.
-
-Other 76-core controls took 15.95 seconds (seed2006 chr22), 15.03
-(seed2000 chr13), 27.54 (seed2006 chr6), 25.78 (seed2005 chr23) and 23.15
-(seed2006 chr1). Thus roughly 25 seconds is achievable on the named difficult
-fixtures, not a universal limit. Fragmented components and useful deep count
-refits can take longer.
-
-The direct-production comparison covers 217 cached chromosomes across ten
-N80/5x seeds, representing both 20/30/30 and 10/30/40 cohort designs. All ordered
-alleles, missingness, geometry, probabilities and provenance match the frozen
-pre-optimization baseline. The screen avoided 163 losing deep refits while
-retaining all 11 accepted count reductions. These are empirical comparisons,
-not a guarantee for unseen inputs or an accuracy claim for every earlier
-algorithm redesign. See [validation scope](validation.md#optimized-founder-refinement).
-
-### Earlier final-only N320 warm-cache measurements
-
-Seven distinct N320/5x chromosomes from seeds404–408 passed field-by-field
-comparisons against the frozen predecessor using unchanged cached L4 inputs.
-Both versions give 274 founder-allele errors in 20,334,788 called cells, with
-592 unknown output cells. This test isolates refinement and deliberately
-retains the input component boundaries.
-
-| Same-node warm cache, fresh final-only checkpoints | CPUs | Predecessor (s) | Optimized final-only (s) |
-| --- | ---: | ---: | ---: |
-| Seed404 chr1 | 76 | 255.96 | 58.48 |
-| Seed404 chr11 | 76 | 333.80 | 62.88 |
-| Seed405 chr20 | 76 | 337.64 | 47.17 |
-| Seed407 chr10 | 76 | 195.87 | 53.45 |
-| Seed408 chr19 | 76 | 92.19 | 42.96 |
-| Seed404 chr20, fragmented | 66 | 240.87 | 87.84 |
-
-Large seed406 chr3 (1,505,847 markers) took 179.33 seconds on 76 cores with
-warm native caches. Separate first-use 112-core runs took 221.79 seconds
-optimized versus 642.31 for the predecessor; these are not comparable to the
-warm 76-core result as a scaling experiment. Short N320 cases therefore take
-roughly 43–63 seconds; the large chromosome still takes about three minutes.
-
-All 27 refinement solves, including paired warm repeats and the additional
-76-core chr3 check, passed completed-resume checks. Fourteen optimized outputs
-were compared against recomputed predecessor outputs. No discovery or
-upstream assembly was rerun in this comparison.
-
-### Cached block-discovery reconstruction replay
-
-The subsequent eight-fragmented-chromosome check reran both balanced feedback
-rounds, partial-founder-aware L1–L4, final refinement and painting. Seven
-existing nodes provided 558 CPUs: five with 76, one with 66 and one with 112.
-The first available node picked up the eighth chromosome.
-
-From loaded block discovery inputs through painting/checkpoint output, seven chromosomes
-took 372–590 seconds each; large seed406 chr3 took 1,087 seconds on 112 cores.
-These include fresh per-node native-cache costs except for the queued chr15
-case. They exclude discovery, initial reads, truth evaluation and pedigree–recombination, so
-are neither isolated refiner timings nor full fresh-seed timings.
-
-All eight now contain one six-row component, but joining is not uniformly an
-accuracy improvement. Seed407 chr15 rises from 2,075 to 4,994 errors, chiefly
-during final refinement. The [fragmentation validation](validation.md#n320-fragmentation-replay)
-retains this regression and the smaller seed408 chr18 regression explicitly.
-
-### Memory and checkpoint I/O
-
-Intermediate refinement checkpoints store identity-bound local-row paths and
-non-derived metadata instead of repeated full-chromosome arrays. Final
-release products retain ordinary block arrays. Completed and partial resumes
-reconstruct the original probabilities, called/inference alleles and provenance.
-
-On the N80 chr11/chr20 integration controls, intermediate storage fell from
-about 405/387 MB to 2.11/2.42 MB, with unchanged checkpoint counts of 258/327.
-The later 217-chromosome matrix used about 354 MB of intermediate checkpoints
-and had a maximum observed process RSS of 25.5 GiB. N320 refiner-only peak RSS
-was 63.94 GiB; the fresh-feedback/assembly chr3 replay peaked at 110.90 GiB in
-its parent process. These are different workloads and not aggregate node-memory
-measurements.
-
-Packed buffers, dosage/traceback tables and background/flank caches are bounded
-by available memory; direct numerical fallbacks remain. Candidate concurrency
-is also memory-bounded. Sampled warm N320 runs averaged about 48–54 useful
-CPU-equivalents on 76-core nodes, rather than continuous full saturation.
-Phase boundaries, checkpoint I/O, memory traffic and synchronization remain.
-
-Detailed benchmark sources and artifacts stay in ignored work storage:
-`.work/founder_25s_20260916_EO7tojvt/`,
-`.work/n320_refiner_20260917_g3ece5Py/`, and
-`.work/n320_fragment_retry_20260917_UTISglBg/`. Progressive assembly results are
-in `.work/progressive_refinement_20260917_V2eVeIBe/`.
-Earlier optimization-stage timings are archived locally rather than repeated
-here as competing descriptions of the current implementation.
-
-## CPU allocation and checkpoint reuse
-
-`core/parallel.py` owns the shared process/thread budget, forkserver pools,
-shared arrays and dynamic Numba allocation. Discovery reuses workers across
-chromosomes in all three workflows. Active workers share the full caller's CPU
-affinity; freed cores become available at the next numerical phase boundary.
-A running Numba kernel cannot acquire additional threads mid-call.
-
-Scientific results do not depend on the thread count, the contig layout or
-timing. Kernels never combine floating-point partial sums by thread or worker:
-the copying-model E-step writes per-sample statistic rows in parallel and adds
-them element by element in sample order, and totals in parallel kernels are
-sequential loops rather than team-size-dependent `np.sum` reductions. Formerly
-ulp-level, team-size-dependent sums could resolve exact ties differently
-between runs (for example a level-0 merge/drop choice); the fixed order makes
-every checkpoint and published output bitwise reproducible at any thread count.
-
-Painting, genome-wide pedigree inference and family refinement use their
-supplied Numba budgets with other numerical libraries limited to one thread.
-Compression/decompression and raw-GL tile work are also bounded by the caller's
-budget. Memory bandwidth, memory-limited worker counts, I/O and straggler tails
-can limit useful activity; a nominal thread count is not a utilization measure.
-
-Checkpoint records retain scientific identities. A chromosome's GLs,
-positions and observed mask are stored once, in its `discovery/prepared`
-record; pedigree, allele refit, family phase and recombination decode only the
-arrays they use from it, and discovery blocks rebuild their GL slices from it
-on loading.
-
-| Bounded raw-evidence work, 112 CPUs | Before | Updated |
-| --- | ---: | ---: |
-| Complete GL construction, chr16 | 11.93 s | 0.81 s |
-| Complete GL construction, chr3 | 48.99 s | 3.02 s |
-| Repeated raw-evidence read, chr16 median | 2.10 s | 0.60 s |
-| Repeated raw-evidence read, chr3 median | 8.41 s | 2.34 s |
-
-GL timers include validation/construction, not loading the read checkpoint.
-Reader timings are repeated shared-filesystem reads, not guaranteed cold-disk
-measurements. On chr3, GL-construction peak RSS fell from 46.96 to 26.48 GiB and
-reader RSS from 38.82 to 11.52 GiB. Compact chr16/chr3 caches occupy approximately
-0.77/3.04 GiB and cost approximately 1.76/6.86 s to write.
-
-## block discovery: 200-SNP discovery
-
-The canonical reversible-cavity search retains its likelihoods, three mean-field
-starts, convergence, wildcard interpretation, ties and release rules.
-
-- Binary frontiers share identical fixed-K fitting trajectories, including
-  observation masks. Wholly unobserved samples become WW before usage ordering
-  and founder updates.
-- Equal assigned-pair/read cases share cavity calculations, predictive
-  logarithms and entropy terms without rounding likelihoods or losing sample
-  multiplicity. Site tiles target 8 MiB.
-- Ordered founder-row/pair emissions are shared within frontiers using bounded
-  scratch. Pattern tables retain ascending-set-bit sums and contiguous access.
-- Exact gauge cuts decompose positive-edge connected components and solve
-  bipartite components by coloring. Non-bipartite components retain exhaustive
-  cuts; the high-K heuristic and production exact-search cap are unchanged.
-
-The default mean-field cavity predictor is not itself exhaustive enumeration.
-Exact gauge search can still be exponential in non-bipartite component size.
-Clustering retains its jointly observed, bit-packed distance calculation and
-can require quadratic storage in the residual cloud size.
-
-| Separate warm comparisons | Before | Updated |
-| --- | ---: | ---: |
-| Mask-aware fitting/cavity reuse, 1,571 blocks, 76 CPUs | 99.84 s | 90.15 s |
-| Further exact reuse, same batch size, first 76-CPU node | 89.74 s | 83.05 s |
-| Further exact reuse, second 76-CPU node | 88.67 s | 82.09 s |
-| Shared frontier emissions, 1,571 blocks, 112 CPUs | 48.95 s | 38.51 s |
-| Graph simplification, all 1,647 chr1 blocks, 112 CPUs | 40.82 s | 40.31 s |
-
-These exclude first-use compilation/pool startup. The graph simplification is
-effectively neutral on the tested low-K chromosome; a roughly 22-fold bipartite
-K=16 kernel improvement used a raised exact cap only in that fixture.
-All 1,647 block outputs and targeted 2× dropout/missing-tract controls retained
-their scientific fields. No new full-genome discovery timing is implied.
-
-## Founder completion before L1
-
-Let D=K(K+1)/2 be unordered diplotypes, U_l unresolved founder alleles at site l,
-and C_l allowed allele configurations: C_l=2^U_l for U_l<=10, otherwise the
-uncertain-core support of `assembly/site_posterior.py` (an exact core of at
-most 2^10 assignments or a Hamming ball of O(U_l^3)), fixed for the whole EM.
-Completion retains the shared latent-allele model, robustness parameters and
-release gates; the former cap U_l<=6 is gone.
-
-For each configuration update, dosage sufficient statistics accumulate sample
-log evidence once. Dosage terms are quadratic polynomials in the unknown binary
-alleles; known alleles are absorbed into constants/linear terms. Successive
-binary table expansion evaluates all assignments. Positive-only marginal
-folding supplies unary/pair dosages for the state update.
-
-The dominant per-iteration work is
-O(N L D + L D + sum_l C_l), with O(K sum_l C_l) configuration storage.
-Identical suffixes of the existing five starts are shared while preserving
-their initial ELBOs, first-increment checks and diagnostics. These starts do
-not constitute five independent searches after their identical first update.
-
-Whole-bin cavity completion reuses outside-bin scores, counts and separations.
-Its core likelihood table improves from O(N K² 2^U) to O(N K² + N 2^U).
-The public assignment table and exact carrier-sensitivity diagnostics still
-retain O(N U 2^U) work for U<=10. Near-cancellation polynomial values use direct
-positive mixtures. Above ten unresolved founders the uncertain-core support
-replaces the enumeration (O(N U^3) per site, support-restricted sensitivity in
-O(N U^2)); its Hamming-ball regime adds the shell release guard, and sites with
-two comparable unconnected posterior basins release nothing.
-
-| Complete preprocessing, fixed chr16 blocks, 112 CPUs | Before | Updated |
-| --- | ---: | ---: |
-| Seed400, 1,828 blocks | 31.08 s | 27.03 s |
-| Seed401, 1,828 blocks | 30.72 s | 25.99 s |
-| Seed402, 1,828 blocks | 30.75 s | 25.88 s |
-
-All discrete fields matched across 5,484 blocks; maximum float-array differences
-were 1.01e-12. A synthetic exchangeable-founder case amplified internal state
-roundoff to 7.96e-6, but starts, iterations, released calls and held-out profiles
-were unchanged. This is documented numerical variation, not bitwise identity.
-
-## L1–L4 assembly
-
-Assembly uses one linker with at most 20 fitting iterations and bounded
-search with 16 full proposal scores per category; dense learned transitions
-are cubic in K. Search quality is described in
-[founder scaling](founder_scaling.md).
-
-Model-preserving optimizations include range-guarded dense BLAS contractions,
-streamed scores, shared candidate prefixes, native stable top-q ranking,
-streamed candidate/mate reductions, and reuse of an already scored panel.
-Small/extreme dense cases retain stable log-domain arithmetic. The structured
-model has its own near-quadratic extreme-value path, not a cubic fallback.
-Scientific search caps and full Viterbi/BIC acceptance are unchanged by these
-numerical optimizations.
-
-| Whole four-block assembly, 320 samples, 112 CPUs | Before | Updated |
-| --- | ---: | ---: |
-| Dense, K=64 | 10.32 s | 8.78 s |
-| Dense, K=128 | 90.25 s | 42.47 s |
-| Structured, K=64 | 19.95 s | 18.69 s |
-| Structured, K=128 | 83.05 s | 60.40 s |
-
-These fixed-input comparisons retained all calls, BIC values and search
-decisions. They do not establish a low-K win: warm complete chr16 calls on
-seeds401/402 rose from 107.56/104.53 s to 112.11/110.50 s, and chr3 from 418.98
-to 428.76 s, including added downstream-evidence cache writes.
-The last non-assembly optimization round changed none of the L1–L4 algorithms.
-
-## sample painting and pedigree inference
-
-Painting uses bounded sample batches, direct ragged emissions and efficient
-release/chunk construction. painting coverage validation uses sorted-bin searches
-and difference arrays: O(C log M + M) instead of O(C M) for C chunks/M bins.
-
-Pedigree fuses strict raw normalization and gathering, reuses named-founder emissions
-only where both alleles are called, and specializes exactly classified star
-bridge operators. Missing/BACKGROUND states retain their general likelihoods.
-The child-tiled scoring cache is capped at 256 MiB; uncached scoring preserves
-the same quadratic state calculation. Deterministic transmitted alleles avoid
-an unnecessary mate-state sum.
-
-Separately, painting can retain the upper triangle of its symmetric diploid emission
-table. Its aggregate budget is at most 1 GiB per chromosome, also constrained
-by an explicit painting workspace limit. pedigree reuses it after existing
-raw-input, sample-order and configuration checks. Transitions remain ordered;
-high-K, memory-limited and uncached products recompute emissions normally.
-
-| Packed-cache comparison, 112 CPUs | Before | Updated |
-| --- | ---: | ---: |
-| chr16 pedigree preparation | 5.06 s | 3.45 s |
-| chr3 pedigree preparation | 20.74 s | 18.35 s |
-| chr16 painting + checkpoint write/read + preparation | 7.32 s | 6.36 s |
-| chr3 painting + checkpoint write/read + preparation | 29.14 s | 27.80 s |
-
-Net savings are 5–13% for these measured portions, after added I/O. Compressed
-painting files grow from 48.6 to 261.8 MB on chr16 and 197.3 to 541.7 MB on chr3;
-retained arrays occupy 250/406 MiB.
-
-Earlier paired painting tests on 19 seed402 chromosomes at 76 threads reduced
-painting-call time from 247.87 to 74.74 s; largest chr3 fell from 48.50 to 13.12 s.
-These exclude discovery, assembly, input loading and checkpoint writes.
-
-Label continuity ranks row-suffix transpositions by exact Viterbi-score gains
-in O(links N S^3) per search iteration. A transposition fixes every state that
-involves neither of its rows, so the identity terms are sorted once per link
-and sample and only the 4S - 4 affected states are evaluated per pair; the
-gains are bitwise identical to the former O(links N S^4) scan. A candidate
-check re-decodes only the samples whose best state at the link can involve the
-transposed rows; the other samples' painted switch counts cannot change. On
-random message arrays (40 links, 116 samples, 8 threads) the gains took
-0.0026/0.014/0.039/0.070 s at K = 8/16/24/30, versus 0.0012/0.021/0.104/0.258 s
-(time exponent over K = 16-30: 2.6 versus 4.0). Accepted moves and painting
-checkpoints are unchanged.
-
-The latest full 22-chromosome metadata-free seed401 pedigree call took **15.04 min**,
-including loading/preparation/output; inference itself took **9.44 min** on
-112 CPUs. Peak process RSS was about 66.9 GiB and sampled CPU activity 97.9%.
-It used new packed chr3/chr16 paintings and the uncached path elsewhere.
-All seven result tables matched the accepted reference: 20 M0 roots, 300 exact
-M2 pairs and 600 correct edges with no extras. This is a measured duration,
-not a paired whole-stage speedup or an untouched-seed accuracy claim.
-
-### Chromosome-parallel pedigree scheduling
-
-The default pedigree scheduler prepares chromosomes concurrently, including
-checkpoint loading and validation. Screening and detailed scoring also run in
-persistent chromosome workers: source tensors and M0/M1 projections stay in
-the owning worker across the genome-wide candidate-panel barrier. Only compact
-summaries and final scores return to the coordinator.
-
-The CLI's `--cores` remains the total CPU budget, not a per-chromosome count.
-With 22 tasks and 76 CPUs, 10 workers initially receive four threads and 12
-receive three. Larger chromosomes start first. Finished workers return their
-thread allocation; remaining workers expand at projection, child-batch and
-checkpoint boundaries. An active numerical kernel is not resized mid-call.
-
-Both phases limit concurrent chromosome processes with `memory_worker_limit()`.
-A preparation worker is budgeted its decoded raw evidence and painting plus
-three arrays of 8 N B S^2 bytes (source emissions, factors and working space;
-founders and markers per component come from the painting's founder-support
-report). A scoring worker is budgeted its decoded painting plus four decoded
-prepared chromosomes, whose source factors are N B S^2 doubles. On chr7-scale
-synthetic input at K = 30 (production kernels) the preparation estimate was
-1.33x and 1.10x the measured peak RSS plus the decoded painting a worker holds,
-at N = 116 and 500. At K <= 9 and N <= 120 every chromosome fits, so process
-counts are unchanged; for 22
-chr7-sized chromosomes at K = 30 and N = 500 a 501 GiB node runs 20
-preparation and 16 scoring workers, a 256 GiB node 10 and 8.
-Claims never exceed the total budget, and results/aggregation retain configured
-chromosome order regardless of completion order.
-
-Bootstrap and leave-one-chromosome-out refits share one process pool, with
-separate support counts and unchanged random draws. Full-marker Mendelian
-exclusion uses the same chromosome scheduler rather than a four-worker cap.
-The candidate-panel selection and dependent family-message iterations remain
-genome-wide; this does not turn pedigree inference into independent chromosome
-pedigrees. Custom in-process score callbacks retain a sequential fallback.
-
-This is an execution-only change. Small numerical, missing-data, process-budget
-and checkpoint-resume checks validate it; no new speedup benchmark is claimed.
-The historical timings above predate this scheduler. Shared-filesystem
-bandwidth and indivisible kernels can still limit CPU utilization.
-
-## family refinement and final phase and phase correction
-
-The phase-focused product begins checking final phase after 20 iterations and
-requires five consecutive unchanged checks unless family inference converges
-sooner. It does not release full marginal-posterior tensors. This is a validated
-scientific stopping trade-off, not a guarantee of latent convergence.
-
-Exact implementation work skips irrelevant hard-genotype factors, contracts
-zero-transition phase bins, and reuses settled selector chains and an identical
-immediately preceding conditional solve. Factor-produced 32-marker dirty tiles
-restrict selector-block inspections; forward/backward propagation and stopping
-semantics remain intact. Ordinary/branch caches are bounded near 24/4 GiB per
-chromosome. Transient work states retain messages, phase and stability history.
-
-Family phase now uses the same node-local chromosome scheduler as pedigree
-scoring. Each worker loads and checkpoints its own chromosome; the parent
-publishes ordered summaries and completion only after all chromosomes succeed.
-The CLI's `--cores` is the **total** CPU budget. Finished workers release their
-threads, and remaining workers grow their leases at family-message iterations,
-phase-polishing colour updates and checkpoint boundaries—not inside a running
-kernel. The pedigree, likelihoods, phase-release criterion and genomic component
-boundaries are unchanged.
-
-A decoded-source-size estimate limits simultaneous workers to available
-memory, since family-message/selector workspaces are substantially larger than
-compressed checkpoints. This does not reduce the shared CPU budget; fewer
-active chromosomes receive more threads. This scheduler is within one
-allocation, not cross-node family inference. Active frozen campaigns keep their
-original source snapshot. The timings below predate this scheduling change.
-
-A focused full-density N320 check on seed8002 chr16 and chr22 used 32 Ice Lake
-SL4 CPUs, initially 16 threads per chromosome; the survivor grew to 32.
-All 489,378,096 called alleles, phase paths, missingness, corrected painting
-chunks and stability/retry results matched the saved sequential products;
-floating diagnostics agreed within 1e-7 relative/1e-8 absolute tolerance.
-Completed-stage resume left chromosome files untouched. The pair took
-137.07 seconds through phase checkpoint publication; the whole validation job
-took 159 seconds, with 53.6 GiB reported peak RSS and about 15.1 average busy
-cores including loading, compilation and comparison. This is not a matched
-speedup benchmark or a whole-genome runtime estimate. Results are recorded
-locally in `.work/family_parallel_20260927.aKsAtGMm/`.
-
-
-Recorded complete phase-focused trials took 18.10–18.71 min for seeds400–402
-on 76 CPUs; a canonical seed401 wrapper run including checkpoints took 19.03 min.
-Those runs used fixed earlier q4 assemblies, not newly assembled q16 inputs.
-They do not guarantee a sub-20-minute runtime on every dataset.
-
-The latest dirty-tile comparison gave chr16 27.80 ->26.30 s and paired chr3 means
-76.74 ->74.55 s on 112 CPUs: modest 3–5% gains with identical final phase and
-stability results. Earlier exact reuse reduced summed 22-chromosome calls from
-586.55 to 542.70 s; those sums exclude external raw reads/final checkpoint writes.
-
-## Conditional recombination maps
-
-Shared-family orientation trials use indexed four-state transfer products,
-lazy parent/child XOR updates, and a separate tree for the asymmetric
-orientation prior. Missing/gap/component resets, trial order, conflict refresh
-and acceptance remain unchanged. After O(E L) initialization, trial/update
-work is O(log J) per incident edge, with J segment leaves.
-
-The indexed route requires a positive artifact process and strictly increasing
-genetic coordinates. Disabled artifact processes or flat map stretches retain
-stable streaming. A 100-Mb zero-map case exposed non-finite unguarded products;
-the guarded public route matches streaming. No truncated local likelihood or
-changed recombination prior is substituted.
-
-All 22 seed401 final-phase maps passed paired comparisons. Summed paired mean
-chromosome times fell from 176.59 to 146.43 s: 17.1% less wall time and 20.1%
-less CPU work. Up to four workers shared 112 CPUs. These sums are not a single
-112-thread whole-stage wall time. Orientation moves, called crossover intervals
-and coverage matched; floating map values matched rtol=2e-9, atol=2e-8.
-
-Whole-genome map generation now schedules independent chromosomes with the same
-dynamic CPU leases as pedigree inference and evaluation. Numerical phases
-refresh their thread allocation at safe boundaries. Each worker loads/writes
-its own chromosome; the coordinator publishes ordered summaries and the global
-completion marker only after every chromosome succeeds. A decoded-size estimate
-limits concurrent workers against the enclosing Slurm memory budget.
-
-On all 22 cached seed8001 final-phase products, the 76-core map stage took
-**56.30 s**, versus **201.27 s** recorded in the original run. All scientific
-checkpoint fields matched exactly apart from timing/source fingerprints, and
-all 132 chromosome CSV/PNG files were byte-identical. This is an observed
-comparison, not an alternating cold-cache benchmark. Small controls additionally
-covered partial resume, shared-family evidence on/off, missing data, component
-gaps and flat/input-map stretches.
-
-## Checkpoint loading and final simulation evaluation
-
-The v2 protocol-5/Blosc format and its per-chunk CRC checks are unchanged.
-Large checkpoint reads use a rolling queue across array-buffer groups:
-positioned reads, checksum verification and decompression run concurrently into
-disjoint, aligned final buffers. The supplied thread count is a total budget
-split between the parser/writer and chunk workers' Blosc teams, not multiplied
-by nested pools. Any completed chunk releases CPU credits for queued work;
-there is no full-batch barrier.
-Compressed input in flight is bounded near one original maximum chunk (1 GiB);
-small files and one-thread loads retain the direct path. Blosc's GIL-release
-mode is enabled only within a protected parallel-I/O scope, then restored;
-without it, concurrent decoders serialize in the installed Blosc2 version.
-Checkpoint writes overlap compression and checksumming, while emitting chunks
-in their original order; a record counts only once it is completely written. Pending writer
-workspace is bounded using raw-plus-compressed byte reservations, with a single
-oversized direct chunk allowed alone. Source/final arrays and any required
-contiguous producer copy are separate from that allowance; earlier asynchronous
-work drains before another large non-contiguous copy is made. Small arrays
-retain the packed-group path.
-Metadata still uses the bounded spool, and no object is returned before
-verification completes.
-
-`run.py evaluate --cores N` evaluates chromosomes concurrently using the
-shared chromosome scheduler in `core/chromosome_parallel.py`. Workers load their
-own records and return only metric rows; the coordinator retains simulation
-chromosome order and the existing JSON/CSV schemas. Each chromosome's truth is
-a separate `simulation/truth` record, so evaluation never reads or decompresses
-the large read and likelihood arrays. No truth record is read by inference.
-
-Founder metrics batch small panels and tile large panels into parallel compiled
-integer counts. Hungarian matching, tie handling, component spans and metric
-definitions are unchanged. Ancestry masks use sparse interval endpoints instead
-of repeatedly updating full spans.
-
-Concurrency is limited by decoded checkpoint sizes and available memory, not
-compressed disk sizes. This matters: the seed8001 serial evaluator peaked near
-50 GiB, and running all 22 decoded source/product pairs together would require
-about 291 GiB before workspaces. A process-count limit does not reduce the CPU
-budget: the active chromosome workers share all requested cores and grow their
-thread leases at numerical and loading boundaries.
-
-Scientific metric definitions, whole-component founder matching, missingness
-handling, stage selection and inference outputs are not changed. The evaluation
-is still downstream-only and never feeds simulation truth into inference.
-
-Before the rolling-I/O, compiled-metric and compact-truth additions, the first
-chromosome-parallel full-density seed8001 evaluation (all 22 chromosomes and all
-saved stages) took **72.67 s** on 76 cores, compared with
-**464.81 s** recorded before these changes. All five JSON/CSV outputs were
-byte-for-byte identical. This is an observed 6.40-fold elapsed-time difference,
-not a controlled cold-cache benchmark or a whole-inference speedup.
-
-That earlier measurement's memory guard selected six processes, initially
-assigned 13/13/13/13/12/12 threads. Tail leases grew through 16/19/25/38 to 76.
-Step-wide CPU accounting averaged 8.04 busy cores: filesystem I/O, memory throughput and remaining serial
-metric work prevent continuous 76-core saturation. The cgroup peak was
-70.54 GiB including page cache, not aggregate process RSS. Independent fixtures
-also checked metadata spooling, alias/layout preservation, corruption rejection,
-GIL-flag restoration, stage selection and missing-product errors.
-
-The completed additions reduced the subsequent full evaluation to **30.87 s**
-on 76 cores, with the same five byte-identical reports. The first evaluation of
-the old simulation took **98.54 s**, including one-time compact-truth extraction
-and writes (688 MiB on disk). This first-use cost must not be hidden behind the
-reuse timing. New simulations create the product while truth is already
-resident; their complete fresh-run timing has not been remeasured.
-
-The cached-truth evaluation selected 13 chromosome workers and grew tail leases
-to 76 threads. Step-wide CPU accounting averaged 13.13 busy cores, and the
-cgroup peak was 85.99 GiB including page cache. These remain I/O/memory-heavy
-workloads, not continuously saturated 76-core computations. Timings are
-observed same-dataset runs, not cold-cache scaling claims.
-
-In a separate old/new/new/old I/O comparison, chr1 discovery loading took
-1.797/1.801 s with the rolling reader, versus 2.203 s for the final warmed
-reference (the initial reference took 3.920 s). Painting checkpoint writing
-showed **no wall-time gain**: 0.503/0.446 s versus 0.441/0.433 s, about 8.5%
-slower on average, despite lower CPU work and RSS. Parallelizing the writer is
-therefore not claimed as a uniform speedup. Both readers recovered identical
-data from every new checkpoint.
-
-Durable local reports and frozen references:
-`work/runs/serial_work_parallel_validation/VALIDATION.md`,
-`work/runs/io_pipeline_validation/INTERPRETATION.md`, and
-`work/runs/recombination_parallel_validation/VALIDATION.md`.
-
-## Changes deliberately not adopted
-
-- Five-bit split pattern tables: 16-fold table-memory reduction but about 7%
-  slower warm discovery; some search diagnostics/assignments changed.
-- Full unpacked painting emission caching: extra I/O erased most chr3 benefit.
-- Simple optimistic M2 bounds: eliminated 0 of 60,800 candidate trios; pruning
-  MAP losers alone would not preserve integrated state/bootstrapping results.
-- Persistent VCF handles/coarse queries and packed assembly traceback: no
-  useful measured improvement on their controlled workloads.
-- Approximate cavity posterior truncation, sparse-neighbour replacement of
-  missing-data clustering, or weaker release thresholds: not promoted.
-
-Local detailed measurements remain under ignored `.work/` result directories.
-Loose development source and the full pre-cleanup documentation are recoverable
-from `work/history/precommit_20260912_ONuv9Z/development_sources.tar.gz`; its
-manifest identifies original paths. Neither that archive nor checkpoints are
-part of the public package. The current scientific evidence is summarized in
-[validation](validation.md), not inferred from benchmark speed alone.
+How a run uses its CPUs and memory, what the compiled-kernel and checkpoint caches do, why results do not depend
+on any of it, and what a whole-genome run costs. Runtime, peak memory and scaling are acceptance criteria of the
+package, measured on the reference runs ([validation.md](validation.md)).
+
+## Where the time goes
+
+| stage | parallel unit | main cost |
+| --- | --- | --- |
+| evidence | contig (read in parallel windows); prepared one contig ahead of discovery | VCF decoding, read-model fits |
+| discovery | block, in one persistent pool for all pending contigs | fixed-K fits and the reversible K search per block |
+| local selection | block (path fits), component (context refits), inside a contig lane | path-model fits and the candidate bank; two context assemblies |
+| assembly | joined batch (hierarchy), component (founder refinement), inside a contig lane | linker EM and certified panel searches; converged refinement fits and count decisions |
+| painting | sample block, inside a contig lane | binned emissions and the diploid HMM |
+| pedigree | chromosome (preparation, scoring, exclusion); genome-wide decisions are a barrier | pair scoring on the fixed candidate panel; bootstrap and leave-one-chromosome-out resampling |
+| founder refit, family phase, recombination | chromosome | coordinate sweeps; family message passing and polishing; per-meiosis decoding |
+
+The [methods](methods/README.md) give each stage's complexity in the founder count K, the samples N and the sites L.
+Checkpoint I/O, process start-up, ordered beam and panel updates, and the dependencies between stages can leave
+CPUs idle at times; the design keeps them busy where independent work exists, but sustained full utilisation is
+not claimed.
+
+## CPUs
+
+The run's ceiling is `[execution] cores` (default: the CPU affinity). It is divided as leases of one tree (run ->
+contig lane -> pool -> worker), never exceeded by the product of processes and threads:
+
+- **Contig lanes.** After discovery, contigs are reconstructed in concurrent lanes: one lane per
+  `execution.contig_lanes.CONTIG_LANE_CORES = 16` cores (narrow lanes use fewer core-seconds per contig, because
+  path selection scales fully but hierarchy tails, refinement tails and serial checkpoint phases do not), at most one
+  per pending contig, limited by memory. Each lane takes its contigs longest first. Leases start in proportion to
+  each lane's work and grow as finished lanes release theirs: at contig starts, at the phase starts the stages mark,
+  and inside pool phases.
+- **Pools.** A pool task claims `floor(total / active)` threads plus a share of the remainder at its numerical
+  boundaries; during a batch's start-up every worker has one thread until the batch's workers have started.
+  Freed threads move to surviving tasks at their next boundary; a running Numba kernel never changes its team.
+- **Shared arrays** are copied into shared memory once per pool, with at most
+  `execution.shared_arrays.COPY_THREADS = 16` threads (the copy saturates memory bandwidth at about 16 threads).
+- **Serial mode** runs one contig at a time with every core: less throughput on a large node, smaller units of
+  durable progress ([usage.md](usage.md#short-allocations)).
+
+`[execution] profile = true` prints per-phase timings and the thread-allocation trace of the leases. Every run
+record holds exclusive stage timings (stages timed inside another stage on the same thread are subtracted, helper
+threads are recorded under their own name) and per-contig summaries.
+
+## Memory
+
+One memory governor per run (`execution/memory.py`) keeps every process of the run within a memory limit by
+admission, never by failing:
+
+- **Limit.** The memory available when the run starts (the node's available memory, every enclosing cgroup's limit
+  minus its working set, and the Slurm job's memory) minus a headroom of `execution.memory.HEADROOM_FRACTION = 0.1`
+  (at least 4 GiB, at most half), and at most `[execution] memory_limit` when set.
+- **Reservations.** Pools, chromosome executors, contig lanes and concurrent fits reserve each task's estimated
+  peak bytes before starting it and release them when it ends; a pool's shared arrays are reserved for the pool's
+  lifetime. A task starts when its bytes fit next to the reservations already held and into the memory the node has
+  at that moment; otherwise it waits. Waiting requests nested in running work are served first (finishing started
+  work before starting new work), then in arrival order; a smaller request may pass a waiting larger one only when
+  both fit, so large tasks are not starved. Work nested d levels deep may fill the ledger only up to the limit minus
+  `execution.memory.NESTED_HEADROOM_FRACTION = 0.2` / 2^(d - 1) of it (80% at the first level, 90% at the second,
+  95% at the third, ...), so outer work that waits for its sub-tasks always leaves room for them.
+- **Progress.** A task larger than the limit runs alone when nothing else holds memory; if every holder is itself
+  waiting, the first waiting request is admitted over the limit so that work continues. Both are logged; the
+  governor never deadlocks and never signals a process.
+- **Shared memory of killed runs.** Every shared-memory segment the run creates is named after the run, and a new
+  run removes this user's ledgers and segments of runs that have died (no live process holds them) before it reads
+  the available memory, so a run killed with its allocation leaves no memory behind in `/dev/shm`.
+- **Lanes.** While a lane works on a contig it holds about the contig's planning size (its discovery records, two
+  copies of its genotype likelihoods and its observation mask); the lanes running together may hold at most
+  `execution.contig_lanes.LANE_RESIDENT_SHARE = 0.5` of the limit, and everything inside a lane reserves its own
+  bytes.
+- **Stage estimates.** Each stage supplies per-task byte estimates from its inputs, conservative where unsure;
+  kernels with large temporaries tile them under fixed byte budgets, so their results do not depend on free
+  memory. The memory summary lines at the end of the run log and the run record's `memory` entry report the limit, reservations, waits and wait time,
+  the peak reserved and peak used memory, and each task kind's estimate against its measured peak.
+- **Phases.** Within a contig, local selection and assembly release their pools and arrays before painting starts,
+  so their memory and painting's never overlap; executors return freed heap to the system (`malloc_trim`) after
+  each task and at phase boundaries.
+
+Pacing changes when work runs, never what it computes.
+
+## Compiled kernels
+
+Every `@njit(cache=True)` kernel compiles into a cache directory per code version: the key covers the whole
+package source and its location, the Python, NumPy, Numba and llvmlite versions, the code-generation settings and
+the CPU model, because Numba's own cache checks only each kernel's file timestamp. Workers of a run share the
+directory. Between runs, compiled kernels persist in `~/.cache/haplotype-reconstruction/numba` (under
+`$XDG_CACHE_HOME` when set; the `execution.kernel_cache.KEEP_KEYS = 6` most recently used code versions are kept):
+a run starts from the stored snapshot of its code version, and for a new version it compiles every listed kernel
+in a pool of the run's cores before its first scientific pool, longest first. A run publishes its cache when it
+ends if it compiled anything. These are disposable compiled kernels, not scientific checkpoints; a store failure
+costs only compilation time and is logged. `NUMBA_CACHE_DIR` sets the base of the per-version directories
+([configuration.md](configuration.md#environment)).
+
+## Checkpoint I/O
+
+Records are protocol-5 pickles whose array buffers are written out of band in Blosc2-ZSTD chunks
+(`store.codec.CLEVEL = 5`; assembly records and work states, which are superseded often, use
+`store.codec.FAST_CLEVEL = 1`). Large payloads overlap chunk reads, checksums and (de)compression on a rolling
+pipeline with at most 1 GiB in flight; decoding is zero-copy into one aligned allocation, and readers decode only
+the entries they ask for. Compression threads come from the writer's lease. Contig files grow append-only and are
+never compacted (superseded records are small).
+
+## Determinism
+
+Results do not depend on the number of cores, lanes, workers or helpers, on memory pacing, or on completion order:
+parallel kernels add per-sample (or per-site) rows in a fixed order instead of team-size-dependent reductions;
+pools return results in task order (or in an order their callers do not depend on); random streams are fixed
+before scheduling. The only intended randomness is a simulation with `seed = "random"`, whose realised seed is
+recorded. Search limits that bound memory are fixed constants, never the memory that happens to be free: founder
+refinement's window programmes, for example, are solved within growing budgets reserved from the governor up to a
+fixed cap (`AssemblyConfig.refinement.frontier_bytes = 137438953472`, 128 GiB), and a solve within a budget computes
+exactly what a solve at the cap computes. The same configuration and inputs therefore give the same records at any
+allocation size.
+
+## Founder counts
+
+The pipeline is designed for up to 30 founder haplotypes per block. Exact branches with exponential cost are
+bounded (exact site posteriors over at most `assembly.founder_alleles.site_posterior.MAX_EXACT_BITS = 10` free
+founders; exact maximum cuts up to `DiscoveryConfig.search.exact_cut_max_k = 12`), with polynomial methods above
+them, and the number of search steps is bounded by reported backstops that grow linearly in K. Founder refinement's
+exact window programmes are the one data-dependent term: their frontier can grow as R^W in the worst case (R rows
+per block, W = 8 fine blocks or 4 coarse spans), and the fixed frontier cap bounds it, with every fallback
+reported. Each methods chapter states its stage's complexity, including the worst cases those backstops allow.
+
+Measured on the package's own K-ladder simulation: every 200-site block carries K distinct founder haplotypes;
+5 contigs x 8,000 real marker positions, N = 320 samples, one contig lane; CPU seconds per unit of work, the growth
+exponent from K = 20 to 30 and the peak resident memory of one worker at K = 30 (tree of 17 October, before the
+founder-refinement speed-ups, which leave results unchanged):
+
+| stage (unit) | K = 12 | K = 20 | K = 30 | growth 20 -> 30 | worker peak at K = 30 |
+| --- | --- | --- | --- | --- | --- |
+| discovery (block) | 4.3 | 12.1 | 33.4 | K^2.5 | 0.70 GiB |
+| local selection, initial round (block) | 15.1 | 32.1 | 60.8 | K^1.6 | 0.78 GiB |
+| local selection, round l1 (block) | 0.4 | 3.1 | 9.2 | K^2.7 | |
+| context refit (component) | 29 | 80 | 217 | K^2.5 | 0.60 GiB |
+| linker and join (10-block batch) | 14.4 | 26.7 | 88.7 | K^3.0 | 1.40 GiB |
+| founder refinement, level 1 (10-block component) | 31 | 113 | 445 | K^3.4 | 3.26 GiB |
+| founder refinement, level 2 (40-block component) | 324 | 1,038 | 3,156 | K^2.7 | |
+
+Every stage ran to recombination at K = 30 with no backstop hit and no frontier fallback (largest window frontier 257
+entries), and discovery recovered 12.02, 20.04 and 30.01 rows per block. Whole runs took 511, 1,277 and 2,376 s.
+With weakly supported founders (N = 80: about five carriers per founder per block at K = 30) the data-dependent
+multipliers grow faster than K^3 from K = 20 to 30 (local selection K^4.2 to K^4.8 per block, context joins K^4.7,
+founder refinement K^4.0 at level 1 and K^7.2 at level 2), and the K = 30 run took seven times the K = 20 wall time;
+the per-step kernels themselves stay within O(K^3).
+
+## Reference timings
+
+Release 2.0 against release 1.0 (commit 92b3daf), whole genomes, each run alone on a dedicated 112-CPU Sapphire
+Rapids node (Xeon Platinum 8480+) with a fresh kernel store, in the same software environment; largest process =
+peak resident memory of one process, node peak = the node's used memory (total minus available, sampled every 30 s):
+
+| run | release 1.0 wall | release 2.0 wall | ratio | largest process, 1.0 -> 2.0 | node peak, 1.0 -> 2.0 |
+| --- | --- | --- | --- | --- | --- |
+| simulation seed 10000 (N = 320, 22 contigs) | 2:08:46 | 2:03:41 | 0.961 | 27.4 -> 20.0 GiB | 301.7 -> 259.1 GiB |
+| simulation seed 10001 | 2:13:49 | 2:09:56 | 0.971 | 28.5 -> 19.9 GiB | 312.6 -> 257.7 GiB |
+| backcross simulation (N = 80, 22 contigs) | 40:46 | 38:53 | 0.954 | 8.9 -> 5.9 GiB | 169.9 -> 136.3 GiB |
+| TroMau (116 samples, 22 contigs) | 41:00 | 41:10 | 1.004 | 6.4 -> 5.3 GiB | 114.2 -> 96.3 GiB |
+
+The two TroMau runs ran at the same time on two identical nodes; 41:00 against 41:10 is equal within run-to-run
+noise. The simulation rows were measured with the accepted tree, to which the release adds only changes with
+identical results and the export stage (26 s on TroMau). Evaluating a simulation against its truth takes 0:30-0:38
+instead of 1:16-1:37.
+
+Exclusive main-thread stage times in seconds, from the run records of the seed-10000 simulation (accepted tree, no
+export stage) and of TroMau (release tree). The evidence stage runs on a helper thread while discovery works, so its
+time overlaps discovery's and is not part of the sum:
+
+| stage | simulation seed 10000 | TroMau |
+| --- | --- | --- |
+| simulating the inputs | 72 | - |
+| evidence (helper thread) | 303 | 448 |
+| discovery | 668 | 472 |
+| contig lanes: local selection, assembly, painting | 5,765 | 1,813 |
+| pedigree | 553 | 76 |
+| founder refit | 12 | 3 |
+| family phase | 285 | 40 |
+| recombination | 32 | 14 |
+| export | - | 26 |
+| outside any stage | 30 | 24 |
+| run wall time | 7,417 | 2,468 |
+
+The contig lanes take about three quarters of the wall time in both runs, discovery a tenth of the simulation's and
+a fifth of TroMau's.
+
+Concurrent runs belong on separate allocations with separate output roots. On a shared node, the governor's limit
+starts from the memory available when the run starts; set `[execution] memory_limit` to leave room for other work.
