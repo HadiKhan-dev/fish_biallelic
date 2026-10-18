@@ -587,12 +587,13 @@ The real cichlid dataset does not currently have established individual-level tr
 Whenever inspecting, designing, implementing, or validating pedigree inference:
 
 - A generation or cohort label such as `G0`, `F1`, or `F2` does not identify an individual's parents.
-- Do not treat the two sequenced G0 individuals as a known parental pair.
-- One sequenced G0 individual may potentially be a parent of some pedigree members while the other is unrelated. Do not assume which relationships are valid without explicit evidence.
-- Do not automatically include either G0 individual as a parent candidate. Include an individual only when eligibility rules, breeding records, metadata, or a user-approved design make that individual legitimate.
-- Two sequenced individuals from the other species are outside the pedigree and must not be used as candidates, anchors, positive controls, or inferred relatives.
+- The TroMau cross has four sequenced G0 individuals: three AstCal females (fAstCal29, fAstCal30 and fAstCal31) and one TroMau male (fTroMau1). That is three plus one, not two G0 individuals plus two individuals from another species; every sequenced sample in the cross is labelled G0, F1 or F2.
+- Do not treat any sequenced G0 individual, or any pairing of them, as known parents.
+- Any sequenced G0 individual may be a parent of some pedigree members and unrelated to others. Do not assume which relationships are valid without explicit evidence.
+- Do not automatically include any G0 individual as a parent candidate. Include an individual only when eligibility rules, breeding records, metadata, or a user-approved design make that individual legitimate.
+- Individuals from outside a cross's pedigree must not be used as candidates, anchors, positive controls, or inferred relatives.
 - Do not label candidate pairs or trios true, false, positive, negative, or decoy without independent ground truth.
-- Do not calibrate thresholds, IBS0, Mendelian error, genotype-likelihood compatibility, founder-label consistency, or rankings against an assumed G0 pair.
+- Do not calibrate thresholds, IBS0, Mendelian error, genotype-likelihood compatibility, founder-label consistency, or rankings against assumed G0 parentage.
 - Distinguish species identity, cohort or generation, parent eligibility, known parentage, and inferred parentage.
 - When ground truth is absent, validate with simulations, internal consistency, chromosome-level stability, resampling, legitimate negative controls, generation constraints, competing-candidate margins, and explicit ambiguous or unresolved outcomes.
 - Preserve support for missing biological parents, single observed parents, ambiguous candidates, and unresolved individuals where scientifically appropriate.
