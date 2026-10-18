@@ -16,9 +16,11 @@ import math
 import numpy as np
 from numba import njit
 
-# NLL difference below which two fits of the same panel are equal (deduplication keeps the
-# first one seen unless the other is better by more than this).
-NLL_TOLERANCE = 1e-10
+from ..maths.ties import BlockQuanta, class_sort
+
+# Release 2.1: NLL comparisons use the block's ``nll`` tie quantum (BlockQuanta.nll; the old absolute
+# NLL_TOLERANCE = 1e-10 sat at the 1e-9-noise scale). Duplicates keep the first fit seen unless the
+# other is better by more than the quantum.
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,8 @@ class FixedKSolution:
     nll: total NLL (sum of per_sample_cost, as the fitter reported it).
     fixed_point: the fitter proved haplotypes an A(H), H(A) fixed point in this workspace.
     key: canonical key (int8 bytes of the rows).
+    quanta: the block's BlockQuanta the solution was fitted under (None for solutions built outside a
+        workspace); orders of solutions use tie classes of kind ``nll`` with them (maths.ties).
     """
 
     haplotypes: np.ndarray
@@ -43,6 +47,7 @@ class FixedKSolution:
     nll: float
     fixed_point: bool = field(compare=False)
     key: bytes = field(repr=False)
+    quanta: BlockQuanta | None = field(default=None, compare=False, repr=False)
 
     @property
     def k(self) -> int:
@@ -53,7 +58,8 @@ class FixedKSolution:
         return int(self.haplotypes.shape[1])
 
     def order(self) -> tuple[float, int, bytes]:
-        """Search order: lower NLL first, then smaller K, then the canonical key."""
+        """Exact (NLL, K, key). Tie-aware orders of several solutions use :func:`sort_solutions`
+        (tie classes of kind ``nll``), not this tuple."""
         return (self.nll, self.k, self.key)
 
 
@@ -113,19 +119,22 @@ def _canonical_panel_kernel(haplotypes, assignments):
     return canonical_haplotypes, canonical_assignments, canonical_bytes
 
 
-def canonical_solution(fit, workspace) -> FixedKSolution:
+def canonical_solution(fit, workspace, quanta=None) -> FixedKSolution:
     """The canonical solution of a fit ``(H, A, per_sample_cost, unknown_slots, iterations, nll)``.
 
     ``fixed_point`` is set when ``workspace`` certifies the canonical rows (in that exact order)
-    as a fixed point of its coordinate map; None means never certified.
+    as a fixed point of its coordinate map; None means never certified. ``quanta``: the block's
+    BlockQuanta (default: the workspace's when given).
     """
+    if quanta is None and workspace is not None:
+        quanta = workspace.quanta
     haplotypes, assignments, key_bytes = _canonical_panel_kernel(
         np.ascontiguousarray(fit[0], dtype=np.int64), np.ascontiguousarray(fit[1], dtype=np.int64))
     certified = bool(workspace is not None and workspace.certifies_fixed_point(haplotypes))
     return FixedKSolution(
         haplotypes=_readonly(haplotypes), assignments=_readonly(assignments),
         per_sample_cost=fit[2], unknown_slots=fit[3], iterations=int(fit[4]),
-        nll=float(fit[5]), fixed_point=certified, key=key_bytes.tobytes())
+        nll=float(fit[5]), fixed_point=certified, key=key_bytes.tobytes(), quanta=quanta)
 
 
 def restricted(solution: FixedKSolution, samples: np.ndarray) -> FixedKSolution:
@@ -134,8 +143,8 @@ def restricted(solution: FixedKSolution, samples: np.ndarray) -> FixedKSolution:
     return FixedKSolution(
         haplotypes=solution.haplotypes, assignments=solution.assignments[samples],
         per_sample_cost=cost, unknown_slots=solution.unknown_slots[samples],
-        iterations=solution.iterations, nll=float(np.sum(cost)),
-        fixed_point=solution.fixed_point, key=solution.key)
+        iterations=solution.iterations, nll=math.fsum(cost.tolist()),
+        fixed_point=solution.fixed_point, key=solution.key, quanta=solution.quanta)
 
 
 def has_distinct_rows(solution: FixedKSolution) -> bool:
@@ -147,17 +156,37 @@ def has_distinct_rows(solution: FixedKSolution) -> bool:
     return len({key[start:start + width] for start in range(0, len(key), width)}) == solution.k
 
 
-def deduplicate(solutions, beam_width: int | None = None) -> tuple[FixedKSolution, ...]:
-    """Distinct complete panels (by key), each with its lowest-NLL fit (an equal-NLL later fit
-    does not replace an earlier one), ordered by (nll, key), optionally the first beam_width."""
+def _nll_quantum(solutions, quanta):
+    if quanta is not None:
+        return quanta.nll
+    for solution in solutions:
+        if solution.quanta is not None:
+            return solution.quanta.nll
+    return BlockQuanta.floors().nll
+
+
+def sort_solutions(solutions, quanta=None, *, by_k=True, counter=None) -> list:
+    """Solutions in tie-class order of their NLLs (kind ``nll``; quanta: the block's, default the
+    solutions' own), then smaller K, then the canonical key."""
+    solutions = list(solutions)
+    q = _nll_quantum(solutions, quanta)
+    return class_sort(solutions, lambda s: s.nll, q, secondary=(lambda s: (s.k,)) if by_k else None,
+                      content=lambda s: s.key, counter=counter, kind="nll_order")
+
+
+def deduplicate(solutions, beam_width: int | None = None, *, quanta=None) -> tuple[FixedKSolution, ...]:
+    """Distinct complete panels (by key), each with its lowest-NLL fit (a later fit replaces an
+    earlier one only when better by more than the ``nll`` quantum), in tie-class order of NLL, then
+    smaller K, then key (sort_solutions; 2.0's (nll, K, key) order with tie classes), optionally the
+    first beam_width (the cut falls inside a class by K and key)."""
+    solutions = [solution for solution in solutions if has_distinct_rows(solution)]
+    q = _nll_quantum(solutions, quanta)
     unique: dict[bytes, FixedKSolution] = {}
     for solution in solutions:
-        if not has_distinct_rows(solution):
-            continue
         previous = unique.get(solution.key)
-        if previous is None or solution.nll < previous.nll - NLL_TOLERANCE:
+        if previous is None or solution.nll < previous.nll - q:
             unique[solution.key] = solution
-    ordered = sorted(unique.values(), key=lambda solution: (solution.nll, solution.key))
+    ordered = sort_solutions(unique.values(), quanta)
     return tuple(ordered if beam_width is None else ordered[:beam_width])
 
 

@@ -21,7 +21,7 @@ The pool is released in the background while the coordinator runs the gate.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import threading
 from typing import Sequence
 
@@ -89,6 +89,8 @@ class CompletionSummary:
         and the cavity fills (sites above MAX_EXACT_BITS unresolved founders; zero at today's
         founder counts).
     guard_skipped: releases the Hamming-ball shell guard withheld (cross-fit and cavity).
+    tie_events: decisions of the occupancy gate taken inside a tie or a threshold band (``maths.ties.TieCounter``
+        record; release 2.1).
     """
 
     candidate_fills: np.ndarray
@@ -98,6 +100,7 @@ class CompletionSummary:
     rare_without_focal_observation: int
     site_posterior: tuple[int, ...]
     guard_skipped: int
+    tie_events: dict = field(default_factory=dict)
 
     @property
     def blocks(self) -> int:
@@ -126,6 +129,7 @@ class CompletionSummary:
             "site_posterior": dict(zip(site_posterior.SUMMARY_FIELDS,
                                        (int(value) for value in self.site_posterior))),
             "guard_skipped": int(self.guard_skipped),
+            "tie_events": {kind: dict(values) for kind, values in self.tie_events.items()},
         }
 
     @classmethod
@@ -140,6 +144,7 @@ class CompletionSummary:
             site_posterior=tuple(int(record["site_posterior"][field])
                                  for field in site_posterior.SUMMARY_FIELDS),
             guard_skipped=int(record["guard_skipped"]),
+            tie_events={str(kind): dict(values) for kind, values in record.get("tie_events", {}).items()},
         )
 
     def describe(self) -> str:
@@ -346,7 +351,8 @@ def _complete(panels, evidence, config, budget):
             tuple(fill.filled for fill in fills), tuple(crossfit.profiles for crossfit in crossfits),
             tuple(_block_view(focal, samples, int(offsets[index]), int(offsets[index + 1]))
                   for index in range(blocks)),
-            tuple(links), config.occupancy, veto)
+            tuple(links), config.occupancy, veto,
+            keys=tuple(f"p{int(panel.positions[0])}/b{index}" for index, panel in enumerate(panels)))
         prepared = []
         for panel, alleles, fill, released_fills in zip(panels, inference, fills, gate.released):
             released = np.array(panel.calls, dtype=np.int8)
@@ -368,7 +374,8 @@ def _complete(panels, evidence, config, budget):
             released_fills=np.array([np.sum(mask) for mask in gate.released], dtype=np.int64),
             unknown_mass_veto=veto, gate_reasons=gate.reason_counts,
             rare_without_focal_observation=gate.rare_without_focal_observation,
-            site_posterior=tuple(int(value) for value in totals), guard_skipped=int(guard_skipped))
+            site_posterior=tuple(int(value) for value in totals), guard_skipped=int(guard_skipped),
+            tie_events=dict(gate.tie_events or {}))
     finally:
         releaser.join()
     if errors:

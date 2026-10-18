@@ -34,6 +34,9 @@ class BlockEvidence:
     block, site_start: block index and its first contig site; positions: int64[L];
     kept: bool[L] discovery sites; likelihoods: float64[N, L, 3] normalised GLs (zero depth
     exactly 1/3); observed: bool[N, L] positive depth (False for excluded samples).
+    sample_ids: the samples' names (release 2.1; optional): the search runs in the run's canonical
+    sample order (maths.ties.run_sample_order), so its result does not depend on the input order.
+    None means the evidence is already in canonical order.
     """
 
     block: int
@@ -42,6 +45,7 @@ class BlockEvidence:
     kept: np.ndarray
     likelihoods: np.ndarray
     observed: np.ndarray
+    sample_ids: tuple | None = None
 
     @property
     def informative(self) -> bool:
@@ -56,7 +60,8 @@ def block_evidence(evidence, block: int) -> BlockEvidence:
                          positions=evidence.positions[start:stop],
                          kept=evidence.discovery_sites[start:stop],
                          likelihoods=evidence.likelihoods[:, start:stop],
-                         observed=evidence.observed[:, start:stop])
+                         observed=evidence.observed[:, start:stop],
+                         sample_ids=tuple(evidence.sample_ids))
 
 
 def discover_block(evidence: BlockEvidence, config: DiscoveryConfig) -> DiscoveredBlock | None:
@@ -65,7 +70,8 @@ def discover_block(evidence: BlockEvidence, config: DiscoveryConfig) -> Discover
         return None
     kept = evidence.kept
     result = search_block(np.ascontiguousarray(evidence.likelihoods[:, kept]),
-                          np.ascontiguousarray(evidence.observed[:, kept]), config)
+                          np.ascontiguousarray(evidence.observed[:, kept]), config,
+                          sample_ids=evidence.sample_ids)
     return materialise(evidence.block, evidence.site_start, evidence.positions, kept,
                        evidence.likelihoods, evidence.observed, result, config)
 
@@ -78,12 +84,17 @@ ESTIMATE_FOUNDERS = 32
 TASK_BASE_BYTES = 512 << 20
 
 
-def block_task_bytes(evidence: BlockEvidence) -> int:
-    """Planned peak additional bytes of one block's discovery in a pool worker."""
+def block_task_bytes(evidence: BlockEvidence, config: DiscoveryConfig | None = None) -> int:
+    """Planned peak additional bytes of one block's discovery in a pool worker (release 2.1: plus
+    the canonical-order copy of the block's GLs and mask, and a second search workspace when the
+    reversed-convention search is configured)."""
     samples, sites = evidence.likelihoods.shape[:2]
     kept = int(np.count_nonzero(evidence.kept))
-    return (TASK_BASE_BYTES + 2 * 8 * 3 * samples * sites
-            + search_bytes(samples, kept, ESTIMATE_FOUNDERS))
+    searches = 1
+    if config is not None and config.search.reversed_convention_search != "off":
+        searches = 2
+    return (TASK_BASE_BYTES + 2 * 8 * 3 * samples * sites + 25 * samples * kept
+            + searches * search_bytes(samples, kept, ESTIMATE_FOUNDERS))
 
 
 # Block workers return freed heap pages every this many blocks, or whenever their resident set
@@ -137,7 +148,7 @@ def _discover_contig(store, contig, config, pool, evidence=None) -> None:
                 tasks.append((block_input, config))
             else:
                 writer.add(block, None)
-        sizes = [block_task_bytes(block_input) for block_input, _config in tasks]
+        sizes = [block_task_bytes(block_input, config) for block_input, _config in tasks]
         for index, result in pool.imap_unordered(_discover_task, tasks, task_bytes=sizes):
             writer.add(index, result)
     finally:

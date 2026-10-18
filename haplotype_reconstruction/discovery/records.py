@@ -8,6 +8,10 @@
 
 A contig is complete when every block index 0 .. B-1 is in some chunk. No genotype likelihoods
 are stored (blocks reference the evidence record by site span).
+
+Release 2.1: the encoded search summary also holds tie_quantum, escalated, conventions, ambiguous,
+tied_alternatives, score_margin and tie_events (search.SearchSummary); 2.0 payloads without them decode with the
+defaults. The SCHEMA stays 1 (the stage identity carries the code digest, so 2.1 never resumes 2.0 records).
 """
 from __future__ import annotations
 
@@ -57,14 +61,24 @@ def encode(block: DiscoveredBlock | None):
             exact_score_cache_hits=int(summary.exact_score_cache_hits),
             residual_calls=int(summary.residual_calls), residual_rows=int(summary.residual_rows),
             limits=list(summary.limits), heuristic_gauge_cuts=bool(summary.heuristic_gauge_cuts),
-            stop_reason=str(summary.stop_reason), certified=bool(summary.certified)))
+            stop_reason=str(summary.stop_reason), certified=bool(summary.certified),
+            tie_quantum=float(summary.tie_quantum), escalated=bool(summary.escalated),
+            conventions=int(summary.conventions), ambiguous=bool(summary.ambiguous),
+            tied_alternatives=int(summary.tied_alternatives),
+            score_margin=float(summary.score_margin),
+            tie_events={str(kind): {str(name): int(value) for name, value in counts.items()}
+                        for kind, counts in summary.tie_events.items()}))
 
 
 def decode(payload) -> DiscoveredBlock | None:
+    """A recorded block (2.0 payloads without the 2.1 summary fields decode with their defaults)."""
     if payload is None:
         return None
     search = dict(payload["search"])
     search["limits"] = tuple(search["limits"])
+    if "tie_events" in search:
+        search["tie_events"] = {str(kind): {str(name): int(value) for name, value in dict(counts).items()}
+                                for kind, counts in dict(search["tie_events"]).items()}
     fields = dict(payload)
     fields["search"] = SearchSummary(**search)
     return DiscoveredBlock(**fields)

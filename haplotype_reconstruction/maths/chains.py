@@ -14,6 +14,22 @@ import math
 import numpy as np
 from numba import njit
 
+# Viterbi tie quantum of the chains (nats; release 2.1): max-product scores within this of the best are tied and the
+# path keeps its state (fewest changes), then the lowest state; the maxima themselves stay exact. Census of the family
+# phase's phase-view decisions (TroMau chr18, float64 messages, iid 1e-9; work/IE/census/chain_chr18_*): 69,106
+# decisions within 1e-2, 8,386 exact zeros and ~60,000 rounding gaps (<= 3e-12), gap motion <= 1.1e-12, genuine gaps
+# from 1e-6 up (210 in [1e-5, 3e-5)): 2^-29 = 1.9e-9 sits ~1000x from both.
+CHAIN_TIE = 2.0 ** -29
+# Global frame of a chain without an anchor (release 2.1): binary_viterbi's final-state comparison then chooses between
+# two mirror-image path families. When the emissions carry no frame information this is an exact tie, which belief
+# propagation leaves as amplified rounding rather than as a rounding-sized gap. Census of the final-state decisions of
+# every unanchored phase-view chain (TroMau, 22 contigs, ref / iid 1e-9 / value-consistent 1e-9; work/IE/census/
+# final_t4_*): 13 exact zeros, 6 gaps in [3e-9, 3e-7] (chains whose largest per-run frame asymmetry is <= 3e-10 nats;
+# one of them changed sign under the value-consistent noise and flipped a sample's whole-chromosome decoder frame),
+# genuine gaps from 0.3 nats (most >= 3 nats): 2^-11 = 4.9e-4 sits ~1000x from both. Ties keep state 0 (2.0's choice
+# at an exact tie: the frame of the painting scaffold).
+FRAME_TIE = 2.0 ** -11
+
 
 @njit(cache=True, inline="always")
 def mix4(a, b, c, d, t):
@@ -62,12 +78,16 @@ def selector_cavity(emission, theta):
 
 
 @njit(cache=True)
-def selector_viterbi(emission, theta):
-    """Max-product path of a four-state selector chain (uniform start); ties keep the lower previous state."""
+def selector_viterbi(emission, theta, tie=0.0):
+    """Max-product path of a four-state selector chain (uniform start). Predecessors within ``tie`` of the best are
+    tied: the path keeps its state, else takes the fewest bit changes, then the lower previous state (tie = 0: exact
+    ties only; 2.0 took the lower previous state at an exact tie); the final state is the lowest within ``tie`` of the
+    best."""
     n = len(emission)
     score = np.zeros(4, dtype=np.float64)
     new = np.empty(4, dtype=np.float64)
     back = np.zeros((n, 4), dtype=np.int8)
+    values = np.empty(4, dtype=np.float64)
     for site in range(n):
         if site == 0:
             for state in range(4):
@@ -78,23 +98,37 @@ def selector_viterbi(emission, theta):
             jump = math.log(t) if t != 0 else 0.
             for state in range(4):
                 best = -np.inf
-                arg = 0
                 for previous in range(4):
                     bits = previous ^ state
                     changes = (bits >> 1) + (bits & 1)
                     if changes and t == 0:
+                        values[previous] = -np.inf
                         continue
                     value = score[previous] + (2 - changes) * stay
                     if changes:
                         value += changes * jump
+                    values[previous] = value
                     if value > best:
                         best = value
-                        arg = previous
+                arg = 0
+                fewest = 3
+                for previous in range(4):
+                    if values[previous] >= best - tie and values[previous] > -np.inf:
+                        bits = previous ^ state
+                        changes = (bits >> 1) + (bits & 1)
+                        if changes < fewest:
+                            fewest = changes
+                            arg = previous
                 new[state] = best + math.log(max(1e-300, emission[site, state]))
                 back[site, state] = arg
         score, new = new, score
     result = np.empty(n, dtype=np.int8)
-    state = np.argmax(score)
+    top = np.max(score)
+    state = 0
+    for candidate in range(4):
+        if score[candidate] >= top - tie:
+            state = candidate
+            break
     for site in range(n - 1, -1, -1):
         result[site] = state
         if site:
@@ -162,8 +196,11 @@ def binary_posterior(emission, theta, anchor):
 
 
 @njit(cache=True)
-def binary_viterbi(emission, theta, anchor):
-    """Max-product path of a two-state chain (uniform start, state 1 forbidden at ``anchor``); ties stay."""
+def binary_viterbi(emission, theta, anchor, tie=0.0, final_tie=-1.0):
+    """Max-product path of a two-state chain (uniform start, state 1 forbidden at ``anchor``); predecessors within
+    ``tie`` of the best are tied and the path stays (tie = 0: exact ties stay, as 2.0); the final state is 0 unless
+    state 1 is better by more than ``final_tie`` (default: ``tie``; FRAME_TIE for the global frame of an unanchored
+    chain)."""
     n = len(emission)
     scores = np.zeros(2, dtype=np.float64)
     back = np.zeros((n, 2), dtype=np.int8)
@@ -180,16 +217,13 @@ def binary_viterbi(emission, theta, anchor):
             jump = math.log(theta[i - 1]) if theta[i - 1] > 0 else -np.inf
             a = scores[state] + stay
             b = scores[1 - state] + jump
-            if a >= b:
-                new[state] = a
-                back[i, state] = state
-            else:
-                new[state] = b
-                back[i, state] = 1 - state
+            new[state] = a if a >= b else b
+            back[i, state] = state if a >= b - tie else 1 - state
             new[state] += math.log(max(emission[i, state], 1e-300))
         scores = new
     path = np.empty(n, dtype=np.int8)
-    state = 0 if scores[0] >= scores[1] else 1
+    final_limit = tie if final_tie < 0 else final_tie
+    state = 0 if scores[0] >= scores[1] - final_limit else 1
     for i in range(n - 1, -1, -1):
         path[i] = state
         if i:

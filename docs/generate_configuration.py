@@ -77,12 +77,17 @@ ENVIRONMENT_READ = (
     ("LSB_JOBID", "LSF job identity (automatic kernel cache directory); also `LSB_JOBINDEX`."),
     ("SGE_ROOT", "Marks a Grid Engine site, whose `JOB_ID` and `SGE_TASK_ID` then scope the automatic kernel "
      "cache directory."),
+    ("HAPLOTYPES_TIE_CENSUS", "Diagnostic, unset in normal use: a directory into which every tie decision appends "
+     "its compared values (`DIR/census.<pid>.jsonl`, one JSON line per decision) for the valley census that places "
+     "the tie quanta (maths/ties.py). Results do not depend on it."),
 )
 ENVIRONMENT_SET = (
     ("OMP_NUM_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS, VECLIB_MAXIMUM_THREADS, NUMEXPR_NUM_THREADS",
      "Set to 1 at package import: numerical libraries never start their own thread pools; all parallelism is "
      "explicit (Numba teams and process pools)."),
     ("NUMBA_THREADING_LAYER, OMP_WAIT_POLICY", "Set to `omp` and `PASSIVE` at package import."),
+    ("NUMBA_DISABLE_INTEL_SVML", "Set to 1 at package import (release 2.1): Numba's math functions use scalar libm, "
+     "never Intel SVML's vector kernels, so results do not depend on the machine."),
     ("NUMBA_NUM_THREADS", "Set to the run's cores at run start, so worker processes size their Numba pools from "
      "it."),
     ("NUMBA_CACHE_DIR", "Set to the code-version cache directory at package import (inherited by workers)."),

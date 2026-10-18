@@ -178,8 +178,8 @@ Columns that changed:
 - Pedigree tables: the constant `Generation` column of the relationship tables and constant, duplicate or relict
   diagnostics columns are gone (the list is in the docstring of `pedigree/tables.py`); `chromosome_summary.csv`
   has `Contig`, `ComponentCount`, `ScoredComponentCount`, `InformativeMarkers`, `OmittedReason`.
-- `family_phase/summary.csv`: one row per contig with `contig`, `samples`, `sites`, `iterations`, `converged`,
-  `final_residual`, `called_alleles`, `changed_observable_phase_sites`, `root_frame_moves`, `root_frame_reverts`,
+- `family_phase/summary.csv`: one row per contig with `contig`, `samples`, `sites`, `map_sweeps`, `converged`,
+  `map_objective` (release 2.1; 2.0 wrote `iterations` and `final_residual`), `called_alleles`, `changed_observable_phase_sites`, `root_frame_moves`, `root_frame_reverts`,
   `root_frame_transfers`, `elapsed_seconds`; the constant policy columns and `final_checkpoint` are gone (the phase
   is the contig file's `family_phase` record).
 - `painting/<contig>/founder_counts.tsv` (`Join*`, `FeedbackJoin*` columns) and `assembly_search.tsv` count each

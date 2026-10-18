@@ -6,6 +6,14 @@ positive expected complete-emission gains, or, at a GEM stationary point, the si
 conditional one-bit flip with the largest gain. The fit stops at a conditional fixed point; a
 flip that would duplicate a row stops it (a K change belongs to the outer search). The update
 backstop is reported (termination "update_backstop").
+
+Release 2.1 (noise stability): a fit is returned with its rows in canonical (lexicographic) order
+(frequencies and per-row posteriors permuted with them). GEM flips move rows past one another, so
+2.0's final row order depended on the trajectory: two fits ending at the same founders and
+frequencies were different panels to every byte-keyed comparison, tie-break and record. The
+choice of the founder whose sites flip and of the single exact flip take the first candidate
+(row, then site order) within FLIP_TIE (relative) of the largest gain, so mathematically equal
+gains computed through different arithmetic cannot steer the fit by their last bits.
 """
 from __future__ import annotations
 
@@ -15,8 +23,30 @@ import numpy as np
 from scipy.special import expit
 
 from ..execution import claim_threads
+from ..maths.ties import census
 from .objective import regularizer
 from .path_model import COUNTS, EXACT, FLIPS, PathWorkspace
+
+# Relative tie band of the GEM's flip choices (release 2.1): candidates whose gain is within
+# FLIP_TIE x |largest gain| of the largest are tied and the first in row, then site order is
+# taken. Far above the rounding of the gains (~1e-16 relative) and their motion under 1e-9
+# relative GL noise; it only fixes the order of ascent steps among (near-)equal gains.
+FLIP_TIE = 2.0 ** -20
+
+
+def first_within(values, tie=FLIP_TIE) -> int:
+    """Flat index of the first element within tie x |max| of the maximum of ``values``."""
+    flat = np.ravel(values)
+    best = float(flat.max())
+    return int(np.flatnonzero(flat >= best - tie * abs(best))[0])
+
+
+def canonical_order(panel) -> np.ndarray:
+    """Permutation putting distinct binary rows in lexicographic order (stable)."""
+    panel = np.asarray(panel)
+    if len(panel) <= 1:
+        return np.arange(len(panel))
+    return np.lexsort(panel.T[::-1])
 
 
 @dataclass(frozen=True)
@@ -99,9 +129,16 @@ def fit_posteriors(panel, frequencies, prepared, buffers=None):
     return posteriors(workspace.state(panel, frequencies, EXACT), panel)
 
 
-def fit_fixed(panel, frequencies, prepared, search_config, buffers=None) -> PathFit:
+def _census_top(kind, key, values):
+    """Valley census of a GEM choice: the two largest candidates (negated, best first)."""
+    flat = np.sort(np.ravel(values))[::-1][:2]
+    census(kind, key, [-float(value) for value in flat])
+
+
+def fit_fixed(panel, frequencies, prepared, search_config, buffers=None, census_key=None) -> PathFit:
     """GEM fit from (panel, frequencies) (frequencies None = uniform) at fixed K. ``buffers``: the
-    block search's shared trajectory storage (path_model.WorkspaceBuffers)."""
+    block search's shared trajectory storage (path_model.WorkspaceBuffers). ``census_key``: when the
+    valley census is on, the fit's key for its flip choices (diagnostics only)."""
     tolerance = search_config.tolerance
     panel, frequencies = canonical(panel, frequencies)
     workspace = PathWorkspace(len(panel), prepared, buffers)
@@ -113,7 +150,7 @@ def fit_fixed(panel, frequencies, prepared, search_config, buffers=None) -> Path
     # After an update without a positive expected flip the next one usually has none either
     # (the frequency-only tail): its E-step then computes the exact gains in the same pass.
     stationary = False
-    for _ in range(search_config.update_backstop(len(panel), panel.shape[1])):
+    for update in range(search_config.update_backstop(len(panel), panel.shape[1])):
         claim_threads()
         state = workspace.state(panel, frequencies, COUNTS)
         counts = (state["initial_copy_counts"] + state["redraw_destination_counts"])[:-1]
@@ -128,14 +165,19 @@ def fit_fixed(panel, frequencies, prepared, search_config, buffers=None) -> Path
         state = workspace.state(panel, frequencies, level)
         gains = state["flip_gains"]
         positive = np.where(gains > tolerance, gains, 0.)
-        founder = int(np.argmax(positive.sum(axis=1)))
+        sums = positive.sum(axis=1)
+        if census_key is not None and len(sums) > 1 and sums.max() > 0:
+            _census_top("ls.gem.founder", f"{census_key}/u{update}", sums)
+        founder = first_within(sums)
         changed = positive[founder] > 0
         stationary = not changed.any()
         if stationary:
             # A conditional one-bit improvement can escape a stationary GEM point (checked with
             # the exact marginal likelihood; computed only here and for the reported posteriors).
             exact = workspace.state(panel, frequencies, EXACT)["conditional_flip_gains"]
-            founder, site = np.unravel_index(np.argmax(exact), exact.shape)
+            if census_key is not None and exact.max() > tolerance:
+                _census_top("ls.gem.exact", f"{census_key}/u{update}", exact)
+            founder, site = np.unravel_index(first_within(exact), exact.shape)
             if exact[founder, site] <= tolerance:
                 if frequency_gain > tolerance:
                     continue
@@ -153,6 +195,10 @@ def fit_fixed(panel, frequencies, prepared, search_config, buffers=None) -> Path
         panel, score = trial, trial_score
         objective = trial_score + regularizer(trial, frequencies)
     allele_probability, occupancy = posteriors(workspace.state(panel, frequencies, EXACT), panel)
-    return PathFit(panel=panel, frequencies=frequencies, allele_probability=allele_probability,
-                   occupancy=occupancy, log_likelihood=float(score), objective=float(objective),
-                   converged=converged, termination=termination)
+    # Canonical row order on output (the likelihood and the objective are invariant to it).
+    order = canonical_order(panel)
+    return PathFit(panel=np.ascontiguousarray(panel[order]),
+                   frequencies=np.ascontiguousarray(frequencies[order]),
+                   allele_probability=np.ascontiguousarray(allele_probability[order]),
+                   occupancy=np.ascontiguousarray(occupancy[order]), log_likelihood=float(score),
+                   objective=float(objective), converged=converged, termination=termination)

@@ -299,7 +299,7 @@ def lower_bounds(moves, forwards, likelihood, to_local, offsets, replaced=None):
 
 
 def best_improvement(bounds, canonical, materialize, score, current_score, *, signature,
-                     admissible):
+                     admissible, reach=0.0, choose=None):
     """Best-first exact scoring of the moves a bound cannot exclude.
 
     materialize(move) -> panel; score(panel, move) -> (exact join score -2 LL, payload);
@@ -308,10 +308,14 @@ def best_improvement(bounds, canonical, materialize, score, current_score, *, si
     resolution allowed for the exact score and the bounds (measured disagreement
     <= 1.2e-10 relative). A move improves iff its exact change < -t, t = max(1e-8,
     eps); it is excluded iff its bound > -t + eps. Survivors are scored in increasing
-    bound order while the next bound <= min(best admissible exact change, -t) + eps.
-    The best move has the least exact change, ties by canonical order; identical
-    panels are scored once and take the path order of their first move in canonical
-    order. Returns ((change, canonical, move, panel, payload) or None, survivors, scored).
+    bound order while the next bound <= min(best admissible exact change + reach, -t) + eps
+    (reach: how far above the best a tie class may extend, in score units; release 2.1 passes
+    WIDE_CLASS_QUANTA tie quanta so every move that could share the best's tie class is scored).
+    choose(improving entries) picks the move among the improving (default, base: the least exact
+    change, ties by canonical order; release 2.1: tie classes of the change, the panel's content
+    inside a class); identical panels are scored once and take the path order of their first move
+    in canonical order. Entries are [change, canonical, move, panel, payload]. Returns
+    ((change, canonical, move, panel, payload) or None, survivors, scored).
     """
     eps = 1e-9 * (1.0 + abs(float(current_score)))
     threshold = max(1e-8, eps)
@@ -325,7 +329,7 @@ def best_improvement(bounds, canonical, materialize, score, current_score, *, si
     best_change = None
     scored = 0
     for move in order.tolist():
-        limit = -threshold if best_change is None else min(-threshold, best_change)
+        limit = -threshold if best_change is None else min(-threshold, best_change + reach)
         if bounds[move] > limit + eps:
             break
         panel = materialize(move)
@@ -355,4 +359,6 @@ def best_improvement(bounds, canonical, materialize, score, current_score, *, si
     improving = [entry for entry in seen.values() if entry[0] < -threshold]
     if not improving:
         return None, len(survivors), scored
+    if choose is not None:
+        return tuple(choose(improving)), len(survivors), scored
     return tuple(min(improving, key=lambda entry: (entry[0], entry[1]))), len(survivors), scored

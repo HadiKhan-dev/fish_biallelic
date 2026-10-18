@@ -67,8 +67,12 @@ A fitted (H, f) is scored by its log likelihood plus a coding regularizer
 
 - **Dictionary.** log C(2^L, U) is the code length of U rows coded as new arbitrary binary
   haplotypes. In the initial round, and in blocks no assembled context covers, U = K. In a covered
-  block of a context round, each refitted context founder claims its nearest panel row on the
-  founder's called sites (ties: the lowest row); a claimed row is a local parameter of a founder
+  block of a context round, each refitted context founder claims one of its nearest panel rows on
+  the founder's called sites. The claims are those of the shortest description of the panel (release
+  2.1, a declared model change): a maximum-cardinality, then minimum-edit-cost matching of founders
+  to their nearest rows, so the code is a function of the row set whatever the row order (2.0 let a
+  founder equidistant to several rows claim the lowest of them, a greedy rule applied to a
+  trajectory-dependent row order); a claimed row is a local parameter of a founder
   whose existence the multi-block assembly decided, coded by reference to that founder plus its
   edits, log C(n_f, d) for d differing sites among the founder's n_f called sites (the smallest
   over the row's claimers, and never more than one more free row would cost). c_claimed sums these
@@ -95,7 +99,13 @@ current (H, f):
 
 The fit converges at a conditional fixed point: no frequency gain and no exact one-bit flip gain
 above `LocalSelectionConfig.search.tolerance = 1e-6` nats. A flip that would make two rows equal
-stops the fit, because changing K belongs to the outer search. The update backstop is
+stops the fit, because changing K belongs to the outer search. The founder whose sites flip, and
+the single exact flip, are the first candidates (row order, then site order) within a relative
+2^-20 of the largest gain (`local_selection.fit.FLIP_TIE = 9.5367431640625e-07`), so equal gains
+computed through different arithmetic cannot steer the fit by their last bits. A fit is returned
+with its rows in lexicographic order (frequencies and per-row posteriors permuted with them): the
+likelihood and the objective do not depend on the row order, and two fits ending at the same
+founders are the same panel to every comparison, tie-break and record downstream. The update backstop is
 20 + 4K + 2L updates (`LocalSelectionConfig.search.update_backstop_base = 20`,
 `LocalSelectionConfig.search.update_backstop_per_founder = 4`,
 `LocalSelectionConfig.search.update_backstop_per_site = 2`), a reported limit. At fixed K the
@@ -106,15 +116,27 @@ prior odds) and the expected copies per site.
 
 ## Panel search
 
-The search (`local_selection/search.py`) starts by fitting the round's start panel. In a context
-round, when the previous round's selected fit of the block (the *incumbent*) has the higher
-selection objective, the search refits and explores from the incumbent instead, so it does not
-climb back to it. Each search round then:
+The search (`local_selection/search.py`) starts by fitting the round's start panel. Every decision
+between objectives in the search and between rounds uses anchored tie classes (`maths/ties.py`) of
+the decision tolerance `LocalSelectionConfig.search.decision_tolerance = 0.0009765625` nats
+(2^-10): values whose consecutive gaps are at most the tolerance are tied, and a tie is decided by
+content (fewer founders, then the canonical panel bytes, then the order in which the candidates
+were generated), never by the last bits of the objectives. The tolerance lies far above EM
+convergence residuals and the motion of 1e-9 relative GL perturbations, and far below the
+differences between distinct drop, merge and add outcomes. In a context round, when the start's fit
+reaches the previous round's selected panel of the block (the *incumbent*), the search continues
+from the incumbent's fit; when the incumbent scores better than the start's fit by more than the
+tolerance, the search explores from the incumbent instead (refitted only when that improves it by
+more than the tolerance), so it does not climb back to it. Each search round then:
 
 - proposes every **drop** (one row deleted, frequencies renormalised), every **merge** of rows
   i < j (row j deleted, row i set to the occupancy-weighted consensus of the two rows' allele
-  probabilities, its frequency f_i + f_j) and every **add** of a candidate-bank row not in the
-  panel (frequency 1/(K + 1), the others scaled by K/(K + 1));
+  probabilities, its frequency f_i + f_j; where that probability is 1/2 within
+  `local_selection.search.CONSENSUS_TIE = 4.656612873077393e-10` (2^-31, placed by the valley census
+  between the motion of 1e-9 GL perturbations and the closest genuine values), row i's allele is
+  kept) and every **add** of
+  a candidate-bank row not in the panel (frequency 1/(K + 1), the others scaled by K/(K + 1));
+  starts with the same panel and frequencies equal up to rounding are proposed once;
 - screens drops and adds by their exact forward log likelihood plus the coded regularizer, and
   merges by an EM lower bound: the merged panel is the drop panel of either row with the other row
   replaced by the consensus, so the drop panel's posterior gives LL(drop) plus the replaced row's
@@ -122,17 +144,23 @@ climb back to it. Each search round then:
   larger of the two bounds ranks the merge. For every row k, the merge of k with its nearest row
   and the merge not involving k whose consensus is nearest row k are scored exactly as well (at
   most 2K forwards), because the fixed-posterior bound credits no re-routing of carriers;
-- refits the best `LocalSelectionConfig.search.refits_per_kind = 8` proposals of each kind to a
-  conditional fixed point and moves to the best refit (ties: smaller K, then row order) when it
-  improves the selection objective by more than the tolerance.
+- refits the best `LocalSelectionConfig.search.refits_per_kind = 8` proposals of each kind, and
+  the proposals tied with the last of them (its tie class of the screened score) up to
+  `LocalSelectionConfig.search.refits_per_kind_cap = 12` (a cut still inside the class goes by
+  panel bytes, then generation order), to a conditional fixed point and
+  moves to the best refit (the best tie class of the objective; inside it fewer founders, then the
+  panel bytes, then the refit order) when it improves the selection objective by more than the
+  decision tolerance.
 
 The search stops when no refit improves; the round backstop 10 + 2K
 (`LocalSelectionConfig.search.round_backstop_base = 10`,
 `LocalSelectionConfig.search.round_backstop_per_founder = 2`) is a reported limit. After the
-search, the incumbent is kept when its selection objective, under the current round's context
-code, exceeds the search result's by more than the tolerance. A block whose search inputs (start,
-candidate bank, likelihoods, map distances, settings and context founders) equal the incumbent's
-reuses the incumbent's search. Fits, scores and merge bounds are deterministic functions of their
+search, the incumbent is kept unless the search result beats its selection objective, both under
+the current round's context code, by more than the decision tolerance (hysteresis): a context
+round replaces a block's panel only for a real improvement, so a change elsewhere in the contig
+does not move a block between equally good optima. A block whose search inputs (start, candidate
+bank, likelihoods, map distances, settings and context founders) equal the incumbent's reuses the
+incumbent's search. Fits, scores and merge bounds are deterministic functions of their
 inputs; they are memoised within a block and carried to the block's next round.
 
 ## Candidate bank
@@ -145,8 +173,13 @@ is refitted with discovery's fixed-K model and its endpoints are cavity-scored
 (`local_selection/bank.py`). The union bank and the drop, add and replace neighbourhoods of its
 best panel are then searched under discovery's switch-penalised binned-Viterbi NLL in a BIC form,
 K x `LocalSelectionConfig.bank.complexity_scale = 0.5` x (L / 200) x N_active + 2 NLL (lower is
-better; N_active the samples with depth), until it improves by at most
-`LocalSelectionConfig.bank.improvement_tolerance = 1e-9` nats. Reported backstops, with K the
+better; N_active the samples with depth), until it improves by at most the block's `improvement`
+tie quantum (2^-14 nats). The block's discovery tie quanta order the bank's choices: the selected
+panel is the best tie class of the BIC score (kind `nll`), inside it the best class of the NLL,
+then fewer founders, then the canonical key; each source's endpoint is chosen the same way from
+its cavity scores; a budget-bound admission keeps the NLL tie-class order. These choices do not
+depend on the order in which panels were admitted: inside every class (also a class wider than the
+width guard, ordered by value) exact ties go by founder count, then the canonical key. Reported backstops, with K the
 current panel's founder count: at most 512 + 64K novel starts per call
 (`LocalSelectionConfig.bank.start_backstop_base = 512`,
 `LocalSelectionConfig.bank.start_backstop_per_founder = 64`), 1024 + 128K admitted panels
@@ -155,7 +188,7 @@ current panel's founder count: at most 512 + 64K novel starts per call
 (`LocalSelectionConfig.bank.round_backstop_base = 8`).
 
 The path search starts from the newest source's cavity-best endpoint, released with the raw
-discovery rule (released alleles, latent alleles where withheld). The rows the add move may use are
+discovery rule and the block's tie quanta (released alleles, latent alleles where withheld). The rows the add move may use are
 the raw latent rows, that start, the BIC-selected panel and the incumbent's rows. Neither the BIC
 nor the cavity score replaces the path objective; they only supply starts and rows. Completed
 latent alleles are not released as calls by themselves.
@@ -173,7 +206,8 @@ proposal, with every row coded free. A completed assembly round therefore does n
 every block receives a new proposal.
 
 **Refit** (`local_selection/context_refit.py`). The component's distinct pre-fill rows are its
-founders (-1 = uncalled). Per sample, a bin-level diploid HMM has one bin per covered block and as
+founders (-1 = uncalled), taken in lexicographic order, so the refit does not depend on the
+component's founder order. Per sample, a bin-level diploid HMM has one bin per covered block and as
 states the ordered pairs of the component's K founders and a background state, whose alleles are
 Bernoulli(site background frequency) per copy, the background frequency at a site being
 (1 + called ALT) / (2 + called founders). Transitions redraw toward pi = ((1 - u)/K, ..., u) at
@@ -196,15 +230,22 @@ the mode; the remaining core is enumerated exactly when it has at most ten found
 a Hamming ball of at most `assembly.founder_alleles.site_posterior.SITE_BALL_CONFIGURATIONS = 1024`
 configurations (radius at least `assembly.founder_alleles.site_posterior.SITE_BALL_MINIMUM_RADIUS = 3`).
 There is no founder-count cap. An allele is released at posterior probability
-`LocalSelectionConfig.context_refit.posterior_threshold = 0.99` with carrier support (count or
-mass) of at least `LocalSelectionConfig.context_refit.min_support = 2.0`; nothing is released at a
-site whose two ascent starts end in different comparable optima (multimodal abstention), or where
-the ball's shell guard withholds it. The [assembly](assembly.md) page describes this posterior in
+`LocalSelectionConfig.context_refit.posterior_threshold = 0.99` with carrier support of at least
+`LocalSelectionConfig.context_refit.min_support = 2.0`, by count (samples more likely than not to
+carry the founder) or by carrier mass; nothing is released at a site whose two ascent starts end in
+different comparable optima (multimodal abstention), or where the ball's shell guard withholds it.
+The refit's founder prior is uniform, so a carrier probability can be exactly 1/2 by symmetry and a
+carrier mass exactly at the threshold (a sum of halves): within
+`assembly.founder_alleles.site_posterior.SITE_HALF_BAND = 1.4901161193847656e-08` of 1/2 a sample is
+not counted, and a mass within that band of the threshold does not release (a fixed conservative
+rule at a mathematical tie). An ascent flip, a ball recentring and the complement start's optimum
+must raise the log posterior by more than
+`assembly.founder_alleles.site_posterior.SITE_IMPROVEMENT = 7.62939453125e-06` nats. The [assembly](assembly.md) page describes this posterior in
 full. A withheld allele keeps the component's published (completion-filled) call when it has one.
 
 **Proposals.** A covered block's proposal is the set of distinct local rows of the refitted
-founders; they are its candidate panel and the context founders of the dictionary code. Proposals
-are recorded per round.
+founders, in lexicographic order; they are its candidate panel and the context founders of the
+dictionary code. Proposals are recorded per round.
 
 ## Release rule
 
@@ -215,9 +256,11 @@ The selected panel's alleles are released from one more E-step over per-sample p
   the log marginal likelihood ratio of flipping that allele with every other bit and pi fixed
   (summed over samples, equal prior odds);
 - the *favourable* samples are those whose own exact flip gain is below
-  -`LocalSelectionConfig.release.favourable_margin = 1e-9` nats, i.e. whose evidence favours the
-  allele; their carrier probability is the posterior probability that a homologue copies founder k
-  at the site (a homozygous state counted once);
+  -`LocalSelectionConfig.release.favourable_margin = 1.1920928955078125e-07` nats (the `cell` tie
+  quantum 2^-23), i.e. whose evidence favours the allele; a symmetric-evidence cell (one REF and one
+  ALT read: GL(0/0) = GL(1/1)) gives a homozygous carrier a gain of exactly zero, inside this band,
+  so it is never favourable; the carrier probability is the posterior probability that a homologue
+  copies founder k at the site (a homozygous state counted once);
 - the allele is released when its probability reaches
   `LocalSelectionConfig.release.min_call_probability = 0.85` and the favourable samples include
   `LocalSelectionConfig.release.min_supporters = 2.0` carriers, by count (samples with carrier
@@ -232,7 +275,10 @@ favourable carrier counts.
 
 **Unknown-copy summary.** For each sample with depth, the largest MAP number (0, 1 or 2) of copies
 drawn from the unknown state over its observed discovery sites (2 for a sample without depth), and
-the block's `unknown_mass`, those copies over the 2 copies of every sample with depth. Assembly's
+the block's `unknown_mass`, those copies over the 2 copies of every sample with depth. A site's
+MAP count must win by more than `LocalSelectionConfig.release.unknown_count_band = 9.5367431640625e-07`
+(2^-20, the `probability` tie quantum) times the largest count mass, else the smaller count is
+taken: completion's veto is all-or-nothing, and count masses can tie exactly. Assembly's
 completion reads them as a spatial MAP summary; it is not a probability of any unknown state and
 does not invent a constant founder pair for a sample.
 

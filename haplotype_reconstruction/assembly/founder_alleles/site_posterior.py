@@ -47,6 +47,19 @@ The constants reach the kernels through their ``settings`` argument
 (``settings()``, a float64 vector indexed by the SETTING_* positions): Numba's
 on-disk cache does not notice a changed imported global, so a cached kernel
 could otherwise keep a stale value.
+
+Release 2.1 (noise stability, design A-1/A-2/A-7): among ascent moves and ball
+recentrings the first (fixed order) within SITE_IMPROVEMENT of the best is taken, so
+moves that are equal by symmetry (exchangeable founders) go by founder order; a flip,
+a ball recentring and the complement start's optimum must raise the log posterior by more than
+SITE_IMPROVEMENT (2^-17 nats, the ``nll`` tie quantum floor; 2.0's 1e-12 sat at
+the rounding and 1e-12-noise scale, so mathematically zero gains of exchangeable
+founders were taken or not by their last bits). In the context refit's carrier
+support, a sample whose carrier probability is exactly 1/2 by symmetry (the refit's
+founder prior is uniform) is not counted within SITE_HALF_BAND (2^-26, census-placed)
+of 1/2, and ``site_release_marginals`` returns the count and the mass
+separately so that a mass sitting exactly at the support threshold (a sum of halves)
+is decided by the caller's conservative band.
 """
 import math
 
@@ -77,6 +90,13 @@ SITE_BP_TOLERANCE = 1e-9
 SITE_BP_ITERATIONS = 500
 SITE_ASCENT_BACKSTOP = 50
 SITE_RECENTRE_BACKSTOP = 50
+# Release 2.1 tie quanta: the least log-posterior improvement of a flip, a recentring or the complement
+# optimum (the ``nll`` floor of maths.ties), and the band of a carrier probability around exactly 1/2 and of a
+# carrier mass around the support threshold, placed by the valley census of the context refit's carrier
+# probabilities (actm3, 4,674 within 1e-3 of 1/2: 1e-9 relative GL noise moves them by <= 5.7e-11, genuine
+# values are dense from 3e-6): 2^-26 = 1.5e-8, >= 200x from both.
+SITE_IMPROVEMENT = 2.0 ** -17
+SITE_HALF_BAND = 2.0 ** -26
 
 # Support of a site's posterior.
 METHOD_CUBE = 0       # all m <= MAX_EXACT_BITS bits enumerated
@@ -97,8 +117,6 @@ INFO_MULTIMODAL = 9         # the two starts' optima differ within SITE_CERTAIN_
 INFO_FIELDS = 10
 
 _TINY = 1e-300
-# A flip or a recentring must raise the log posterior by more than this.
-_IMPROVEMENT = 1e-12
 
 # Positions in the kernels' settings vector (``settings()``).
 SETTING_EXACT_BITS = 0
@@ -111,14 +129,17 @@ SETTING_BP_TOLERANCE = 6
 SETTING_BP_ITERATIONS = 7
 SETTING_ASCENT_BACKSTOP = 8
 SETTING_RECENTRE_BACKSTOP = 9
+SETTING_IMPROVEMENT = 10
+SETTING_HALF_BAND = 11
 
 
 def settings():
-    """float64[10]: the site-posterior constants as the kernels' settings argument."""
+    """float64[12]: the site-posterior constants as the kernels' settings argument."""
     return np.array([
         MAX_EXACT_BITS, SITE_CERTAIN_NATS, SITE_BALL_CONFIGURATIONS, SITE_BALL_MINIMUM_RADIUS,
         SITE_SHELL_GUARD, SITE_BP_DAMPING, SITE_BP_TOLERANCE, SITE_BP_ITERATIONS,
-        SITE_ASCENT_BACKSTOP, SITE_RECENTRE_BACKSTOP], dtype=np.float64)
+        SITE_ASCENT_BACKSTOP, SITE_RECENTRE_BACKSTOP, SITE_IMPROVEMENT, SITE_HALF_BAND],
+        dtype=np.float64)
 
 
 @njit(cache=True)
@@ -158,25 +179,27 @@ def _feedback_quadratic(e, w, background_q, fixed, bit_index, unary, coupling):
 
 
 @njit(cache=True)
-def _carrier_support(w, k, support, carried_mass):
+def _carrier_support(w, k, support, carried_mass, half_band):
     """Carrier support of each founder from one sample's pair weights (in place): the sample
-    counts in ``support`` when it is more likely than not to carry the founder, and its carrier
-    probability (a homozygote counts once) adds to ``carried_mass``."""
+    counts in ``support`` when it is more likely than not to carry the founder (by more than
+    ``half_band``: an exact 1/2 by symmetry is not counted), and its carrier probability (a
+    homozygote counts once) adds to ``carried_mass``. Returns the number of carrier decisions
+    inside the band."""
+    inside = 0
     for i in range(k):
         carried = w[i, :].sum() + w[:, i].sum() - w[i, i]
         carried_mass[i] += carried
-        if carried > .5:
+        if carried > .5 + half_band:
             support[i] += 1.0
+        elif carried >= .5 - half_band:
+            inside += 1
+    return inside
 
 
 @njit(cache=True)
-def exact_feedback_site(gl, observed, weights, background_q):
-    """Exact uniform-prior shared K-bit posterior, background integrated per copy.
-
-    Returns q float64[K] (posterior ALT probability), the carrier support float64[K] (the larger
-    of the count of samples more likely than not carrying each founder and their summed carrier
-    probability) and the posterior float64[2^K] over little-endian configurations.
-    """
+def _exact_feedback(gl, observed, weights, background_q, half_band):
+    """``exact_feedback_site`` with the carrier count and mass separate and the number of
+    carrier decisions inside the 1/2 band."""
     n, s, _ = weights.shape
     k = s - 1
     count = 1 << k
@@ -186,6 +209,7 @@ def exact_feedback_site(gl, observed, weights, background_q):
     support = np.zeros(k)
     carried_mass = np.zeros(k)
     e = np.empty(3)
+    inside = 0
     for sample in range(n):
         if not observed[sample]:
             continue
@@ -195,7 +219,7 @@ def exact_feedback_site(gl, observed, weights, background_q):
         unary = np.zeros(k)
         coupling = np.zeros((k, k))
         constant = _feedback_quadratic(e, w, background_q, fixed, bit_index, unary, coupling)
-        _carrier_support(w, k, support, carried_mass)
+        inside += _carrier_support(w, k, support, carried_mass, half_band)
         values = quadratic_values(constant, unary, coupling)
         for code in range(count):
             log_joint[code] += np.log(max(values[code], 1e-300))
@@ -208,12 +232,26 @@ def exact_feedback_site(gl, observed, weights, background_q):
                 q[i] += probabilities[code]
     for i in range(k):
         q[i] = min(1.0, max(0.0, q[i]))
+    return q, support, carried_mass, probabilities, inside
+
+
+@njit(cache=True)
+def exact_feedback_site(gl, observed, weights, background_q, half_band=SITE_HALF_BAND):
+    """Exact uniform-prior shared K-bit posterior, background integrated per copy.
+
+    Returns q float64[K] (posterior ALT probability), the carrier support float64[K] (the larger
+    of the count of samples more likely than not carrying each founder and their summed carrier
+    probability) and the posterior float64[2^K] over little-endian configurations.
+    """
+    q, support, carried_mass, probabilities, _ = _exact_feedback(gl, observed, weights, background_q,
+                                                                 half_band)
     return q, np.maximum(support, carried_mass), probabilities
 
 
 @njit(cache=True)
-def _feedback_quadratics(gl, observed, weights, background_q):
-    """Per-sample quadratics and support exactly as ``exact_feedback_site`` builds them."""
+def _feedback_quadratics(gl, observed, weights, background_q, half_band):
+    """Per-sample quadratics, carrier count and mass, and the carrier decisions inside the 1/2
+    band, exactly as ``_exact_feedback`` builds them."""
     n, s, _ = weights.shape
     k = s - 1
     fixed = np.zeros(k, np.int8)
@@ -225,6 +263,7 @@ def _feedback_quadratics(gl, observed, weights, background_q):
     support = np.zeros(k)
     carried_mass = np.zeros(k)
     e = np.empty(3)
+    inside = 0
     for sample in range(n):
         if not observed[sample]:
             continue
@@ -234,8 +273,8 @@ def _feedback_quadratics(gl, observed, weights, background_q):
         w = weights[sample]
         constants[sample] = _feedback_quadratic(e, w, background_q, fixed, bit_index,
                                                 unaries[sample], couplings[sample])
-        _carrier_support(w, k, support, carried_mass)
-    return constants, unaries, couplings, use, np.maximum(support, carried_mass)
+        inside += _carrier_support(w, k, support, carried_mass, half_band)
+    return constants, unaries, couplings, use, support, carried_mass, inside
 
 
 @njit(cache=True)
@@ -376,28 +415,42 @@ def _flip_gains(couplings, use, prior, b, base, field, single, pair):
 
 @njit(cache=True)
 def _ascend(constants, unaries, couplings, use, prior, b, base, field, single, pair, settings):
-    """Steepest single/pair-flip ascent of b in place; fields and gains end at b."""
+    """Steepest single/pair-flip ascent of b in place; fields and gains end at b.
+
+    Release 2.1: a move must gain more than SITE_IMPROVEMENT, and among the moves the first (singles
+    in founder order, then pairs in (i, j) order) within SITE_IMPROVEMENT of the largest gain is taken,
+    so moves whose gains are equal by symmetry (exchangeable founders) are chosen by founder order,
+    never by the last bits of their gains."""
     m = len(b)
     limit = int(settings[SETTING_ASCENT_BACKSTOP])
+    improvement = settings[SETTING_IMPROVEMENT]
     steps = 0
     backstop = False
     while True:
         _local_fields(constants, unaries, couplings, use, b, base, field)
         _flip_gains(couplings, use, prior, b, base, field, single, pair)
-        best = _IMPROVEMENT
-        first = -1
-        second = -1
+        largest = -np.inf
         for i in range(m):
-            if single[i] > best:
-                best = single[i]
-                first = i
-                second = -1
+            if single[i] > largest:
+                largest = single[i]
         for i in range(m):
             for j in range(i + 1, m):
-                if pair[i, j] > best:
-                    best = pair[i, j]
+                if pair[i, j] > largest:
+                    largest = pair[i, j]
+        first = -1
+        second = -1
+        if largest > improvement:
+            cut = largest - improvement
+            for i in range(m):
+                if single[i] >= cut:
                     first = i
-                    second = j
+                    break
+            if first < 0:
+                for i in range(m):
+                    for j in range(i + 1, m):
+                        if first < 0 and pair[i, j] >= cut:
+                            first = i
+                            second = j
         if first < 0:
             break
         if steps >= limit:
@@ -585,16 +638,23 @@ def _core_ball(constants, unaries, couplings, use, prior, b, core, base, field, 
     log_prior = np.empty(count)
     recentres = 0
     backstop = False
+    improvement = settings[SETTING_IMPROVEMENT]
     while True:
         _ball_weights(couplings, use, prior, b, core, flips, sizes, base, field,
                       log_likelihood, log_prior)
-        best = 0
-        best_value = _IMPROVEMENT
+        # Recentre on the first configuration (ball order) within SITE_IMPROVEMENT of the best one
+        # when that beats the centre by more than SITE_IMPROVEMENT (release 2.1 tie rule).
+        largest = 0.0
         for config in range(1, count):
             value = log_likelihood[config] + log_prior[config]
-            if value > best_value:
-                best_value = value
-                best = config
+            if value > largest:
+                largest = value
+        best = 0
+        if largest > improvement:
+            for config in range(1, count):
+                if log_likelihood[config] + log_prior[config] >= largest - improvement:
+                    best = config
+                    break
         if best == 0:
             break
         if recentres >= limit:
@@ -672,7 +732,9 @@ def core_support(constants, unaries, couplings, use, prior, settings):
     info[INFO_ASCENT_STEPS] = steps + steps_o
     if backstop or backstop_o:
         info[INFO_ASCENT_BACKSTOP] = 1
-    if value_o > value:
+    if value_o > value + settings[SETTING_IMPROVEMENT]:
+        # The complement start's optimum replaces the BP start's only when better by more than
+        # the improvement quantum (equal optima by symmetry keep the BP start's).
         b, other = other, b
         base = base_o
         field = field_o
@@ -765,20 +827,32 @@ def site_marginals(gl, observed, weights, background_q, settings):
     outside the ball), the int64 diagnostics (INFO_*; release nothing when
     ``info[INFO_MULTIMODAL]`` is set) and the ball's outermost-shell mass.
     """
+    q, count, mass, shell, info, boundary, _ = site_release_marginals(gl, observed, weights,
+                                                                      background_q, settings)
+    return q, np.maximum(count, mass), shell, info, boundary
+
+
+@njit(cache=True)
+def site_release_marginals(gl, observed, weights, background_q, settings):
+    """``site_marginals`` with the carrier support split into its count (samples more likely than
+    not carrying the founder, by more than the 1/2 band) and its mass (summed carrier
+    probabilities), plus the number of carrier decisions inside the 1/2 band; returns (q, count,
+    mass, shell, info, boundary, inside)."""
     k = weights.shape[1] - 1
+    half_band = settings[SETTING_HALF_BAND]
     info = np.zeros(INFO_FIELDS, np.int64)
     if k <= settings[SETTING_EXACT_BITS]:
-        q, support, _ = exact_feedback_site(gl, observed, weights, background_q)
+        q, count, mass, _, inside = _exact_feedback(gl, observed, weights, background_q, half_band)
         info[INFO_METHOD] = METHOD_CUBE
         info[INFO_CORE] = -1
-        return q, support, np.zeros(k), info, 0.0
-    constants, unaries, couplings, use, support = _feedback_quadratics(
-        gl, observed, weights, background_q)
+        return q, count, mass, np.zeros(k), info, 0.0, inside
+    constants, unaries, couplings, use, count, mass, inside = _feedback_quadratics(
+        gl, observed, weights, background_q, half_band)
     b, core, rows, shell_flags, log_likelihood, log_prior, _, _, info = core_support(
         constants, unaries, couplings, use, np.zeros(k), settings)
     q, shell, boundary, _ = support_marginals(b, core, rows, shell_flags,
                                               log_likelihood, log_prior)
-    return q, support, shell, info, boundary
+    return q, count, mass, shell, info, boundary, inside
 
 
 @njit(cache=True)

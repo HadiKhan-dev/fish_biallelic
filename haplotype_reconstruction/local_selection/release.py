@@ -10,6 +10,15 @@ count alone would withhold diffusely supported sites). Released alleles are the 
 
 The unknown-copy summary for assembly: per sample the largest marginal MAP number of unknown
 copies over its observed sites (2 without depth) and their fraction over samples with depth.
+Release 2.1: a site's MAP count must win by more than ``unknown_count_band`` relative posterior
+mass, else the smaller count (design A-7: the count feeds completion's all-or-nothing veto, and
+its masses can tie exactly); the band decisions are counted ("ls.unknown.band") and, with the
+valley census on, the samples' smallest relative gaps near zero are recorded.
+
+Release 2.1: ``favourable_margin`` is the ``cell`` tie quantum, a band around the exact zero gain
+of symmetric-evidence cells (1 REF + 1 ALT read: GL(0/0) == GL(1/1)), which are not favourable
+inside it (design A-4, A-7); the band decisions are counted ("ls.favourable.band") and, with the
+valley census on, the carrier cells' gains near zero are recorded.
 """
 from __future__ import annotations
 
@@ -18,8 +27,15 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import expit
 
+from ..maths.ties import census, census_enabled
 from ..model.local_panels import LocalPanel, unknown_copy_mass
 from .path_model import release_statistics
+
+# Census window of the favourable band (carrier cells with |exact gain| up to this are recorded).
+FAVOURABLE_CENSUS_WINDOW = 1e-3
+# Census window of the unknown-count band (samples whose smallest relative gap between a site's two
+# largest count masses is at most this are recorded).
+UNKNOWN_CENSUS_WINDOW = 1e-3
 
 
 @dataclass(frozen=True)
@@ -27,7 +43,8 @@ class PathRelease:
     """calls int8[K, L_kept] (-1 withheld); probability float64[K, L_kept] of the current
     allele; supporters int64[K, L_kept] favourable carriers by count; unknown_copy_fraction:
     posterior unknown-state occupancy over all copies (diagnostic); has_depth bool[N];
-    unknown_slots int8[N]; unknown_mass float."""
+    unknown_slots int8[N]; unknown_mass float; favourable_band_cells: observed carrier cells whose
+    gain lies inside the favourable band (diagnostic, release 2.1; 0 in older records)."""
 
     calls: np.ndarray
     probability: np.ndarray
@@ -36,10 +53,31 @@ class PathRelease:
     has_depth: np.ndarray
     unknown_slots: np.ndarray
     unknown_mass: float
+    favourable_band_cells: int = 0
 
 
-def release(fit, prepared, config) -> PathRelease:
-    statistics = release_statistics(fit.panel, fit.frequencies, prepared, config.favourable_margin)
+def release(fit, prepared, config, ties=None, census_key=None) -> PathRelease:
+    """The PathRelease of a selected fit. ``ties`` (maths.ties.TieCounter) counts the favourable band
+    and the unknown-count band (one decision per release each; inside: some observed carrier cell's
+    gain in the favourable band, some observed site's count lowered by the unknown-count band);
+    ``census_key`` records the carrier cells' gains within FAVOURABLE_CENSUS_WINDOW of zero and the
+    samples' smallest count gaps within UNKNOWN_CENSUS_WINDOW when the census is on."""
+    collect = census_key is not None and census_enabled()
+    statistics = release_statistics(fit.panel, fit.frequencies, prepared, config.favourable_margin,
+                                    config.unknown_count_band, keep_gains=collect)
+    if ties is not None:
+        # One decision per release; inside the tie when some observed carrier cell's gain lies in the
+        # band (their number is PathRelease.favourable_band_cells).
+        ties.note("ls.favourable.band", inside_tie=statistics["band_cells"] > 0)
+        ties.note("ls.unknown.band", inside_tie=statistics["unknown_band_sites"] > 0)
+    if collect:
+        gains = statistics["sample_gains"]
+        for sample, founder, site in np.argwhere(np.abs(gains) <= FAVOURABLE_CENSUS_WINDOW):
+            census("ls.favourable.band", f"{census_key}/n{sample}/a{founder}/s{site}",
+                   (0.0, float(gains[sample, founder, site])))
+        for sample in np.flatnonzero(statistics["unknown_gaps"] <= UNKNOWN_CENSUS_WINDOW):
+            census("ls.unknown.band", f"{census_key}/n{sample}",
+                   (0.0, float(statistics["unknown_gaps"][sample])))
     probability = expit(-statistics["conditional_flip_gains"])
     supporters, mass = statistics["supporters"], statistics["carrier_mass"]
     confident = ((probability >= config.min_call_probability)
@@ -50,7 +88,8 @@ def release(fit, prepared, config) -> PathRelease:
     return PathRelease(
         calls=np.where(confident, fit.panel, -1).astype(np.int8), probability=probability,
         supporters=supporters, unknown_copy_fraction=float(occupancy[-1].sum()) / float(occupancy.sum()),
-        has_depth=has_depth, unknown_slots=slots, unknown_mass=unknown_copy_mass(slots, has_depth))
+        has_depth=has_depth, unknown_slots=slots, unknown_mass=unknown_copy_mass(slots, has_depth),
+        favourable_band_cells=int(statistics["band_cells"]))
 
 
 def local_panel(block: int, site_start: int, positions, kept, fit, path_release: PathRelease

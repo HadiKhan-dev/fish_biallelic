@@ -12,6 +12,9 @@ length log C(2^L, K) of an unordered set of K distinct binary rows. Missing cell
 (the evidence there is exactly 1/3 for every state, a constant that cancels across K).
 
 Scores are uncalibrated pseudo-scores: the panel and A were selected from the full data.
+
+Release 2.1: a held-out solve's mean-field start is chosen with the solution's ``nll`` tie quantum
+(``FixedKSolution.quanta``; the floors for solutions without quanta), see cavity_kernels.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ import numpy as np
 from ..execution import claim_threads
 from .cavity_kernels import (_build_evidence_emission_cache_kernel, _floor_log_likelihood_kernel,
                              _score_mode_cavity_kernel)
+from ..maths.ties import BlockQuanta
 from .panel import FixedKSolution, log_haplotype_set_count, restricted
 
 
@@ -105,6 +109,12 @@ class PanelScore:
         return self.solution.k
 
 
+def _elbo_tie(solution) -> float:
+    """The start-choice tie quantum of a solution's held-out solves: its block's ``nll`` quantum."""
+    quanta = solution.quanta if solution.quanta is not None else BlockQuanta.floors()
+    return quanta.nll
+
+
 def score_solutions(workspace: CavityWorkspace, solutions, active: np.ndarray):
     """Cavity scores of solutions of the block (``active``: bool[N] samples with depth; the
     workspace holds exactly those samples)."""
@@ -126,7 +136,7 @@ def score_solutions(workspace: CavityWorkspace, solutions, active: np.ndarray):
             np.ascontiguousarray(scored.assignments, dtype=np.int64), kind, first, second, base,
             float(config.state_concentration), int(config.mean_field_max_iterations),
             float(config.mean_field_tolerance), float(config.likelihood_floor),
-            workspace.shared_triple)
+            workspace.shared_triple, float(_elbo_tie(solution)))
         total = math.fsum(float(value) for value in sample_scores)
         k = solution.k
         log_k_prior = -math.log(k) - math.log(k + 1)

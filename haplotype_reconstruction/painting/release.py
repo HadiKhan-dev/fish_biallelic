@@ -20,7 +20,7 @@ Samples without any observed informative site abstain everywhere
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import NamedTuple
 
@@ -183,6 +183,8 @@ class LabelContinuity:
     moves: accepted moves in search order (also when the final check rejects them);
     row_maps: int64[A, K] applied relabelling (span a, new row k carries old
         row row_maps[a, k]), None unless accepted.
+    tie_events: candidate rankings decided inside a tie class (``maths.ties.TieCounter``
+        record; release 2.1).
     """
 
     accepted: bool
@@ -195,6 +197,7 @@ class LabelContinuity:
     candidate_checks: int
     moves: tuple[RelabelMove, ...]
     row_maps: np.ndarray | None
+    tie_events: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

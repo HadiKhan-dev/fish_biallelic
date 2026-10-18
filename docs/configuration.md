@@ -475,7 +475,7 @@ Stage `discovery`, `discovery/config.py`. All raw-discovery settings (one record
 | `cavity.mean_field_tolerance` | `1e-10` | per held-out site solve (three starts). |
 | `cavity.likelihood_floor` | `1e-300` | lower bound of a genotype likelihood before its logarithm. |
 | **search** (SearchConfig) |  | Adaptive reversible search over complete panels (search.py, moves.py). |
-| `search.beam_width` | `3` | low-NLL basins expanded at the selected K. expansion_backstop_base/_per_founder, exact_score_backstop_base/_per_founder: reported backstops, K = the largest K represented in the search archive. |
+| `search.beam_width` | `6` | low-NLL basins expanded at the selected K. expansion_backstop_base/_per_founder, exact_score_backstop_base/_per_founder: reported backstops, K = the largest K represented in the search archive. |
 | `search.expansion_backstop_base` | `32` |  |
 | `search.expansion_backstop_per_founder` | `8` |  |
 | `search.exact_score_backstop_base` | `96` |  |
@@ -487,7 +487,16 @@ Stage `discovery`, `discovery/config.py`. All raw-discovery settings (one record
 | `search.max_replacement_children` | `24` | generator size of birth-delete replacements per expansion. |
 | `search.exact_cut_max_k` | `12` | gauge rewires use exact maximum cuts up to this K, a degree-ordered local search above (reported separately from search limits). |
 | `search.max_cut_ties` | `4` | equal maximum cuts used per expansion. |
-| `search.score_tolerance` | `1e-09` | an improvement must exceed this (nats); also the strict-improvement margin of the bank and the favourable-sample margin of the path release. |
+| `search.data_birth_attempts_factor` | `3` | data births fit at most max(16, 2(K + 1)) x this many starts (the attempt budget; release 2.1 broader births, 3). |
+| `search.data_birth_children_factor` | `3` | data births stop once (K + 1) x this many distinct complete children exist (3). |
+| `search.data_birth_tie_budget_factor` | `2` | data-birth tie groups (samples tied on excess NLL and observed sites) are consumed whole; a group is cut (canonical order, reported as "data_birth_tie_budget") only when the starts would exceed this multiple of the attempt budget (the hard cap). |
+| `search.reversed_convention_search` | `'off'` | "off" (default), "fragile" or "all": a second search with the reversed sample order and content keys whose panels join the first search's archive (fragile = only blocks meeting the escalation trigger). Off in 2.1 unless simulation truth favours it (owner decision 2). |
+| `search.escalation` | `False` | widen the search once for blocks the base search leaves fragile (selected K >= escalate_min_k, a cavity margin over the best other K below escalate_margin nats, or a selection taken inside a tie), keeping every fit, score and archived panel; reported as SearchSummary.escalated. Off in 2.1 unless simulation truth favours it. |
+| `search.escalate_beam_width` | `12` | the beam width of an escalated search (the archive keeps this many panels per K when escalation is on). |
+| `search.escalate_replacement_children` | `48` | the birth-delete replacement generator size of an escalated search. |
+| `search.escalate_min_k` | `9` | a selected K of at least this triggers escalation. |
+| `search.escalate_margin` | `10.0` | a cavity-score margin (nats) of the selected K over the best other represented K below this triggers escalation. |
+| `search.escalate_expansions_percent` | `100` | an escalated search may run at most this percentage of the expansion backstop more expansions (the "escalation_backstop" limit). |
 | **residual_births** (ResidualBirthConfig) |  | Soft-residual birth proposals (residual_births.py). Fractions are of the block's sites. |
 | `residual_births.usable_founder_known_fraction` | `0.8` | rows must be known at this fraction of sites to subtract. |
 | `residual_births.residual_call_probability` | `0.8` | residual strand allele called when its probability reaches this. |
@@ -515,24 +524,26 @@ Stage `local_selection`, `local_selection/config.py`. All local-selection settin
 | `model.unknown_mass` | `0.01` | fixed prior mass of the unknown state (base ``background_mass``; also the background-state mass of the context refit's bin-level HMM). |
 | **search** (PathSearchConfig) |  | Drop / merge / add search with GEM refits (search.py, fit.py). |
 | `search.refits_per_kind` | `8` | top proposals per kind (drop, merge, add) refitted each round. round_backstop_base/_per_founder: reported round backstop, K of the current panel. update_backstop_base/_per_founder/_per_site: reported backstop of fixed-K GEM updates, base + per_founder K + per_site L. |
+| `search.refits_per_kind_cap` | `12` | release 2.1: the proposals tied with the last of the top refits_per_kind (its tie class of the screened score at decision_tolerance) join the refits, up to this many per kind; a cut still inside the class goes by panel bytes, then generation order. |
 | `search.round_backstop_base` | `10` |  |
 | `search.round_backstop_per_founder` | `2` |  |
 | `search.update_backstop_base` | `20` |  |
 | `search.update_backstop_per_founder` | `4` |  |
 | `search.update_backstop_per_site` | `2` |  |
-| `search.tolerance` | `1e-06` | fit tolerance and minimum improvement of the selection objective (nats). |
-| **bank** (CandidateBankConfig) |  | Candidate-bank search (bank.py): refits of the context proposals with discovery's fixed-K model, ranked by its binned-Viterbi BIC, K * complexity_scale * (L / 200) * N_active - 2 log L; K-scaled reported backstops with K the current panel's founder count: at most start_backstop(K) novel starts per call, score_backstop(K) admitted panels, round_backstop(K) rounds; rounds stop when the BIC score improves by at most improvement_tolerance (nats). |
+| `search.tolerance` | `1e-06` | the GEM fit's own tolerance (frequency-step acceptance, flip gains, convergence; nats). |
+| `search.decision_tolerance` | `0.0009765625` | tie quantum of every decision between EM-fitted or screened objectives (release 2.1): the proposal cut per kind, the round winner and the stop of the climb, the start-or-incumbent choice and the keep-incumbent rule between rounds; values chained within it are tied and decided by content (fewer founders, then the canonical panel bytes). A power of two placed by the valley census far above EM convergence residuals and the motion of 1e-9 relative GL noise, far below genuine drop / merge / add differences (nats). |
+| **bank** (CandidateBankConfig) |  | Candidate-bank search (bank.py): refits of the context proposals with discovery's fixed-K model, ranked by its binned-Viterbi BIC, K * complexity_scale * (L / 200) * N_active - 2 log L; K-scaled reported backstops with K the current panel's founder count: at most start_backstop(K) novel starts per call, score_backstop(K) admitted panels, round_backstop(K) rounds. Release 2.1: the block's discovery tie quanta (maths.ties BlockQuanta of the fixed-K workspace) order the BIC selection and the cavity-best endpoints (kind ``nll``) and stop the rounds (an improvement must exceed the ``improvement`` quantum). |
 | `bank.round_backstop_base` | `8` |  |
 | `bank.score_backstop_base` | `1024` |  |
 | `bank.score_backstop_per_founder` | `128` |  |
 | `bank.start_backstop_base` | `512` |  |
 | `bank.start_backstop_per_founder` | `64` |  |
 | `bank.complexity_scale` | `0.5` |  |
-| `bank.improvement_tolerance` | `1e-09` |  |
-| **release** (PathReleaseConfig) |  | Release of a selected panel's alleles (release.py): the one-bit conditional allele probability reaches ``min_call_probability`` and the favourable samples (whose own evidence favours the allele by more than ``favourable_margin`` nats) include ``min_supporters`` carriers by count (posterior carrier probability above 1/2) or by expected carrier mass. |
+| **release** (PathReleaseConfig) |  | Release of a selected panel's alleles (release.py): the one-bit conditional allele probability reaches ``min_call_probability`` and the favourable samples (whose own evidence favours the allele by more than ``favourable_margin`` nats) include ``min_supporters`` carriers by count (posterior carrier probability above 1/2) or by expected carrier mass. Release 2.1: ``favourable_margin`` is the ``cell`` tie quantum of maths.ties (2^-23 nats; the 1e-9 of 2.0 sat at the motion of 1e-9 GL noise, so a symmetric-evidence cell, whose gain is exactly 0, straddled it). ``unknown_count_band``: a site's MAP number of unknown copies (0, 1, 2; it feeds assembly completion's all-or-nothing veto) must win by more than this relative posterior margin, else the smaller count (the ``probability`` tie quantum of maths.ties, 2^-20; design A-7: an integer count whose posterior masses can tie exactly). |
 | `release.min_call_probability` | `0.85` |  |
 | `release.min_supporters` | `2.0` |  |
-| `release.favourable_margin` | `1e-09` |  |
+| `release.favourable_margin` | `1.1920928955078125e-07` |  |
+| `release.unknown_count_band` | `9.5367431640625e-07` |  |
 | **context_refit** (ContextRefitConfig) |  | Refit of a context component's founders from the block's own evidence (context_refit.py). |
 | `context_refit.posterior_threshold` | `0.99` | a refitted allele is released at this site-posterior probability. |
 | `context_refit.min_support` | `2.0` | and with this carrier support (count or mass). |
@@ -716,11 +727,7 @@ Stage `family_phase`, `family_phase/config.py`. Pedigree-conditioned phase of on
 | `transmission_error` | `0.001` | probability that a copy factor transmits the other parental allele. |
 | `scaffold_phase_error` | `0.01` | probability that a root's scaffold orientation is wrong at a heterozygous site. |
 | `phase_switch_probability` | `0.005` | probability of a frame switch at a painting-bin edge inside a component (the family phase chain and the polish's coarse bins); component edges switch with probability 1/2 and the family chain never switches phase inside a painting bin (the polish's refinement: polish_window_sites). |
-| `damping` | `0.5` | weight of the new message (probability space) |
-| `tolerance` | `0.0001` | largest message change that counts as converged |
-| `max_iterations` | `25` | iterations run before the phase is released when not converged earlier (base released after 20 initial iterations and 5 stability checks, which can never fail under the scaffold polish, see tickets/T8/questions.md Q1) |
-| `gauge_move_interval` | `5` | iterations between joint root/children gauge moves |
-| `minimum_gauge_support` | `2` | children whose selector changes at a boundary needed for a gauge move (one child cannot distinguish a root frame change from its own crossover). |
+| `map_max_sweeps` | `60` | safety cap on block-ascent sweeps. Every accepted step raises the posterior by more than a tie quantum, so the solver terminates by construction; reaching the cap is an error. Ten times the most sweeps measured (6: stress_n80; TroMau and std_n80 at most 3; validation of 18 Oct 2026, review M1). 2.0's belief-propagation settings (damping, tolerance, max_iterations, gauge_move_interval, minimum_gauge_support) are gone. |
 | `root_frame_window_bp` | `500000.0` | flank reach W around a bin edge |
 | `root_frame_location_bp` | `250000.0` | location tolerance (net votes ignore +- this around the edge) |
 | `root_frame_minimum_children` | `3` | children needed to move a frame (also the junction guard's parent size) |
@@ -730,8 +737,8 @@ Stage `family_phase`, `family_phase/config.py`. Pedigree-conditioned phase of on
 | `polish_copy_error` | `0.01` | copy-consistency error of called scaffold alleles |
 | `polish_window_sites` | `100` | fine phase boundaries allowed within this many sites of a current phase or selector change, inside the bin to the right of a bin edge (that edge's flip probability is split over them; the first painting bin of a chromosome or component has no such edge and stays rigid) |
 | `polish_max_sweeps` | `6` | colour sweeps before the polish must have converged |
-| `polish_minimum_gain` | `1e-06` | smallest accepted score gain (nats) |
-| `polish_minimum_biological_gain` | `0.0` | smallest copy-consistency gain for an interval that changes an observable phase. |
+| `polish_minimum_gain` | `1e-06` | the polish's tie quantum q (nats): an interval is accepted only when its exact gain exceeds q, inside q the current configuration is kept (the score reads called scaffold alleles only, so q only has to exceed rounding) |
+| `polish_minimum_biological_gain` | `0.0` | smallest copy-consistency gain for an interval that changes an observable phase, compared with a band of q. |
 
 ### RecombinationConfig
 
@@ -796,6 +803,7 @@ No setting is read from the environment: every setting is in the configuration. 
 | `PBS_JOBID` | PBS job identity (automatic kernel cache directory); also `PBS_ARRAY_INDEX`, `PBS_ARRAYID`. |
 | `LSB_JOBID` | LSF job identity (automatic kernel cache directory); also `LSB_JOBINDEX`. |
 | `SGE_ROOT` | Marks a Grid Engine site, whose `JOB_ID` and `SGE_TASK_ID` then scope the automatic kernel cache directory. |
+| `HAPLOTYPES_TIE_CENSUS` | Diagnostic, unset in normal use: a directory into which every tie decision appends its compared values (`DIR/census.<pid>.jsonl`, one JSON line per decision) for the valley census that places the tie quanta (maths/ties.py). Results do not depend on it. |
 
 and sets these for itself and its worker processes:
 
@@ -803,5 +811,6 @@ and sets these for itself and its worker processes:
 | --- | --- |
 | `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS` | Set to 1 at package import: numerical libraries never start their own thread pools; all parallelism is explicit (Numba teams and process pools). |
 | `NUMBA_THREADING_LAYER`, `OMP_WAIT_POLICY` | Set to `omp` and `PASSIVE` at package import. |
+| `NUMBA_DISABLE_INTEL_SVML` | Set to 1 at package import (release 2.1): Numba's math functions use scalar libm, never Intel SVML's vector kernels, so results do not depend on the machine. |
 | `NUMBA_NUM_THREADS` | Set to the run's cores at run start, so worker processes size their Numba pools from it. |
 | `NUMBA_CACHE_DIR` | Set to the code-version cache directory at package import (inherited by workers). |

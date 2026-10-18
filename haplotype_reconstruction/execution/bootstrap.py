@@ -1,7 +1,8 @@
 """Process set-up: numerical-library configuration at package import, run settings at run start.
 
 Package import (`configure_imports`, called once from ``haplotype_reconstruction/__init__.py``): BLAS/OpenMP
-library pools get one thread each (all parallelism is explicit: Numba teams and process pools); Numba's threading
+library pools get one thread each (all parallelism is explicit: Numba teams and process pools); Numba's math stays on
+scalar libm (no Intel SVML, release 2.1: machine-independent results); Numba's threading
 layer is omp with passive waiting (the measured production baseline; workqueue threads spin and tbb was never the
 production layer); Numba gets a cache directory that holds only kernels of this exact package source (so the
 kernel cache can persist them between runs). These settings must precede the first NumPy/Numba import to take
@@ -61,6 +62,9 @@ def configure_imports() -> None:
         os.environ[variable] = "1"
     os.environ["NUMBA_THREADING_LAYER"] = THREADING_LAYER
     os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
+    # Release 2.1: Numba's math functions stay on scalar libm even where an Intel SVML runtime is installed (SVML's
+    # vector kernels can differ from libm by an ulp and by CPU), so results do not depend on the machine.
+    os.environ["NUMBA_DISABLE_INTEL_SVML"] = "1"
     _configure_numba_cache()
     numba_config = sys.modules.get("numba.core.config")
     if numba_config is not None:

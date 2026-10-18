@@ -1,7 +1,8 @@
 """Family phase stage: pedigree-conditioned, genotype-preserving final phase of every chromosome.
 
-Per chromosome: scaffold (painting + founder refit) -> family belief propagation (solver.py) -> family MAP frames
--> root-frame repair (frames.py) -> polish of two-parent children on the repaired scaffold (polish.py). The
+Per chromosome: scaffold (painting + founder refit) -> family MAP (map_solver.py: the posterior mode of the family
+model by monotone exact block ascent; release 2.1, replacing belief propagation) -> family MAP frames -> root-frame
+repair (frames.py) -> polish of two-parent children on the repaired scaffold (polish.py). The
 released calls are the scaffold alleles in the displayed track order: genotypes and missingness are the
 scaffold's. Samples with fewer than two observed parents are displayed in their (repaired) scaffold orientation
 and decoded by recombination in their family MAP frame.
@@ -17,8 +18,8 @@ from ..execution import ChromosomeExecutor, claim_threads, memory_worker_limit, 
 from ..founder_refit import records as refit_records
 from ..painting import records as painting_records
 from ..store import CheckpointStore
-from . import frames, polish, records, solver
-from .records import FamilyPhaseDiagnostics, FamilyPhaseProduct, WORK_SAVE_SECONDS
+from . import frames, map_solver, polish, records, solver
+from .records import FamilyPhaseDiagnostics, FamilyPhaseProduct
 from .scaffold import build_scaffold, tie_boundaries
 
 
@@ -27,8 +28,7 @@ def run(store, contigs, edges, config, genetic_maps, budget):
     """Final phase of every chromosome (one executor task each, with a shared dynamic CPU budget).
 
     Returns the per-contig FamilyPhaseSummary rows (also stored as run record ``family_phase``). Contigs whose
-    product exists are not recomputed; an interrupted chromosome resumes its belief propagation from its work
-    state.
+    product exists are not recomputed; an interrupted chromosome is recomputed (the solver keeps no work state).
     """
     contigs = tuple(map(str, contigs))
     store.require(painting_records.KEY, contigs)
@@ -41,25 +41,6 @@ def run(store, contigs, edges, config, genetic_maps, budget):
     store.run.put(records.KEY, summaries)
     store.mark_stage_complete(records.STAGE)
     return summaries
-
-
-class _ResumeState:
-    """The chromosome's work state bound to its stage identity: load() -> FamilyMessages | None, save(messages)."""
-
-    def __init__(self, work, identity):
-        self.work, self.identity = work, identity
-
-    def load(self):
-        saved = self.work.load()
-        if saved is None:
-            return None
-        identity, messages = saved
-        if identity != self.identity:
-            raise ValueError(f"{self.work.contig}: family-phase work state belongs to other inputs or settings")
-        return messages
-
-    def save(self, messages):
-        self.work.save((self.identity, messages))
 
 
 def _phase_contig(contig, state, phase, common, budget):
@@ -83,18 +64,21 @@ def _phase_contig(contig, state, phase, common, budget):
     ties = tie_boundaries(painting, evidence.positions,
                           np.flatnonzero(parents >= config.root_frame_minimum_children))
     del painting
-    work = store.work(contig, records.KEY)
-    product = phase_chromosome(contig, evidence.sample_ids, evidence.positions, scaffold, evidence.likelihoods,
-                               evidence.observed, edges, config, chromosome_map, ties=ties,
-                               work=_ResumeState(work, identity))
-    del evidence, scaffold
+    started = time.perf_counter()
+    sample_ids, positions = evidence.sample_ids, evidence.positions.copy()
+    workspace = prepare_chromosome(sample_ids, positions, scaffold, evidence.likelihoods, evidence.observed, edges,
+                                   config, chromosome_map)
+    # The genotype likelihoods enter only the potentials: release them before solving (release 2.1;
+    # N x L x 25 bytes less at the stage's memory peak).
+    del evidence
+    product = solve_chromosome(contig, sample_ids, scaffold, workspace, edges, config, ties=ties, started=started)
+    del scaffold, workspace
     records.write(file, product)
-    work.clear()
     summary = records.summary(product)
     del product
     release_memory()
-    print(f"[family phase {contig}] final phase released: iterations={summary.iterations} "
-          f"converged={summary.converged}", flush=True)
+    print(f"[family phase {contig}] final phase released: family MAP sweeps={summary.map_sweeps} "
+          f"J={summary.map_objective:.6f}", flush=True)
     return state, summary
 
 
@@ -111,8 +95,13 @@ def _resources(store, contigs, samples, budget):
 
     Float64 GLs, four-state family messages, selector caches and the polish peaked at 7.7 decoded-evidence
     sizes plus 3.2 GiB for Python/JIT and up to 3.6 GiB a worker retains from earlier chromosomes (base,
-    N = 320); nine evidence-sized copies (evidence = N x L x (3 float64 GLs + mask)), two painting copies and
-    5 GiB per process stayed above every measured peak by 12-21%. A finished chromosome only decodes its product.
+    N = 320; release 2.0); nine evidence-sized copies (evidence = N x L x (3 float64 GLs + mask)), two painting
+    copies and 5 GiB per process stayed above every measured peak by 12-21%. Release 2.1's family MAP keeps no
+    messages: float64 potentials (N x L x 4), int8 states, per-block work arrays and, at the release, float64
+    Gibbs conditionals and repair emissions. Its measured peaks are below 2.1's belief propagation (8 threads,
+    prepare + solve + release: std_n80 chr1 3.2 GiB vs 5.5, stress_n80 chr13 2.2 vs 5.5, TroMau chr7 2.3 vs 4.8),
+    so ten evidence-sized copies stay conservative.
+    A finished chromosome only decodes its product.
     """
     estimates = []
     for contig in contigs:
@@ -121,43 +110,51 @@ def _resources(store, contigs, samples, budget):
             estimate = 2 * file.info(records.KEY).decoded_bytes
         else:
             sites = len(evidence_records.load_arrays(file, ("positions",))["positions"])
-            estimate = 9 * samples * sites * 25 + 2 * _painting_bytes(file, samples)
+            estimate = 10 * samples * sites * 25 + 2 * _painting_bytes(file, samples)
         estimates.append(estimate + (5 << 30))
     return estimates, memory_worker_limit(estimates, budget.threads(), label="FAMILY PHASE")
 
 
 def phase_chromosome(contig, sample_ids, positions, scaffold, likelihoods, observed, edges, config,
-                     chromosome_map, *, ties, work=None, log=print):
+                     chromosome_map, *, ties, log=print):
     """FamilyPhaseProduct of one chromosome.
 
     ``scaffold`` PhaseScaffold; ``likelihoods`` float64 [N, L, 3] normalised genotype likelihoods and
     ``observed`` bool [N, L] (positive read depth) of every sample; ``edges`` ParentEdges; ``ties``
     {sample: marker boundaries} (scaffold.tie_boundaries of the parents with root_frame_minimum_children
-    children); ``work`` a resume handle with load() -> FamilyMessages | None and save(messages), bound to this
-    chromosome's inputs by the caller (run uses the store's work state).
+    children).
     """
     started = time.perf_counter()
-    samples = len(sample_ids)
+    workspace = prepare_chromosome(sample_ids, positions, scaffold, likelihoods, observed, edges, config,
+                                   chromosome_map)
+    return solve_chromosome(contig, sample_ids, scaffold, workspace, edges, config, ties=ties, log=log,
+                            started=started)
+
+
+def prepare_chromosome(sample_ids, positions, scaffold, likelihoods, observed, edges, config, chromosome_map):
+    """The chromosome's solver workspace (phase_chromosome's first step; the genotype likelihoods enter only its
+    potentials, so a caller may release them before solve_chromosome)."""
     positions = np.asarray(positions, dtype=np.int64)
-    graph = solver.family_graph(edges.parents, edges.children, edges.slots, samples)
-    workspace = solver.prepare_workspace(likelihoods, observed, scaffold.alleles, positions, scaffold.bins,
-                                         scaffold.components, graph, config, chromosome_map)
-    messages = None if work is None else work.load()
-    if messages is None:
-        messages = solver.initial_messages(samples, len(positions), len(graph.parents), len(graph.group_child))
-    last_saved = time.perf_counter()
+    graph = solver.family_graph(edges.parents, edges.children, edges.slots, len(sample_ids))
+    return solver.prepare_workspace(likelihoods, observed, scaffold.alleles, positions, scaffold.bins,
+                                    scaffold.components, graph, config, chromosome_map)
 
-    def after_iteration(state):
-        nonlocal last_saved
-        if work is not None and time.perf_counter() - last_saved >= WORK_SAVE_SECONDS:
-            work.save(state)
-            last_saved = time.perf_counter()
 
-    converged = solver.iterate(workspace, messages, config, after_iteration)
-    log(f"  [family phase {contig}] belief propagation: iterations={messages.iteration} "
-        f"residual={messages.residuals[-1] if messages.residuals else float('nan'):.6g} converged={converged}")
-    inferred, family_displayed = solver.released_frames(workspace, messages, config)
-    emissions = solver.selector_emissions(workspace, messages, config)
+def solve_chromosome(contig, sample_ids, scaffold, workspace, edges, config, *, ties, log=print, started=None):
+    """FamilyPhaseProduct of a prepared chromosome (phase_chromosome's second step; arguments as there)."""
+    started = time.perf_counter() if started is None else started
+    positions = workspace.positions
+    graph = workspace.graph
+    family_map = map_solver.FamilyMap(workspace, config)
+    solution = family_map.solve(config.map_max_sweeps)
+    log(f"  [family phase {contig}] family MAP: sweeps={solution.sweeps} accepted={list(solution.accepted)} "
+        f"J={solution.objective[0]:.6f} -> {solution.objective[-1]:.6f}")
+    inferred, family_displayed = map_solver.release_frames(family_map, solution.state)
+    emissions = map_solver.selector_emissions(family_map, solution.state)
+    conflicts = tuple((str(sample_ids[int(parent)]), int(positions[int(site)]))
+                      for parent, site in map_solver.conflict_sites(family_map, solution.state))
+    log(f"  [family phase {contig}] Mendelian-conflict sites in the MAP: {len(conflicts)}")
+    del family_map
     repair = frames.repair_root_frames(workspace, emissions, inferred, config, tie_boundaries=ties,
                                        protected=config.protected_for(contig))
     del emissions
@@ -181,11 +178,12 @@ def phase_chromosome(contig, sample_ids, positions, scaffold, likelihoods, obser
     calls = np.take_along_axis(polished_scaffold, np.stack((emitted, 1 ^ emitted), axis=-1), axis=-1)
     heterozygous = polished_scaffold[..., 0] != polished_scaffold[..., 1]
     diagnostics = FamilyPhaseDiagnostics(
-        messages.iteration, bool(converged), tuple(map(float, messages.residuals)), result.sweep_updates,
+        solution.sweeps, True, tuple(map(int, solution.accepted)), tuple(map(float, solution.objective)),
+        result.sweep_updates,
         int(np.count_nonzero(calls >= 0)), int(np.count_nonzero((emitted != family_displayed) & heterozygous)),
         frames.FrameRepair(repair.moves, repair.reverts, repair.transfers, repair.child_frames, repair.rejected,
                            repair.guard_blocks, repair.flagged_edges),
-        time.perf_counter() - started)
+        time.perf_counter() - started, conflicts)
     return FamilyPhaseProduct(
         str(contig), tuple(map(str, sample_ids)), positions, scaffold.components, scaffold.bin_edges,
         scaffold.bin_edge_offsets, calls, emitted ^ display, decoder ^ display, scaffold.coverage,

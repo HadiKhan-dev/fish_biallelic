@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 import numpy as np
 
+from ..evidence.sample_order import input_rows, recorded_input_order
 from .config import FORMATS, PRODUCTS, ExportConfig
 from .founders import component_record, write_founder_tracks, write_founder_vcf
 from .samples import write_sample_phase
@@ -100,13 +101,15 @@ def contig_bytes(file, products, *, full_length: bool = False, synthetic: bool =
 
 
 def export_contig(destination: Path, contig: str, *, products, founders=None, phase=None, reference=None,
-                  synthetic=False, file_format="bcf", sites=None, index=False) -> dict:
+                  synthetic=False, file_format="bcf", sites=None, index=False, input_sample_ids=None) -> dict:
     """Write one chromosome's files; returns its manifest entry.
 
     ``founders``: (stage, [(positions int64 [L], released int8 [K, L])]) in component order; ``phase``:
     (sample_ids, positions, component_ids, calls int8 [N, L, 2]) as family_phase.records.load_calls returns;
     ``sites``: the export.sites table of the VCF rows (default: the phase positions as kept sites, REF/ALT from
-    ``reference``); ``index``: write each VCF/BCF's index (.tbi / .csi).
+    ``reference``); ``index``: write each VCF/BCF's index (.tbi / .csi); ``input_sample_ids``: the run's input
+    sample order (the sample columns are written in it; the records hold the canonical order, release 2.1), None
+    to write the records' order.
     """
     destination = Path(destination)
     stem = quote(contig, safe="")
@@ -149,8 +152,10 @@ def export_contig(destination: Path, contig: str, *, products, founders=None, ph
             raise ValueError("unexpected final allele encoding")
         filename = stem + ".samples" + suffix(file_format)
         temporary = destination / f".{filename}.tmp"
+        rows = input_rows(sample_ids, input_sample_ids)
+        names = tuple(sample_ids) if rows is None else tuple(map(str, input_sample_ids))
         write_sample_phase(temporary, sites, np.asarray(positions), calls, np.asarray(component_ids),
-                           tuple(sample_ids), synthetic=synthetic, file_format=file_format)
+                           names, synthetic=synthetic, file_format=file_format, sample_rows=rows)
         files.extend(place(temporary, destination / filename, file_format=file_format,
                            last_position=int(sites.positions[-1]), index=index))
     entry = dict(contig=contig, files=files, founder_components=components)
@@ -176,7 +181,8 @@ def _export_task(task, shared, budget):
     destination = Path(task["destination"])
     entry = export_contig(destination, task["contig"], products=products, founders=founders, phase=phase,
                           reference=task["reference"], synthetic=task["synthetic"],
-                          file_format=task["file_format"], sites=sites, index=True)
+                          file_format=task["file_format"], sites=sites, index=True,
+                          input_sample_ids=task.get("input_sample_ids"))
     if task.get("record") is not None:
         from . import records
         for name in set(task.get("previous_files", ())) - set(entry["files"]):
@@ -304,8 +310,10 @@ def export_run(run_directory, destination, *, checkpoints=None, contigs=None, pr
     if destination.exists() and any(destination.iterdir()):
         raise FileExistsError("export destination must be new or empty")
     destination.mkdir(parents=True, exist_ok=True)
+    input_ids = recorded_input_order(store.manifest("run"))
     tasks = [dict(checkpoints=str(store.root), destination=str(destination), contig=contig, products=products,
-                  file_format=file_format, reference=reference, synthetic=synthetic, full_length=settings.full_length)
+                  file_format=file_format, reference=reference, synthetic=synthetic, full_length=settings.full_length,
+                  input_sample_ids=input_ids)
              for contig in contigs]
     estimates = [contig_bytes(store.contig(contig), products, full_length=settings.full_length, synthetic=synthetic)
                  for contig in contigs]

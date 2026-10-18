@@ -304,8 +304,13 @@ class FixedKWorkspace:
     Caches are bounded by entry count (least recently used entries leave first).
     """
 
-    def __init__(self, likelihoods, observed, model):
+    def __init__(self, likelihoods, observed, model, quanta=None):
+        """``quanta``: the block's BlockQuanta (maths.ties); None derives them from the block's null NLL. The A step
+        uses ``quanta.sample``, the H step ``quanta.h_step``, cycle and duplicate resolution ``quanta.nll``."""
+        from ...maths.ties import BlockQuanta, block_scale
         self.penalty = float(model.unknown_copy_penalty)
+        self.quanta = (quanta if quanta is not None else BlockQuanta.for_scale(
+            block_scale(likelihoods, observed, model.unknown_copy_penalty)))
         self.switch_penalty = float(model.switch_penalty)
         self.likelihoods = likelihoods
         self.observed = np.ascontiguousarray(observed, dtype=np.bool_)

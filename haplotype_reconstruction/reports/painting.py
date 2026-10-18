@@ -171,7 +171,7 @@ def founder_count_table(painting, searches, feedback) -> list[dict]:
     return rows
 
 
-def sample_switch_table(painting):
+def sample_switch_table(painting, input_ids=None):
     """Painted switches per sample on one chromosome, relative to the cohort median.
 
     Counts are the painter's own biological switches (minimum homologue label changes of the Viterbi state
@@ -191,9 +191,16 @@ def sample_switch_table(painting):
     ratio = np.full(count, np.nan)
     if median > 0:
         ratio[painted > 0] = switches[painted > 0] / median
-    return pd.DataFrame(dict(SampleIndex=np.arange(count), SampleID=list(painting.sample_ids),
-                             PaintedComponents=painted, PaintedSwitches=switches,
-                             CohortMedianSwitches=median, SwitchesOverCohortMedian=ratio))
+    frame = pd.DataFrame(dict(SampleIndex=np.arange(count), SampleID=list(painting.sample_ids),
+                              PaintedComponents=painted, PaintedSwitches=switches,
+                              CohortMedianSwitches=median, SwitchesOverCohortMedian=ratio))
+    if input_ids is not None:
+        # Release 2.1: the records hold the canonical sample order; SampleIndex is the input (VCF) position.
+        from ..evidence.sample_order import frame_in_input_order
+        position = {str(name): index for index, name in enumerate(input_ids)}
+        frame["SampleIndex"] = [position.get(str(name), -1) for name in frame["SampleID"]]
+        frame = frame_in_input_order(frame, input_ids, column="SampleID")
+    return frame
 
 
 def report_bytes(file, samples: int, sites: int) -> int:
@@ -219,10 +226,10 @@ def write_painting(output, store, contig: str) -> list[Path]:
     positions = evidence_records.load_arrays(file, ("positions",))["positions"]
     samples = len(file.get(painting_records.KEY, items=("sample_ids",))["sample_ids"])
     with reserve_memory(report_bytes(file, samples, len(positions)), label="painting report"):
-        return _write_tables(output, file, contig, positions)
+        return _write_tables(output, file, contig, positions, store.manifest("run"))
 
 
-def _write_tables(output, file, contig: str, positions) -> list[Path]:
+def _write_tables(output, file, contig: str, positions, store_manifest=None) -> list[Path]:
     import pandas as pd
     from ..assembly import records as assembly_records
     from ..evidence import records as evidence_records
@@ -232,7 +239,8 @@ def _write_tables(output, file, contig: str, positions) -> list[Path]:
     searches = assembly_records.join_searches(file)
     support, windows, search_rows = founder_support_tables(painting, positions, observed, searches)
     del observed
-    switches = sample_switch_table(painting)
+    from ..evidence.sample_order import recorded_input_order
+    switches = sample_switch_table(painting, recorded_input_order(store_manifest))
     directory = Path(output) / "painting" / contig
     highest = switches[switches.PaintedComponents > 0].nlargest(3, "PaintedSwitches", keep="first")
     listed = ", ".join(f"{row.SampleIndex} ({row.SampleID}) {row.PaintedSwitches} "

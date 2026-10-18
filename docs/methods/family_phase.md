@@ -2,9 +2,11 @@
 
 Family phase (stage `family_phase`, entry point `family_phase.stage.run`) gives every sample a final,
 pedigree-conditioned phase of every chromosome while preserving its called genotypes and missingness. It starts from
-a phase scaffold decoded from the [painting](painting.md) and the [founder refit](founder_refit.md), runs damped
-loopy belief propagation of a family model conditioned on the supported Tier-B parent edges released by [pedigree
-inference](pedigree.md), repairs pedigree roots' scaffold frames by the votes of their children, and polishes the
+a phase scaffold decoded from the [painting](painting.md) and the [founder refit](founder_refit.md), computes the
+posterior mode (the family MAP, pedigree roots' genotypes summed out) of a family model conditioned on the
+supported Tier-B parent edges released by [pedigree inference](pedigree.md) by monotone exact block coordinate
+ascent, repairs pedigree roots' scaffold frames
+by the votes of their children, and polishes the
 frames of children with two observed parents by a genotype-preserving copy-consistency search. It runs genome-wide
 after the founder refit, one chromosome per worker; [recombination](recombination.md) decodes its product. Family
 phase does not modify the pedigree, the painting or any founder panel, and nothing feeds back upstream.
@@ -20,7 +22,6 @@ phase does not modify the pedigree, the painting or any founder panel, and nothi
 | reads | the contig's genetic map | meiosis switch probabilities (Haldane) |
 | reads | `[family_phase] protected_intervals` | optional breakpoint TSV of intervals where no root frame is repaired |
 | writes | `identity/family_phase` | `FamilyPhaseConfig` (protected intervals included), the identities of `painting`, `founder_refit` and `evidence`, the edges' identity, the map's digest, code identity |
-| writes | `work/<contig>/family_phase` | transient belief-propagation state |
 | writes | `family_phase` | the `FamilyPhaseProduct`; run record `family_phase` (summaries) and `complete/family_phase` |
 | publishes | `OUTPUT/family_phase/summary.csv` | one row per contig |
 
@@ -76,50 +77,117 @@ The variables of one chromosome (`family_phase/solver.py`, `family_phase/potenti
   homozygote carry no selector evidence and are integrated out exactly through the composed switch probability
   (1 − Π(1 − 2θ))/2.
 
-Hard-homozygote point masses keep fixed beliefs whatever the incoming messages, and factor work lists only the
-(child, site) entries where some member is not a hard homozygote.
+A hard homozygote has a single possible ordered genotype, so every maximisation below sees one state there.
 
-## Belief propagation and release
+## Family MAP solver and release
 
-One iteration updates the phase chains, sweeps every copy factor (the order within a 32-site tile alternates with the
-iteration's parity) and updates the selector chains. Messages are stored in float32 (copy-factor messages as
-logarithms) and updated with damping in probability space, `FamilyPhaseConfig.damping = 0.5` being the weight given
-to the updated message. The residual of an iteration is the largest message change over all three updates.
+The released estimate is the family MAP: the mode of the posterior of the frame chains F, the selector chains S
+and the ordered genotypes G of every sample with an observed parent, with every pedigree root's genotypes summed out
+site by site (the Lander-Green treatment of founder alleles). Its log is
 
-Every `FamilyPhaseConfig.gauge_move_interval = 5` iterations, joint root/children gauge moves
-(`family_phase/gauges.py`) may relabel a root's homologues from one boundary on: this flips the root's frame and
-every child's selector bit for that parent together. Per root, the MAP frame path and its children's MAP selector
-paths are decoded, and a relabelling at a boundary is made when it raises their joint MAP score (frame-switch and
-meiosis log-odds) and at least `FamilyPhaseConfig.minimum_gauge_support = 2` children change selector there; one
-child cannot tell a root frame change from its own crossover. An iteration with a gauge move counts as unconverged.
+    J = Σ_children Σ_sites potential(G) + Σ_children [log 1/4 + selector chain(S)]
+        + Σ_roots [log 1/2 + frame chain(F) + Σ_sites R] + Σ_children Σ_sites log copy (observed non-root parents)
+        + log 1/2 per unobserved parental slot and site,
+    R = log Σ_g exp( potential_root(g) + log φ(g | F) + Σ_children of the root log copy(child's allele | g, S) ),
 
-The release state is the one after `FamilyPhaseConfig.max_iterations = 25` iterations, or after the first earlier
-iteration whose residual is below `FamilyPhaseConfig.tolerance = 0.0001` without a gauge move. The release does not
-wait for convergence: when the residual is still at or above the tolerance at iteration 25, the state of iteration
-25 is used and the product records it as not converged, with every iteration's residual. From the release state,
-every sample's family MAP frame is decoded over its painting-bin runs (`phase_view`): roots with their phase
-messages, other samples with a neutral one. The family MAP frame is what recombination decodes for samples with
-fewer than two observed parents; for samples with two observed parents the polish below gives the released and the
-decoded frame.
+where φ is 1 − 0.01 for the heterozygote the frame matches, 0.01 for the other and 1/2 for homozygotes and
+unoriented sites, and copy is 1 − 0.001 per transmitted and 0.001 per mistransmitted allele. Summing a root's
+genotype keeps the evidence of allele sharing between its children where the root's own scaffold has fewer than two
+called alleles: a maximised root genotype would explain shared alleles by a homozygote and discard it. Given the
+children's selectors and genotypes the copy factors factorise over the slots, so each R is an exact four-term sum.
 
-The messages are saved as the chromosome's work state after an iteration whenever
-`family_phase.records.WORK_SAVE_SECONDS = 120.0` seconds have passed since the last save, bound to the stage
-identity; an interrupted chromosome resumes from them (large selector caches are rebuilt), and the work state is
-cleared once the product is stored.
+`family_phase/map_solver.py` maximises J by monotone exact block coordinate ascent (release 2.1). Releases up to 2.0
+ran damped loopy belief propagation, which has no convergence guarantee on this graph of short loops (along the
+chromosome and through multi-parent families) and cycled where a family's data conflict, so that a capped release
+depended on the phase of the cycle.
+
+- **Initialisation** (one top-down sum-product pass): every frame 0 (the scaffold orientation); child blocks in
+  generation order, each set to its exact optimum given its parents' genotypes summed: a root's potential, φ and
+  its already initialised children's factors; a non-root parent's stored conditional genotype distribution given
+  its own selector path, with its already initialised children. Tied genotype orders of a parent therefore carry no
+  phase evidence to its children (a maximised parent would resolve them to 0|1).
+- **Child block** (a child's selector chain and genotypes, everything else fixed): Viterbi over the child's
+  supported markers with, for selector state s at a site, the maximum over the child's ordered genotype of its
+  potential, its slot terms under s and its own children's copy factors. A root parent's slot term is that root's R
+  with the child's factor in (the root's cavity without the child, its other children in), so siblings conflict
+  through their parent's summed genotype; an unobserved slot's term is 1/2.
+- **Root block** (a root's frame chain): Viterbi over the root's frame-chain runs with, for frame f, the sum of R
+  over the run's sites; the anchor run keeps frame 0.
+- **Relabelling moves**: for root r and every boundary of its frame chain (component edges included), r's homologue
+  labels are flipped from the boundary to the chromosome end, re-gauged at its anchor (the side without the anchor
+  is flipped): r's frame and r's bit in every child's selector. R and every other term are symmetric under it, so
+  the change of J is r's frame transition plus each child's selector transition across the boundary. A root with a
+  single child moves only at component edges.
+- **Compound moves** (exact, each accepted as a whole on its change of J):
+  - a child's selector change pair (two consecutive changes at most
+    `family_phase.map_solver.COMPOUND_MAX_SPAN = 8192` sites apart) is removed and its genotypes refitted, then its
+    parents (root frames, non-root blocks), their other children, its own children and itself are re-decoded exactly
+    inside a window around the pair;
+  - a non-root parent's two tracks are swapped on such an interval (its own change pairs and each child's change
+    pairs of the bit for it) together with every child's bit for it, which leaves the children's copy factors
+    unchanged; then the same windowed re-decodes;
+  - the children of a root that share a change pair of their bit for it move back to the root's other homologue
+    together, then the same windowed re-decodes;
+  - a compound relabelling: a root is relabelled at the frame-chain boundary nearest a child's change of its bit
+    for it (within `family_phase.map_solver.COMPOUND_WIDTH = 1024` sites), then its children and frame are re-decoded
+    inside the window spanning both: a child's switch that sat elsewhere in the stretch where the root's bit is
+    uninformative for it moves to the boundary or vanishes. This is the move for a scaffold frame error that the
+    children's switches do
+    not meet exactly.
+  Windows widen the interval by max(64, min(span, 1024)) sites on each side; the windowed re-decodes pin the states
+  outside the window, and a move's gain is the change of the J terms it can alter, evaluated by one routine before
+  and after.
+- **Site moves** (sibship genotypes): at every Mendelian-conflict site of a root with at least two children or of a
+  non-root parent, the exact joint maximum over the ordered genotypes of its children (and of the parent itself
+  when it is not a root), selectors fixed; candidates are the genotypes of finite potential (at most
+  `family_phase.map_solver.SITE_MAX_COMBOS = 4096` joint configurations). Full siblings that must swap together which
+  parent transmitted which allele, or several children whose genotypes must change together to remove a transmission
+  error, need it: no single child block can make such a change.
+- **Acceptance and schedule.** A block's new path is split into the maximal intervals where it differs from the
+  current configuration (intervals joined by a transition are merged); each interval, relabelling or compound move is
+  accepted only if its exact gain (one scoring routine before and after, never a dynamic-programming maximum)
+  exceeds `family_phase.map_solver.GAIN_QUANTUM` (2^-17 nats); otherwise the current configuration is kept. Viterbi
+  ties within `maths.chains.CHAIN_TIE` take the fewest switches, then the current state, then the lowest; a genotype
+  within `family_phase.map_solver.GENOTYPE_TIE = 1e-12` of the best keeps the current one. A sweep runs the blocks
+  over a greedy colouring of the conflict graph (parent-child edges plus a clique of each root's children; samples by
+  decreasing degree, then
+  sample index): blocks of one colour share no free variable, so they run in parallel with the result independent
+  of thread count and order. Then every root's relabelling moves (root, then position), the compound moves, the
+  compound relabellings and the site moves run sequentially in canonical order (sample order, then position).
+- **Convergence.** After every sweep the from-scratch J must have risen by the accepted gains (checked). Every
+  accepted step raises J by more than the quantum, J is bounded and the configurations are finite, so the solver
+  stops when a sweep accepts nothing. Cycles are impossible. `FamilyPhaseConfig.map_max_sweeps = 60` is a safety
+  cap (measured: at most 6 sweeps); reaching it is an error.
+- **Mendelian-conflict diagnostic.** `diagnostics.map_conflicts` lists the (parent, bp) sites where the converged
+  configuration needs a transmission error (a root's best genotype, or a non-root's MAP genotype, leaves a child's
+  allele mistransmitted).
+
+From the converged configuration every sample's family MAP frame is released over its painting-bin runs: a root's
+frame chain itself; any other sample's frame path decoded from the per-site Gibbs conditionals of its ordered
+genotype (its potential, slot terms and own children's factors at the converged configuration, normalised) used as
+`phase_view` emissions (frame switches at painting-bin edges with probability `phase_switch_probability`, ties by
+`CHAIN_TIE`, or `FRAME_TIE` for a chain without an anchor). A point-mass genotype would resolve a tied order to
+0|1 and act as false phase evidence. The family MAP frame is what recombination decodes for samples with fewer
+than two observed parents; for samples with two observed parents the polish below gives the released and the
+decoded frame. The solver keeps no work state: an interrupted chromosome is recomputed.
 
 ## Root-frame repair
 
 A root's scaffold frame can be wrong over the rest of a component: panel rows exchanging founder identity, painting
 abstentions or ties between interchangeable rows, segregating deletions. Every child then changes homologue near the
-error. Where the root's own data cannot place that change, the children's changes spread over a stretch, so a
-single-boundary gauge move gains nothing and belief propagation settles on the scaffold frame; it can also change a
-root's family MAP frame where the scaffold is right. After the release, `family_phase/frames.py` repairs the frames
-of roots with at least `FamilyPhaseConfig.root_frame_minimum_children = 3` children on the final family state,
-without changing the messages (a resumed stage makes the same decisions).
+error. Where the root's own data cannot place that change, the children's changes spread over a stretch; the compound
+relabelling covers changes within its window, beyond it the family MAP keeps the scaffold frame, and the MAP can
+also change a root's frame where the scaffold is right. After the solve, `family_phase/frames.py` repairs the frames
+of roots
+with at least `FamilyPhaseConfig.root_frame_minimum_children = 3` children on the converged family MAP, without
+changing it (a recomputed stage makes the same decisions).
 
 - **Votes.** For root P, a bin edge e inside a component and each child edge of P, the child's joint selector
-  chain (the family model's copy-factor emissions and selector transitions) is re-decoded with free ends after
-  relabelling P's homologues from e on. The exact vote is the change of the max-path log score on the window
+  chain is re-decoded with free ends after
+  relabelling P's homologues from e on; its emissions at the family MAP use conditional cavities (every observed
+  parent's genotype summed without the voting child's factor, the child's own genotype summed), so a vote is not
+  confirmed by a parental genotype fitted to the voter itself. The exact vote is the change of the max-path log score
+  on the window
   ±W around e (W = `FamilyPhaseConfig.root_frame_window_bp = 500000.0` bp); at a flagged edge it is the best such
   change at any boundary of the flagged stretch around e. The net vote is the same change with the evidence inside
   a location zone left out (e ± `FamilyPhaseConfig.root_frame_location_bp = 250000.0` bp, or the flagged stretch
@@ -144,7 +212,7 @@ without changing the messages (a resumed stage makes the same decisions).
   window) the same votes, guard and protection decide: at least three supporters, no opponent and a positive total
   revert the internal (decoder) frame, since the scaffold was right; at least three opponents, no supporter and a
   negative total copy the change into the scaffold (transfer), so the displayed frame agrees with the decoded one.
-- **Children's frames.** A child with one observed parent releases its family MAP frame, which belief propagation
+- **Children's frames.** A child with one observed parent releases its family MAP frame, which the family MAP
   aligned with the parent's homologue labels. When a root's internal frame changes, each such child's frame is
   changed with it inside every run of the parent's heterozygous sites at which the child is heterozygous (bounded
   by sites where the child is homozygous, which are data) that contains the change, so that its meiosis
@@ -177,7 +245,7 @@ where copy is log(2(1 − c)) for a match, log(2c) for a mismatch and 0 when eit
 c = `FamilyPhaseConfig.polish_copy_error = 0.01`; only called scaffold alleles count, never genotype likelihoods or
 family fills. Selector switches use the Haldane probabilities, 1/2 at component edges (the polish and the
 recombination decoder restart selectors at assembly breaks). Initial selectors are each edge's MAP path given the
-initial frames.
+initial frames (back-pointers within `CHAIN_TIE` stay, final state 0 within `CHAIN_TIE`).
 
 Frame switch probabilities refine the painting bins: every painting-bin edge inside a component is allowed, and
 so is every marker interval within `FamilyPhaseConfig.polish_window_sites = 100` sites of a change of the initial
@@ -187,16 +255,21 @@ transition keeps the edge's probability p. Component edges switch with probabili
 has θ = 0: the first painting bin of a chromosome or component has no edge on its left, so the polish never
 switches phase inside it.
 
-Coordinate ascent runs over a greedy colouring of the pedigree graph (no two vertices of a colour adjacent; colours
-in alternating order per sweep). Within a colour, every child with two observed parents is re-decoded exactly by
-an eight-state Viterbi over (frame, two incoming selectors) with its neighbours fixed, factorised over the three
-binary axes. When the best path raises the score by more than `FamilyPhaseConfig.polish_minimum_gain = 1e-06`
-nats, each maximal interval where it differs from the current configuration is accepted if its own gain exceeds
-that minimum and, where it changes an observable phase (a frame change at a scaffold-heterozygous site), its
-copy-consistency gain is at least `FamilyPhaseConfig.polish_minimum_biological_gain = 0.0`. The polish must
-converge (a sweep accepting nothing) within `FamilyPhaseConfig.polish_max_sweeps = 6` sweeps; otherwise the stage
-stops with an error. Samples with fewer than two observed parents keep frame 0. Called alleles never change, only
-their track order.
+Coordinate ascent runs over a greedy colouring of the pedigree graph (no two vertices of a colour adjacent; samples
+by descending degree, then sample index; colours forward on even sweeps, backward on odd ones). Within a colour,
+every child with two observed parents is re-decoded exactly by an eight-state Viterbi over (frame, two incoming
+selectors) with its neighbours fixed, factorised over the three binary axes; its vertices share no variable, so
+their parallel updates do not depend on the thread count. Tie rules (release 2.1): back-pointers within
+`maths.chains.CHAIN_TIE` stay (fewest switches); the final state is the current one when it is within `CHAIN_TIE` of
+the best, else the lowest such state. Each maximal interval where the new path differs from the current
+configuration is accepted on its own exact gain (one routine, never the dynamic-programming maximum), only above the
+quantum `FamilyPhaseConfig.polish_minimum_gain = 1e-06` nats (inside it the current configuration is kept) and,
+where it changes an observable phase (a frame change at a scaffold-heterozygous site), only if its copy-consistency
+gain is at least `FamilyPhaseConfig.polish_minimum_biological_gain = 0.0` minus that quantum (an exactly zero gain
+passes whatever its rounding). The polish score depends only on called scaffold alleles and fixed switch
+probabilities, so genotype-likelihood noise cannot move it. The polish must converge (a sweep accepting nothing)
+within `FamilyPhaseConfig.polish_max_sweeps = 6` sweeps; otherwise the stage stops with an error. Samples with fewer
+than two observed parents keep frame 0. Called alleles never change, only their track order.
 
 ## Frames and released calls
 
@@ -213,11 +286,10 @@ re-called, and no separate imputation product exists. Two frames, relative to th
   displayed frame for two-parent children; for roots and one-parent children it is the family MAP frame with the
   repair's moves, reverts and children's following frames applied.
 
-The belief-propagation messages therefore enter the released calls only through the root-frame repair decisions;
-they give the decoder frame of samples with fewer than two observed parents and the diagnostic
+The family MAP therefore enters the released calls only through the root-frame repair decisions; it gives the
+decoder frame of samples with fewer than two observed parents and the diagnostic
 `changed_observable_phase_sites` (two-parent sample-sites at scaffold-heterozygous sites where the polished frame
 differs from the family MAP frame).
-<!-- owner question (BLUEPRINT 8, T8 Q1): the family BP is released unconverged at iteration 25 and the released calls do not depend on its messages beyond the frame repair; what should the BP contribute -->
 
 ## Product and records
 
@@ -233,33 +305,34 @@ differs from the family MAP frame).
 | `displayed_frame`, `decoder_frame` | `int8[N, L]` | the two frames above |
 | `coverage`, `coverage_offsets` | `int64[R, 2]`, `int64[N + 1]` | each sample's painted site ranges [start, stop) |
 | `edges_identity` | str | identity of the `ParentEdges` the phase is conditioned on |
-| `diagnostics` | `FamilyPhaseDiagnostics` | iterations, converged, residuals, polish updates per sweep, called alleles, changed observable phase sites, frame repair decisions, elapsed seconds |
+| `diagnostics` | `FamilyPhaseDiagnostics` | family-MAP sweeps, converged, accepted steps per sweep, J after the initialisation and every sweep, polish updates per sweep, called alleles, changed observable phase sites, frame repair decisions, elapsed seconds, Mendelian-conflict sites (sample, bp) |
 
 Evaluation and export read `sample_ids`, `positions`, `component_ids` and `calls`; export writes them as phased
 genotypes with one phase set per component. `OUTPUT/family_phase/summary.csv` has one row per contig: `samples`,
-`sites`, `iterations`, `converged`, `final_residual`, `called_alleles`, `changed_observable_phase_sites`,
+`sites`, `map_sweeps`, `converged`, `map_objective` (final J), `called_alleles`, `changed_observable_phase_sites`,
 `root_frame_moves`, `root_frame_reverts`, `root_frame_transfers` and `elapsed_seconds`.
 
 ## Implementation and cost
 
 - **Structure.** One chromosome per worker of a chromosome executor sharing the stage's CPU budget; the number of
-  concurrent chromosomes is limited by a per-chromosome byte estimate (nine evidence-sized arrays, two decoded
-  paintings and 5 GiB). Inside a chromosome, Numba kernels parallelise over samples, 256-site belief tiles,
-  32-site factor tiles, child groups and the vertices of a polish colour.
-- **Cost.** The family model is independent of the founder count K: one iteration costs O(N L) for beliefs and
-  phase chains, O(E L) over the supported factor entries and O(G L) for the four-state selector chains (G children
-  with an observed parent). Selector chains are kept in 256-marker blocks; only blocks whose emissions changed are
-  recomputed, propagating until the block-boundary messages are exactly unchanged, so every stored value equals a
-  full recomputation. Root-frame repair re-decodes windows of the children's selector chains per candidate edge;
-  the polish costs O(L) per two-parent child and sweep.
-- **Memory.** Float32 messages (E × L × 4 to parents, G × L × 4 to children and selector cavities, N × L phase),
-  float32 potentials and beliefs (N × L × 4), the float64 genotype likelihoods and the selector caches, which are
-  bounded by `family_phase.selector_chains.MAX_SELECTOR_CACHE_BYTES = 25769803776` (24 GiB) per chromosome; groups
-  beyond that budget are recomputed in full each iteration.
+  concurrent chromosomes is limited by a per-chromosome byte estimate (ten evidence-sized arrays, two decoded
+  paintings and 5 GiB). Inside a chromosome, Numba kernels parallelise over the blocks of a colour, samples and
+  child groups (objective, release) and the vertices of a polish colour.
+- **Cost.** The family model is independent of the founder count K. A sweep costs O(N L) over the sample blocks,
+  each site's maximisation touching the sample's own copy factor and its children's (O(E L) in all; a root's R sums
+  over its children), plus the relabelling scan (per root, one binary search per child and frame-chain boundary)
+  and the sequential compound moves, whose windowed re-decodes and gains touch only the moved family's blocks and
+  terms; site moves enumerate a sibship's genotypes at its Mendelian-conflict sites only. The solver converges in at
+  most a few sweeps (measured: at most 6). Root-frame repair re-decodes windows of the children's selector chains per
+  candidate edge; the polish costs O(L) per two-parent child and sweep.
+- **Memory.** Float64 potentials (N × L × 4), int8 genotypes, frames (N × L) and dense selector states (G × L),
+  and during the initialisation float32 conditionals (L × 4) of each non-root parent; no message arrays. The
+  genotype likelihoods are released once the potentials exist.
 - **Resume.** `identity/family_phase` is bound per contig before any work and checked on resume; a contig with a
-  `family_phase` record is not recomputed; an interrupted contig resumes belief propagation from its work state.
-- **Determinism.** Updates run in fixed orders (copy factors per tile, chains per group, sequential score sums), so
-  results do not depend on the thread count.
+  `family_phase` record is not recomputed; an interrupted contig is recomputed.
+- **Determinism.** Blocks of a colour share no free variable and colours run in a fixed order; relabelling and
+  compound moves run sequentially in canonical order; sums run in fixed orders, so results do not depend on the
+  thread count.
 
 ## Interpretation and limitations
 
@@ -269,9 +342,13 @@ genotypes with one phase set per component. `OUTPUT/family_phase/summary.csv` ha
   one-parent child's other track is constrained only by its own scaffold.
 - The scaffold limits what can be phased: a track the painting withholds, or whose candidate rows disagree, stays
   unknown even where relatives would determine it.
-- The release point is a fixed iteration count. Samples with fewer than two observed parents are decoded by
-  recombination in their family MAP frame, which therefore depends on the unconverged state when belief
-  propagation has not converged.
+- The released family MAP is a block-wise and gauge-wise optimum of J (no block, relabelling, compound or site move
+  raises it), not a certified global maximum, and it can stop short of the best mode. Validation (18 Oct 2026): the
+  same ascent started from a belief-propagation configuration (25 iterations, the method this solver replaced) ends
+  higher on 11 of 22 TroMau chromosomes (by up to 303 nats; joint changes of several children's genotypes and
+  selectors over a few regions), on 5 of 8 `std_n80` chromosomes (up to 153 nats) and on every chromosome of the
+  high-error `stress_n80` (up to about 10^4 nats). Larger moves are planned for 2.2. It is a point estimate
+  (overconfident relative to marginals).
 - Root-frame repair is a vote with fixed thresholds. A real scaffold frame error of a root with a single child
   becomes one false crossover call; the two cannot be told apart.
 - Inside a painting bin the frame is constant except where the polish uses the fine boundaries near selector

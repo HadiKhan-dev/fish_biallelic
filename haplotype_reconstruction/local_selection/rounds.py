@@ -2,8 +2,11 @@
 
 Per block: the candidate bank (context rounds) from the raw discovery panel, every earlier
 round's selected calls and the newest proposals; the path search from the bank's start, or from
-the previous round's selected fit (the incumbent) when it scores better; the incumbent is kept
-when the new search does not beat it by more than the tolerance; the release is reused when the
+the previous round's selected fit (the incumbent) when the start's fit reaches the incumbent's
+panel or the incumbent scores better by more than the decision tolerance; the incumbent is kept
+unless the new search beats it by more than the decision tolerance (release 2.1: 2.0 kept it only
+when it beat the new search, which the monotone climb made impossible, so every upstream change
+re-ran the greedy search into whatever optimum it reached); the release is reused when the
 selected (panel, frequencies) equal the incumbent's. Blocks run one task each in a pool whose
 workers claim freed cores at phase boundaries (or as cross-node batches); completed blocks are
 recorded in chunks as they arrive. Every block task reserves its planned peak memory with the
@@ -19,17 +22,19 @@ import numpy as np
 from ..discovery.fixed_k.workspace import search_bytes
 from ..execution import BudgetedPool, claim_threads, memory_worker_limit
 from ..execution.batch_queue import BatchKind, map_batches, queue_key
+from ..maths.ties import BOUNDARY_GUARD, TieCounter, census, census_enabled, improves
 from . import records
 from .bank import candidate_bank
 from .objective import ContextFounders, selection_objective
 from .path_model import LANE_WIDTH, RELEASE_SAMPLE_BATCH, PreparedBlock, workspace_bytes
 from .release import PathRelease, local_panel, release
-from .search import LikelihoodMemo, SearchOutcome, search_panel
+from .search import DECISION_MOTION, LikelihoodMemo, SearchOutcome, search_panel
 
 
 @dataclass(frozen=True)
 class BlockTask:
-    """Inputs of one block's selection (columns: contig site indices of its discovery sites)."""
+    """Inputs of one block's selection (columns: contig site indices of its discovery sites;
+    label: "contig/round/i<index>", the block's key in diagnostics and the valley census)."""
 
     index: int
     block: int
@@ -45,6 +50,7 @@ class BlockTask:
     incumbent_release: PathRelease | None
     memo: dict | None
     keep_memo: bool
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,23 +74,40 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
     prepared = PreparedBlock(likelihoods, observed, task.intervals, generations,
                              config.model.unknown_mass)
     incumbent = task.incumbent
+    ties = TieCounter()
+    census_key = task.label or None
     start, bank, bank_summary = candidate_bank(
         likelihoods, observed, task.latent, task.proposals, discovery_config, config.bank,
-        incumbent_panel=None if incumbent is None else incumbent.fit.panel)
+        incumbent_panel=None if incumbent is None else incumbent.fit.panel, ties=ties,
+        census_key=census_key)
     memo = LikelihoodMemo(task.memo)
     attempted = search_panel(start, bank, prepared, config.search, incumbent=incumbent,
-                             founders=task.founders, memo=memo)
+                             founders=task.founders, memo=memo, ties=ties, census_key=census_key)
     context = None if task.founders is None else ContextFounders(task.founders)
-    retained = incumbent is not None and (
-        selection_objective(incumbent.fit, context)
-        > attempted.selection_objective + config.search.tolerance)
+    retained = False
+    incumbent_margin = None
+    if incumbent is not None:
+        # Keep-incumbent rule (hysteresis): the new search replaces the previous round's outcome
+        # only when it beats it by more than the decision tolerance (both under this round's
+        # context code).
+        incumbent_objective = selection_objective(incumbent.fit, context)
+        incumbent_margin = float(attempted.selection_objective - incumbent_objective)
+        tolerance = config.search.decision_tolerance
+        retained = not improves(attempted.selection_objective, incumbent_objective, tolerance)
+        ties.note("ls.keep_incumbent",
+                  inside_tie=bool(abs(incumbent_margin) <= tolerance
+                                  and not np.array_equal(attempted.fit.panel, incumbent.fit.panel)),
+                  boundary=int(abs(abs(incumbent_margin) - tolerance) <= BOUNDARY_GUARD * DECISION_MOTION))
+        if census_key is not None and census_enabled():
+            census("ls.keep", f"{census_key}/keep", (-incumbent_objective, -attempted.selection_objective))
     outcome = incumbent if retained else attempted
     # The release is a function of the selected (panel, frequencies) and the block data: an
     # incumbent's release is reused when they are equal.
     reuse = (incumbent is not None and task.incumbent_release is not None
              and np.array_equal(outcome.fit.panel, incumbent.fit.panel)
              and np.array_equal(outcome.fit.frequencies, incumbent.fit.frequencies))
-    path_release = task.incumbent_release if reuse else release(outcome.fit, prepared, config.release)
+    path_release = (task.incumbent_release if reuse
+                    else release(outcome.fit, prepared, config.release, ties=ties, census_key=census_key))
     panel = local_panel(task.block, task.site_start, task.positions, task.kept, outcome.fit,
                         path_release)
     summary = dict(
@@ -93,10 +116,13 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
         attempted_objective=float(attempted.fit.objective),
         selection_objective=float(selection_objective(outcome.fit, context)),
         search_start=attempted.search_start, search_rounds=len(attempted.trace),
+        start_was_incumbent_panel=bool(attempted.start_was_incumbent_panel),
+        incumbent_margin=incumbent_margin,
         round_backstop=bool(attempted.round_backstop),
         update_backstop=bool(outcome.fit.update_backstop),
         context_founders=None if context is None else len(context),
         free_rows=len(outcome.fit.panel) if context is None else context.free(outcome.fit.panel),
+        tie_events=ties.record(),
         memo_hits=dict(memo.hits), seconds=time.monotonic() - started)
     return BlockSelection(index=task.index, panel=panel, outcome=outcome, release=path_release,
                           memo=memo.state() if task.keep_memo else None, summary=summary)
@@ -257,10 +283,29 @@ def _report(selections, label):
                   round_backstop=sum(s.summary["round_backstop"] for s in selections),
                   update_backstop=sum(s.summary["update_backstop"] for s in selections),
                   bank_backstop=sum(bool(s.summary["bank"] is not None
-                                         and s.summary["bank"]["budget_bound"]) for s in selections))
+                                         and s.summary["bank"]["budget_bound"]) for s in selections),
+                  incumbent_retained=sum(bool(s.summary["incumbent_retained"]) for s in selections))
     hits: dict = {}
     for selection in selections:
         for name, value in selection.summary["memo_hits"].items():
             hits[name] = hits.get(name, 0) + value
     print(f"[Local selection] {label}: backstop hits {counts}; likelihood memo hits {hits}",
           flush=True)
+    ties = tie_totals(selections)
+    if ties:
+        print(f"[Local selection] {label}: tie events (decisions/inside tie/wide/boundary) "
+              + "; ".join(f"{kind} {v['decisions']}/{v['inside_tie']}/{v['wide']}/{v['boundary']}"
+                          for kind, v in sorted(ties.items())), flush=True)
+
+
+def tie_totals(selections) -> dict:
+    """Per decision kind, the summed tie events of a round's block summaries (blocks recorded before
+    release 2.1 have none)."""
+    totals = TieCounter()
+    for selection in selections:
+        events = selection.summary.get("tie_events") or {}
+        for kind, values in events.items():
+            entry = totals.counts.setdefault(kind, dict(decisions=0, inside_tie=0, wide=0, boundary=0))
+            for name, value in values.items():
+                entry[name] = entry.get(name, 0) + int(value)
+    return totals.record()

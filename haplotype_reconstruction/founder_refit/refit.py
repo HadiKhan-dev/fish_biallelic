@@ -11,6 +11,17 @@ painted together at the site: it keeps the genotype of every sample painted
 with that pair, so a single flip of either row loses likelihood on those
 samples and only the swap corrects an allele carried by the wrong one of the
 two rows. Unknown alleles stay unknown.
+
+Move order (release 2.1, design A-4 / review R4): a sweep's moves are judged against the state at the
+start of a round, not in row-index order. Each sweep has a flip phase and a swap phase; in a round
+every eligible move of the phase is scored against the round's start state, and the moves that reach
+their minimum gain are applied in decision order (tie classes of the gains, quantum REFIT_TIE_QUANTUM,
+maths.ties rules; inside a class the content order of the rows, which is their canonical index order)
+while they do not interact with a move already applied in that round (share a row, or a row painted
+together with one of its rows at the site, whose score it would change); the others are re-scored in
+the next round. A row changes at most once per phase and sweep; a sweep that changes nothing ends the
+site. 2.0 applied the first move reaching its minimum gain in row-index order (Gauss-Seidel), so its
+result depended on the row order whenever two candidate moves interacted.
 """
 from __future__ import annotations
 
@@ -27,6 +38,64 @@ from .config import FounderRefitConfig
 
 # Sites per parallel task; each task owns one founder-pair table.
 SITE_TILE = 1024
+# Tie quantum of the move gains (nats): gains are sums of per-sample log terms, which 1e-9 relative GL
+# noise moves by about 1e-9 per carrier (<= ~1e-6 for a few hundred carriers); 2^-16 = 1.5e-5 lies above
+# that and far below the 5-nat minimum gain. Gains closer than this are ordered by content.
+REFIT_TIE_QUANTUM = 2.0 ** -16
+# A tie class wider than this many quanta keeps value order (maths.ties.WIDE_CLASS_QUANTA).
+WIDE_QUANTA = 4.0
+
+
+@njit(cache=True)
+def _decision_order(values, n, quantum):
+    """Decision order of n candidate moves with gains values[:n] (candidates listed in content order):
+    exact gain descending, then tie classes chaining gaps <= quantum, content (list) order inside a
+    class; a class wider than WIDE_QUANTA x quantum keeps value order (list order among equal gains)."""
+    order = np.arange(n)
+    for i in range(1, n):
+        j = i
+        while j > 0 and (values[order[j]] > values[order[j - 1]] or (
+                values[order[j]] == values[order[j - 1]] and order[j] < order[j - 1])):
+            order[j - 1], order[j] = order[j], order[j - 1]
+            j -= 1
+    start = 0
+    while start < n:
+        end = start + 1
+        while end < n and values[order[end - 1]] - values[order[end]] <= quantum:
+            end += 1
+        if end - start > 1 and values[order[start]] - values[order[end - 1]] <= WIDE_QUANTA * quantum:
+            for i in range(start + 1, end):
+                j = i
+                while j > start and order[j] < order[j - 1]:
+                    order[j - 1], order[j] = order[j], order[j - 1]
+                    j -= 1
+        start = end
+    return order
+
+
+@njit(cache=True)
+def _flip_gain(table, alleles, row):
+    """Log-likelihood change from flipping called row `row` (partners' alleles held)."""
+    ll0 = table[row, row, 0]
+    ll1 = table[row, row, 2]
+    for partner in range(len(alleles)):
+        other = alleles[partner]
+        if partner == row or other < 0:
+            continue
+        lo, hi = min(row, partner), max(row, partner)
+        ll0 += table[lo, hi, other]
+        ll1 += table[lo, hi, other + 1]
+    return ll1 - ll0 if alleles[row] == 0 else ll0 - ll1
+
+
+@njit(cache=True)
+def _touch(touched, together, row):
+    """Marks `row` and every row painted together with it at the site."""
+    touched[row] = True
+    for partner in range(len(touched)):
+        lo, hi = min(row, partner), max(row, partner)
+        if together[lo, hi]:
+            touched[partner] = True
 
 
 @njit(cache=True)
@@ -59,12 +128,13 @@ def _refit_kernel(calls, first, second, likelihoods, observed, evidence_sites,
     over observed samples painted with the unordered pair {a, b}; a row's
     objective then needs only its partners' current alleles. Pairs whose
     partner allele is unknown contribute nothing, as do unpainted tracks. Each
-    sweep tries every single-row flip (accepted at a gain >= minimum_gain),
-    then every swap of two rows with different alleles that are painted
+    sweep tries the single-row flips (accepted at a gain >= minimum_gain),
+    then the swaps of two rows with different alleles that are painted
     together at the site (``together[a, b]``: some sample painted {a, b} is
     observed there), accepted at a gain >= 2 x minimum_gain because it changes
-    two cells. O(L (N + K^2 + P K)) for P co-painted pairs per site
-    (P <= min(N, K (K - 1) / 2)), with 1024-site tiles in parallel.
+    two cells; moves are judged against the round's start state in decision
+    order (module docstring). O(L (N + K^2 + P K)) per round for P co-painted
+    pairs per site (P <= min(N, K (K - 1) / 2)), with 1024-site tiles in parallel.
     """
     founders, sites = calls.shape
     samples = first.shape[0]
@@ -75,6 +145,12 @@ def _refit_kernel(calls, first, second, likelihoods, observed, evidence_sites,
     for tile in prange(tiles):
         table = np.zeros((founders, founders, 3), dtype=np.float64)
         together = np.zeros((founders, founders), dtype=np.bool_)
+        flipped = np.zeros(founders, dtype=np.bool_)
+        swapped = np.zeros(founders, dtype=np.bool_)
+        touched = np.zeros(founders, dtype=np.bool_)
+        cand_a = np.empty(founders * founders, dtype=np.int64)
+        cand_b = np.empty(founders * founders, dtype=np.int64)
+        cand_gain = np.empty(founders * founders, dtype=np.float64)
         for site in range(tile * SITE_TILE, min(sites, (tile + 1) * SITE_TILE)):
             table[:] = 0.0
             together[:] = False
@@ -95,40 +171,72 @@ def _refit_kernel(calls, first, second, likelihoods, observed, evidence_sites,
             if not carried:
                 continue
             for _ in range(sweeps):
-                for row in range(founders):
-                    current = refit[row, site]
-                    if current < 0:
-                        continue
-                    ll0 = table[row, row, 0]
-                    ll1 = table[row, row, 2]
-                    for partner in range(founders):
-                        other = refit[partner, site]
-                        if partner == row or other < 0:
+                moved = False
+                flipped[:] = False
+                swapped[:] = False
+                # Flip phase: rounds of non-interacting flips judged against the round's start state.
+                while True:
+                    n = 0
+                    for row in range(founders):
+                        if flipped[row] or refit[row, site] < 0:
                             continue
-                        lo, hi = min(row, partner), max(row, partner)
-                        ll0 += table[lo, hi, other]
-                        ll1 += table[lo, hi, other + 1]
-                    delta = ll1 - ll0 if current == 0 else ll0 - ll1
-                    if delta > 0.0 and delta >= minimum_gain:
-                        refit[row, site] = 1 - current
-                        gain[row, site] = delta
-                # Swaps only (class-B fix B1; 92b3daf flipped any two called rows
-                # together on a summed gain >= minimum_gain, so rows never painted
-                # together, or with equal alleles, changed on less than the prior
-                # of each cell and identical rows could end with different calls).
-                for a in range(founders):
-                    for b in range(a + 1, founders):
-                        if not together[a, b]:
+                        delta = _flip_gain(table, refit[:, site], row)
+                        if delta > 0.0 and delta >= minimum_gain:
+                            cand_a[n] = row
+                            cand_gain[n] = delta
+                            n += 1
+                    if n == 0:
+                        break
+                    touched[:] = False
+                    for t in _decision_order(cand_gain, n, REFIT_TIE_QUANTUM):
+                        row = cand_a[t]
+                        if touched[row]:
+                            continue
+                        refit[row, site] = 1 - refit[row, site]
+                        gain[row, site] = cand_gain[t]
+                        flipped[row] = True
+                        moved = True
+                        _touch(touched, together, row)
+                # Swap phase (class-B fix B1; 92b3daf flipped any two called rows together on a
+                # summed gain >= minimum_gain, so rows never painted together, or with equal
+                # alleles, changed on less than the prior of each cell and identical rows could
+                # end with different calls): rounds as above, pairs in (a, b) order.
+                while True:
+                    n = 0
+                    for a in range(founders):
+                        if swapped[a]:
+                            continue
+                        for b in range(a + 1, founders):
+                            if swapped[b] or not together[a, b]:
+                                continue
+                            xa, xb = refit[a, site], refit[b, site]
+                            if xa < 0 or xb < 0 or xa == xb:
+                                continue
+                            delta = _swap_gain(table, refit[:, site], a, b)
+                            if delta > 0.0 and delta >= swap_minimum_gain:
+                                cand_a[n] = a
+                                cand_b[n] = b
+                                cand_gain[n] = delta
+                                n += 1
+                    if n == 0:
+                        break
+                    touched[:] = False
+                    for t in _decision_order(cand_gain, n, REFIT_TIE_QUANTUM):
+                        a, b = cand_a[t], cand_b[t]
+                        if touched[a] or touched[b]:
                             continue
                         xa, xb = refit[a, site], refit[b, site]
-                        if xa < 0 or xb < 0 or xa == xb:
-                            continue
-                        delta = _swap_gain(table, refit[:, site], a, b)
-                        if delta > 0.0 and delta >= swap_minimum_gain:
-                            refit[a, site] = xb
-                            refit[b, site] = xa
-                            gain[a, site] = delta
-                            gain[b, site] = delta
+                        refit[a, site] = xb
+                        refit[b, site] = xa
+                        gain[a, site] = cand_gain[t]
+                        gain[b, site] = cand_gain[t]
+                        swapped[a] = True
+                        swapped[b] = True
+                        moved = True
+                        _touch(touched, together, a)
+                        _touch(touched, together, b)
+                if not moved:
+                    break
     return refit, gain
 
 

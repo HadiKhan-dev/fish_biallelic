@@ -19,6 +19,7 @@ import time
 import numpy as np
 
 from .. import count_rule
+from .. import tie_rules
 from ...model.components import CountCall, CountStepDecision, FounderComponents, PreparedPanels
 from ... import execution
 from .config import FounderRefinementConfig
@@ -88,6 +89,7 @@ class _Settings:
     cost_scale: float
     additions: bool
     count_rule: count_rule.CountRuleConfig
+    level: int = 0
 
 
 def bin_floor(level: int, prepared, config: FounderRefinementConfig) -> int:
@@ -141,7 +143,8 @@ def refine_component(number, component, panels, evidence, context, settings, bud
 
     panels: its prepared panels; evidence: its float32 (S, L_c, 3) evidence; context: its L1
     context (macro_context); fit_records: its fit-state scope or None. Returns (refined
-    FounderComponent with its count call, ComponentRefinement)."""
+    FounderComponent with its count call, ComponentRefinement). The refined founders are in
+    canonical order (rows sorted lexicographically, design 5.1)."""
     started = time.perf_counter()
     start_rows = np.asarray(component.rows, np.int64)
     founders, blocks = start_rows.shape
@@ -151,12 +154,16 @@ def refine_component(number, component, panels, evidence, context, settings, bud
             changed=False, reason="single_block_or_founder", founders_before=int(founders),
             founders=int(founders), elapsed_seconds=time.perf_counter() - started)
         return replace(component, count_call=_count_call(refinement)), refinement
+    # Tie-class decisions of the component (fits and count pass) and its valley-census prefix.
+    counter = tie_rules.SharedCounter()
+    census_prefix = f"L{settings.level}/{int(component.start)}-{int(component.stop)}/K{int(founders)}"
     # The component's set-up kernels run on its whole share (also in a pool worker).
     with execution.numba_threads(max(1, int(budget.threads()))):
         workspace = ComponentWorkspace(panels, evidence,
                                        min_sites_per_bin=settings.min_sites_per_bin,
                                        max_bins=settings.config.proposal_max_bins)
-        engine = SweepEngine(workspace, context, settings.config, fit_records, f"component{number}")
+        engine = SweepEngine(workspace, context, settings.config, fit_records, f"component{number}",
+                             counter=counter, census_prefix=census_prefix)
     geometry = count_rule.RowGeometry.from_panels(panels)
     # S = the component's informative samples: founder-excluded (uniform) samples and samples
     # without evidence at a complete site score exactly 0 for every panel.
@@ -166,8 +173,8 @@ def refine_component(number, component, panels, evidence, context, settings, bud
     seed_key = [int(panels[0].positions[0]), int(panels[-1].positions[-1]), int(blocks),
                 int(founders)]
     result = count_pass(engine, geometry, start_rows, cost, settings.count_rule, budget, seed_key,
-                        settings.additions)
-    rows = result.rows
+                        settings.additions, counter=counter, census_prefix=census_prefix)
+    rows, _ = tie_rules.canonical_rows(np.asarray(result.rows, np.int64))
     same_shape = rows.shape == start_rows.shape
     refinement = ComponentRefinement(
         component=int(number), start=int(component.start), stop=int(component.stop),
@@ -180,7 +187,8 @@ def refine_component(number, component, panels, evidence, context, settings, bud
         cycle_undecided=result.cycle_undecided, count_limit=result.count_limit,
         count_limit_reached=result.count_limit_reached, ambiguous=result.ambiguous,
         final_fit=result.final_fit, best_f_replacement=result.best_f_replacement,
-        weak_label_junctions=result.weak_junctions, elapsed_seconds=time.perf_counter() - started)
+        weak_label_junctions=result.weak_junctions, elapsed_seconds=time.perf_counter() - started,
+        tie_events=counter.record())
     refined = replace(component, rows=np.ascontiguousarray(rows, np.int32),
                       count_call=_count_call(refinement))
     return refined, refinement
@@ -263,7 +271,7 @@ def refine_level(level: LevelInput, config: FounderRefinementConfig, budget: exe
     settings = _Settings(config=config, min_sites_per_bin=bin_floor(level.level, level.prepared,
                                                                        config),
                          cost_scale=float(level.cost_scale), additions=bool(level.additions),
-                         count_rule=level.count_rule)
+                         count_rule=level.count_rule, level=int(level.level))
     tasks = []
     for number, component in enumerate(level.components):
         if results[number] is not None:

@@ -12,19 +12,19 @@ from dataclasses import dataclass
 class FamilyPhaseConfig:
     """Pedigree-conditioned phase of one chromosome.
 
-    Family model (belief propagation over ordered genotypes, four states per sample and site):
+    Family model (ordered genotypes, four states per sample and site; its posterior mode, the family MAP, is
+    computed by map_solver.py):
       transmission_error: probability that a copy factor transmits the other parental allele.
       scaffold_phase_error: probability that a root's scaffold orientation is wrong at a heterozygous site.
       phase_switch_probability: probability of a frame switch at a painting-bin edge inside a component (the
         family phase chain and the polish's coarse bins); component edges switch with probability 1/2 and the
         family chain never switches phase inside a painting bin (the polish's refinement: polish_window_sites).
-    Belief-propagation schedule:
-      damping: weight of the new message (probability space); tolerance: largest message change that counts
-        as converged; max_iterations: iterations run before the phase is released when not converged earlier
-        (base released after 20 initial iterations and 5 stability checks, which can never fail under the
-        scaffold polish, see tickets/T8/questions.md Q1); gauge_move_interval: iterations between joint
-        root/children gauge moves; minimum_gauge_support: children whose selector changes at a boundary needed
-        for a gauge move (one child cannot distinguish a root frame change from its own crossover).
+    Family MAP solver (map_solver.py, release 2.1):
+      map_max_sweeps: safety cap on block-ascent sweeps. Every accepted step raises the posterior by more than
+        a tie quantum, so the solver terminates by construction; reaching the cap is an error. Ten times the most
+        sweeps measured (6: stress_n80; TroMau and std_n80 at most 3; validation of 18 Oct 2026, review M1).
+        2.0's belief-propagation settings (damping, tolerance, max_iterations, gauge_move_interval,
+        minimum_gauge_support) are gone.
     Root-frame repair (frames.py), on the final family state:
       root_frame_window_bp: flank reach W around a bin edge; root_frame_location_bp: location tolerance (net
       votes ignore +- this around the edge); root_frame_minimum_children: children needed to move a frame (also
@@ -37,18 +37,16 @@ class FamilyPhaseConfig:
       right of a bin edge (that edge's flip probability is split over them; the first painting bin of a
       chromosome or component has no such edge and stays rigid); polish_max_sweeps: colour sweeps before the
       polish must have converged;
-      polish_minimum_gain: smallest accepted score gain (nats); polish_minimum_biological_gain: smallest
-      copy-consistency gain for an interval that changes an observable phase.
+      polish_minimum_gain: the polish's tie quantum q (nats): an interval is accepted only when its exact gain
+      exceeds q, inside q the current configuration is kept (the score reads called scaffold alleles only, so q only
+      has to exceed rounding); polish_minimum_biological_gain: smallest copy-consistency gain for an interval that
+      changes an observable phase, compared with a band of q.
     """
 
     transmission_error: float = 0.001
     scaffold_phase_error: float = 0.01
     phase_switch_probability: float = 0.005
-    damping: float = 0.5
-    tolerance: float = 1e-4
-    max_iterations: int = 25
-    gauge_move_interval: int = 5
-    minimum_gauge_support: int = 2
+    map_max_sweeps: int = 60
     root_frame_window_bp: float = 5e5
     root_frame_location_bp: float = 2.5e5
     root_frame_minimum_children: int = 3
@@ -66,12 +64,8 @@ class FamilyPhaseConfig:
                      "polish_copy_error"):
             if not 0 < getattr(self, name) < 0.5:
                 raise ValueError(f"family_phase.{name} must lie strictly between 0 and 0.5")
-        if not 0 < self.damping <= 1:
-            raise ValueError("family_phase.damping must lie in (0, 1]")
-        if not self.tolerance > 0:
-            raise ValueError("family_phase.tolerance must be positive")
-        for name in ("max_iterations", "gauge_move_interval", "minimum_gauge_support",
-                     "root_frame_minimum_children", "root_frame_max_rounds", "polish_max_sweeps"):
+        for name in ("map_max_sweeps", "root_frame_minimum_children", "root_frame_max_rounds",
+                     "polish_max_sweeps"):
             if int(getattr(self, name)) != getattr(self, name) or getattr(self, name) < 1:
                 raise ValueError(f"family_phase.{name} must be a positive integer")
         if not 0 <= self.root_frame_location_bp < self.root_frame_window_bp:

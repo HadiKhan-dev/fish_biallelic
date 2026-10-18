@@ -11,6 +11,15 @@ fixed-K fitter refits them and the cavity score decides).
   genotype oracle (subtraction and dosage seeds).
 * Soft births: K + 1 starts from soft-residual consensus rows (residual_births.py).
 * Birth-delete replacements: a birth followed by deleting any row (same K).
+
+Release 2.1 (noise stability, design/DESIGN.md 3.3): no proposal order is decided by rounding,
+perturbation-level differences or array layout. K = 1 similarities are computed in one fixed
+summation order (no BLAS layout), exactly symmetric; consensus and dosage rows treat values within
+the ``probability`` quantum of 1/2 as exactly 1/2 (population ALT fraction, then REF); gauge
+rewires need a gain above the ``nll`` quantum; data births rank samples by tie classes of their
+excess NLL (kind ``sample``; an all-unknown sample's excess is its exact value 2 lambda n_obs), then
+observed sites, then canonical sample order, and consume tied samples as whole groups; replacements
+follow births in tie-class order.
 """
 from __future__ import annotations
 
@@ -18,15 +27,17 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit
+from numba import njit, prange
 
 from ..execution import claim_threads
+from ..maths.ties import NOISE_MOTION, WIDE_CLASS_QUANTA, tie_classes
 from .fixed_k.fit import FIT_MAX_THREADS, fit_one, fit_panels, fit_starts
-from .panel import canonical_solution, deduplicate, has_distinct_rows, panel_key
-from .residual_births import soft_candidates
+from .panel import canonical_solution, deduplicate, has_distinct_rows, panel_key, sort_solutions
+from .residual_births import (HALF_BAND, alt_fraction_rule, exact_hdbscan_labels, half_band_rows,
+                              hardening_fallback, note_band, scalar_log_floored,
+                              soft_candidates)
 
 _TINY = np.finfo(np.float64).tiny
-_NLL_TOLERANCE = 1e-10
 # Maximum-cut results memoised per block search (an exact memo of a pure function).
 MAX_CUT_CACHE_ENTRIES = 256
 
@@ -34,53 +45,87 @@ MAX_CUT_CACHE_ENTRIES = 256
 # ---------------------------------------------------------------------------------------------
 # K = 1 data seeds
 # ---------------------------------------------------------------------------------------------
-def _soft_cluster_seeds(likelihoods, n_seeds, min_cluster_size):
+@njit(cache=True, parallel=True, nogil=True)
+def expected_agreement(likelihoods):
+    """S[i, j] = mean over sites of sum_g P_i(g) P_j(g), each entry summed over sites (then
+    genotypes 0, 1, 2) in one fixed order and stored in both triangles: the values do not depend
+    on the sample order, threads, BLAS layout or CPU type (2.0 used three BLAS Gram matrices)."""
+    n, n_sites, _ = likelihoods.shape
+    similarity = np.empty((n, n), dtype=np.float64)
+    for i in prange(n):
+        for j in range(i, n):
+            total = 0.0
+            for site in range(n_sites):
+                total += (likelihoods[i, site, 0] * likelihoods[j, site, 0]
+                          + likelihoods[i, site, 1] * likelihoods[j, site, 1]
+                          + likelihoods[i, site, 2] * likelihoods[j, site, 2])
+            value = total / n_sites
+            similarity[i, j] = value
+            similarity[j, i] = value
+    return similarity
+
+
+def _soft_cluster_seeds(likelihoods, n_seeds, min_cluster_size, counter=None):
     """Up to n_seeds pooled binary rows from HDBSCAN clusters of the samples (distance =
-    max agreement - expected per-site genotype agreement), largest clusters first."""
-    import hdbscan
+    max agreement - expected per-site genotype agreement), largest clusters first (ties: HDBSCAN's
+    label order). A consensus within HALF_BAND of 1/2 takes the population ALT fraction (REF at
+    1/2 itself). HDBSCAN: residual_births.exact_hdbscan_labels (the package's algorithm, equal-weight tree edges in
+    a CPU-independent order)."""
     if likelihoods.shape[0] < int(min_cluster_size):
         return []
     likelihoods = np.ascontiguousarray(likelihoods, dtype=np.float64)
-    n_sites = likelihoods.shape[1]
-    # Expected agreement S[i, j] = mean over sites of sum_g P_i(g) P_j(g), as three BLAS Gram
-    # matrices (their L-axis reduction order is BLAS-internal; only HDBSCAN reads them).
-    similarity = np.zeros((likelihoods.shape[0], likelihoods.shape[0]), dtype=np.float64)
-    for genotype in range(3):
-        channel = np.ascontiguousarray(likelihoods[:, :, genotype])
-        similarity += channel @ channel.T
-    similarity /= float(n_sites)
+    similarity = expected_agreement(likelihoods)
     distance = similarity.max() - similarity
     np.fill_diagonal(distance, 0.0)
-    labels = hdbscan.HDBSCAN(metric="precomputed", min_cluster_size=int(min_cluster_size)).fit(
-        np.ascontiguousarray(distance, dtype=np.float64)).labels_
+    labels = exact_hdbscan_labels(distance, min_cluster_size=int(min_cluster_size),
+                                  min_samples=int(min_cluster_size), allow_single_cluster=False)
     clusters = [np.flatnonzero(labels == label) for label in np.unique(labels) if label != -1]
     clusters.sort(key=lambda members: -len(members))
     alt_fraction = 0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2]
-    return [(alt_fraction[members].mean(axis=0) > 0.5).astype(np.int64)
-            for members in clusters[:n_seeds]]
+    population = alt_fraction.mean(axis=0)
+    marginal = alt_fraction_rule(population, False)
+    note_band(counter, "discovery.k1.half_band", population, 0.5, HALF_BAND)
+    rows = []
+    for members in clusters[:n_seeds]:
+        mean = alt_fraction[members].mean(axis=0)
+        note_band(counter, "discovery.k1.half_band", mean, 0.5, HALF_BAND)
+        rows.append(half_band_rows(mean, marginal).astype(np.int64))
+    return rows
 
 
 def _dosage_seed(likelihoods, sample):
     """The sample's argmax dosage as a row: dosage 2 -> 1, dosage 1 -> 1 where the population
-    ALT fraction exceeds 1/2, else 0."""
+    ALT fraction exceeds 1/2 (outside HALF_BAND), else 0."""
     dosage = likelihoods[sample].argmax(axis=1)
     population_alt = likelihoods[..., 1].mean(axis=0) * 0.5 + likelihoods[..., 2].mean(axis=0)
     row = np.zeros(likelihoods.shape[1], dtype=np.int64)
     row[dosage == 2] = 1
-    row[(dosage == 1) & (population_alt > 0.5)] = 1
+    row[(dosage == 1) & alt_fraction_rule(population_alt, False)] = 1
     return row
 
 
-def initial_solutions(workspace, likelihoods, active, config):
+def _most_decisive(likelihoods, observed, sample_quantum):
+    """The fallback seed sample: most observed sites (exact), then the best class of
+    decisiveness (sum of the largest GL over observed sites; tie classes of kind ``sample``,
+    descending), then canonical sample order."""
+    observed_sites = observed.sum(axis=1)
+    candidates = np.flatnonzero(observed_sites == observed_sites.max())
+    decisiveness = np.where(observed, likelihoods.max(axis=2), 0.0).sum(axis=1)
+    classes = tie_classes(decisiveness[candidates], sample_quantum, descending=True)
+    return int(candidates[classes.winner])
+
+
+def initial_solutions(workspace, likelihoods, active, config, counter=None):
     """The K = 1 search starts: fitted soft-cluster seeds (of the samples with depth), at most
-    ``data_start_beam_width`` distinct ones by NLL."""
+    ``data_start_beam_width`` distinct ones in tie-class order of NLL (kind ``nll``)."""
     seed_likelihoods = likelihoods if np.all(active) else np.ascontiguousarray(likelihoods[active])
     search = config.search
     seeds = _soft_cluster_seeds(seed_likelihoods, search.data_seed_count,
-                                search.seed_min_cluster_size)
+                                search.seed_min_cluster_size, counter)
     if not seeds:
-        decisiveness = seed_likelihoods.max(axis=2).sum(axis=1)
-        seeds = [_dosage_seed(seed_likelihoods, int(decisiveness.argmax()))]
+        seed_observed = workspace.observed if np.all(active) else workspace.observed[active]
+        sample = _most_decisive(seed_likelihoods, seed_observed, workspace.quanta.sample)
+        seeds = [_dosage_seed(seed_likelihoods, sample)]
     fits = fit_starts(workspace, [seed[None, :] for seed in seeds], config.model.max_iterations)
     solutions = [canonical_solution(fit, workspace) for fit in fits]
     return deduplicate(solutions, search.data_start_beam_width)
@@ -344,9 +389,10 @@ def _gauge_sites(haplotypes, side):
     return first_constant & second_constant & (first_anchor != second_anchor)
 
 
-def gauge_starts(solution, likelihoods, partitions):
+def gauge_starts(solution, likelihoods, partitions, quantum):
     """Gauge-rewire starts of a fitted panel for the given cuts (sitewise, then opposite per
-    cut), skipping panels already proposed or equal to the parent."""
+    cut), skipping panels already proposed or equal to the parent. A sitewise flip needs its
+    resolving samples' NLL to fall by more than ``quantum`` (the block's ``nll`` quantum)."""
     haplotypes = solution.haplotypes
     assignments = solution.assignments
     k = solution.k
@@ -369,10 +415,11 @@ def gauge_starts(solution, likelihoods, partitions):
             if len(resolving) == 0:
                 continue
             dosage = haplotypes[first[resolving], site] + haplotypes[second[resolving], site]
-            current = -float(np.sum(np.log(np.maximum(likelihoods[resolving, site, dosage], _TINY))))
-            opposite = -float(np.sum(np.log(np.maximum(
-                likelihoods[resolving, site, 2 - dosage], _TINY))))
-            if opposite < current - _NLL_TOLERANCE:
+            current = -float(np.sum(scalar_log_floored(
+                np.ascontiguousarray(likelihoods[resolving, site, dosage], dtype=np.float64), _TINY)))
+            opposite = -float(np.sum(scalar_log_floored(
+                np.ascontiguousarray(likelihoods[resolving, site, 2 - dosage], dtype=np.float64), _TINY)))
+            if opposite < current - quantum:
                 sitewise[:, site] = 1 - sitewise[:, site]
         key = panel_key(sitewise)
         if key not in seen:
@@ -395,20 +442,23 @@ class GrowthInputs:
     """Evidence-only inputs of data births (one block): the sitewise genotype-oracle NLL and the
     decisiveness of every sample over its observed sites, argmax dosages, a dosage seed row per
     sample (dosage 2 -> 1; dosage 1 or unobserved -> 1 where the observed population ALT
-    fraction exceeds 1/2), and the samples with depth."""
+    fraction exceeds 1/2 outside HALF_BAND), the samples with depth, and each sample's number of
+    observed sites."""
 
     oracle_nll: np.ndarray
     decisiveness: np.ndarray
     dosage: np.ndarray
     seed_rows: np.ndarray
     active: np.ndarray
+    observed_sites: np.ndarray
 
 
 def growth_inputs(likelihoods, observed) -> GrowthInputs:
     maximum = np.max(likelihoods, axis=2)
     dosage = np.argmax(likelihoods, axis=2)
     active = np.any(observed, axis=1)
-    oracle_nll = -np.sum(np.where(observed, np.log(np.maximum(maximum, _TINY)), 0.0), axis=1)
+    oracle_nll = -np.sum(np.where(observed, scalar_log_floored(
+        np.ascontiguousarray(maximum, dtype=np.float64), _TINY), 0.0), axis=1)
     decisiveness = np.sum(np.where(observed, maximum, 0.0), axis=1)
     alt_fraction = 0.5 * likelihoods[..., 1] + likelihoods[..., 2]
     observed_count = np.sum(observed, axis=0)
@@ -418,20 +468,90 @@ def growth_inputs(likelihoods, observed) -> GrowthInputs:
     seed_rows = np.zeros_like(dosage)
     seed_rows[observed & (dosage == 2)] = 1
     ambiguous = (~observed) | (dosage == 1)
-    seed_rows[ambiguous & (population_alt[None, :] > 0.5)] = 1
-    return GrowthInputs(oracle_nll, decisiveness, dosage, seed_rows, active)
+    seed_rows[ambiguous & alt_fraction_rule(population_alt, False)[None, :]] = 1
+    observed_sites = np.sum(observed, axis=1).astype(np.int64)
+    return GrowthInputs(oracle_nll, decisiveness, dosage, seed_rows, active, observed_sites)
 
 
-def data_births(workspace, solution, growth: GrowthInputs, max_iterations):
-    """K + 1 children of a panel from its most misfit samples.
+@dataclass(frozen=True)
+class DataBirths:
+    """K + 1 children of one data-birth call; ``tie_cut``: a tie group was cut at the hard cap
+    (reported as the search limit "data_birth_tie_budget")."""
+
+    children: tuple
+    tie_cut: bool = False
+
+
+def data_birth_order(excess, observed_sites, samples, quantum):
+    """(samples in data-birth order, their tie-group ids, the TieClasses) of the samples with depth.
+
+    Order: tie classes of excess NLL (kind ``sample``, descending: the most misfit first), then more
+    observed sites, then canonical sample order (inside a class wider than 4 quanta: excess first,
+    the width guard). A tie group is the samples of one class with one observed-site count (a wide
+    class is one group); groups are consumed whole.
+    """
+    samples = [int(sample) for sample in samples]
+    if not samples:
+        return [], [], None
+    classes = tie_classes([float(excess[sample]) for sample in samples], quantum,
+                          content=[(-int(observed_sites[sample]), sample) for sample in samples],
+                          descending=True, motion=NOISE_MOTION["sample"])
+    wide = classes.spans > WIDE_CLASS_QUANTA * quantum
+    order, groups = [], []
+    for index in classes.order:
+        sample = samples[int(index)]
+        cls = int(classes.classes[int(index)])
+        order.append(sample)
+        groups.append((cls,) if wide[cls] else (cls, int(observed_sites[sample])))
+    return order, groups, classes
+
+
+def collect_birth_starts(order, groups, seeds_of, budget: int, hard_cap: int):
+    """(groups of start rows, cut) of data births: the starts of the samples in ``order`` collected
+    group by group (``groups[i]`` is the tie-group id of ``order[i]``) until at least ``budget``
+    starts are collected; the last group is completed unless the total would exceed ``hard_cap``
+    (then it is cut in its order: ``cut``). ``seeds_of(sample)`` yields the sample's novel starts
+    (it skips rows already proposed)."""
+    collected: list[list] = []
+    total = 0
+    position = 0
+    cut = False
+    while position < len(order) and total < budget and not cut:
+        group_id = groups[position]
+        group = []
+        while position < len(order) and groups[position] == group_id:
+            sample = order[position]
+            position += 1
+            if cut:
+                continue
+            for row in seeds_of(sample):
+                if total + len(group) >= hard_cap:
+                    cut = True
+                    break
+                group.append(row)
+        if group:
+            collected.append(group)
+            total += len(group)
+    return collected, cut
+
+
+def data_births(workspace, solution, growth: GrowthInputs, max_iterations, search,
+                counter=None) -> DataBirths:
+    """K + 1 children of a panel from its most misfit samples (``search``: SearchConfig).
 
     The parent is first refitted (unless the workspace certified it a fixed point). Samples
-    with depth are ranked by excess NLL over their genotype oracle (then decisiveness, then
-    index); each contributes K subtraction seeds clip(dosage - row, 0, 1) and its dosage seed
-    row. Novel seeds (at most max(16, 2(K + 1)) starts) are fitted in waves of K + 1 and
-    consumed in order until K + 1 distinct complete children exist. If none is complete, the
-    assignment-only fits of the attempted starts with distinct rows are returned instead
-    (deduplicated, at most K + 1): the requested K without moving an unsupported row.
+    with depth are ranked by excess NLL over their genotype oracle in tie classes (kind
+    ``sample``; an excess within the quantum of an all-unknown sample's exact value 2 lambda n_obs
+    is that value, so mathematically equal excesses are equal), then observed sites, then
+    canonical sample order (data_birth_order). Each sample contributes K subtraction seeds
+    clip(dosage - row, 0, 1) and its dosage seed row. Tie groups are consumed whole: novel seeds
+    are collected group by group until the attempt budget (search.data_birth_attempts(K)) is
+    reached, then fitted group by group until search.data_birth_children(K) distinct complete
+    children exist or the budget is spent, both tested only at group boundaries; a group is cut
+    (canonical order) only at search.data_birth_tie_budget_factor x the budget (``tie_cut``). If no
+    child is complete, the assignment-only fits of the fitted starts with distinct rows are
+    returned instead (deduplicated, at most K + 1): the requested K without moving an unsupported
+    row.
     """
     claim_threads(max_threads=FIT_MAX_THREADS)
     if solution.fixed_point and workspace.certifies_fixed_point(solution.haplotypes):
@@ -439,62 +559,67 @@ def data_births(workspace, solution, growth: GrowthInputs, max_iterations):
     else:
         parent = canonical_solution(fit_one(workspace, solution.haplotypes, max_iterations),
                                     workspace)
+    quantum = workspace.quanta.sample
     excess = np.maximum(parent.per_sample_cost - growth.oracle_nll, 0.0)
-    order = sorted(np.flatnonzero(growth.active).tolist(), key=lambda sample: (
-        -float(excess[sample]), -float(growth.decisiveness[sample]), int(sample)))
-    target = parent.k + 1
-    maximum_attempts = max(16, 2 * target)
-    existing = {np.ascontiguousarray(row, dtype=np.int8).tobytes() for row in parent.haplotypes}
-    attempted: set[bytes] = set()
-    starts = []
-    for sample in order:
-        seeds = [np.clip(growth.dosage[sample] - parent.haplotypes[index], 0, 1).astype(np.int64)
+    # An all-unknown sample's excess is exactly 2 lambda n_obs (a grid point by construction): snap
+    # values within the quantum to it, so equal mathematics gives equal keys (2.0: 1-2 ulps apart).
+    unknown_excess = 2.0 * workspace.penalty * growth.observed_sites.astype(np.float64)
+    snapped = np.abs(excess - unknown_excess) <= quantum
+    excess = np.where(snapped, unknown_excess, excess)
+    order, groups, classes = data_birth_order(excess, growth.observed_sites,
+                                              np.flatnonzero(growth.active), quantum)
+    target = search.data_birth_children(parent.k)
+    budget = search.data_birth_attempts(parent.k)
+    hard_cap = budget * max(1, int(search.data_birth_tie_budget_factor))
+    seen = {np.ascontiguousarray(row, dtype=np.int8).tobytes() for row in parent.haplotypes}
+
+    def seeds_of(sample):
+        """The sample's novel K + 1 starts: K subtraction seeds, then its dosage seed row."""
+        seeds = [np.clip(growth.dosage[sample] - parent.haplotypes[index], 0, 1)
                  for index in range(parent.k)]
         seeds.append(growth.seed_rows[sample])
         for seed in seeds:
             row = np.ascontiguousarray(seed, dtype=np.int64)
             key = row.astype(np.int8).tobytes()
-            if key in existing or key in attempted:
+            if key in seen:
                 continue
-            attempted.add(key)
-            starts.append(np.vstack([parent.haplotypes, row[None, :]]))
-            if len(starts) >= maximum_attempts:
-                break
-        if len(starts) >= maximum_attempts:
-            break
+            seen.add(key)
+            yield np.vstack([parent.haplotypes, row[None, :]])
+
+    collected, cut = collect_birth_starts(order, groups, seeds_of, budget, hard_cap)
     children = []
-    child_keys = set()
-    attempts = 0
-    for wave_start in range(0, len(starts), target):
-        stop = False
-        for fit in fit_starts(workspace, starts[wave_start:wave_start + target], max_iterations):
+    child_keys: set[bytes] = set()
+    fitted = []
+    tie_cut = False
+    for number, group in enumerate(collected):
+        for fit in fit_starts(workspace, group, max_iterations):
             child = canonical_solution(fit, workspace)
-            attempts += 1
             if has_distinct_rows(child):
                 children.append(child)
                 child_keys.add(child.key)
-            if len(child_keys) >= target or attempts >= maximum_attempts:
-                stop = True
-                break
-        if stop:
+        fitted.extend(group)
+        if cut and number == len(collected) - 1:
+            tie_cut = True
+        if len(child_keys) >= target or len(fitted) >= budget:
             break
+    if counter is not None and classes is not None:
+        counter.note("discovery.data_birth", inside_tie=tie_cut, wide=classes.wide_classes,
+                     boundary=len(classes.boundary_gaps))
     if children:
-        return tuple(children)
-    fallbacks = [canonical_solution(fit, workspace)
-                 for fit in fit_starts(workspace, starts[:attempts], 0)]
-    return deduplicate([child for child in fallbacks if has_distinct_rows(child)], target)
+        return DataBirths(tuple(children), tie_cut)
+    fallbacks = [canonical_solution(fit, workspace) for fit in fit_starts(workspace, fitted, 0)]
+    return DataBirths(deduplicate([child for child in fallbacks if has_distinct_rows(child)],
+                                  parent.k + 1), tie_cut)
 
 
 # ---------------------------------------------------------------------------------------------
 # Soft births and birth-delete replacements
 # ---------------------------------------------------------------------------------------------
-def _hardened_rows(soft, likelihoods):
-    """Binary rows of soft candidates (> 1/2 is ALT; within 1e-12 of 1/2 the population ALT
-    fraction decides), distinct, in candidate order."""
-    marginal = np.mean(0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2], axis=0)
-    binary = soft > 0.5
-    ties = np.isclose(soft, 0.5, rtol=0.0, atol=1e-12)
-    binary[ties] = np.broadcast_to(marginal >= 0.5, binary.shape)[ties]
+def _hardened_rows(soft, likelihoods, counter=None):
+    """Binary rows of soft candidates (> 1/2 is ALT; within HALF_BAND of 1/2 the population ALT
+    fraction decides; release 2.1, was 1e-12), distinct, in candidate order."""
+    note_band(counter, "discovery.soft.half_band", soft, 0.5, HALF_BAND)
+    binary = half_band_rows(soft, hardening_fallback(likelihoods))
     unique: dict[bytes, np.ndarray] = {}
     for row in np.asarray(binary, dtype=np.int64):
         row = np.ascontiguousarray(row, dtype=np.int64)
@@ -512,19 +637,20 @@ class SoftBirths:
     omitted: int
 
 
-def soft_births(workspace, solution, likelihoods, residual_inputs, config, cache) -> SoftBirths:
-    """Soft-residual births of a panel (memoised per (panel, assignments) in ``cache``)."""
+def soft_births(workspace, solution, likelihoods, residual_inputs, config, cache, counter=None) -> SoftBirths:
+    """Soft-residual births of a panel (memoised per (panel, assignments) in ``cache``; ``counter``: optional
+    TieCounter of the band decisions)."""
     key = (solution.key, solution.assignments.tobytes())
     cached = cache.get(key)
     if cached is not None:
         return cached
-    soft = soft_candidates(solution.haplotypes, residual_inputs, config.residual_births)
+    soft = soft_candidates(solution.haplotypes, residual_inputs, config.residual_births, counter)
     if len(soft) == 0:
         result = SoftBirths((), 0, 0)
     else:
         existing = {np.asarray(row, dtype=np.int8).tobytes() for row in solution.haplotypes}
         starts = [np.vstack((solution.haplotypes, row[None, :]))
-                  for row in _hardened_rows(soft, likelihoods)
+                  for row in _hardened_rows(soft, likelihoods, counter)
                   if np.asarray(row, dtype=np.int8).tobytes() not in existing]
         limit = config.search.max_proposals_per_expansion
         synchronized, refitted = fit_panels(workspace, starts[:limit], config.model.max_iterations)
@@ -535,13 +661,14 @@ def soft_births(workspace, solution, likelihoods, residual_inputs, config, cache
     return result
 
 
-def replacements(workspace, parent, births, config):
-    """Same-K starts: each K + 1 birth (in search order) with any one row deleted, distinct by
-    the remaining rows, at most ``max_replacement_children``; returns (children, omitted)."""
+def replacements(workspace, parent, births, config, limit=None):
+    """Same-K starts: each K + 1 birth (in tie-class order of NLL, then key) with any one row
+    deleted, distinct by the remaining rows, at most ``limit`` (default
+    ``max_replacement_children``); returns (children, omitted)."""
     width = parent.sites
     descriptors = []
     seen: set[bytes] = set()
-    for birth in sorted(deduplicate(births), key=lambda solution: solution.order()):
+    for birth in sort_solutions(deduplicate(births)):
         if birth.k != parent.k + 1:
             continue
         for deleted in range(birth.k):
@@ -551,7 +678,7 @@ def replacements(workspace, parent, births, config):
                 continue
             seen.add(key)
             descriptors.append((birth, deleted))
-    limit = config.search.max_replacement_children
+    limit = config.search.max_replacement_children if limit is None else int(limit)
     starts = [np.ascontiguousarray(np.delete(birth.haplotypes, deleted, axis=0))
               for birth, deleted in descriptors[:limit]]
     synchronized, refitted = fit_panels(workspace, starts, config.model.max_iterations)
@@ -571,7 +698,7 @@ class OrdinaryMoves:
 
 
 def ordinary_moves(workspace, solution, likelihoods, growth, ceiling, cuts: MaximumCuts,
-                   config) -> OrdinaryMoves:
+                   config, counter=None) -> OrdinaryMoves:
     """Deaths and gauge rewires (interleaved one each, each kind in key order, at most
     ``max_proposals_per_expansion`` starts), fitted, plus data births below the ceiling."""
     search = config.search
@@ -583,7 +710,8 @@ def ordinary_moves(workspace, solution, likelihoods, growth, ceiling, cuts: Maxi
         partitions = cuts.partitions(weights, search.max_cut_ties + 1)
         if len(partitions) > search.max_cut_ties:
             limits.append("gauge_max_cut_ties_truncated")
-        buckets[0].extend(gauge_starts(solution, likelihoods, partitions[:search.max_cut_ties]))
+        buckets[0].extend(gauge_starts(solution, likelihoods, partitions[:search.max_cut_ties],
+                                       workspace.quanta.nll))
     unique = {}
     for offset, starts in buckets.items():
         by_key = {}
@@ -611,9 +739,11 @@ def ordinary_moves(workspace, solution, likelihoods, growth, ceiling, cuts: Maxi
     synchronized, refitted = fit_panels(workspace, retained, config.model.max_iterations)
     children = list(deduplicate((*synchronized, *refitted)))
     if solution.k < ceiling:
-        children.extend(child for child in data_births(
-            workspace, solution, growth, config.model.max_iterations)
-            if child.k == solution.k + 1)
+        births = data_births(workspace, solution, growth, config.model.max_iterations, search,
+                             counter=counter)
+        if births.tie_cut:
+            limits.append("data_birth_tie_budget")
+        children.extend(child for child in births.children if child.k == solution.k + 1)
     children = deduplicate(children)
     births = tuple(child for child in children if child.k == solution.k + 1)
     return OrdinaryMoves(children, births, omitted, tuple(dict.fromkeys(limits)))

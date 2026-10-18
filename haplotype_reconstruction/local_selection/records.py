@@ -78,7 +78,8 @@ def encode_outcome(outcome: SearchOutcome) -> dict:
                 trace=[asdict(item) for item in outcome.trace], search_start=outcome.search_start,
                 round_backstop=bool(outcome.round_backstop),
                 context_founders=outcome.context_founders, free_rows=int(outcome.free_rows),
-                input_key=outcome.input_key, work=list(outcome.work))
+                input_key=outcome.input_key, work=list(outcome.work),
+                start_was_incumbent_panel=bool(outcome.start_was_incumbent_panel))
 
 
 def decode_outcome(payload) -> SearchOutcome:
@@ -88,7 +89,8 @@ def decode_outcome(payload) -> SearchOutcome:
                     for item in payload["trace"]),
         search_start=payload["search_start"], round_backstop=payload["round_backstop"],
         context_founders=payload["context_founders"], free_rows=payload["free_rows"],
-        input_key=payload["input_key"], work=tuple(map(tuple, payload["work"])))
+        input_key=payload["input_key"], work=tuple(map(tuple, payload["work"])),
+        start_was_incumbent_panel=bool(payload.get("start_was_incumbent_panel", False)))
 
 
 def encode_release(release: PathRelease) -> dict:

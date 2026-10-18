@@ -205,7 +205,8 @@ each task kind's estimate against its measured peak.
 
 Cores, lanes, memory pacing, serial mode, shards and batch helpers change when work runs, not what it computes.
 Parallel kernels reduce per-sample (or per-site) rows in a fixed order, so results do not depend on thread counts
-or on how work was distributed. These settings are outside every checkpoint identity and may differ between the
+or on how work was distributed, and ties between equally supported alternatives are decided by fixed conventions
+([ties](methods/ties.md)). These settings are outside every checkpoint identity and may differ between the
 invocations of one run. Every search limit that bounds memory is a fixed constant (for example founder
 refinement's window-frontier budget), never the memory that happens to be free.
 
@@ -365,7 +366,7 @@ after the stages. Tables are written atomically; list and dict cells are JSON.
 | `pedigree/evidence_calibration.json` | the cross-chromosome evidence scaling and its fit |
 | `pedigree/summary.json` | informative and omitted contigs, the chromosome-count statement (whether Tier A and Tier B were reachable), the family solve, the exclusion and the eligibility summaries |
 | `founder_refit/summary.csv` | per contig: components, founder rows, called and changed alleles, changed sites, median gain of a change, samples excluded from founder construction |
-| `family_phase/summary.csv` | per contig: iterations, convergence, called alleles, observable phase changes, root-frame repairs |
+| `family_phase/summary.csv` | per contig: family-MAP sweeps, convergence, final objective, called alleles, observable phase changes, root-frame repairs |
 | `recombination/<contig>.map.csv` | per map bin: called and expected crossovers, observable exposure, rates, cumulative cM |
 | `recombination/<contig>.crossovers.csv` | called crossover intervals per meiosis, with bin-honest reported intervals |
 | `recombination/<contig>.coverage.csv`, `<contig>.called_coverage.csv` | informative and callable spans per meiosis |
@@ -376,12 +377,13 @@ after the stages. Tables are written atomically; list and dict cells are JSON.
 | `export/<contig>.founders.vcf.gz`, `.tbi` | the founder VCF: haploid GT, one column `c<C>_H<k>` per founder row `k` of component `C` ([Export](#export)) |
 | `export/<contig>.samples.vcf.gz`, `.tbi` | the final sample phase: GT and PS ([Export](#export)) |
 | `export/manifest.json` | every exported file, its components, columns and site counts |
+| `ties/decisions.csv`, `ties/summary.json` | when the run completes: decisions taken inside a tie by the fixed conventions, per contig, record group and decision kind, their totals per stage, and the recorded ambiguity flags ([ties](methods/ties.md#what-a-run-records)) |
 | `simulation/truth_pedigree.csv` | simulations: the analysed samples and their true parents |
 | `evaluation/` | written by `haplotypes evaluate` ([simulation.md](simulation.md#evaluation)) |
 
 The methods pages explain how to read the tables of their stages: [painting](methods/painting.md),
 [pedigree](methods/pedigree.md), [family phase](methods/family_phase.md) and
-[recombination](methods/recombination.md). Readable tables summarise; the complete results (allele calls, phase,
+[recombination](methods/recombination.md), and [ties](methods/ties.md) for `ties/`. Readable tables summarise; the complete results (allele calls, phase,
 paintings) are in the checkpoint records; the export stage writes the founder alleles and the final phase out
 losslessly as VCFs.
 

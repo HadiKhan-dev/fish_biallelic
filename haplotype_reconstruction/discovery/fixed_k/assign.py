@@ -1,7 +1,8 @@
 """A step: every sample's best diploid state for a fixed panel H.
 
-States, in this order (the tie rule is the first strict minimum): row pairs (i, j), i <= j,
-row-major; a row with an unknown copy (k, U), k ascending; both copies unknown (U, U). A state's
+States, in this order (the tie rule, release 2.1: the first state whose cost is within the block's ``sample`` tie
+quantum of the cheapest; costs that differ by rounding or by perturbation-level amounts do not decide): row pairs
+(i, j), i <= j, row-major; a row with an unknown copy (k, U), k ascending; both copies unknown (U, U). A state's
 cost is minus its summed binned log emission (uncapped); the chosen state is the cheapest one.
 The reported per-sample cost is minus the best binned switching-Viterbi log likelihood over all
 states (switch penalty between adjacent bins), the model's NLL. Samples without any observed
@@ -52,7 +53,7 @@ def haplotype_patterns(haplotypes, first, second, snps_per_bin, n_bins):
 @njit(cache=True, nogil=True, inline="always")
 def _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pair_slots,
                    ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins,
-                   founder_diff1, emissions, assignments, unknown_slots, viterbi):
+                   founder_diff1, emissions, assignments, unknown_slots, viterbi, state_cost, tie):
     """One sample's state choice and Viterbi likelihood (scratch: founder_diff1 (K, bins),
     emissions (states, bins))."""
     n_pairs = pair_slots.shape[0]
@@ -80,9 +81,9 @@ def _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots
                      + diff1_table[b, row_slots[j, b], s] + w_table[b, pair_slots[p, b], s])
             emissions[state, b] = e
             total += e
+        state_cost[state] = -total
         if -total < best_cost:
             best_cost = -total
-            best_state = state
         state += 1
     for row in range(k):
         total = 0.0
@@ -90,15 +91,22 @@ def _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots
             e = kw_cb[s, b] + kw_diff_table[b, row_slots[row, b], s]
             emissions[state, b] = e
             total += e
+        state_cost[state] = -total
         if -total < best_cost:
             best_cost = -total
-            best_state = state
         state += 1
     for b in range(n_bins):
         emissions[state, b] = ww_bin_emissions[s, b]
+    state_cost[state] = ww_total_cost[s]
     if ww_total_cost[s] < best_cost:
         best_cost = ww_total_cost[s]
-        best_state = state
+    # The first state (state order) within the tie quantum of the cheapest.
+    threshold = best_cost + tie
+    best_state = state
+    for st in range(n_states):
+        if state_cost[st] <= threshold:
+            best_state = st
+            break
     if best_state < n_pairs:
         assignments[s, 0] = first[best_state]
         assignments[s, 1] = second[best_state]
@@ -133,7 +141,7 @@ def _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots
 
 @njit(cache=True, parallel=True, nogil=True)
 def _assign_parallel(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pair_slots,
-                     ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins):
+                     ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins, tie):
     n = c0b.shape[0]
     n_states = pair_slots.shape[0] + k + 1
     assignments = np.empty((n, 2), dtype=np.int64)
@@ -142,15 +150,17 @@ def _assign_parallel(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots,
     for s in prange(n):
         founder_diff1 = np.empty((k, n_bins), dtype=np.float64)
         emissions = np.empty((n_states, n_bins), dtype=np.float64)
+        state_cost = np.empty(n_states, dtype=np.float64)
         _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots,
                        pair_slots, ww_bin_emissions, ww_total_cost, first, second, penalty, k,
-                       n_bins, founder_diff1, emissions, assignments, unknown_slots, viterbi)
+                       n_bins, founder_diff1, emissions, assignments, unknown_slots, viterbi,
+                       state_cost, tie)
     return assignments, -viterbi, unknown_slots
 
 
 @njit(cache=True, nogil=True)
 def assign_serial(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pair_slots,
-                  ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins):
+                  ww_bin_emissions, ww_total_cost, first, second, penalty, k, n_bins, tie):
     """The A step on one thread, with one scratch slab for all samples (no per-sample
     allocation); the same arithmetic as the parallel driver."""
     n = c0b.shape[0]
@@ -160,10 +170,12 @@ def assign_serial(c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots, pa
     viterbi = np.empty(n, dtype=np.float64)
     founder_diff1 = np.empty((k, n_bins), dtype=np.float64)
     emissions = np.empty((n_states, n_bins), dtype=np.float64)
+    state_cost = np.empty(n_states, dtype=np.float64)
     for s in range(n):
         _assign_sample(s, c0b, diff1_table, w_table, kw_cb, kw_diff_table, row_slots,
                        pair_slots, ww_bin_emissions, ww_total_cost, first, second, penalty, k,
-                       n_bins, founder_diff1, emissions, assignments, unknown_slots, viterbi)
+                       n_bins, founder_diff1, emissions, assignments, unknown_slots, viterbi,
+                       state_cost, tie)
     return assignments, -viterbi, unknown_slots
 
 
@@ -183,7 +195,8 @@ def assign(workspace, haplotypes):
     assignments, cost, unknown_slots = kernel(
         workspace.c0b, tables.diff1_table, tables.w_table, workspace.kw_cb,
         tables.kw_diff_table, row_slots, pair_slots, workspace.ww_bin_emissions,
-        workspace.ww_total_cost, first, second, workspace.switch_penalty, k, workspace.n_bins)
+        workspace.ww_total_cost, first, second, workspace.switch_penalty, k, workspace.n_bins,
+        float(workspace.quanta.sample))
     uninformative = workspace.uninformative
     assignments[uninformative] = k
     unknown_slots[uninformative] = 2

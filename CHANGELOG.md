@@ -1,5 +1,84 @@
 # Changelog
 
+## 2.1.0 (19 October 2026)
+
+Release 2.1 makes the results independent of floating-point rounding, of the input sample order, of the thread count
+and of arbitrary tie-breaks, replaces family phase's loopy belief propagation with a convergent solver, and searches
+discovery more broadly. On the release candidate of 18 October, the noise-stability matrix found zero changed outcomes
+at every stage, from evidence to export. The matrix covered 1e-12 and 1e-9 relative genotype-likelihood noise,
+value-consistent noise, permuted sample order (in memory and in the input file), a changed numerical environment
+and a different thread count, on simulated crosses and the TroMau benchmark. Against 2.0, that candidate gave:
+
+- identical pedigrees on every simulation, and one more correct edge on the K = 30 ladder;
+- phase switch errors and component-aligned allele errors within a few percent either way (allele errors -22% to
+  +6.5% by simulation);
+- on the TroMau benchmark, slightly lower founder coverage (best-row coverage -0.012) and fewer painted F2
+  switches;
+- TroMau wall time within +6% of 2.0, with a peak memory of 62 GB against 44-59 GB.
+
+The release adds the family-phase solver and late fixes to that candidate. It was checked end to end before
+release: three TroMau chromosomes and the std_n80 and stress_n80 simulations completed cleanly. Their pedigree calls
+equal the candidate's, and so do std_n80's genotype, phase-switch and allele errors. On stress_n80, allele errors
+are +1.6% from the new family-phase solver. The full noise matrix was not rerun on the final code.
+
+### Declared model changes
+
+- **Local selection, context code: claims coded by the cheapest matching.** Context founders claim panel rows by a
+  maximum-cardinality, then minimum-edit-cost matching of founders to their nearest rows (the panel's shortest
+  description), so the code length is a function of the panel's rows whatever their order. 2.0's greedy rule (a
+  founder equidistant to several rows claimed the lowest; applied to a trajectory-dependent row order, it let the
+  same row set cost up to ~140 nats more or less) is removed.
+- **Founder refinement: zero-gain founders are deleted first.** A founder whose removal leaves every sample's score
+  unchanged (within the tie quantum) is removed before each deletion round, which can lower the founder count where 2.0
+  kept a founder no sample uses.
+- **Discovery: broader search.** More data-birth attempts and children (x3), beam width 6, and tie groups of
+  equally ranked data births consumed whole. The founder-count criterion is unchanged; the broader search finds
+  better-optimised lower-K panels more often, which lowers K in some blocks (accepted).
+- **Family phase: loopy belief propagation is replaced by a provably convergent posterior-mode solver** (the family
+  MAP). It runs monotone exact block coordinate ascent, with pedigree roots' genotypes summed out. Every accepted
+  step raises the posterior by more than a tie quantum, so the solver terminates; reaching the sweep cap
+  (`FamilyPhaseConfig.map_max_sweeps`) is an error. Decoder frames, root-frame repairs and crossovers can change
+  where 2.0's propagation had not converged. Known limitation: the solver can stop at a local optimum; larger
+  moves are planned for 2.2. `family_phase/summary.csv` reports `map_sweeps`, `converged` and `map_objective`
+  instead of `iterations`, `converged` and `final_residual`.
+- **Read model: fits polished to their exact optimum**, so genotype likelihoods do not depend on the numerical
+  environment (BLAS kernels, SIMD paths).
+
+### Noise stability
+
+- One canonical sample order per run (samples sorted by name) from the evidence stage on; exported VCF columns and
+  per-sample report tables keep the input order.
+- Tie classes with per-kind tie quanta (`maths/ties.py`) replace exact floating-point comparisons and array-order
+  tie-breaks in discovery, local selection, assembly, painting, pedigree, family phase and recombination; ties are
+  decided by exact content keys and every panel is kept in canonical row order. Threshold comparisons get a band
+  only where a value can sit exactly on the threshold mathematically.
+- Results no longer depend on the CPU's vector instructions. Discovery's HDBSCAN (K = 1 seeds, residual-strand
+  clusters) orders links of equal weight by a fixed pseudo-random key of the canonical record indices; the hdbscan
+  package's unstable sort of equal-weight edges differed between AVX-512 and other CPUs. This equal-weight-link
+  rule is a content-key convention under review. Logarithms and exponentials in discovery and the block scale go
+  through scalar libm, and Numba's Intel SVML is disabled (`NUMBA_DISABLE_INTEL_SVML=1` at package import).
+- Local selection decides ties without index or hash order. Bank winners inside wide tie classes are ordered by
+  (K, canonical key). Proposals tied with the eighth refit of a kind are refitted too, up to
+  `PathSearchConfig.refits_per_kind_cap` = 12. A larger MAP unknown-copy count must win by more than
+  `PathReleaseConfig.unknown_count_band` (2^-20) of the largest count mass, else the smaller count stands.
+- Founder refinement's exchange and content moves, its coarse-move guard and founder refit's interacting allele
+  moves are decided by tie classes of their exact gains, then content. Founder refit judges each site's moves
+  against the round-start state; it is identical to 2.0 when candidate moves do not interact.
+- Ties are decided by documented deterministic conventions and counted. Where alternatives tie (exactly equal
+  support, or within one tie quantum) a fixed rule decides: content keys, a parsimony preference (smaller panel,
+  fewer parents, fewest switches), keeping the current state, sample-name order, a conservative threshold side,
+  or abstention. [docs/methods/ties.md](docs/methods/ties.md) lists them per stage. They are conventions, not
+  inferences, and are under review for 2.2. A completed run writes `ties/decisions.csv` and `ties/summary.json`
+  (decisions taken inside a tie per contig, stage and decision kind; discovery blocks selected inside a tie,
+  their tied alternatives and score margins; ambiguous founder-count calls; tied refits that disagree) and a
+  one-line digest in the log; the fields they come from (`tie_events`, `ambiguous`, `tied_alternatives`,
+  `score_margin`) are documented there. The plan for 2.2 is to carry every tie resolution forward as a
+  candidate and let the block score decide.
+- Fixed: an assembly join could cycle forever between a birth, a death and a seed swap (count-state revisit guard
+  and a reported backstop).
+- New diagnostic environment variable `HAPLOTYPES_TIE_CENSUS` (valley census of tie decisions; results do not
+  depend on it).
+
 ## 2.0.0 (unreleased)
 
 The package is rebuilt from release 1.0 (commit 92b3daf) as one pipeline of typed stage packages joined through the

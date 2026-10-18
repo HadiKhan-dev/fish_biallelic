@@ -12,6 +12,8 @@ the stage that feeds it (each returns the paths written):
   write_family_phase(output, summaries)                     family_phase/summary.csv
   write_recombination(output, store, contigs)               recombination/...
   write_truth_pedigree(output, manifest)                    simulation/truth_pedigree.csv
+  write_ties(output, store, contigs, pedigree_events)       ties/decisions.csv, summary.json (when the run
+                                                            completes)
 """
 from .painting import write_painting
 from .pedigree import write_pedigree
@@ -19,6 +21,7 @@ from .quality import write_quality
 from .recombination import write_recombination
 from .reference_consistency import write_reference_consistency
 from .tables import write_family_phase, write_founder_refit, write_truth_pedigree
+from .ties import write_ties
 
 __all__ = ["write_family_phase", "write_founder_refit", "write_painting", "write_pedigree", "write_quality",
-           "write_recombination", "write_reference_consistency", "write_truth_pedigree"]
+           "write_recombination", "write_reference_consistency", "write_ties", "write_truth_pedigree"]

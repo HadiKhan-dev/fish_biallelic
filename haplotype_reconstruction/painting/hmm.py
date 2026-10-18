@@ -21,6 +21,15 @@ from .transitions import PaintingTransitions
 
 # Spread of a normalised GL row above which the row is informative (not flat).
 INFORMATIVE_SPREAD = 16.0 * np.finfo(np.float64).eps
+# Viterbi tie quantum (nats; release 2.1, design A-4): predecessors whose path scores are within this of the best are
+# tied, and the back-pointer then takes the fewest track changes (stay, then one change, then two), then the
+# smallest flat index; the final state is the smallest index within it of the best. Equal-score paths arise where
+# two switch placements cost the same (equal theta on a cold, zero-cM stretch of the map, and the states' emissions
+# identical in the bins between) and their sums differ only in rounding, which GL noise reorders. The path scores
+# themselves stay exact maxima. Census (TroMau chr18 painting, iid 1e-9; work/IE/census/viterbi_chr18_*): 4,980
+# decisions within 1e-2, gap motion <= 1.9e-9, genuine gaps from 1e-5 (2 in [1e-5, 3e-5), then >= 3e-4): 2^-20 =
+# 9.5e-7 sits ~500x above the motion and ~10x below the first genuine gaps.
+VITERBI_TIE = 2.0 ** -20
 
 
 @njit(cache=True, parallel=True)
@@ -193,13 +202,17 @@ def unpack_emissions(packed, n_states):
 def hamming_max_step(previous, cost_same, cost_one, cost_two, n_states, out_values, out_index,
                      row_best_value, row_second_value, row_best_index, row_second_index,
                      column_best_value, column_second_value, column_best_index,
-                     column_second_index):
+                     column_second_index, tie):
     """out_values[z] = max_y previous[y] + T(y, z) and out_index[z] its argmax, O(S^2).
 
     T charges cost_same, cost_one or cost_two for zero, one or two changed
     tracks. The best y excluding row/column/both of z comes from the best and
-    second-best entries of each row and column. Exact ties go to the smallest
-    flat index y (canonical tie rule).
+    second-best entries of each row and column. out_values are exact maxima; the
+    back-pointer takes, among the candidates within ``tie`` of the maximum, the one
+    with the fewest changed tracks (stay, one, two), and between the best one-change
+    candidates of the row and of the column the smaller flat index when they are
+    within ``tie`` (release 2.1; exact ties inside a row or column go to the
+    smallest flat index, the canonical tie rule).
     """
     for row in range(n_states):
         best_value = -np.inf
@@ -270,8 +283,7 @@ def hamming_max_step(previous, cost_same, cost_one, cost_two, n_states, out_valu
 
         for current_column in range(n_states):
             current = current_row * n_states + current_column
-            best_value = previous[current] + cost_same
-            best_index = current
+            stay_value = previous[current] + cost_same
 
             column_index = column_best_index[current_column]
             column_value = column_best_value[current_column]
@@ -283,25 +295,30 @@ def hamming_max_step(previous, cost_same, cost_one, cost_two, n_states, out_valu
             if row_index % n_states == current_column:
                 row_index = row_second_index[current_row]
                 row_value = row_second_value[current_row]
-            one_value = column_value
-            one_index = column_index
-            if row_value > one_value or (row_value == one_value and row_index < one_index):
-                one_value = row_value
+            one_value = max(row_value, column_value)
+            if row_value > column_value + tie:
                 one_index = row_index
-            candidate = one_value + cost_one
-            if candidate > best_value or (candidate == best_value and one_index < best_index):
-                best_value = candidate
-                best_index = one_index
+            elif column_value > row_value + tie:
+                one_index = column_index
+            elif row_index < 0 or (column_index >= 0 and column_index < row_index):
+                one_index = column_index
+            else:
+                one_index = row_index
+            one_candidate = one_value + cost_one
 
             complement_value = complement_best_value
             complement_index = complement_best_index
             if complement_best_column == current_column:
                 complement_value = complement_second_value
                 complement_index = complement_second_index
-            candidate = complement_value + cost_two
-            if (candidate > best_value
-                    or (candidate == best_value and complement_index < best_index)):
-                best_value = candidate
+            two_candidate = complement_value + cost_two
+
+            best_value = max(stay_value, max(one_candidate, two_candidate))
+            if stay_value >= best_value - tie:
+                best_index = current
+            elif one_candidate >= best_value - tie:
+                best_index = one_index
+            else:
                 best_index = complement_index
 
             out_values[current] = best_value
@@ -369,7 +386,7 @@ def hamming_max_values(values, cost_same, cost_one, cost_two, n_states, out, row
 
 
 @njit(cache=True, parallel=True)
-def _viterbi_kernel(emissions, n_states, log_same, log_one, log_two):
+def _viterbi_kernel(emissions, n_states, log_same, log_one, log_two, tie):
     n_samples, n_diplotypes, n_bins = emissions.shape
     back = np.full((n_samples, n_bins, n_diplotypes), -1, dtype=np.int32)
     final_scores = np.empty((n_samples, n_diplotypes), dtype=np.float64)
@@ -391,7 +408,7 @@ def _viterbi_kernel(emissions, n_states, log_same, log_one, log_two):
                              back[sample, bin_index],
                              row_best_value, row_second_value, row_best_index,
                              row_second_index, column_best_value, column_second_value,
-                             column_best_index, column_second_index)
+                             column_best_index, column_second_index, tie)
             for current in range(n_diplotypes):
                 current_scores[current] += emissions[sample, current, bin_index]
             # Per-bin centring prevents long-path overflow; paths and ties are unchanged.
@@ -401,7 +418,13 @@ def _viterbi_kernel(emissions, n_states, log_same, log_one, log_two):
 
     result = np.empty((n_samples, 2, n_bins), dtype=np.int32)
     for sample in prange(n_samples):
-        current = int(np.argmax(final_scores[sample]))
+        # The smallest final state within the tie quantum of the best (release 2.1).
+        top = np.max(final_scores[sample])
+        current = 0
+        for state in range(n_diplotypes):
+            if final_scores[sample, state] >= top - tie:
+                current = state
+                break
         result[sample, 0, n_bins - 1] = current // n_states
         result[sample, 1, n_bins - 1] = current % n_states
         for bin_index in range(n_bins - 1, 0, -1):
@@ -411,14 +434,17 @@ def _viterbi_kernel(emissions, n_states, log_same, log_one, log_two):
     return result
 
 
-def viterbi_paths(emissions: np.ndarray, transitions: PaintingTransitions) -> np.ndarray:
+def viterbi_paths(emissions: np.ndarray, transitions: PaintingTransitions, *,
+                  tie: float = VITERBI_TIE) -> np.ndarray:
     """int32[N, 2, B] state of each track on the Viterbi path (needs B >= 1).
 
-    Exact O(N B S^2); exact ties go to the smallest previous flat state.
+    Exact O(N B S^2) maxima; predecessors within ``tie`` nats of the best are tied
+    and resolved by the fewest track changes, then the smallest flat state
+    (VITERBI_TIE; tie = 0 gives 2.0's exact rule up to the stay preference).
     Holds int32 back-pointers [N, B, S^2], the largest painting array.
     """
     return _viterbi_kernel(emissions, transitions.n_states, transitions.log_same,
-                           transitions.log_one, transitions.log_two)
+                           transitions.log_one, transitions.log_two, float(tie))
 
 
 @njit(cache=True)

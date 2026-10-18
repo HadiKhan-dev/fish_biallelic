@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..maths import ties as tie_rules
 from .alternatives import Alternatives, softmax_finite
 from .config import PedigreeConfig, TierThresholds
 from .eligibility import ParentEligibility
@@ -332,7 +333,10 @@ def partial_edges(label: str, thresholds: TierThresholds, calls: TierCalls,
 
 
 def coverage_rows(rows: np.ndarray, scores: np.ndarray, coverage: float) -> tuple[int, ...]:
-    """Fewest rows, by descending softmax probability (ties by row), carrying ``coverage`` mass."""
+    """Fewest rows, by descending softmax probability (ties by row), carrying ``coverage`` mass.
+
+    Probabilities in one tie class (probability quantum, ``maths.ties``) are tied: they are ordered by row and a
+    cut inside a class keeps the whole class (release 2.1; GL noise reorders near-equal probabilities)."""
     candidate_rows = np.asarray(rows, dtype=np.int64)
     probabilities = softmax_finite(scores[candidate_rows])
     positive = probabilities > 0.0
@@ -340,13 +344,18 @@ def coverage_rows(rows: np.ndarray, scores: np.ndarray, coverage: float) -> tupl
     probabilities = probabilities[positive]
     if not len(candidate_rows):
         return ()
+    ranked = tie_rules.tie_classes(probabilities, tie_rules.tie_quantum(0.0, "probability"),
+                                   content=[int(row) for row in candidate_rows], descending=True)
     selected = []
     cumulative = 0.0
-    for position in np.lexsort((candidate_rows, -probabilities)):
+    cut_class = None
+    for position in ranked.order:
+        if cut_class is not None and ranked.classes[position] != cut_class:
+            break
         selected.append(int(candidate_rows[position]))
         cumulative += float(probabilities[position])
-        if cumulative >= coverage:
-            break
+        if cut_class is None and cumulative >= coverage:
+            cut_class = ranked.classes[position]
     return tuple(selected)
 
 

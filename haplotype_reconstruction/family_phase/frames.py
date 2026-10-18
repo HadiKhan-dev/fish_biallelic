@@ -4,12 +4,13 @@ The scaffold frame of a pedigree root (the track order of its painting, used by 
 phase) can be wrong over the rest of a component: panel rows that exchange founder identity, painting
 abstentions or ties between interchangeable rows, segregating deletions. Every child of the root then changes
 homologue near the error. Where the root's own data cannot place that change, the children's changes spread
-over a stretch, so the single-boundary gauge move (gauges.py) gains nothing and belief propagation settles on
-the scaffold frame. Belief propagation can also change a root's internal frame (the family MAP, which
+over a stretch, so beyond the reach of the family MAP's relabelling and compound moves (map_solver.py) the MAP
+keeps the scaffold frame. The MAP can also change a root's internal frame (the family MAP frame, which
 recombination decodes) where the scaffold is right.
 
 Votes. For root P, a bin edge e inside a component and each child edge of P, the child's joint selector chain
-(the family model's copy-factor emissions and selector transitions) is re-decoded with free ends after
+(selector emissions from conditional cavities at the family MAP, map_solver.selector_emissions, and the
+selector transitions) is re-decoded with free ends after
 relabelling P's homologues from e on:
   - exact: the change of the max-path log score on the window +-W around e; at a flagged edge (where the root's
     own data do not carry the scaffold orientation, ``orientation_flags``) also the best such change at any
@@ -35,13 +36,13 @@ support and a positive total revert the internal frame (the scaffold was right);
 ``root_frame_minimum_children`` opponents, no supporter and a negative total copy the change into the scaffold
 (transfer: the displayed frame then agrees with the decoded one).
 
-Children's frames. A child with one observed parent releases its family MAP frame, which belief propagation
+Children's frames. A child with one observed parent releases its family MAP frame, which the family MAP
 aligned with the parent's homologue labels; in stretches where the child's genotype does not place the
 parent's homologue that frame can carry the root's frame error and cancel it in the decoder. When a root's
 internal frame changes, such children's frames follow it (``follow_child_frames``).
 
-All inputs are recomputed from the final family messages without changing them, so a resumed stage makes the
-same decisions.
+All inputs are computed from the converged family MAP without changing it, so a recomputed stage makes the same
+decisions.
 """
 from __future__ import annotations
 
@@ -233,7 +234,7 @@ def _component_runs(components):
 def repair_root_frames(workspace, emissions, family_frame, config, *, tie_boundaries, protected):
     """Decide root frame moves, reverts and transfers on the final family state (module docstring).
 
-    ``emissions`` float32 [G, L, 4] are the final selector emissions (solver.selector_emissions; relabelled in
+    ``emissions`` float64 [G, L, 4] are the final selector emissions (map_solver.selector_emissions; relabelled in
     place here); ``family_frame`` int8 [N, L] the family MAP (inferred) frames; ``tie_boundaries`` {sample:
     marker boundaries}; ``protected`` int64 (n, 2) closed bp intervals. Masks are relative to the scaffold.
     """
@@ -511,11 +512,11 @@ def follow_child_frames(scaffold, frame, internal, parents, children, slots, com
     A sample with one observed parent releases its family MAP frame (``frame``), and recombination decodes its
     meiosis from it: at a parent-heterozygous site where the child is homozygous the observation (transmitted
     allele against the parent's homologue 0) is data; where the child is heterozygous it follows the child's
-    frame, which belief propagation aligned with the parent's homologue labels. Inside a run of such sites
+    frame, which the family MAP aligned with the parent's homologue labels. Inside a run of such sites
     between homozygous ones the child's own data do not place the parent's homologue, so its frame can carry
     the root's frame error and cancel it. ``internal`` relabels roots' homologues (1 = relabelled). For every
-    run that contains a relabelling change, the child's frame is changed so that its observations keep belief
-    propagation's pattern relative to the homozygous sites on both sides: where the label is equal at the two
+    run that contains a relabelling change, the child's frame is changed so that its observations keep the
+    family MAP's pattern relative to the homozygous sites on both sides: where the label is equal at the two
     bounding sites (or one side reaches a component end) the frame is relabelled with the root; where it
     differs, the data on the two sides change parity, so the run's own observation switch nearest to the label
     change is removed, or, if the run has none, the switch at the label change is kept (the data require one).

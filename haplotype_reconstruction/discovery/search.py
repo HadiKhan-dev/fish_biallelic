@@ -1,26 +1,44 @@
 """Adaptive reversible search over complete panels of one block.
 
-The archive ranks every fitted complete panel (one per canonical key, the lowest-NLL fit) and
-keeps, per K, the panels the search reads: the ``beam_width`` lowest; the minimum-NLL panel of
-each represented K is its *representative* and is cavity-scored (score
-cached by key; at most ``exact_score_backstop(K_rep)`` scores, K_rep the largest represented K).
-The selected panel is the representative with the best score (ties: smaller K, then key).
+The archive ranks every fitted complete panel (one per canonical key, the first fit seen unless a
+later fit is better by more than the block's ``nll`` tie quantum) and keeps, per K, the panels the
+search reads: the first ``beam_width`` in tie-class order of NLL; the first of each represented K is
+its *representative* and is cavity-scored (score cached by key; at most
+``exact_score_backstop(K_rep)`` scores, K_rep the largest represented K). The selected panel is the
+representative with the best score (ties: smaller K, then key).
 
-Each expansion takes the selected K's beam (its ``beam_width`` lowest-NLL archived panels): the
-first panel not yet expanded ordinarily gets the ordinary moves (deaths, gauge rewires, data
-births; then, if the score did not improve, birth-delete replacements); once every beam panel
-was expanded ordinarily, the first not yet expanded in the residual phase gets soft-residual
-births (then replacements, then, if still no improvement, a K + 2 bridge: data and soft births
-of the K + 1 representative). The search stops when the beam is exhausted in both phases, or at
-the reported expansion backstop. There is no K grid and no K cap besides the identifiability
-ceiling min(2 N_active, 2^L).
+Each expansion takes the selected K's beam (its ``beam_width`` first archived panels): the first
+panel not yet expanded ordinarily gets the ordinary moves (deaths, gauge rewires, data births;
+then, if the score did not improve, birth-delete replacements); once every beam panel was
+expanded ordinarily, the first not yet expanded in the residual phase gets soft-residual births
+(then replacements, then, if still no improvement, a K + 2 bridge: data and soft births of the
+K + 1 representative). The search stops when the beam is exhausted in both phases, or at the
+reported expansion backstop. There is no K grid and no K cap besides the identifiability ceiling
+min(2 N_active, 2^L).
+
+Release 2.1 (noise stability; design/DESIGN.md section 3 and A-1..A-3):
+* Samples are searched in the run's canonical order (``run_sample_order`` of the sample names when
+  the caller passes them; otherwise the caller's order, which the evidence stage makes canonical),
+  and the selected solution's per-sample arrays are returned in the input order: a reordering of
+  the samples changes nothing.
+* Every order and winner uses anchored tie classes (maths.ties) with the block's tie quanta
+  (``BlockQuanta`` from the block's null NLL): the archive per K by NLL classes (kind ``nll``)
+  with the canonical key inside a class; the selection by cavity-score classes (kind ``nll``),
+  then smaller K, then key; improvement tests by the ``improvement`` quantum. Values that differ
+  only by rounding or by perturbation-level amounts never decide, and neither does array order.
+* Optional, off by default (owner decision 2): an escalation of fragile blocks and a second search
+  under the reversed tie convention, both pooled into one archive; the selection rule over the
+  pool is unchanged (within K the lowest NLL, across K the cavity score).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import math
 
 import numpy as np
 
+from ..maths.ties import (NOISE_MOTION, BlockQuanta, TieCounter, block_scale, improves,
+                          inverse_permutation, run_sample_order, tie_classes)
 from .cavity import CavityWorkspace, score_solutions
 from .fixed_k.fit import prepare_workspace
 from .moves import (MaximumCuts, SoftBirths, data_births, growth_inputs, initial_solutions,
@@ -30,6 +48,9 @@ from .residual_births import ResidualInputs
 
 # Relative K of the moves a search step generates (death, same-K, birth, bridge).
 _MOVE_OFFSETS = (-1, 0, 1, 2)
+# Content keys of the reversed tie convention: the complemented 0/1 row bytes (reverse lexicographic order of
+# equally long keys).
+_COMPLEMENT = bytes.maketrans(bytes([0, 1]), bytes([1, 0]))
 
 
 @dataclass(frozen=True)
@@ -38,20 +59,30 @@ class SearchSummary:
 
     k_values: int16[R] represented K values, ascending; k_log_scores: float64[R] the cavity
         log score (leave-one-out predictive + telescoping K prior + unordered set code) of each
-        K's representative. The selected K maximises it.
+        K's representative. The selected K maximises it (tie classes: smaller K, then key).
     natural_k_ceiling: identifiability ceiling min(2 N_active, 2^L).
     expansions, data_starts, exact_scores, exact_score_cache_hits: work counts.
     residual_calls, residual_rows: soft-residual birth calls and the novel rows they emitted.
     limits: reported search limitations in first-occurrence order, from
         "expansion_backstop", "exact_score_backstop", "proposal_budget",
         "replacement_proposal_budget", "soft_residual_proposal_budget",
-        "gauge_max_cut_ties_truncated", "mean_field_nonconvergence".
+        "gauge_max_cut_ties_truncated", "mean_field_nonconvergence", "data_birth_tie_budget",
+        "escalation_backstop".
     heuristic_gauge_cuts: some expanded panel had K > exact_cut_max_k, so its gauge rewires came
         from the degree-ordered local-search maximum cut (reported here, not as a limit).
     stop_reason: "generated_neighbourhood_local_optimum", "incumbent_neighbourhood_search_limited"
         or "expansion_backstop".
     certified: the selected panel's generated neighbourhood was completely generated and scored
         without improvement (a local certificate, not a global one).
+    Release 2.1 (defaults keep 2.0 records decodable):
+    tie_quantum: the block's ``nll`` tie quantum (selection and archive orders).
+    escalated: the escalation ran (SearchConfig.escalation).
+    conventions: searches pooled (2 when the reversed-convention search ran).
+    ambiguous: the selection was taken inside a tie: another representative's score is in the
+        selected score's tie class, or another panel is in the first NLL class of the selected K.
+    tied_alternatives: the number of such other representatives and panels.
+    score_margin: the selected score minus the best other represented K's score (inf if none).
+    tie_events: maths.ties.TieCounter record {kind: {decisions, inside_tie, wide, boundary}}.
     """
 
     k_values: np.ndarray
@@ -67,6 +98,13 @@ class SearchSummary:
     heuristic_gauge_cuts: bool
     stop_reason: str
     certified: bool
+    tie_quantum: float = 0.0
+    escalated: bool = False
+    conventions: int = 1
+    ambiguous: bool = False
+    tied_alternatives: int = 0
+    score_margin: float = math.inf
+    tie_events: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -85,228 +123,452 @@ def natural_k_ceiling(n_samples: int, n_sites: int) -> int:
     return sample_ceiling
 
 
-def _score_key(score):
-    return (-score.log_score, score.k, score.solution.key)
+def _readonly(array):
+    array.setflags(write=False)
+    return array
 
 
-def search_block(likelihoods, observed, config) -> BlockSearch:
+def _sample_subset(solution: FixedKSolution, index: np.ndarray) -> FixedKSolution:
+    """The same fit with its per-sample arrays taken at ``index`` (a permutation of the samples)."""
+    return FixedKSolution(
+        haplotypes=solution.haplotypes,
+        assignments=_readonly(np.ascontiguousarray(solution.assignments[index])),
+        per_sample_cost=_readonly(np.ascontiguousarray(solution.per_sample_cost[index])),
+        unknown_slots=_readonly(np.ascontiguousarray(solution.unknown_slots[index])),
+        iterations=solution.iterations, nll=solution.nll, fixed_point=solution.fixed_point,
+        key=solution.key, quanta=solution.quanta)
+
+
+def search_block(likelihoods, observed, config, *, sample_ids=None) -> BlockSearch:
     """Search the panel of one block's discovery sites.
 
     likelihoods: float64[N, L, 3] normalised GLs; observed: bool[N, L] (at least one True).
-    Unobserved cells are set to exactly 1/3 before any seed, fit or score.
+    sample_ids: the samples' names (optional). With names the samples are searched in the run's
+    canonical order (maths.ties.run_sample_order); without, in the given order, which the caller
+    keeps canonical (the evidence stage's run order). The selected solution's per-sample arrays
+    are in the input order either way. Unobserved cells are set to exactly 1/3 before any seed,
+    fit or score.
     """
     observed = np.ascontiguousarray(observed, dtype=np.bool_)
     likelihood = np.array(likelihoods, dtype=np.float64, order="C", copy=True)
     likelihood[~observed] = 1.0 / 3.0
-    active = np.ascontiguousarray(observed.any(axis=1))
-    n_sites = likelihood.shape[1]
-    ceiling = natural_k_ceiling(int(active.sum()), n_sites)
-    search = config.search
-    tolerance = search.score_tolerance
-    max_iterations = config.model.max_iterations
+    order = None
+    if sample_ids is not None:
+        if len(sample_ids) != likelihood.shape[0]:
+            raise ValueError("sample_ids must name every sample of the block")
+        order = run_sample_order(sample_ids)
+        if np.array_equal(order, np.arange(len(order))):
+            order = None
+    if order is not None:
+        likelihood = np.ascontiguousarray(likelihood[order])
+        observed = np.ascontiguousarray(observed[order])
+    result = _search(likelihood, observed, config)
+    if order is None:
+        return result
+    return BlockSearch(selected=_sample_subset(result.selected, inverse_permutation(order)),
+                       summary=result.summary)
 
-    workspace = prepare_workspace(likelihood, observed, config.model)
-    growth = growth_inputs(likelihood, observed)
-    residual_inputs = ResidualInputs(likelihood, observed)
-    cuts = MaximumCuts(search.exact_cut_max_k, search.max_cut_ties)
-    data_solutions = initial_solutions(workspace, likelihood, active, config)
-    cavity_workspace = CavityWorkspace(
-        likelihood if bool(active.all()) else likelihood[active], config.cavity)
 
-    # Per canonical key the order of its lowest-NLL fit; per K only the beam_width best fits (the
-    # first is the representative): the search reads nothing else of the thousands of panels a
-    # large-K block fits, so the archive's memory stays bounded.
-    archive_order: dict[bytes, tuple] = {}
-    archive_beams: dict[int, list] = {}
-    represented = dict(k=0)
-    representatives: dict[int, FixedKSolution] = {}
-    score_cache: dict = {}
-    scores: dict = {}
-    soft_cache: dict = {}
-    limits: list[str] = []
-    state = dict(exact_scores=0, cache_hits=0, mean_field_failed=False)
+def select_scores(values, quantum: float, content):
+    """(winner, TieClasses) of PanelScores: cavity-score classes (descending, ``quantum``), then smaller
+    K, then the content key of the panel (the selection rule across K; within K the archive's NLL order
+    already chose each K's representative)."""
+    classes = tie_classes([score.log_score for score in values], quantum,
+                          content=[content(score.solution) for score in values],
+                          secondary=[(score.k,) for score in values], descending=True,
+                          motion=NOISE_MOTION["nll"])
+    return values[classes.winner], classes
 
-    def add(solutions):
-        width = search.beam_width
+
+class _Archive:
+    """Per K the retained panels in decision order: tie classes of NLL (kind ``nll``), the content
+    key inside a class (forward: the canonical key; reversed convention: its complement). Every
+    panel ever fitted keeps the NLL of its archived fit (a later fit of the same key replaces it only
+    when better by more than the quantum). A K's retained list is re-ordered over its previous
+    members and the new arrivals and cut at ``width`` (a cut inside a class falls by content)."""
+
+    def __init__(self, width: int, quanta: BlockQuanta, content, counter: TieCounter):
+        self.width = int(width)
+        self.quantum = float(quanta.nll)
+        self.content = content
+        self.counter = counter
+        self.fitted: dict[bytes, float] = {}
+        self.beams: dict[int, list] = {}
+        self.max_k = 0
+
+    def add(self, solutions) -> None:
+        touched: dict[int, None] = {}
         for solution in solutions:
-            order = solution.order()
-            previous = archive_order.get(solution.key)
-            if previous is not None and not order < previous:
+            previous = self.fitted.get(solution.key)
+            if previous is not None and not solution.nll < previous - self.quantum:
                 continue
-            archive_order[solution.key] = order
-            represented["k"] = max(represented["k"], solution.k)
-            panels = archive_beams.setdefault(solution.k, [])
+            self.fitted[solution.key] = solution.nll
+            self.max_k = max(self.max_k, solution.k)
+            panels = self.beams.setdefault(solution.k, [])
             if previous is not None:
                 panels[:] = [entry for entry in panels if entry.key != solution.key]
-            if len(panels) < width or order < panels[-1].order():
-                panels.append(solution)
-                panels.sort(key=FixedKSolution.order)
-                del panels[width:]
+            panels.append(solution)
+            touched[solution.k] = None
+        for k in touched:
+            self.beams[k] = self._ordered(self.beams[k])[:self.width]
 
-    def represented_k() -> int:
-        return represented["k"]
+    def _ordered(self, panels):
+        if len(panels) == 1:
+            return panels
+        classes = tie_classes([panel.nll for panel in panels], self.quantum,
+                              content=[self.content(panel) for panel in panels],
+                              motion=NOISE_MOTION["nll"])
+        ordered = [panels[index] for index in classes.order]
+        cut_inside = (len(ordered) > self.width
+                      and classes.classes[classes.order[self.width - 1]]
+                      == classes.classes[classes.order[self.width]])
+        self.counter.add("discovery.archive", classes,
+                         decided_inside=bool(classes.tied_winner or cut_inside))
+        return ordered
 
-    def refresh(preferred_k: int) -> bool:
+    def first_class_size(self, k: int) -> int:
+        """Members of the first NLL class among the retained panels of K."""
+        panels = self.beams.get(k, ())
+        if len(panels) <= 1:
+            return len(panels)
+        classes = tie_classes([panel.nll for panel in panels], self.quantum,
+                              content=[self.content(panel) for panel in panels])
+        return int(np.count_nonzero(classes.classes == 0))
+
+
+class _Search:
+    """One search of a block under one tie convention (+1 forward, -1 reversed: the caller passes
+    the samples in reversed canonical order and content keys are complemented)."""
+
+    def __init__(self, likelihood, observed, config, convention: int = 1):
+        search = config.search
+        self.config = config
+        self.search = search
+        self.convention = int(convention)
+        self.likelihood = likelihood
+        self.observed = observed
+        self.active = np.ascontiguousarray(observed.any(axis=1))
+        self.ceiling = natural_k_ceiling(int(self.active.sum()), likelihood.shape[1])
+        self.quanta = BlockQuanta.for_scale(
+            block_scale(likelihood, observed, config.model.unknown_copy_penalty))
+        self.counter = TieCounter()
+        if self.convention > 0:
+            self.content = lambda solution: solution.key
+        else:
+            self.content = lambda solution: solution.key.translate(_COMPLEMENT)
+        self.workspace = prepare_workspace(likelihood, observed, config.model, self.quanta)
+        self.growth = growth_inputs(likelihood, observed)
+        self.residual_inputs = ResidualInputs(likelihood, observed)
+        self.cuts = MaximumCuts(search.exact_cut_max_k, search.max_cut_ties)
+        self.cavity_workspace = CavityWorkspace(
+            likelihood if bool(self.active.all()) else likelihood[self.active], config.cavity)
+        width = search.beam_width
+        if search.escalation:
+            width = max(width, search.escalate_beam_width)
+        self.archive = _Archive(width, self.quanta, self.content, self.counter)
+        self.beam_width = int(search.beam_width)
+        self.replacement_limit = int(search.max_replacement_children)
+        self.representatives: dict[int, FixedKSolution] = {}
+        self.score_cache: dict = {}
+        self.scores: dict = {}
+        self.soft_cache: dict = {}
+        self.limits: list[str] = []
+        self.exact_scores = 0
+        self.cache_hits = 0
+        self.score_backstop_factor = 1
+        self.mean_field_failed = False
+        self.ordinary_expanded: set[bytes] = set()
+        self.residual_expanded: set[bytes] = set()
+        self.ordinary_complete: dict[bytes, bool] = {}
+        self.residual_complete: dict[bytes, bool] = {}
+        self.generated_offsets: dict[bytes, set] = {}
+        self.no_improvement: set[bytes] = set()
+        self.residual_calls = 0
+        self.residual_rows = 0
+        self.heuristic_cuts = False
+        self.stop_reason = ""
+        self.expansions = 0
+        self.escalated = False
+        self.data_starts = 0
+
+    # ---------------------------------------------------------------------------------- scoring
+    def refresh(self, preferred_k: int) -> bool:
         """Score changed representatives (nearest K first); True if the backstop omitted any."""
         changed = []
-        for k in sorted(archive_beams):
-            representative = archive_beams[k][0]
-            previous = representatives.get(k)
+        for k in sorted(self.archive.beams):
+            representative = self.archive.beams[k][0]
+            previous = self.representatives.get(k)
             if previous is None or previous.key != representative.key:
                 changed.append(representative)
-        changed.sort(key=lambda solution: (abs(solution.k - preferred_k), solution.k, solution.nll,
-                                           solution.key))
+        changed.sort(key=lambda solution: (abs(solution.k - preferred_k), solution.k))
         novel = []
         for solution in changed:
-            cached = score_cache.get(solution.key)
+            cached = self.score_cache.get(solution.key)
             if cached is None:
                 novel.append(solution)
             else:
-                state["cache_hits"] += 1
-                representatives[solution.k] = solution
-                scores[solution.k] = cached
-        room = max(0, search.exact_score_backstop(represented_k()) - state["exact_scores"])
+                self.cache_hits += 1
+                self.representatives[solution.k] = solution
+                self.scores[solution.k] = cached
+        backstop = self.search.exact_score_backstop(self.archive.max_k) * self.score_backstop_factor
+        room = max(0, backstop - self.exact_scores)
         retained = novel[:room]
-        for score in score_solutions(cavity_workspace, retained, active):
-            score_cache[score.solution.key] = score
-            representatives[score.k] = score.solution
-            scores[score.k] = score
+        for score in score_solutions(self.cavity_workspace, retained, self.active):
+            self.score_cache[score.solution.key] = score
+            self.representatives[score.k] = score.solution
+            self.scores[score.k] = score
             if score.mean_field_failures:
-                state["mean_field_failed"] = True
-        state["exact_scores"] += len(retained)
+                self.mean_field_failed = True
+        self.exact_scores += len(retained)
         return len(novel) > room
 
-    def selected():
-        return min(scores.values(), key=_score_key)
+    def selection(self):
+        """(selected PanelScore, its tie classes, the scores in class-input order): score classes
+        (kind ``nll``, descending), then smaller K, then the content key."""
+        values = list(self.scores.values())
+        winner, classes = select_scores(values, self.quanta.nll, self.content)
+        return winner, classes, values
 
-    def beam(k: int):
-        return list(archive_beams.get(k, ()))[:search.beam_width]
+    def selected(self):
+        return self.selection()[0]
 
-    def soft(solution) -> SoftBirths:
-        if solution.k >= ceiling:
+    def improved(self, after, before) -> bool:
+        return improves(after.log_score, before.log_score, self.quanta.improvement)
+
+    def margin_and_ties(self):
+        """(score margin of the selected panel over the best other K, tied alternatives)."""
+        best, classes, values = self.selection()
+        others = [score.log_score for score in values if score.k != best.k]
+        margin = best.log_score - max(others) if others else math.inf
+        tied = int(np.count_nonzero(classes.classes == 0)) - 1
+        tied += max(0, self.archive.first_class_size(best.k) - 1)
+        return best, margin, tied
+
+    # ---------------------------------------------------------------------------------- moves
+    def beam(self, k: int):
+        return list(self.archive.beams.get(k, ()))[:self.beam_width]
+
+    def soft(self, solution) -> SoftBirths:
+        if solution.k >= self.ceiling:
             return SoftBirths((), 0, 0)
-        return soft_births(workspace, solution, likelihood, residual_inputs, config, soft_cache)
+        return soft_births(self.workspace, solution, self.likelihood, self.residual_inputs,
+                           self.config, self.soft_cache, counter=self.counter)
 
-    add(data_solutions)
-    if refresh(1):
-        limits.append("exact_score_backstop")
-    if state["mean_field_failed"]:
-        limits.append("mean_field_nonconvergence")
-    ordinary_expanded: set[bytes] = set()
-    residual_expanded: set[bytes] = set()
-    ordinary_complete: dict[bytes, bool] = {}
-    residual_complete: dict[bytes, bool] = {}
-    generated_offsets: dict[bytes, set] = {}
-    no_improvement: set[bytes] = set()
-    residual_calls = residual_rows = 0
-    heuristic_cuts = False
-    stop_reason = ""
-    expansion = 0
-    while True:
-        if expansion >= search.expansion_backstop(represented_k()):
-            limits.append("expansion_backstop")
-            stop_reason = "expansion_backstop"
-            break
-        before = selected()
-        candidates = beam(before.k)
-        parent = next((solution for solution in candidates
-                       if solution.key not in ordinary_expanded), None)
-        phase = "ordinary"
-        if parent is None:
-            parent = next((solution for solution in candidates
-                           if solution.key not in residual_expanded), None)
-            phase = "residual"
-        if parent is None:
-            stop_reason = ("generated_neighbourhood_local_optimum" if not limits
-                           else "incumbent_neighbourhood_search_limited")
-            break
+    def start(self) -> None:
+        data_solutions = initial_solutions(self.workspace, self.likelihood, self.active,
+                                           self.config, counter=self.counter)
+        self.data_starts = len(data_solutions)
+        self.archive.add(data_solutions)
+        if self.refresh(1):
+            self.limits.append("exact_score_backstop")
+        if self.mean_field_failed:
+            self.limits.append("mean_field_nonconvergence")
+
+    def expand(self, parent, phase: str, before) -> None:
+        """One expansion of ``parent`` (see the module docstring)."""
+        config = self.config
+        search = self.search
         local_limits: list[str] = []
         generated: list = []
         if phase == "ordinary":
-            ordinary_expanded.add(parent.key)
-            moves = ordinary_moves(workspace, parent, likelihood, growth, ceiling, cuts, config)
-            if parent.k > 1 and cuts.heuristic(parent.k):
-                heuristic_cuts = True
+            self.ordinary_expanded.add(parent.key)
+            moves = ordinary_moves(self.workspace, parent, self.likelihood, self.growth,
+                                   self.ceiling, self.cuts, config, counter=self.counter)
+            if parent.k > 1 and self.cuts.heuristic(parent.k):
+                self.heuristic_cuts = True
             generated.extend(moves.children)
             local_limits.extend(moves.limits)
-            add(moves.children)
-            if refresh(parent.k):
+            self.archive.add(moves.children)
+            if self.refresh(parent.k):
                 local_limits.append("exact_score_backstop")
-            if not selected().log_score > before.log_score + tolerance:
-                children, omitted = replacements(workspace, parent, moves.births, config)
+            if not self.improved(self.selected(), before):
+                children, omitted = replacements(self.workspace, parent, moves.births, config,
+                                                 self.replacement_limit)
                 generated.extend(children)
                 if omitted:
                     local_limits.append("replacement_proposal_budget")
-                add(children)
-                if refresh(parent.k):
+                self.archive.add(children)
+                if self.refresh(parent.k):
                     local_limits.append("exact_score_backstop")
-            ordinary_complete[parent.key] = not local_limits
+            self.ordinary_complete[parent.key] = not local_limits
         else:
-            residual_expanded.add(parent.key)
-            births = soft(parent)
-            residual_calls += 1
-            residual_rows += births.emitted
+            self.residual_expanded.add(parent.key)
+            births = self.soft(parent)
+            self.residual_calls += 1
+            self.residual_rows += births.emitted
             if births.omitted:
                 local_limits.append("soft_residual_proposal_budget")
             generated.extend(births.children)
-            add(births.children)
+            self.archive.add(births.children)
             # Refresh unconditionally: a retained soft proposal counts even if others were capped.
-            if refresh(parent.k):
+            if self.refresh(parent.k):
                 local_limits.append("exact_score_backstop")
-            if not selected().log_score > before.log_score + tolerance:
-                children, omitted = replacements(workspace, parent, births.children, config)
+            if not self.improved(self.selected(), before):
+                children, omitted = replacements(self.workspace, parent, births.children, config,
+                                                 self.replacement_limit)
                 generated.extend(children)
                 if omitted:
                     local_limits.append("replacement_proposal_budget")
-                add(children)
-                if refresh(parent.k):
+                self.archive.add(children)
+                if self.refresh(parent.k):
                     local_limits.append("exact_score_backstop")
-            if (selected().log_score <= before.log_score + tolerance
-                    and parent.k + 2 <= ceiling and parent.k + 1 in representatives):
-                bridge = representatives[parent.k + 1]
-                paired = [child for child in data_births(workspace, bridge, growth, max_iterations)
-                          if child.k == parent.k + 2]
-                bridge_births = soft(bridge)
-                residual_calls += 1
-                residual_rows += bridge_births.emitted
+            if (not self.improved(self.selected(), before)
+                    and parent.k + 2 <= self.ceiling and parent.k + 1 in self.representatives):
+                bridge = self.representatives[parent.k + 1]
+                bridged = data_births(self.workspace, bridge, self.growth,
+                                      config.model.max_iterations, search, counter=self.counter)
+                if bridged.tie_cut:
+                    local_limits.append("data_birth_tie_budget")
+                paired = [child for child in bridged.children if child.k == parent.k + 2]
+                bridge_births = self.soft(bridge)
+                self.residual_calls += 1
+                self.residual_rows += bridge_births.emitted
                 if bridge_births.omitted:
                     local_limits.append("soft_residual_proposal_budget")
                 paired.extend(child for child in bridge_births.children
                               if child.k == parent.k + 2)
                 paired = deduplicate(paired)
                 generated.extend(paired)
-                add(paired)
-                if refresh(parent.k):
+                self.archive.add(paired)
+                if self.refresh(parent.k):
                     local_limits.append("exact_score_backstop")
-            residual_complete[parent.key] = not local_limits
-            after = selected()
-            if after.solution.key == parent.key and after.log_score <= before.log_score + tolerance:
-                no_improvement.add(parent.key)
-        limits.extend(local_limits)
-        if state["mean_field_failed"]:
-            limits.append("mean_field_nonconvergence")
-        generated_offsets.setdefault(parent.key, set()).update(
+            self.residual_complete[parent.key] = not local_limits
+            after = self.selected()
+            if after.solution.key == parent.key and not self.improved(after, before):
+                self.no_improvement.add(parent.key)
+        self.limits.extend(local_limits)
+        if self.mean_field_failed:
+            self.limits.append("mean_field_nonconvergence")
+        self.generated_offsets.setdefault(parent.key, set()).update(
             child.k - parent.k for child in generated if child.k - parent.k in _MOVE_OFFSETS)
-        expansion += 1
+        self.expansions += 1
 
-    if state["mean_field_failed"]:
-        limits.append("mean_field_nonconvergence")
+    def fragile(self) -> bool:
+        """The escalation trigger (on the representatives, 2.0's selection): selected K >=
+        escalate_min_k, a score margin below escalate_margin, or a selection inside a tie."""
+        best, margin, tied = self.margin_and_ties()
+        search = self.search
+        return bool(best.k >= search.escalate_min_k or margin < search.escalate_margin or tied > 0)
+
+    def escalate(self) -> bool:
+        """Widen the search once (beam, replacements) for a fragile block, keeping every fit, score
+        and archived panel; the widened beam is expanded again until exhausted or until
+        escalate_expansions_percent % of the expansion backstop more expansions."""
+        search = self.search
+        if not search.escalation or self.escalated or not self.fragile():
+            return False
+        self.escalated = True
+        self.beam_width = max(self.beam_width, int(search.escalate_beam_width))
+        self.replacement_limit = max(self.replacement_limit,
+                                     int(search.escalate_replacement_children))
+        for collection in (self.ordinary_expanded, self.residual_expanded, self.ordinary_complete,
+                           self.residual_complete, self.no_improvement):
+            collection.clear()
+        self.escalation_limit = self.expansions + max(
+            1, search.expansion_backstop(self.archive.max_k) * int(search.escalate_expansions_percent)
+            // 100)
+        return True
+
+    def run(self) -> None:
+        self.start()
+        search = self.search
+        while True:
+            if self.escalated:
+                if self.expansions >= self.escalation_limit:
+                    self.limits.append("escalation_backstop")
+                    self.stop_reason = "expansion_backstop"
+                    break
+            elif self.expansions >= search.expansion_backstop(self.archive.max_k):
+                self.limits.append("expansion_backstop")
+                self.stop_reason = "expansion_backstop"
+                if self.escalate():
+                    continue
+                break
+            before = self.selected()
+            candidates = self.beam(before.k)
+            parent = next((solution for solution in candidates
+                           if solution.key not in self.ordinary_expanded), None)
+            phase = "ordinary"
+            if parent is None:
+                parent = next((solution for solution in candidates
+                               if solution.key not in self.residual_expanded), None)
+                phase = "residual"
+            if parent is None:
+                self.stop_reason = ("generated_neighbourhood_local_optimum" if not self.limits
+                                    else "incumbent_neighbourhood_search_limited")
+                if self.escalate():
+                    continue
+                break
+            self.expand(parent, phase, before)
+        if self.mean_field_failed:
+            self.limits.append("mean_field_nonconvergence")
+
+    # ---------------------------------------------------------------------------------- pooling
+    def archived(self):
+        """Every retained archived panel (all K, decision order)."""
+        return [panel for k in sorted(self.archive.beams) for panel in self.archive.beams[k]]
+
+    def adopt(self, other: "_Search", index: np.ndarray) -> None:
+        """Pool another search's archived panels (per-sample arrays mapped to this search's sample
+        order by ``index``) into this archive and re-select: within K the NLL classes decide, across
+        K the cavity score (the shared-archive rule). The score backstop doubles."""
+        panels = [_sample_subset(panel, index) for panel in other.archived()]
+        self.archive.add(panels)
+        self.score_backstop_factor = 2
+        if self.refresh(self.selected().k):
+            self.limits.append("exact_score_backstop")
+        if self.mean_field_failed:
+            self.limits.append("mean_field_nonconvergence")
+
+    def certified(self, key: bytes, best_k: int, unique_limits) -> bool:
+        offsets = self.generated_offsets.get(key, set())
+        return bool(
+            key in self.ordinary_expanded and key in self.residual_expanded
+            and self.ordinary_complete.get(key, False) and self.residual_complete.get(key, False)
+            and all(best_k + offset in self.scores for offset in offsets)
+            and key in self.no_improvement and not unique_limits and not self.mean_field_failed)
+
+
+def _search(likelihood, observed, config) -> BlockSearch:
+    """The search of a block whose samples are in canonical order (see search_block)."""
+    forward = _Search(likelihood, observed, config, convention=1)
+    forward.run()
+    searches = [forward]
+    mode = config.search.reversed_convention_search
+    if mode == "all" or (mode == "fragile" and forward.fragile()):
+        reverse = np.arange(likelihood.shape[0] - 1, -1, -1, dtype=np.int64)
+        second = _Search(np.ascontiguousarray(likelihood[reverse]),
+                         np.ascontiguousarray(observed[reverse]), config, convention=-1)
+        second.run()
+        forward.adopt(second, reverse)          # reverse is its own inverse
+        searches.append(second)
+    limits = [name for search in searches for name in search.limits]
     unique_limits = tuple(dict.fromkeys(limits))
-    best = selected()
-    key = best.solution.key
-    offsets = generated_offsets.get(key, set())
-    certified = bool(
-        key in ordinary_expanded and key in residual_expanded
-        and ordinary_complete.get(key, False) and residual_complete.get(key, False)
-        and all(best.k + offset in scores for offset in offsets)
-        and key in no_improvement and not unique_limits and not state["mean_field_failed"])
-    k_values = np.array(sorted(scores), dtype=np.int16)
+    best, classes, values = forward.selection()
+    _, margin, tied = forward.margin_and_ties()
+    forward.counter.add("discovery.selection", classes)
+    certified = forward.certified(best.solution.key, best.k, unique_limits)
+    if len(searches) > 1 and not certified:
+        certified = searches[1].certified(best.solution.key, best.k, unique_limits)
+    counter = TieCounter()
+    for search in searches:
+        counter.merge(search.counter)
+    k_values = np.array(sorted(forward.scores), dtype=np.int16)
     summary = SearchSummary(
         k_values=k_values,
-        k_log_scores=np.array([scores[int(k)].log_score for k in k_values], dtype=np.float64),
-        natural_k_ceiling=int(ceiling), expansions=int(expansion),
-        data_starts=len(data_solutions), exact_scores=int(state["exact_scores"]),
-        exact_score_cache_hits=int(state["cache_hits"]), residual_calls=int(residual_calls),
-        residual_rows=int(residual_rows), limits=unique_limits,
-        heuristic_gauge_cuts=bool(heuristic_cuts), stop_reason=stop_reason, certified=certified)
+        k_log_scores=np.array([forward.scores[int(k)].log_score for k in k_values],
+                              dtype=np.float64),
+        natural_k_ceiling=int(forward.ceiling),
+        expansions=int(sum(search.expansions for search in searches)),
+        data_starts=int(forward.data_starts),
+        exact_scores=int(sum(search.exact_scores for search in searches)),
+        exact_score_cache_hits=int(sum(search.cache_hits for search in searches)),
+        residual_calls=int(sum(search.residual_calls for search in searches)),
+        residual_rows=int(sum(search.residual_rows for search in searches)),
+        limits=unique_limits,
+        heuristic_gauge_cuts=bool(any(search.heuristic_cuts for search in searches)),
+        stop_reason=forward.stop_reason, certified=bool(certified),
+        tie_quantum=float(forward.quanta.nll), escalated=bool(forward.escalated),
+        conventions=len(searches), ambiguous=bool(tied > 0), tied_alternatives=int(tied),
+        score_margin=float(margin), tie_events=counter.record())
     return BlockSearch(selected=best.solution, summary=summary)

@@ -879,8 +879,28 @@ class PathWorkspace:
 # ---------------------------------------------------------------------------------------------
 # Release E-step (per-sample full posteriors).
 # ---------------------------------------------------------------------------------------------
+@njit(cache=True)
+def _unknown_count(none, one, two, band):
+    """(count, strict count, gap) of a site's posterior masses of 0, 1 and 2 unknown copies: the
+    smallest count whose mass is within ``band`` x the largest mass of it (a larger count must win
+    by more than that relative margin); the first maximum (the rule without the band); the relative
+    gap between the two largest masses."""
+    top = max(none, max(one, two))
+    floor = top - band * top
+    count = 0
+    if none < floor:
+        count = 1 if one >= floor else 2
+    strict = 0
+    if one > none:
+        strict = 1
+    if two > (one if strict == 1 else none):
+        strict = 2
+    second = max(min(none, one), min(max(none, one), two))
+    return count, strict, (top - second) / top
+
+
 @njit(cache=True, parallel=True)
-def _release_samples(panel, gl, observed, pi, rates, favourable_margin, batch):
+def _release_samples(panel, gl, observed, pi, rates, favourable_margin, count_band, batch, keep_gains):
     """Per-sample posteriors for the release, aggregates summed in sample order.
 
     Returns per-sample log likelihoods; the exact one-bit gains summed over samples (K, L) (log
@@ -889,8 +909,16 @@ def _release_samples(panel, gl, observed, pi, rates, favourable_margin, batch):
     (samples whose own exact gain is below -favourable_margin and whose carrier probability,
     the posterior probability that a homologue copies founder a with a homozygous state counted
     once, exceeds 1/2) and by mass (their summed carrier probabilities); copy occupancy summed
-    over samples (S, L); and per sample the largest MAP unknown-copy count (0, 1, 2) over its
-    observed sites.
+    over samples (S, L); per sample the largest MAP unknown-copy count (0, 1, 2) over its
+    observed sites, where a larger count must win by more than ``count_band`` relative posterior
+    mass (else the smaller count, release 2.1), with per sample the number of observed sites where
+    the band took a smaller count than the strict MAP and the smallest relative gap between a
+    site's two largest count masses (inf without observed sites); per sample the number of
+    observed carrier cells (carrier probability above
+    1/2) whose exact gain lies inside the favourable band [-margin, margin] (release 2.1: the
+    band around the exact zero of symmetric-evidence cells; not favourable there); and, with
+    ``keep_gains`` (diagnostics only), every carrier cell's exact gain (N, K, L; NaN elsewhere),
+    else a (1, 1, 1) placeholder.
     """
     n, length, k = len(gl), gl.shape[1], len(panel)
     s = k + 1
@@ -906,6 +934,11 @@ def _release_samples(panel, gl, observed, pi, rates, favourable_margin, batch):
     occupancy_rows = np.empty((width, s, length))
     gain_size, occupancy_size = k * length, s * length
     unknown_slots = np.zeros(n, dtype=np.int64)
+    count_band_sites = np.zeros(n, dtype=np.int64)
+    count_gaps = np.full(n, np.inf)
+    band_cells = np.zeros(n, dtype=np.int64)
+    sample_gains = (np.full((n, k, length), np.nan) if keep_gains
+                    else np.full((1, 1, 1), np.nan))
     for start in range(0, n, width):
         count = min(width, n - start)
         for slot_index in prange(count):
@@ -952,7 +985,7 @@ def _release_samples(panel, gl, observed, pi, rates, favourable_margin, batch):
                         copies += posterior[a, b] + posterior[b, a]
                     occupancy_rows[worker, a, site] = copies
                 if observed[sample, site]:
-                    # MAP number of unknown copies (first maximum on ties).
+                    # MAP number of unknown copies under the relative band (_unknown_count).
                     none = 0.
                     for a in range(k):
                         for b in range(k):
@@ -963,11 +996,11 @@ def _release_samples(panel, gl, observed, pi, rates, favourable_margin, batch):
                     for a in range(k):
                         one += posterior[a, k]
                     two = posterior[k, k]
-                    best = 0
-                    if one > none:
-                        best = 1
-                    if two > (one if best == 1 else none):
-                        best = 2
+                    best, strict, gap = _unknown_count(none, one, two, count_band)
+                    if best < strict:
+                        count_band_sites[sample] += 1
+                    if gap < count_gaps[sample]:
+                        count_gaps[sample] = gap
                     if best > slots:
                         slots = best
                 _outside_rows_and_columns_into(mass, tl, tr, bl, br, outside)
@@ -989,6 +1022,10 @@ def _release_samples(panel, gl, observed, pi, rates, favourable_margin, batch):
                     if exact_gain < -favourable_margin:
                         support_rows[worker, a, site] = 1 if carrier > .5 else 0
                         mass_rows[worker, a, site] = carrier
+                    elif carrier > .5 and observed[sample, site] and exact_gain <= favourable_margin:
+                        band_cells[sample] += 1
+                    if keep_gains and carrier > .5 and observed[sample, site]:
+                        sample_gains[sample, a, site] = exact_gain
                 if site > 0:
                     for a in range(s):
                         for b in range(s):
@@ -1019,21 +1056,34 @@ def _release_samples(panel, gl, observed, pi, rates, favourable_margin, batch):
             for row_index in range(count):
                 for cell in range(low, high):
                     occupancy_total[cell] += occupancy_matrix[row_index, cell]
-    return likelihoods, gains, supporters, carrier_mass, occupancy, unknown_slots
+    return (likelihoods, gains, supporters, carrier_mass, occupancy, unknown_slots, count_band_sites,
+            count_gaps, band_cells, sample_gains)
 
 
-def release_statistics(panel, frequencies, prepared: PreparedBlock, favourable_margin) -> dict:
+def release_statistics(panel, frequencies, prepared: PreparedBlock, favourable_margin,
+                       unknown_count_band, keep_gains: bool = False) -> dict:
     """The release E-step of a fitted (panel, frequencies) (see ``_release_samples``):
     conditional_flip_gains (K, L), favourable carriers by count (supporters, int64) and by mass
     (carrier_mass) (K, L), occupancy (S, L); has_depth and unknown_slots (2 without depth) per
-    sample."""
-    likelihoods, gains, supporters, carrier_mass, occupancy, slots = _release_samples(
+    sample, the MAP counts under the relative band ``unknown_count_band``, with unknown_band_sites
+    (observed sites where the band took a smaller count than the strict MAP, summed over samples)
+    and unknown_gaps (per sample the smallest relative gap between a site's two largest count
+    masses, inf without depth); band_cells (carrier cells inside the favourable band, summed over
+    samples) and, with ``keep_gains``, sample_gains (N, K, L carrier-cell exact gains, NaN
+    elsewhere)."""
+    (likelihoods, gains, supporters, carrier_mass, occupancy, slots, count_band_sites, count_gaps, band,
+     sample_gains) = _release_samples(
         np.ascontiguousarray(panel, dtype=np.int64), prepared.gl, prepared.observed,
         prepared.state_prior(frequencies), prepared.rates, float(favourable_margin),
-        RELEASE_SAMPLE_BATCH)
+        float(unknown_count_band), RELEASE_SAMPLE_BATCH, bool(keep_gains))
     if np.any(~np.isfinite(likelihoods)):
         raise ValueError("E-step undefined for a sample with zero panel likelihood")
     has_depth = prepared.observed.any(axis=1)
-    return dict(conditional_flip_gains=gains, supporters=supporters, carrier_mass=carrier_mass,
-                occupancy=occupancy, has_depth=has_depth,
-                unknown_slots=np.where(has_depth, slots, 2).astype(np.int8))
+    statistics = dict(conditional_flip_gains=gains, supporters=supporters, carrier_mass=carrier_mass,
+                      occupancy=occupancy, has_depth=has_depth,
+                      unknown_slots=np.where(has_depth, slots, 2).astype(np.int8),
+                      unknown_band_sites=int(count_band_sites.sum()), unknown_gaps=count_gaps,
+                      band_cells=int(band.sum()))
+    if keep_gains:
+        statistics["sample_gains"] = sample_gains
+    return statistics

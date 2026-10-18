@@ -16,12 +16,14 @@ internally parallel A and H steps. Results never depend on batch composition or 
 """
 from __future__ import annotations
 
+import math
+
 import numba
 import numpy as np
 from numba import njit, prange
 
 from ...execution import claim_threads
-from ..panel import NLL_TOLERANCE, canonical_solution, deduplicate, unique_rows
+from ..panel import canonical_solution, deduplicate, unique_rows
 from .assign import assign, haplotype_patterns, pair_indices
 from .update import founder_buckets, sweep_one_thread, update_founders, usage_order
 from .workspace import FixedKWorkspace
@@ -46,7 +48,8 @@ def _readonly(*arrays):
 def _assignment_record(assignments, cost, unknown_slots):
     """Immutable A(H) record: (assignments, per-sample cost, unknown slots, total NLL)."""
     _readonly(assignments, cost, unknown_slots)
-    return (assignments, cost, unknown_slots, float(cost.sum()))
+    # The exactly rounded total: independent of sample order and summation layout (release 2.1).
+    return (assignments, cost, unknown_slots, math.fsum(cost.tolist()))
 
 
 def _fit_result(haplotypes, record, iterations):
@@ -112,7 +115,7 @@ def _frontier_layout(batch, first, second):
 @njit(cache=True, parallel=True, nogil=True)
 def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emissions,
                      ww_total_cost, row_slots, pair_i, pair_j, pair_slots, state_indices, first,
-                     second, penalty, k, n_bins, tile_width):
+                     second, penalty, k, n_bins, tile_width, tie):
     """A step of every panel of a frontier, sharing the emissions of distinct rows and row
     pairs within sample tiles; per panel the state order, argmin tie rule and Viterbi are those
     of the single-panel A step (identical values)."""
@@ -166,13 +169,20 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
                     candidate = -totals[shared, t]
                     if candidate < best_cost[t]:
                         best_cost[t] = candidate
-                        best_state[t] = state
                     alpha[state, t] = emissions[shared, 0, t]
             for t in range(width):
                 s = start_sample + t
                 if ww_total_cost[s] < best_cost[t]:
-                    best_state[t] = n_states - 1
+                    best_cost[t] = ww_total_cost[s]
                 alpha[n_states - 1, t] = ww_bin_emissions[s, 0]
+                # The first state (state order) within the tie quantum of the cheapest, as assign.py.
+                threshold = best_cost[t] + tie
+                chosen = n_states - 1
+                for st in range(n_states - 1):
+                    if -totals[state_indices[panel, st], t] <= threshold:
+                        chosen = st
+                        break
+                best_state[t] = chosen
                 state = best_state[t]
                 if state < n_rr:
                     assignments[panel, s, 0] = first[state]
@@ -222,7 +232,7 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
 
 @njit(cache=True, parallel=True, nogil=True)
 def _update_frontier(batch, assignments, unknown_slots, uninformative, genotype_cost_by_sample,
-                     unknown_cost_by_sample):
+                     unknown_cost_by_sample, tie):
     """Uninformative samples to (U, U), then every panel's one-thread H sweep (parallel over
     panels)."""
     following = batch.copy()
@@ -240,7 +250,7 @@ def _update_frontier(batch, assignments, unknown_slots, uninformative, genotype_
         changes[panel] = sweep_one_thread(
             following[panel], order, homozygous, with_partner, with_unknown, partner,
             n_homozygous, n_with_partner, n_with_unknown, genotype_cost_by_sample,
-            unknown_cost_by_sample)
+            unknown_cost_by_sample, tie)
     return following, changes
 
 
@@ -275,10 +285,11 @@ def _batched_transitions(workspace, batch):
         workspace.c0b, tables.diff1_table, tables.w_table, workspace.kw_cb, tables.kw_diff_table,
         workspace.ww_bin_emissions, workspace.ww_total_cost, row_slots, pair_i, pair_j,
         pair_slots, state_indices, first, second, workspace.switch_penalty, k, n_bins,
-        tile_width)
+        tile_width, float(workspace.quanta.sample))
     following, changes = _update_frontier(
         batch, assignments, unknown_slots, workspace.uninformative,
-        workspace.genotype_cost_by_sample, workspace.unknown_cost_by_sample)
+        workspace.genotype_cost_by_sample, workspace.unknown_cost_by_sample,
+        float(workspace.quanta.h_step))
     return following, assignments, cost, unknown_slots, changes
 
 
@@ -308,7 +319,7 @@ def _best_cycle_state(workspace, cycle_keys):
     """(key, assignment record) of the lowest-NLL state of a cycle of the coordinate map.
 
     ``cycle_keys`` lists the cycle's states in the order the fit first visited them; NLLs within
-    NLL_TOLERANCE of each other are ties, which keep that order. A cyclic fit returns this state
+    the block's ``nll`` tie quantum of each other are ties, which keep that order. A cyclic fit returns this state
     unconverged: it reports the iteration limit and is never certified a fixed point. (Base
     returned the state the iteration-by-iteration loop would stop on after the limit, so the
     endpoint depended on the limit's parity rather than on the objective: discovery B2.)
@@ -319,7 +330,7 @@ def _best_cycle_state(workspace, cycle_keys):
         if record is None:
             # Evicted from the bounded cache: recompute (a pure function of the state).
             record = _transition_scalar(workspace, workspace.state_from_key(key), key)[0]
-        if best is None or record[3] < best[3] - NLL_TOLERANCE:
+        if best is None or record[3] < best[3] - workspace.quanta.nll:
             best_key, best = key, record
     return best_key, best
 
@@ -427,12 +438,14 @@ def _frontier_fits(workspace, starts, max_iterations, with_initial):
     return finals
 
 
-def fit_starts(workspace, starts, max_iterations, *, with_initial=False):
+def fit_starts(workspace, starts, max_iterations, *, with_initial=False, quanta=None):
     """Fit binary int64 starts of one K (in order); duplicate starts are fitted once.
 
     Returns the fit tuples (with ``with_initial``: (initial assignment-only fit, final fit)
-    pairs) in start order.
+    pairs) in start order. ``quanta`` (release 2.1 interface): must be None or the workspace's own
+    BlockQuanta (the fits' tie rules are those of the workspace).
     """
+    _check_quanta(workspace, quanta)
     starts = [np.ascontiguousarray(start, dtype=np.int64) for start in starts]
     if not starts:
         return []
@@ -452,8 +465,11 @@ def fit_starts(workspace, starts, max_iterations, *, with_initial=False):
     return [results[index] for index in replay]
 
 
-def fit_panels(workspace, starts, max_iterations):
+def fit_panels(workspace, starts, max_iterations, *, quanta=None):
     """Fit every distinct-row start and return (synchronized, refitted) canonical solutions.
+
+    ``quanta``: None (the workspace's) or the workspace's own BlockQuanta; solutions carry them and both
+    collections are deduplicated and ordered with them (tie classes of kind ``nll``).
 
     For each start (its distinct rows), the synchronized endpoint is its assignment-only fit
     (A of the start, no H step) and the refitted endpoint its complete fit. A refit that collapses
@@ -461,6 +477,8 @@ def fit_panels(workspace, starts, max_iterations):
     deduplicated (distinct complete panels, lowest NLL, ordered by (nll, key)). A synchronized
     endpoint is marked a fixed point only if its start was certified before this call.
     """
+    _check_quanta(workspace, quanta)
+    quanta = workspace.quanta
     pending = []
     seen = set()
     certified_before = {}
@@ -489,8 +507,8 @@ def fit_panels(workspace, starts, max_iterations):
                 if initial is not None:
                     key = (start.shape, start.tobytes())
                     synchronized.append(canonical_solution(
-                        initial, workspace if certified_before[key] else None))
-                solution = canonical_solution(final, workspace)
+                        initial, workspace if certified_before[key] else None, quanta))
+                solution = canonical_solution(final, workspace, quanta)
                 rows = np.ascontiguousarray(unique_rows(solution.haplotypes), dtype=np.int64)
                 if len(rows) == solution.k:
                     refitted.append(solution)
@@ -500,14 +518,20 @@ def fit_panels(workspace, starts, max_iterations):
                     seen.add(key)
                     pending.append(rows)
         capture_initial = False
-    return deduplicate(synchronized), deduplicate(refitted)
+    return deduplicate(synchronized, quanta=quanta), deduplicate(refitted, quanta=quanta)
 
 
-def fit_one(workspace, haplotypes, max_iterations):
+def fit_one(workspace, haplotypes, max_iterations, *, quanta=None):
     """The fit tuple of one start."""
-    return fit_starts(workspace, [haplotypes], max_iterations)[0]
+    return fit_starts(workspace, [haplotypes], max_iterations, quanta=quanta)[0]
 
 
-def prepare_workspace(likelihoods, observed, model) -> FixedKWorkspace:
-    """A block's fixed-K workspace (see workspace.FixedKWorkspace)."""
-    return FixedKWorkspace(likelihoods, observed, model)
+def _check_quanta(workspace, quanta):
+    if quanta is not None and quanta != workspace.quanta:
+        raise ValueError("a fixed-K fit uses its workspace's tie quanta; pass None or workspace.quanta")
+
+
+def prepare_workspace(likelihoods, observed, model, quanta=None) -> FixedKWorkspace:
+    """A block's fixed-K workspace (see workspace.FixedKWorkspace); ``quanta``: the block's BlockQuanta
+    (None: derived from the block's null NLL, maths.ties.block_scale)."""
+    return FixedKWorkspace(likelihoods, observed, model, quanta)

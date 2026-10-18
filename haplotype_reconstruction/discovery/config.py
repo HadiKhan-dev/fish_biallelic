@@ -108,11 +108,39 @@ class SearchConfig:
     exact_cut_max_k: gauge rewires use exact maximum cuts up to this K, a degree-ordered local
         search above (reported separately from search limits).
     max_cut_ties: equal maximum cuts used per expansion.
-    score_tolerance: an improvement must exceed this (nats); also the strict-improvement margin
-        of the bank and the favourable-sample margin of the path release.
+    data_birth_attempts_factor: data births fit at most max(16, 2(K + 1)) x this many starts (the
+        attempt budget; release 2.1 broader births, 3).
+    data_birth_children_factor: data births stop once (K + 1) x this many distinct complete
+        children exist (3).
+    data_birth_tie_budget_factor: data-birth tie groups (samples tied on excess NLL and observed
+        sites) are consumed whole; a group is cut (canonical order, reported as
+        "data_birth_tie_budget") only when the starts would exceed this multiple of the attempt
+        budget (the hard cap).
+    reversed_convention_search: "off" (default), "fragile" or "all": a second search with the
+        reversed sample order and content keys whose panels join the first search's archive
+        (fragile = only blocks meeting the escalation trigger). Off in 2.1 unless simulation truth
+        favours it (owner decision 2).
+    escalation: widen the search once for blocks the base search leaves fragile (selected K >=
+        escalate_min_k, a cavity margin over the best other K below escalate_margin nats, or a
+        selection taken inside a tie), keeping every fit, score and archived panel; reported as
+        SearchSummary.escalated. Off in 2.1 unless simulation truth favours it.
+    escalate_beam_width: the beam width of an escalated search (the archive keeps this many panels
+        per K when escalation is on).
+    escalate_replacement_children: the birth-delete replacement generator size of an escalated
+        search.
+    escalate_min_k: a selected K of at least this triggers escalation.
+    escalate_margin: a cavity-score margin (nats) of the selected K over the best other
+        represented K below this triggers escalation.
+    escalate_expansions_percent: an escalated search may run at most this percentage of the
+        expansion backstop more expansions (the "escalation_backstop" limit).
+
+    Ties (release 2.1): every order, winner and improvement test of the search uses the block's tie
+    quanta (maths.ties.BlockQuanta from the block's null NLL): NLL orders and the selection by tie
+    classes of kind ``nll`` with the canonical key inside a class, improvement tests by the
+    ``improvement`` quantum (replacing ``score_tolerance`` = 1e-9, which sat at the 1e-9-noise scale).
     """
 
-    beam_width: int = 3
+    beam_width: int = 6
     expansion_backstop_base: int = 32
     expansion_backstop_per_founder: int = 8
     exact_score_backstop_base: int = 96
@@ -124,7 +152,28 @@ class SearchConfig:
     max_replacement_children: int = 24
     exact_cut_max_k: int = 12
     max_cut_ties: int = 4
-    score_tolerance: float = 1e-9
+    data_birth_attempts_factor: int = 3
+    data_birth_children_factor: int = 3
+    data_birth_tie_budget_factor: int = 2
+    reversed_convention_search: str = "off"
+    escalation: bool = False
+    escalate_beam_width: int = 12
+    escalate_replacement_children: int = 48
+    escalate_min_k: int = 9
+    escalate_margin: float = 10.0
+    escalate_expansions_percent: int = 100
+
+    def __post_init__(self):
+        if self.reversed_convention_search not in ("off", "fragile", "all"):
+            raise ValueError("reversed_convention_search must be 'off', 'fragile' or 'all'")
+
+    def data_birth_attempts(self, k: int) -> int:
+        """Attempt budget of one data-birth call from a K-row panel."""
+        return max(16, 2 * (int(k) + 1)) * max(1, int(self.data_birth_attempts_factor))
+
+    def data_birth_children(self, k: int) -> int:
+        """Distinct complete children after which one data-birth call from a K-row panel stops."""
+        return (int(k) + 1) * max(1, int(self.data_birth_children_factor))
 
     def expansion_backstop(self, k: int) -> int:
         return self.expansion_backstop_base + self.expansion_backstop_per_founder * k

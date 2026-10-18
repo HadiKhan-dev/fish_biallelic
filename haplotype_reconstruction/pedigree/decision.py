@@ -54,6 +54,7 @@ class Decision:
     calibration: dict
     reach: TierReach
     family_solve: dict
+    tie_events: dict
 
     @property
     def alternatives(self) -> Alternatives:
@@ -64,10 +65,10 @@ def informative_contigs(alternatives: Alternatives) -> np.ndarray:
     """int64 [N]: chromosomes on which the child's own state evidence has a unique winner."""
     counts = np.zeros(alternatives.n_samples, dtype=np.int64)
     states = np.arange(3, dtype=np.int64)
-    for likelihoods in alternatives.log_likelihoods:
+    for contig, likelihoods in enumerate(alternatives.log_likelihoods):
         evidence = alternatives_module.state_log_evidence(likelihoods, alternatives)
         for child in range(alternatives.n_samples):
-            winner, _ = unique_finite_winner(states, evidence[child])
+            winner, _ = unique_finite_winner(states, evidence[child], key=f"informative/k{contig}/c{child}")
             counts[child] += winner is not None
     return counts
 
@@ -87,13 +88,26 @@ def decide(scores: GenomeScores, eligibility: ParentEligibility, config: Pedigre
                           config.direction.chromosome_error_probability),
         eligibility.chronology)
     trace: dict = {}
-    full, orientation, adjusted = selection.fit(np.ones(len(scores.contigs)), inputs, config, trace)
+    from ..maths import ties as tie_rules
+    from . import ties as pedigree_ties
+    pedigree_ties.FULL_FIT_COUNTER = tie_rules.TieCounter()
+    pedigree_ties.CENSUS_CONTEXT = "full"         # census keys and tie counts for the full-data fit only
+    try:
+        full, orientation, adjusted = selection.fit(np.ones(len(scores.contigs)), inputs, config, trace)
+    finally:
+        pedigree_ties.CENSUS_CONTEXT = None
     sensitivity = tuple(
         (tuple(priors), full if tuple(priors) == tuple(config.selection.state_priors)
          else selection.select(*adjusted, alternatives, priors, orientation, config))
         for priors in config.selection.prior_sensitivity)
     resampled = resampling.run(inputs, config, budget)
-    informative = informative_contigs(alternatives)
+    pedigree_ties.CENSUS_CONTEXT = "full"
+    try:
+        informative = informative_contigs(alternatives)
+    finally:
+        pedigree_ties.CENSUS_CONTEXT = None
+    tie_events = pedigree_ties.FULL_FIT_COUNTER.record()
+    pedigree_ties.FULL_FIT_COUNTER = None
     log_odds = trace["orientation_log_odds"]
     evidence = release.child_evidence(full, list(sensitivity), resampled, alternatives, informative,
                                       log_odds, eligibility.chronology, config)
@@ -120,4 +134,4 @@ def decide(scores: GenomeScores, eligibility: ParentEligibility, config: Pedigre
     return Decision(scores, eligibility, inputs, full, orientation, adjusted, trace, sensitivity,
                     resampled, informative, evidence, tier_a, tier_b, complete, partial_a, partial_b,
                     candidates, calibration_report, resampling.reach(resampled.multiplicities, config),
-                    family_solve)
+                    family_solve, tie_events)

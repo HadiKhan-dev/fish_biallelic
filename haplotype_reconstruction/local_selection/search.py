@@ -8,6 +8,17 @@ forward-backward statistics of the two corresponding drop panels (plus at most 2
 O(N L K^3) per round. Reuse is keyed by the complete panel AND its frequencies. Fits, scores and
 merge bounds are founder-independent and kept across rounds in a ``LikelihoodMemo``; a whole
 search is reused when all its inputs are identical (``search_input_key``).
+
+Release 2.1 (noise stability): every decision between objectives uses anchored tie classes of
+``PathSearchConfig.decision_tolerance`` (maths.ties): the cut of each kind's proposals (the
+proposals tied with the last of the top ``refits_per_kind`` join, up to ``refits_per_kind_cap``; a
+cut still inside a class goes by panel bytes, then generation order), the round winner (best
+class, then fewer founders, then panel bytes, then trial order), the stop of the climb and the
+start-or-incumbent choice (an improvement must exceed the quantum). Fits come back with canonical
+rows (fit.py), so trials reaching the same founders compare equal. Proposals are distinct by panel
+and frequencies up to rounding (PROPOSAL_FREQUENCY_TIE), and a merge consensus at an
+occupancy-weighted probability of exactly 1/2 (within CONSENSUS_TIE, placed by the valley census)
+keeps row i's allele.
 """
 from __future__ import annotations
 
@@ -18,28 +29,71 @@ import itertools
 import numpy as np
 
 from ..execution import claim_threads
+from ..maths.ties import TieCounter, census, census_enabled, improves, tie_classes
 from .fit import PathFit, canonical, fit_fixed, fit_posteriors, unique_rows
 from .objective import ContextFounders, coded_regularizer, selection_objective
 from .path_model import FLIPS, PathWorkspace, WorkspaceBuffers, log_likelihood
 
+# Two proposals with the same panel are the same start when their frequencies agree to within this
+# (absolute; frequencies are O(1e-3..1)): different formulas for one value differ by rounding
+# (~1e-16), genuinely different starts by >= 1e-6. 2.0 compared the frequencies' exact bytes.
+PROPOSAL_FREQUENCY_TIE = 1e-12
+# Band around 1/2 of the merge consensus probability, placed by the valley census (actm3, 22,671 consensus
+# sites within 1e-3 of 1/2 over three rounds): 1e-9 relative GL noise moves them by <= 3.9e-11, the closest
+# genuine value lies 3e-9 from 1/2 (dense from 1e-7): 2^-31 = 4.7e-10 holds an exact 1/2 (with its rounding)
+# and decides no genuine value (design A-7: a band only at a mathematical tie).
+CONSENSUS_TIE = 2.0 ** -31
+# Measured motion of compared local-selection objectives under 1e-9 relative GL noise, including
+# a GEM stopping one EM step earlier or later (<= the fit tolerance): enables the boundary guard.
+DECISION_MOTION = 1e-6
 
-def proposals(fit: PathFit, bank):
+
+class _Starts:
+    """Distinct (panel, frequencies) starts: the same panel bytes with frequencies equal up to
+    PROPOSAL_FREQUENCY_TIE is one start (the first one generated is kept)."""
+
+    def __init__(self):
+        self.by_panel: dict[bytes, list] = {}
+
+    def add(self, panel, frequencies) -> bool:
+        """Record a start; False when an equal one was recorded before."""
+        frequencies = np.asarray(frequencies, dtype=np.float64)
+        known = self.by_panel.setdefault(panel.tobytes(), [])
+        for other in known:
+            if other.shape == frequencies.shape and np.max(np.abs(other - frequencies)) <= PROPOSAL_FREQUENCY_TIE:
+                return False
+        known.append(frequencies)
+        return True
+
+
+# Census window of the consensus band (values of |probability - 1/2| up to this are recorded).
+CONSENSUS_CENSUS_WINDOW = 1e-3
+
+
+def merge_consensus(panel_i, mean):
+    """A merge's consensus row: ALT where the occupancy-weighted ALT probability exceeds 1/2, row
+    i's allele within CONSENSUS_TIE of 1/2 (an exact 1/2, e.g. at a site without information, must
+    not be decided by its last bits: a band at a mathematical tie, design A-7)."""
+    return np.where(np.abs(mean - .5) <= CONSENSUS_TIE, panel_i, mean > .5).astype(np.int64)
+
+
+def proposals(fit: PathFit, bank, ties: TieCounter | None = None, census_key: str | None = None):
     """(kind, panel, frequencies, origin) of every drop, merge and add start.
 
     origin: the deleted row j of a drop; (i, j, consensus) of the merge of rows i < j (row j
-    deleted, row i set to the occupancy-weighted consensus); None for an add.
+    deleted, row i set to the occupancy-weighted consensus); None for an add. Starts equal to an
+    earlier one (same panel, frequencies equal up to rounding) are skipped. ``ties`` counts the
+    consensus band decisions (kind "ls.consensus.band": one per merge, inside the tie when some
+    site's probability lies within the band); ``census_key`` records the sites near 1/2.
     """
     panel, f = fit.panel, fit.frequencies
-
-    def key(p, q):
-        return (p.tobytes(), np.ascontiguousarray(q).tobytes())
-
-    seen = {key(panel, f)}
+    seen = _Starts()
+    seen.add(panel, f)
+    collect = census_key is not None and census_enabled()
     if len(panel) > 1:
         for i in range(len(panel)):
             p, q = canonical(np.delete(panel, i, axis=0), np.delete(f, i))
-            if key(p, q) not in seen:
-                seen.add(key(p, q))
+            if seen.add(p, q):
                 yield "drop", p, q, i
         # The consensus is only an initialisation; the same model refits it.
         for i in range(len(panel)):
@@ -49,20 +103,25 @@ def proposals(fit: PathFit, bank):
                 mean = np.divide(fit.occupancy[i] * fit.allele_probability[i]
                                  + fit.occupancy[j] * fit.allele_probability[j],
                                  weight, out=np.full(panel.shape[1], .5), where=weight > 0)
-                p[i] = np.where(mean == .5, panel[i], mean > .5)
+                p[i] = merge_consensus(panel[i], mean)
+                distance = mean - .5
+                if ties is not None:
+                    ties.note("ls.consensus.band",
+                              inside_tie=bool(np.any((np.abs(distance) <= CONSENSUS_TIE) & (weight > 0))))
+                if collect:
+                    for site in np.flatnonzero((np.abs(distance) <= CONSENSUS_CENSUS_WINDOW) & (weight > 0)):
+                        census("ls.consensus.band", f"{census_key}/m{i}_{j}/s{site}", (0.0, float(distance[site])))
                 consensus = p[i].copy()
                 q[i] += f[j]
                 p, q = canonical(p, q)
-                if key(p, q) not in seen:
-                    seen.add(key(p, q))
+                if seen.add(p, q):
                     yield "merge", p, q, (i, j, consensus)
     for row in bank:
         if np.any(np.all(panel == row, axis=1)):
             continue
         p, q = canonical(np.vstack((panel, row)),
                          np.r_[f * len(panel) / (len(panel) + 1), 1 / (len(panel) + 1)])
-        if key(p, q) not in seen:
-            seen.add(key(p, q))
+        if seen.add(p, q):
             yield "add", p, q, None
 
 
@@ -215,7 +274,8 @@ class RoundTrace:
 class SearchOutcome:
     """A block search's result: the fit, its selection objective, rounds, how it started
     ("start", "incumbent" or "reused"), the round backstop, the context founders and free rows,
-    the reuse key of its inputs and work counts."""
+    the reuse key of its inputs and work counts. ``start_was_incumbent_panel``: the start's fit
+    reached the incumbent's panel (release 2.1; the search then continued from the incumbent)."""
 
     fit: PathFit
     selection_objective: float
@@ -226,6 +286,7 @@ class SearchOutcome:
     free_rows: int
     input_key: str
     work: tuple[tuple[str, int], ...]
+    start_was_incumbent_panel: bool = False
 
 
 def search_input_key(start, bank, prepared, search_config, founders) -> str:
@@ -243,13 +304,30 @@ def search_input_key(start, bank, prepared, search_config, founders) -> str:
     return digest.hexdigest()
 
 
+def tied_cut(classes, limit: int, cap: int) -> int:
+    """How many proposals of tie-class order ``classes.order`` (maths.ties.TieClasses) are refitted:
+    the first ``limit``, and the members of the last one's class that follow it, up to ``cap``."""
+    total = len(classes.order)
+    take = min(limit, total)
+    if total > limit:
+        cut_class = classes.classes[int(classes.order[limit - 1])]
+        while take < min(cap, total) and classes.classes[int(classes.order[take])] == cut_class:
+            take += 1
+    return take
+
+
 def search_panel(start, bank, prepared, search_config, *, incumbent=None, founders=None,
-                 memo: LikelihoodMemo | None = None) -> SearchOutcome:
+                 memo: LikelihoodMemo | None = None, ties: TieCounter | None = None,
+                 census_key: str | None = None) -> SearchOutcome:
     """Local search from ``start``, or from ``incumbent`` (a previous round's selected outcome of
-    the same block) when it scores better; reuses the incumbent's whole search when the inputs
-    are identical. ``founders``: the assembled context's founders in this block (context rounds);
-    None codes every row as free."""
-    tolerance = search_config.tolerance
+    the same block) when the start's fit reaches the incumbent's panel or the incumbent scores
+    better by more than the decision tolerance; reuses the incumbent's whole search when the
+    inputs are identical. ``founders``: the assembled context's founders in this block (context
+    rounds); None codes every row as free. ``ties``: counts the decisions taken inside a tie class
+    (and guard events); ``census_key``: the block's key for the valley census (maths.ties)."""
+    tolerance = search_config.decision_tolerance
+    ties = TieCounter() if ties is None else ties
+    collect = census_key is not None and census_enabled()
     input_key = search_input_key(start, bank, prepared, search_config, founders)
     if incumbent is not None and incumbent.input_key == input_key:
         return replace(incumbent, search_start="reused", work=(("reused_previous_search", 1),))
@@ -272,7 +350,11 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
         memo_key = content_key(start_panel, start_frequencies)
         result = memo.fit(memo_key)
         if result is None:
-            result = fit_fixed(panel, frequencies, prepared, search_config, buffers)
+            fit_key = None
+            if collect:
+                # A diagnostic key stable across reruns: the start panel and its frequencies to 1e-6.
+                fit_key = f"{census_key}/fit{content_key(start_panel, np.round(start_frequencies, 6)).hex()[:16]}"
+            result = fit_fixed(panel, frequencies, prepared, search_config, buffers, census_key=fit_key)
             work["fit_calls"] += 1
             memo.add_fit(memo_key, result)
         fit_cache[key] = replace(result, allele_probability=None, occupancy=None)
@@ -318,12 +400,25 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
 
     search_start = "start"
     fit = fit_panel(start)
-    if incumbent_fit is not None and objective(incumbent_fit) > objective(fit) + tolerance:
-        # Climbing from the context start back to a better incumbent dominated the context
-        # rounds' cost; explore the incumbent's neighbourhood instead.
-        trial = fit_panel(incumbent_fit.panel, incumbent_fit.frequencies)
-        fit = trial if objective(trial) >= objective(incumbent_fit) else incumbent_fit
-        search_start = "incumbent"
+    start_was_incumbent_panel = False
+    if incumbent_fit is not None:
+        if collect:
+            census("ls.start", f"{census_key}/start", (-objective(incumbent_fit), -objective(fit)))
+        if np.array_equal(fit.panel, incumbent_fit.panel):
+            # The start's fit reached the incumbent's founders: the two fits differ only by EM
+            # residuals, so continue from the incumbent fit (deterministic), unless the start's
+            # frequencies are better by more than the decision tolerance.
+            start_was_incumbent_panel = True
+            if not improves(objective(fit), objective(incumbent_fit), tolerance):
+                fit = incumbent_fit
+                search_start = "incumbent"
+        elif improves(objective(incumbent_fit), objective(fit), tolerance):
+            # Climbing from the context start back to a better incumbent dominated the context
+            # rounds' cost; explore the incumbent's neighbourhood instead (its refit only when that
+            # improves it by more than the decision tolerance, e.g. an unconverged incumbent).
+            trial = fit_panel(incumbent_fit.panel, incumbent_fit.frequencies)
+            fit = trial if improves(objective(trial), objective(incumbent_fit), tolerance) else incumbent_fit
+            search_start = "incumbent"
     trace = []
     round_backstop = False
     for round_index in itertools.count():
@@ -332,7 +427,8 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
             break
         ranked, seen, drops, merges = {}, set(), {}, []
         fit = complete(fit)
-        for kind, panel, frequency, origin in proposals(fit, bank):
+        for kind, panel, frequency, origin in proposals(
+                fit, bank, ties, None if not collect else f"{census_key}/r{round_index}"):
             tagged_key = (kind, panel.tobytes(), frequency.tobytes())
             if tagged_key in seen:
                 continue
@@ -364,19 +460,59 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
                 ranked["merge"].append(
                     (bound + coded_regularizer(panel, frequency, context), panel, frequency))
         trials = []
+        limit, cap = search_config.refits_per_kind, search_config.refits_per_kind_cap
         for kind, options in ranked.items():
-            options.sort(key=lambda value: (-value[0], value[1].tobytes()))
-            for rank, (_score, panel, frequency) in enumerate(options[:search_config.refits_per_kind]):
+            # Tie classes of the screened scores. The proposals tied with the last of the top
+            # ``limit`` (its class) join up to ``cap``; a cut still inside that class goes by panel
+            # bytes, then by generation order (proposals are generated in canonical row and bank
+            # order).
+            classes = tie_classes([option[0] for option in options], tolerance,
+                                  content=[(option[1].tobytes(), n) for n, option in enumerate(options)],
+                                  descending=True, motion=DECISION_MOTION)
+            ordered = classes.order
+            take = tied_cut(classes, limit, cap)
+            if len(options) > limit:
+                ties.note(f"ls.rank.{kind}.join", inside_tie=take > limit)
+                inside = take < len(options) and bool(
+                    classes.classes[int(ordered[take - 1])] == classes.classes[int(ordered[take])])
+                ties.note(f"ls.rank.{kind}", inside_tie=inside,
+                          wide=classes.wide_classes, boundary=len(classes.boundary_gaps))
+                if collect:
+                    census(f"ls.rank.{kind}", f"{census_key}/r{round_index}/{kind}",
+                           [-options[int(n)][0] for n in ordered[max(0, limit - 4):limit + 4]])
+            for rank, n in enumerate(ordered[:take]):
+                _score, panel, frequency = options[int(n)]
                 trials.append((fit_panel(panel, frequency), kind, rank))
         if not trials:
             break
-        best, kind, rank = min(trials, key=lambda value: (
-            -objective(value[0]), len(value[0].panel), value[0].panel.tobytes()))
+        objectives = [objective(trial[0]) for trial in trials]
+        if collect:
+            # One value per distinct panel (its best refit) for the winner's valley; the spread of the
+            # refits that reached one panel (EM residuals) separately.
+            per_panel: dict = {}
+            for trial, value in zip(trials, objectives):
+                per_panel.setdefault(trial[0].panel.tobytes(), []).append(value)
+            census("ls.trials", f"{census_key}/r{round_index}",
+                   sorted(-max(values) for values in per_panel.values())[:8])
+            for number, values in enumerate(sorted(per_panel.values(), key=max, reverse=True)[:4]):
+                if len(values) > 1:
+                    census("ls.trials.same_panel", f"{census_key}/r{round_index}/p{number}", sorted(values))
+        classes = tie_classes(objectives, tolerance, secondary=[(len(trial[0].panel),) for trial in trials],
+                              content=[(trial[0].panel.tobytes(), n) for n, trial in enumerate(trials)],
+                              descending=True, motion=DECISION_MOTION)
+        winner = int(classes.order[0])
+        # Inside a tie only when the best class holds different founder sets (refits reaching the
+        # same canonical panel are one candidate).
+        ties.note("ls.winner", inside_tie=len({trials[int(n)][0].panel.tobytes() for n in classes.members(0)}) > 1,
+                  wide=classes.wide_classes, boundary=len(classes.boundary_gaps))
+        best, kind, rank = trials[winner]
         trace.append(RoundTrace(
             proposals=tuple((name, len(values)) for name, values in ranked.items()),
             refits=len(trials), old_k=len(fit.panel), best_k=len(best.panel),
             gain=objective(best) - objective(fit), kind=kind, winner_rank=rank))
-        if objective(best) <= objective(fit) + tolerance:
+        if collect:
+            census("ls.stop", f"{census_key}/r{round_index}/stop", (-objective(best), -objective(fit)))
+        if not improves(objective(best), objective(fit), tolerance):
             break
         fit = best
     fit = complete(fit)
@@ -385,4 +521,5 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
         search_start=search_start, round_backstop=round_backstop,
         context_founders=None if context is None else len(context),
         free_rows=len(fit.panel) if context is None else context.free(fit.panel),
-        input_key=input_key, work=tuple(sorted(work.items())))
+        input_key=input_key, work=tuple(sorted(work.items())),
+        start_was_incumbent_panel=start_was_incumbent_panel)

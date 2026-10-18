@@ -92,6 +92,7 @@ import numpy as np
 from numba import njit, prange
 
 from .. import execution
+from ..maths import ties
 from ..model.components import ComponentPanel, relabel_rows
 from . import hmm
 from .config import PaintingConfig
@@ -334,11 +335,12 @@ def _painted_switches(emissions, transitions, eligible) -> np.ndarray:
 
 
 def _outcome(reason, *, link_points=0, movable_rows=0, unit=None, before=None, after=None,
-             checks=0, moves=(), row_maps=None, accepted=False) -> LabelContinuity:
+             checks=0, moves=(), row_maps=None, accepted=False, tie_events=None) -> LabelContinuity:
     return LabelContinuity(accepted=accepted, reason=reason, link_points=link_points,
                            movable_rows=movable_rows, switch_unit_nats=unit,
                            switches_before=before, switches_after=after,
-                           candidate_checks=checks, moves=tuple(moves), row_maps=row_maps)
+                           candidate_checks=checks, moves=tuple(moves), row_maps=row_maps,
+                           tie_events=dict(tie_events or {}))
 
 
 def relabel_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: np.ndarray,
@@ -550,6 +552,7 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
     maximum_loser_ratio = config.label_continuity_maximum_loser_ratio
     checked = 0
     moves: list[RelabelMove] = []
+    counter = ties.TieCounter()
     while True:
         # Summed gains: each batch adds its samples in sample order (the same sums as one pass).
         total = np.zeros((len(links), len(pairs)))
@@ -559,12 +562,20 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
             _add_transposition_gains(total, left, right, eligible[start:stop], pairs, n_states)
             kept = (left, right) if len(spans) == 1 else None
             del left, right
-        # Rank by the exact score gain; accept on exact per-sample painted switches.
+        # Rank by the score gain in tie classes (release 2.1: gains equal up to rounding, e.g. one transposition at
+        # two link points inside a stretch where both rows are identical, keep the leftmost link, then the pair
+        # order, instead of the order their rounding gives); accept on exact per-sample painted switches.
+        flats = np.flatnonzero(total.ravel() >= minimum_gain * unit)
+        values = total.ravel()[flats]
         candidates = []
-        for flat in np.argsort(-total, axis=None, kind="stable"):
-            if total.flat[flat] < minimum_gain * unit:
-                break
-            candidates.append(divmod(int(flat), len(pairs)))
+        if len(flats):
+            quantum = ties.tie_quantum(float(np.max(np.abs(values))), "nll")
+            ranked = ties.tie_classes(values, quantum, content=[int(flat) for flat in flats], descending=True,
+                                      motion=ties.NOISE_MOTION["nll"])
+            counter.add("painting.relabel_rank", ranked)
+            ties.census("painting.relabel_rank", f"p{int(panel.positions[0])}/m{len(moves)}",
+                        np.sort(values)[::-1][:8])
+            candidates = [divmod(int(flats[index]), len(pairs)) for index in ranked.order]
         if candidates:
             candidate_links, candidate_pairs = np.asarray(candidates, dtype=np.int64).T
             redecode = np.empty((len(candidates), n_samples), dtype=np.bool_)
@@ -611,7 +622,7 @@ def _relabel_linked(panel, likelihoods, observed, evidence_sites, config, geneti
             winners=tuple(int(value) for value in winners),
             losers=tuple(int(value) for value in losers)))
 
-    counts.update(unit=unit, before=switches_before, checks=checked, moves=moves)
+    counts.update(unit=unit, before=switches_before, checks=checked, moves=moves, tie_events=counter.record())
     if not moves:
         return panel, _outcome("no_move", after=switches_before, **counts)
 

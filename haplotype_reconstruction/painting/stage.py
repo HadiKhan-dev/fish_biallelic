@@ -28,6 +28,7 @@ import numpy as np
 
 from .. import execution
 from ..assembly import records as assembly_records
+from ..maths import ties
 from ..evidence import records as evidence_records
 from ..model.components import ComponentPanel
 from ..model.evidence import ContigEvidence
@@ -190,6 +191,15 @@ def release_component(panel: ComponentPanel, decoding: ComponentDecoding,
                       config: PaintingConfig) -> ComponentPainting:
     """Apply the release rule once and build the component's product."""
     states = decoding.states
+    if ties.census_enabled() and decoding.bins.n_bins:
+        # Continuous release thresholds are not banded (design A-7, owner 15:50): posteriors within 1e-5 of tau go
+        # to the valley census so a crossing is reported with its distance.
+        tau = config.minimum_release_posterior
+        first = int(panel.positions[0])
+        for name, values in (("painting.release.qv", decoding.qv), ("painting.release.qa", decoding.qa)):
+            for sample, bin_index in zip(*np.nonzero(np.abs(values - tau) < 1e-5)):
+                ties.census(name, f"p{first}/s{int(sample)}/b{int(bin_index)}",
+                            [float(values[sample, bin_index]) - tau])
     labels, classes, status = release_tracks(
         states, decoding.paths, decoding.eligible, decoding.qv, decoding.qa,
         decoding.local_keys, decoding.support, config.minimum_release_posterior)

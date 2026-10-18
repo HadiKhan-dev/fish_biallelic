@@ -14,6 +14,16 @@ child's (frame, two incoming selectors) path is re-decoded exactly by an eight-s
 neighbours fixed, and contiguous intervals of the new path are accepted when they raise the score (and, where
 they change an observable phase, the copy-consistency part by at least ``minimum_biological_gain``). Called
 alleles never change: only the track order does. Samples with fewer than two observed parents keep frame 0.
+
+Tie rules (release 2.1, design A-12 / TIE_INVENTORY H8). The polish score depends only on called scaffold alleles and
+fixed switch probabilities, so genotype-likelihood noise cannot move it; its quantum q = ``minimum_gain`` only has to
+exceed rounding. Viterbi back-pointers within ``maths.chains.CHAIN_TIE`` stay (fewest switches); the final state is
+the current one when it is within CHAIN_TIE of the best, else the lowest such state (initial selectors: state 0).
+Each maximal interval where the new path differs is accepted on its own exact gain (one routine, interval_gain),
+only above q: inside q the current configuration is kept. The biological condition has a band of q (an interval
+whose copy-consistency gain is exactly 0 up to rounding passes it). Colours by descending degree, then sample index
+(the canonical sample order); colours forward on even sweeps, backward on odd ones; the vertices of a colour share
+no variable, so their parallel updates do not depend on thread count.
 """
 from __future__ import annotations
 
@@ -24,6 +34,7 @@ import numpy as np
 from numba import njit, prange
 
 from ..execution import claim_threads
+from ..maths import chains
 
 
 @dataclass(frozen=True)
@@ -129,15 +140,11 @@ def initialize_selectors(scaffold, frames, parents, children, slots, logstay, lo
                 if j:
                     stay = score[s] + logstay[j - 1]
                     jump = score[1 - s] + logjump[j - 1]
-                    if jump > stay:
-                        value = jump
-                        back[j, s] = 1 - s
-                    else:
-                        value = stay
-                        back[j, s] = s
+                    value = max(stay, jump)
+                    back[j, s] = s if stay >= value - chains.CHAIN_TIE else 1 - s
                 current[s] = value + copy_log(scaffold[p, j, s ^ frames[p, j]], child, match, mismatch)
             score, current = current, score
-        state = 0 if score[0] >= score[1] else 1
+        state = 0 if score[0] >= max(score[0], score[1]) - chains.CHAIN_TIE else 1
         for j in range(sites - 1, -1, -1):
             result[e, j] = state
             if j:
@@ -242,7 +249,7 @@ def accept_supported_intervals(i, path, scaffold, frames, selectors, incoming, o
         biological, prior = interval_gain(i, a, b, path, scaffold, frames, selectors, incoming, offsets,
                                           outgoing, parents, logstay, logjump, phase_stay, phase_jump, error)
         gain = biological + prior
-        if gain <= minimum_gain or (meaningful_phase and biological < minimum_biological_gain):
+        if gain <= minimum_gain or (meaningful_phase and biological < minimum_biological_gain - minimum_gain):
             continue
         total_gain += gain
         for j in range(a, b):
@@ -272,7 +279,6 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
     origin = np.empty(8, dtype=np.int8)
     origins = np.empty(8, dtype=np.int8)
     back = np.zeros((sites, 8), dtype=np.int8)
-    old_score = 0.
     for j in range(sites):
         trans_stay, trans_jump = 0., 0.
         if j:
@@ -283,11 +289,6 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
                 source_changed = (selectors[edge, j] != selectors[edge, j - 1]) ^ old_flip
                 trans_stay += logjump[j - 1] if source_changed else logstay[j - 1]
                 trans_jump += logstay[j - 1] if source_changed else logjump[j - 1]
-            old_score += trans_jump if old_flip else trans_stay
-            if e0 >= 0:
-                old_score += logjump[j - 1] if selectors[e0, j] != selectors[e0, j - 1] else logstay[j - 1]
-            if e1 >= 0:
-                old_score += logjump[j - 1] if selectors[e1, j] != selectors[e1, j - 1] else logstay[j - 1]
         if j:
             for state in range(8):
                 origin[state] = state
@@ -301,10 +302,11 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
                 for state in range(8):
                     other = state ^ (1 << bit)
                     a, b = scores[state] + stay, scores[other] + jump
-                    if b > a:
-                        values[state], origins[state] = b, origin[other]
+                    top = max(a, b)
+                    if a >= top - chains.CHAIN_TIE:
+                        values[state], origins[state] = top, origin[state]
                     else:
-                        values[state], origins[state] = a, origin[state]
+                        values[state], origins[state] = top, origin[other]
                 scores, values = values, scores
                 origin, origins = origins, origin
             back[j] = origin
@@ -321,25 +323,24 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
                 p = parents[e1]
                 emission += copy_log(scaffold[p, j, s1 ^ frames[p, j]], scaffold[i, j, 1 ^ f], match, mismatch)
             scores[state] += emission
-        if e0 >= 0:
-            p = parents[e0]
-            old_score += copy_log(scaffold[p, j, selectors[e0, j] ^ frames[p, j]],
-                                  scaffold[i, j, frames[i, j]], match, mismatch)
-        if e1 >= 0:
-            p = parents[e1]
-            old_score += copy_log(scaffold[p, j, selectors[e1, j] ^ frames[p, j]],
-                                  scaffold[i, j, 1 ^ frames[i, j]], match, mismatch)
-    state = int(np.argmax(scores))
-    gain = scores[state] - old_score
-    if gain <= minimum_gain:
-        return 0., 0
+    best = scores.max()
+    state = int(frames[i, sites - 1])
+    if e0 >= 0:
+        state += 2 * int(selectors[e0, sites - 1])
+    if e1 >= 0:
+        state += 4 * int(selectors[e1, sites - 1])
+    if not scores[state] >= best - chains.CHAIN_TIE:
+        for candidate in range(8):
+            if scores[candidate] >= best - chains.CHAIN_TIE:
+                state = candidate
+                break
     path = np.empty(sites, dtype=np.int8)
     for j in range(sites - 1, -1, -1):
         path[j] = state
         if j:
             state = back[j, state]
-    # A DP sum and the same fixed path can differ slightly in evaluation order over long chromosomes. An
-    # unchanged configuration is not a move, irrespective of the apparent floating-point score gain.
+    # Gains are exact interval differences (accept_supported_intervals), never this DP maximum (review B2): an
+    # unchanged configuration is not a move.
     different_configuration = False
     for j in range(sites):
         if ((path[j] & 1) != frames[i, j]

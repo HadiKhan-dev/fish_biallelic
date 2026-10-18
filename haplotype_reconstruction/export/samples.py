@@ -26,9 +26,14 @@ def _genotype_table(separator: str, phase_set: str) -> list[str]:
 
 
 def write_sample_phase(path: Path, sites: SiteTable, positions: np.ndarray, calls: np.ndarray,
-                       components: np.ndarray, names, *, synthetic: bool, file_format: str) -> None:
+                       components: np.ndarray, names, *, synthetic: bool, file_format: str,
+                       sample_rows: np.ndarray | None = None) -> None:
     """Write one chromosome's phased calls int8 [N, L, 2] (-1 / 0 / 1) at ``positions`` (the kept rows of
-    ``sites``) with the rows of ``sites`` to ``path`` (format "bcf" or "vcf")."""
+    ``sites``) with the rows of ``sites`` to ``path`` (format "bcf" or "vcf").
+
+    ``names`` are the written sample columns in order; ``sample_rows`` (int64 [N], optional) the row of ``calls``
+    written in each column (the run's canonical sample order mapped back to the input order, release 2.1), applied
+    chunk by chunk (no reordered copy of the calls)."""
     from cyvcf2 import Writer
     positions = np.asarray(positions)
     calls = np.asarray(calls)
@@ -37,6 +42,10 @@ def write_sample_phase(path: Path, sites: SiteTable, positions: np.ndarray, call
     contig = sites.contig
     if calls.shape != (len(names), len(positions), 2):
         raise ValueError("final phase sample/site axes do not match")
+    if sample_rows is not None:
+        sample_rows = np.asarray(sample_rows, dtype=np.int64)
+        if sorted(sample_rows.tolist()) != list(range(len(names))):
+            raise ValueError("sample_rows must be a permutation of the call rows")
     if not np.array_equal(sites.positions[sites.kept], positions):
         raise ValueError(f"{contig}: final phase sites differ from the kept sites of the export")
     length = int(sites.positions[-1]) if synthetic else sites.contig_length
@@ -67,8 +76,9 @@ def write_sample_phase(path: Path, sites: SiteTable, positions: np.ndarray, call
             kept = sites.kept[start:stop]
             selected = kept_index[start:stop][kept]
             # Genotype codes 3 * (a + 1) + (b + 1) of the chunk's kept sites, one list per site.
-            codes = (3 * (calls[:, selected, 0].astype(np.int64) + 1)
-                     + calls[:, selected, 1].astype(np.int64) + 1).T.tolist()
+            chunk = calls[:, selected] if sample_rows is None else calls[:, selected][sample_rows]
+            codes = (3 * (chunk[:, :, 0].astype(np.int64) + 1)
+                     + chunk[:, :, 1].astype(np.int64) + 1).T.tolist()
             site_components = components[selected].tolist()
             k = 0
             for offset, row in enumerate(range(start, stop)):

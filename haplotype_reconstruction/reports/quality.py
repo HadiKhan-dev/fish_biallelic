@@ -15,6 +15,7 @@ def write_quality(output, store, contig: str, sample_ids) -> list[Path]:
     """Write the contig's QC tables from its evidence record; returns the paths written (none without QC)."""
     from ..evidence import records as evidence_records
     from ..evidence import reports as evidence_reports
+    from ..evidence.sample_order import input_rows, store_input_order
     report = evidence_records.load_report(store.contig(contig))
     sample_ids = tuple(map(str, sample_ids))
     directory = Path(output) / "quality"
@@ -24,5 +25,10 @@ def write_quality(output, store, contig: str, sample_ids) -> list[Path]:
         if result is None:
             return written
         header, rows = result
+        if suffix == "samples":
+            # One row per sample in axis order: list them in the run's input order (release 2.1 records are canonical).
+            order = input_rows(sample_ids, store_input_order(store))
+            if order is not None and len(rows) == len(sample_ids):
+                rows = [rows[index] for index in order]
         written.append(write_text_table(directory / f"{contig}.{suffix}.tsv", header, rows))
     return written

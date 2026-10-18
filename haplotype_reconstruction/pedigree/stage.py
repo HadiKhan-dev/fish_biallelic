@@ -301,7 +301,8 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         tier_a=_calls(decided.tier_a, rows), complete=_calls(decided.complete, rows),
         reach=decided.reach, calibration=decided.calibration, family_solve=decided.family_solve,
         exclusion=exclusion_summary, eligibility=eligibility.summary(), panel=candidate_panel,
-        report=tables.build(decided, released, search, chromosome_summary, config))
+        report=tables.build(decided, released, search, chromosome_summary, config),
+        tie_events=decided.tie_events)
     store.run.put(records.PRODUCT, records.encode_product(product))
     store.mark_stage_complete(records.STAGE)
     print(f"PEDIGREE: {decided.reach.statement}", flush=True)

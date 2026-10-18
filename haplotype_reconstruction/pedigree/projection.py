@@ -25,6 +25,21 @@ from .records import PreparedComponent
 
 # A GL row whose max - min exceeds this is informative (base pedigree definition).
 INFORMATIVE_GL_SPREAD = 1e-12
+# Exact Hall equality of a bridge (release 2.1, review R12). Where the equality holds mathematically (all residual flow
+# through one state) the computed Hall gap is the rounding of the two differences that form it: <= 2 ULP of their terms
+# on TroMau chr3 (5,009 of 147,320 bridges), and 6,923 bridges flipped between exactly 0 and such a rounding value
+# under iid 1e-9 noise, switching between the star and the one-large parameterisation (M1/M2 scores moved by up to
+# 1.4e-4 / 0.07 nats through the rows of near-unreachable states). A difference within HALL_ULPS ULP of its larger term
+# is that equality up to rounding (the same 64 ULP as the feasibility tolerance); genuine gaps move by <= 3e-16 under
+# the same noise. The scale is per difference: a gap formed by tiny flows is compared with those flows, not with 1.
+HALL_ULPS = 64.0
+# The Hall state among states whose loads tie up to rounding (release 2.1). Such ties are the rule when the residual
+# flow is an exchange between two states (both loads equal 1 up to rounding: 1,500-1,900 bridges per TroMau contig);
+# the choice then decides only the rows of near-unreachable states (masses far below rounding of the flows), which the
+# star sends through the Hall state. In the exact transmitted chain those states leave to, and are entered from, the
+# state that holds the mass at the boundary, so the Hall state is the tied state with the largest mass pi_b + pi_b+1
+# (masses within HUB_MASS_TIE are tied: then the lowest state). 2.0 took the first maximum of the rounded loads.
+HUB_MASS_TIE = 2.0 ** -20
 
 
 @dataclass(frozen=True)
@@ -423,9 +438,21 @@ def _bridges(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tole
                 valid[candidate, boundary] = False
             if load > max_load:
                 max_load = load
-                hall_index = state
             root_sum = math.sqrt(a[state]) + math.sqrt(b[state])
             max_l = max(max_l, root_sum * root_sum)
+        # The Hall state (release 2.1): among the states whose load is within HALL_ULPS of the maximum (tied up to
+        # rounding, e.g. the two states of an exchange), the one with the largest mass across the boundary, then the
+        # lowest state (HUB_MASS_TIE).
+        load_floor = max_load - HALL_ULPS * epsilon * max(1.0, max_load)
+        hub_mass = -1.0
+        for state in range(states):
+            if a[state] + b[state] >= load_floor:
+                hub_mass = max(hub_mass, pi[candidate, boundary, state] + pi[candidate, boundary + 1, state])
+        for state in range(states):
+            if (a[state] + b[state] >= load_floor
+                    and pi[candidate, boundary, state] + pi[candidate, boundary + 1, state] >= hub_mass - HUB_MASS_TIE):
+                hall_index = state
+                break
         if not valid[candidate, boundary] or max_l <= 0.0:
             continue
         complement_a = 0.0
@@ -440,11 +467,14 @@ def _bridges(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tole
             valid[candidate, boundary] = False
             continue
         hall_gap = max(0.0, gap_from_a, gap_from_b)
+        equality = (gap_from_a <= HALL_ULPS * epsilon * max(complement_a, b[hall_index])
+                    and gap_from_b <= HALL_ULPS * epsilon * max(complement_b, a[hall_index]))
 
         chosen_large = -1
         q = 0.0
-        if states == 2 or hall_gap == 0.0:
-            # Exact Hall equality has a unique star support (always for S = 2).
+        if states == 2 or hall_gap == 0.0 or equality:
+            # Exact Hall equality has a unique star support (always for S = 2); gaps within HALL_ULPS of their terms
+            # are that equality up to rounding (release 2.1).
             branch[candidate, boundary] = 3
             source_mass = row_mass[hall_index]
             operator_pivot[candidate, boundary] = hall_index
@@ -513,10 +543,15 @@ def _bridges(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tole
             else:
                 for state in range(states):
                     beta[candidate, boundary, state] = qstar[state]
-            pivot = 0
+            # The pivot: the lowest state whose beta is within HALL_ULPS of the largest (release 2.1).
+            top_beta = beta[candidate, boundary, 0]
             for state in range(1, states):
-                if beta[candidate, boundary, state] > beta[candidate, boundary, pivot]:
+                top_beta = max(top_beta, beta[candidate, boundary, state])
+            pivot = 0
+            for state in range(states):
+                if beta[candidate, boundary, state] >= top_beta - HALL_ULPS * epsilon * abs(top_beta):
                     pivot = state
+                    break
             pivot_value = beta[candidate, boundary, pivot]
             if pivot_value <= 0.0 or not np.isfinite(pivot_value):
                 valid[candidate, boundary] = False

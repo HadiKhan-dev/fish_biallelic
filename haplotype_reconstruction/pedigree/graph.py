@@ -14,9 +14,10 @@ from typing import Mapping, Sequence
 import numpy as np
 from numba import njit
 
+from ..maths import ties as tie_rules
 from .orientation import Orientation, parent_role_probability
 from .records import M0
-from .ties import contrast_tolerance, unique_finite_winner
+from .ties import contrast_tolerance, unique_finite_winner, winner_tolerance
 
 
 @dataclass(frozen=True)
@@ -107,10 +108,21 @@ def _confidence(child: int, state_margins: np.ndarray, identity_margins: np.ndar
 
 
 def _visit_order(local_rows, rows, state_margins, identity_margins, orientation):
+    """Children by descending orientation support (exact: junction counts), then confidence in tie classes
+    (release 2.1: confidences closer than the winner tolerance are tied; GL noise moves them), then index (the run's
+    canonical sample order)."""
     role = {child: parent_role_probability(row, rows, orientation)
             for child, row in local_rows.items()}
-    return sorted(local_rows, key=lambda child: (
-        -role[child], -_confidence(child, state_margins, identity_margins), child))
+    children = list(local_rows)
+    if not children:
+        return []
+    confidence = np.asarray([_confidence(child, state_margins, identity_margins) for child in children])
+    finite = confidence[np.isfinite(confidence)]
+    quantum = winner_tolerance(float(np.max(np.abs(finite))) if finite.size else 1.0)
+    classes = tie_rules.tie_classes(np.where(np.isfinite(confidence), confidence, -np.inf), max(quantum, 1e-300),
+                                    descending=True).classes
+    rank = {child: int(classes[index]) for index, child in enumerate(children)}
+    return sorted(children, key=lambda child: (-role[child], rank[child], child))
 
 
 def select_local(rows: np.ndarray, local_rows: Mapping[int, int], state_margins: np.ndarray,
@@ -275,7 +287,8 @@ def tie_conflict_children(rows: np.ndarray, local_rows: Mapping[int, int],
             if np.isfinite(minimum):
                 finite = np.isfinite(values)
                 scales = np.asarray(score_scales, dtype=np.float64)[implicated]
-                tolerance = contrast_tolerance(np.r_[values[finite], scales[finite]])
+                tolerance = max(contrast_tolerance(np.r_[values[finite], scales[finite]]),
+                                winner_tolerance(1.0))
                 tied = [child for child, value in zip(implicated, values)
                         if np.isfinite(value) and abs(float(value) - minimum) <= tolerance]
             else:

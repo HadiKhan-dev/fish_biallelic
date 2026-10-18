@@ -5,8 +5,7 @@
 ``family_phase``           per contig: the FamilyPhaseProduct as a dict of arrays and plain data (arrays decode
                            selectively, e.g. ``load_calls``)
 run ``family_phase``       the per-contig FamilyPhaseSummary rows
-``work/<contig>/family_phase``  transient (identity, FamilyMessages) saved every WORK_SAVE_SECONDS of solving and
-                           cleared once the product is stored
+(Release 2.1 keeps no work state: the family MAP solver is cheap and an interrupted chromosome is recomputed.)
 """
 from __future__ import annotations
 
@@ -24,27 +23,35 @@ from .frames import ChildFrameChange, FrameDecision, FrameRepair, GuardBlock
 STAGE = "family_phase"
 KEY = "family_phase"
 SCHEMA_VERSION = 1
-WORK_SAVE_SECONDS = 120.
 ARRAYS = ("positions", "component_ids", "bin_edges", "bin_edge_offsets", "calls", "displayed_frame",
           "decoder_frame", "coverage", "coverage_offsets")
 
 
 @dataclass(frozen=True)
 class FamilyPhaseDiagnostics:
-    """iterations: belief-propagation iterations run; converged: largest message change below tolerance at
-    release; residuals: largest message change per iteration (1 or more after a gauge move); polish_sweep_updates:
-    accepted vertex updates per polish sweep; called_alleles: called entries of ``calls``;
-    changed_observable_phase_sites: two-parent sample-sites at heterozygous scaffold sites where the polished
-    frame differs from the family MAP frame; frame_repair: root-frame decisions (masks dropped)."""
+    """map_sweeps: family-MAP sweeps run (every block once, then the relabelling scan, the compound moves and the
+    site moves; the last accepted nothing); converged: the solver stopped because a sweep accepted nothing (always
+    true for a released product: reaching map_max_sweeps is an error); map_accepted: accepted steps per sweep
+    (block intervals, relabelling, compound and site moves);
+    map_objective: the family model's log posterior J after the initialisation and after every sweep (nats,
+    non-decreasing); polish_sweep_updates: accepted vertex updates per polish sweep; called_alleles: called entries
+    of ``calls``; changed_observable_phase_sites: two-parent sample-sites at heterozygous scaffold sites where the
+    polished frame differs from the family MAP frame; frame_repair: root-frame decisions (masks dropped).
+    map_conflicts: Mendelian-conflict diagnostic, (parent sample, bp position) of every site where the parent's best
+    genotype leaves a child's allele mistransmitted in the MAP (a root's best summed genotype).
+    (Release 2.1; 2.0 recorded belief-propagation ``iterations`` and ``residuals`` instead of the map_* fields:
+    such payloads decode with map_sweeps = iterations and empty map_accepted / map_objective / map_conflicts.)"""
 
-    iterations: int
+    map_sweeps: int
     converged: bool
-    residuals: tuple[float, ...]
+    map_accepted: tuple[int, ...]
+    map_objective: tuple[float, ...]
     polish_sweep_updates: tuple[int, ...]
     called_alleles: int
     changed_observable_phase_sites: int
     frame_repair: FrameRepair
     elapsed_seconds: float
+    map_conflicts: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -92,9 +99,9 @@ class FamilyPhaseSummary:
     contig: str
     samples: int
     sites: int
-    iterations: int
+    map_sweeps: int
     converged: bool
-    final_residual: float
+    map_objective: float
     called_alleles: int
     changed_observable_phase_sites: int
     root_frame_moves: int
@@ -107,8 +114,8 @@ def summary(product):
     diagnostics = product.diagnostics
     repair = diagnostics.frame_repair
     return FamilyPhaseSummary(
-        product.contig, len(product.sample_ids), len(product.positions), diagnostics.iterations,
-        diagnostics.converged, float(diagnostics.residuals[-1]) if diagnostics.residuals else float("nan"),
+        product.contig, len(product.sample_ids), len(product.positions), diagnostics.map_sweeps,
+        diagnostics.converged, float(diagnostics.map_objective[-1]) if diagnostics.map_objective else float("nan"),
         diagnostics.called_alleles, diagnostics.changed_observable_phase_sites, len(repair.moves),
         len(repair.reverts), len(repair.transfers), diagnostics.elapsed_seconds)
 
@@ -151,6 +158,13 @@ def _decode_diagnostics(record):
         rejected=tuple(tuple(item) for item in repair["rejected"]),
         guard_blocks=tuple(GuardBlock(**item) for item in repair["guard_blocks"]),
         flagged_edges=tuple(tuple(item) for item in repair["flagged_edges"]))
+    record = dict(record)
+    if "iterations" in record:                   # a 2.0 belief-propagation payload
+        record["map_sweeps"] = record.pop("iterations")
+        record.pop("residuals", None)
+        record.setdefault("map_accepted", ())
+        record.setdefault("map_objective", ())
+    record["map_conflicts"] = tuple(tuple(item) for item in record.get("map_conflicts", ()))
     return FamilyPhaseDiagnostics(**{**record, "frame_repair": frame_repair})
 
 

@@ -17,8 +17,11 @@ The sweep limit only marks a fit non-converged, never silently.
 Best of two: every fit runs this search twice from the same start, concurrently, once with its
 first pass forward and once reversed (both then alternate; their common sweep-0 messages and
 proposals are computed once). Each is a deterministic local search; the fit keeps the higher exact
-F (exact ties: the forward-first one), so at a fixed start it never ends below the forward-first
-search.
+F, decided by tie classes of F (release 2.1: two results within the quantum tie_rules.quantum("refine_F", F)
+are tied and the canonically smaller panel is kept; base: exact ties to the forward-first one), so at a
+fixed start it never ends measurably below the forward-first search. The fit's panel is returned in
+canonical founder order (rows sorted lexicographically, design 5.1): founder indices of the count pass
+(candidates, shortlists, tie-breaks) are content ranks.
 """
 from __future__ import annotations
 
@@ -31,6 +34,8 @@ import numpy as np
 from numba.typed import List
 
 from . import messages as kernels
+from .. import tie_rules
+from ...maths import ties
 from .acceptance import MOVE_COARSE, MOVE_FINE, accept_pass
 from .objective import SWITCH_PENALTY, score_panel, selected_alleles
 from .proposals import WindowSolver
@@ -203,8 +208,12 @@ class SweepEngine:
     """The fixed inputs of every converged fit of one component (workspace, window solver,
     both orientations, fit records)."""
 
-    def __init__(self, workspace, context, config, records=None, name="component"):
+    def __init__(self, workspace, context, config, records=None, name="component", counter=None,
+                 census_prefix=None):
         self.workspace = workspace
+        # Tie-class decisions of this component's fits (tie_rules.SharedCounter or None) and its census prefix.
+        self.counter = counter
+        self.census_prefix = census_prefix
         self.config = config
         self.windows = WindowSolver(workspace.emissions, context, workspace.penalty)
         self.penalty = float(workspace.penalty)
@@ -393,7 +402,8 @@ class SweepEngine:
     def converge(self, start, label, budget):
         """C(start): the better of the forward-first and the reverse-first search (module
         docstring). Both run concurrently, each with its share of the budget; the higher exact F is
-        kept (exact ties: forward-first). Returns a Fit."""
+        kept (tie classes of F; within a class the canonically smaller panel). Returns a Fit whose
+        rows are in canonical founder order."""
         done = self._load(f"{label}.done")
         if done is not None:
             return Fit(np.asarray(done["rows"], np.int64).copy(), FitSummary(**done["summary"]),
@@ -420,8 +430,23 @@ class SweepEngine:
                 label="founder_refinement searches"):
             searches[index] = result
         (X_fwd, fwd), (X_rev, rev) = searches
-        chosen = "rev" if rev["F"] > fwd["F"] else "fwd"
+        # Tie classes of the two exact F (quantum at |F|); within a class the canonically smaller
+        # panel (sorted rows, compared as row tuples) is kept.
+        values = [float(fwd["F"]), float(rev["F"])]
+        contents = [tie_rules.panel_key(X_fwd), tie_rules.panel_key(X_rev)]
+        scale = max(abs(v) for v in values)
+        quantum = tie_rules.quantum("refine_F", scale)
+        result = ties.tie_classes(values, quantum, content=contents, descending=True)
+        tie_rules.add_decision(self.counter, "assembly.refine_converge", result, values, quantum,
+                               tie_rules.motion("refine_F", scale), descending=True)
+        if self.census_prefix is not None:
+            tie_rules.census("assembly.refine_converge", f"{self.census_prefix}/{label}", [-v for v in values])
+        chosen = ("fwd", "rev")[result.winner]
         X, kept = (X_rev, rev) if chosen == "rev" else (X_fwd, fwd)
+        # Canonical founder order of the fit (weak-junction founder pairs follow the permutation).
+        X, order = tie_rules.canonical_rows(np.asarray(X, np.int64))
+        inverse = np.empty(len(order), dtype=np.int64)
+        inverse[order] = np.arange(len(order), dtype=np.int64)
         scores = {first: self._fit_scores.pop(f"{label}.{first}", None) for first in ("fwd", "rev")}
         if scores[chosen] is not None:
             self._fit_scores[label] = scores[chosen]
@@ -434,7 +459,8 @@ class SweepEngine:
             wall=time.perf_counter() - started,
             worker_cpu=float(fwd["worker_cpu"] + rev["worker_cpu"]),
             thread_cpu=float(fwd["thread_cpu"] + rev["thread_cpu"]))
-        weak = tuple(WeakJunction(*item) for item in kept["weak_junctions"])
+        weak = tuple(WeakJunction(first, last, tuple(sorted((int(inverse[pair[0]]), int(inverse[pair[1]])))),
+                                  gain) for first, last, pair, gain in kept["weak_junctions"])
         self._save(f"{label}.done", dict(rows=X.astype(np.int32), summary=vars(summary).copy(),
                                          weak_junctions=[tuple(vars(item).values()) for item in weak]))
         return Fit(X, summary, weak)
@@ -539,7 +565,7 @@ class SweepEngine:
             del fwd, bwd, fcnt, bcnt, fscale, bscale
             acc, gains, pairs = accept_pass(orientation, Xo, stored, stored_cnt, stored_scale, props,
                                             self.penalty, self.guarded, budget,
-                                            start_fwd=start_fwd, start_fcnt=start_fcnt)
+                                            start_fwd=start_fwd, start_fcnt=start_fcnt, scale=abs(F))
             del stored, stored_cnt, stored_scale, start_fwd, start_fcnt
             if sweep == 0 and shared is not None:
                 # Run one after the other (a one-thread or memory-limited budget), the other search

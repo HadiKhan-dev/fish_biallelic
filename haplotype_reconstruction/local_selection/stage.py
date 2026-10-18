@@ -113,7 +113,7 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
                 components = materialise(result.components, result.prepared)
                 proposals, summary = refine(
                     panels, components, evidence, genetic_map, config, generations,
-                    budget.phase(f"feedback_l{level}_refine"))
+                    budget.phase(f"feedback_l{level}_refine"), census_key=f"{contig}/{round_name}/refit")
                 scope.save("proposals", records.encode_proposals(proposals, summary))
                 del result, components
                 release_memory()
@@ -137,7 +137,8 @@ def run_contig(store, contig, config, assembly_config, genetic_map, budget, *,
                 incumbent=None if prior is None else prior.outcome,
                 incumbent_release=None if prior is None else prior.release,
                 memo=None if prior is None else prior.memo,
-                keep_memo=round_index < len(ROUNDS) - 1))
+                keep_memo=round_index < len(ROUNDS) - 1,
+                label=f"{contig}/{round_name}/i{index}"))
         previous = run_round(scope, tasks, settings, evidence,
                              budget.phase(f"feedback_round{round_index}"), queue=queue,
                              label=f"{contig} {round_name}")

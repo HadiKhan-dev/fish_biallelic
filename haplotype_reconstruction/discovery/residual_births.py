@@ -11,19 +11,163 @@ most ``max_cluster_hamming``), globally and within each (subtracted row, dominan
 route. Each cluster's consensus pools its samples' responsibility-weighted log odds with one
 capped vote per sample; a consensus is emitted when enough distinct and effective samples
 support it, enough of it is called, and it is no duplicate of the panel or an earlier emission.
-Emission order is the consensus digest order (a fixed tie rule). The candidates are soft (ALT
-probabilities); the search hardens them into birth starts and its cavity score decides.
+Emission order (release 2.1): more distinct supporting samples first, then the consensus's hardened
+0/1 row (> 1/2 is ALT; within the ``probability`` quantum of 1/2 the population ALT fraction decides,
+as the search hardens it), then source order -- exact discrete keys (2.0 sorted by a digest of the
+probabilities rounded to 12 decimals, which 1e-12 GL noise reshuffled). The order decides which of
+two near-duplicate consensus rows is kept, so the better supported one is (measured on stress_n80:
+fewer blocks losing a founder than with the hardened row first, design A-6). A record's dominant
+partner is the largest partner mass beyond a relative band of the ``probability`` quantum (lower
+row on ties). The candidates are soft (ALT probabilities); the search hardens them into birth
+starts and its cavity score decides.
 """
 from __future__ import annotations
 
-import hashlib
 import math
 
 import numpy as np
 from numba import njit
 
+from ..maths.ties import tie_quantum
+
+# Bands of posterior-mass decisions (probability-kind quantum): the dominant-partner choice (relative to
+# max(1, mass)), and the record-weight and effective-support thresholds, where symmetric evidence puts masses
+# exactly at the threshold (e.g. a posterior split exactly in half, effective support exactly 1.5): values within
+# the band count as at the threshold, which passes (2.0's decision at exact equality; 2.0 used a 1e-12 fuzz, the
+# 1e-12-noise scale).
+PARTNER_BAND = tie_quantum(0.0, "probability")
+MASS_BAND = tie_quantum(0.0, "probability")
+# Values within this band of 1/2 are 1/2 (probability-kind quantum; 2.0 compared exactly or with 1e-12, the 1e-12-noise
+# scale). Inside the band a consensus row takes the population ALT fraction, and a population ALT fraction itself
+# inside the band takes the rule's decision at exactly 1/2 (2.0's: REF for "> 1/2" rules, ALT for ">= 1/2").
+HALF_BAND = tie_quantum(0.0, "probability")
+
+
+def note_band(counter, kind, values, threshold, band):
+    """Count one batch of threshold decisions for the stage records (counter: maths.ties.TieCounter or None):
+    decisions = the values compared, inside_tie = those strictly inside the band (0 < |value - threshold| <= band:
+    where the band, not the exact comparison, decided)."""
+    if counter is None:
+        return
+    values = np.asarray(values, dtype=np.float64)
+    distance = np.abs(values - threshold)
+    entry = counter.counts.setdefault(kind, dict(decisions=0, inside_tie=0, wide=0, boundary=0))
+    entry["decisions"] += int(values.size)
+    entry["inside_tie"] += int(np.count_nonzero((distance > 0.0) & (distance <= band)))
+
+
+def half_band_rows(values, fallback):
+    """Binary rows of probabilities: > 1/2 is 1, < 1/2 is 0; within HALF_BAND of 1/2 the
+    ``fallback`` row (broadcast) decides."""
+    values = np.asarray(values, dtype=np.float64)
+    rows = values > 0.5
+    tied = np.abs(values - 0.5) <= HALF_BAND
+    rows[tied] = np.broadcast_to(fallback, rows.shape)[tied]
+    return rows
+
+
+def alt_fraction_rule(population_alt, at_half: bool):
+    """population ALT fraction > 1/2 (outside the band); within HALF_BAND of 1/2: ``at_half``."""
+    population_alt = np.asarray(population_alt, dtype=np.float64)
+    rows = population_alt > 0.5
+    rows[np.abs(population_alt - 0.5) <= HALF_BAND] = at_half
+    return rows
+
+
+def hardening_fallback(likelihoods):
+    """The ALT/REF row hardening uses within HALF_BAND of 1/2: the population ALT fraction of all
+    samples >= 1/2 (ALT within HALF_BAND of 1/2, 2.0's decision at exactly 1/2)."""
+    marginal = np.mean(0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2], axis=0)
+    return alt_fraction_rule(marginal, True)
+
+
+# Elementary functions (release 2.1): discovery takes log and exp from the C library's scalar functions (math.log /
+# math.exp in Numba kernels), never from NumPy's float64 ufuncs. NumPy picks those ufuncs' SIMD code paths at run time
+# from the CPU (AVX-512 vs AVX2 kernels), and they differ from the scalar function by an ulp in ~0.3% (log) and ~5%
+# (exp) of values, so the same evidence gave different soft-residual candidates on different CPUs (actm3 chr8:204 under
+# env_haswell). The scalar functions, element-wise arithmetic and fixed-order sums give the same bits on every x86-64
+# CPU with FMA (all CSD3 node types); discovery makes no BLAS calls.
+@njit(cache=True, nogil=True)
+def scalar_log_floored(values, floor):
+    """float64 array of log(max(value, floor)) for a C-contiguous float64 array (C library scalar log)."""
+    flat = values.reshape(-1)
+    out = np.empty(flat.size, dtype=np.float64)
+    for index in range(flat.size):
+        value = flat[index]
+        out[index] = math.log(value if value > floor else floor)
+    return out.reshape(values.shape)
+
+
+@njit(cache=True, nogil=True)
+def _exp_inplace(values):
+    """values[i, j] = exp(values[i, j]) for a 2-D float64 array of any layout (C library scalar exp)."""
+    rows, columns = values.shape
+    for row in range(rows):
+        for column in range(columns):
+            values[row, column] = math.exp(values[row, column])
+
+
+@njit(cache=True, nogil=True)
+def _logistic_where(total, observed):
+    """ALT probability 1 / (1 + exp(-total)) where observed (0.5 elsewhere), evaluated on the stable side of 0 with
+    the C library scalar exp."""
+    out = np.full(total.shape[0], 0.5, dtype=np.float64)
+    for site in range(total.shape[0]):
+        if observed[site]:
+            value = total[site]
+            if value >= 0.0:
+                out[site] = 1.0 / (1.0 + math.exp(-value))
+            else:
+                exponential = math.exp(value)
+                out[site] = exponential / (1.0 + exponential)
+    return out
+
+
+def _splitmix64(values):
+    """splitmix64 of uint64 values (wrapping arithmetic): a fixed pseudo-random content key."""
+    z = values + np.uint64(0x9E3779B97F4A7C15)
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return z ^ (z >> np.uint64(31))
+
+
+def exact_hdbscan_labels(distance, min_cluster_size, min_samples, allow_single_cluster):
+    """int64 HDBSCAN labels (-1 = noise) of a precomputed float64 distance matrix: the hdbscan package's algorithm
+    for ``metric="precomputed"`` (mutual reachability, Prim's minimum spanning tree, single linkage, condensed tree,
+    excess-of-mass selection; alpha 1, no epsilon or persistence) with one change (release 2.1): the tree's edges are
+    ordered by weight and, among equal weights, by a fixed pseudo-random key of their two record indices (splitmix64).
+    The package orders them with NumPy's default argsort, which is unstable and whose order among equal weights depends
+    on the CPU's SIMD sort kernel (AVX-512 vs AVX2); equal weights are the rule for Hamming distances, and the order of
+    equal-weight merges shapes the condensed tree, so the clusters depended on the CPU (actm3 chr8:204 under
+    env_haswell). The key depends only on the (canonical) record order and keeps the unstable sort's effectively random
+    resolution of equal-weight merges, with which 2.1 was validated; a stable order would resolve every multi-way merge
+    as a chain, so equidistant records would fall out of the growing cluster instead of pairing up (fewer residual
+    clusters and soft candidates, measured as a downward shift of the selected K on TroMau)."""
+    from hdbscan._hdbscan_linkage import label, mst_linkage_core
+    from hdbscan._hdbscan_reachability import mutual_reachability
+    from hdbscan.hdbscan_ import _tree_to_labels
+    reachability = np.array(distance, dtype=np.float64, order="C", copy=True)
+    size = reachability.shape[0]
+    min_samples = max(1, min(size - 1, int(min_samples)))
+    reachability = mutual_reachability(reachability, min_samples, 1.0)
+    tree = mst_linkage_core(reachability)
+    first = np.minimum(tree[:, 0], tree[:, 1]).astype(np.uint64)
+    second = np.maximum(tree[:, 0], tree[:, 1]).astype(np.uint64)
+    tree = tree[np.lexsort((_splitmix64((first << np.uint64(32)) | second), tree[:, 2])), :]
+    labels = _tree_to_labels(None, label(tree), int(min_cluster_size), "eom", bool(allow_single_cluster), False,
+                             0.0, 0.0, 0, float("inf"))[0]
+    return np.asarray(labels, dtype=np.int64)
+
+
 # Residual strand hard-call sentinel.
 _UNCALLED = -1
+# Bounds of a residual strand's log odds: release 2.0 clipped the ALT probability to [tiny, 1 - eps] before taking
+# log(p) - log1p(-p), so its log odds lay in [log tiny, log((1 - eps) / eps)]. 2.1 computes the log odds exactly as
+# log(residual ALT mass) - log(residual REF mass) within the same bounds: from p itself they lost all precision as
+# p -> 1 (1 - p carries ~1e-16 absolute error), and 1e-12 GL noise moved a record's log odds by 0.15 nats there
+# (TroMau chr7:665, chr17:425), flipping near-cancelling consensus sites.
+_LOG_ODDS_MAX = math.log((1.0 - np.finfo(np.float64).eps) / np.finfo(np.float64).eps)
+_LOG_ODDS_MIN = math.log(np.finfo(np.float64).tiny) - math.log1p(-np.finfo(np.float64).tiny)
 # Bound of the largest temporary of the diplotype responsibility (bytes).
 _PREDICTIVE_CHUNK_BYTES = 32 * 1024 * 1024
 
@@ -35,8 +179,7 @@ class ResidualInputs:
 
     def __init__(self, likelihood, observed):
         self.likelihood = np.ascontiguousarray(likelihood, dtype=np.float64)
-        self.log_likelihood = np.ascontiguousarray(
-            np.log(np.maximum(self.likelihood, np.finfo(np.float64).tiny)))
+        self.log_likelihood = scalar_log_floored(self.likelihood, np.finfo(np.float64).tiny)
         self.observed = np.ascontiguousarray(observed, dtype=np.bool_)
         self.cluster_cache: dict = {}
 
@@ -77,20 +220,24 @@ def _diplotype_responsibility(log_likelihood, haplotypes, pair_i, pair_j):
                                   log_predictive)
         log_emission[start:stop] = np.sum(log_predictive, axis=2)
     row_maximum = np.max(log_emission, axis=1, keepdims=True)
-    responsibility = np.exp(log_emission - row_maximum)
+    responsibility = log_emission - row_maximum
+    _exp_inplace(responsibility)
     responsibility /= np.sum(responsibility, axis=1, keepdims=True)
     return np.ascontiguousarray(responsibility)
 
 
 @njit(cache=True, nogil=True)
 def _residual_records(responsibility, pair_i, pair_j, n_rows, likelihood, observed, haplotypes,
-                      call_probability, minimum_responsibility):
+                      call_probability, minimum_responsibility, partner_band, mass_band):
     """Residual strands of every (sample, subtracted row) with enough expected copies.
 
     Returns sample, subtracted row, dominant partner (largest posterior partner mass of the
-    subtracted row; lowest index on ties), weight min(1, expected copies), the residual ALT
-    probability per site (0.5 where unobserved), hard calls (-1 uncalled) and the compatible
-    mask (observed sites with positive residual mass).
+    subtracted row; a later row replaces the current one only when its mass exceeds the current
+    by more than partner_band x max(1, current): lowest index on ties), weight min(1, expected
+    copies), the residual ALT probability per site (0.5 where unobserved), hard calls (-1
+    uncalled), the compatible mask (observed sites with positive residual mass) and the residual
+    ALT log odds log(r1) - log(r0) at compatible sites within [_LOG_ODDS_MIN, _LOG_ODDS_MAX] (0
+    elsewhere). A record needs weight + mass_band >= minimum_responsibility.
     """
     n_samples, n_states = responsibility.shape
     n_sites = haplotypes.shape[1]
@@ -120,12 +267,13 @@ def _residual_records(responsibility, pair_i, pair_j, n_rows, likelihood, observ
         for row in range(n_rows):
             expected = copy_mass[row]
             weight = min(1.0, expected)
-            if weight + 1e-12 < minimum_responsibility:
+            if weight + mass_band < minimum_responsibility:
                 continue
             partner = 0
             best = partner_mass[row, 0]
             for other in range(1, n_rows):
-                if partner_mass[row, other] > best:
+                band = partner_band * (best if best > 1.0 else 1.0)
+                if partner_mass[row, other] > best + band:
                     partner = other
                     best = partner_mass[row, other]
             sample_indices[count] = sample
@@ -136,6 +284,7 @@ def _residual_records(responsibility, pair_i, pair_j, n_rows, likelihood, observ
     soft_alt = np.full((count, n_sites), 0.5, dtype=np.float64)
     hard_calls = np.full((count, n_sites), _UNCALLED, dtype=np.int8)
     compatible = np.zeros((count, n_sites), dtype=np.bool_)
+    log_odds = np.zeros((count, n_sites), dtype=np.float64)
     for record in range(count):
         sample = sample_indices[record]
         row = subtracted[record]
@@ -148,12 +297,23 @@ def _residual_records(responsibility, pair_i, pair_j, n_rows, likelihood, observ
                 value = residual_one / denominator
                 soft_alt[record, site] = value
                 compatible[record, site] = True
+                if residual_zero <= 0.0:
+                    odds = _LOG_ODDS_MAX
+                elif residual_one <= 0.0:
+                    odds = _LOG_ODDS_MIN
+                else:
+                    odds = math.log(residual_one) - math.log(residual_zero)
+                    if odds > _LOG_ODDS_MAX:
+                        odds = _LOG_ODDS_MAX
+                    elif odds < _LOG_ODDS_MIN:
+                        odds = _LOG_ODDS_MIN
+                log_odds[record, site] = odds
                 if value >= call_probability:
                     hard_calls[record, site] = 1
                 if value <= 1.0 - call_probability:
                     hard_calls[record, site] = 0
     return (sample_indices[:count], subtracted[:count], partners[:count], weights[:count],
-            soft_alt, hard_calls, compatible)
+            soft_alt, hard_calls, compatible, log_odds)
 
 
 @njit(cache=True, inline="always")
@@ -209,14 +369,7 @@ def _cluster(distance, maximum_hamming):
     if n_records == 2:
         pair_distance = float(distance[0, 1])
         return ((0, 1),) if pair_distance <= maximum_hamming + 1e-12 else ()
-    import hdbscan
-    labels = np.asarray(hdbscan.hdbscan(
-        distance, min_cluster_size=2, min_samples=1, alpha=1.0, cluster_selection_epsilon=0.0,
-        cluster_selection_persistence=0.0, max_cluster_size=0, metric="precomputed", p=None,
-        leaf_size=40, algorithm="best", approx_min_span_tree=True, gen_min_span_tree=False,
-        core_dist_n_jobs=1, cluster_selection_method="eom", allow_single_cluster=True,
-        match_reference_implementation=False, cluster_selection_epsilon_max=np.inf)[0],
-        dtype=np.int64)
+    labels = exact_hdbscan_labels(distance, min_cluster_size=2, min_samples=1, allow_single_cluster=True)
     clusters = []
     noise = set(np.flatnonzero(labels == -1).tolist())
     for label in sorted(int(value) for value in np.unique(labels) if value >= 0):
@@ -299,14 +452,8 @@ def _consensus(members, sample_indices, weights, compatible, log_odds, call_prob
     total, contributing = _pooled_log_odds(
         np.ascontiguousarray(members, dtype=np.int64), sample_indices, weights, compatible,
         log_odds)
-    n_sites = log_odds.shape[1]
-    posterior = np.full(n_sites, 0.5, dtype=np.float64)
     observed = contributing > 0
-    positive = observed & (total >= 0.0)
-    negative = observed & ~positive
-    posterior[positive] = 1.0 / (1.0 + np.exp(-total[positive]))
-    exponential = np.exp(total[negative])
-    posterior[negative] = exponential / (1.0 + exponential)
+    posterior = _logistic_where(total, observed)
     confident = observed & ((posterior >= call_probability) | (posterior <= 1.0 - call_probability))
     return np.ascontiguousarray(posterior), float(np.mean(confident))
 
@@ -362,15 +509,16 @@ def _closest(candidate, existing, minimum_joint, n_sites, known_probability):
             closest_other_coverage)
 
 
-def _digest(candidate) -> str:
-    """Content digest of a soft candidate (rounded to 12 decimals): the emission-order key."""
-    rounded = np.round(np.asarray(candidate, dtype=np.float64), 12).astype("<f8", copy=False)
-    return hashlib.sha256(rounded.tobytes(order="C")).hexdigest()
+def _hardened_key(candidate, fallback) -> bytes:
+    """The emission-order key of a soft candidate: its hardened 0/1 row as bytes (> 1/2 is ALT;
+    within the probability quantum of 1/2 the ``fallback`` row decides, as moves.half_band_rows)."""
+    return np.ascontiguousarray(half_band_rows(candidate, fallback), dtype=np.uint8).tobytes()
 
 
-def soft_candidates(haplotypes, inputs: ResidualInputs, config) -> np.ndarray:
+def soft_candidates(haplotypes, inputs: ResidualInputs, config, counter=None) -> np.ndarray:
     """float64[C, L] soft birth candidates of a complete binary panel, in emission order
-    (``config``: ResidualBirthConfig; the block's sites are all kept)."""
+    (``config``: ResidualBirthConfig; the block's sites are all kept; ``counter``: optional TieCounter of the
+    band decisions, kinds discovery.residual.half_band and discovery.residual.mass_band)."""
     rows = np.ascontiguousarray(haplotypes, dtype=np.int64)
     k, n_sites = rows.shape
     pair_i, pair_j = np.triu_indices(k)
@@ -378,9 +526,10 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config) -> np.ndarray:
     pair_j = np.ascontiguousarray(pair_j, dtype=np.int64)
     responsibility = _diplotype_responsibility(inputs.log_likelihood, rows, pair_i, pair_j)
     (sample_indices, subtracted, partners, weights, soft_alt, hard_calls,
-     compatible) = _residual_records(
+     compatible, log_odds) = _residual_records(
         responsibility, pair_i, pair_j, k, inputs.likelihood, inputs.observed, rows,
-        float(config.residual_call_probability), float(config.min_soft_responsibility))
+        float(config.residual_call_probability), float(config.min_soft_responsibility),
+        float(PARTNER_BAND), float(MASS_BAND))
     n_records = len(sample_indices)
     # Sources: global clusters, then clusters within each (subtracted row, partner) route.
     sources = []
@@ -403,9 +552,10 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config) -> np.ndarray:
             sources.append(tuple(pool[index] for index in local))
     if not sources:
         return np.empty((0, n_sites), dtype=np.float64)
-    probability = np.clip(soft_alt, np.finfo(np.float64).tiny, 1.0 - np.finfo(np.float64).eps)
-    log_odds = np.ascontiguousarray(np.log(probability) - np.log1p(-probability))
-    # One consensus per distinct member set, in emission order (digest, then source order).
+    fallback = hardening_fallback(inputs.likelihood)
+    log_odds = np.ascontiguousarray(log_odds)
+    # One consensus per distinct member set, in emission order (more distinct supporting samples,
+    # hardened row, source order).
     prepared = []
     consensus_by_members: dict[tuple, tuple] = {}
     for source_index, members in enumerate(sources):
@@ -421,17 +571,20 @@ def soft_candidates(haplotypes, inputs: ResidualInputs, config) -> np.ndarray:
                 ordered, sample_indices, weights, compatible, log_odds,
                 float(config.candidate_call_probability))
             cached = consensus_by_members[ordered] = (
-                _digest(candidate), len(by_sample), math.fsum(by_sample.values()), candidate,
-                known_fraction)
+                _hardened_key(candidate, fallback), len(by_sample), math.fsum(by_sample.values()),
+                candidate, known_fraction)
+            note_band(counter, "discovery.residual.half_band", candidate, 0.5, HALF_BAND)
+            note_band(counter, "discovery.residual.mass_band", [cached[2]],
+                      float(config.min_effective_sample_support), MASS_BAND)
         prepared.append((cached, source_index))
-    prepared.sort(key=lambda item: (item[0][0], item[1]))
+    prepared.sort(key=lambda item: (-item[0][1], item[0][0], item[1]))
     existing = [np.asarray(row, dtype=np.float64) for row in rows]
     emitted = []
     minimum_dedup_joint = max(1, int(math.ceil(config.min_dedup_joint_known_fraction * n_sites)))
     for (digest, unique_support, effective_support, candidate, known_fraction), _ in prepared:
         if unique_support < config.min_unique_sample_support:
             continue
-        if effective_support + 1e-12 < config.min_effective_sample_support:
+        if effective_support + MASS_BAND < config.min_effective_sample_support:
             continue
         if known_fraction < config.min_candidate_known_fraction:
             continue

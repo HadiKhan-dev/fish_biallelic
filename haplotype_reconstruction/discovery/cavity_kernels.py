@@ -8,6 +8,16 @@ value reuses that value's logarithm; the site's complete-data potentials are fil
 held-out solve patches only its own sample's unary or edge term (restored afterwards); sigmoid and
 entropy terms are memoised per founder. Every sample accumulates its own predictions in site and
 founder order and samples are reduced in sample order, so results do not depend on threads.
+
+Release 2.1: the three mean-field starts of a held-out solve are compared by ELBO with a tie
+quantum (the block's ``nll`` quantum, ``elbo_tie``): converged starts within it of the best ELBO are
+tied and the first in the fixed start order (q = H, q = 1 - H, q = 1/2) wins. 2.0 compared with an
+absolute 1e-12 band and broke ties by the endpoints' values, so rounding- or perturbation-level ELBO
+differences between different endpoints (e.g. mirror-image modes) chose the endpoint. A founder
+update's logit within the same quantum of zero is zero (q = 1/2 exactly): symmetric evidence (equal
+REF and ALT reads) makes such logits exactly zero, and an exactly symmetric start then stays on its
+symmetric fixed point; GL noise broke that symmetry and let the start escape to another mode
+(TroMau chr18:375: a non-selected representative's score moved by 3.9 nats under 1e-12 noise).
 """
 from __future__ import annotations
 
@@ -117,7 +127,7 @@ def _solve_cavity_site(
         heldout, site, k, log_likelihood, rw_log_likelihood, haplotypes,
         assignments, founder_support, unary, pair, edge_first, edge_second,
         neighbours, neighbour_counts, mean_field_max_iter,
-        mean_field_tolerance, work, edge_lookup):
+        mean_field_tolerance, work, edge_lookup, elbo_tie):
     (
         q,
         candidate_q,
@@ -265,6 +275,9 @@ def _solve_cavity_site(
                         directed_difference_one[founder, other]
                     )
 
+                # Release 2.1: an exact zero by symmetry stays exactly zero.
+                if logit <= elbo_tie and logit >= -elbo_tie:
+                    logit = 0.0
                 # The sigmoid is a pure function of the logit: an equal
                 # logit reuses the earlier value bit for bit.
                 if logit == memo_logit[0, founder]:
@@ -378,49 +391,25 @@ def _solve_cavity_site(
         candidate_elbo[start_index] = elbo
         candidate_q[start_index,:] = q
 
+    # The best ELBO among the converged starts (all starts when none converged), then the first
+    # start in the fixed order whose ELBO is within elbo_tie of it.
     any_converged = False
-    best_start = 0
-    best_elbo = -math.inf
     for start_index in range(3):
         if candidate_converged[start_index] == 1:
             any_converged = True
-            value = candidate_elbo[start_index]
-            better = value > best_elbo + 1e-12
-            if abs(value - best_elbo) <= 1e-12:
-                for founder in range(k):
-                    difference = (
-                        candidate_q[start_index, founder]
-                        - candidate_q[best_start, founder]
-                    )
-                    if difference < -1e-12:
-                        better = True
-                        break
-                    if difference > 1e-12:
-                        break
-            if better:
-                best_elbo = value
-                best_start = start_index
     if not any_converged:
         heldout_not_converged += 1
-        best_start = 0
-        best_elbo = candidate_elbo[0]
-        for start_index in range(1, 3):
-            value = candidate_elbo[start_index]
-            better = value > best_elbo + 1e-12
-            if abs(value - best_elbo) <= 1e-12:
-                for founder in range(k):
-                    difference = (
-                        candidate_q[start_index, founder]
-                        - candidate_q[best_start, founder]
-                    )
-                    if difference < -1e-12:
-                        better = True
-                        break
-                    if difference > 1e-12:
-                        break
-            if better:
-                best_elbo = value
-                best_start = start_index
+    best_elbo = -math.inf
+    for start_index in range(3):
+        if (not any_converged or candidate_converged[start_index] == 1) \
+                and candidate_elbo[start_index] > best_elbo:
+            best_elbo = candidate_elbo[start_index]
+    best_start = 0
+    for start_index in range(3):
+        if (not any_converged or candidate_converged[start_index] == 1) \
+                and candidate_elbo[start_index] >= best_elbo - elbo_tie:
+            best_start = start_index
+            break
     q[:] = candidate_q[best_start,:]
     # Restore the complete-data potentials for the site's next held-out.
     if patched_founder >= 0:
@@ -446,7 +435,7 @@ def grouped_cavity_predictions(
         haplotypes, assignments, founder_support, unary, pair, edge_first,
         edge_second, edge_lookup, neighbours, neighbour_counts,
         mean_field_max_iter, mean_field_tolerance, likelihood_floor,
-        site_start, site_stop, shared_triple):
+        site_start, site_stop, shared_triple, elbo_tie):
     """Solve and predict exact cases once in a bounded, site-parallel tile.
 
     ``edge_lookup[a, b]`` is the edge index of the pair factor of founders
@@ -485,7 +474,7 @@ def grouped_cavity_predictions(
                 heldout, site, k, log_likelihood, rw_log_likelihood, haplotypes,
                 assignments, founder_support, unary, pair, edge_first,
                 edge_second, neighbours, neighbour_counts, mean_field_max_iter,
-                mean_field_tolerance, work, edge_lookup)
+                mean_field_tolerance, work, edge_lookup, elbo_tie)
             not_converged[offset, heldout] = failed
 
             g0 = likelihood[heldout, site, 0]
@@ -647,9 +636,11 @@ def _score_mode_cavity_kernel(
     mean_field_tolerance: float,
     likelihood_floor: float,
     shared_triple: np.ndarray,
+    elbo_tie: float,
 ) -> tuple[np.ndarray, int]:
     """Fixed-assignment cavity log predictive of every sample of one complete panel, and the
-    number of held-out site solves whose three mean-field starts all failed to converge.
+    number of held-out site solves whose three mean-field starts all failed to converge
+    (``elbo_tie``: the start-choice tie quantum, see the module docstring).
 
     Exact equal assignment/evidence cases share per-site posterior solves. Each sample
     accumulates its own predictions in site/founder order.
@@ -777,7 +768,7 @@ def _score_mode_cavity_kernel(
             haplotypes, assignments, founder_support, unary, pair, edge_first,
             edge_second, edge_lookup, neighbours, neighbour_counts,
             mean_field_max_iter, mean_field_tolerance, likelihood_floor,
-            site_start, site_stop, shared_triple,
+            site_start, site_stop, shared_triple, elbo_tie,
         )
         for heldout in prange(n_samples):
             heldout_not_converged = not_converged_by_heldout[heldout]

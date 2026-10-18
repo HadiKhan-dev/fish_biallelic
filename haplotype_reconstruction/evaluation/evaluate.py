@@ -140,18 +140,21 @@ def pedigree_counts(sample_ids, calls, truth, names) -> dict:
 
     ``sample_ids``/``calls``: pedigree.records.load_calls (PedigreeCalls: state -1 unresolved, parents -1 none);
     ``truth``: the simulation manifest's PedigreeTable of the analysed samples (parents outside the analysed
-    samples are not observable edges); ``names``: the analysed sample axis.
+    samples are not observable edges); ``names``: the analysed sample axis. The calls' axis may be any order of
+    ``names`` (release 2.1 records hold the run's canonical sample order); edges are matched by sample name.
     """
-    if tuple(sample_ids) != tuple(names):
+    sample_ids = tuple(map(str, sample_ids))
+    if len(set(sample_ids)) != len(sample_ids) or set(sample_ids) != set(names) or len(sample_ids) != len(names):
         raise ValueError("inferred and true sample axes differ")
     true_parents = {sample: (first, second)
                     for sample, first, second in zip(truth.samples, truth.parent1, truth.parent2)}
     known = set(names)
     exact = correct_states = true_edges = inferred_edges = shared_edges = 0
     expected_states = {state: 0 for state in PARENT_STATES}
-    for sample, state, parents in zip(names, np.asarray(calls.state).tolist(), np.asarray(calls.parents).tolist()):
+    for sample, state, parents in zip(sample_ids, np.asarray(calls.state).tolist(),
+                                      np.asarray(calls.parents).tolist()):
         expected = set(true_parents[sample]) & known
-        actual = {names[parent] for parent in parents if parent >= 0}
+        actual = {sample_ids[parent] for parent in parents if parent >= 0}
         called_state = PARENT_STATES[state] if state >= 0 else None
         expected_state = PARENT_STATES[len(expected)]
         expected_states[expected_state] += 1
@@ -171,8 +174,12 @@ def map_counts(product, events, names) -> dict:
 
     ``product``: recombination.records RecombinationProduct; ``events``: {(parent, child): sorted true crossover
     positions (bp)}. Only edges of the true pedigree count; an interval (left, right] localizes a true crossover
-    when it contains one.
+    when it contains one. Edge indices refer to the product's own sample axis (any order of ``names``).
     """
+    if getattr(product, "sample_ids", None) is not None:
+        if set(map(str, product.sample_ids)) != set(names):
+            raise ValueError("recombination and true sample axes differ")
+        names = tuple(map(str, product.sample_ids))
     true_observed = unmatched = 0
     expected = exposure = 0.0
     called = called_hits = reported_hits = 0
@@ -260,6 +267,11 @@ def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1):
         if phase_records.complete(file):
             sample_ids, phase_positions, component_ids, calls = phase_records.load_calls(file, nthreads=nthreads)
             true_alleles = np.asarray(truth.alleles, dtype=np.int8)
+            if tuple(sample_ids) != tuple(names) and sorted(sample_ids) == sorted(names):
+                # Release 2.1 records hold the run's canonical sample order: rows back to the truth's order.
+                index = {name: row for row, name in enumerate(sample_ids)}
+                calls = np.asarray(calls)[[index[name] for name in names]]
+                sample_ids = tuple(names)
             if tuple(sample_ids) != tuple(names) or true_alleles.shape != calls.shape:
                 raise ValueError(f"{contig}: incompatible true/final allele axes")
             if not np.array_equal(phase_positions, positions):

@@ -367,6 +367,7 @@ class PedigreeProduct:
     calibration, family_solve, exclusion, eligibility: small JSON-safe summaries.
     panel:    the fixed M2 candidate panel (trios and screen utilities).
     report:   report tables.
+    tie_events: full-data-fit decisions taken inside a tie (``maths.ties.TieCounter`` record; release 2.1).
     """
 
     sample_ids: tuple[str, ...]
@@ -384,6 +385,7 @@ class PedigreeProduct:
     eligibility: dict[str, Any]
     panel: CandidatePanel
     report: PedigreeReport = field(repr=False)
+    tie_events: dict = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------------------- identities
@@ -507,7 +509,8 @@ def encode_product(value: PedigreeProduct) -> dict:
         family_solve=value.family_solve, exclusion=value.exclusion,
         eligibility=value.eligibility,
         panel=dict(trios=value.panel.trios, screen_scores=value.panel.screen_scores),
-        report={field.name: getattr(value.report, field.name) for field in fields(value.report)})
+        report={field.name: getattr(value.report, field.name) for field in fields(value.report)},
+        tie_events=dict(value.tie_events))
 
 
 def _decode_calls(record: dict) -> PedigreeCalls:
@@ -529,7 +532,7 @@ def decode_product(record: dict) -> PedigreeProduct:
         family_solve=record["family_solve"], exclusion=record["exclusion"],
         eligibility=record["eligibility"],
         panel=CandidatePanel(record["panel"]["trios"], record["panel"]["screen_scores"]),
-        report=PedigreeReport(**record["report"]))
+        report=PedigreeReport(**record["report"]), tie_events=dict(record.get("tie_events", {})))
 
 
 # ------------------------------------------------------------------------------- readers

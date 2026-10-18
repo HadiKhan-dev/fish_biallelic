@@ -15,6 +15,12 @@ transition with an overlapping evidence interval (the stretch between the sample
 informative sites where u and v differ). Moves that do not lower E, and moves whose gain comes from
 switch savings at unshared junctions or from excursions, pass. The acceptance pass
 (acceptance.uncredited_switches) traces the paths with and without the move.
+
+Event identity (release 2.1, design 5.3): the traceback places a switch at one site of the stretch where the two
+states' genotypes are equal for the sample (or the sample has no evidence), and which site it picks there follows
+exact float ties. Removed events are therefore compared by (transition, evidence interval): every event's site is
+moved to the leftmost site of its interval (canonical_sites) before the set difference, using the alleles of the
+panel the path was traced on (with or without the move).
 """
 from __future__ import annotations
 
@@ -181,6 +187,45 @@ def sorted_events(events, count):
                 break
     for i in range(count):
         out[i] = events[order[i]]
+    return out
+
+
+@njit(cache=True, nogil=True)
+def canonical_sites(events, count, s, haps, leaves, logs, offsets, first, second, focal, p1, p2, rows,
+                    lo_site):
+    """A copy of one path's first `count` switch events (site, state before, state after) with every site moved to
+    the leftmost site of the event's evidence interval: lo + 1, lo the last site before it (lo_site - 1 when there is
+    none at or after lo_site) where sample s has evidence and the two states' genotypes differ. With focal >= 0
+    founder focal's rows are replaced on blocks [p1, p2) by `rows` (the panel with the move). Inside the interval the
+    two states have equal emissions, so the event is the same switch wherever the traceback placed it there."""
+    out = events[:count].copy()
+    lo_override = offsets[p1] if focal >= 0 else 0
+    hi_override = offsets[p2] if focal >= 0 else 0
+    for e in range(count):
+        j = events[e, 0]
+        x1, y1 = first[events[e, 1]], second[events[e, 1]]
+        x2, y2 = first[events[e, 2]], second[events[e, 2]]
+        lo = lo_site - 1
+        b = len(offsets) - 2
+        while b > 0 and offsets[b] > j - 1:
+            b -= 1
+        for i in range(j - 1, lo_site - 1, -1):
+            while b > 0 and offsets[b] > i:
+                b -= 1
+            if is_skipped(logs, s, i):
+                continue
+            if focal >= 0 and lo_override <= i < hi_override:
+                r = rows[b - p1]
+                own = leaves[b][r, i - offsets[b]]
+                d1 = (own if x1 == focal else haps[x1, i]) + (own if y1 == focal else haps[y1, i])
+                d2 = (own if x2 == focal else haps[x2, i]) + (own if y2 == focal else haps[y2, i])
+            else:
+                d1 = haps[x1, i] + haps[y1, i]
+                d2 = haps[x2, i] + haps[y2, i]
+            if d1 != d2:
+                lo = i
+                break
+        out[e, 0] = lo + 1
     return out
 
 

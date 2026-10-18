@@ -2462,17 +2462,20 @@ class WindowSolver:
 
     def coarse_window(self, X, fwd, bwd, i, j, frontier_bytes):
         """Proposals of every founder over L1 spans [i, j). A span's alphabet: the distinct row
-        tuples the founders use there, then the L1 context paths."""
+        tuples the founders use there and the L1 context paths, in content order (release 2.1,
+        design 5.3: the tuples sorted lexicographically, so the window programme's canonical-tie
+        order "incumbent, then ascending index" is incumbent, then content; 2.0: founder slots
+        first, in first-seen order)."""
         groups, context = self.coarse
         alphabets, lookups = [], []
         for unit in range(i, j):
             start, stop = groups[unit]
-            rows, lookup = [], {}
+            distinct = {}
             for row in [*X[:, start:stop], *context[unit]]:
-                key = np.ascontiguousarray(row, np.int64).tobytes()
-                if key not in lookup:
-                    lookup[key] = len(rows)
-                    rows.append(np.ascontiguousarray(row, np.int64))
+                row = np.ascontiguousarray(row, np.int64)
+                distinct.setdefault(row.tobytes(), row)
+            rows = sorted(distinct.values(), key=lambda row: tuple(int(v) for v in row))
+            lookup = {row.tobytes(): index for index, row in enumerate(rows)}
             alphabets.append(np.asarray(rows, np.int64))
             lookups.append(lookup)
         emissions = gather_macro(self.emissions, np.asarray(groups[i:j], np.int64), List(alphabets))

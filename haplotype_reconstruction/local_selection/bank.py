@@ -10,6 +10,16 @@ reads them). The path search starts from the latest source's cavity-best endpoin
 with the raw-discovery rule (released alleles, latent rows where withheld); the bank adds the
 raw latent rows, that start and the BIC-selected panel. Neither score replaces the path
 objective.
+
+Release 2.1 (noise stability): the BIC selection and each source's cavity-best endpoint are
+chosen by nested anchored tie classes of the block's ``nll`` quantum (the fixed-K workspace's
+BlockQuanta): the best class of the score, inside it the best class of the NLL, then fewer
+founders, then the canonical key (2.0 took a strict minimum of float-first keys, so panels whose
+hard-model NLLs are mathematically equal, e.g. differing only at symmetric-evidence cells, were
+picked by their last bits). The neighbourhood rounds stop unless the selection improves by more
+than the ``improvement`` quantum (2.0: 1e-9, at the noise scale); a budget-bound admission cuts
+the NLL tie-class order (discovery's ``sort_solutions``); the endpoints' release uses the block's
+quanta.
 """
 from __future__ import annotations
 
@@ -19,9 +29,10 @@ import numpy as np
 
 from ..discovery.cavity import CavityWorkspace, score_solutions
 from ..discovery.fixed_k.fit import fit_panels, prepare_workspace
-from ..discovery.panel import deduplicate, panel_key, unique_rows
+from ..discovery.panel import deduplicate, panel_key, sort_solutions, unique_rows
 from ..discovery.release import release_alleles
 from ..execution import claim_threads
+from ..maths.ties import NOISE_MOTION, TieCounter, census, census_enabled, improves, tie_classes
 from .fit import unique_rows as unique_integer_rows
 
 
@@ -103,8 +114,41 @@ class _Deferred:
     solution: object
 
 
+def nested_winner(entries, levels, *, counter=None, kind=""):
+    """The winner of scored bank entries (each with a ``solution``) under nested anchored tie
+    classes: ``levels`` = ((value, quantum, motion), ...), smaller values better. At each level the
+    best class (everything chained from the best value within the quantum) goes on to the next;
+    the last level's class is cut by (K, canonical key). A class wider than the width guard is
+    decided by value inside, exact value ties by (K, canonical key) (maths.ties). The candidates are
+    taken in (K, canonical key) order and every level orders by (K, canonical key) inside its
+    classes, so no outcome depends on the order the entries arrive in (admission order, or a
+    Python set's hash-seed order for a repeated source). Counts the decision in ``counter`` (inside
+    a tie: the first level's best class had several members; wide and boundary events of every
+    level)."""
+    candidates = sorted(entries, key=lambda entry: (entry.solution.k, entry.solution.key))
+    inside = False
+    wide = boundary = 0
+    for position, (value, quantum, motion) in enumerate(levels):
+        last = position == len(levels) - 1
+        classes = tie_classes([value(entry) for entry in candidates], quantum, motion=motion,
+                              secondary=[(entry.solution.k,) for entry in candidates],
+                              content=[entry.solution.key for entry in candidates])
+        wide += classes.wide_classes
+        boundary += len(classes.boundary_gaps)
+        members = classes.members(0)
+        if position == 0:
+            inside = len(members) > 1
+        if last or classes.wide or len(members) == 1:
+            winner = candidates[int(classes.order[0])]
+            break
+        candidates = [candidates[int(index)] for index in members]
+    if counter is not None:
+        counter.note(kind, inside_tie=inside, wide=wide, boundary=boundary)
+    return winner
+
+
 def _bic_search(likelihoods, observed, original_latent, proposal_panels, discovery_config,
-                bank_config):
+                bank_config, ties=None, census_key=None):
     """(BIC-selected solution, released cavity-best endpoint per source (None for an empty
     source), summary)."""
     model = discovery_config.model
@@ -114,6 +158,9 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
     likelihood[~observed] = 1.0 / 3.0
     sources, bank, _missing = complete_proposals(original_latent, proposal_panels)
     workspace = prepare_workspace(likelihood, observed, model)
+    quanta = workspace.quanta
+    motion = NOISE_MOTION["nll"]
+    collect = census_key is not None and census_enabled()
     cavity = CavityWorkspace(likelihood if np.all(active) else likelihood[active],
                              discovery_config.cavity)
     scored: dict = {}
@@ -128,9 +175,16 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
         solution = entry.solution
         return -0.5 * (solution.k * complexity - 2.0 * (-solution.nll))
 
-    def rank(entry):
-        solution = entry.solution
-        return (-selection_score(entry), solution.nll, solution.k, solution.key)
+    def select(round_label):
+        """The BIC-selected entry over everything admitted: classes of -selection_score, then of
+        the NLL, then (K, key)."""
+        entries = list(scored.values())
+        if collect:
+            census("ls.bank.bic", f"{census_key}/bank/{round_label}",
+                   sorted(-selection_score(entry) for entry in entries)[:8])
+        return nested_winner(entries, ((lambda entry: -selection_score(entry), quanta.nll, motion),
+                                       (lambda entry: entry.solution.nll, quanta.nll, motion)),
+                             counter=ties, kind="ls.bank.bic")
 
     def fit_and_score(panels, require_cavity=False):
         selected = state["selected"]
@@ -150,7 +204,8 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
             for panel in panels:
                 if len(panel):
                     keys.update(endpoint_keys.get(panel_key(panel), ()))
-            return tuple(scored[key] for key in keys if key in scored)
+            # Canonical key order (a set's iteration order depends on the hash seed).
+            return tuple(scored[key] for key in sorted(keys) if key in scored)
         start_limit = bank_config.start_backstop(k)
         if len(novel) > start_limit:
             state["budget_bound"] = True
@@ -166,7 +221,7 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
         room = max(0, bank_config.score_backstop(k) - len(scored))
         if len(pending) > room:
             state["budget_bound"] = True
-            pending = sorted(pending, key=lambda solution: solution.order())[:room]
+            pending = sort_solutions(pending, quanta)[:room]
         if require_cavity:
             for score in (score_solutions(cavity, pending, active) if pending else ()):
                 scored[score.solution.key] = score
@@ -177,16 +232,20 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
 
     # Each source separately first: fair source-only refits that protect every input basin.
     cavity_best = []
-    for panel in sources:
+    for index, panel in enumerate(sources):
         values = fit_and_score([panel], require_cavity=True)
         if not values and len(panel):
             key = panel_key(panel)
             values = (scored[key],) if key in scored else ()
-        cavity_best.append(min(values, key=lambda score: (
-            -score.log_score, score.solution.nll, score.solution.k, score.solution.key))
-            if values else None)
+        if values and collect:
+            census("ls.bank.cavity", f"{census_key}/bank/source{index}",
+                   sorted(-score.log_score for score in values)[:8])
+        cavity_best.append(nested_winner(
+            values, ((lambda score: -score.log_score, quanta.nll, motion),
+                     (lambda score: score.solution.nll, quanta.nll, motion)),
+            counter=ties, kind="ls.bank.cavity") if values else None)
     fit_and_score([bank])
-    selected = state["selected"] = min(scored.values(), key=rank)
+    selected = state["selected"] = select("r0")
     rounds = 0
     while True:
         if rounds >= bank_config.round_backstop(selected.solution.k):
@@ -194,9 +253,12 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
             break
         before = selected
         fit_and_score(_neighbours(selected.solution.haplotypes, bank))
-        selected = state["selected"] = min(scored.values(), key=rank)
+        selected = state["selected"] = select(f"r{rounds + 1}")
         rounds += 1
-        if selection_score(selected) <= selection_score(before) + bank_config.improvement_tolerance:
+        if collect:
+            census("ls.bank.stop", f"{census_key}/bank/stop{rounds}",
+                   (-selection_score(selected), -selection_score(before)))
+        if not improves(selection_score(selected), selection_score(before), quanta.improvement):
             break
         if len(scored) >= bank_config.score_backstop(selected.solution.k):
             state["budget_bound"] = True
@@ -213,7 +275,7 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
             claim_threads()
             _, _, calls = release_alleles(likelihood, solution.haplotypes, solution.assignments,
                                           observed, model.unknown_copy_penalty,
-                                          discovery_config.release)
+                                          discovery_config.release, quanta)
             releases[key] = calls
         return releases[key], solution.haplotypes
 
@@ -224,18 +286,20 @@ def _bic_search(likelihoods, observed, original_latent, proposal_panels, discove
 
 
 def candidate_bank(likelihoods, observed, original_latent, proposal_panels, discovery_config,
-                   bank_config, incumbent_panel=None):
+                   bank_config, incumbent_panel=None, *, ties=None, census_key=None):
     """(start panel, bank rows, summary or None) of a block's path search.
 
     Without proposals (the initial round) the start is the raw latent panel and the bank its
-    rows. An incumbent (the previous round's selected panel) contributes all its rows.
+    rows. An incumbent (the previous round's selected panel) contributes all its rows. ``ties``:
+    a maths.ties.TieCounter for the bank's tie decisions; ``census_key``: the block's census key.
     """
     original_latent = np.asarray(original_latent, dtype=np.int64)
     proposal_panels = list(proposal_panels)
     summary = None
     if proposal_panels:
         selected, endpoints, summary = _bic_search(
-            likelihoods, observed, original_latent, proposal_panels, discovery_config, bank_config)
+            likelihoods, observed, original_latent, proposal_panels, discovery_config, bank_config,
+            ties, census_key)
         calls, latent = next(value for value in reversed(endpoints) if value is not None)
         start = np.where(calls >= 0, calls, latent)
         bank = unique_integer_rows(np.vstack((original_latent, start, selected.haplotypes)))

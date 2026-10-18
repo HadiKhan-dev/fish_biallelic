@@ -121,7 +121,10 @@ def check_run(config: RunConfig) -> PreparedRun:
     from ..pedigree import tier_b_minimum_contigs
     paths = RunPaths.from_config(config)
     cores = resolve_cores(config)
-    source = observation_source(config)
+    # One canonical sample order for the whole run (release 2.1, design A-11): applied here, after any wrapper a test
+    # harness puts around observation_source, so every record's sample axis is the samples sorted by name.
+    from ..evidence.sample_order import canonical_order_source
+    source = canonical_order_source(observation_source(config))
     samples = eligibility = None
     if config.input.kind == "vcf":
         source.check()
@@ -309,14 +312,15 @@ def _reconstruct(store, contigs, context, cores, config, n_samples, paths) -> No
 
 def _genome_wide(store, contigs, sample_ids, prepared: PreparedRun, budget, output) -> None:
     """Pedigree, founder refit, family phase, recombination and the export (each stage resumes and marks itself
-    complete)."""
+    complete), then the run's tie report."""
     from .. import founder_refit, pedigree
     from ..family_phase.stage import run as phase_families
     from ..recombination.stage import run as map_recombination
     configs, maps = prepared.configs, prepared.genetic_maps
     with execution.stage_timer("pedigree"):
         product = pedigree.run(store, contigs, sample_ids, prepared.eligibility, configs.pedigree, maps, budget)
-    publish("write_pedigree", output, product)
+    from ..evidence.sample_order import store_input_order
+    publish("write_pedigree", output, product, input_ids=store_input_order(store))
     with execution.stage_timer("founder_refit"):
         summaries = founder_refit.run(store, contigs, configs.founder_refit, budget)
     publish("write_founder_refit", output, summaries)
@@ -333,6 +337,8 @@ def _genome_wide(store, contigs, sample_ids, prepared: PreparedRun, budget, outp
         with execution.stage_timer("export"):
             export_stage.run(store, contigs, configs.export, output, budget, synthetic=synthetic,
                              reference=None if synthetic else reference_vcf(store, output, None))
+    # Decisions taken inside a tie and the recorded ambiguity flags (docs/methods/ties.md), from the records.
+    publish("write_ties", output, store, contigs, product.tie_events)
 
 
 __all__ = ["PRELOAD_MODULES", "PreparedRun", "RunPaths", "RunResult", "check_run", "run_pipeline"]

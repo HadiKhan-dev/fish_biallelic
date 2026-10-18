@@ -27,12 +27,19 @@ concurrent refits are evaluated in seed order; caches never change results; so t
 panel does not depend on thread counts. The Numba team is re-read from the budget at the
 boundaries where the search changes phase (each full score or painting chunk, each panel's
 forwards, each certify pass); a concurrent refit runs on its share of the budget.
+
+Ties (release 2.1, design 5.4): the panel is kept in canonical order (its paths sorted, tie_rules.sort_panel) after
+every change, so every slot tie-break (painting ties to the lower slot, proposal descriptions, the death candidate,
+main coverers) is a content rule; the pool comes from the beam in tie-class order. Every choice between candidates
+on a continuous value (start panel, tier-1 winner, the top proposals of each kind, tier-2 winner, death candidate,
+birth and seed choices) uses anchored tie classes of the join log likelihood (quantum
+tie_rules.quantum("join_ll", |LL|)) with the candidate panel's content (its sorted paths) deciding inside a class;
+a truncation keeps every proposal of the class it cuts (at most twice the budget).
 """
 from __future__ import annotations
 
 from contextlib import ExitStack
 from dataclasses import dataclass, field, fields as dataclass_fields
-from heapq import nsmallest
 import threading
 import time
 from typing import Callable, Mapping, Sequence
@@ -41,6 +48,8 @@ import numba
 import numpy as np
 
 from .. import count_rule
+from ...maths import ties
+from .. import tie_rules
 from . import emissions, objective
 from .certify import PanelForwards
 from .count_step import CountStep, main_coverer
@@ -59,6 +68,11 @@ from .proposals import (boundary_proposals, boundary_vote_matrix, candidate_nove
 # is the reported pool backstop.
 SWEEP_BACKSTOP_BASE = 100
 SWEEP_BACKSTOP_PER_ROW = 20
+# Count changes (decisions plus seed swaps) per search before births and seed swaps stop (a reported backstop, never
+# expected to bind: normal searches make at most a few count changes; release 2.1 guard against count cycles that
+# return through seed swaps, which the born-path freeze cannot see).
+COUNT_BACKSTOP_BASE = 50
+COUNT_BACKSTOP_PER_ROW = 10
 POOL_QUOTA_DOUBLINGS = 4
 POOL_EXTENDED_DOUBLINGS = 6
 # Bytes per path of the pool's beam lists and move arrays per input block and founder pair (base
@@ -125,6 +139,10 @@ class CountCensus:
     ladder_births: births accepted at a pool-saturation rung; final_paths_failing_death_test:
     final paths that would fail their own death test (None when the search stopped at the sweep
     backstop); seconds, seed_seconds: wall time of the count steps and of their seed refits.
+    state_revisits (release 2.1): count steps that would have returned to a panel this search already
+    held after a count change (a count cycle through births, deaths and seed swaps; births and seed
+    swaps then stop); count_backstop_reached: the search reached COUNT_BACKSTOP count changes and
+    stopped births and seed swaps (reported, never expected).
     """
 
     decisions: int = 0
@@ -145,6 +163,8 @@ class CountCensus:
     final_paths_failing_death_test: int | None = None
     seconds: float = 0.0
     seed_seconds: float = 0.0
+    state_revisits: int = 0
+    count_backstop_reached: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +191,8 @@ class JoinSummary:
     exact scores the count step made; pool_original / pool_final / pool_largest: candidate pool
     sizes; certified: no move improves the panel and the count rule is quiescent at every rung;
     backstop_reached / pool_backstop: the search stopped at a backstop (not certified).
+    tie_events: maths.ties.TieCounter record of the join's tie-class decisions (beam cuts and search choices):
+    {kind: {decisions, inside_tie, wide, boundary}}.
     events: the search's records in order (tier-1 sweeps, count deaths / seeds / births, tier-2
     passes, pool-saturation rungs), plain JSON dicts as the reports table lists them.
     """
@@ -201,6 +223,7 @@ class JoinSummary:
     backstop_reached: bool
     pool_backstop: bool
     events: tuple[dict, ...] = field(default=(), repr=False)
+    tie_events: dict = field(default_factory=dict)
 
     @property
     def ladder_extended(self) -> bool:
@@ -232,7 +255,7 @@ class JoinSummary:
             pool_sizes=dict(original=self.pool_original, final=self.pool_final,
                             largest=self.pool_largest),
             certified=self.certified, backstop_reached=self.backstop_reached,
-            pool_backstop=self.pool_backstop)
+            pool_backstop=self.pool_backstop, tie_events=_plain(self.tie_events))
 
     def records(self) -> list[dict]:
         """Every record of the search in order, the closing record last (one reports-table row
@@ -263,14 +286,15 @@ class JoinSummary:
             ladder_top=int(record["ladder_top"]), quota_backstop=int(record["quota_backstop"]),
             beam_seconds=float(record["beam_seconds"]),
             count=CountCensus(**{item.name: record["count"][item.name]
-                                 for item in dataclass_fields(CountCensus)}),
+                                 for item in dataclass_fields(CountCensus) if item.name in record["count"]}),
             count_exact_scores=int(record["count_exact_scores"]),
             count_exact_sample_scores=int(record["count_exact_sample_scores"]),
             pool_original=int(pools["original"]), pool_final=int(pools["final"]),
             pool_largest=int(pools["largest"]), certified=bool(record["certified"]),
             backstop_reached=bool(record["backstop_reached"]),
             pool_backstop=bool(record["pool_backstop"]),
-            events=tuple(_plain(event) for event in record.get("events", ())))
+            events=tuple(_plain(event) for event in record.get("events", ())),
+            tie_events=_plain(record.get("tie_events", {})))
 
 
 @dataclass(frozen=True)
@@ -278,7 +302,7 @@ class JoinOutcome:
     """The selected panel of one join.
 
     paths: int32[K_out, n]; output founder f copies founder (local row) paths[f, j] of input
-        block j. The founder order is the search's panel order (later levels' tie rules read it).
+        block j, in canonical order (the hierarchy publishes the prepared-row form in canonical order).
     log_likelihood: the join objective of the panel (sum over the batch's samples of V_s, nats).
     summary: what the search did.
     """
@@ -295,7 +319,8 @@ def summarise(summaries: Sequence[JoinSummary]) -> dict:
                    pool_backstop=0, extended_ladders=0, largest_pool=0, births=0, deaths=0,
                    pure_mosaic_deaths=0, ambiguous=0, frozen=0, cycles_undecided=0,
                    most_decisions=0, start_rows=0, final_rows=0, seed_births=0, seed_swaps=0,
-                   seed_refits=0, ladder_births=0, trap_blocks=0, failing_final=0)
+                   seed_refits=0, ladder_births=0, trap_blocks=0, failing_final=0, state_revisits=0,
+                   count_backstops=0)
     for item in summaries:
         count = item.count
         summary['searched'] += 1
@@ -323,6 +348,8 @@ def summarise(summaries: Sequence[JoinSummary]) -> dict:
         summary['ladder_births'] += count.ladder_births
         summary['trap_blocks'] += count.trap_indicators > 0
         summary['failing_final'] += count.final_paths_failing_death_test or 0
+        summary['state_revisits'] += count.state_revisits
+        summary['count_backstops'] += bool(count.count_backstop_reached)
     return summary
 
 
@@ -344,7 +371,8 @@ def census_lines(summaries: Sequence[JoinSummary]) -> list[str]:
         "({cycles_undecided} undecided cycles), at most {most_decisions} decisions in one "
         "super-block; duplicate seeds: {seed_refits} refits, {seed_births} births, {seed_swaps} "
         "swaps; {ladder_births} saturation births; {trap_blocks} super-blocks with chimera-trap "
-        "indicators; {failing_final} final paths fail their own death test".format(**summary),
+        "indicators; {failing_final} final paths fail their own death test; {state_revisits} count-state "
+        "revisits, {count_backstops} count backstops".format(**summary),
     ]
 
 
@@ -406,6 +434,11 @@ def _improves(new_ll, old_ll) -> bool:
     return 2.0 * (new_ll - old_ll) > max(1e-8, 1e-9 * (1.0 + 2.0 * abs(old_ll)))
 
 
+def _improvement_distance(new_ll, old_ll) -> float:
+    """Signed distance (nats of LL) of a rise to the improvement threshold of :func:`_improves`."""
+    return (new_ll - old_ll) - 0.5 * max(1e-8, 1e-9 * (1.0 + 2.0 * abs(old_ll)))
+
+
 def _paths(beam) -> list[tuple[int, ...]]:
     """Distinct beam paths (tuples of Python ints) in beam order."""
     return list(dict.fromkeys(tuple(int(row) for row in path) for path, _ in beam))
@@ -423,9 +456,17 @@ class PanelSearch:
     birth bounds by path set, beam re-runs), which never change results.
     """
 
-    def __init__(self, inputs, beam, beam_runner, *, config, count_rule_config, cost_scale, budget):
+    def __init__(self, inputs, beam, beam_runner, *, config, count_rule_config, cost_scale, budget,
+                 label=None, counter=None):
         self.config = config
         self.budget = budget
+        # The batch's census label (None: no valley census) and its tie-class decision counter.
+        self.label = label
+        self.tie_counter = counter if counter is not None else tie_rules.SharedCounter()
+        self._tie_lock = threading.Lock()      # concurrent seed refits record decisions too
+        self._sweeps_run = 0
+        self._certify_runs = 0
+        self._count_steps = 0
         self.beam_runner = beam_runner
         self._local = threading.local()
         self.blocks = len(inputs.blocks)
@@ -446,7 +487,8 @@ class PanelSearch:
         self.seed_refits = int(count_rule_config.ranked_refits)
         self.counter = CountStep(layout=self.layout, penalty=self.penalty, cost=self.cost,
                                  samples=self.samples, geometry=self.geometry,
-                                 config=count_rule_config, score=self._score)
+                                 config=count_rule_config, score=self._score,
+                                 tie_counter=self.tie_counter, label=label)
         self.evaluations = 0
         self._evaluations_lock = threading.Lock()
         self.original_pool = candidates
@@ -463,17 +505,22 @@ class PanelSearch:
         self.born = set()
         self.births_frozen = False
         self.sweep_backstop = SWEEP_BACKSTOP_BASE + SWEEP_BACKSTOP_PER_ROW * max(self.block_sizes)
+        self.count_backstop = COUNT_BACKSTOP_BASE + COUNT_BACKSTOP_PER_ROW * max(self.block_sizes)
+        # Canonical panel states held after the start and after every count change (count-cycle guard).
+        self.count_states = set()
         self.events = []
         self.count = dict(decisions=0, births=0, pool_births=0, seed_births=0, seed_swaps=0,
                           deaths=0, pure_mosaic_deaths=0, ambiguous=0, births_frozen=False,
                           start_size=0, cycles=0, cycles_undecided=0, trap_indicators=0,
                           seed_refits=0, ladder_births=0, final_paths_failing_death_test=None,
-                          seconds=0.0, seed_seconds=0.0)
-        # The start: the anchor-covering panel of largest likelihood. It only seeds the search;
-        # the count rule decides the panel size.
+                          seconds=0.0, seed_seconds=0.0, state_revisits=0, count_backstop_reached=False)
+        # The start: the anchor-covering panel of largest likelihood (tie classes of the join log
+        # likelihood, the panel's content inside a class). It only seeds the search; the count rule
+        # decides the panel size.
         self.initialization = []
         self.selected = None
         initial_panels = set()
+        trials = []
         for anchor in range(self.blocks):
             seen = set()
             trial = []
@@ -481,16 +528,19 @@ class PanelSearch:
                 if path[anchor] not in seen:
                     trial.append(path)
                     seen.add(path[anchor])
-            signature = tuple(sorted(trial))
+            signature = tie_rules.panel_key(trial)
             if signature in initial_panels:
                 continue
             initial_panels.add(signature)
             trial_scores = self._score(trial)
             trial_ll = float(trial_scores.sum())
             self.initialization.append(InitialPanel(anchor, len(trial), trial_ll))
-            if self.selected is None or trial_ll > self.likelihood + 1e-8:
-                self.selected, self.baseline_scores, self.likelihood = list(trial), trial_scores, trial_ll
-                self.selected_anchor = anchor
+            trials.append((trial_ll, signature, anchor, trial_scores))
+        best = self._class_winner('assembly.join_start', trials, lambda item: item[0], lambda item: item[1],
+                                  census_key='start', quantum_kind='join_ll_wide')
+        self._set_panel(best[1], best[3], best[0])
+        self.selected_anchor = best[2]
+        self.count_states.add(tie_rules.panel_key(self.selected))
         self.start_size = len(self.selected)
         self.count['start_size'] = self.start_size
         # Panel size at the start and after every count change, and the changes that deleted a
@@ -499,6 +549,55 @@ class PanelSearch:
         self.cleanup_steps = set()
         self.static_totals = [self.layout.block(j).sum(axis=3) for j in range(self.blocks)]
         self._set_pool(self.original_pool)
+
+    # -- tie classes -----------------------------------------------------------------------------
+
+    def _quantum(self, scale=None) -> float:
+        """The join's tie quantum at the scale of ``scale`` (default: the current log likelihood)."""
+        return tie_rules.quantum('join_ll', self.likelihood if scale is None else scale)
+
+    def _census(self, kind, key, values):
+        if self.label is not None and ties.census_enabled():
+            with self._tie_lock:
+                ties.census(kind, f"{self.label}/{key}", values)
+
+    def _tie_add(self, kind, result, decided_inside=None):
+        with self._tie_lock:
+            self.tie_counter.add(kind, result, decided_inside=decided_inside)
+
+    def _class_order(self, kind, items, value, content, *, census_key=None, scale=None,
+                     quantum_kind='join_ll'):
+        """``items`` in tie-class order of value(item), descending (log likelihoods and gains: higher is
+        better), content(item) deciding inside a class; returns (ordered items, TieClasses). The quantum
+        is quantum_kind's at ``scale`` (join_ll: default the current log likelihood; join_proxy: default
+        the largest |value|)."""
+        items = list(items)
+        values = [float(value(item)) for item in items]
+        if scale is None and quantum_kind == 'join_ll':
+            scale = getattr(self, 'likelihood', None)
+        if scale is None:
+            finite = [abs(v) for v in values if np.isfinite(v)]
+            scale = max(finite) if finite else 0.0
+        quantum = tie_rules.quantum(quantum_kind, scale)
+        motion = tie_rules.motion(quantum_kind, scale)
+        result = ties.tie_classes(values, quantum, content=[content(item) for item in items], descending=True)
+        tie_rules.add_decision(self.tie_counter, kind, result, values, quantum, motion, descending=True)
+        if census_key is not None:
+            # Census values: smaller is better (negated log likelihoods), the decision's candidates.
+            self._census(kind, census_key, [-v for v in values])
+        return [items[i] for i in result.order], result
+
+    def _class_winner(self, kind, items, value, content, *, census_key=None, scale=None,
+                      quantum_kind='join_ll'):
+        ordered, _ = self._class_order(kind, items, value, content, census_key=census_key, scale=scale,
+                                       quantum_kind=quantum_kind)
+        return ordered[0] if ordered else None
+
+    def _set_panel(self, panel, scores, likelihood):
+        """The search's panel, in canonical order (paths sorted), with its per-sample scores."""
+        self.selected = tie_rules.sort_panel(panel)
+        self.baseline_scores = scores
+        self.likelihood = float(likelihood)
 
     # -- threads -------------------------------------------------------------------------------
 
@@ -624,12 +723,14 @@ class PanelSearch:
     # -- tier 2 and the saturation rungs ----------------------------------------------------------
 
     def _certify(self, panel, pool, pool_offset, structural, pool_capacity, panel_ll=None,
-                 slots=None, refit_scores=None):
+                 slots=None, refit_scores=None, key=None):
         """Bound every same-count move of N(P, pool) (or only replacements by pool paths).
 
         slots: a seed refit; only moves changing these rows, which are exempt from the
         novelty rule of same-count moves. refit_scores: the exact one-path scores shared by
-        the seed refits of one count step. Returns (best move or None, record, forwards)."""
+        the seed refits of one count step. key: the pass's census key. The best move is chosen
+        by tie classes of its exact change (the moved panel's content inside a class). Returns
+        (best move or None, record, forwards)."""
         started = time.perf_counter()
         panel_ll = self.likelihood if panel_ll is None else panel_ll
         rows = np.asarray(panel, dtype=np.int64)
@@ -653,7 +754,15 @@ class PanelSearch:
         cache = {}
         sparse = dict(scores=0, samples=0)
 
+        scored_changes = []
+
         def exact_move(trial, move):
+            result = _exact_move(trial, move)
+            if key is not None:
+                scored_changes.append(result[1][0] - panel_ll)
+            return result
+
+        def _exact_move(trial, move):
             # A survivor replacing one path is scored exactly per sample where its bound exceeds
             # V_s(P minus f) (PanelForwards.replacement_scores); other moves by the full score.
             row = replaced_row(moves, move)
@@ -683,12 +792,24 @@ class PanelSearch:
                 refit_scores[shared] = result
             return result
 
+        q_ll = self._quantum(panel_ll)
+
+        def choose(entries):
+            # Changes are in units of the join score -2 LL: the class value is the LL gain.
+            return self._class_winner('assembly.join_tier2', entries, lambda entry: -0.5 * entry[0],
+                                      lambda entry: tie_rules.panel_key(entry[3]),
+                                      census_key=key, scale=panel_ll)
+
         best_move, survivors, exact_scores = best_improvement(
             bounds, moves.canonical,
             lambda move: _materialize(moves.description(move), panel, combined),
             exact_move, -2.0 * panel_ll, signature=lambda trial: tuple(sorted(trial)),
             admissible=lambda trial: _admissible(panel, trial, self.geometry, self.near_identity,
-                                                 exempt))
+                                                 exempt),
+            reach=2.0 * ties.WIDE_CLASS_QUANTA * q_ll, choose=choose)
+        if scored_changes:
+            self._census('assembly.join_improve', f"{key}/t2",
+                         [_improvement_distance(panel_ll + gain, panel_ll) for gain in scored_changes])
         record = dict(panel_size=len(panel), pool=len(combined), pool_paths_tested=added,
                       neighbourhood=moves.counts(), moves=len(moves), survivors=int(survivors),
                       exact_scores=int(exact_scores), sparse_exact_scores=sparse['scores'],
@@ -707,9 +828,7 @@ class PanelSearch:
             if old_path in self.born and old_path != new_path:
                 self.born.discard(old_path)
                 self.born.add(new_path)
-        self.selected = list(new_panel)
-        self.baseline_scores = new_scores
-        self.likelihood = float(new_scores.sum())
+        self._set_panel(new_panel, new_scores, float(new_scores.sum()))
 
     def _proposal_scores(self, panel, trial):
         """Exact per-sample scores of a tier-1 proposal: one that replaces one path is scored per
@@ -757,9 +876,35 @@ class PanelSearch:
         novelty, novelty_scored = candidate_novelty(local, candidate_array, self.penalty,
                                                     panel_scores, eligible_mask,
                                                     workspace=self.candidate_workspace)
-        novel = [c for c in np.argsort(-novelty, kind='stable')
-                 if candidates[c] not in panel_set and novelty[c] > 0]
-        for c in novel[:quota]:
+        self._sweeps_run += 1
+        sweep_key = f"s{self._sweeps_run}"
+        # Novel candidates: novelty beyond the band at its exact zero (a rounding-level positive novelty,
+        # equal scores reached by another summation order, is no novelty; band = the join_proxy floor),
+        # in tie-class order of their novelty (content: the candidate path), the class the budget cuts
+        # kept whole (at most twice the budget).
+        band = tie_rules.quantum('join_proxy')
+        novel_items = [c for c in np.flatnonzero(eligible_mask).tolist()
+                       if candidates[c] not in panel_set and novelty[c] > band]
+        near = sorted(float(novelty[c]) for c in np.flatnonzero(eligible_mask).tolist()
+                      if 0.0 < novelty[c] <= 1e3 * band)
+        with self._tie_lock:
+            # The band at the exact zero of a non-novel candidate's novelty (owner rule A-7).
+            self.tie_counter.note('assembly.join_novelty.band', inside_tie=bool(near and near[0] <= band))
+        if near:
+            self._census('assembly.join_novelty.band', f"{sweep_key}", near[:16])
+        novel = []
+        if novel_items:
+            scale = float(max(novelty[c] for c in novel_items))
+            values = [float(novelty[c]) for c in novel_items]
+            quantum = tie_rules.quantum('join_proxy', scale)
+            result = ties.tie_classes(values, quantum, content=[candidates[c] for c in novel_items],
+                                      descending=True)
+            tie_rules.add_decision(self.tie_counter, 'assembly.join_novelty', result, values, quantum,
+                                   tie_rules.motion('join_proxy', scale), descending=True, cut=quota)
+            novel = tie_rules.truncate(novel_items, result, quota)
+            self._census('assembly.join_novelty', f"{sweep_key}",
+                         sorted(-float(novelty[c]) for c in novel_items)[:4 * quota])
+        for c in novel:
             similarity = np.mean(local == candidate_array[c], axis=1)
             for founder in np.argsort(-similarity, kind='stable')[:2]:
                 proposals['novel_replace'].append((float(novelty[c] * (.5 + similarity[founder])),
@@ -769,10 +914,12 @@ class PanelSearch:
         gains = np.zeros((k, len(candidates)))
         for b in range(blocks):
             gains += fields[b][:, candidate_array[:, b]]
-        proposals['static_replace'] = replacement_proposals(static_gains, eligible, quota)
-        proposals['replace'] = replacement_proposals(gains, eligible, quota)
+        # Generators return twice the budget: the per-kind cut below keeps the tie class it cuts.
+        wide_quota = 2 * quota
+        proposals['static_replace'] = replacement_proposals(static_gains, eligible, wide_quota)
+        proposals['replace'] = replacement_proposals(gains, eligible, wide_quota)
         proposal_counts['replace'] = proposal_counts['static_replace'] = k * len(eligible)
-        proposals['local'], proposal_counts['local'] = local_proposals(fields, local, quota)
+        proposals['local'], proposal_counts['local'] = local_proposals(fields, local, wide_quota)
         proposal_counts['onesided'] = (blocks - 1) * k * (k - 1)
         proposal_counts['splice'] = (blocks - 1) * k * (k - 1) // 2
         proposal_counts['switch_splice'] = proposal_counts['splice']
@@ -782,12 +929,13 @@ class PanelSearch:
         for boundary in range(blocks - 1, 0, -1):
             preference += fields[boundary][:, local[:, boundary]]
             pair_gain += corrections[boundary]
-            proposals['onesided'].extend(boundary_proposals(preference, boundary, quota, 'onesided'))
+            proposals['onesided'].extend(boundary_proposals(preference, boundary, wide_quota,
+                                                            'onesided'))
             delta = preference + preference.T + pair_gain
-            proposals['splice'].extend(boundary_proposals(delta, boundary, quota, 'splice'))
+            proposals['splice'].extend(boundary_proposals(delta, boundary, wide_quota, 'splice'))
             votes = boundary_vote_matrix(exploratory, int(offsets[boundary]), k)
             switch_gain = votes + votes.T - np.diag(votes)[:, None] - np.diag(votes)[None, :]
-            proposals['switch_splice'].extend(boundary_proposals(switch_gain, boundary, quota,
+            proposals['switch_splice'].extend(boundary_proposals(switch_gain, boundary, wide_quota,
                                                                  'splice'))
             permutation = greedy_permutation(votes)
             if np.any(permutation != np.arange(k)):
@@ -812,10 +960,24 @@ class PanelSearch:
         boundary_acceptances = []
         scored = set()
         current_signature = tuple(sorted(panel))
+        improving_trials = []
+        threshold_distances = []
         for kind, items in proposals.items():
-            # Only q proposals were ever considered, before de-duplication.
-            # Stable top-q selection preserves those exact edits and tie order.
-            ranked = nsmallest(quota, items, key=lambda item: (-item[0], item[1]))
+            # The top q proposals of the kind before de-duplication: tie classes of their proxy gains
+            # (content: the edit description, slots and pool indices being content ranks), the class
+            # the budget cuts kept whole (at most 2q).
+            ranked = []
+            if items:
+                scale = max(abs(float(item[0])) for item in items)
+                values = [float(item[0]) for item in items]
+                quantum = tie_rules.quantum('join_proxy', scale)
+                result = ties.tie_classes(values, quantum, content=[item[1] for item in items], descending=True)
+                tie_rules.add_decision(self.tie_counter, 'assembly.join_proposals', result, values, quantum,
+                                       tie_rules.motion('join_proxy', scale), descending=True, cut=quota)
+                ranked = tie_rules.truncate(items, result, quota)
+                if len(items) > quota:
+                    self._census('assembly.join_proposals', f"{sweep_key}/{kind}",
+                                 sorted(-float(item[0]) for item in items)[:wide_quota])
             evaluated_by_kind[kind] = 0
             for proposal_rank, (gain, description) in enumerate(ranked, 1):
                 trial = _materialize(description, panel, candidates)
@@ -832,10 +994,21 @@ class PanelSearch:
                 evaluated_by_kind[kind] += 1
                 evaluated.append((float(trial_ll), str(description)))
                 improving = _improves(trial_ll, panel_ll)
+                threshold_distances.append(_improvement_distance(trial_ll, panel_ll))
                 if improving and proposal_rank == quota:
                     boundary_acceptances.append(kind)
-                if improving and (best is None or trial_ll > best[0]):
-                    best = (trial_ll, trial, description, gain, trial_scores)
+                if improving:
+                    improving_trials.append((trial_ll, trial, description, gain, trial_scores, signature))
+        # The winner: tie classes of the improving trials' log likelihoods, their content (sorted
+        # paths) inside a class (base: the first evaluated of the maximum).
+        if improving_trials:
+            best = self._class_winner('assembly.join_tier1', improving_trials, lambda item: item[0],
+                                      lambda item: item[5], census_key=f"{sweep_key}/winner",
+                                      scale=panel_ll)[:5]
+        if threshold_distances:
+            # Valley census of the improvement threshold (a continuous threshold: the distances of the
+            # evaluated trials' gains to it, in nats; positive = improving).
+            self._census('assembly.join_improve', f"{sweep_key}/t1", threshold_distances)
         leading = sorted([(float(panel_ll), "current panel"), *evaluated], reverse=True)[:2]
         record = dict(
             panel_size=k, candidate_pool=len(candidates),
@@ -870,10 +1043,13 @@ class PanelSearch:
         active = list(range(len(states)))
         candidates = self.candidates
 
+        step = self._count_steps
+
         def certify_pass(index):
-            panel, _, panel_ll, slots, _ = states[index]
+            panel, _, panel_ll, slots, passes = states[index]
             return self._certify(panel, candidates, 0, True, len(candidates) + 1,
-                                 panel_ll=panel_ll, slots=slots, refit_scores=refit_scores)[:2]
+                                 panel_ll=panel_ll, slots=slots, refit_scores=refit_scores,
+                                 key=f"c{step}/seed{seeds[index]}/p{len(passes)}")[:2]
         for _ in range(self.sweep_backstop):
             if not active:
                 break
@@ -917,8 +1093,11 @@ class PanelSearch:
         deleting a path without sequence of its own is not a decision)."""
         count = self.count
         changed = False
+        deaths = 0
         while True:
-            outcome = self.counter.deletion(self.selected, forwards, self.baseline_scores)
+            outcome = self.counter.deletion(self.selected, forwards, self.baseline_scores,
+                                            key=f"c{self._count_steps}/death{deaths}")
+            deaths += 1
             if outcome is None:
                 break
             record, rest, values = outcome
@@ -943,7 +1122,8 @@ class PanelSearch:
             count['deaths'] += 1
             count['pure_mosaic_deaths'] += record['pure_mosaic']
             count['ambiguous'] += record['ambiguous']
-            self.selected, self.baseline_scores, self.likelihood = rest, values, float(values.sum())
+            self._set_panel(rest, values, float(values.sum()))
+            self._note_count_state('death')
             self.sizes.append(len(self.selected))
             if record['pure_mosaic']:
                 self.cleanup_steps.add(len(self.sizes) - 1)
@@ -955,6 +1135,7 @@ class PanelSearch:
 
     def _count_step(self, forwards, pool=None, seeds=False) -> bool:
         started = time.perf_counter()
+        self._count_steps += 1
         try:
             return self._count_decision(forwards, pool, seeds)
         finally:
@@ -971,10 +1152,18 @@ class PanelSearch:
             pool_paths = self.candidates
         else:
             pool_paths = pool
+        if not self.births_frozen and count['decisions'] + count['seed_swaps'] >= self.count_backstop:
+            # Reported backstop: births and seed swaps stop (deaths still decided, panel moves continue).
+            self.births_frozen = True
+            count['count_backstop_reached'] = True
+            self.events.append(dict(stage='count_backstop', changes=count['decisions'] + count['seed_swaps'],
+                                    panel_size=len(self.selected)))
+            print(f"  [panel search] count backstop {self.count_backstop} reached (panel "
+                  f"{len(self.selected)}): births and seed swaps stop", flush=True)
         if self.births_frozen:
             return False
         record, larger_panel, values, indicators = self.counter.birth(
-            self.selected, pool_paths, forwards, self.baseline_scores)
+            self.selected, pool_paths, forwards, self.baseline_scores, key=f"c{self._count_steps}")
         count['trap_indicators'] = max(count['trap_indicators'], record['trap_indicators'])
         best = None if larger_panel is None else (float(values.sum()), larger_panel, values, record,
                                                   'pool')
@@ -986,13 +1175,28 @@ class PanelSearch:
             if len(self.selected) <= self.seed_refits:
                 chosen = list(range(len(self.selected)))      # every seed when k <= r
             else:
+                # The strongest indicators (tie classes of their bound gains, the class the budget
+                # cuts kept whole), then their exact gains in tie-class order (content inside).
+                screened = indicators[:3 * self.seed_refits]
+                if len(indicators) > len(screened):
+                    scale = max(abs(item[0]) for item in indicators)
+                    bound_gains = [item[0] for item in indicators]
+                    quantum = tie_rules.quantum('join_proxy', scale)
+                    result = ties.tie_classes(bound_gains, quantum, content=[item[1] for item in indicators],
+                                              descending=True)
+                    tie_rules.add_decision(self.tie_counter, 'assembly.join_seed_screen', result, bound_gains,
+                                           quantum, tie_rules.motion('join_proxy', scale), descending=True,
+                                           cut=3 * self.seed_refits)
+                    screened = tie_rules.truncate(indicators, result, 3 * self.seed_refits)
                 strongest = []
-                for _, path in indicators[:3 * self.seed_refits]:
+                for _, path in screened:
                     gain = self.counter.total_gain(self.selected, path, forwards,
                                                    self.baseline_scores)
                     if gain is not None:
-                        strongest.append((-gain, path))
-                strongest.sort(key=lambda item: item[0])
+                        strongest.append((gain, path))
+                if strongest:
+                    strongest, _ = self._class_order('assembly.join_seed_rank', strongest,
+                                                     lambda item: item[0], lambda item: item[1])
                 chosen = []
                 for _, path in strongest:
                     seed = main_coverer(self.selected, path)
@@ -1005,8 +1209,11 @@ class PanelSearch:
             # the same one-path moves (above all replace(seed, c) = P + c): each is scored once
             # (its value does not depend on the refit that scored it).
             refits = self._refit_seeds(chosen, {})
-            settles = self._concurrent(lambda refit: self.counter.settle(refit[0], refit[1]),
-                                       refits)
+            step = self._count_steps
+            settles = self._concurrent(
+                lambda item: self.counter.settle(item[1][0], item[1][1], key=f"c{step}/seed{item[0]}"),
+                list(zip(chosen, refits)))
+            candidates = []
             for seed, (_, _, _, used), (settled, settled_scores, settle_record, survives) in zip(
                     chosen, refits, settles):
                 count['seed_refits'] += 1
@@ -1017,14 +1224,27 @@ class PanelSearch:
                                    settle=settle_record)
                 self.events.append(dict(stage='count_seed', **seed_record))
                 if (survives and len(settled) >= len(self.selected)
-                        and _improves(settled_ll, self.likelihood)
-                        and (best is None or settled_ll > best[0])):
-                    best = (settled_ll, settled, settled_scores, seed_record, 'seed')
+                        and _improves(settled_ll, self.likelihood)):
+                    candidates.append((settled_ll, settled, settled_scores, seed_record, 'seed'))
+            if candidates:
+                # The best surviving refit: tie classes of its log likelihood, the settled panel's
+                # content inside a class (base: the first seed of the maximum).
+                best = self._class_winner('assembly.join_seed', candidates, lambda item: item[0],
+                                          lambda item: tie_rules.panel_key(item[1]),
+                                          census_key=f"c{step}/seed")
             count['seed_seconds'] += time.perf_counter() - seed_started
         self.events.append(dict(stage='count_birth', **record))
         if best is None:
             return False
         new_ll, new_panel, new_scores, new_record, source = best
+        if tie_rules.panel_key(new_panel) in self.count_states:
+            # The step would return to a panel this search already held after a count change: a count
+            # cycle (births, deaths and seed swaps chasing each other; seed swaps never tag born paths, so
+            # the born-path freeze misses it). Births and seed swaps stop; the panel stays.
+            self.births_frozen = True
+            count['state_revisits'] += 1
+            self.events.append(dict(stage='count_revisit', source=source, panel_size=len(new_panel)))
+            return False
         old = set(self.selected)
         if len(new_panel) > len(self.selected):
             count['decisions'] += 1
@@ -1034,10 +1254,21 @@ class PanelSearch:
             self.born.update(path for path in new_panel if path not in old)
         else:
             count['seed_swaps'] += 1
-        self.selected, self.baseline_scores, self.likelihood = list(new_panel), new_scores, new_ll
+        self._set_panel(new_panel, new_scores, new_ll)
+        self.count_states.add(tie_rules.panel_key(self.selected))
         if len(self.selected) != self.sizes[-1]:
             self.sizes.append(len(self.selected))
         return True
+
+    def _note_count_state(self, source):
+        """Record the panel held after a death; a death returning to a panel this search already held after
+        a count change stands but stops births and seed swaps (a count cycle)."""
+        key = tie_rules.panel_key(self.selected)
+        if key in self.count_states and not self.births_frozen:
+            self.births_frozen = True
+            self.count['state_revisits'] += 1
+            self.events.append(dict(stage='count_revisit', source=source, panel_size=len(self.selected)))
+        self.count_states.add(key)
 
     def _final_census(self, forwards) -> int:
         """Final paths that would fail their own death test (reported; nothing changes)."""
@@ -1114,7 +1345,7 @@ class PanelSearch:
                     continue
             tier2_passes += 1
             best_move, record, forwards = self._certify(self.selected, self.candidates, 0, True,
-                                                        self.capacity)
+                                                        self.capacity, key=f"t2/{tier2_passes}")
             record.update(tier=2, tier2_pass=tier2_passes, quota=quota, pool_before=pool_before,
                           beam_seconds=self.beam_seconds - beam_before)
             self.events.append(record)
@@ -1156,7 +1387,7 @@ class PanelSearch:
                            if path not in checked]
                 best_move, record, level_forwards = self._certify(
                     self.selected, doubled, len(self.candidates), False,
-                    len(self.candidates) + len(doubled))
+                    len(self.candidates) + len(doubled), key=f"sat{saturation_steps}")
                 checked.update(doubled)
                 record.update(stage='pool_saturation', quota=quota, tested_quota=level,
                               new_paths=len(doubled), beam_seconds=self.beam_seconds - beam_before)
@@ -1193,13 +1424,15 @@ class PanelSearch:
             count_exact_sample_scores=self.counter.exact_sample_scores,
             pool_original=len(self.original_pool), pool_final=len(self.candidates),
             pool_largest=largest_pool, certified=certified, backstop_reached=backstop_reached,
-            pool_backstop=pool_backstop, events=tuple(_plain(event) for event in self.events))
+            pool_backstop=pool_backstop, events=tuple(_plain(event) for event in self.events),
+            tie_events=self.tie_counter.record())
         return JoinOutcome(paths=np.asarray(self.selected, dtype=np.int32).reshape(-1, self.blocks),
                            log_likelihood=float(self.likelihood), summary=summary)
 
 
 def search_panel(inputs, beam, beam_runner: Callable[[int, Mapping | None], list], *, config,
-                 count_rule, cost_scale: float, budget) -> JoinOutcome:
+                 count_rule, cost_scale: float, budget, label: str | None = None,
+                 counter: ties.TieCounter | None = None) -> JoinOutcome:
     """The certified panel of one joined batch.
 
     inputs: JoinInputs (n >= 2 input components, the informative samples' float32 evidence).
@@ -1209,7 +1442,9 @@ def search_panel(inputs, beam, beam_runner: Callable[[int, Mapping | None], list
         ({(block, row): quota}), same format (pool extension and saturation rungs).
     config: JoinConfig; count_rule: CountRuleConfig; cost_scale: the per-founder cost scale
         (count_rule.founder_cost); budget: the batch's CpuBudget (re-read at the search's
-        boundaries; concurrent seed refits share it).
+        boundaries; concurrent seed refits share it). label: the batch's valley-census label (None:
+        no census); counter: the batch's maths.ties.TieCounter (shared with its beam; recorded as the
+        summary's tie_events).
     """
     return PanelSearch(inputs, beam, beam_runner, config=config, count_rule_config=count_rule,
-                       cost_scale=cost_scale, budget=budget).run()
+                       cost_scale=cost_scale, budget=budget, label=label, counter=counter).run()

@@ -6,7 +6,7 @@ its carriers, in ascending sample order within each bucket: homozygous carriers 
 2), carriers with a known partner j (genotype H[j, l] vs H[j, l] + 1, reading partners already
 updated in this sweep) and carriers with an unknown copy (the row-unknown costs); every cost is
 capped at the cell's unknown-unknown cost. The allele changes when the two sums differ by at
-least 1e-9 (ties keep the current allele). Sites are independent, so the sweep runs site-parallel
+least the block's ``h_step`` tie quantum (ties keep the current allele; release 2.1, was 1e-9). Sites are independent, so the sweep runs site-parallel
 (several threads) or founder-outer over site-contiguous tables (one thread) with the same terms
 in the same order.
 """
@@ -16,8 +16,6 @@ import numba
 import numpy as np
 from numba import njit, prange
 
-# Two allele costs closer than this keep the current allele.
-_TIE = 1e-9
 
 
 @njit(cache=True, nogil=True)
@@ -80,7 +78,7 @@ def usage_order(usage):
 @njit(cache=True, parallel=True, nogil=True)
 def _sweep_site_parallel(haplotypes, order, homozygous, with_partner, with_unknown, partner,
                          n_homozygous, n_with_partner, n_with_unknown, genotype_cost,
-                         unknown_cost):
+                         unknown_cost, tie):
     """Ordered sweep, parallel over sites; costs laid out (L, N, c)."""
     length = haplotypes.shape[1]
     changes = 0
@@ -106,7 +104,7 @@ def _sweep_site_parallel(haplotypes, order, homozygous, with_partner, with_unkno
             difference = nll0 - nll1
             if difference < 0.0:
                 difference = -difference
-            if difference < _TIE:
+            if difference < tie:
                 value = current
             elif nll0 < nll1:
                 value = 0
@@ -121,7 +119,7 @@ def _sweep_site_parallel(haplotypes, order, homozygous, with_partner, with_unkno
 @njit(cache=True, nogil=True)
 def sweep_one_thread(haplotypes, order, homozygous, with_partner, with_unknown, partner,
                      n_homozygous, n_with_partner, n_with_unknown, genotype_cost_by_sample,
-                     unknown_cost_by_sample):
+                     unknown_cost_by_sample, tie):
     """Ordered sweep on one thread, founder-outer and site-inner over (N, c, L) tables.
 
     A partner-bucket term is the cost at the partner's allele h (allele 0) or h + 1 (allele 1),
@@ -175,7 +173,7 @@ def sweep_one_thread(haplotypes, order, homozygous, with_partner, with_unknown, 
             difference = nll0[l] - nll1[l]
             if difference < 0.0:
                 difference = -difference
-            if difference < _TIE:
+            if difference < tie:
                 value = current
             elif nll0[l] < nll1[l]:
                 value = 0
@@ -197,8 +195,8 @@ def update_founders(workspace, haplotypes, assignments) -> int:
         return int(sweep_one_thread(
             haplotypes, order, homozygous, with_partner, with_unknown, partner, n_homozygous,
             n_with_partner, n_with_unknown, workspace.genotype_cost_by_sample,
-            workspace.unknown_cost_by_sample))
+            workspace.unknown_cost_by_sample, float(workspace.quanta.h_step)))
     return int(_sweep_site_parallel(
         haplotypes, order, homozygous, with_partner, with_unknown, partner, n_homozygous,
         n_with_partner, n_with_unknown, workspace.genotype_cost_by_site,
-        workspace.unknown_cost_by_site))
+        workspace.unknown_cost_by_site, float(workspace.quanta.h_step)))

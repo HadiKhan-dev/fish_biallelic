@@ -18,7 +18,7 @@ refined_levels.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import re
 
 from .. import records as assembly_records
@@ -36,7 +36,9 @@ LEVEL = "level"
 class ComponentRefinement:
     """One component's refinement at one level (the content of its component record).
 
-    component: index in the level; start, stop: prepared block range. changed: rows or K changed.
+    component: index in the level; start, stop: prepared block range. changed: rows or K changed (release 2.1:
+    the refined rows are in canonical founder order, as are the incoming join rows, so a pure reordering is no
+    change).
     reason: None when refined; "single_block_or_founder" when the component has one block or one
     founder (passed through unchanged; no decision). founders_before / founders: K in and out.
     F0: exact objective of the incoming panel; F: of the returned panel (log units; None when not
@@ -48,7 +50,8 @@ class ComponentRefinement:
     additions reached it. ambiguous: the call is ambiguous (any decision, a cycle or a restored
     panel failing its own deletion test). final_fit: label of the returned panel's fit;
     best_f_replacement: see BestFReplacement. weak_label_junctions: of the returned fit.
-    elapsed_seconds: wall time of the component's refinement.
+    elapsed_seconds: wall time of the component's refinement. tie_events: maths.ties.TieCounter record of
+    the component's tie-class decisions ({kind: {decisions, inside_tie, wide, boundary}}, release 2.1).
     """
 
     component: int
@@ -75,6 +78,7 @@ class ComponentRefinement:
     best_f_replacement: BestFReplacement | None = None
     weak_label_junctions: tuple = ()
     elapsed_seconds: float = 0.0
+    tie_events: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

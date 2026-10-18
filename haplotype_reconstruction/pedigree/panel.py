@@ -10,10 +10,18 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..maths import ties as tie_rules
 from .config import PedigreeConfig
 from .eligibility import ParentEligibility
 from .records import CandidatePanel
 from .ties import tied_rank_probabilities
+
+# Screen utilities (probability mixtures in [0, 1]) closer than this are tied (release 2.1): the top-parent cut keeps
+# every parent tied with the last one admitted (at most twice ``parents_per_child``), ordered by sample index.
+# Census (std_n80, work/IE/probes/std_t2_*): utilities move by <= 5.4e-12 under iid/value-consistent 1e-9 GL noise;
+# consecutive genuine gaps among the top 25 parents reach down to 1e-8 (1 in [1e-8, 1e-7), 9 in [1e-7, 1e-6)), so the
+# quantum sits between: 2^-32 = 2.3e-10, ~40x from both.
+SCREEN_TIE = 2.0 ** -32
 
 # Centred tempered scores below this many nats contribute exp(-60) (no underflow).
 _SOFTMAX_CLIP = -60.0
@@ -56,13 +64,23 @@ def robust_screen(pair_scores: np.ndarray, markers: np.ndarray, eligibility: Par
 
 def fixed_panel(screen_scores: np.ndarray, eligibility: ParentEligibility,
                 config: PedigreeConfig) -> CandidatePanel:
-    """Every eligible pair among each child's top screen parents (ties by sample index)."""
+    """Every eligible pair among each child's top screen parents: utilities in tie classes (SCREEN_TIE), ties by
+    sample index, and the parents tied with the last admitted one are admitted too (at most twice the budget)."""
     rows = []
     top = config.panel.parents_per_child
     for child in np.flatnonzero(eligibility.children):
         parents = np.flatnonzero(eligibility.parents[child])
-        order = np.lexsort((parents, -screen_scores[child, parents]))
-        leading = parents[order[:min(top, len(parents))]].tolist()
+        if not len(parents):
+            continue
+        values = screen_scores[child, parents]
+        ranked = tie_rules.tie_classes(np.where(np.isfinite(values), values, -np.inf), SCREEN_TIE,
+                                       content=[int(parent) for parent in parents], descending=True)
+        count = min(top, len(parents))
+        if count < len(parents):
+            last_class = ranked.classes[ranked.order[count - 1]]
+            while count < min(2 * top, len(parents)) and ranked.classes[ranked.order[count]] == last_class:
+                count += 1
+        leading = parents[ranked.order[:count]].tolist()
         pairs = {tuple(sorted((int(leading[i]), int(leading[j]))))
                  for i in range(len(leading)) for j in range(i + 1, len(leading))
                  if eligibility.pair_allowed(int(child), leading[i], leading[j])}

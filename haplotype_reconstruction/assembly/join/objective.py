@@ -285,10 +285,16 @@ def score_samples(flat, block_start, block_haps, block_bins, rows, penalty, samp
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop):
+def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop, relative):
     """Viterbi paintings of samples start .. stop - 1: per bin the state a * K + c (a <= c) of the
-    maximising sequence (the traceback of :func:`forward`'s recursion; same values, tie rules: the
-    first maximiser, stay when stay >= switch). int32[stop - start, total bins]."""
+    maximising sequence (the traceback of :func:`forward`'s recursion; same values). Tie rules within
+    the band b = relative x max(1, |the bin's best score|) (release 2.1; relative 0 gives base's exact
+    rules): the switch source is the first state in pair order within b of the maximum, a state stays
+    when stay >= switch - b, the last bin's state is the first within b of the maximum. The recursion's
+    values stay exact maxima; a traceback choice inside the band costs the painted sequence at most b,
+    and near-equal sequences (equal scores reached through different summation orders, which a tiny
+    input perturbation reorders) are painted by the content rule (stay, then the lower pair, the panel
+    being in canonical order). int32[stop - start, total bins]."""
     k = rows.shape[0]
     first, second = pair_lists(np.ones(k, np.bool_))
     pairs = len(first)
@@ -315,20 +321,31 @@ def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop)
                     for z in range(pairs):
                         current[z] = gathered[marker, z]
                 else:
-                    source, best = _first_maximiser(current, pairs)
+                    best = max_range(current, 0, pairs, -np.inf)
+                    band = relative * max(1.0, abs(best))
+                    source = 0
+                    for z in range(pairs):
+                        if current[z] >= best - band:
+                            source = z
+                            break
                     switch_base = best - penalty
                     for z in range(pairs):
                         emission = gathered[marker, z]
                         stay = current[z] + emission
                         switch = switch_base + emission
-                        if stay >= switch:
-                            current[z] = stay
+                        if stay >= switch - band:
                             backptrs[t, z] = z
                         else:
-                            current[z] = switch
                             backptrs[t, z] = source
+                        current[z] = stay if stay >= switch else switch
                 t += 1
-        state, _ = _first_maximiser(current, pairs)
+        best = max_range(current, 0, pairs, -np.inf)
+        band = relative * max(1.0, abs(best))
+        state = 0
+        for z in range(pairs):
+            if current[z] >= best - band:
+                state = z
+                break
         sample_paths[position, total - 1] = code[state]
         for t in range(total - 1, 0, -1):
             state = backptrs[t, state]
@@ -361,7 +378,10 @@ def panel_scores(layout, rows, penalty, samples=None) -> np.ndarray:
 def painting(layout, rows, penalty, tensor_budget_mb, claim) -> np.ndarray:
     """The Viterbi paintings int32[S, total bins] of the panel ``rows`` at ``penalty``, in sample
     chunks whose back pointers (int32, bins x states per sample) fit ``tensor_budget_mb``;
-    ``claim()`` re-reads the thread budget before each chunk."""
+    ``claim()`` re-reads the thread budget before each chunk. Traceback ties within the band of
+    :func:`paint` (tie_rules ASSEMBLY_QUANTA["paint"] relative)."""
+    from ..tie_rules import ASSEMBLY_QUANTA
+    relative = float(ASSEMBLY_QUANTA["paint"][1])
     rows = np.ascontiguousarray(rows, dtype=np.int64)
     k = rows.shape[0]
     samples, bins = layout.samples, layout.total_bins
@@ -371,5 +391,5 @@ def painting(layout, rows, penalty, tensor_budget_mb, claim) -> np.ndarray:
     for start in range(0, samples, chunk):
         stop = min(samples, start + chunk)
         claim()
-        result[start:stop] = paint(*layout.arrays(), rows, float(penalty), start, stop)
+        result[start:stop] = paint(*layout.arrays(), rows, float(penalty), start, stop, relative)
     return result

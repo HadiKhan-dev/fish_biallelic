@@ -1,18 +1,21 @@
 """The endpoint beam: candidate chromosome paths through a batch's blocks from the linker's transitions (base
 paths.run_endpoint_beam, FastMesh), and the beam's maximum transition gap (base hierarchy.compute_max_gap).
 
-A path picks one founder per block. Its score is the sum over blocks k >= 1 of the mean of the float32 log
-transitions into block k from the earlier blocks within the maximum gap (a missing gap contributes nothing).
-Pass 1 builds paths left to right and keeps, at every block, at most a quota of the best paths per endpoint
-founder. Pass 2 refines backwards: at each block k (n - 1 down to 0) every kept path tries every founder at k
-with the rest fixed (only the affected steps are rescored), and the pooled candidates are selected with the same
-endpoint quota. Every path selected at any refinement step is kept in an archive, so full paths through
-interior states survive (at most n times the largest per-block sum of endpoint quotas).
+A path picks one founder per block. Its score is the sum over blocks k >= 1 of the mean of the log transitions into
+block k from the earlier blocks within the maximum gap (a missing gap contributes nothing). Pass 1 builds paths left
+to right and keeps, at every block, at most a quota of the best paths per endpoint founder. Pass 2 refines
+backwards: at each block k (n - 1 down to 0) every kept path tries every founder at k with the rest fixed (only the
+affected steps are rescored), and the pooled candidates are selected with the same endpoint quota. Every path
+selected at any refinement step is kept in an archive, so full paths through interior states survive (at most n
+times the largest per-block sum of endpoint quotas, twice that when tie classes extend the quotas).
 
-Arithmetic and ties follow base exactly (the panel search's tie rules downstream depend on the order): scores
-accumulate in float32 in past-block order, divide by the transition count in float32 and are stored in
-float64; candidates are ranked by descending score, ties by the lexicographic path; duplicates are kept once;
-the archive keeps first-selection order and is returned sorted by descending score (stable).
+Arithmetic and ties (release 2.1, design 5.4): the log transitions are float64 (linker.em), scores accumulate in
+float64 in past-block order and divide by the transition count in float64, so a one-ulp change of a stored
+transition no longer reorders paths. Candidates are ranked by anchored tie classes of their scores
+(maths.ties rules; quantum ``tie_rules.quantum("beam", scale of the cut)``), the lexicographic path deciding inside
+a class; identical paths are kept once (their best score); an endpoint's quota keeps every path of the tie class it
+cuts (at most twice the quota). The archive is returned in the same tie-class order (descending score, content
+inside a class), so the panel search's pool order is a content order up to genuine score differences.
 """
 from __future__ import annotations
 
@@ -21,19 +24,25 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from ...maths import ties
 from ...model.components import ComponentPanel
 from ..linker.em import Transitions
+from ..tie_rules import count_vector_classes, motion, path_class_order, quantum
+
+# Beam-cut census: scores of the paths within this many ranks of an endpoint's quota are recorded per cut.
+_CENSUS_RANKS = 3
 
 
 def _lookup(transitions: Transitions) -> list[list[np.ndarray | None]]:
-    """lookup[past][current]: the float32 log transition matrix between two blocks, or None (unfitted gap)."""
+    """lookup[past][current]: the log transition matrix between two blocks, or None (unfitted gap)."""
     n = transitions.blocks
     return [[transitions.matrix(past, current) if past < current else None for current in range(n)]
             for past in range(n)]
 
 
 def _step_scores(path, lookup, gap_limit: int) -> np.ndarray:
-    """float64[n] per-step scores of one path (step 0 is 0): float32 mean of the transitions into each block."""
+    """float64[n] per-step scores of one path (step 0 is 0): the mean of the transitions into each block (float64
+    sums in past-block order)."""
     num_blocks = len(path)
     step_scores = np.zeros(num_blocks, dtype=np.float64)
     for current in range(1, num_blocks):
@@ -43,7 +52,7 @@ def _step_scores(path, lookup, gap_limit: int) -> np.ndarray:
         for past in range(earliest, current):
             matrix = lookup[past][current]
             if matrix is not None:
-                step_total += matrix[path[past], path[current]]
+                step_total += float(matrix[path[past], path[current]])
                 count += 1
         if count > 0:
             step_scores[current] = step_total / count
@@ -54,8 +63,8 @@ def _affected_steps(paths, step_scores, changed_block, choices, lookup, gap_limi
     """float64[P, choices, n] per-step scores of every path with every founder choice at ``changed_block``.
 
     Only step ``changed_block`` (transitions into it) and steps changed_block + 1 .. changed_block + gap_limit
-    (transitions out of it) change; each follows the scalar recursion (float32 accumulation in past-block
-    order, float32 division by the transition count, float64 storage).
+    (transitions out of it) change; each follows the scalar recursion (float64 sums in past-block order, divided
+    by the transition count), so the values equal :func:`_step_scores` bit for bit.
     """
     n_paths, num_blocks = paths.shape
     steps = np.repeat(step_scores[:, None, :], choices, axis=1)
@@ -63,7 +72,7 @@ def _affected_steps(paths, step_scores, changed_block, choices, lookup, gap_limi
     last = min(changed_block + gap_limit, num_blocks - 1)
     for current in range(first, last + 1):
         earliest = max(0, current - gap_limit)
-        step_total = np.zeros((n_paths, choices), dtype=np.float32)
+        step_total = np.zeros((n_paths, choices), dtype=np.float64)
         count = 0
         for past in range(earliest, current):
             matrix = lookup[past][current]
@@ -82,56 +91,117 @@ def _affected_steps(paths, step_scores, changed_block, choices, lookup, gap_limi
     return steps
 
 
-def _endpoint_order(paths, scores, block, quota, overrides):
-    """Indices of the candidates kept at ``block``, in selection order.
+def _ranked(paths, scores):
+    """Tie-class order of the candidates, identical paths kept once (their best-scoring copy, the first index among
+    equal scores). Returns (kept indices in decision order, their classes in that order, wide classes, boundary
+    gaps, the quantum)."""
+    scores = np.asarray(scores, dtype=np.float64)
+    count = len(paths)
+    if count > 1:
+        grouped = np.lexsort((-scores,) + tuple(paths[:, column]
+                                                for column in range(paths.shape[1] - 1, -1, -1)))
+        ordered = paths[grouped]
+        first = np.ones(count, dtype=bool)
+        first[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
+        representatives = grouped[first]
+    else:
+        representatives = np.arange(count, dtype=np.int64)
+    values = scores[representatives]
+    finite = values[np.isfinite(values)]
+    q = quantum("beam", float(np.max(np.abs(finite))) if finite.size else 0.0)
+    order, classes, wide, _ = path_class_order(values, paths[representatives], q, descending=True)
+    return representatives[order], classes[order], wide, q
 
-    Order: descending score (as float64), then the lexicographic path; identical paths are kept once; at most
-    ``quota`` paths (or the endpoint's override) per founder at ``block``.
-    """
-    order = np.lexsort(tuple(paths[:, column] for column in range(paths.shape[1] - 1, -1, -1))
-                       + (-np.asarray(scores, dtype=np.float64),))
-    ordered = paths[order]
-    keep = np.ones(len(order), dtype=bool)
-    keep[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
-    order = order[keep]
-    endpoint = paths[order, block]
-    # Rank of every candidate among those with the same endpoint so far.
-    by_endpoint = np.argsort(endpoint, kind='stable')
-    sorted_endpoint = endpoint[by_endpoint]
-    starts = np.r_[0, np.flatnonzero(np.diff(sorted_endpoint)) + 1]
-    sizes = np.diff(np.r_[starts, len(sorted_endpoint)])
-    rank = np.empty(len(order), dtype=np.int64)
-    rank[by_endpoint] = np.arange(len(order)) - np.repeat(starts, sizes)
-    limit = np.full(len(order), quota, dtype=np.int64)
-    if overrides:
-        for (override_block, founder), value in overrides.items():
-            if override_block == block:
-                limit[endpoint == founder] = value
-    return order[rank < limit]
+
+def _cut_boundaries(values, classes, cut_classes, q):
+    """Boundary-guard events of a beam cut: the gaps entering and leaving each class an endpoint quota cuts
+    (values and classes in decision order, classes non-decreasing) that lie within BOUNDARY_GUARD noise
+    motions of q. Only these gaps decide which paths a quota keeps; gaps elsewhere in the candidate list are
+    not exposures of the cut."""
+    guard_motion = motion("beam")
+    if guard_motion is None or not cut_classes:
+        return ()
+    starts = np.flatnonzero(np.r_[True, classes[1:] != classes[:-1]])
+    finite = np.where(np.isfinite(values), values, 0.0)
+    high = np.maximum.reduceat(finite, starts)
+    low = np.minimum.reduceat(finite, starts)
+    guard = ties.BOUNDARY_GUARD * guard_motion
+    events = set()
+    for c in sorted(cut_classes):
+        for gap in ((low[c - 1] - high[c]) if c > 0 else None, (low[c] - high[c + 1]) if c + 1 < len(starts) else None):
+            if gap is not None and abs(gap - q) <= guard:
+                events.add((int(c), float(gap)))
+    return tuple(gap for _, gap in sorted(events))
+
+
+def _endpoint_order(paths, scores, block, quota, overrides, *, counter=None, census_key=None):
+    """Indices of the candidates kept at ``block``, in selection (decision) order.
+
+    Order: tie classes of the scores (descending), the lexicographic path inside a class; identical paths are kept
+    once; at most ``quota`` paths (or the endpoint's override) per founder at ``block``, extended by the paths of the
+    tie class an endpoint's quota cuts (at most twice the quota)."""
+    ranked, in_order, wide, q = _ranked(paths, scores)
+    endpoint = paths[ranked, block]
+    kept = np.zeros(len(ranked), dtype=bool)
+    collect = census_key is not None and ties.census_enabled()
+    scores = np.asarray(scores, dtype=np.float64)
+    inside = False
+    cut_classes = set()
+    for founder in np.unique(endpoint).tolist():
+        members = np.flatnonzero(endpoint == founder)
+        limit = int(quota)
+        if overrides:
+            limit = int(overrides.get((block, founder), limit))
+        if collect and len(members) > 1:
+            low, high = max(0, limit - _CENSUS_RANKS), min(len(members), limit + _CENSUS_RANKS)
+            if high - low > 1:
+                ties.census("assembly.beam_cut", f"{census_key}/e{founder}", scores[ranked[members[low:high]]].tolist())
+        if len(members) <= limit:
+            kept[members] = True
+            continue
+        kept[members[:limit]] = True
+        cut = in_order[members[limit - 1]]
+        cut_classes.add(int(cut))
+        if in_order[members[limit]] == cut:
+            inside = True
+            for position in members[limit:2 * limit]:
+                if in_order[position] != cut:
+                    break
+                kept[position] = True
+    boundary = _cut_boundaries(scores[ranked], in_order, cut_classes, q)
+    count_vector_classes(counter, "assembly.beam_cut", in_order, wide, boundary, inside)
+    return ranked[kept]
 
 
 def endpoint_beam(transitions: Transitions, *, quota: int,
                   overrides: Mapping[tuple[int, int], int] | None = None,
-                  max_gap: int | None = None) -> list[tuple[tuple[int, ...], float]]:
-    """Candidate paths of one batch with their scores, sorted by descending score (stable).
+                  max_gap: int | None = None, counter: ties.TieCounter | None = None,
+                  label: str | None = None) -> list[tuple[tuple[int, ...], float]]:
+    """Candidate paths of one batch with their scores, in tie-class order (descending score, the lexicographic path
+    inside a class).
 
     quota: paths kept per endpoint founder at every block. overrides: {(block, founder): quota} for endpoints
     whose quota differs (the panel search's pool extension and saturation re-runs). max_gap: the largest gap
     whose transitions enter a step (None: every fitted gap). Each item is (founder of each block, score); the
-    score is the float64 sum of the path's float32 step scores.
+    score is the float64 sum of the path's step scores. counter: TieCounter of the batch (beam_cut decisions);
+    label: the batch's census label (None: no census).
     """
     num_blocks = transitions.blocks
     gap_limit = max_gap if max_gap is not None else num_blocks
     lookup = _lookup(transitions)
+    key = None
+    if label is not None and ties.census_enabled():
+        signature = ",".join(f"{b}:{f}={v}" for (b, f), v in sorted((overrides or {}).items()))
+        key = f"{label}/q{quota}/{signature}"
 
     # Pass 1 (forward): mean of the transitions into each new block.
     first_founders = int(transitions.founders[0])
     beam_paths = np.arange(first_founders, dtype=np.int64)[:, None]
-    beam_scores = np.zeros(first_founders, dtype=np.float32)
+    beam_scores = np.zeros(first_founders, dtype=np.float64)
     for current in range(1, num_blocks):
         choices = int(transitions.founders[current])
         earliest = max(0, current - gap_limit)
-        transition_to_current = np.zeros((len(beam_paths), choices), dtype=np.float32)
+        transition_to_current = np.zeros((len(beam_paths), choices), dtype=np.float64)
         count = 0
         for past in range(earliest, current):
             matrix = lookup[past][current]
@@ -143,7 +213,8 @@ def endpoint_beam(transitions: Transitions, *, quota: int,
         paths = np.empty((len(beam_paths) * choices, current + 1), dtype=np.int64)
         paths[:, :current] = np.repeat(beam_paths, choices, axis=0)
         paths[:, current] = np.tile(np.arange(choices, dtype=np.int64), len(beam_paths))
-        kept = _endpoint_order(paths, scores, current, quota, overrides)
+        kept = _endpoint_order(paths, scores, current, quota, overrides, counter=counter,
+                               census_key=None if key is None else f"{key}/p1/b{current}")
         beam_paths, beam_scores = paths[kept], scores[kept]
 
     # Pass 2 (backward refinement of the forward paths as scaffolds, with cached step scores).
@@ -166,16 +237,20 @@ def endpoint_beam(transitions: Transitions, *, quota: int,
         paths = np.repeat(scaffold_paths, choices, axis=0)
         paths[:, refine_block] = np.tile(np.arange(choices, dtype=np.int64), n_scaffolds)
         totals = totals.ravel()
-        kept = _endpoint_order(paths, totals, refine_block, quota, overrides)
+        kept = _endpoint_order(paths, totals, refine_block, quota, overrides, counter=counter,
+                               census_key=None if key is None else f"{key}/p2/b{refine_block}")
         scaffold_paths = paths[kept]
         scaffold_steps = steps.reshape(-1, num_blocks)[kept]
         scaffold_totals = totals[kept]
         for path, total in zip(map(tuple, scaffold_paths.tolist()), scaffold_totals):
             archive[path] = total
 
-    result = [(path, float(total)) for path, total in archive.items()]
-    result.sort(key=lambda item: item[1], reverse=True)
-    return result
+    if not archive:
+        return []
+    result_paths = np.asarray(list(archive.keys()), dtype=np.int64).reshape(len(archive), num_blocks)
+    result_scores = np.asarray(list(archive.values()), dtype=np.float64)
+    ranked, _, _, _ = _ranked(result_paths, result_scores)
+    return [(tuple(int(row) for row in result_paths[i]), float(result_scores[i])) for i in ranked.tolist()]
 
 
 def max_gap(blocks: Sequence[ComponentPanel], genetic_map, n_generations, tolerance) -> int:

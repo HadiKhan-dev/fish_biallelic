@@ -13,6 +13,10 @@ library (exact for at most ten founders, polynomial core above) refits every all
 block's own reads, released at ``posterior_threshold`` with carrier support ``min_support`` (none
 where the posterior is multimodal or the ball guard withholds it). A withheld allele keeps the
 component's published (completion-filled) call when it has one.
+
+Release 2.1 (noise stability): the component's distinct founder rows enter the refit, and each
+block's proposal rows leave it, in canonical content (lexicographic) order, so neither the
+refit's arithmetic nor the recorded proposals depend on the component's founder order.
 """
 from __future__ import annotations
 
@@ -24,7 +28,11 @@ from numba import njit, prange
 
 from ..assembly.founder_alleles import site_posterior
 from ..execution import BudgetedPool, claim_threads
+from ..maths.ties import census, census_enabled
 from .fit import unique_rows
+
+# Census window of the carrier-probability band at 1/2 (diagnostics only).
+HALF_CENSUS_WINDOW = 1e-3
 
 # Per site, a copy state's allele probability is 0 or 1 (a called founder) or the site
 # background (an uncalled founder or the background state): codes 0, 1, 2. The emission term of
@@ -179,21 +187,34 @@ def _carrier_weights(weights, centers, rate, background_mass):
 
 @njit(cache=True, parallel=True)
 def _refit_sites(result, probabilities, supporters, gl, observed, cavity, background, start, stop,
-                 threshold, min_support, site_info, site_boundary, site_withheld, settings):
+                 threshold, min_support, site_info, site_boundary, site_withheld, site_bands, settings):
+    """Refit and release the alleles of sites [start, stop) of one bin. Release 2.1: the support
+    test is ``count >= min_support`` or ``mass > min_support + band`` (a carrier mass sitting
+    exactly at the threshold, a sum of exact halves by the refit's symmetric founder prior, is
+    withheld inside the band, design A-7); site_bands[0, site] counts the carrier decisions inside
+    the 1/2 band, site_bands[1, site] the founders whose support mass lies inside the threshold
+    band (count below the threshold)."""
+    band = settings[site_posterior.SETTING_HALF_BAND]
     for site in prange(start, stop):
-        q, support, shell, info, boundary = site_posterior.site_marginals(
+        q, count, mass, shell, info, boundary, inside = site_posterior.site_release_marginals(
             gl[:, site], observed[:, site], cavity, background[site], settings)
         probabilities[:, site] = q
-        supporters[:, site] = support
+        supporters[:, site] = np.maximum(count, mass)
         site_info[:, site] = info
         site_boundary[site] = boundary
+        site_bands[0, site] = inside
+        mass_band = 0
+        for i in range(len(result)):
+            if count[i] < min_support and abs(mass[i] - min_support) <= band:
+                mass_band += 1
+        site_bands[1, site] = mass_band
         if info[site_posterior.INFO_MULTIMODAL]:
             # Two comparable, unconnected posterior basins: release nothing here.
             site_withheld[site] = 0
             continue
         withheld = 0
         for i in range(len(result)):
-            if support[i] >= min_support:
+            if count[i] >= min_support or mass[i] > min_support + band:
                 if q[i] >= threshold or 1 - q[i] >= threshold:
                     if site_posterior.guard_withholds(q[i], shell[i], threshold, settings):
                         withheld += 1
@@ -218,28 +239,41 @@ def refit_task_bytes(samples: int, sites: int, blocks: int, founders: int) -> in
     return slices + grid + threads + outputs + (256 << 20)
 
 
-def refit_component(h, gl, observed, starts, stops, centers, rate, config, unknown_mass):
+def refit_component(h, gl, observed, starts, stops, centers, rate, config, unknown_mass, census_key=None):
     """(refitted calls, ALT posterior, carrier support, per-bin MAP background-copy counts
-    (N, B), site-posterior report) of one component's founders ``h`` over its blocks' sites."""
+    (N, B), site-posterior report) of one component's founders ``h`` over its blocks' sites.
+    ``census_key``: the component's key for the valley census of its carrier probabilities near
+    1/2 (diagnostics only)."""
     claim_threads()
     cavity, background = _emission_grid(h, gl, observed, starts, stops,
                                         float(config.emission_mix))
     claim_threads()
     slots = _carrier_weights(cavity, centers, float(rate), float(unknown_mass))
+    if census_key is not None and census_enabled():
+        k = len(h)
+        carried = (cavity[:, :, :k, :].sum(axis=3) + cavity[:, :, :, :k].sum(axis=2)
+                   - np.diagonal(cavity, axis1=2, axis2=3)[:, :, :k])
+        for sample, bin_index, founder in np.argwhere(np.abs(carried - .5) <= HALF_CENSUS_WINDOW):
+            census("ls.refit.half.band", f"{census_key}/b{bin_index}/n{sample}/f{founder}",
+                   (0.0, float(carried[sample, bin_index, founder] - .5)))
     result = h.copy()
     probabilities = np.full(h.shape, .5)
     supporters = np.zeros(h.shape)
     site_info = np.zeros((site_posterior.INFO_FIELDS, h.shape[1]), np.int64)
     site_boundary = np.zeros(h.shape[1])
     site_withheld = np.zeros(h.shape[1], np.int64)
+    site_bands = np.zeros((2, h.shape[1]), np.int64)
     settings = site_posterior.settings()
     for b in range(len(starts)):
         claim_threads()
         _refit_sites(result, probabilities, supporters, gl, observed, cavity[:, b], background,
                      starts[b], stops[b], float(config.posterior_threshold),
-                     float(config.min_support), site_info, site_boundary, site_withheld, settings)
-    return (result, probabilities, supporters, slots,
-            site_posterior.summarize_sites(site_info, site_boundary, site_withheld))
+                     float(config.min_support), site_info, site_boundary, site_withheld, site_bands,
+                     settings)
+    report = site_posterior.summarize_sites(site_info, site_boundary, site_withheld)
+    report["half_band_sites"] = int(np.count_nonzero(site_bands[0]))
+    report["support_band_sites"] = int(np.count_nonzero(site_bands[1]))
+    return result, probabilities, supporters, slots, report
 
 
 @dataclass(frozen=True)
@@ -247,7 +281,7 @@ class ContextProposal:
     """One block's proposal of a context round.
 
     covered: a context component covered the block; then ``calls`` are the distinct local rows
-    of the component's refitted founders (first-occurrence order; -1 uncalled), which are also
+    of the component's refitted founders (lexicographic order; -1 uncalled), which are also
     the context founders of the path objective's code, ``posterior_alt``/``support`` the refit's
     ALT posterior and carrier support, ``unknown_slots`` the MAP number of background copies per
     sample (2 without depth). Otherwise ``calls`` are the block's current selected calls and the
@@ -268,19 +302,24 @@ class ContextProposal:
 
 def _refit_task(task, shared, budget):
     """Pool task: one component (worker side)."""
-    index, h, columns, starts, stops, centers, rate, config, unknown_mass = task
+    index, h, columns, starts, stops, centers, rate, config, unknown_mass, census_key = task
     gl = np.ascontiguousarray(shared["likelihoods"][:, columns], dtype=np.float64)
     observed = np.ascontiguousarray(shared["observed"][:, columns])
     started = time.monotonic()
     result, q, support, slots, report = refit_component(
-        h, gl, observed, starts, stops, centers, rate, config, unknown_mass)
+        h, gl, observed, starts, stops, centers, rate, config, unknown_mass,
+        census_key=None if census_key is None else f"{census_key}/c{index}")
     return index, result, q, support, np.ascontiguousarray(slots.T), time.monotonic() - started, report
 
 
 @dataclass(frozen=True)
 class RefitSummary:
     """components refitted, components skipped (block coverage incomplete), released alleles
-    that changed a published call, alleles newly called, site-posterior totals, largest K."""
+    that changed a published call, alleles newly called, site-posterior totals, largest K;
+    tie_events (release 2.1, maths.ties TieCounter record; one decision per refitted site): sites
+    with a band decision of the release ("ls.refit.half.band": a carrier probability within the
+    band of an exact 1/2; "ls.refit.support.band": a founder's support mass within the band of the
+    threshold, its count below it)."""
 
     components: int
     skipped: int
@@ -288,6 +327,7 @@ class RefitSummary:
     filled_alleles: int
     site_posterior: tuple[tuple[str, int], ...]
     max_founders: int
+    tie_events: dict | None = None
 
 
 _TOTALS = ("cube_sites", "core_cube_sites", "core_ball_sites", "bp_nonconverged",
@@ -295,11 +335,12 @@ _TOTALS = ("cube_sites", "core_cube_sites", "core_ball_sites", "bp_nonconverged"
            "multimodal_abstained", "guard_withheld")
 
 
-def refine(panels, components, evidence, genetic_map, config, generations, budget):
+def refine(panels, components, evidence, genetic_map, config, generations, budget, census_key=None):
     """Context proposals of every panel (one per LocalPanel, same order) and a summary.
 
     panels: the current round's LocalPanels; components: the context assembly's materialised
-    ComponentPanels (first/stop index ``panels``); evidence: the founder-view ContigEvidence.
+    ComponentPanels (first/stop index ``panels``); evidence: the founder-view ContigEvidence;
+    census_key: the round's key for the valley census (diagnostics only).
     """
     refit_config = config.context_refit
     unknown_mass = config.model.unknown_mass
@@ -318,8 +359,9 @@ def refine(panels, components, evidence, genetic_map, config, generations, budge
             skipped += 1
             continue
         inference = np.asarray(component.inference, np.int8)
+        # Distinct founder rows in content order (unique_rows sorts them; the index is each
+        # row's first occurrence, whose released template row it keeps).
         _, representatives = unique_rows(inference, return_index=True)
-        representatives = np.sort(representatives)
         h = np.ascontiguousarray(inference[representatives])
         template = np.ascontiguousarray(np.asarray(component.released)[representatives])
         lengths = [panels[b].sites for b in members]
@@ -334,11 +376,12 @@ def refine(panels, components, evidence, genetic_map, config, generations, budge
             rate = genetic_map.fallback_rate_per_bp * generations
         columns = np.searchsorted(evidence.positions, positions)
         specs[index] = (members, starts, stops, template)
-        tasks.append((index, h, columns, starts, stops, centers, rate, refit_config, unknown_mass))
+        tasks.append((index, h, columns, starts, stops, centers, rate, refit_config, unknown_mass, census_key))
     proposals = [ContextProposal(block=panel.block, covered=False, calls=panel.calls)
                  for panel in panels]
     changes = fills = 0
     totals = dict.fromkeys(_TOTALS, 0)
+    bands = dict(half=0, support=0, sites=0)
     max_founders = 0
     if tasks:
         samples = evidence.likelihoods.shape[0]
@@ -356,11 +399,15 @@ def refine(panels, components, evidence, genetic_map, config, generations, budge
                 fills += int(((result >= 0) & (template < 0)).sum())
                 for key in _TOTALS:
                     totals[key] += int(report[key])
+                bands["half"] += int(report["half_band_sites"])
+                bands["support"] += int(report["support_band_sites"])
+                bands["sites"] += int(result.shape[1])
                 max_founders = max(max_founders, len(result))
                 for b, lo, hi, block_slots in zip(members, starts, stops, slots):
                     rows = result[:, lo:hi]
+                    # Distinct local rows in content order; each keeps its first founder's
+                    # posterior and support (founders are in content order too).
                     _, unique = unique_rows(rows, return_index=True)
-                    unique = np.sort(unique)
                     panel = panels[b]
                     depth = np.any(observed[:, panel.site_start:panel.site_start + panel.sites],
                                    axis=1)
@@ -369,9 +416,12 @@ def refine(panels, components, evidence, genetic_map, config, generations, budge
                         calls=np.ascontiguousarray(rows[unique]),
                         posterior_alt=q[unique, lo:hi].copy(), support=support[unique, lo:hi].copy(),
                         unknown_slots=np.where(depth, block_slots, 2).astype(np.int8))
+    tie_events = {"ls.refit.half.band": dict(decisions=bands["sites"], inside_tie=bands["half"], wide=0, boundary=0),
+                  "ls.refit.support.band": dict(decisions=bands["sites"], inside_tie=bands["support"], wide=0,
+                                                boundary=0)}
     summary = RefitSummary(components=len(tasks), skipped=skipped, allele_changes=changes,
                            filled_alleles=fills, site_posterior=tuple(totals.items()),
-                           max_founders=max_founders)
+                           max_founders=max_founders, tie_events=tie_events)
     print(f"[Context refit] {len(tasks)} components, {skipped} skipped; allele changes {changes}, "
           f"fills {fills}; site posterior " + " ".join(f"{k}={v}" for k, v in totals.items())
           + f" max_founders {max_founders}", flush=True)

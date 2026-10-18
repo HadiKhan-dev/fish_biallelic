@@ -217,14 +217,14 @@ def select(state_scores: np.ndarray, identity_scores: np.ndarray, alternatives: 
     local_rows: dict[int, int] = {}
     state_indices = np.arange(3, dtype=np.int64)
     for child, rows in enumerate(alternatives.child_rows):
-        state, margin = unique_finite_winner(state_indices, marginal[child])
+        state, margin = unique_finite_winner(state_indices, marginal[child], key=f"state/c{child}")
         state_margin[child] = margin
         if state is None:
             reasons[child] = "no_unique_marginal_parent_state"
             continue
         local_state[child] = state
         candidates = rows[states[rows] == state]
-        row, margin = unique_finite_winner(candidates, decision)
+        row, margin = unique_finite_winner(candidates, decision, key=f"identity/c{child}")
         identity_margin[child] = margin
         if row is None:
             reasons[child] = "parent_state_resolved_identity_unresolved"

@@ -15,10 +15,14 @@ from pathlib import Path
 from .tables import write_frame, write_json
 
 
-def write_pedigree(output, product) -> list[Path]:
-    """Write every table of ``product.report``, the calibration and the run summary; returns the paths written."""
+def write_pedigree(output, product, input_ids=None) -> list[Path]:
+    """Write every table of ``product.report``, the calibration and the run summary; returns the paths written.
+    ``input_ids``: the run's input sample order (the store manifest's, evidence.sample_order.store_input_order);
+    per-sample tables list their rows in it (the records keep the canonical order, release 2.1)."""
+    from ..evidence.sample_order import frame_in_input_order
     directory = Path(output) / "pedigree"
-    written = [write_frame(directory / f"{field.name}.csv", getattr(product.report, field.name))
+    written = [write_frame(directory / f"{field.name}.csv",
+                           frame_in_input_order(getattr(product.report, field.name), input_ids))
                for field in fields(product.report)]
     written.append(write_json(directory / "evidence_calibration.json", product.calibration))
     written.append(write_json(directory / "summary.json", dict(

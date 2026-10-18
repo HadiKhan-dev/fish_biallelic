@@ -102,32 +102,42 @@ def join_inputs(task: BatchTask, scoring: np.ndarray, budget) -> JoinInputs:
 
 
 def run_batch(task: BatchTask, scoring: np.ndarray, budget) -> JoinResult:
-    """Join one batch (see the module docstring); results never depend on the budget."""
+    """Join one batch (see the module docstring); results never depend on the budget.
+
+    The joined component's founders are returned in canonical order (lexicographic order of their prepared-row
+    index paths, design 5.1), so every later level's slot and row-index tie-breaks are content rules."""
     from ..join import beam as join_beam
     from ..join import search as join_search
     from ..linker import em as linker_em
+    from ..tie_rules import SharedCounter, canonical_rows
     started = time.perf_counter()
     settings = task.settings
     inputs = join_inputs(task, scoring, budget)
+    # The batch's content label (valley-census keys): its inputs, without settings or evidence identity.
+    label = batch_digest(task, context="", evidence_identity="")[:16]
     gap = None if settings.level_one else join_beam.max_gap(
         inputs.blocks, settings.genetic_map, settings.n_generations,
         settings.recombination_tolerance)
     transitions = linker_em.fit_transitions(inputs, settings.genetic_map, max_gap=gap,
-                                            config=settings.linker, budget=budget)
+                                            config=settings.linker, budget=budget, label=label)
     numba.set_num_threads(team_size(budget))
+    # Tie-class decisions of the beam and the search (the join summary's tie_events).
+    counter = SharedCounter()
     beam = join_beam.endpoint_beam(transitions, quota=settings.join.paths_per_endpoint,
-                                   max_gap=gap)
+                                   max_gap=gap, counter=counter, label=label)
 
     def beam_runner(quota, overrides):
         # Pool extension and saturation re-runs of this batch's beam.
-        return join_beam.endpoint_beam(transitions, quota=quota, overrides=overrides, max_gap=gap)
+        return join_beam.endpoint_beam(transitions, quota=quota, overrides=overrides, max_gap=gap,
+                                       counter=counter, label=label)
 
     outcome = join_search.search_panel(
         inputs, beam, beam_runner, config=settings.join, count_rule=settings.count_rule,
-        cost_scale=settings.cost_scale, budget=budget)
+        cost_scale=settings.cost_scale, budget=budget, label=label, counter=counter)
     paths = np.asarray(outcome.paths, dtype=np.int64)
     rows = np.concatenate([block.rows[paths[:, j]] for j, block in enumerate(inputs.blocks)],
                           axis=1).astype(np.int32)
+    rows, _ = canonical_rows(rows)
     return JoinResult(index=task.index, rows=rows, log_likelihood=float(outcome.log_likelihood),
                       summary=outcome.summary, seconds=time.perf_counter() - started)
 

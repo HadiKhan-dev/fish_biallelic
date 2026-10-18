@@ -19,12 +19,14 @@ fails if a cited value differs from the code.
 | family phase | [family_phase.md](family_phase.md) | pedigree-conditioned phase that preserves the called genotypes |
 | recombination | [recombination.md](recombination.md) | conditional recombination maps, crossover intervals and observable meiosis exposure |
 | export | [usage](../usage.md#export) | the final founder and sample VCFs, written from the records (no model) |
+| all stages | [ties.md](ties.md) | the deterministic conventions that decide ties between equally supported alternatives (release 2.1; under review for 2.2), and what a run records about them |
 
 ## Conventions
 
 - Alleles are 0 (reference), 1 (alternate) and -1 (unknown); a genotype counts alternate copies (0, 1, 2).
-  Positions are VCF positions (1-based). The sample axis is the input order (VCF header order, or the simulated
-  observed individuals in pedigree order).
+  Positions are VCF positions (1-based). Inside the records the run's samples are ordered by sample name, so no
+  result depends on the input order; published tables and VCFs list samples in the input order (VCF header
+  order, or the simulated observed individuals in pedigree order).
 - Genotype likelihoods and the observed-read mask are separate. A site without reads has the flat likelihood
   (1/3, 1/3, 1/3) and is unobserved; a flat likelihood is never an observed heterozygote, and missing data never
   counts as an allele match.
@@ -41,6 +43,8 @@ fails if a cited value differs from the code.
 - One genetic map serves inference everywhere ([genetic_maps.md](../genetic_maps.md)): the switch and transition
   probabilities of local selection, assembly, painting, pedigree, family phase and recombination come from the
   contig's map, or from the fallback rate where there is none.
+- Ties between alternatives the data do not separate (equal, or within one tie quantum) are decided by fixed
+  conventions listed in [ties.md](ties.md); the run counts every such decision (`ties/` in the run directory).
 - Every stage records its products with an identity (its configuration, upstream records and code), and nothing
   feeds back upstream: pedigree reads paintings, family phase reads the pedigree, recombination reads the phase.
 

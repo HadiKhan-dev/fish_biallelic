@@ -28,7 +28,9 @@ then deleted here.
 Order at a panel certified for same-count moves: (1) a path without private cells is deleted
 (largest V(P minus f) first); (2) otherwise the best-F death candidate (largest V(P minus f)) is
 decided; (3) otherwise the birth with the largest total gain among the pool births the rule
-accepts is added. Births are excluded by per-sample upper bounds (two-region bounds of
+accepts is added. "Largest" is decided by tie classes of the join log likelihood (release 2.1,
+tie_rules.quantum("join_ll", |V(P)|)): within a class the path's content decides (base: the
+lowest slot or pool index). Births are excluded by per-sample upper bounds (two-region bounds of
 :mod:`.certify`; u_s >= d_s >= q_s) through the necessary conditions of the effective-carrier test,
 and scored exactly best-first until the bound excludes every remaining birth. Work per step:
 O(D k |pool|) bounds plus exact scores restricted to the samples a bound cannot rule out.
@@ -41,6 +43,8 @@ import threading
 import numpy as np
 
 from .. import count_rule
+from ...maths import ties
+from .. import tie_rules
 from .certify import PanelForwards
 from .objective import column_sums, score_samples
 
@@ -54,7 +58,8 @@ def _test_record(test) -> dict:
 
 
 def main_coverer(panel, path) -> int:
-    """The panel path sharing most cells with ``path`` (ties: lowest index)."""
+    """The panel path sharing most cells with ``path`` (ties: lowest index; the panel is in canonical
+    order, so the lexicographically smallest path)."""
     shared = [sum(int(a == b) for a, b in zip(row, path)) for row in panel]
     return int(np.argmax(shared))
 
@@ -69,7 +74,8 @@ class CountStep:
     rows per block). exact_scores / exact_sample_scores count the exact scores this step made.
     """
 
-    def __init__(self, *, layout, penalty, cost, samples, geometry, config, score):
+    def __init__(self, *, layout, penalty, cost, samples, geometry, config, score, tie_counter=None,
+                 label=None):
         self.layout = layout
         self.total_bins = layout.total_bins
         self.offsets = np.ascontiguousarray(layout.offsets[:-1], dtype=np.int64)
@@ -84,6 +90,22 @@ class CountStep:
         self.exact_scores = 0
         self.exact_sample_scores = 0
         self._counts = threading.Lock()     # concurrent seed refits settle on one CountStep
+        self.tie_counter = tie_counter
+        self.label = label
+
+    def _choose(self, kind, items, value, content, scale, key=None, quantum_kind='join_ll'):
+        """The tie-class winner of ``items`` by value(item) (descending; nats of the join log
+        likelihood, quantum_kind's quantum at |scale|), content(item) deciding inside a class."""
+        items = list(items)
+        values = [float(value(item)) for item in items]
+        quantum = tie_rules.quantum(quantum_kind, scale)
+        result = ties.tie_classes(values, quantum, content=[content(item) for item in items], descending=True)
+        with self._counts:
+            tie_rules.add_decision(self.tie_counter, kind, result, values, quantum,
+                                   tie_rules.motion(quantum_kind, scale), descending=True)
+            if key is not None and self.label is not None and ties.census_enabled():
+                ties.census(kind, f"{self.label}/{key}", [-v for v in values])
+        return items[int(result.order[0])]
 
     @staticmethod
     def rows(paths) -> np.ndarray:
@@ -95,9 +117,16 @@ class CountStep:
             self.exact_scores += scores
             self.exact_sample_scores += samples
 
-    def _decision(self, larger, smaller, shadow, kind, seed_panel):
-        return count_rule.decide(larger, smaller, shadow, self.cost, kind=kind, config=self.config,
-                                 seed_key=('join_count', kind, sorted(map(tuple, seed_panel))))
+    def _decision(self, larger, smaller, shadow, kind, seed_panel, key=None):
+        decision = count_rule.decide(larger, smaller, shadow, self.cost, kind=kind, config=self.config,
+                                     seed_key=('join_count', kind, sorted(map(tuple, seed_panel))))
+        if key is not None and self.label is not None and ties.census_enabled():
+            # Valley census of the count rule's continuous thresholds (margins at 0, units of c).
+            with self._counts:
+                ties.census('assembly.count_margin', f"{self.label}/{key}",
+                            [decision.total.margin, decision.total.loso_margin, decision.sequence.margin,
+                             decision.sequence.loso_margin])
+        return decision
 
     def _sparse(self, panel, base, bound):
         """Exact V_s(panel) where the bound exceeds base (elsewhere V_s = base exactly)."""
@@ -109,11 +138,11 @@ class CountStep:
             self._counted(samples=len(need))
         return values
 
-    def deletion(self, panel, forwards, base):
+    def deletion(self, panel, forwards, base, key=None):
         """Delete a path without private cells, else decide the best-F death candidate.
 
         Returns None (fewer than two paths) or (record, smaller panel or None when the founder
-        stays, the smaller panel's per-sample scores or None)."""
+        stays, the smaller panel's per-sample scores or None). key: the decision's census key."""
         k = len(panel)
         if k < 2:
             return None
@@ -121,7 +150,9 @@ class CountStep:
         totals = column_sums(np.ascontiguousarray(removal))
         pure = np.flatnonzero(~count_rule.novel_paths(panel, self.geometry, self.near_identity))
         pool = pure if len(pure) else np.arange(k)
-        founder = int(pool[np.lexsort((pool, -totals[pool]))[0]])
+        founder = int(self._choose('assembly.join_death', pool.tolist(), lambda f: totals[f],
+                                   lambda f: tie_rules.path_key(panel[f]), float(np.sum(base)), key,
+                                   quantum_kind='join_ll_wide'))
         rest = [path for i, path in enumerate(panel) if i != founder]
         smaller = removal[:, founder]
         if len(pure):
@@ -134,7 +165,8 @@ class CountStep:
             shadow_panel[founder] = shadow_founder
             shadow = self.score(shadow_panel)
             self._counted(scores=1)
-        decision = self._decision(base, smaller, shadow, 'deletion', panel)
+        decision = self._decision(base, smaller, shadow, 'deletion', panel,
+                                  None if key is None else f"{key}/margin")
         record = dict(kind='death', founder=founder, pure_mosaic=bool(len(pure)), lost_cells=int(lost),
                       panel_size=k, deleted=not decision.accept_larger, margin=decision.margin,
                       band=list(decision.band), ambiguous=decision.ambiguous,
@@ -143,7 +175,7 @@ class CountStep:
             return record, None, None
         return record, rest, smaller
 
-    def birth(self, panel, pool, forwards, base):
+    def birth(self, panel, pool, forwards, base, key=None):
         """The pool birth of largest total gain among those the rule accepts.
 
         Births without a private cell are pure mosaics (never accepted) and are not scored.
@@ -182,8 +214,15 @@ class CountStep:
         # their cells (the chimera-trap indicator); their coverers seed duplicate births.
         trap = np.flatnonzero(passing & ~is_novel)
         record['trap_indicators'] = int(len(trap))
-        indicators = [(float(totals_all[i]), outside[i]) for i in
-                      trap[np.lexsort((trap, -totals_all[trap]))].tolist()]
+        # Strongest first: tie classes of the bound gain, the path's content inside a class.
+        indicators = []
+        if len(trap):
+            scale = float(np.max(np.abs(totals_all[trap])))
+            result = ties.tie_classes([float(totals_all[i]) for i in trap.tolist()],
+                                      tie_rules.quantum('join_proxy', scale),
+                                      content=[outside[i] for i in trap.tolist()], descending=True,
+                                      motion=tie_rules.motion('join_proxy', scale))
+            indicators = [(float(totals_all[trap[j]]), outside[trap[j]]) for j in result.order.tolist()]
         novel_index = np.flatnonzero(is_novel)
         novel = [outside[i] for i in novel_index.tolist()]
         if not novel:
@@ -193,9 +232,13 @@ class CountStep:
         survivors = np.flatnonzero(passing[novel_index])
         record['survivors'] = int(len(survivors))
         order = survivors[np.lexsort((survivors, -totals[survivors]))]
+        # Births whose bound reaches the tie classes of the best accepted total gain are scored too.
+        scale = float(np.sum(base))
+        reach = ties.WIDE_CLASS_QUANTA * tie_rules.quantum('join_ll', scale)
         best = None
+        accepted = []
         for index in order.tolist():
-            if best is not None and totals[index] < best[0]:
+            if best is not None and totals[index] < best[0] - reach:
                 break
             path = novel[index]
             larger_panel = list(panel) + [path]
@@ -205,14 +248,18 @@ class CountStep:
             shadow_values = self._sparse(list(panel) + [shadow], base, shadow_bound)
             self._counted(scores=1)
             record['exact'] += 1
-            decision = self._decision(larger, base, shadow_values, 'addition', larger_panel)
+            decision = self._decision(larger, base, shadow_values, 'addition', larger_panel,
+                                      None if key is None else f"{key}/add{index}/margin")
             if decision.accept_larger:
                 total = float((larger - base).sum())
+                accepted.append((total, index, decision, larger, lost))
                 if best is None or total > best[0]:
                     best = (total, index, decision, larger, lost)
         if best is None:
             return record, None, None, indicators
-        total, index, decision, larger, lost = best
+        total, index, decision, larger, lost = self._choose(
+            'assembly.join_birth', accepted, lambda item: item[0], lambda item: tie_rules.path_key(novel[item[1]]),
+            scale, None if key is None else f"{key}/birth")
         record.update(accepted=list(novel[index]), lost_cells=int(lost), total_gain=total,
                       margin=decision.margin, band=list(decision.band), ambiguous=decision.ambiguous,
                       total=_test_record(decision.total), sequence=_test_record(decision.sequence))
@@ -229,7 +276,7 @@ class CountStep:
             return None
         return float(gain.sum())
 
-    def settle(self, panel, scores):
+    def settle(self, panel, scores, key=None):
         """A refitted seed panel: delete paths without private cells (best-F first), then the
         best-F candidate must pass the death test. Returns (panel, scores, record, survives)."""
         removed = 0
@@ -241,14 +288,17 @@ class CountStep:
             forwards = PanelForwards(self.layout, self.rows(panel), self.penalty, self.total_bins)
             removal = forwards.removal_scores()
             totals = column_sums(np.ascontiguousarray(removal))
-            founder = int(pure[np.lexsort((pure, -totals[pure]))[0]])
+            founder = int(self._choose('assembly.join_death', pure.tolist(), lambda f: totals[f],
+                                       lambda f: tie_rules.path_key(panel[f]), float(np.sum(scores)),
+                                       None if key is None else f"{key}/pure{removed}",
+                                       quantum_kind='join_ll_wide'))
             scores = removal[:, founder]
             panel = [path for i, path in enumerate(panel) if i != founder]
             removed += 1
         if len(panel) < 2:
             return panel, scores, dict(removed_pure=removed, decided=None), True
         forwards = PanelForwards(self.layout, self.rows(panel), self.penalty, self.total_bins)
-        outcome = self.deletion(panel, forwards, scores)
+        outcome = self.deletion(panel, forwards, scores, None if key is None else f"{key}/death")
         record = dict(removed_pure=removed, decided=None if outcome is None else outcome[0])
         survives = outcome is None or outcome[1] is None
         return panel, scores, record, survives

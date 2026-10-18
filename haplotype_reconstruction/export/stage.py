@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..evidence.sample_order import recorded_input_order
 from . import records
 from .config import ExportConfig
 from .run import contig_bytes, run_tasks, write_manifest
@@ -26,6 +27,8 @@ def run(store, contigs, config: ExportConfig, output, budget, *, synthetic: bool
     destination = Path(output) / STAGE
     destination.mkdir(parents=True, exist_ok=True)
     entries, tasks, estimates = {}, [], []
+    # The records hold the run's canonical sample order (release 2.1); the sample columns return to the input order.
+    input_ids = recorded_input_order(store.manifest("run"))
     for contig in contigs:
         file = store.contig(contig)
         identity = records.identity(file, config)
@@ -37,7 +40,8 @@ def run(store, contigs, config: ExportConfig, output, budget, *, synthetic: bool
         tasks.append(dict(checkpoints=str(store.root), destination=str(destination), contig=contig,
                           products=tuple(config.products), file_format=config.file_format, reference=reference,
                           synthetic=synthetic, full_length=config.full_length, record=identity,
-                          previous_files=() if recorded is None else tuple(recorded["entry"]["files"])))
+                          previous_files=() if recorded is None else tuple(recorded["entry"]["files"]),
+                          input_sample_ids=input_ids))
         estimates.append(contig_bytes(file, config.products, full_length=config.full_length, synthetic=synthetic,
                                       evidence=evidence_sites(file)))
     if not tasks:

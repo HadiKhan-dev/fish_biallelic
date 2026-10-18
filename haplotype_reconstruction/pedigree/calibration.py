@@ -16,6 +16,7 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 from scipy.special import logsumexp
 
+from ..maths import ties
 from .alternatives import Alternatives
 from .config import PedigreeConfig
 from .records import GenomeScores
@@ -27,6 +28,13 @@ GRID_POINTS = 33
 OPTIMIZER_XATOL = 1e-5
 MINIMUM_GAIN = 1e-8          # nats of pooled predictive log likelihood
 BOUNDARY_MARGIN = 0.01       # log-scale distance to a search bound treated as the boundary
+# Release 2.1 (review R12): Brent's bounded search stops anywhere within OPTIMIZER_XATOL of an interior optimum, and
+# where depends on its path, which rounding and 1e-9 GL noise alter; the scale multiplies every log likelihood, so
+# a 1e-5 shift moves every margin by 1e-5 relative. Each interior maximum is therefore refined to the root of the
+# objective's analytic derivative (safeguarded Newton, bracketed), to rounding precision; a step below this
+# (relative to max(1, |x|)) ends the refinement.
+REFINE_TOLERANCE = 1e-14
+REFINE_ITERATIONS = 60
 
 
 def fit_scale(scores: GenomeScores, alternatives: Alternatives,
@@ -46,8 +54,51 @@ def fit_scale(scores: GenomeScores, alternatives: Alternatives,
     return float(report["scale"]), report
 
 
-def _maximize(prediction):
-    """Bracket the visible maxima of a scalar objective on the grid, then refine each."""
+def _refine(derivatives, start, low, high):
+    """The stationary point of a smooth maximum near ``start`` inside [low, high]: the root of the first
+    derivative (``derivatives(x) -> (f', f'')``), bracketed around ``start`` and found by Newton steps safeguarded
+    by bisection. Returns ``start`` when no sign change of f' (+ to -) brackets a maximum."""
+    width = 4.0 * OPTIMIZER_XATOL
+    left = right = None
+    for _ in range(30):
+        a, b = max(low, start - width), min(high, start + width)
+        fa, fb = derivatives(a)[0], derivatives(b)[0]
+        if fa >= 0.0 >= fb:
+            left, right = (a, fa), (b, fb)
+            break
+        if a == low and b == high:
+            break
+        width *= 4.0
+    if left is None:
+        return float(start)
+    (a, fa), (b, fb) = left, right
+    if fa == 0.0:
+        return float(a)
+    if fb == 0.0:
+        return float(b)
+    x = min(max(start, a), b)
+    for _ in range(REFINE_ITERATIONS):
+        first, second = derivatives(x)
+        if first == 0.0:
+            return float(x)
+        if first > 0.0:
+            a = x
+        else:
+            b = x
+        step = -first / second if second < 0.0 else None
+        candidate = x + step if step is not None else None
+        if candidate is None or not (a < candidate < b):
+            candidate = 0.5 * (a + b)
+        if abs(candidate - x) <= REFINE_TOLERANCE * max(1.0, abs(x)) or b - a <= REFINE_TOLERANCE * max(1.0, abs(x)):
+            return float(candidate)
+        x = candidate
+    return float(x)
+
+
+def _maximize(prediction, derivatives=None):
+    """Bracket the visible maxima of a scalar objective on the grid, then refine each (Brent, then the root of the
+    derivative when ``derivatives`` is given). Maxima whose values lie in one tie class (nll quantum) are tied: the
+    one closest to scale 1 (smallest |log scale|) is taken."""
     grid = np.linspace(*LOG_SCALE_BOUNDS, GRID_POINTS)
     values = np.asarray([prediction(x) for x in grid])
     candidates = [(float(values[i]), float(grid[i])) for i in (0, len(grid) - 1)]
@@ -60,8 +111,19 @@ def _maximize(prediction):
                                     method="bounded", options={"xatol": OPTIMIZER_XATOL})
             converged &= bool(found.success)
             if found.success:
-                candidates.append((prediction(found.x), float(found.x)))
-    best, log_scale = max(candidates)
+                x = float(found.x)
+                if derivatives is not None:
+                    x = _refine(derivatives, x, float(grid[i - 1]), float(grid[i + 1]))
+                candidates.append((prediction(x), x))
+    values_only = [value for value, _ in candidates]
+    finite = [value for value in values_only if np.isfinite(value)]
+    if finite:
+        quantum = ties.tie_quantum(max(abs(value) for value in finite), "nll")
+        ranked = ties.tie_classes(values_only, quantum, descending=True)
+        tied = [candidates[index] for index in ranked.members(0)]
+        best, log_scale = min(tied, key=lambda item: (abs(item[1]), item[1]))
+    else:
+        best, log_scale = max(candidates)
     return best, log_scale, converged, grid, values
 
 
@@ -149,7 +211,25 @@ def _fit(scores: GenomeScores, alternatives: Alternatives, config: PedigreeConfi
                                 - logsumexp(weights, axis=1))
         return float(total)
 
-    best, log_scale, success, grid, values = _maximize(prediction)
+    def derivatives(log_scale):
+        """(d/dx, d2/dx2) of prediction(x), x = log scale: s (E'[t] - E[t]) and s (E'[t] - E[t]) + s^2 (Var'[t] -
+        Var[t]) summed over children and folds, with E/Var under softmax(s t + p) and E'/Var' under
+        softmax(s t + p + validation) (t = train)."""
+        scale = float(np.exp(log_scale))
+        mean_difference = variance_difference = 0.0
+        for train, validation, _, _, p, _ in prepared:
+            base = scale * train + p
+            for logits, sign in ((base + validation, 1.0), (base, -1.0)):
+                top = np.max(logits, axis=1, keepdims=True)
+                weights = np.exp(logits - top)
+                weights /= np.sum(weights, axis=1, keepdims=True)
+                mean = np.sum(weights * train, axis=1)
+                variance = np.sum(weights * (train - mean[:, None]) ** 2, axis=1)
+                mean_difference += sign * float(np.sum(mean))
+                variance_difference += sign * float(np.sum(variance))
+        return scale * mean_difference, scale * mean_difference + scale * scale * variance_difference
+
+    best, log_scale, success, grid, values = _maximize(prediction, derivatives)
     gain = best - prediction(0.0)
     boundary = min(log_scale - LOG_SCALE_BOUNDS[0], LOG_SCALE_BOUNDS[1] - log_scale) < BOUNDARY_MARGIN
     # Tempering only: a scale above one would sharpen evidence without calibration support.
@@ -160,9 +240,11 @@ def _fit(scores: GenomeScores, alternatives: Alternatives, config: PedigreeConfi
     report.update(
         scale=float(np.exp(log_scale)) if selected else 1.0,
         fitted_scale=float(np.exp(log_scale)), selected=selected,
-        status=("selected" if selected else "boundary_optimum" if boundary else
-                "optimizer_failed" if not success else
-                "above_unit_scale" if above_unit and gain > MINIMUM_GAIN else "no_predictive_gain"),
+        # Release 2.1: without predictive gain the optimum is unidentified and its location (boundary or not) is
+        # rounding- and noise-driven on the flat objective, so the gain test comes before the boundary label.
+        status=("selected" if selected else "optimizer_failed" if not success else
+                "no_predictive_gain" if not (np.isfinite(gain) and gain > MINIMUM_GAIN) else
+                "boundary_optimum" if boundary else "above_unit_scale"),
         optimizer_success=success, at_search_boundary=bool(boundary),
         selection_gain=float(gain), search_log_scale_grid=grid.tolist(),
         search_predictive_grid=values.tolist(),

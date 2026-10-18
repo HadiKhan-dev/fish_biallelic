@@ -24,6 +24,7 @@ import numba
 import numpy as np
 
 from ...execution.memory import malloc_trim
+from ...maths import ties
 from ...maths.emissions import GENOTYPE_CODES, PREDICTIVE_CODES
 from ..config import LinkerConfig
 from ..join.inputs import JoinInputs
@@ -38,10 +39,11 @@ class Transitions:
     """The fitted forward transitions of one batch: what the endpoint beam reads.
 
     founders: int64[n] K_j, the founders of each of the batch's n input blocks.
-    log_forward: for each fitted gap g = 1 .. G (index g - 1), for each block i = 0 .. n - 1 - g, the float32
-        matrix [K_i, K_{i+g}] of log P(founder v at block i + g | founder u at block i): the natural log
-        (computed in float64) of the fitted probability, rounded to float32 (base FastMesh). Rows sum to 1 in
-        probability; every entry is finite (the uniform mixture keeps probabilities positive).
+    log_forward: for each fitted gap g = 1 .. G (index g - 1), for each block i = 0 .. n - 1 - g, the float64
+        matrix [K_i, K_{i+g}] of log P(founder v at block i + g | founder u at block i): the natural log of the
+        fitted probability. Rows sum to 1 in probability; every entry is finite (the uniform mixture keeps
+        probabilities positive). Release 2.1 keeps float64 (base FastMesh rounded to float32, so a one-ulp change
+        of one entry under a tiny input perturbation reordered the endpoint beam; design 5.4, review r8).
     """
 
     founders: np.ndarray
@@ -58,8 +60,8 @@ class Transitions:
         return len(self.log_forward)
 
     def matrix(self, past: int, current: int) -> np.ndarray | None:
-        """The float32 log transition matrix from block ``past`` to block ``current`` > past, or None when
-        their gap was not fitted."""
+        """The log transition matrix from block ``past`` to block ``current`` > past, or None when their gap was
+        not fitted."""
         gap = current - past
         if 1 <= gap <= len(self.log_forward):
             return self.log_forward[gap - 1][past]
@@ -188,17 +190,20 @@ def _largest_change(old, new):
     return change
 
 
-def _fit_gap(scans, founders, gap, config: LinkerConfig, budget):
+def _fit_gap(scans, founders, gap, config: LinkerConfig, budget, label=None):
     """EM of one gap's transitions; returns the fitted forward probabilities float64[K_i, K_{i+g}] per edge.
 
     Starts from uniform transitions; each iteration runs the E-step under the current transitions, the damped
     M-step at rate max(decay^iteration, minimum) and stops when no forward transition or reverse summary moved
     by more than ``min_change`` (Class-B note (assembly B6): the stop rule sees damped steps and the otherwise
-    unused reverse summaries; ported as base).
+    unused reverse summaries; ported as base). label: the batch's census label; with the valley census on, the
+    signed distances change - min_change of the last two iterations (the ones that decide the stop) are recorded
+    (kind ``linker_em_stop``, design A-9(b)).
     """
     n = len(scans)
     forward = [np.full((founders[i], founders[i + gap]), 1 / founders[i + gap]) for i in range(n - gap)]
     reverse = [np.full((founders[i + gap], founders[i]), 1 / founders[i]) for i in range(n - gap)]
+    changes = []
     for iteration in range(config.max_iterations):
         _apply_threads(budget)
         learning_rate = max(config.learning_rate_decay ** iteration, config.minimum_learning_rate)
@@ -208,13 +213,17 @@ def _fit_gap(scans, founders, gap, config: LinkerConfig, budget):
                                            config, budget)
         change = max(_largest_change(forward, new_forward), _largest_change(reverse, new_reverse))
         forward, reverse = new_forward, new_reverse
+        changes.append(change)
         if change <= config.min_change:
             break
+    if label is not None and ties.census_enabled():
+        ties.census("assembly.linker_em_stop", f"{label}/g{gap}",
+                    [value - config.min_change for value in changes[-2:]])
     return forward
 
 
 def fit_transitions(inputs: JoinInputs, genetic_map, *, max_gap: int | None, config: LinkerConfig,
-                    budget) -> Transitions:
+                    budget, label: str | None = None) -> Transitions:
     """Fit the forward transitions of every gap 1 .. min(n - 1, max_gap) of one batch (max_gap None: all).
 
     inputs: the batch (n >= 2 input components, informative samples' float32 neutral likelihoods).
@@ -223,6 +232,7 @@ def fit_transitions(inputs: JoinInputs, genetic_map, *, max_gap: int | None, con
     budget: the batch's CPU budget (re-read at every block, edge and EM iteration). Block emissions run one
         Numba thread per block concurrently; block scans, gap fits and each fit's forward/backward recursions
         run concurrently with shares of the live budget. Results do not depend on the thread counts.
+    label: the batch's census label (None: no census).
     """
     n = len(inputs.blocks)
     last_gap = n - 1 if max_gap is None else min(n - 1, int(max_gap))
@@ -236,12 +246,12 @@ def fit_transitions(inputs: JoinInputs, genetic_map, *, max_gap: int | None, con
     for index, block_scans in budget.concurrent(tasks, 0, label="linker scans"):
         scans[index] = block_scans
     del blocks, tasks
-    fits = [partial(_fit_gap, scans, founders, gap, config) for gap in range(1, last_gap + 1)]
+    fits = [partial(_fit_gap, scans, founders, gap, config, label=label) for gap in range(1, last_gap + 1)]
     fitted = [None] * len(fits)
     for index, forward in budget.concurrent(fits, 0, label="linker fits"):
         fitted[index] = forward
     malloc_trim()
     return Transitions(
         founders=np.asarray(founders, dtype=np.int64),
-        log_forward=tuple(tuple(entrywise_log(table).astype(np.float32) for table in forward)
+        log_forward=tuple(tuple(np.ascontiguousarray(entrywise_log(table), dtype=np.float64) for table in forward)
                           for forward in fitted))
