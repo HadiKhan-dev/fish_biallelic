@@ -96,7 +96,9 @@ of follow-on work nor the two-hour idle limit releases them, and the protected
 runner must never be released.
 
 For SL4 CPU workers, follow AGENTS.md's **SL4 worker size, partition and walltime**
-policy: **prefer `icelake-himem` for suitable Ice Lake requests**, especially
+policy: **check `hpcstat` first and queue only partitions with free capacity**
+(for example `sapphire` when it has idle nodes and `icelake-himem` is full);
+among those, **prefer `icelake-himem` for suitable Ice Lake requests**, especially
 large workers (roughly half a node or more, including the established 48-CPU
 profile), with **two-hour** walltimes. Use ordinary `icelake` as a documented
 fallback when high-memory capacity is inaccessible, unsuitable, or current

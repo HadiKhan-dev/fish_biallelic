@@ -183,6 +183,15 @@ per-user controller allowance.
 Apply the user's partition policy (updated 29 September 2026) to new SL4 CPU
 workers. Account for scheduling tier as well as hardware and memory:
 
+- **Check `hpcstat` before choosing a partition** (user instruction,
+  19 October 2026). It shows the idle, mixed and allocated nodes and CPUs of
+  each partition. Do not queue a partition with no free capacity, such as an
+  `icelake-himem` whose nodes are all allocated, when another suitable
+  partition, such as `sapphire`, has idle nodes: a request on a full
+  partition may wait indefinitely, and a higher tier does not create free
+  nodes. Check again at each submission decision instead of relying on an
+  earlier snapshot, and cancel pending requests on a partition that has
+  filled up when suitable capacity is idle elsewhere.
 - **Prefer `icelake-himem` for suitable Ice Lake requests.** On 29 September
   2026, `icelake-himem` had `PriorityTier=2`, while `icelake` and `sapphire`
   had tier 1. Slurm considers partition tier before numerical job priority;
@@ -192,10 +201,12 @@ workers. Account for scheduling tier as well as hardware and memory:
   snapshots and verify at setup or when admission changes, not for every job.
 - **Large workers, at roughly half-node scale or larger (including the
   established 48-CPU profile): prefer `icelake-himem` with a two-hour
-  walltime.** Fall back to `icelake` when high-memory nodes are inaccessible,
-  unsuitable, or current resource/admission evidence favors ordinary Ice Lake.
-  Record the reason for the fallback. Use checkpoint/resume for longer
-  investigations; do not default these large workers to Sapphire.
+  walltime** when `hpcstat` shows free capacity there. Fall back to `icelake`
+  when high-memory nodes are inaccessible, unsuitable, or current
+  resource/admission evidence favors ordinary Ice Lake, and to `sapphire` when
+  it has idle nodes and the Ice Lake partitions do not. Record the reason for
+  the fallback. Use checkpoint/resume for longer investigations; do not
+  default these large workers to Sapphire without that evidence.
 - **Small workers: prefer `sapphire` when suitable capacity can start promptly
   and its per-core performance is useful.** When admission is constrained,
   prioritize suitable `icelake-himem` capacity before ordinary `icelake`;
