@@ -15,6 +15,16 @@ allele-equivalence keys (qA >= qV). Release, with tau = minimum_release_posterio
    classes with that key); the other track keeps its stage-1 release.
 3. else both tracks abstain (LOW_POSTERIOR_ABSTENTION).
 
+Switch intervals (release 2.2). Where a track's switch between classes a and b
+cannot be placed by the sample's data (a run of bins in which a and b have the
+same calls at every site the sample observes; painting.hmm.switch_interval_masks),
+the track's candidates in those bins are {a, b}. The gate is unchanged from 2.1
+(qV / qA of the Viterbi pair, taken as the smaller of the two traceback
+conventions' pairs, so no bin 2.1 rejects is released). A released interval track has status
+SWITCH_INTERVAL, no label or class, and the union of the candidates' founder rows
+as members (stage 2: of every class sharing a candidate's local key); () when a
+candidate is BACKGROUND or unanchored. The other track is released as usual.
+
 Samples without any observed informative site abstain everywhere
 (INELIGIBLE_NO_EVIDENCE). The rule runs once, when the product is made.
 """
@@ -25,6 +35,7 @@ from enum import IntEnum
 from typing import NamedTuple
 
 import numpy as np
+from numba import njit, prange
 
 from ..model.components import ComponentPanel
 from .config import PaintingConfig
@@ -44,6 +55,10 @@ class TrackStatus(IntEnum):
     # Founder label ambiguous among rows identical over the bin's selected
     # sites; the alleles there are known and the sample's reads observe them.
     LOCAL_ALLELE_EQUIVALENCE = 6
+    # The track switches between candidate classes somewhere in a run of bins
+    # where the candidates have the same calls at every site the sample observes
+    # (release 2.2): the members are the candidates' rows; neither is named.
+    SWITCH_INTERVAL = 7
 
 
 class PaintedChunk(NamedTuple):
@@ -53,13 +68,31 @@ class PaintedChunk(NamedTuple):
         else -1 (component-local row index).
     members: per track the candidate founder rows (ascending): the row of a
         named track, the pooled rows of POOLED_EQUIVALENCE and
-        LOCAL_ALLELE_EQUIVALENCE tracks, () otherwise.
+        LOCAL_ALLELE_EQUIVALENCE tracks, the candidates' rows of a
+        SWITCH_INTERVAL track, () otherwise.
     """
 
     start: int
     end: int
     labels: tuple[int, int]
     members: tuple[tuple[int, ...], tuple[int, ...]]
+
+
+class SwitchInterval(NamedTuple):
+    """One released switch interval of a sample's track (release 2.2); [start, end) in bp.
+
+    track: 0 or 1; start, end: the bp span of the interval's bins (the switch lies inside);
+    rows: the candidate founder rows released there (() if a candidate is not a panel row);
+    before, after: the released member rows of the track in the bins just before and after
+    (() at a component end or where the track abstains).
+    """
+
+    track: int
+    start: int
+    end: int
+    rows: tuple[int, ...]
+    before: tuple[int, ...]
+    after: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -76,7 +109,7 @@ class ComponentPainting:
         selected site of the component (else it abstains everywhere).
     labels: int32[N, 2, B] released founder row of a SINGLETON_NAMED track, else -1.
     classes: int32[N, 2, B] released class (stage 1) or local key
-        (LOCAL_ALLELE_EQUIVALENCE), -1 when abstaining.
+        (LOCAL_ALLELE_EQUIVALENCE), -1 when abstaining or SWITCH_INTERVAL.
     status: uint8[N, 2, B] :class:`TrackStatus`.
     direct: bool[N, 2, B] the released class is called and read-observed at an
         informative selected site of the bin (direct callability).
@@ -133,6 +166,50 @@ class ComponentPainting:
             (int(labels[0, start]), int(labels[1, start])),
             (self.member_sets[members[0, start]], self.member_sets[members[1, start]]))
             for start, stop in zip(starts, stops)]
+
+    def switch_intervals(self, sample: int) -> list[SwitchInterval]:
+        """The released switch intervals of one sample (runs of SWITCH_INTERVAL bins per track)."""
+        if not self.eligible[sample] or self.bins.n_bins == 0:
+            return []
+        edges = self.bins.edges
+        n_bins = self.bins.n_bins
+        result = []
+        for track in (0, 1):
+            flagged = self.status[sample, track] == int(TrackStatus.SWITCH_INTERVAL)
+            if not np.any(flagged):
+                continue
+            ids = self.member_ids[sample, track]
+            changed = np.ones(n_bins, dtype=np.bool_)
+            changed[1:] = (flagged[1:] != flagged[:-1]) | (ids[1:] != ids[:-1])
+            starts = np.flatnonzero(changed)
+            stops = np.r_[starts[1:], n_bins]
+            for start, stop in zip(starts, stops):
+                if not flagged[start]:
+                    continue
+                before = self.member_sets[ids[start - 1]] if start > 0 else ()
+                after = self.member_sets[ids[stop]] if stop < n_bins else ()
+                result.append(SwitchInterval(track, int(edges[start]), int(edges[stop]),
+                                             self.member_sets[ids[start]], before, after))
+        return result
+
+    def carrier_observed(self, positions: np.ndarray, columns: np.ndarray, observed: np.ndarray,
+                         n_rows: int) -> np.ndarray:
+        """bool[K, L]: founder row k at bp ``positions[j]`` is observed by a painted carrier (release 2.2): some
+        eligible sample whose released track at that site names k in its member set (named, pooled, local
+        equivalence or switch interval) has read depth there (``observed`` bool [N, L_e] at evidence columns
+        ``columns`` int64 [L]). False outside the painting bins."""
+        positions = np.asarray(positions, dtype=np.int64)
+        if self.bins.n_bins == 0:
+            return np.zeros((n_rows, len(positions)), dtype=np.bool_)
+        bins = np.searchsorted(self.bins.edges, positions, side="right") - 1
+        bins[(bins < 0) | (bins >= self.bins.n_bins)] = -1
+        offsets = np.zeros(len(self.member_sets) + 1, dtype=np.int64)
+        offsets[1:] = np.cumsum([len(rows) for rows in self.member_sets])
+        rows = np.asarray([row for members in self.member_sets for row in members], dtype=np.int64)
+        return _carrier_observed_kernel(np.ascontiguousarray(self.member_ids, dtype=np.int32), offsets, rows,
+                                        np.ascontiguousarray(self.eligible, dtype=np.bool_), bins.astype(np.int64),
+                                        np.asarray(columns, dtype=np.int64),
+                                        np.ascontiguousarray(observed, dtype=np.bool_), int(n_rows))
 
     def site_labels(self, positions: np.ndarray) -> np.ndarray:
         """int16[N, 2, L] released labels at bp ``positions`` (sorted); -1 outside the bins."""
@@ -222,15 +299,26 @@ class ChromosomePainting:
     config: PaintingConfig
 
 
+def interval_tracks(paths: np.ndarray, masks: np.ndarray | None) -> np.ndarray:
+    """bool[N, 2, B]: the track has candidates besides its Viterbi state (a switch interval)."""
+    if masks is None:
+        return np.zeros(paths.shape, dtype=np.bool_)
+    return masks != np.left_shift(np.int64(1), paths.astype(np.int64))
+
+
 def release_tracks(states: PaintingStates, paths: np.ndarray, eligible: np.ndarray,
                    qv: np.ndarray, qa: np.ndarray, local_keys: np.ndarray,
-                   support: np.ndarray, threshold: float
+                   support: np.ndarray, threshold: float, masks: np.ndarray | None = None
                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Staged release of the Viterbi tracks: (labels, classes, status), each [N, 2, B].
 
     ``paths`` int32[N, 2, B] gauge-fixed Viterbi states; ``qv``/``qa``
-    float64[N, B]; ``support`` bool[N, 2, B] direct read support of each
-    Viterbi track; ``threshold`` = tau.
+    float64[N, B] (masses over the candidate sets, painting.hmm.release_posteriors);
+    ``support`` bool[N, 2, B] direct read support of each Viterbi track;
+    ``threshold`` = tau; ``masks`` int64[N, 2, B] candidate states (None = the
+    Viterbi state alone): an interval track of a released bin gets SWITCH_INTERVAL.
+    The gate itself is 2.1's (stages 1 and 2 on the Viterbi tracks), so a switch
+    interval never releases a bin that 2.1 rejects.
     """
     anchored = states.anchored
     class_labels = np.asarray([
@@ -249,12 +337,18 @@ def release_tracks(states: PaintingStates, paths: np.ndarray, eligible: np.ndarr
     status = status_by_class[paths]
     stage_one = qv >= threshold
     bins = np.arange(paths.shape[2])[None, None, :]
+    interval = interval_tracks(paths, masks)
     multi = multi_member_local_states(local_keys)[bins, paths]
+    # Stage 2 exactly as 2.1 (the Viterbi tracks' direct support); an interval track is then released as
+    # SWITCH_INTERVAL instead of LOCAL_ALLELE_EQUIVALENCE.
     stage_two = (~stage_one) & (qa >= threshold) & ~np.any(multi & ~support, axis=1)
-    local = stage_two[:, None, :] & multi
+    local = stage_two[:, None, :] & multi & ~interval
     classes[local] = local_keys[bins, paths][local]
     labels[local] = -1
     status[local] = int(TrackStatus.LOCAL_ALLELE_EQUIVALENCE)
+    classes[interval] = -1
+    labels[interval] = -1
+    status[interval] = int(TrackStatus.SWITCH_INTERVAL)
     low = np.broadcast_to(~(stage_one | stage_two)[:, None, :], paths.shape)
     classes[low] = -1
     labels[low] = -1
@@ -266,13 +360,17 @@ def release_tracks(states: PaintingStates, paths: np.ndarray, eligible: np.ndarr
 
 
 def track_members(status: np.ndarray, classes: np.ndarray, local_keys: np.ndarray,
-                  state_classes: tuple[tuple[int, ...], ...]
+                  state_classes: tuple[tuple[int, ...], ...], masks: np.ndarray | None = None,
+                  stage_two: np.ndarray | None = None, anchored: np.ndarray | None = None
                   ) -> tuple[np.ndarray, tuple[tuple[int, ...], ...]]:
     """Candidate founder rows of every released track: (member_ids int32[N, 2, B], member_sets).
 
     SINGLETON_NAMED and POOLED_EQUIVALENCE name the rows of their class;
     LOCAL_ALLELE_EQUIVALENCE names the rows of every class whose key in that
-    bin is the released key; other statuses name none (id 0, the empty set).
+    bin is the released key; SWITCH_INTERVAL names the rows of its candidate
+    classes (``masks``; in a stage-2 bin, ``stage_two`` bool[N, B], of every class
+    sharing a candidate's local key), none if a candidate is BACKGROUND or not
+    ``anchored``; other statuses name none (id 0, the empty set).
     """
     n_classes = len(state_classes)
     sets: list[tuple[int, ...]] = [()]
@@ -304,4 +402,91 @@ def track_members(status: np.ndarray, classes: np.ndarray, local_keys: np.ndarra
                 row for class_index in np.flatnonzero(local_keys[bin_index, :n_classes] == key)
                 for row in state_classes[class_index])
         ids[local] = code_ids[inverse.reshape(-1)]
+    interval = status == int(TrackStatus.SWITCH_INTERVAL)
+    if np.any(interval):
+        if masks is None:
+            raise ValueError("switch-interval tracks need their candidate masks")
+        anchored = (np.ones(n_classes, dtype=np.bool_) if anchored is None
+                    else np.asarray(anchored, dtype=np.bool_))
+        bins = np.broadcast_to(np.arange(status.shape[2]), status.shape)[interval]
+        local_stage = (np.zeros(status.shape, dtype=np.bool_) if stage_two is None
+                       else np.broadcast_to(np.asarray(stage_two)[:, None, :], status.shape))[interval]
+        # One member set per distinct (bin if stage 2 else -1, mask).
+        keyed = np.stack([np.where(local_stage, bins, -1).astype(np.int64),
+                          np.asarray(masks)[interval].astype(np.int64)], axis=1)
+        codes, inverse = np.unique(keyed, axis=0, return_inverse=True)
+        code_ids = np.empty(len(codes), dtype=np.int32)
+        for position, (bin_index, mask) in enumerate(codes.tolist()):
+            candidates = [state for state in range(n_classes + 1) if (mask >> state) & 1]
+            if any(state >= n_classes or not anchored[state] for state in candidates):
+                code_ids[position] = 0
+                continue
+            if bin_index >= 0:
+                keys = {int(local_keys[bin_index, state]) for state in candidates}
+                candidates = [index for index in range(n_classes) if int(local_keys[bin_index, index]) in keys]
+            code_ids[position] = intern(row for class_index in candidates for row in state_classes[class_index])
+        ids[interval] = code_ids[inverse.reshape(-1)]
     return ids, tuple(sets)
+
+
+def segment_rows(painting: "ChromosomePainting", input_ids=None) -> list[dict]:
+    """The released painting as segments (release 2.2): one row per sample, component, track and run of bins with
+    one release (status, label and candidate rows), in sample, component, track and position order.
+
+    Columns: SampleID, Component, Track (0/1, the painting's gauge: which homologue is track 0 carries no meaning),
+    Start, End (bp, [Start, End)), Status (TrackStatus name), Label (the founder row of a SINGLETON_NAMED segment,
+    else empty), Rows (candidate founder rows, ';'-joined; component-local). A SWITCH_INTERVAL segment is the bp
+    interval where the track switches between its candidate rows; the segments before and after it name the two
+    sides. Ineligible samples have no rows. ``input_ids`` (the run's input sample order) orders the samples; default
+    the records' order."""
+    names = {int(status.value): status.name for status in TrackStatus}
+    order = list(range(len(painting.sample_ids)))
+    if input_ids is not None:
+        position = {str(name): index for index, name in enumerate(input_ids)}
+        order.sort(key=lambda sample: position.get(str(painting.sample_ids[sample]), len(position)))
+    rows = []
+    for sample in order:
+        sample_id = painting.sample_ids[sample]
+        for index, component in enumerate(painting.components):
+            if not component.eligible[sample] or component.bins.n_bins == 0:
+                continue
+            edges = component.bins.edges
+            n_bins = component.bins.n_bins
+            for track in (0, 1):
+                status = component.status[sample, track]
+                labels = component.labels[sample, track]
+                ids = component.member_ids[sample, track]
+                changed = np.ones(n_bins, dtype=np.bool_)
+                changed[1:] = (status[1:] != status[:-1]) | (labels[1:] != labels[:-1]) | (ids[1:] != ids[:-1])
+                starts = np.flatnonzero(changed)
+                stops = np.r_[starts[1:], n_bins]
+                for start, stop in zip(starts.tolist(), stops.tolist()):
+                    label = int(labels[start])
+                    rows.append(dict(SampleID=str(sample_id), Component=index, Track=track,
+                                     Start=int(edges[start]), End=int(edges[stop]),
+                                     Status=names[int(status[start])], Label="" if label < 0 else str(label),
+                                     Rows=";".join(map(str, component.member_sets[ids[start]]))))
+    return rows
+
+
+@njit(cache=True, parallel=True)
+def _carrier_observed_kernel(member_ids, set_offsets, set_rows, eligible, site_bins, site_columns, observed,
+                             n_rows):
+    n_samples = member_ids.shape[0]
+    n_sites = len(site_bins)
+    result = np.zeros((n_rows, n_sites), dtype=np.bool_)
+    for site in prange(n_sites):
+        bin_index = site_bins[site]
+        if bin_index < 0:
+            continue
+        column = site_columns[site]
+        for sample in range(n_samples):
+            if not eligible[sample] or not observed[sample, column]:
+                continue
+            for track in range(2):
+                identifier = member_ids[sample, track, bin_index]
+                for member in range(set_offsets[identifier], set_offsets[identifier + 1]):
+                    row = set_rows[member]
+                    if row < n_rows:
+                        result[row, site] = True
+    return result

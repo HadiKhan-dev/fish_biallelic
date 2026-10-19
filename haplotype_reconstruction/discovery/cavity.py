@@ -27,6 +27,7 @@ from ..execution import claim_threads
 from .cavity_kernels import (_build_evidence_emission_cache_kernel, _floor_log_likelihood_kernel,
                              _score_mode_cavity_kernel)
 from ..maths.ties import BlockQuanta
+from .conventions import rev
 from .panel import FixedKSolution, log_haplotype_set_count, restricted
 
 
@@ -115,9 +116,12 @@ def _elbo_tie(solution) -> float:
     return quanta.nll
 
 
-def score_solutions(workspace: CavityWorkspace, solutions, active: np.ndarray):
+def score_solutions(workspace: CavityWorkspace, solutions, active: np.ndarray, tie_masks=None):
     """Cavity scores of solutions of the block (``active``: bool[N] samples with depth; the
-    workspace holds exactly those samples)."""
+    workspace holds exactly those samples). ``tie_masks`` (release 2.2, discovery): per solution uint8[N, states] of
+    every sample's tied A-step states T (fixed_k.assign.tie_mask); a sample with |T| > 1 counts 1/|T| at each state of
+    T in the Dirichlet state prior (its evidence enters the founder field through its meet assignment). None: one
+    count at the assigned state."""
     # A phase boundary before the parallel held-out kernel: late blocks claim freed cores.
     claim_threads()
     if not solutions:
@@ -127,16 +131,21 @@ def score_solutions(workspace: CavityWorkspace, solutions, active: np.ndarray):
     samples = None if all_active else np.flatnonzero(active)
     n_sites = workspace.likelihood.shape[1]
     scores = []
-    for solution in solutions:
+    for index, solution in enumerate(solutions):
         scored = solution if samples is None else restricted(solution, samples)
         kind, first, second, base = workspace.geometry(solution.k)
+        if tie_masks is None:
+            mask = np.zeros((0, len(kind)), dtype=np.uint8)
+        else:
+            mask = tie_masks[index] if samples is None else tie_masks[index][samples]
+            mask = np.ascontiguousarray(mask, dtype=np.uint8)
         sample_scores, failures = _score_mode_cavity_kernel(
             workspace.likelihood, workspace.log_likelihood, workspace.rw_log_likelihood,
             workspace.ww_log_emission, np.ascontiguousarray(scored.haplotypes, dtype=np.int64),
             np.ascontiguousarray(scored.assignments, dtype=np.int64), kind, first, second, base,
             float(config.state_concentration), int(config.mean_field_max_iterations),
             float(config.mean_field_tolerance), float(config.likelihood_floor),
-            workspace.shared_triple, float(_elbo_tie(solution)))
+            workspace.shared_triple, float(_elbo_tie(solution)), rev("d12"), mask)
         total = math.fsum(float(value) for value in sample_scores)
         k = solution.k
         log_k_prior = -math.log(k) - math.log(k + 1)

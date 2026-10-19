@@ -260,6 +260,13 @@ The driver may prepare the next contig on a helper thread while discovery runs t
 Results do not depend on the CPU budget: every reduction over samples or sites runs in a fixed
 order, and the window partition of the loader does not change the records read.
 
+Convention reversal (`HAPLOTYPES_TIE_REVERSE=1`, release 2.2): the run's canonical sample axis is reverse name order
+(maths.ties.run_sample_order); the read model keeps the last instead of the first EM start whose converged log
+likelihood lies in the band of the best; the site filter's histogram mode is the last instead of the first of
+exactly tied maximal bins; the sample-QC minor allele at exactly equal ALT and REF read totals is REF instead of
+ALT. Not reversed (stated preferences): the simplest read model among equally good candidates and the hyperfit
+boundary at tau = 0.
+
 ## Interpretation and limitations
 
 - The likelihoods are P(reads | genotype) of one fitted model per contig. Model selection is

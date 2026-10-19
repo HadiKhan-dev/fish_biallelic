@@ -6,6 +6,13 @@ butterfly step ``max_step4``) and the run contraction of chains with zero-probab
 them for its phase and selector chains and gauges, recombination for its two-state screening posterior. All
 recurrences are scaled forward-backward or max-product scans in a fixed order, so results do not depend on thread
 counts.
+
+Convention reversal (release 2.2, maths.ties.reverse_conventions): the Viterbi kernels take ``reverse``. Their tie
+rules mix stated priors (fewest switches: a back-pointer within the tie quantum keeps its state) with conventions:
+WHERE an unavoidable switch lands among tied positions (a back-trace that stays puts it at the leftmost tied position)
+and WHICH state wins an exact tie (the lowest). With ``reverse`` the chain is decoded mirrored (the forward pass runs
+from the right end), which puts such switches at the rightmost tied position, and state ties go to the highest state;
+the fewest-switches prior is kept.
 """
 from __future__ import annotations
 
@@ -78,11 +85,7 @@ def selector_cavity(emission, theta):
 
 
 @njit(cache=True)
-def selector_viterbi(emission, theta, tie=0.0):
-    """Max-product path of a four-state selector chain (uniform start). Predecessors within ``tie`` of the best are
-    tied: the path keeps its state, else takes the fewest bit changes, then the lower previous state (tie = 0: exact
-    ties only; 2.0 took the lower previous state at an exact tie); the final state is the lowest within ``tie`` of the
-    best."""
+def _selector_viterbi_core(emission, theta, tie, high):
     n = len(emission)
     score = np.zeros(4, dtype=np.float64)
     new = np.empty(4, dtype=np.float64)
@@ -112,7 +115,8 @@ def selector_viterbi(emission, theta, tie=0.0):
                         best = value
                 arg = 0
                 fewest = 3
-                for previous in range(4):
+                for index in range(4):
+                    previous = 3 - index if high else index
                     if values[previous] >= best - tie and values[previous] > -np.inf:
                         bits = previous ^ state
                         changes = (bits >> 1) + (bits & 1)
@@ -124,8 +128,9 @@ def selector_viterbi(emission, theta, tie=0.0):
         score, new = new, score
     result = np.empty(n, dtype=np.int8)
     top = np.max(score)
-    state = 0
-    for candidate in range(4):
+    state = 3 if high else 0
+    for index in range(4):
+        candidate = 3 - index if high else index
         if score[candidate] >= top - tie:
             state = candidate
             break
@@ -133,6 +138,29 @@ def selector_viterbi(emission, theta, tie=0.0):
         result[site] = state
         if site:
             state = back[site, state]
+    return result
+
+
+@njit(cache=True)
+def selector_viterbi(emission, theta, tie=0.0, reverse=False):
+    """Max-product path of a four-state selector chain (uniform start). Predecessors within ``tie`` of the best are
+    tied: the path keeps its state, else takes the fewest bit changes, then the lower previous state (tie = 0: exact
+    ties only; 2.0 took the lower previous state at an exact tie); the final state is the lowest within ``tie`` of the
+    best. ``reverse`` (convention reversal): decoded mirrored, state ties to the higher state."""
+    if not reverse:
+        return _selector_viterbi_core(emission, theta, tie, False)
+    n = len(emission)
+    mirrored = np.empty((n, 4), dtype=np.float64)
+    mirrored_theta = np.empty(max(n - 1, 0), dtype=np.float64)
+    for site in range(n):
+        for state in range(4):
+            mirrored[site, state] = emission[n - 1 - site, state]
+    for site in range(n - 1):
+        mirrored_theta[site] = theta[n - 2 - site]
+    path = _selector_viterbi_core(mirrored, mirrored_theta, tie, True)
+    result = np.empty(n, dtype=np.int8)
+    for site in range(n):
+        result[site] = path[n - 1 - site]
     return result
 
 
@@ -196,11 +224,7 @@ def binary_posterior(emission, theta, anchor):
 
 
 @njit(cache=True)
-def binary_viterbi(emission, theta, anchor, tie=0.0, final_tie=-1.0):
-    """Max-product path of a two-state chain (uniform start, state 1 forbidden at ``anchor``); predecessors within
-    ``tie`` of the best are tied and the path stays (tie = 0: exact ties stay, as 2.0); the final state is 0 unless
-    state 1 is better by more than ``final_tie`` (default: ``tie``; FRAME_TIE for the global frame of an unanchored
-    chain)."""
+def _binary_viterbi_core(emission, theta, anchor, tie, final_limit, prefer_one):
     n = len(emission)
     scores = np.zeros(2, dtype=np.float64)
     back = np.zeros((n, 2), dtype=np.int8)
@@ -222,13 +246,41 @@ def binary_viterbi(emission, theta, anchor, tie=0.0, final_tie=-1.0):
             new[state] += math.log(max(emission[i, state], 1e-300))
         scores = new
     path = np.empty(n, dtype=np.int8)
-    final_limit = tie if final_tie < 0 else final_tie
-    state = 0 if scores[0] >= scores[1] - final_limit else 1
+    if prefer_one:
+        state = 1 if scores[1] >= scores[0] - final_limit else 0
+    else:
+        state = 0 if scores[0] >= scores[1] - final_limit else 1
     for i in range(n - 1, -1, -1):
         path[i] = state
         if i:
             state = back[i, state]
     return path
+
+
+@njit(cache=True)
+def binary_viterbi(emission, theta, anchor, tie=0.0, final_tie=-1.0, reverse=False):
+    """Max-product path of a two-state chain (uniform start, state 1 forbidden at ``anchor``); predecessors within
+    ``tie`` of the best are tied and the path stays (tie = 0: exact ties stay, as 2.0); the final state is 0 unless
+    state 1 is better by more than ``final_tie`` (default: ``tie``; FRAME_TIE for the global frame of an unanchored
+    chain). ``reverse`` (convention reversal): decoded mirrored (the end-state decision is taken at the first marker)
+    and the end state is 1 unless state 0 is better by more than ``final_tie``."""
+    final_limit = tie if final_tie < 0 else final_tie
+    if not reverse:
+        return _binary_viterbi_core(emission, theta, anchor, tie, final_limit, False)
+    n = len(emission)
+    mirrored = np.empty((n, 2), dtype=np.float64)
+    mirrored_theta = np.empty(max(n - 1, 0), dtype=np.float64)
+    for i in range(n):
+        mirrored[i, 0] = emission[n - 1 - i, 0]
+        mirrored[i, 1] = emission[n - 1 - i, 1]
+    for i in range(n - 1):
+        mirrored_theta[i] = theta[n - 2 - i]
+    path = _binary_viterbi_core(mirrored, mirrored_theta, n - 1 - anchor if anchor >= 0 else -1, tie, final_limit,
+                                True)
+    result = np.empty(n, dtype=np.int8)
+    for i in range(n):
+        result[i] = path[n - 1 - i]
+    return result
 
 
 @njit(cache=True)

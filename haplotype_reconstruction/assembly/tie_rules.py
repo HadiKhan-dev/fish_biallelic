@@ -159,7 +159,10 @@ def path_class_order(values, paths, quantum_value: float, *, descending: bool = 
     wide = spans > ties.WIDE_CLASS_QUANTA * quantum_value
     value_key = np.where(wide[class_sorted], ordered, 0.0)
     sorted_paths = paths[exact]
-    inner = np.lexsort(tuple(sorted_paths[:, column] for column in range(paths.shape[1] - 1, -1, -1))
+    # Content order inside a class: lexicographic paths, reversed under ties.reverse_conventions() (release 2.2
+    # convention reversal; classes and values are not reversed).
+    direction = -1 if ties.reverse_conventions() else 1
+    inner = np.lexsort(tuple(direction * sorted_paths[:, column] for column in range(paths.shape[1] - 1, -1, -1))
                        + (value_key, class_sorted))
     order = exact[inner]
     classes = np.empty(n, dtype=np.int64)
@@ -170,6 +173,59 @@ def path_class_order(values, paths, quantum_value: float, *, descending: bool = 
         finite = np.isfinite(gaps) & (gaps != 0.0)
         boundary = tuple(float(gap) for gap in gaps[finite & (np.abs(gaps - quantum_value) <= guard)])
     return order.astype(np.int64), classes, int(np.count_nonzero(wide)), boundary
+
+
+def linkage_order(result: ties.TieClasses, links, contents, kind: str = "beam") -> list:
+    """Decision order of a tie-class decision with a data criterion inside the classes (release 2.2): inside every
+    class of ``result`` (not wider than WIDE_CLASS_QUANTA x q; those keep value order) the members are ordered by
+    tie classes of ``links`` (descending; quantum ``kind`` at the largest |link| of the class) and only then by the
+    content key (reversed under the convention reversal). links: the batch linker's log-probability of each
+    candidate's paths (join/beam.path_linkage), the population linkage the sample likelihood could not use to
+    separate them. Returns element indices in decision order; symmetric_winner(result, links, order) tells whether
+    the winner was still decided by content (a fully symmetric tie, counted and flagged by the callers)."""
+    order = [int(i) for i in result.order]
+    if links is None or len(order) < 2:
+        return order
+    classes = result.classes
+    out = []
+    start = 0
+    while start < len(order):
+        c = int(classes[order[start]])
+        end = start
+        while end < len(order) and int(classes[order[end]]) == c:
+            end += 1
+        members = order[start:end]
+        wide = float(result.spans[c]) > ties.WIDE_CLASS_QUANTA * float(result.quantum)
+        if len(members) > 1 and not wide:
+            values = [float(links[m]) for m in members]
+            finite = [abs(v) for v in values if np.isfinite(v)]
+            sub = ties.tie_classes(values, quantum(kind, max(finite) if finite else 0.0),
+                                   content=[contents[m] for m in members], descending=True)
+            members = [members[k] for k in sub.order]
+        out.extend(members)
+        start = end
+    return out
+
+
+def symmetric_members(result: ties.TieClasses, links, kind: str = "beam") -> list:
+    """The elements a tie-class decision's winner is still tied with once the data criteria are used: the members
+    of its class (not wider than WIDE_CLASS_QUANTA x q) that are also tied with it on the linker score (all of them
+    without links). Empty when the data decide. A non-empty list is a fully symmetric decision, decided by the
+    content key (release 2.2: counted as kind "<decision>.symmetric" and its alternatives released in the events)."""
+    if not result.tied_winner:
+        return []
+    c = int(result.classes[result.winner])
+    if float(result.spans[c]) > ties.WIDE_CLASS_QUANTA * float(result.quantum):
+        return []
+    members = [int(i) for i in result.members(c)]
+    if links is None:
+        return members
+    values = [float(links[m]) for m in members]
+    finite = [abs(v) for v in values if np.isfinite(v)]
+    sub = ties.tie_classes(values, quantum(kind, max(finite) if finite else 0.0), descending=True)
+    if not sub.tied_winner:
+        return []
+    return [members[k] for k in sub.members(int(sub.classes[sub.winner]))]
 
 
 def relevant_boundaries(values, ties_value: ties.TieClasses, quantum_value: float, motion_value: float | None, *,
@@ -250,18 +306,24 @@ def count_vector_classes(counter: ties.TieCounter | None, kind: str, classes: np
 
 
 def truncate(items: list, ties_value: ties.TieClasses, limit: int, cap: int | None = None) -> list:
-    """The first ``limit`` items in decision order, extended by the members of the class the cut falls in (at most
-    ``cap`` items in all; default 2 x limit). ``items`` are in the original indexing of ``ties_value``."""
+    """The first ``limit`` items in decision order, extended by the members of the class the cut falls in, so the
+    whole cut class is kept (release 2.2: order-invariant). When the cut class would take the list beyond ``cap``
+    items (default 2 x limit), the whole class is dropped instead and only the classes before it are kept (2.1 kept
+    the class's first members in content order); a first class larger than the cap is kept whole. ``items`` are in
+    the original indexing of ``ties_value``."""
     order = [int(i) for i in ties_value.order]
     if len(order) <= limit:
         return [items[i] for i in order]
     cap = 2 * limit if cap is None else cap
-    cut_class = ties_value.classes[order[limit - 1]]
-    kept = order[:limit]
-    for index in order[limit:]:
-        if len(kept) >= cap or ties_value.classes[index] != cut_class:
-            break
-        kept.append(index)
+    classes = ties_value.classes
+    cut_class = classes[order[limit - 1]]
+    start = limit - 1
+    while start > 0 and classes[order[start - 1]] == cut_class:
+        start -= 1
+    end = limit
+    while end < len(order) and classes[order[end]] == cut_class:
+        end += 1
+    kept = order[:end] if (end <= cap or start == 0) else order[:start]
     return [items[i] for i in kept]
 
 

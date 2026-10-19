@@ -45,6 +45,17 @@ must not decide a discrete outcome, and neither may array order. This module giv
 
 * :func:`census` (diagnostic valley census, design A-8; on only when HAPLOTYPES_TIE_CENSUS names a directory).
 
+* **Convention reversal** (release 2.2 acceptance test, design/V22_BRIEF.md): :func:`reverse_conventions` is True when
+  the environment sets HAPLOTYPES_TIE_REVERSE=1. Every remaining ARBITRARY convention then runs in reverse: index
+  order, content-key order, binary default states (0/1), sample-name order and keep-first. Stated priors are NOT
+  reversed (smaller K, fewer switches or parents, the conservative side of an exact threshold, keep-current inside a
+  tie class), nor canonical labels (e.g. :func:`rows_key`). A released biological output that changes under reversal
+  (outside released ambiguity) was selected by a convention. Helpers: :func:`conv_key` (reverse the last, arbitrary
+  component of a sort key), :func:`conv_index`, :func:`conv_order`, :func:`conv_first`, :func:`conv_argmin`,
+  :func:`conv_argmax`, :func:`conv_state`, :func:`conv_sorted`. :func:`tie_classes` (hence :func:`class_sort` and
+  :func:`class_winner`) and :func:`run_sample_order` apply it themselves. Default: off, and every helper is the
+  identity (no-op). Numba kernels take the flag as an argument (pass ``reverse_conventions()``).
+
 * :func:`grid_key` only for values that are grid points by construction (e.g. the excess of an all-unknown sample,
   n_obs x 2 lambda nats); :func:`improves`; :func:`threshold_band` (owner decision 5; see design A-7).
 """
@@ -192,7 +203,9 @@ def tie_classes(values: Sequence[float], quantum: float, *, content: Sequence | 
     descending: larger values first (scores); the default puts smaller values first (NLLs, costs).
     motion: the measured noise motion of the compared quantity (e.g. NOISE_MOTION[kind]); enables the boundary guard.
     Sorting is by exact value (ties by content key); a new class starts where the gap to the previous value exceeds q;
-    inside a class wider than WIDE_CLASS_QUANTA x q the order stays by value (width guard).
+    inside a class wider than WIDE_CLASS_QUANTA x q the order stays by value (width guard). Under
+    reverse_conventions() the content key (or index) order inside a class is reversed; classes, values and
+    secondary keys (stated preferences) are not.
     """
     x = np.asarray(values, dtype=np.float64)
     n = len(x)
@@ -228,11 +241,13 @@ def tie_classes(values: Sequence[float], quantum: float, *, content: Sequence | 
     wide = spans_array > WIDE_CLASS_QUANTA * quantum
     second = [(_exact_key(secondary[i]) if secondary is not None else ()) for i in range(n)]
 
+    last = [conv_key(key) for key in keys] if reverse_conventions() else keys     # the arbitrary component
+
     def decision_key(i):
         c = classes[i]
         if wide[c]:
-            return (c, sign * x[i], second[i], keys[i])
-        return (c, 0.0, second[i], keys[i])
+            return (c, sign * x[i], second[i], last[i])
+        return (c, 0.0, second[i], last[i])
 
     order = np.asarray(sorted(range(n), key=decision_key), dtype=np.int64)
     return TieClasses(order=order, classes=classes, spans=spans_array, quantum=float(quantum),
@@ -339,16 +354,18 @@ def canonical_sample_order(likelihood: np.ndarray, observed: np.ndarray) -> np.n
     dosage = np.where(observed, np.argmax(likelihood, axis=2) + 1, 0).astype(np.uint8)
     exact = np.ascontiguousarray(likelihood, dtype=">f8")
     keys = [dosage[s].tobytes() + exact[s].tobytes() for s in range(likelihood.shape[0])]
-    return np.asarray(sorted(range(len(keys)), key=lambda s: keys[s]), dtype=np.int64)
+    return np.asarray(sorted(range(len(keys)), key=lambda s: conv_key(keys[s])), dtype=np.int64)
 
 
 def run_sample_order(sample_ids: Sequence[str]) -> np.ndarray:
     """int64[N] permutation putting a run's samples in canonical order (by name; names are unique and travel with the
-    data, so the order does not depend on the input order). Applied once at the evidence entry (design A-11)."""
+    data, so the order does not depend on the input order). Applied once at the evidence entry (design A-11).
+    Reverse name order under reverse_conventions()."""
     names = [str(name) for name in sample_ids]
     if len(set(names)) != len(names):
         raise ValueError("sample names must be unique for the canonical run order")
-    return np.asarray(sorted(range(len(names)), key=lambda index: names[index]), dtype=np.int64)
+    return np.asarray(sorted(range(len(names)), key=lambda index: names[index], reverse=reverse_conventions()),
+                      dtype=np.int64)
 
 
 def inverse_permutation(order: np.ndarray) -> np.ndarray:
@@ -389,3 +406,112 @@ def census(kind: str, key: str, values: Iterable[float]) -> None:
         _CENSUS["pid"] = pid
     _CENSUS["handle"].write(json.dumps({"kind": str(kind), "key": str(key),
                                         "values": [float(value) for value in values]}) + "\n")
+
+
+# Convention reversal (see the module docstring). Read once per process from the environment, which worker processes
+# inherit; set_reverse_conventions() overrides it for tests and harness tools (never midway through a run).
+_REVERSE: dict = {"value": None}
+
+
+def reverse_conventions() -> bool:
+    """Whether the run reverses its arbitrary conventions (HAPLOTYPES_TIE_REVERSE set to 1/true/yes/on)."""
+    value = _REVERSE["value"]
+    if value is None:
+        import os
+        text = os.environ.get("HAPLOTYPES_TIE_REVERSE", "").strip().lower()
+        value = text not in ("", "0", "false", "no", "off")
+        _REVERSE["value"] = value
+    return value
+
+
+def set_reverse_conventions(value: bool | None) -> None:
+    """Force the reversal on (True) or off (False), or go back to the environment (None). Processes started earlier
+    keep their own value; a run must not change it midway."""
+    _REVERSE["value"] = None if value is None else bool(value)
+
+
+class _Descending:
+    """A sort key that inverts the order of an exact key (conv_key under reversal)."""
+
+    __slots__ = ("key",)
+
+    def __init__(self, key):
+        self.key = key
+
+    def __lt__(self, other):
+        return other.key < self.key
+
+    def __gt__(self, other):
+        return other.key > self.key
+
+    def __le__(self, other):
+        return other.key <= self.key
+
+    def __ge__(self, other):
+        return other.key >= self.key
+
+    def __eq__(self, other):
+        return isinstance(other, _Descending) and self.key == other.key
+
+    def __hash__(self):
+        return hash(self.key)
+
+    def __repr__(self):
+        return f"_Descending({self.key!r})"
+
+
+def conv_key(key):
+    """An exact key in convention order: ``key`` itself, or a wrapper that sorts in reverse under the reversal. Use it
+    only for the arbitrary (last) component of a sort key, never for values or stated preferences."""
+    return _Descending(key) if reverse_conventions() else key
+
+
+def conv_index(index: int, size: int) -> int:
+    """An index as a convention rank: ``index``, or ``size - 1 - index`` under the reversal (so "the lowest index"
+    becomes "the highest")."""
+    return int(size - 1 - index) if reverse_conventions() else int(index)
+
+
+def conv_order(size: int) -> np.ndarray:
+    """int64[size]: the convention's traversal order of ``size`` exchangeable items (0 .. size-1, or reversed)."""
+    order = np.arange(int(size), dtype=np.int64)
+    return order[::-1].copy() if reverse_conventions() else order
+
+
+def conv_first(items: Sequence):
+    """Keep-first: the first element of a sequence, or the last under the reversal (None if empty)."""
+    if len(items) == 0:
+        return None
+    return items[-1] if reverse_conventions() else items[0]
+
+
+def conv_argmin(values) -> int:
+    """np.argmin over the flattened values with exact ties going to the lowest index, or to the highest under the
+    reversal."""
+    a = np.ravel(np.asarray(values))
+    if not reverse_conventions():
+        return int(np.argmin(a))
+    return int(len(a) - 1 - np.argmin(a[::-1]))
+
+
+def conv_argmax(values) -> int:
+    """np.argmax over the flattened values with exact ties going to the lowest index, or to the highest under the
+    reversal."""
+    a = np.ravel(np.asarray(values))
+    if not reverse_conventions():
+        return int(np.argmax(a))
+    return int(len(a) - 1 - np.argmax(a[::-1]))
+
+
+def conv_state(state: int) -> int:
+    """A binary default state (0/1; e.g. "frame 0 = scaffold orientation", "state 0 on a tie") in the convention:
+    ``state``, or ``1 - state`` under the reversal."""
+    return 1 - int(state) if reverse_conventions() else int(state)
+
+
+def conv_sorted(items: Iterable, key: Callable | None = None) -> list:
+    """sorted(items, key=key), or its exact reverse under the reversal (equal keys in reversed order too). For orders
+    that are wholly conventions (e.g. a traversal by name or index); for (value, ..., content) orders use conv_key on
+    the content component instead."""
+    ordered = sorted(items, key=key)
+    return ordered[::-1] if reverse_conventions() else ordered

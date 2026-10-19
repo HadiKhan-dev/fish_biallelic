@@ -148,8 +148,13 @@ Every sample is decoded independently (`painting/hmm.py`):
 
 - **Viterbi.** Exact max-product recursion over the S^2 ordered states, O(S^2) per bin: the best predecessor for
   each of the three Hamming costs comes from the best and second-best entries of every row and column of the
-  previous scores and their complement. Exact ties go to the smallest previous flat state; scores are centred per
-  bin.
+  previous scores and their complement. Predecessors within `VITERBI_TIE` = 2^-20 nats of the best are tied; the
+  back-pointer takes the fewest track changes (a stated prior), then the smallest previous flat state; scores are
+  centred per bin. The traceback runs right to left and stays while staying is tied, so among co-optimal
+  placements a switch lands on the leftmost tied edge. That placement is a convention and is never released by
+  itself: the release uses switch intervals (below). Under `HAPLOTYPES_TIE_REVERSE=1` (release 2.2 convention
+  reversal) the recursion runs over the bins in reverse order and index ties take the largest flat state, so the
+  switch lands on the rightmost tied edge.
 - **Track order.** Emissions are symmetric in track order and the Hamming transition is invariant to swapping both
   tracks, so swapping the whole path suffix after a boundary changes the score only through that one transition.
   Where the ordered and swapped continuations change equally many tracks, both are exact Viterbi paths; the suffix
@@ -167,7 +172,39 @@ Every sample is decoded independently (`painting/hmm.py`):
 - **Direct support.** A track is directly supported in a bin when its Viterbi class is called at an informative
   selected site of the bin.
 - **Switch counts.** `switch_counts[s]` is the minimum number of unordered track changes along the Viterbi path (a
-  pure exchange of the two tracks is gauge, not a switch), 0 for ineligible samples.
+  pure exchange of the two tracks is gauge, not a switch; the fewer of the two traceback conventions' paths, see
+  below), 0 for ineligible samples.
+
+### Switch intervals (release 2.2)
+
+Where a track switches between classes a and b but the sample's reads cannot place the switch, the painting
+releases the interval instead of a point (`painting/hmm.py` `switch_interval_masks`, `decode_candidates`):
+
+- **Indistinguishable bins.** In a bin, a and b are indistinguishable for a sample when they have the same call
+  (0, 1 or uncalled; BACKGROUND counts as uncalled everywhere) at every selected site of the bin that the sample
+  observes (read depth > 0). In such a bin the emissions of (a, y) and (b, y) are equal, so moving the switch across
+  the bin changes the path score only through the transition prior (the map distance of the edge, or nothing on a
+  cold stretch). The test reads only the observed mask and the calls, so genotype-likelihood noise cannot move it.
+- **Interval of a switch.** For a track change a → b of the gauge-fixed Viterbi path after bin e, the interval is
+  the maximal run of indistinguishable bins on both sides of e; it stops at the track's neighbouring switches, each
+  switch keeping one bin of its own segments, so an interval never removes a switch. The bins of the interval get
+  the candidate set {a, b} on that track; elsewhere the candidate set is the Viterbi state.
+- **Both traceback conventions.** The Viterbi path of the mirrored convention is decoded too and its intervals
+  taken. Per bin the two decodings' candidate sets are combined into the smallest unordered cover (the two track
+  matchings give (P0 ∪ S0, P1 ∪ S1) and (P0 ∪ S1, P1 ∪ S0); the smaller is kept, and if both are equally small but
+  differ, both tracks get every candidate). This also covers a double switch whose pairing of before and after
+  classes on the two homologues is not determined. The run's convention gives the released track order (gauge).
+- **Release gate.** The gate is 2.1's: qV and qA are the posterior masses of the Viterbi state's unordered
+  public-class (local-key) pair, here the smaller of the two traceback conventions' pairs. Where both conventions
+  agree (everywhere a 2.1 release was decided by data) this is 2.1's value; where they disagree, their pairs are
+  disjoint and at most one can pass, so the bin abstains. A switch interval therefore never releases a bin that 2.1
+  rejected and never adds a call: it only replaces the named class of the interval track by its candidates' rows,
+  so the scaffold keeps the alleles the candidates share (release 2.2 v4; an earlier gate over the candidate sets
+  released more bins and lowered the accuracy of the extra calls on stress_n80).
+
+Measured (in-process, fixed final3 panels): the released and abstained bins equal 2.1's exactly (stress_n80 chr2
+and chr20, TroMau chr7); interval track bins: TroMau chr7 4,894, stress chr20 2,111; default versus reversed
+conventions and default versus iid 1e-9 / value-consistent 1e-12 GL noise release identical unordered painting.
 
 ## Release rule
 
@@ -185,6 +222,12 @@ every sample and bin is released by the first applicable stage (`painting/releas
 3. **Otherwise** both tracks abstain. Without reads in the bin a local-equivalence pair is withheld, as is
    everything below τ.
 
+A track whose candidate set holds more than one class (a switch interval) is released, in a bin that passes stage 1
+or 2, as `SWITCH_INTERVAL`: label −1, class −1, candidate rows = the rows of its candidate classes (in a stage-2
+bin, of every class sharing a candidate's local key), or none when a candidate is BACKGROUND or an unanchored class
+(no row set represents "not in the panel"). The other track is released as usual; the direct-support requirement of
+stage 2 applies to the non-interval tracks.
+
 | status (uint8) | name | label | candidate rows |
 | --- | --- | --- | --- |
 | 0 | `INELIGIBLE_NO_EVIDENCE` | −1 | none |
@@ -194,6 +237,7 @@ every sample and bin is released by the first applicable stage (`painting/releas
 | 4 | `BACKGROUND` | −1 | none |
 | 5 | `UNANCHORED_TRAJECTORY` | −1 | none |
 | 6 | `LOCAL_ALLELE_EQUIVALENCE` | −1 | rows of the classes sharing the released key in the bin |
+| 7 | `SWITCH_INTERVAL` | −1 | rows of the candidate classes of a switch the sample's reads cannot place (none if a candidate is BACKGROUND or unanchored) |
 
 The rule runs once, when the product is made; records decode the released grids without re-deriving them.
 
@@ -213,16 +257,22 @@ independent: every assembly break is an unconditional reset. Per component (N sa
 | `local_keys` | `int32[B, S]` | per-bin allele-equivalence keys |
 | `eligible` | `bool[N]` | the sample has an informative site on the component |
 | `labels` | `int32[N, 2, B]` | released founder row of a `SINGLETON_NAMED` track, else −1 |
-| `classes` | `int32[N, 2, B]` | released class (stage 1) or local key (`LOCAL_ALLELE_EQUIVALENCE`), −1 when abstaining |
+| `classes` | `int32[N, 2, B]` | released class (stage 1) or local key (`LOCAL_ALLELE_EQUIVALENCE`), −1 when abstaining or `SWITCH_INTERVAL` |
 | `status` | `uint8[N, 2, B]` | the track status above |
 | `direct` | `bool[N, 2, B]` | the released class is called and read-observed at an informative selected site of the bin |
 | `member_ids`, `member_sets` | `int32[N, 2, B]`, interned row tuples | candidate founder rows per track and bin; `member_sets[0]` is the empty set |
-| `switch_counts` | `int64[N]` | minimum unordered Viterbi switches |
+| `switch_counts` | `int64[N]` | minimum unordered Viterbi switches (the fewer of the two conventions' paths) |
 | `packed_emissions` | `float64[N, S(S+1)/2, B]` or None | the upper triangle of the binned log emissions, kept for pedigree preparation |
 
 Views: `chunks(sample)` coalesces consecutive bins whose label, class, status and candidate rows agree on both
 tracks into `PaintedChunk(start, end, labels, members)` with a bp interval [start, end) (none for an ineligible
-sample); `site_labels(positions)` gives the released labels at bp positions (−1 outside the bins).
+sample; a switch interval is its own chunk); `switch_intervals(sample)` lists the released switch intervals as
+`SwitchInterval(track, start, end, rows, before, after)` (bp [start, end) of the interval's bins, its candidate rows,
+and the track's member rows just before and after); `site_labels(positions)` gives the released labels at bp
+positions (−1 outside the bins; −1 inside a switch interval); `carrier_observed(positions, columns, observed, K)`
+marks the founder alleles that a painted carrier (a sample whose released track names the row in its member set)
+observes with read depth (export withholds the others, release 2.2). `painting/summary` and the log line count the
+released switch intervals and their track bins.
 
 Consumers: pedigree inference rebuilds its source model from `states`, `bins`, `transitions`, the released grids and
 the packed emissions (recomputed with the same kernel when absent), using the stored ε and floor; the founder refit
@@ -230,6 +280,11 @@ reads `site_labels` and the painted panels; family phase reads the bin edges (it
 rows, local keys, trajectory classes and chunks; export and evaluation read the painted panels as founder stage
 `painting` (per component in chromosome order: positions, released and inference calls; founder labels are row
 indices 0..K−1).
+
+Inside a switch interval no consumer counts the sample as evidence for either candidate: the pedigree's junction
+counter sees an unknown label (class −1: compatible with every trajectory, not a callable bin), the founder refit
+sees no label, and the family-phase scaffold takes an allele only where every candidate row has the same call (−1
+where they differ, sites the sample does not observe by construction).
 
 ## Published reports
 

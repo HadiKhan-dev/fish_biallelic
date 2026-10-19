@@ -34,7 +34,7 @@ from .objective import is_skipped, row_max, unordered_pairs
 
 @njit(cache=True, parallel=True, nogil=True)
 def path_switch_events(haps, leaves, logs, offsets, penalty, f_start, fcnt_start, g_end, gcnt_end,
-                       a, c, samples, focal, p1, p2, rows):
+                       a, c, samples, focal, p1, p2, rows, reverse):
     """Switch events of each listed sample's lexicographic maximum path on blocks [a, c).
 
     The path is the traceback of the accumulators of messages_lex (maximum score, then the fewest
@@ -68,7 +68,7 @@ def path_switch_events(haps, leaves, logs, offsets, penalty, f_start, fcnt_start
             for j in range(offsets[b], offsets[b + 1]):
                 if is_skipped(logs, s, j):
                     continue
-                m, k, best = lex_best_index(row, cnt)
+                m, k, best = _lex_best_index(row, cnt, reverse)
                 sw = m - penalty
                 source[j - lo] = best
                 for q in range(states):
@@ -93,7 +93,7 @@ def path_switch_events(haps, leaves, logs, offsets, penalty, f_start, fcnt_start
         for q in range(states):
             v = row[q] + g_end[i, q]
             k = cnt[q] + gcnt_end[i, q]
-            if v > best_value or (v == best_value and k < best_cnt):
+            if v > best_value or (v == best_value and (k < best_cnt or (reverse and k == best_cnt))):
                 best_value = v
                 best_cnt = k
                 end = q
@@ -113,6 +113,23 @@ def path_switch_events(haps, leaves, logs, offsets, penalty, f_start, fcnt_start
         counts[i] = nev
         total[i] = fcnt_start[i, q] + nev + gcnt_end[i, end]
     return start_state, end_state, total, counts, events
+
+
+@njit(cache=True, nogil=True)
+def _lex_best_index(row, cnt, reverse):
+    """messages.lex_best_index (the lexicographic maximum: largest value, then fewest switches) with its switch
+    source among exact ties: the first state, or the last under the convention reversal."""
+    if not reverse:
+        return lex_best_index(row, cnt)
+    m = row[0]
+    c = cnt[0]
+    best = 0
+    for q in range(1, len(row)):
+        if row[q] > m or (row[q] == m and cnt[q] <= c):
+            m = row[q]
+            c = cnt[q]
+            best = q
+    return m, c, best
 
 
 @njit(cache=True, nogil=True)

@@ -53,6 +53,10 @@ assumptions supplied by the caller, never individual parentage, over the run's s
 - the policy name, its plain-language assumptions and the metadata fields read. With the masks they form the
   eligibility identity, and the product's eligibility summary records them with `individual_parentage_ground_truth`
   false.
+- `sexes` (release 2.2): the recorded sex label of every sample from the `[samples]` workbook (upper-cased; `F`,
+  `M`, anything else or blank = unknown), or none without metadata (unrestricted and constraints policies). Sexes
+  are never inferred. They order released parent pairs (below) and, when present, enter the eligibility identity;
+  the summary counts the recorded labels.
 
 The driver builds the record with `pipeline/samples.py` before any computation, so a wrong workbook, sheet, sample
 list or label fails at once. `[pedigree.eligibility] policy` selects one of three policies:
@@ -582,11 +586,32 @@ these), `tier_a` and `complete`; the released edges `edges`; `reach` (`TierReach
 `family_solve`, the exclusion summary and the eligibility summary; the candidate panel (its rows and the screen
 utilities); and the report tables.
 
+### Released parent order (release 2.2)
+
+Scoring treats a parent pair as unordered. Only the released products order it (`pedigree/slots.py`), applied once
+to `calls`, `tier_a`, `complete`, `edges` and the relationship and candidate-set tables:
+
+- **dam_sire**: both parents have recorded sexes exactly {F, M}: Parent1 / slot 0 is the dam (F), Parent2 / slot 1
+  the sire (M). Family phase gives the child's homologue 0 to slot 0, so the exported GT of such a child reads
+  maternal | paternal. This basis needs recorded sexes {F, M} from the configured metadata; nothing is inferred.
+- **unordered**: otherwise (no metadata, unknown or equal sexes) the slots carry no biological meaning and their
+  order is a canonical label that does not depend on sample names or input order: the parent with more observed
+  sites (read depth > 0) first, compared over the configured contigs in order until the counts differ; only parents
+  with identical counts on every contig fall back to the name. Under `HAPLOTYPES_TIE_REVERSE=1` this label flips.
+- **single**: one observed parent: slot 1 when its recorded sex is M (the sire), else slot 0.
+
+Tables carry `ParentSlotBasis` (`dam_sire`, `unordered`, `single`, `none`) next to Parent2; per-slot columns
+(Parent1Supported, Parent1Candidates, …) move with their parent. The diagnostic tables (`diagnostics.csv`,
+`call_explanations.csv`, `alternative_explanations.csv`) keep the internal configuration order (sample-axis order).
+Simulation evaluation compares parents as sets. 2.1 ordered every pair by sample name, so renaming samples changed
+Parent1/Parent2 and the GT order of two-parent children.
+
 ### ParentEdges
 
 `ParentEdges` is the only pedigree input of [family phase](family_phase.md) and [recombination](recombination.md);
 `pedigree.records.load_edges` decodes it without the report tables. It lists the supported Tier-B edges after the exclusion release
-as parent, child and slot arrays (slot 0 for the child's Parent1 column, 1 for Parent2), ordered by child and slot,
+as parent, child and slot arrays (slot 0 for the child's Parent1 column, 1 for Parent2, in the released parent
+order above), ordered by child and slot,
 with each sample's observed-parent count bounds (minimum = released edges, maximum = 2 unless the count is resolved).
 Unreleased candidates, orientation-withheld edges and Tier-A or complete-view information never appear, and an edge
 does not establish whether the child's other parent was sampled. Its identity, a digest of the sample axis and the
@@ -594,9 +619,9 @@ edge list, is what downstream conditioning binds.
 
 ### Published tables
 
-`OUTPUT/pedigree/` holds one CSV per report table, `evidence_calibration.json` and `summary.json`. Parent order within a configuration
-is arbitrary (sample-axis order); state names are `zero_observed_parents`, `one_observed_parent`,
-`two_observed_parents` and `unresolved`.
+`OUTPUT/pedigree/` holds one CSV per report table, `evidence_calibration.json` and `summary.json`. Parent order within a
+configuration follows the released parent order (`ParentSlotBasis`; dam/sire only where sexes are recorded); state
+names are `zero_observed_parents`, `one_observed_parent`, `two_observed_parents` and `unresolved`.
 
 | file | one row per | how to read it |
 | --- | --- | --- |
@@ -716,6 +741,13 @@ Components are summed in component order and chromosomes stacked in contig order
 index; the bootstrap is seeded and support counts are integer sums independent of worker count and completion order;
 each kernel task is independent of the thread count. Results do not depend on `[execution] cores`, the number of
 chromosome workers or memory pacing.
+
+Convention reversal (`HAPLOTYPES_TIE_REVERSE=1`, release 2.2) reverses the remaining arbitrary orders: the run's
+sample axis (centrally), the graph's visit order among equal role and confidence (the index, last key), the search
+diagnostics' rank ties, the calibration's choice between equally near scales after the stated prior (smallest
+|log scale|), and the projection bridges' lowest state among rounding-tied Hall states, bracketing large branches and
+pivots. Not reversed (stated priors and abstentions): abstention on a tie (winners, margins), fewer parents at graph
+ties, the symmetric top-16 boundary, and the released parent order's dam/sire basis.
 
 ## Interpretation and limitations
 

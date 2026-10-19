@@ -33,9 +33,10 @@ class PathSearchConfig:
     round_backstop_base/_per_founder: reported round backstop, K of the current panel.
     update_backstop_base/_per_founder/_per_site: reported backstop of fixed-K GEM updates,
         base + per_founder K + per_site L.
-    refits_per_kind_cap: release 2.1: the proposals tied with the last of the top refits_per_kind
-        (its tie class of the screened score at decision_tolerance) join the refits, up to this many
-        per kind; a cut still inside the class goes by panel bytes, then generation order.
+    refits_per_kind_cap: release 2.2: the proposal cut takes whole tie classes of the screened
+        score (at decision_tolerance) until at least refits_per_kind; a class that would take the
+        refits of a kind past this cap is left out whole (counted as an overflow; no member of a
+        tie class is preferred to another).
     tolerance: the GEM fit's own tolerance (frequency-step acceptance, flip gains, convergence; nats).
     decision_tolerance: tie quantum of every decision between EM-fitted or screened objectives
         (release 2.1): the proposal cut per kind, the round winner and the stop of the climb, the
@@ -46,7 +47,7 @@ class PathSearchConfig:
     """
 
     refits_per_kind: int = 8
-    refits_per_kind_cap: int = 12
+    refits_per_kind_cap: int = 16
     round_backstop_base: int = 10
     round_backstop_per_founder: int = 2
     update_backstop_base: int = 20
@@ -71,9 +72,15 @@ class CandidateBankConfig:
     start_backstop(K) novel starts per call, score_backstop(K) admitted panels,
     round_backstop(K) rounds. Release 2.1: the block's discovery tie quanta (maths.ties
     BlockQuanta of the fixed-K workspace) order the BIC selection and the cavity-best endpoints
-    (kind ``nll``) and stop the rounds (an improvement must exceed the ``improvement`` quantum)."""
+    (kind ``nll``) and stop the rounds (an improvement must exceed the ``improvement`` quantum).
+
+    completion_variant_cap: release 2.2: a proposal panel whose partial rows have tied completions
+        becomes one source per combination of them, up to this many; above it the panel's source
+        keeps only its rows with a unique completion (counted as an overflow,
+        "ls.bank.completion.overflow")."""
 
     round_backstop_base: int = 8
+    completion_variant_cap: int = 8
     score_backstop_base: int = 1024
     score_backstop_per_founder: int = 128
     start_backstop_base: int = 512

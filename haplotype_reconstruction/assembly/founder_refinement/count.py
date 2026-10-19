@@ -98,6 +98,12 @@ class CountDecisionRecord:
     would have given; tie_decisions_agree: all members give the same point decision (None without a
     tie). Kind "cleanup" (release 2.1): founders no sample uses deleted before a deletion round
     (cleanup_removed: their row paths; selected: None; accept_larger False; not a count decision).
+    Release 2.2 (tied refits decided by data, else a stated prior): ambiguous_k: the members of the
+    selected refit's tie class disagree on the count decision, which then takes the smaller K (prior);
+    alternatives: the distinct resulting panels (panel keys, sorted) equally supported by the data when
+    the decision changes the panel, released flagged (empty when the choice is unique); prior: the rule
+    that decided ("smaller_k", "margin": the member whose count margin most strongly supports the decision
+    taken, "symmetric": a remaining exact tie, decided by the canonical panel key and flagged).
     Sample indices (per_sample_gain_bound_sample, the criterion's loso_sample and top_samples) are
     evidence rows; the count rule's S (the criterion's "samples") counts the informative samples.
     """
@@ -137,6 +143,9 @@ class CountDecisionRecord:
     tie_decisions: tuple | None = None
     tie_decisions_agree: bool | None = None
     cleanup_removed: tuple = ()
+    ambiguous_k: bool = False
+    alternatives: tuple = ()
+    prior: str | None = None
 
 
 @dataclass(frozen=True)
@@ -361,6 +370,48 @@ def _refit_choice(values, keys, scale, counter=None, census_key=None):
     return pick, members
 
 
+def _tied_resolution(members, pick, outcomes, refits, X):
+    """Release 2.2: the count decision among the members of the selected refit's tie class (refits whose F
+    the data do not separate), decided by the data where they can and by stated priors otherwise -- never by
+    index or content order (design tickets/IC/DESIGN_22.md B1).
+
+    outcomes: {position: CountDecision} of every member. When the members disagree on the decision (one
+    would keep the larger panel, another accept the smaller), the smaller K is taken (parsimony: the side the
+    count rule takes at an exact zero margin) and flagged ambiguous_k. Among the members giving the decision
+    taken, the one whose count margin most strongly supports it is chosen (the most negative margin for the
+    smaller panel, the most positive for the larger), by tie classes of the margins (count_margin quantum);
+    members still tied are alternatives: when their resulting panels differ, the set is released flagged and
+    the canonical panel key decides ("symmetric"). A decision that keeps the incumbent panel X has no
+    alternatives. Returns (position, record flags)."""
+    if len(members) < 2:
+        return pick, {}
+    taken_larger = {position: bool(outcomes[position].accept_larger) for position in members}
+    disagree = len(set(taken_larger.values())) > 1
+    # accept_larger False = the smaller panel (a deletion accepted, an addition rejected)
+    candidates = [p for p in members if not taken_larger[p]] if disagree else list(members)
+    larger_side = taken_larger[candidates[0]]
+
+    def panel_of(position):
+        # The panel the decision leaves: the member's refit (K + 1 rows for an addition, K - 1 for a deletion)
+        # when the decision takes it, else the incumbent X.
+        refit_rows = np.asarray(refits[position].rows)
+        takes_refit = larger_side if len(refit_rows) > len(X) else not larger_side
+        return tie_rules.panel_key(refit_rows if takes_refit else X)
+
+    margins = [float(outcomes[p].margin) for p in candidates]
+    contents = [panel_of(p) for p in candidates]
+    quantum = tie_rules.quantum("count_margin")
+    result = ties.tie_classes(margins, quantum, content=contents, descending=larger_side)
+    winner = candidates[result.winner]
+    tied = [candidates[i] for i in result.members(int(result.classes[result.winner]))]
+    distinct = sorted({panel_of(p) for p in tied})
+    flags = dict(ambiguous_k=bool(disagree), prior="smaller_k" if disagree else "margin")
+    if len(distinct) > 1:
+        flags["alternatives"] = tuple(distinct)
+        flags["prior"] = flags["prior"] + "+symmetric"
+    return winner, flags
+
+
 def _shortlist(candidates, keys, limit, quantum, contents, *, descending, counter=None, kind="",
                census_key=None):
     """The first ``limit`` candidates in tie-class order of their ranking keys (descending or not),
@@ -511,15 +562,17 @@ def count_pass(engine, geometry, start, cost, rule, budget, seed_key, additions,
         """The decisions the other members of the selected refit's tie class would have given
         (decide(position) -> CountDecision), with the pick's own; (tied candidates, records, agree)."""
         if len(members) < 2:
-            return (), None, None
+            return (), None, None, {pick: decide(pick)}
         records = []
+        outcomes = {}
         for position in members:
             decision = decide(position)
+            outcomes[position] = decision
             records.append(dict(candidate=int(chosen[position]), F=float(refits[position].summary.F),
                                 accept_larger=bool(decision.accept_larger),
                                 margin=float(decision.margin)))
         agree = len({item["accept_larger"] for item in records}) == 1
-        return tuple(int(chosen[p]) for p in members), tuple(records), bool(agree)
+        return tuple(int(chosen[p]) for p in members), tuple(records), bool(agree), outcomes
 
     def cleanup(X, scores, larger_fit):
         """Founders no sample uses, deleted before a deletion round (module docstring). Returns None or
@@ -530,7 +583,8 @@ def count_pass(engine, geometry, start, cost, rule, budget, seed_key, additions,
         while len(current) > 2:
             found = None
             losses = []
-            for founder in range(len(current)):        # canonical order: content order
+            # canonical order = content order (reversed under ties.reverse_conventions())
+            for founder in ties.conv_order(len(current)).tolist():
                 reduced = unrefitted(current, founder)
                 loss = float(np.max(np.abs(view(current_scores) - view(reduced))))
                 losses.append(loss)
@@ -633,15 +687,24 @@ def count_pass(engine, geometry, start, cost, rule, budget, seed_key, additions,
                                      kind="deletion", config=rule,
                                      seed_key=[*seed_key, label, "deletion"])
 
-        tied, tie_records, agree = tie_outcomes("deletion", label, members, pick, chosen, refits,
-                                                decide_member)
+        tied, tie_records, agree, outcomes = tie_outcomes("deletion", label, members, pick, chosen, refits,
+                                                          decide_member)
+        resolved, flags = _tied_resolution(members, pick, outcomes, refits, X)
+        if resolved != pick:
+            pick = resolved
+            smaller = refits[pick]
+            founder = chosen[pick]
+            decision = outcomes[pick]
+            smaller_scores = engine.fit_scores(smaller.summary.label, smaller.rows, budget)
+            _, _, shadow_cells = _sequence_scores(engine, geometry, X, scores, np.delete(X, founder, axis=0),
+                                                  budget)
         hidden = hidden_failures(X, scores, founder) if decision.accept_larger else None
         entry = _decision("deletion", label, K, decision, ranking, keys, chosen, refits, pick, cost,
                           view, larger_fit=larger_fit, smaller_fit=smaller.summary.label,
                           optimistic_score=optimistic, band_bound=band_bound,
                           without_sequence=without, shadow_cells=shadow_cells,
                           hidden_sequence_failures=hidden, tied_candidates=tied,
-                          tie_decisions=tie_records, tie_decisions_agree=agree)
+                          tie_decisions=tie_records, tie_decisions_agree=agree, **flags)
         remember(smaller.rows, smaller, smaller_scores)
         return entry, smaller, smaller_scores, (X, smaller.rows)
 
@@ -739,15 +802,24 @@ def count_pass(engine, geometry, start, cost, rule, budget, seed_key, additions,
                                      kind="addition", config=rule,
                                      seed_key=[*seed_key, label, "addition"])
 
-        tied, tie_records, agree = tie_outcomes("addition", label, members, pick, chosen, refits,
-                                                decide_member)
+        tied, tie_records, agree, outcomes = tie_outcomes("addition", label, members, pick, chosen, refits,
+                                                          decide_member)
+        resolved, flags = _tied_resolution(members, pick, outcomes, refits, X)
+        if resolved != pick:
+            pick = resolved
+            larger = refits[pick]
+            decision = outcomes[pick]
+            larger_scores = engine.fit_scores(larger.summary.label, larger.rows, budget)
+            _, without, shadow_cells = _sequence_scores(engine, geometry, larger.rows, larger_scores, X,
+                                                        budget)
         entry = _decision("addition", label, K, decision, ranking, gains, chosen, refits, pick, cost,
                           view, larger_fit=larger.summary.label, smaller_fit=smaller_fit,
                           optimistic_score=optimistic, without_sequence=without,
                           shadow_cells=shadow_cells,
                           copy_responses=None if responses is None else tuple(
                               response[1] for response in responses),
-                          tied_candidates=tied, tie_decisions=tie_records, tie_decisions_agree=agree)
+                          tied_candidates=tied, tie_decisions=tie_records, tie_decisions_agree=agree,
+                          **flags)
         remember(larger.rows, larger, larger_scores)
         return entry, larger, larger_scores, (larger.rows, X)
 

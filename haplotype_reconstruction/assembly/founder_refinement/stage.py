@@ -122,6 +122,19 @@ def macro_context(component, l1_context):
     return groups, [np.asarray(list(by_span[group].values()), np.int64) for group in groups]
 
 
+def _final_alternatives(result) -> tuple:
+    """Release 2.2: the sets of alternative panels the data support equally for the refined component (released
+    flagged, panel keys): the final fit's tied forward/reverse results and the alternatives of its count decisions."""
+    sets = []
+    for fit in result.fits:
+        if fit.label == result.final_fit and getattr(fit, "tied_panels", ()):
+            sets.append(tuple(fit.tied_panels))
+    for decision in result.decisions:
+        if getattr(decision, "alternatives", ()):
+            sets.append(tuple(decision.alternatives))
+    return tuple(sets)
+
+
 def _count_call(refinement: ComponentRefinement) -> CountCall:
     """The component's count call (founder_counts.tsv) from its refinement."""
     if refinement.reason is not None:
@@ -188,7 +201,7 @@ def refine_component(number, component, panels, evidence, context, settings, bud
         count_limit_reached=result.count_limit_reached, ambiguous=result.ambiguous,
         final_fit=result.final_fit, best_f_replacement=result.best_f_replacement,
         weak_label_junctions=result.weak_junctions, elapsed_seconds=time.perf_counter() - started,
-        tie_events=counter.record())
+        tie_events=counter.record(), alternatives=_final_alternatives(result))
     refined = replace(component, rows=np.ascontiguousarray(rows, np.int32),
                       count_call=_count_call(refinement))
     return refined, refinement

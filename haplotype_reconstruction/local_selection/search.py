@@ -10,11 +10,11 @@ merge bounds are founder-independent and kept across rounds in a ``LikelihoodMem
 search is reused when all its inputs are identical (``search_input_key``).
 
 Release 2.1 (noise stability): every decision between objectives uses anchored tie classes of
-``PathSearchConfig.decision_tolerance`` (maths.ties): the cut of each kind's proposals (the
-proposals tied with the last of the top ``refits_per_kind`` join, up to ``refits_per_kind_cap``; a
-cut still inside a class goes by panel bytes, then generation order), the round winner (best
-class, then fewer founders, then panel bytes, then trial order), the stop of the climb and the
-start-or-incumbent choice (an improvement must exceed the quantum). Fits come back with canonical
+``PathSearchConfig.decision_tolerance`` (maths.ties): the cut of each kind's proposals (release
+2.2: whole tie classes until at least ``refits_per_kind``; a class that would pass
+``refits_per_kind_cap`` is left out whole and counted, "ls.rank.<kind>.overflow"), the round winner
+(best class, then fewer founders, then panel bytes, then trial order), the stop of the climb and
+the start-or-incumbent choice (an improvement must exceed the quantum). Fits come back with canonical
 rows (fit.py), so trials reaching the same founders compare equal. Proposals are distinct by panel
 and frequencies up to rounding (PROPOSAL_FREQUENCY_TIE), and a merge consensus at an
 occupancy-weighted probability of exactly 1/2 (within CONSENSUS_TIE, placed by the valley census)
@@ -29,7 +29,8 @@ import itertools
 import numpy as np
 
 from ..execution import claim_threads
-from ..maths.ties import TieCounter, census, census_enabled, improves, tie_classes
+from ..maths.ties import (TieCounter, census, census_enabled, conv_argmin, improves, reverse_conventions,
+                          tie_classes)
 from .fit import PathFit, canonical, fit_fixed, fit_posteriors, unique_rows
 from .objective import ContextFounders, coded_regularizer, selection_objective
 from .path_model import FLIPS, PathWorkspace, WorkspaceBuffers, log_likelihood
@@ -68,13 +69,18 @@ class _Starts:
 
 # Census window of the consensus band (values of |probability - 1/2| up to this are recorded).
 CONSENSUS_CENSUS_WINDOW = 1e-3
+# Labels of the proposal kinds, for naming one fit reached by several refits (not a decision).
+KIND_ORDER = {"drop": 0, "merge": 1, "add": 2}
 
 
-def merge_consensus(panel_i, mean):
+def merge_consensus(panel_i, mean, panel_j=None):
     """A merge's consensus row: ALT where the occupancy-weighted ALT probability exceeds 1/2, row
     i's allele within CONSENSUS_TIE of 1/2 (an exact 1/2, e.g. at a site without information, must
-    not be decided by its last bits: a band at a mathematical tie, design A-7)."""
-    return np.where(np.abs(mean - .5) <= CONSENSUS_TIE, panel_i, mean > .5).astype(np.int64)
+    not be decided by its last bits: a band at a mathematical tie, design A-7). Row i is the
+    lexicographically smaller row: a content-order convention (row j's allele under
+    maths.ties.reverse_conventions)."""
+    kept = panel_j if (panel_j is not None and reverse_conventions()) else panel_i
+    return np.where(np.abs(mean - .5) <= CONSENSUS_TIE, kept, mean > .5).astype(np.int64)
 
 
 def proposals(fit: PathFit, bank, ties: TieCounter | None = None, census_key: str | None = None):
@@ -103,7 +109,7 @@ def proposals(fit: PathFit, bank, ties: TieCounter | None = None, census_key: st
                 mean = np.divide(fit.occupancy[i] * fit.allele_probability[i]
                                  + fit.occupancy[j] * fit.allele_probability[j],
                                  weight, out=np.full(panel.shape[1], .5), where=weight > 0)
-                p[i] = merge_consensus(panel[i], mean)
+                p[i] = merge_consensus(panel[i], mean, panel[j])
                 distance = mean - .5
                 if ties is not None:
                     ties.note("ls.consensus.band",
@@ -182,8 +188,9 @@ def merge_bounds(panel, drops, merges, prepared, buffers=None):
 def double_removal_merges(panel, merges) -> set[int]:
     """Merges scored exactly besides their EM bounds: for every row k, the merge of k with its
     nearest row and the merge (i, j), k not in {i, j}, whose consensus is nearest row k (Hamming;
-    ties: the earlier merge). The fixed-posterior bound credits no re-routing of carriers, so it
-    can rank such merges far below their exact scores. At most 2K exact forwards per round."""
+    ties: the earlier row / merge, a convention reversed under maths.ties.reverse_conventions). The
+    fixed-posterior bound credits no re-routing of carriers, so it can rank such merges far below
+    their exact scores. At most 2K exact forwards per round."""
     if len(panel) < 2 or not merges:
         return set()
     panel = np.asarray(panel)
@@ -195,13 +202,13 @@ def double_removal_merges(panel, merges) -> set[int]:
     distance = (consensus[:, None, :] != panel[None, :, :]).sum(axis=2)
     chosen = set()
     for k in range(len(panel)):
-        nearest = int(np.argmin(rows[k]))
+        nearest = conv_argmin(rows[k])
         pair = (min(k, nearest), max(k, nearest))
         if pair in order:
             chosen.add(order[pair])
         valid = (pairs[:, 0] != k) & (pairs[:, 1] != k)
         if valid.any():
-            chosen.add(int(np.argmin(np.where(valid, distance[:, k], np.iinfo(np.int64).max))))
+            chosen.add(conv_argmin(np.where(valid, distance[:, k], np.iinfo(np.int64).max)))
     return chosen
 
 
@@ -304,16 +311,38 @@ def search_input_key(start, bank, prepared, search_config, founders) -> str:
     return digest.hexdigest()
 
 
-def tied_cut(classes, limit: int, cap: int) -> int:
-    """How many proposals of tie-class order ``classes.order`` (maths.ties.TieClasses) are refitted:
-    the first ``limit``, and the members of the last one's class that follow it, up to ``cap``."""
+def tied_cut(classes, limit: int, cap: int) -> tuple[int, bool]:
+    """(how many proposals of tie-class order ``classes.order`` (maths.ties.TieClasses) are
+    refitted, overflow). Release 2.2: whole tie classes only, in class order, until at least
+    ``limit``; a class that would take the total past ``cap`` is left out whole (overflow: its
+    tied members are not refitted, and the caller counts and flags it). Order-invariant: no
+    member of a class is preferred to another."""
     total = len(classes.order)
-    take = min(limit, total)
-    if total > limit:
-        cut_class = classes.classes[int(classes.order[limit - 1])]
-        while take < min(cap, total) and classes.classes[int(classes.order[take])] == cut_class:
-            take += 1
-    return take
+    if total <= limit:
+        return total, False
+    order = classes.order
+    take = 0
+    while take < total and take < limit:
+        cut_class = classes.classes[int(order[take])]
+        end = take
+        while end < total and classes.classes[int(order[end])] == cut_class:
+            end += 1
+        if end > cap:
+            return take, True
+        take = end
+    return take, False
+
+
+def fitted_start(start, prepared, search_config, memo: "LikelihoodMemo") -> PathFit:
+    """The fixed-K fit of a start (memoised under the key search_panel uses, so the search from
+    this start reuses it)."""
+    start_panel, start_frequencies = canonical(start, None)
+    memo_key = content_key(start_panel, start_frequencies)
+    result = memo.fit(memo_key)
+    if result is None:
+        result = fit_fixed(start, None, prepared, search_config, WorkspaceBuffers())
+        memo.add_fit(memo_key, result)
+    return result
 
 
 def search_panel(start, bank, prepared, search_config, *, incumbent=None, founders=None,
@@ -462,19 +491,18 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
         trials = []
         limit, cap = search_config.refits_per_kind, search_config.refits_per_kind_cap
         for kind, options in ranked.items():
-            # Tie classes of the screened scores. The proposals tied with the last of the top
-            # ``limit`` (its class) join up to ``cap``; a cut still inside that class goes by panel
-            # bytes, then by generation order (proposals are generated in canonical row and bank
-            # order).
+            # Tie classes of the screened scores; whole classes are refitted until at least
+            # ``limit`` (a class crossing ``cap`` is left out whole and counted as an overflow).
             classes = tie_classes([option[0] for option in options], tolerance,
                                   content=[(option[1].tobytes(), n) for n, option in enumerate(options)],
                                   descending=True, motion=DECISION_MOTION)
             ordered = classes.order
-            take = tied_cut(classes, limit, cap)
+            take, overflow = tied_cut(classes, limit, cap)
             if len(options) > limit:
                 ties.note(f"ls.rank.{kind}.join", inside_tie=take > limit)
-                inside = take < len(options) and bool(
-                    classes.classes[int(ordered[take - 1])] == classes.classes[int(ordered[take])])
+                ties.note(f"ls.rank.{kind}.overflow", inside_tie=overflow)
+                inside = bool(0 < take < len(options) and
+                              classes.classes[int(ordered[take - 1])] == classes.classes[int(ordered[take])])
                 ties.note(f"ls.rank.{kind}", inside_tie=inside,
                           wide=classes.wide_classes, boundary=len(classes.boundary_gaps))
                 if collect:
@@ -482,7 +510,7 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
                            [-options[int(n)][0] for n in ordered[max(0, limit - 4):limit + 4]])
             for rank, n in enumerate(ordered[:take]):
                 _score, panel, frequency = options[int(n)]
-                trials.append((fit_panel(panel, frequency), kind, rank))
+                trials.append((fit_panel(panel, frequency), kind, rank, panel.tobytes()))
         if not trials:
             break
         objectives = [objective(trial[0]) for trial in trials]
@@ -501,11 +529,20 @@ def search_panel(start, bank, prepared, search_config, *, incumbent=None, founde
                               content=[(trial[0].panel.tobytes(), n) for n, trial in enumerate(trials)],
                               descending=True, motion=DECISION_MOTION)
         winner = int(classes.order[0])
+        # Refits that reached the winning panel from different proposals are one answer (their fits
+        # differ by EM residuals only): the refit of the proposal with the smallest (kind, proposal
+        # panel) label represents it (release 2.2: a label of the same answer, stable under noise
+        # and not a convention reversed by maths.ties; 2.1 took the trial order inside the class).
+        panel_key = trials[winner][0].panel.tobytes()
+        same = [n for n in range(len(trials))
+                if classes.classes[n] == classes.classes[winner] and trials[n][0].panel.tobytes() == panel_key]
+        if len(same) > 1:
+            winner = min(same, key=lambda n: (KIND_ORDER[trials[n][1]], trials[n][3], trials[n][2]))
         # Inside a tie only when the best class holds different founder sets (refits reaching the
         # same canonical panel are one candidate).
         ties.note("ls.winner", inside_tie=len({trials[int(n)][0].panel.tobytes() for n in classes.members(0)}) > 1,
                   wide=classes.wide_classes, boundary=len(classes.boundary_gaps))
-        best, kind, rank = trials[winner]
+        best, kind, rank, _proposal = trials[winner]
         trace.append(RoundTrace(
             proposals=tuple((name, len(values)) for name, values in ranked.items()),
             refits=len(trials), old_k=len(fit.panel), best_k=len(best.panel),

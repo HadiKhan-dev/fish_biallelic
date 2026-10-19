@@ -19,7 +19,7 @@ fails if a cited value differs from the code.
 | family phase | [family_phase.md](family_phase.md) | pedigree-conditioned phase that preserves the called genotypes |
 | recombination | [recombination.md](recombination.md) | conditional recombination maps, crossover intervals and observable meiosis exposure |
 | export | [usage](../usage.md#export) | the final founder and sample VCFs, written from the records (no model) |
-| all stages | [ties.md](ties.md) | the deterministic conventions that decide ties between equally supported alternatives (release 2.1; under review for 2.2), and what a run records about them |
+| all stages | [ties.md](ties.md) | how ties are handled: tied alternatives carried forward and decided by the data, ambiguity released (unknowns, intervals, unordered slots, flagged alternatives), the stated priors, the remaining conventions and the reversal test |
 
 ## Conventions
 
@@ -43,8 +43,9 @@ fails if a cited value differs from the code.
 - One genetic map serves inference everywhere ([genetic_maps.md](../genetic_maps.md)): the switch and transition
   probabilities of local selection, assembly, painting, pedigree, family phase and recombination come from the
   contig's map, or from the fallback rate where there is none.
-- Ties between alternatives the data do not separate (equal, or within one tie quantum) are decided by fixed
-  conventions listed in [ties.md](ties.md); the run counts every such decision (`ties/` in the run directory).
+- Ties between alternatives the data do not separate (equal, or within one tie quantum) are carried forward and
+  decided by the data where more data can separate them, released as ambiguity where they cannot, and otherwise
+  decided by a stated prior ([ties.md](ties.md)); the run counts them (`ties/` in the run directory).
 - Every stage records its products with an identity (its configuration, upstream records and code), and nothing
   feeds back upstream: pedigree reads paintings, family phase reads the pedigree, recombination reads the phase.
 

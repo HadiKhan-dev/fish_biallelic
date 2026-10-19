@@ -49,6 +49,7 @@ from typing import Any, Mapping
 import numpy as np
 from scipy.special import expit
 
+from ..maths import ties
 from .config import SampleQualityConfig
 
 VERSION = "private-low-fraction-qc-per-contig-v2"
@@ -234,7 +235,10 @@ def assess(alt, dep, positions, heterozygote_balance, config: SampleQualityConfi
     dep = np.asarray(dep, np.int64)
     positions = np.asarray(positions, np.int64)
     n_samples = dep.shape[1]
-    minor_is_alt = alt.sum(axis=1) <= (dep - alt).sum(axis=1)
+    # The minor allele; at exactly equal read totals ALT by convention (REF under the convention reversal,
+    # release 2.2).
+    alt_total, ref_total = alt.sum(axis=1), (dep - alt).sum(axis=1)
+    minor_is_alt = (alt_total < ref_total) if ties.reverse_conventions() else (alt_total <= ref_total)
     minor = np.where(minor_is_alt[:, None], alt, dep - alt)
     carrier = minor > 0
     carriers = carrier.sum(axis=1)

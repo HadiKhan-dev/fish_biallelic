@@ -97,7 +97,9 @@ def search_diagnostics(panel: CandidatePanel, eligibility: ParentEligibility,
     scores = panel.screen_scores
     for child, sample in enumerate(sample_ids):
         parents = np.flatnonzero(eligibility.parents[child])
-        order = parents[np.lexsort((parents, -scores[child, parents]))]
+        # Exact score ties by sample index (reversed under the convention reversal, release 2.2).
+        index_key = -parents if tie_rules.reverse_conventions() else parents
+        order = parents[np.lexsort((index_key, -scores[child, parents]))]
         rank = {int(parent): position + 1 for position, parent in enumerate(order)}
         trios = panel.trios[panel.trios[:, 0] == child]
         included = set(map(int, trios[:, 1:].ravel()))

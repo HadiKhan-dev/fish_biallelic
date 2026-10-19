@@ -361,6 +361,7 @@ after the stages. Tables are written atomically; list and dict cells are JSON.
 | `painting/<contig>/assembly_search.tsv` | every record of the final assembly's join searches: budgets, truncations, leading alternatives, count decisions |
 | `painting/<contig>/founder_counts.tsv` | per component: founder rows and how firmly the count is determined (ambiguity, count cycles, decisions) |
 | `painting/<contig>/sample_switches.tsv` | per sample: painted switches relative to the cohort median |
+| `painting/<contig>/sample_segments.tsv` | the released painting per sample: one row per sample, component, track and run of bins with one release (Start/End in bp, status, named founder row, candidate rows); a `SWITCH_INTERVAL` row is the interval in which the track switches between founders the sample cannot tell apart |
 | `pedigree/tier_b_relationships.csv` | the primary pedigree calls (one row per sample: parents, parent-count state, status) |
 | `pedigree/*.csv` | partial-edge, Tier-A and complete-data views, candidate sets, state calls, explanations, alternative explanations, search and exclusion diagnostics, evidence and chromosome summaries |
 | `pedigree/evidence_calibration.json` | the cross-chromosome evidence scaling and its fit |

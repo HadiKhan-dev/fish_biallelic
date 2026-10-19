@@ -33,6 +33,11 @@ PHASE_COLUMNS = ("called_alleles", "called_genotypes", "genotype_errors",
 # correct-genotype heterozygotes (wrong/uncalled ones bridged).
 LONG_SWITCH_RUNS = (5, 20)
 LONG_SWITCH_COLUMNS = tuple(f"long_phase_switches_min{runs}" for runs in LONG_SWITCH_RUNS)
+# Released phase sets (release 2.2): component-aligned allele errors per released phase set (family phase's
+# frame_undetermined breaks components where the displayed phase is undetermined), the number of phase sets with
+# at least two called heterozygotes, called alleles at undetermined sites, and the N50 (bp) of the sets' spans.
+# Gate Q of 2.2 is judged on these together: more breaks lower the errors but also the N50.
+PHASE_SET_COLUMNS = ("ps_aligned_allele_errors", "phase_sets", "undetermined_called_alleles")
 # Reported-interval map columns, written after every earlier column.
 REPORTED_INTERVAL_COLUMNS = ("reported_intervals_containing_true_crossover",
                              "reported_interval_hit_rate", "called_interval_median_width_bp",
@@ -238,7 +243,7 @@ def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1):
     from ..recombination import records as recombination_records
     from ..simulation import truth as truth_records
     from .founders import evaluate_founders, represented_ancestry
-    from .metrics import long_switch_counts, phase_counts
+    from .metrics import long_switch_counts, phase_counts, phase_set_counts
     contig = file.name
     automatic = requested in (("available",), ("all",))
     founders, component_rows, matching_rows, skipped = [], [], [], []
@@ -283,6 +288,18 @@ def evaluate_chromosome(file, names, founder_stages, requested, *, nthreads=1):
             values = long_switch_counts(calls, true_alleles, component_ids,
                                         np.asarray(LONG_SWITCH_RUNS, dtype=np.int64))
             added.update(zip(LONG_SWITCH_COLUMNS, map(int, values)))
+            undetermined = phase_records.load_arrays(file, ("frame_undetermined",), nthreads=nthreads).get(
+                "frame_undetermined")
+            if undetermined is not None:
+                undetermined = (np.asarray(undetermined) & 2) != 0          # bit 1: displayed frame
+                order = tuple(phase_records.load_arrays(file, ("sample_ids",), nthreads=nthreads)["sample_ids"])
+                if order != tuple(names):          # canonical record order -> the truth's order (as the calls)
+                    index = {name: row for row, name in enumerate(order)}
+                    undetermined = undetermined[[index[name] for name in names]]
+            errors, sets, loose, spans = phase_set_counts(calls, true_alleles, component_ids, undetermined,
+                                                          positions)
+            added.update(ps_aligned_allele_errors=errors, phase_sets=sets, undetermined_called_alleles=loose,
+                         phase_set_spans_bp=[int(value) for value in spans])
             del calls, true_alleles
         elif not automatic:
             raise FileNotFoundError(f"{contig}: no completed family phase")
@@ -441,8 +458,16 @@ def collect(report: dict, results) -> tuple[list, list]:
                   f"{summary['called_allele_errors']}/{summary['called_alleles']} "
                   f"called errors; {summary['truth_to_panel_errors_missing']} truth-to-panel errors/missing",
                   flush=True)
+    from .metrics import n50
+    spans = []
+    for row in report["chromosomes"]:
+        if "phase_set_spans_bp" in row:
+            contig_spans = row.pop("phase_set_spans_bp")
+            row["phase_set_n50_bp"] = n50(contig_spans)
+            spans.extend(contig_spans)
     report["totals"] = {key: sum(row.get(key, 0) for row in report["chromosomes"])
-                        for key in (*PHASE_COLUMNS, "total_alleles", *LONG_SWITCH_COLUMNS)}
+                        for key in (*PHASE_COLUMNS, "total_alleles", *LONG_SWITCH_COLUMNS, *PHASE_SET_COLUMNS)}
+    report["totals"]["phase_set_n50_bp"] = n50(spans)
     report["interpretation"] = INTERPRETATION
     report["segment_and_long_range_interpretation"] = SEGMENT_INTERPRETATION
     return component_rows, matching_rows

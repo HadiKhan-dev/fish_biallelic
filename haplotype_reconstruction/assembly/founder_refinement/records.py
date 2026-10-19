@@ -50,6 +50,9 @@ class ComponentRefinement:
     additions reached it. ambiguous: the call is ambiguous (any decision, a cycle or a restored
     panel failing its own deletion test). final_fit: label of the returned panel's fit;
     best_f_replacement: see BestFReplacement. weak_label_junctions: of the returned fit.
+    alternatives (release 2.2): sets of alternative panels (panel keys) equally supported by the data -- the
+    final fit's tied forward/reverse results and the count decisions' alternatives -- released flagged; the kept
+    panel is one of them (decided by a stated prior, else the canonical key). Empty when the data decide.
     elapsed_seconds: wall time of the component's refinement. tie_events: maths.ties.TieCounter record of
     the component's tie-class decisions ({kind: {decisions, inside_tie, wide, boundary}}, release 2.1).
     """
@@ -79,6 +82,7 @@ class ComponentRefinement:
     weak_label_junctions: tuple = ()
     elapsed_seconds: float = 0.0
     tie_events: dict = field(default_factory=dict)
+    alternatives: tuple = ()
 
 
 @dataclass(frozen=True)

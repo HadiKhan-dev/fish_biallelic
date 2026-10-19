@@ -11,6 +11,16 @@ selected (panel, frequencies) equal the incumbent's. Blocks run one task each in
 workers claim freed cores at phase boundaries (or as cross-node batches); completed blocks are
 recorded in chunks as they arrive. Every block task reserves its planned peak memory with the
 run's memory governor before it starts (``block_task_bytes``); pacing changes timing only.
+
+Release 2.2 (tied sets decided by the data): the bank returns a set of starts (the cavity-best tie
+set of every source); each start is fitted and the best tie class of their selection objectives
+(the stated prior fewer founders inside it) is searched from every member; the outcomes are
+compared by the selection objective's tie classes, fewer founders inside the best class. Distinct
+panels left tied after that are released as their consensus (``_consensus_panel``: founder rows
+not shared by every alternative are withheld; shared rows keep the calls all alternatives' releases
+agree on; summary ``tied_alternatives``, ``withheld_by_ties``). The internal representative fit (the
+next round's incumbent) is the smallest canonical key, a convention reversed under
+maths.ties.reverse_conventions that the released panel does not depend on.
 """
 from __future__ import annotations
 
@@ -22,19 +32,21 @@ import numpy as np
 from ..discovery.fixed_k.workspace import search_bytes
 from ..execution import BudgetedPool, claim_threads, memory_worker_limit
 from ..execution.batch_queue import BatchKind, map_batches, queue_key
-from ..maths.ties import BOUNDARY_GUARD, TieCounter, census, census_enabled, improves
+from ..maths.ties import BOUNDARY_GUARD, TieCounter, census, census_enabled, improves, tie_classes
+from ..model.local_panels import unknown_copy_mass
 from . import records
 from .bank import candidate_bank
 from .objective import ContextFounders, selection_objective
 from .path_model import LANE_WIDTH, RELEASE_SAMPLE_BATCH, PreparedBlock, workspace_bytes
 from .release import PathRelease, local_panel, release
-from .search import DECISION_MOTION, LikelihoodMemo, SearchOutcome, search_panel
+from .search import DECISION_MOTION, LikelihoodMemo, SearchOutcome, fitted_start, search_panel
 
 
 @dataclass(frozen=True)
 class BlockTask:
     """Inputs of one block's selection (columns: contig site indices of its discovery sites;
-    label: "contig/round/i<index>", the block's key in diagnostics and the valley census)."""
+    label: "contig/round/i<index>", the block's key in diagnostics and the valley census;
+    alternatives: discovery's NLL-tied alternative latent panels, release 2.2)."""
 
     index: int
     block: int
@@ -51,6 +63,7 @@ class BlockTask:
     memo: dict | None
     keep_memo: bool
     label: str = ""
+    alternatives: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +79,73 @@ class BlockSelection:
     summary: dict
 
 
+def _best_outcome(outcomes, tolerance, ties) -> tuple[SearchOutcome, list]:
+    """(the selected outcome of a multi-start search, the tied alternatives): the best tie class of
+    the selection objectives, fewer founders inside it (a stated prior); the distinct panels still
+    tied (one outcome each, the representative included; empty when one panel remains). The
+    smallest canonical key represents them (a convention: tie_classes reverses it under
+    maths.ties.reverse_conventions; the release keeps only what all of them agree on)."""
+    if len(outcomes) == 1:
+        return outcomes[0], []
+    classes = tie_classes([outcome.selection_objective for outcome in outcomes], tolerance,
+                          secondary=[(len(outcome.fit.panel),) for outcome in outcomes],
+                          content=[outcome.fit.panel.tobytes() for outcome in outcomes],
+                          descending=True, motion=DECISION_MOTION)
+    winner = outcomes[int(classes.order[0])]
+    fewest = len(winner.fit.panel)
+    tied = {}
+    for n in classes.order:
+        outcome = outcomes[int(n)]
+        if classes.classes[int(n)] == 0 and len(outcome.fit.panel) == fewest:
+            tied.setdefault(outcome.fit.panel.tobytes(), outcome)
+    ties.note("ls.start.outcome", inside_tie=len(tied) > 1, wide=classes.wide_classes,
+              boundary=len(classes.boundary_gaps))
+    return winner, (list(tied.values()) if len(tied) > 1 else [])
+
+
+def _consensus_panel(task, outcome, path_release, alternatives, prepared, release_config):
+    """The LocalPanel released for tied alternative panels (release 2.2), and the founder rows it
+    withholds. A founder row that every alternative contains keeps a call where all alternatives'
+    releases of that row agree (-1 elsewhere), their mean ALT probability and their smallest
+    support; the other rows are withheld (calls -1, ALT probability 1/2, support 0); unknown slots
+    are the largest over the alternatives (the conservative side for completion's veto); rows are
+    in the order of their released content. Nothing depends on which alternative represents the
+    others."""
+    released = []
+    for alternative in alternatives:
+        own = path_release if alternative is outcome else release(alternative.fit, prepared, release_config)
+        released.append((alternative.fit.panel, local_panel(task.block, task.site_start, task.positions,
+                                                            task.kept, alternative.fit, own)))
+    shared = None
+    for fitted, _panel in released:
+        rows = {row.tobytes() for row in fitted}
+        shared = rows if shared is None else shared & rows
+    representative = next(panel for fitted, panel in released
+                          if fitted is outcome.fit.panel or np.array_equal(fitted, outcome.fit.panel))
+    k, length = representative.calls.shape
+    calls = np.full((k, length), -1, dtype=np.int8)
+    alt_probability = np.full((k, length), .5)
+    support = np.zeros((k, length))
+    for target, key in enumerate(sorted(shared)):
+        rows = []
+        for fitted, panel in released:
+            index = next(i for i, row in enumerate(fitted) if row.tobytes() == key)
+            rows.append((panel.calls[index], panel.alt_probability[index], panel.support[index]))
+        agreed = np.array(rows[0][0], copy=True)
+        for other_calls, _p, _s in rows[1:]:
+            agreed[agreed != other_calls] = -1
+        calls[target] = agreed
+        alt_probability[target] = np.mean([row[1] for row in rows], axis=0)
+        support[target] = np.min([row[2] for row in rows], axis=0)
+    slots = np.max(np.vstack([panel.unknown_slots for _fitted, panel in released]), axis=0).astype(np.int8)
+    order = np.lexsort(np.vstack([alt_probability.T[::-1], calls.T[::-1]]))
+    return (replace(representative, calls=np.ascontiguousarray(calls[order]),
+                    alt_probability=np.ascontiguousarray(alt_probability[order]),
+                    support=np.ascontiguousarray(support[order]), unknown_slots=slots,
+                    unknown_mass=unknown_copy_mass(slots, representative.has_depth)),
+            int(k - len(shared)))
+
+
 def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelection:
     """Select one block's panel (``likelihoods``/``observed``: its discovery-site columns)."""
     config, discovery_config, generations = settings
@@ -76,14 +156,34 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
     incumbent = task.incumbent
     ties = TieCounter()
     census_key = task.label or None
-    start, bank, bank_summary = candidate_bank(
+    starts, bank, bank_summary = candidate_bank(
         likelihoods, observed, task.latent, task.proposals, discovery_config, config.bank,
         incumbent_panel=None if incumbent is None else incumbent.fit.panel, ties=ties,
-        census_key=census_key)
+        census_key=census_key, alternatives=task.alternatives)
     memo = LikelihoodMemo(task.memo)
-    attempted = search_panel(start, bank, prepared, config.search, incumbent=incumbent,
-                             founders=task.founders, memo=memo, ties=ties, census_key=census_key)
     context = None if task.founders is None else ContextFounders(task.founders)
+    tolerance = config.search.decision_tolerance
+    searched = starts
+    if len(starts) > 1:
+        # The fitted starts' selection objectives decide which starts are searched: the best tie
+        # class, fewer founders inside it (a stated prior); one search per distinct fitted panel.
+        fits = [fitted_start(start, prepared, config.search, memo) for start in starts]
+        values = [selection_objective(fit, context) for fit in fits]
+        classes = tie_classes(values, tolerance, descending=True, motion=DECISION_MOTION)
+        best = [n for n in range(len(starts)) if classes.classes[n] == 0]
+        fewest = min(len(fits[n].panel) for n in best)
+        distinct = {}
+        for n in best:
+            if len(fits[n].panel) == fewest:
+                distinct.setdefault((fits[n].panel.tobytes(), fits[n].frequencies.tobytes()), starts[n])
+        searched = [distinct[key] for key in sorted(distinct)]
+        ties.note("ls.start.set", inside_tie=len(searched) > 1, wide=classes.wide_classes,
+                  boundary=len(classes.boundary_gaps))
+    outcomes = [search_panel(start, bank, prepared, config.search, incumbent=incumbent,
+                             founders=task.founders, memo=memo, ties=ties,
+                             census_key=census_key if n == 0 or census_key is None else f"{census_key}/s{n}")
+                for n, start in enumerate(searched)]
+    attempted, alternatives = _best_outcome(outcomes, tolerance, ties)
     retained = False
     incumbent_margin = None
     if incumbent is not None:
@@ -110,6 +210,10 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
                     else release(outcome.fit, prepared, config.release, ties=ties, census_key=census_key))
     panel = local_panel(task.block, task.site_start, task.positions, task.kept, outcome.fit,
                         path_release)
+    withheld_by_ties = 0
+    if alternatives and not retained:
+        panel, withheld_by_ties = _consensus_panel(task, outcome, path_release, alternatives, prepared,
+                                                   config.release)
     summary = dict(
         incumbent_retained=bool(retained), release_reused=bool(reuse),
         bank=None if bank_summary is None else asdict(bank_summary),
@@ -122,7 +226,10 @@ def select_block(task: BlockTask, likelihoods, observed, settings) -> BlockSelec
         update_backstop=bool(outcome.fit.update_backstop),
         context_founders=None if context is None else len(context),
         free_rows=len(outcome.fit.panel) if context is None else context.free(outcome.fit.panel),
-        tie_events=ties.record(),
+        tie_events=ties.record(), starts=len(starts), searched_starts=len(searched),
+        tied_alternatives=len(alternatives), withheld_by_ties=withheld_by_ties,
+        cut_overflow=sum(int(ties.counts.get(f"ls.rank.{kind}.overflow", {}).get("inside_tie", 0))
+                         for kind in ("drop", "merge", "add")),
         memo_hits=dict(memo.hits), seconds=time.monotonic() - started)
     return BlockSelection(index=task.index, panel=panel, outcome=outcome, release=path_release,
                           memo=memo.state() if task.keep_memo else None, summary=summary)
@@ -149,7 +256,8 @@ def _memo_bytes(memo, sites, founders) -> int:
 
 def _founders(task: BlockTask) -> int:
     """The largest panel a block task starts from (latent, proposals or incumbent)."""
-    return max([len(task.latent), *(len(panel) for panel in task.proposals)]
+    return max([len(task.latent), *(len(panel) for panel in task.proposals),
+                *(len(panel) for panel in task.alternatives)]
                + ([len(task.incumbent.fit.panel)] if task.incumbent is not None else []))
 
 

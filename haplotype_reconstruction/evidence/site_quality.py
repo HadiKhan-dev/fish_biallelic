@@ -32,6 +32,7 @@ from numba import njit, prange
 from scipy import special
 from scipy.optimize import minimize
 
+from ..maths import ties
 from .config import SampleQualityConfig, SiteQualityConfig
 from . import sample_quality
 
@@ -188,7 +189,8 @@ def _peak_core(x, smooth, integer=False):
     counts, edges = np.histogram(x, bins=nb, range=(lo, hi))
     centres = 0.5 * (edges[1:] + edges[:-1])
     smoothed = np.convolve(counts, np.ones(smooth) / smooth, mode="same")
-    p = int(np.argmax(smoothed)); top = smoothed[p]
+    # The mode bin: the first of exactly tied maxima (the last under the convention reversal, release 2.2).
+    p = ties.conv_argmax(smoothed); top = smoothed[p]
 
     def cross(direction):
         i = p

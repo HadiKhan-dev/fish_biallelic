@@ -99,10 +99,11 @@ current (H, f):
 
 The fit converges at a conditional fixed point: no frequency gain and no exact one-bit flip gain
 above `LocalSelectionConfig.search.tolerance = 1e-6` nats. A flip that would make two rows equal
-stops the fit, because changing K belongs to the outer search. The founder whose sites flip, and
-the single exact flip, are the first candidates (row order, then site order) within a relative
-2^-20 of the largest gain (`local_selection.fit.FLIP_TIE = 9.5367431640625e-07`), so equal gains
-computed through different arithmetic cannot steer the fit by their last bits. A fit is returned
+stops the fit, because changing K belongs to the outer search. Founders, or single exact flips,
+whose gains lie within a relative 2^-20 of the largest (`local_selection.fit.FLIP_TIE = 9.5367431640625e-07`)
+are tied. The data decide between them by the exact objective after each flip. If tied moves still
+lead to different panels, the fit stops there (keep-current; termination `tied_flips` or
+`tied_exact_flips`), so neither row order nor the last bits of the gains steer it. A fit is returned
 with its rows in lexicographic order (frequencies and per-row posteriors permuted with them): the
 likelihood and the objective do not depend on the row order, and two fits ending at the same
 founders are the same panel to every comparison, tie-break and record downstream. The update backstop is
@@ -144,10 +145,11 @@ more than the tolerance), so it does not climb back to it. Each search round the
   larger of the two bounds ranks the merge. For every row k, the merge of k with its nearest row
   and the merge not involving k whose consensus is nearest row k are scored exactly as well (at
   most 2K forwards), because the fixed-posterior bound credits no re-routing of carriers;
-- refits the best `LocalSelectionConfig.search.refits_per_kind = 8` proposals of each kind, and
-  the proposals tied with the last of them (its tie class of the screened score) up to
-  `LocalSelectionConfig.search.refits_per_kind_cap = 12` (a cut still inside the class goes by
-  panel bytes, then generation order), to a conditional fixed point and
+- refits whole tie classes of each kind's screened scores, in order, until at least
+  `LocalSelectionConfig.search.refits_per_kind = 8` proposals; a class that would take the kind past
+  `LocalSelectionConfig.search.refits_per_kind_cap = 16` is left out whole and counted as an overflow (the block's
+  summary records `cut_overflow`), so no member of a tie class is preferred to another. Each is refitted to a
+  conditional fixed point, and the search
   moves to the best refit (the best tie class of the objective; inside it fewer founders, then the
   panel bytes, then the refit order) when it improves the selection objective by more than the
   decision tolerance.
@@ -168,18 +170,23 @@ inputs; they are memoised within a block and carried to the block's next round.
 In the initial round the start is the raw latent panel and the bank its rows. In a context round,
 the block's candidate panels are first completed: a partial row (-1 cells) takes the alleles of its
 nearest latent rows on its called sites (every tied completion enters the bank; called alleles are
-never overwritten). Every source (the latent panel, each earlier selection, the newest proposals)
+never overwritten). When equally near latent rows give different completions, the panel becomes one
+source per combination of its tied rows' completions, so no donor is preferred. A panel with more
+than `LocalSelectionConfig.bank.completion_variant_cap = 8` combinations keeps only its rows with a
+unique completion as its source; this is counted as an overflow. Every source (the latent panel, each earlier selection, the newest proposals)
 is refitted with discovery's fixed-K model and its endpoints are cavity-scored
 (`local_selection/bank.py`). The union bank and the drop, add and replace neighbourhoods of its
-best panel are then searched under discovery's switch-penalised binned-Viterbi NLL in a BIC form,
+best panels are then searched under discovery's switch-penalised binned-Viterbi NLL in a BIC form,
 K x `LocalSelectionConfig.bank.complexity_scale = 0.5` x (L / 200) x N_active + 2 NLL (lower is
 better; N_active the samples with depth), until it improves by at most the block's `improvement`
-tie quantum (2^-14 nats). The block's discovery tie quanta order the bank's choices: the selected
-panel is the best tie class of the BIC score (kind `nll`), inside it the best class of the NLL,
-then fewer founders, then the canonical key; each source's endpoint is chosen the same way from
-its cavity scores; a budget-bound admission keeps the NLL tie-class order. These choices do not
-depend on the order in which panels were admitted: inside every class (also a class wider than the
-width guard, ordered by value) exact ties go by founder count, then the canonical key. Reported backstops, with K the
+tie quantum (2^-14 nats). The block's discovery tie quanta define the bank's tie sets, which are
+kept whole (no member is preferred by its key). The selected panels are the best tie class of the
+BIC score (kind `nll`), inside it the best class of the NLL, then fewer founders (a class wider
+than the width guard keeps only the panels exactly at its best value). Every member's
+neighbourhood is searched and every member's rows join the bank. The candidate starts are each
+source's cavity-best tie set, chosen the same way from its cavity scores. A budget-bound admission
+keeps the NLL tie-class order. These sets do not depend on the order in which panels were
+admitted. Reported backstops, with K the
 current panel's founder count: at most 512 + 64K novel starts per call
 (`LocalSelectionConfig.bank.start_backstop_base = 512`,
 `LocalSelectionConfig.bank.start_backstop_per_founder = 64`), 1024 + 128K admitted panels
@@ -187,11 +194,21 @@ current panel's founder count: at most 512 + 64K novel starts per call
 `LocalSelectionConfig.bank.score_backstop_per_founder = 128`) and 8 + ceil(K/2) rounds
 (`LocalSelectionConfig.bank.round_backstop_base = 8`).
 
-The path search starts from the newest source's cavity-best endpoint, released with the raw
-discovery rule and the block's tie quanta (released alleles, latent alleles where withheld). The rows the add move may use are
-the raw latent rows, that start, the BIC-selected panel and the incumbent's rows. Neither the BIC
-nor the cavity score replaces the path objective; they only supply starts and rows. Completed
-latent alleles are not released as calls by themselves.
+The candidate starts are the cavity-best tie sets of every source, each member released with the
+raw discovery rule and the block's tie quanta (released alleles, latent alleles where withheld). Each
+candidate start is fitted. The best tie class of their selection objectives (fewer founders inside
+it) is searched from every distinct fitted panel, and the outcomes are compared by the selection
+objective's tie classes, fewer founders inside the best. Distinct panels still tied (`tied_alternatives`)
+are released as their consensus. A founder row that every alternative contains keeps the calls all
+alternatives' releases agree on, their mean ALT probability and their smallest support. The other
+rows are withheld (`withheld_by_ties`). Unknown slots are the largest over the alternatives. The
+next round's incumbent is the alternative with the smallest canonical key, a convention the released
+panel does not depend on. In the initial round, discovery's NLL-tied alternative panels of the block
+(`DiscoveredBlock.tied_panels`) join the latent panel as candidate starts, and in context rounds as
+sources. The rows the add move may use are the raw latent rows, the candidate starts,
+every member of the BIC tie set and the incumbent's rows. Neither the BIC nor the cavity score
+replaces the path objective; they only supply starts and rows. Completed latent alleles are not
+released as calls by themselves.
 
 ## Context rounds
 
@@ -281,6 +298,47 @@ MAP count must win by more than `LocalSelectionConfig.release.unknown_count_band
 taken: completion's veto is all-or-nothing, and count masses can tie exactly. Assembly's
 completion reads them as a spatial MAP summary; it is not a probability of any unknown state and
 does not invent a constant founder pair for a sample.
+
+## Conventions and stated priors
+
+Where tied alternatives remain after every data comparison, the rules below decide. The *conventions* carry no
+biological meaning and are reversed when `HAPLOTYPES_TIE_REVERSE=1`
+(`maths.ties.reverse_conventions`; the release 2.2 acceptance test). A released result that changes under the
+reversal was chosen by a convention. The conventions are:
+
+- the novel starts kept when the bank's start backstop binds (the first in enumeration order);
+- the fit kept per bank key (the first admitted);
+- the internal representative of distinct panels left tied after the multi-start search (the smallest canonical
+  key; the released panel is their consensus);
+- the content order inside tie classes (canonical keys, panel bytes, generation and trial order; reversed centrally
+  in `maths.ties.tie_classes`);
+- the merge consensus allele at a probability of exactly 1/2 (row i's, the lexicographically smaller row);
+- the tie-break of the double-removal merges (the earlier row or merge);
+- in the site posterior: the founder order of tied ascent moves and of tied ball recentrings, and the REF start of
+  an exactly zero BP marginal.
+
+In the context refit, duplicate founder rows share the consensus of their released templates (-1 where called
+templates differ). Duplicate local rows carry their summed support and support-weighted ALT posterior. A bin's background-copy
+count is the smallest count within a relative 2^-20 of the largest state-pair weight
+(`local_selection.context_refit.BACKGROUND_COUNT_BAND = 9.5367431640625e-07`). These are data decisions, not
+conventions.
+
+The *stated priors* are model preferences and are not reversed:
+
+- fewer founders inside a tie class;
+- keep-current inside a tie class (the climb stops unless a gain exceeds the decision tolerance; the previous round's
+  panel is kept unless beaten by more than it; a start that reaches the incumbent's panel continues from the
+  incumbent);
+- the conservative side of an exact threshold (the favourable band, the smaller unknown-copy count, the half bands
+  of the context refit and of the site posterior);
+- fewest flips first in the site posterior's ascent and ball;
+- a GEM fit stops where tied moves lead to different panels (keep-current);
+- the BP basin over its complement at equal optima, which are flagged multimodal and not released.
+
+Proposal starts whose frequencies agree to within `local_selection.search.PROPOSAL_FREQUENCY_TIE = 1e-12` are one
+start, not alternatives. Refits that reach the winning panel from different proposals are one answer, differing
+only by EM residuals; the refit of the proposal with the smallest (kind, proposal panel) label represents it.
+Canonical row orders and these labels are not conventions.
 
 ## Records
 

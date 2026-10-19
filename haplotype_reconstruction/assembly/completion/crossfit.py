@@ -64,6 +64,26 @@ class CrossFit:
     guard_skipped: int
 
 
+def content_two_folds(observed: np.ndarray, seed: int) -> np.ndarray:
+    """int8[N] fold label (0/1) of each sample from its data (release 2.2): samples ordered by a seeded SHA-256 of
+    their observation pattern (``observed`` bool [N, L], read depth at the contig's discovery sites), alternated
+    between the folds. The split depends neither on sample names nor on the input order nor on the convention
+    reversal, and GL noise cannot move it; the sample index orders only samples with identical patterns
+    (exchangeable for the split). Replaces deterministic_two_folds' seeded permutation of positions."""
+    import hashlib
+    observed = np.asarray(observed, dtype=np.bool_)
+    n_samples = observed.shape[0]
+    if n_samples < 2:
+        raise ValueError("two-fold cross-fitting requires at least two samples")
+    prefix = int(seed).to_bytes(8, "little", signed=True)
+    keys = [hashlib.sha256(prefix + np.packbits(observed[sample]).tobytes()).digest()
+            for sample in range(n_samples)]
+    order = sorted(range(n_samples), key=lambda sample: (keys[sample], sample))
+    folds = np.empty(n_samples, dtype=np.int8)
+    folds[np.asarray(order, dtype=np.int64)] = np.arange(n_samples, dtype=np.int64) % 2
+    return folds
+
+
 def deterministic_two_folds(n_samples: int, seed: int) -> np.ndarray:
     """int8[N] fold label (0/1) of each sample: a seeded permutation alternated between the folds."""
     if n_samples < 2:

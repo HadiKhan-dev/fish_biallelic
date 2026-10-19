@@ -12,15 +12,16 @@ from ..maths import chains
 
 
 @njit(cache=True, parallel=True)
-def _selector_paths(emissions, theta, groups, result):
+def _selector_paths(emissions, theta, groups, result, reverse):
     for job in prange(len(groups)):
         group = groups[job]
-        result[group] = chains.selector_viterbi(emissions[group], theta, chains.CHAIN_TIE)
+        result[group] = chains.selector_viterbi(emissions[group], theta, chains.CHAIN_TIE, reverse)
 
 
-def selector_paths(emissions, theta, groups):
-    """MAP selector paths int8 [G, L] of ``groups`` (other rows are not written and must not be read)."""
+def selector_paths(emissions, theta, groups, reverse=False):
+    """MAP selector paths int8 [G, L] of ``groups`` (other rows are not written and must not be read). ``reverse``:
+    the convention reversal of chains.selector_viterbi (maths.ties.reverse_conventions)."""
     paths = np.empty(emissions.shape[:2], dtype=np.int8)
     if len(groups):
-        _selector_paths(emissions, theta, np.asarray(groups, dtype=np.int64), paths)
+        _selector_paths(emissions, theta, np.asarray(groups, dtype=np.int64), paths, bool(reverse))
     return paths

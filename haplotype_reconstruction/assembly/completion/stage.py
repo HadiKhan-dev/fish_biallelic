@@ -36,7 +36,7 @@ from ...execution.shared_arrays import COPY_THREADS, attach_shared_array, close_
 from ...model.components import PreparedPanel
 from ..founder_alleles import site_posterior
 from .cavity_fill import cavity_fill
-from .crossfit import crossfit_block, deterministic_two_folds
+from .crossfit import content_two_folds, crossfit_block
 from .links import link_boundary
 from .observation import UNIFORM_TOLERANCE
 from .occupancy import occupancy_gate
@@ -286,7 +286,8 @@ def complete(panels: Sequence, evidence, config, budget) -> tuple[tuple[Prepared
 def _complete(panels, evidence, config, budget):
     blocks = len(panels)
     samples = evidence.samples
-    folds = deterministic_two_folds(samples, config.crossfit.fold_seed)
+    # Release 2.2: the fold split follows the samples' observation patterns, not their positions on the axis.
+    folds = content_two_folds(evidence.observed, config.crossfit.fold_seed)
     veto = np.array([_unknown_mass_veto(panel, config.maximum_discovery_unknown_mass)
                      for panel in panels], dtype=np.bool_)
     inference = []

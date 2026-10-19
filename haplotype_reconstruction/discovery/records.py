@@ -9,6 +9,9 @@
 A contig is complete when every block index 0 .. B-1 is in some chunk. No genotype likelihoods
 are stored (blocks reference the evidence record by site span).
 
+Release 2.2: blocks also hold latent_unknown (founder alleles no assigned carrier observes) and the tied alternatives
+(tied_panels, tied_panel_nll, tied_unknown; recorded stacked with their founder counts tied_panel_k); 2.1 payloads
+decode with None / empty tuples.
 Release 2.1: the encoded search summary also holds tie_quantum, escalated, conventions, ambiguous,
 tied_alternatives, score_margin and tie_events (search.SearchSummary); 2.0 payloads without them decode with the
 defaults. The SCHEMA stays 1 (the stage identity carries the code digest, so 2.1 never resumes 2.0 records).
@@ -54,6 +57,13 @@ def encode(block: DiscoveredBlock | None):
         kept=block.kept, latent=block.latent, calls=block.calls,
         alt_probability=block.alt_probability, support=block.support,
         unknown_mass=float(block.unknown_mass), nll=float(block.nll),
+        latent_unknown=block.latent_unknown,
+        tied_panels=(np.concatenate(block.tied_panels) if block.tied_panels
+                     else np.zeros((0, block.latent.shape[1]), dtype=np.int8)),
+        tied_panel_k=np.asarray([len(panel) for panel in block.tied_panels], dtype=np.int32),
+        tied_panel_nll=np.asarray(block.tied_panel_nll, dtype=np.float64),
+        tied_unknown=(np.concatenate(block.tied_unknown) if block.tied_unknown
+                      else np.zeros((0, block.latent.shape[1]), dtype=np.bool_)),
         search=dict(
             k_values=summary.k_values, k_log_scores=summary.k_log_scores,
             natural_k_ceiling=int(summary.natural_k_ceiling), expansions=int(summary.expansions),
@@ -81,6 +91,16 @@ def decode(payload) -> DiscoveredBlock | None:
                                 for kind, counts in dict(search["tie_events"]).items()}
     fields = dict(payload)
     fields["search"] = SearchSummary(**search)
+    counts = fields.pop("tied_panel_k", None)
+    if counts is not None:
+        bounds = np.concatenate(([0], np.cumsum(np.asarray(counts, dtype=np.int64))))
+        stacked, unknown = fields.get("tied_panels"), fields.get("tied_unknown")
+        fields["tied_panels"] = tuple(np.ascontiguousarray(stacked[a:b]) for a, b in zip(bounds[:-1], bounds[1:]))
+        fields["tied_unknown"] = tuple(np.ascontiguousarray(unknown[a:b]) for a, b in zip(bounds[:-1], bounds[1:]))
+        fields["tied_panel_nll"] = tuple(float(value) for value in fields.get("tied_panel_nll", ()))
+    else:
+        for name in ("tied_panels", "tied_panel_nll", "tied_unknown"):
+            fields.pop(name, None)
     return DiscoveredBlock(**fields)
 
 

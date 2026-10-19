@@ -66,6 +66,7 @@ import math
 import numpy as np
 from numba import njit
 
+from ...maths.ties import reverse_conventions
 from .polynomials import (add_dosage_term, pair_quadratic, quadratic_values, unknown_bit_index,
                           weighted_terms)
 
@@ -131,14 +132,19 @@ SETTING_ASCENT_BACKSTOP = 8
 SETTING_RECENTRE_BACKSTOP = 9
 SETTING_IMPROVEMENT = 10
 SETTING_HALF_BAND = 11
+SETTING_REVERSE = 12      # 1.0 under maths.ties.reverse_conventions (the kernels cannot read it)
 
 
 def settings():
-    """float64[12]: the site-posterior constants as the kernels' settings argument."""
+    """float64[13]: the site-posterior constants as the kernels' settings argument, and the
+    convention-reversal flag (maths.ties.reverse_conventions, release 2.2 acceptance test: the
+    founder order of tied ascent moves and ball recentrings and the default state of an exact-zero
+    BP marginal are conventions)."""
     return np.array([
         MAX_EXACT_BITS, SITE_CERTAIN_NATS, SITE_BALL_CONFIGURATIONS, SITE_BALL_MINIMUM_RADIUS,
         SITE_SHELL_GUARD, SITE_BP_DAMPING, SITE_BP_TOLERANCE, SITE_BP_ITERATIONS,
-        SITE_ASCENT_BACKSTOP, SITE_RECENTRE_BACKSTOP, SITE_IMPROVEMENT, SITE_HALF_BAND],
+        SITE_ASCENT_BACKSTOP, SITE_RECENTRE_BACKSTOP, SITE_IMPROVEMENT, SITE_HALF_BAND,
+        1.0 if reverse_conventions() else 0.0],
         dtype=np.float64)
 
 
@@ -441,14 +447,20 @@ def _ascend(constants, unaries, couplings, use, prior, b, base, field, single, p
         second = -1
         if largest > improvement:
             cut = largest - improvement
-            for i in range(m):
+            # Singles before pairs (fewest flips: a stated preference); inside each, founder order
+            # is a convention (reversed under settings[SETTING_REVERSE]).
+            reverse = settings[SETTING_REVERSE] > 0.5
+            for t in range(m):
+                i = m - 1 - t if reverse else t
                 if single[i] >= cut:
                     first = i
                     break
             if first < 0:
-                for i in range(m):
-                    for j in range(i + 1, m):
-                        if first < 0 and pair[i, j] >= cut:
+                for t in range(m):
+                    i = m - 1 - t if reverse else t
+                    for u in range(m):
+                        j = m - 1 - u if reverse else u
+                        if j > i and first < 0 and pair[i, j] >= cut:
                             first = i
                             second = j
         if first < 0:
@@ -655,6 +667,14 @@ def _core_ball(constants, unaries, couplings, use, prior, b, core, base, field, 
                 if log_likelihood[config] + log_prior[config] >= largest - improvement:
                     best = config
                     break
+            if settings[SETTING_REVERSE] > 0.5:
+                # Fewest flips first (ball order by size: a stated preference); inside the size,
+                # the subset order is a convention: the last qualifying subset under the reversal.
+                for config in range(best + 1, count):
+                    if sizes[config] != sizes[best]:
+                        break
+                    if log_likelihood[config] + log_prior[config] >= largest - improvement:
+                        best = config
         if best == 0:
             break
         if recentres >= limit:
@@ -720,8 +740,10 @@ def core_support(constants, unaries, couplings, use, prior, settings):
     if not converged:
         info[INFO_BP_NONCONVERGED] = 1
     start = np.zeros(m, np.int64)
+    reverse = settings[SETTING_REVERSE] > 0.5
     for i in range(m):
-        if total[i] > 0.0:
+        # An exactly zero BP marginal starts at REF: a default state (ALT under the reversal).
+        if total[i] > 0.0 or (reverse and total[i] == 0.0):
             start[i] = 1
     # Two deterministic starts, the BP threshold and its allele complement:
     # single and pair flips cannot cross between complement basins.

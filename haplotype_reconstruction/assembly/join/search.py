@@ -56,8 +56,8 @@ from .count_step import CountStep, main_coverer
 from .moves import (MOVES_PER_CHUNK, REPLACE, Moves, best_improvement, lower_bounds,
                     replaced_row)
 from .proposals import (boundary_proposals, boundary_vote_matrix, candidate_novelty,
-                        conditional_fields, cycle_permutation, fixed_paint_delta,
-                        greedy_permutation, local_proposals, prepare_candidate_scores,
+                        conditional_fields, cycle_permutations, fixed_paint_delta,
+                        greedy_permutations, local_proposals, prepare_candidate_scores,
                         replacement_proposals, static_replacement_gains)
 
 # Reported backstops, never expected to bind: total sweeps (tier-1 sweeps plus accepted tier-2
@@ -457,8 +457,11 @@ class PanelSearch:
     """
 
     def __init__(self, inputs, beam, beam_runner, *, config, count_rule_config, cost_scale, budget,
-                 label=None, counter=None):
+                 label=None, counter=None, linkage=None):
         self.config = config
+        # The batch linker's path score (join/beam.path_linkage; release 2.2): the data criterion inside
+        # log-likelihood tie classes (None: content only, 2.1).
+        self.linkage = linkage
         self.budget = budget
         # The batch's census label (None: no valley census) and its tie-class decision counter.
         self.label = label
@@ -488,7 +491,7 @@ class PanelSearch:
         self.counter = CountStep(layout=self.layout, penalty=self.penalty, cost=self.cost,
                                  samples=self.samples, geometry=self.geometry,
                                  config=count_rule_config, score=self._score,
-                                 tie_counter=self.tie_counter, label=label)
+                                 tie_counter=self.tie_counter, label=label, linkage=linkage)
         self.evaluations = 0
         self._evaluations_lock = threading.Lock()
         self.original_pool = candidates
@@ -537,7 +540,8 @@ class PanelSearch:
             self.initialization.append(InitialPanel(anchor, len(trial), trial_ll))
             trials.append((trial_ll, signature, anchor, trial_scores))
         best = self._class_winner('assembly.join_start', trials, lambda item: item[0], lambda item: item[1],
-                                  census_key='start', quantum_kind='join_ll_wide')
+                                  census_key='start', quantum_kind='join_ll_wide',
+                                  link=lambda item: self._panel_link(item[1]))
         self._set_panel(best[1], best[3], best[0])
         self.selected_anchor = best[2]
         self.count_states.add(tie_rules.panel_key(self.selected))
@@ -565,8 +569,14 @@ class PanelSearch:
         with self._tie_lock:
             self.tie_counter.add(kind, result, decided_inside=decided_inside)
 
+    def _panel_link(self, panel):
+        """The linker score of a panel (sum over its paths), or None without a linkage function."""
+        if self.linkage is None:
+            return None
+        return float(sum(self.linkage(path) for path in panel))
+
     def _class_order(self, kind, items, value, content, *, census_key=None, scale=None,
-                     quantum_kind='join_ll'):
+                     quantum_kind='join_ll', link=None):
         """``items`` in tie-class order of value(item), descending (log likelihoods and gains: higher is
         better), content(item) deciding inside a class; returns (ordered items, TieClasses). The quantum
         is quantum_kind's at ``scale`` (join_ll: default the current log likelihood; join_proxy: default
@@ -580,17 +590,30 @@ class PanelSearch:
             scale = max(finite) if finite else 0.0
         quantum = tie_rules.quantum(quantum_kind, scale)
         motion = tie_rules.motion(quantum_kind, scale)
-        result = ties.tie_classes(values, quantum, content=[content(item) for item in items], descending=True)
+        contents = [content(item) for item in items]
+        result = ties.tie_classes(values, quantum, content=contents, descending=True)
         tie_rules.add_decision(self.tie_counter, kind, result, values, quantum, motion, descending=True)
         if census_key is not None:
             # Census values: smaller is better (negated log likelihoods), the decision's candidates.
             self._census(kind, census_key, [-v for v in values])
-        return [items[i] for i in result.order], result
+        links = None
+        if link is not None and self.linkage is not None and result.tied_winner:
+            links = [link(item) for item in items]
+        if result.tied_winner:
+            # Fully symmetric for the data (log likelihood and linker score tied): decided by content, counted,
+            # and the tied alternatives released in the search events.
+            symmetric = tie_rules.symmetric_members(result, links)
+            with self._tie_lock:
+                self.tie_counter.note(kind + ".symmetric", inside_tie=bool(symmetric))
+                if symmetric:
+                    self.events.append(dict(stage='symmetric_tie', kind=kind,
+                                            alternatives=sorted(contents[m] for m in symmetric)))
+        return [items[i] for i in tie_rules.linkage_order(result, links, contents)], result
 
     def _class_winner(self, kind, items, value, content, *, census_key=None, scale=None,
-                      quantum_kind='join_ll'):
+                      quantum_kind='join_ll', link=None):
         ordered, _ = self._class_order(kind, items, value, content, census_key=census_key, scale=scale,
-                                       quantum_kind=quantum_kind)
+                                       quantum_kind=quantum_kind, link=link)
         return ordered[0] if ordered else None
 
     def _set_panel(self, panel, scores, likelihood):
@@ -646,11 +669,12 @@ class PanelSearch:
         self._claim()
         return objective.panel_scores(self.layout, self._rows(paths), self.penalty)
 
-    def _paint(self, paths, penalty) -> np.ndarray:
-        """Viterbi painting int32[S, total bins] of a panel at ``penalty``."""
+    def _paint(self, paths, penalty, reverse=None) -> np.ndarray:
+        """Viterbi painting int32[S, total bins] of a panel at ``penalty`` (reverse: the traceback tie
+        convention; None = maths.ties.reverse_conventions())."""
         self._claim()
         return objective.painting(self.layout, self._rows(paths), penalty,
-                                  self.config.tensor_budget_mb, self._claim)
+                                  self.config.tensor_budget_mb, self._claim, reverse=reverse)
 
     def _exact(self, trial):
         trial_scores = self._score(trial)
@@ -798,7 +822,8 @@ class PanelSearch:
             # Changes are in units of the join score -2 LL: the class value is the LL gain.
             return self._class_winner('assembly.join_tier2', entries, lambda entry: -0.5 * entry[0],
                                       lambda entry: tie_rules.panel_key(entry[3]),
-                                      census_key=key, scale=panel_ll)
+                                      census_key=key, scale=panel_ll,
+                                      link=lambda entry: self._panel_link(entry[3]))
 
         best_move, survivors, exact_scores = best_improvement(
             bounds, moves.canonical,
@@ -845,6 +870,65 @@ class PanelSearch:
             changed[0], self._rows([trial[changed[0]]])[0], self._rows(trial), self.sweep_forwards[2])
         return values, True
 
+    def _painting_proposals(self, panel, local, eligible, wide_quota, convention):
+        """The proposals of the painting-dependent generators (replace, local, one-sided, splices,
+        switch splices, cycles) from the panel's Viterbi paintings with the traceback tie convention
+        ``convention`` (release 2.2: _tier1_sweep merges both conventions). Returns (proposals by kind,
+        local edits screened)."""
+        k = len(panel)
+        blocks = self.blocks
+        offsets = self.layout.offsets
+        candidates = self.candidates
+        candidate_array = self.candidate_array
+        proposals = {kind: [] for kind in ('replace', 'local', 'onesided', 'splice', 'switch_splice',
+                                           'switch_cycle', 'cycle')}
+        painted = self._paint(panel, self.penalty, reverse=convention)
+        fields = []
+        corrections = []
+        for b in range(blocks):
+            painting = np.ascontiguousarray(painted[:, offsets[b]:offsets[b + 1]])
+            unary, pair = conditional_fields(self.layout.block(b), painting, local[:, b], k)
+            fields.append(unary)
+            corrections.append(pair)
+        gains = np.zeros((k, len(candidates)))
+        for b in range(blocks):
+            gains += fields[b][:, candidate_array[:, b]]
+        # Generators return twice the budget: the per-kind cut keeps the tie class it cuts.
+        proposals['replace'] = replacement_proposals(gains, eligible, wide_quota)
+        proposals['local'], local_screened = local_proposals(fields, local, wide_quota)
+        exploratory = self._paint(panel, min(self.penalty, EXPLORATORY_PENALTY), reverse=convention)
+        preference = np.zeros((k, k))
+        pair_gain = np.zeros((k, k))
+        for boundary in range(blocks - 1, 0, -1):
+            preference += fields[boundary][:, local[:, boundary]]
+            pair_gain += corrections[boundary]
+            proposals['onesided'].extend(boundary_proposals(preference, boundary, wide_quota,
+                                                            'onesided'))
+            delta = preference + preference.T + pair_gain
+            proposals['splice'].extend(boundary_proposals(delta, boundary, wide_quota, 'splice'))
+            votes = boundary_vote_matrix(exploratory, int(offsets[boundary]), k)
+            switch_gain = votes + votes.T - np.diag(votes)[:, None] - np.diag(votes)[None, :]
+            proposals['switch_splice'].extend(boundary_proposals(switch_gain, boundary, wide_quota,
+                                                                 'splice'))
+            # Both tie conventions of the greedy and cycle permutations (release 2.2: an order-invariant union).
+            for permutation in greedy_permutations(votes):
+                if np.any(permutation != np.arange(k)):
+                    gain = float(votes[np.arange(k), permutation].sum() - np.trace(votes))
+                    proposals['switch_cycle'].append(
+                        (gain, ('cycle', boundary, tuple(map(int, permutation)))))
+            for permutation in cycle_permutations(preference):
+                if np.any(permutation != np.arange(k)):
+                    new = local.copy()
+                    new[:, boundary:] = local[permutation, boundary:]
+                    gain = 0.
+                    for b in range(boundary, blocks):
+                        gain += fixed_paint_delta(self.layout.block(b), painted[:, offsets[b]:offsets[b + 1]],
+                                                  local[:, b], new[:, b], k)
+                    proposals['cycle'].append(
+                        (float(gain), ('cycle', boundary, tuple(map(int, permutation)))))
+        del candidates
+        return proposals, local_screened
+
     def _tier1_sweep(self, panel, panel_scores, panel_ll):
         """One bounded sweep at ``panel``: the best improving admissible move among the top
         proposals of every same-count kind. Returns (best or None, record)."""
@@ -857,15 +941,7 @@ class PanelSearch:
         candidates = self.candidates
         candidate_array = self.candidate_array
         offsets = self.layout.offsets
-        painted = self._paint(panel, self.penalty)
         local = np.asarray(panel, dtype=np.int64)
-        fields = []
-        corrections = []
-        for b in range(blocks):
-            painting = np.ascontiguousarray(painted[:, offsets[b]:offsets[b + 1]])
-            unary, pair = conditional_fields(self.layout.block(b), painting, local[:, b], k)
-            fields.append(unary)
-            corrections.append(pair)
         panel_set = set(panel)
         proposals = {kind: [] for kind in SAME_COUNT_KINDS}
         eligible = np.asarray([c for c, path in enumerate(candidates) if path not in panel_set],
@@ -906,52 +982,37 @@ class PanelSearch:
                          sorted(-float(novelty[c]) for c in novel_items)[:4 * quota])
         for c in novel:
             similarity = np.mean(local == candidate_array[c], axis=1)
-            for founder in np.argsort(-similarity, kind='stable')[:2]:
+            # the two most similar founders, with every founder tied with the second (release 2.2: order-invariant)
+            if len(similarity) > 2:
+                second = np.sort(similarity)[::-1][1]
+                ranked = [int(f) for f in np.flatnonzero(similarity >= second)]
+            else:
+                ranked = list(range(len(similarity)))
+            for founder in ranked:
                 proposals['novel_replace'].append((float(novelty[c] * (.5 + similarity[founder])),
                                                    ('replace', int(founder), int(c))))
         static_gains = static_replacement_gains(local, candidate_array, totals=self.static_totals,
                                                 workspace=self.candidate_workspace)
-        gains = np.zeros((k, len(candidates)))
-        for b in range(blocks):
-            gains += fields[b][:, candidate_array[:, b]]
-        # Generators return twice the budget: the per-kind cut below keeps the tie class it cuts.
         wide_quota = 2 * quota
         proposals['static_replace'] = replacement_proposals(static_gains, eligible, wide_quota)
-        proposals['replace'] = replacement_proposals(gains, eligible, wide_quota)
         proposal_counts['replace'] = proposal_counts['static_replace'] = k * len(eligible)
-        proposals['local'], proposal_counts['local'] = local_proposals(fields, local, wide_quota)
         proposal_counts['onesided'] = (blocks - 1) * k * (k - 1)
         proposal_counts['splice'] = (blocks - 1) * k * (k - 1) // 2
         proposal_counts['switch_splice'] = proposal_counts['splice']
-        exploratory = self._paint(panel, min(self.penalty, EXPLORATORY_PENALTY))
-        preference = np.zeros((k, k))
-        pair_gain = np.zeros((k, k))
-        for boundary in range(blocks - 1, 0, -1):
-            preference += fields[boundary][:, local[:, boundary]]
-            pair_gain += corrections[boundary]
-            proposals['onesided'].extend(boundary_proposals(preference, boundary, wide_quota,
-                                                            'onesided'))
-            delta = preference + preference.T + pair_gain
-            proposals['splice'].extend(boundary_proposals(delta, boundary, wide_quota, 'splice'))
-            votes = boundary_vote_matrix(exploratory, int(offsets[boundary]), k)
-            switch_gain = votes + votes.T - np.diag(votes)[:, None] - np.diag(votes)[None, :]
-            proposals['switch_splice'].extend(boundary_proposals(switch_gain, boundary, wide_quota,
-                                                                 'splice'))
-            permutation = greedy_permutation(votes)
-            if np.any(permutation != np.arange(k)):
-                gain = float(votes[np.arange(k), permutation].sum() - np.trace(votes))
-                proposals['switch_cycle'].append(
-                    (gain, ('cycle', boundary, tuple(map(int, permutation)))))
-            permutation = cycle_permutation(preference)
-            if np.any(permutation != np.arange(k)):
-                new = local.copy()
-                new[:, boundary:] = local[permutation, boundary:]
-                gain = 0.
-                for b in range(boundary, blocks):
-                    gain += fixed_paint_delta(self.layout.block(b), painted[:, offsets[b]:offsets[b + 1]],
-                                              local[:, b], new[:, b], k)
-                proposals['cycle'].append(
-                    (float(gain), ('cycle', boundary, tuple(map(int, permutation)))))
+        # Painting-dependent generators under both traceback tie conventions (release 2.2): the Viterbi
+        # painting's choice among equal-score states is a convention, so the proposals of both paintings are
+        # merged, the larger proxy of a repeated edit kept: the union does not depend on the order.
+        merged = {}
+        for convention in (False, True):
+            generated, local_screened = self._painting_proposals(panel, local, eligible, wide_quota, convention)
+            proposal_counts['local'] = local_screened
+            for kind, items in generated.items():
+                bucket = merged.setdefault(kind, {})
+                for gain, description in items:
+                    if description not in bucket or gain > bucket[description]:
+                        bucket[description] = gain
+        for kind, bucket in merged.items():
+            proposals[kind].extend((gain, description) for description, gain in bucket.items())
         start_evaluations = self.evaluations
         best = None
         evaluated = []
@@ -1004,7 +1065,7 @@ class PanelSearch:
         if improving_trials:
             best = self._class_winner('assembly.join_tier1', improving_trials, lambda item: item[0],
                                       lambda item: item[5], census_key=f"{sweep_key}/winner",
-                                      scale=panel_ll)[:5]
+                                      scale=panel_ll, link=lambda item: self._panel_link(item[1]))[:5]
         if threshold_distances:
             # Valley census of the improvement threshold (a continuous threshold: the distances of the
             # evaluated trials' gains to it, in nats; positive = improving).
@@ -1196,7 +1257,8 @@ class PanelSearch:
                         strongest.append((gain, path))
                 if strongest:
                     strongest, _ = self._class_order('assembly.join_seed_rank', strongest,
-                                                     lambda item: item[0], lambda item: item[1])
+                                                     lambda item: item[0], lambda item: item[1],
+                                                     link=lambda item: self._panel_link([item[1]]))
                 chosen = []
                 for _, path in strongest:
                     seed = main_coverer(self.selected, path)
@@ -1231,7 +1293,8 @@ class PanelSearch:
                 # content inside a class (base: the first seed of the maximum).
                 best = self._class_winner('assembly.join_seed', candidates, lambda item: item[0],
                                           lambda item: tie_rules.panel_key(item[1]),
-                                          census_key=f"c{step}/seed")
+                                          census_key=f"c{step}/seed",
+                                          link=lambda item: self._panel_link(item[1]))
             count['seed_seconds'] += time.perf_counter() - seed_started
         self.events.append(dict(stage='count_birth', **record))
         if best is None:
@@ -1432,7 +1495,7 @@ class PanelSearch:
 
 def search_panel(inputs, beam, beam_runner: Callable[[int, Mapping | None], list], *, config,
                  count_rule, cost_scale: float, budget, label: str | None = None,
-                 counter: ties.TieCounter | None = None) -> JoinOutcome:
+                 counter: ties.TieCounter | None = None, linkage=None) -> JoinOutcome:
     """The certified panel of one joined batch.
 
     inputs: JoinInputs (n >= 2 input components, the informative samples' float32 evidence).
@@ -1447,4 +1510,5 @@ def search_panel(inputs, beam, beam_runner: Callable[[int, Mapping | None], list
         summary's tie_events).
     """
     return PanelSearch(inputs, beam, beam_runner, config=config, count_rule_config=count_rule,
-                       cost_scale=cost_scale, budget=budget, label=label, counter=counter).run()
+                       cost_scale=cost_scale, budget=budget, label=label, counter=counter,
+                       linkage=linkage).run()

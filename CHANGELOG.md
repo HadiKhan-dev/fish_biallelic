@@ -1,5 +1,124 @@
 # Changelog
 
+## 2.2.0 (19 October 2026)
+
+Release 2.2 removes arbitrary conventions from every decision that selects between different biological answers.
+Tied alternatives that more data can separate are carried forward and decided by the data. Ambiguity the data cannot
+resolve is released as such: unknown alleles, switch intervals, phase-set breaks, unordered parent slots, and flagged
+alternative sets. The remaining exact ties are decided by stated priors ([docs/methods/ties.md](docs/methods/ties.md)).
+
+Validation of the release candidate (19 October):
+
+- **Noise loop.** Released outputs were identical in every cell. Compared were founder alleles (unknowns
+  included), founder counts, painting (intervals included), pedigree, phased calls, crossovers and the VCFs. The
+  cells were 1e-12 and 1e-9 relative genotype-likelihood noise, value-consistent noise, permuted sample order (in
+  memory and in the input file), another thread count and another numerical environment. They covered three
+  TroMau chromosomes, std_n80 and stress_n80, and the TroMau whole genome under 1e-9 noise and permuted order.
+- **Convention reversal.** Released outputs change only through the conventions listed in
+  [docs/methods/ties.md](docs/methods/ties.md#remaining-conventions):
+  - stress_n80: no genotype changes; 13 phase switches; crossover intervals of 26 meioses.
+  - std_n80: 6 genotypes; 20 phase switches; 20 meioses.
+  - Three TroMau chromosomes: 1,361 genotypes and 1,713 phase switches, from 26 discovery blocks.
+  - TroMau whole genome: 22,827 genotypes and 11,056 phase switches, from 326 of 9,979 discovery blocks (2.1
+    with the reversal switches: 46,758 and 20,021). One Tier-B status changes.
+- **Truth against 2.1.**
+  - Pedigree calls are identical on every simulation evaluated, with one more exact configuration on the K = 30
+    ladder. sim_s10000 was still running at release.
+  - stress_n80: genotype errors -20%; allele errors per released phase set -39%, with 137 more phase sets (N50
+    -0.6%); phase switch errors 98 -> 94.
+  - std_n80: allele errors per phase set +19%, all from one sample's orientation at a painting tie boundary;
+    genotype errors -148.
+  - f3_fam: allele errors -6.6%; genotype errors +7%.
+  - reallike6: allele errors -8%.
+  - backcross: allele errors per phase set -9%, with 33% more phase sets; genotype errors +0.3%.
+  - sim_s10001: genotype errors +4 of 2.87 billion calls; allele errors per phase set -15%, with 7,040 -> 11,168
+    phase sets (N50 -5%); 3.3% of called alleles are released unphased where the frame is undetermined.
+  - K = 20 ladder: identical.
+  - K = 30 ladder: genotype errors +9% and phase switch errors 170 -> 216, mostly the cost of the order-free
+    A-step rule. The final panels recover the same 143 of 150 true founders as 2.0 and 2.1.
+  - On a metric that splits each sample at the painting tie boundaries of both releases, stress_n80 is 19% worse.
+    That comes from long orientation errors in four two-parent samples; f3_fam and reallike6 are better on it.
+- **Resources.** The TroMau whole genome took 37:12 against 2.1's 38:23, with peak memory 42.3 GiB against
+  41.7 GiB. Dense simulations take up to 1.13x 2.1's wall time and 1.06x its memory.
+
+### Declared model changes
+
+- **Discovery: tie-carrying residual clustering.** Every tie resolution of the residual clustering is carried as a
+  candidate for the block score to decide: level-wise HDBSCAN* condensed-tree groups and maximal-clique alternatives
+  of the noise, with order-invariant bounds. It replaces 2.1's content-key order of equal-weight links and the
+  complete linkage on noise. Archive beams keep whole NLL classes. Emission, deduplication, K = 1 seeds and the
+  replacement and gauge budgets are order-invariant. Founder alleles that no carrier observes are released unknown
+  (`latent_unknown`). NLL-tied panels are released with the block (`tied_panels`).
+- **Discovery: tied A-step states take their meet.** A sample whose tie band holds several states (within the
+  fewest-unknown-copies category, a kept prior) is assigned the multiset intersection of the founder pairs; a
+  copy that differs between the tied states goes to no founder. This depends only on the tied set, not on row or
+  sample order, and replaces 2.1's row-order rule in discovery. The objective is unchanged: the unknown-copy
+  count stays the tied states', and the cavity's state prior counts a tied sample 1/|T| at each tied state.
+  Accepted cost on the K = 30 ladder: discovery misses 6 more true founders, summed over blocks, than with the
+  row-order rule (10 fewer than 2.0, 3 more than 2.1). After assembly every release recovers the same 143 of 150
+  true founders, but genotype errors rise by 6% and phase switch errors from 170 to 216. A fractional treatment
+  is the planned next step.
+- **Local selection: tied sets decided by the data.**
+  - Every source's cavity tie set is fitted and searched, instead of 2.1's last-source start.
+  - The BIC tie set of the bank is kept whole, and tied donor completions each give a source
+    (`CandidateBankConfig.completion_variant_cap` = 8).
+  - Whole tie classes are refitted (`PathSearchConfig.refits_per_kind_cap` = 16).
+  - Residual ties give a consensus panel that withholds rows not shared by every alternative (`tied_alternatives`,
+    `withheld_by_ties`).
+  - Discovery's tied panels become starts and bank members.
+- **Assembly.**
+  - Batching is orientation-symmetric.
+  - Inside log-likelihood tie classes the batch linker's path score decides join moves.
+  - Painting-dependent proposals run under both traceback conventions and are merged.
+  - Tied count-step refits that disagree on the founder count take the smaller count (prior); otherwise the member
+    whose margin most strongly supports the decision wins.
+  - The two fixed-K refinement searches use opposite conventions and keep the better F. Equal-F alternatives are
+    flagged (`ambiguous_k`, `alternatives`).
+  - Founder refit releases mutually exclusive tied moves as unknown cells.
+- **Painting: switch intervals.** A switch between founders the sample cannot tell apart is released as an interval
+  (`SWITCH_INTERVAL`) instead of a point at the leftmost tied edge. Tracks next to an interval are released only when
+  2.1's gate passes under both traceback conventions, which is never more permissive than 2.1. Founder alleles inside
+  interval bins are those both candidates share. On stress_n80 this removes 366k calls, of which 6.4% were wrong
+  (genotype errors 117,369 -> 93,909), at a cost of 11 more phase switch errors (98 -> 109). The per-sample segments
+  are published (`painting/<contig>/sample_segments.tsv`).
+- **Pedigree: parent slots.** Parent1/Parent2 follow recorded sexes (dam, sire). Without recorded sexes the slots are
+  unordered (`ParentSlotBasis`).
+- **Family phase: a schedule-independent family MAP and released undetermined frames.**
+  - The ascent runs under the canonical schedule and under its mirror. Difference clusters are transplanted,
+    best exact gain first, into the end point with the higher posterior, and the full ascent then continues. It
+    stays monotone with exact gains.
+  - New moves:
+    - compound moves with terminal segments;
+    - a joint sibship genotype refit inside compound seeds (at most 64 joint configurations per site, whole sites
+      skipped, never truncated);
+    - sibship pairs with tolerance;
+    - co-located pairs (siblings switching different parents' bits at the same markers).
+  - The long compound tier is off by default (`FamilyPhaseConfig.map_long_moves`).
+  - `frame_undetermined` marks sites where another tied configuration sets the frame differently (bit 0
+    decoder, bit 1 displayed), and the export breaks the phase set there (`phase_breaks`).
+  - One-parent children are shown in parental origin: the painting phase inside each stretch between its painting
+    tie boundaries, each stretch oriented by its summed family-MAP evidence.
+  - Root-frame repair votes: a child opposes a change only if its exact gains agree with its flanks. This removes
+    both 2.1 transfers on stress_n80, including chr10 F1_8 (+43k allele errors in 2.1).
+  - Recombination decodes the non-homozygous sites of an undetermined decoder frame as unknown, so crossovers do
+    not depend on where a tied switch is placed.
+- **Export.** Founder alleles with no observing painted carrier are written `.`, counted in the manifest and the
+  founder VCF header (`unobserved_founder_alleles`). Phase sets break where family phase leaves the displayed
+  orientation undetermined.
+
+### Convention reversal and evaluation
+
+- `HAPLOTYPES_TIE_REVERSE=1` reverses every remaining arbitrary convention: index, content-key, default-state,
+  sample-name and keep-first orders (`maths.ties.reverse_conventions`). It is the release acceptance test.
+  `HAPLOTYPES_TIE_REVERSE_KEEP` keeps named discovery conventions at their default for attribution. Records written
+  under reversal carry `tie_reverse` in their identities.
+- The evaluation reports allele errors aligned per released phase set (`ps_aligned_allele_errors`), the number of
+  phase sets with at least two called heterozygotes (`phase_sets`), their N50 (`phase_set_n50_bp`) and the called
+  alleles of undetermined frames. The component-aligned metric is kept for continuity, but it charges a released
+  phase-set break as orientation errors.
+- The run report gains `painting/<contig>/sample_segments.tsv`, and `ties/summary.json` records whether conventions
+  were reversed.
+
 ## 2.1.0 (19 October 2026)
 
 Release 2.1 makes the results independent of floating-point rounding, of the input sample order, of the thread count

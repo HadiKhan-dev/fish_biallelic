@@ -133,7 +133,8 @@ def run_batch(task: BatchTask, scoring: np.ndarray, budget) -> JoinResult:
 
     outcome = join_search.search_panel(
         inputs, beam, beam_runner, config=settings.join, count_rule=settings.count_rule,
-        cost_scale=settings.cost_scale, budget=budget, label=label, counter=counter)
+        cost_scale=settings.cost_scale, budget=budget, label=label, counter=counter,
+        linkage=join_beam.path_linkage(transitions, gap))
     paths = np.asarray(outcome.paths, dtype=np.int64)
     rows = np.concatenate([block.rows[paths[:, j]] for j, block in enumerate(inputs.blocks)],
                           axis=1).astype(np.int32)

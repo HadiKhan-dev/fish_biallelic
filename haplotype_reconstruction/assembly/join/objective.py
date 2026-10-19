@@ -28,6 +28,8 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
+from ...maths import ties
+
 
 @njit(cache=True, inline="always")
 def max_range(values, lo, hi, initial):
@@ -285,7 +287,7 @@ def score_samples(flat, block_start, block_haps, block_bins, rows, penalty, samp
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop, relative):
+def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop, relative, reverse=False):
     """Viterbi paintings of samples start .. stop - 1: per bin the state a * K + c (a <= c) of the
     maximising sequence (the traceback of :func:`forward`'s recursion; same values). Tie rules within
     the band b = relative x max(1, |the bin's best score|) (release 2.1; relative 0 gives base's exact
@@ -294,7 +296,8 @@ def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop,
     values stay exact maxima; a traceback choice inside the band costs the painted sequence at most b,
     and near-equal sequences (equal scores reached through different summation orders, which a tiny
     input perturbation reorders) are painted by the content rule (stay, then the lower pair, the panel
-    being in canonical order). int32[stop - start, total bins]."""
+    being in canonical order; under the convention reversal ``reverse`` the last state in pair order
+    instead of the first, "stay" being a stated prior). int32[stop - start, total bins]."""
     k = rows.shape[0]
     first, second = pair_lists(np.ones(k, np.bool_))
     pairs = len(first)
@@ -324,7 +327,8 @@ def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop,
                     best = max_range(current, 0, pairs, -np.inf)
                     band = relative * max(1.0, abs(best))
                     source = 0
-                    for z in range(pairs):
+                    for y in range(pairs):
+                        z = pairs - 1 - y if reverse else y
                         if current[z] >= best - band:
                             source = z
                             break
@@ -342,7 +346,8 @@ def paint(flat, block_start, block_haps, block_bins, rows, penalty, start, stop,
         best = max_range(current, 0, pairs, -np.inf)
         band = relative * max(1.0, abs(best))
         state = 0
-        for z in range(pairs):
+        for y in range(pairs):
+            z = pairs - 1 - y if reverse else y
             if current[z] >= best - band:
                 state = z
                 break
@@ -375,7 +380,7 @@ def panel_scores(layout, rows, penalty, samples=None) -> np.ndarray:
                          sample_ids)
 
 
-def painting(layout, rows, penalty, tensor_budget_mb, claim) -> np.ndarray:
+def painting(layout, rows, penalty, tensor_budget_mb, claim, reverse=None) -> np.ndarray:
     """The Viterbi paintings int32[S, total bins] of the panel ``rows`` at ``penalty``, in sample
     chunks whose back pointers (int32, bins x states per sample) fit ``tensor_budget_mb``;
     ``claim()`` re-reads the thread budget before each chunk. Traceback ties within the band of
@@ -391,5 +396,6 @@ def painting(layout, rows, penalty, tensor_budget_mb, claim) -> np.ndarray:
     for start in range(0, samples, chunk):
         stop = min(samples, start + chunk)
         claim()
-        result[start:stop] = paint(*layout.arrays(), rows, float(penalty), start, stop, relative)
+        result[start:stop] = paint(*layout.arrays(), rows, float(penalty), start, stop, relative,
+                                   bool(ties.reverse_conventions() if reverse is None else reverse))
     return result

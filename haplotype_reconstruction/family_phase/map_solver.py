@@ -59,7 +59,7 @@ import time
 import numpy as np
 from numba import njit, prange
 
-from ..maths import chains
+from ..maths import chains, ties
 
 LOG_HALF = math.log(0.5)
 LOG_QUARTER = math.log(0.25)
@@ -68,13 +68,21 @@ LOG_QUARTER = math.log(0.25)
 GAIN_QUANTUM = 2.0 ** -17
 # Genotype ties within one site's maximisation (sums of a few log terms): within this the current genotype is kept.
 GENOTYPE_TIE = 1e-12
-# Compound moves (review I1): change pairs at most COMPOUND_MAX_SPAN sites apart are candidates; the re-decode window
-# widens the pair's interval by max(COMPOUND_MARGIN, min(its span, COMPOUND_WIDTH)) on each side.
-COMPOUND_MAX_SPAN = 8192
+# Compound moves (review I1): change pairs of any span, and the terminal segments between a chromosome end and the
+# nearest change, are candidates (release 2.2; 2.1 capped spans at 8192 sites); the re-decode window widens the
+# interval by max(COMPOUND_MARGIN, min(its span, COMPOUND_WIDTH)) on each side. Compound relabellings consider child
+# changes up to RELABEL_REACH sites from a frame-chain boundary.
 COMPOUND_MARGIN = 64
 COMPOUND_WIDTH = 1024
+RELABEL_REACH = 4096
+# Compound candidates longer than LONG_SPAN sites, and terminal segments, form the second tier of the schedule (run
+# when the first tier accepts nothing; release 2.2): their windowed work is long, and they are rarely needed.
+LONG_SPAN = 8192
 # Site moves: joint configurations of a sibship's genotypes enumerated at a Mendelian-conflict site, at most this many.
 SITE_MAX_COMBOS = 4096
+# Joint sibship refits inside compound seeds (release 2.2): at most this many joint configurations per site, except at
+# Mendelian-conflict sites of short seeds (SITE_MAX_COMBOS); long seeds are refitted jointly at conflict sites only.
+JOINT_REFIT_COMBOS = 64
 
 
 @dataclass
@@ -248,14 +256,71 @@ def _child_score(group, a, b, child_genotype, selector, marker_offsets, marker_s
 
 
 @njit(cache=True)
+def _viterbi4(emission, trans, left, left_theta, right, right_theta, prior, high):
+    """Selector path over m markers (emission [m, 4] log, trans [m - 1] switch probabilities between consecutive
+    markers, pinned states ``left``/``right`` of the markers just outside (-1: none) joined by left_theta/right_theta,
+    prior [m] the current states). Ties: back-pointers within CHAIN_TIE take the fewest switches, then the
+    predecessor's current state, then the lowest state (``high``: the highest); the final state is the current one
+    within CHAIN_TIE, else the lowest (``high``: highest) within it."""
+    markers = emission.shape[0]
+    path = np.zeros(markers, dtype=np.int8)
+    score = np.empty(4)
+    new = np.empty(4)
+    back = np.zeros((markers, 4), dtype=np.int8)
+    for s in range(4):
+        score[s] = emission[0, s] + (_transition(left, s, left_theta) if left >= 0 else 0.0)
+    for k in range(1, markers):
+        theta = trans[k - 1]
+        prior_state = prior[k - 1]
+        for s in range(4):
+            top = -np.inf
+            for p in range(4):
+                value = score[p] + _transition(p, s, theta)
+                if value > top:
+                    top = value
+            arg, fewest = 0, 3
+            found = False
+            for index in range(4):
+                p = 3 - index if high else index
+                value = score[p] + _transition(p, s, theta)
+                if value >= top - chains.CHAIN_TIE and value > -np.inf:
+                    changes = p ^ s
+                    count = (changes >> 1) + (changes & 1)
+                    if (not found) or count < fewest or (count == fewest and p == prior_state):
+                        fewest, arg, found = count, p, True
+            back[k, s] = arg
+            new[s] = top + emission[k, s]
+        for s in range(4):
+            score[s] = new[s]
+    if right >= 0:
+        for s in range(4):
+            score[s] += _transition(s, right, right_theta)
+    top = max(max(score[0], score[1]), max(score[2], score[3]))
+    state = prior[markers - 1]
+    if score[state] < top - chains.CHAIN_TIE:
+        for index in range(4):
+            s = 3 - index if high else index
+            if score[s] >= top - chains.CHAIN_TIE:
+                state = s
+                break
+    for k in range(markers - 1, -1, -1):
+        path[k] = state
+        if k > 0:
+            state = back[k, state]
+    return path
+
+
+@njit(cache=True)
 def _block_path(group, child, lo, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta, a_idx,
-                b_idx, left, right, new_selector, new_genotype):
+                b_idx, left, right, new_selector, new_genotype, reverse=False):
     """A child block's optimum over sites [lo, lo + len(base)) given its terms there (base [n, 4], slot tables
     [n, 2, 2, 2]): Viterbi over the group's markers a_idx..b_idx-1 (emission: max over G), joined to the pinned
     selector states ``left`` / ``right`` of the markers just outside (-1: none), the selector carried forward between
     markers (backward before the group's first marker), the genotype the argmax given the selector. Ties: fewest
     switches, then the current state, then the lowest; a genotype within GENOTYPE_TIE of the best keeps the current
-    one. Fills new_selector and new_genotype [n]."""
+    one, else the lowest. ``reverse`` (convention reversal, maths.ties): the chain is decoded mirrored (an unavoidable
+    switch lands at the rightmost tied position instead of the leftmost) and state and genotype ties go to the highest
+    state. Fills new_selector and new_genotype [n]."""
     n = base.shape[0]
     markers = b_idx - a_idx
     path = np.zeros(max(markers, 1), dtype=np.int8)
@@ -272,47 +337,29 @@ def _block_path(group, child, lo, base, table, genotype, selector, marker_offset
                     if value > best:
                         best = value
                 emission[k, s] = best
-        score = np.empty(4)
-        new = np.empty(4)
-        back = np.zeros((markers, 4), dtype=np.int8)
-        for s in range(4):
-            score[s] = emission[0, s] + (_transition(left, s, marker_theta[a_idx - 1]) if left >= 0 else 0.0)
-        for k in range(1, markers):
-            theta = marker_theta[a_idx + k - 1]
-            prior_state = selector[group, marker_sites[a_idx + k - 1]]
-            for s in range(4):
-                top = -np.inf
-                for p in range(4):
-                    value = score[p] + _transition(p, s, theta)
-                    if value > top:
-                        top = value
-                arg, fewest = 0, 3
-                found = False
-                for p in range(4):
-                    value = score[p] + _transition(p, s, theta)
-                    if value >= top - chains.CHAIN_TIE and value > -np.inf:
-                        changes = p ^ s
-                        count = (changes >> 1) + (changes & 1)
-                        if (not found) or count < fewest or (count == fewest and p == prior_state):
-                            fewest, arg, found = count, p, True
-                back[k, s] = arg
-                new[s] = top + emission[k, s]
-            for s in range(4):
-                score[s] = new[s]
-        if right >= 0:
-            for s in range(4):
-                score[s] += _transition(s, right, marker_theta[b_idx - 1])
-        top = max(max(score[0], score[1]), max(score[2], score[3]))
-        state = selector[group, marker_sites[b_idx - 1]]
-        if score[state] < top - chains.CHAIN_TIE:
-            for s in range(4):
-                if score[s] >= top - chains.CHAIN_TIE:
-                    state = s
-                    break
-        for k in range(markers - 1, -1, -1):
-            path[k] = state
-            if k > 0:
-                state = back[k, state]
+        trans = np.empty(max(markers - 1, 0))
+        for k in range(markers - 1):
+            trans[k] = marker_theta[a_idx + k]
+        prior = np.empty(markers, dtype=np.int8)
+        for k in range(markers):
+            prior[k] = selector[group, marker_sites[a_idx + k]]
+        left_theta = marker_theta[a_idx - 1] if left >= 0 else 0.0
+        right_theta = marker_theta[b_idx - 1] if right >= 0 else 0.0
+        if reverse:
+            mirrored = np.empty((markers, 4))
+            mirrored_trans = np.empty(max(markers - 1, 0))
+            mirrored_prior = np.empty(markers, dtype=np.int8)
+            for k in range(markers):
+                for s in range(4):
+                    mirrored[k, s] = emission[markers - 1 - k, s]
+                mirrored_prior[k] = prior[markers - 1 - k]
+            for k in range(markers - 1):
+                mirrored_trans[k] = trans[markers - 2 - k]
+            flipped = _viterbi4(mirrored, mirrored_trans, right, right_theta, left, left_theta, mirrored_prior, True)
+            for k in range(markers):
+                path[k] = flipped[markers - 1 - k]
+        else:
+            path = _viterbi4(emission, trans, left, left_theta, right, right_theta, prior, False)
     if left >= 0:
         current = left
     elif markers > 0:
@@ -331,7 +378,8 @@ def _block_path(group, child, lo, base, table, genotype, selector, marker_offset
         s = current
         best, arg = -np.inf, -1
         g_now = genotype[child, site]
-        for g in range(4):
+        for index in range(4):
+            g = 3 - index if reverse else index
             if base[i, g] == -np.inf:
                 continue
             value = base[i, g] + table[i, 0, _allele(g, 0), (s >> 1) & 1] + table[i, 1, _allele(g, 1), s & 1]
@@ -345,7 +393,7 @@ def _block_path(group, child, lo, base, table, genotype, selector, marker_offset
 @njit(cache=True)
 def _child_block(group, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
                  child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
-                 log_error, log_match, log_miss, quantum, decisions, decision_count):
+                 log_error, log_match, log_miss, quantum, decisions, decision_count, reverse=False):
     """Exact update of child block ``group`` (module docstring). Returns (accepted intervals, total gain) and records
     evaluated small decisions."""
     child = group_child[group]
@@ -373,7 +421,7 @@ def _child_block(group, potentials, genotype, selector, frame, orientation, root
     new_selector = np.empty(sites, dtype=np.int8)
     new_genotype = np.empty(sites, dtype=np.int8)
     _block_path(group, child, 0, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
-                marker_offsets[group], marker_offsets[group + 1], -1, -1, new_selector, new_genotype)
+                marker_offsets[group], marker_offsets[group + 1], -1, -1, new_selector, new_genotype, reverse)
     # Maximal differing intervals, merged when no unchanged marker separates them; each on its own exact gain.
     accepted, total = 0, 0.0
     old_genotype = genotype[child].copy()
@@ -426,7 +474,7 @@ def _child_block(group, potentials, genotype, selector, frame, orientation, root
 @njit(cache=True)
 def _init_block(group, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
                 child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
-                log_error, log_match, log_miss, decoded, soft, soft_index):
+                log_error, log_match, log_miss, decoded, soft, soft_index, reverse=False):
     """Initialisation of child block ``group`` (one top-down sum-product pass, module docstring): its optimum given
     each parent's genotype SUMMED - a root's psi, phi and its already initialised children's factors; a non-root
     parent's stored conditional (``soft``, float32 log probabilities) and its already initialised children - so that a
@@ -473,7 +521,7 @@ def _init_block(group, potentials, genotype, selector, frame, orientation, roots
     new_selector = np.empty(sites, dtype=np.int8)
     new_genotype = np.empty(sites, dtype=np.int8)
     _block_path(group, child, 0, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta,
-                marker_offsets[group], marker_offsets[group + 1], -1, -1, new_selector, new_genotype)
+                marker_offsets[group], marker_offsets[group + 1], -1, -1, new_selector, new_genotype, reverse)
     for site in range(sites):
         selector[group, site] = new_selector[site]
         genotype[child, site] = new_genotype[site]
@@ -506,9 +554,69 @@ def _root_score(run_lo, run_hi, frame_row, starts, run_theta, run_value):
 
 
 @njit(cache=True)
+def _viterbi2(run_value, trans, anchor_run, left, left_theta, right, right_theta, end_now):
+    """Frame path over m runs (run_value [m, 2], trans [m - 1], state 0 forced in ``anchor_run`` (-1: none), pinned
+    frames ``left``/``right`` outside (-1: none)): back-pointers within CHAIN_TIE stay (fewest switches); the final
+    frame is ``end_now`` (the current one) within CHAIN_TIE, else the better one."""
+    m = run_value.shape[0]
+    score = np.empty(2)
+    new = np.empty(2)
+    back = np.zeros((m, 2), dtype=np.int8)
+    for f in range(2):
+        score[f] = run_value[0, f]
+        if left >= 0:
+            score[f] += _log_stay(left_theta) if f == left else _log_theta(left_theta)
+        if anchor_run == 0 and f == 1:
+            score[f] = -np.inf
+    for j in range(1, m):
+        theta = trans[j - 1]
+        for f in range(2):
+            stay, jump = score[f] + _log_stay(theta), score[1 - f] + _log_theta(theta)
+            top = max(stay, jump)
+            back[j, f] = f if stay >= top - chains.CHAIN_TIE else 1 - f
+            new[f] = top + run_value[j, f]
+            if j == anchor_run and f == 1:
+                new[f] = -np.inf
+        score[0], score[1] = new[0], new[1]
+    if right >= 0:
+        for f in range(2):
+            score[f] += _log_stay(right_theta) if f == right else _log_theta(right_theta)
+    top = max(score[0], score[1])
+    f = end_now if score[end_now] >= top - chains.CHAIN_TIE else (0 if score[0] >= score[1] else 1)
+    path = np.empty(m, dtype=np.int8)
+    for j in range(m - 1, -1, -1):
+        path[j] = f
+        if j > 0:
+            f = back[j, f]
+    return path
+
+
+@njit(cache=True)
+def _frame_path(run_value, trans, anchor_run, left, left_theta, right, right_theta, first_now, last_now, reverse=False):
+    """_viterbi2, or under the convention reversal its mirror (an unavoidable frame switch lands at the rightmost tied
+    run boundary instead of the leftmost; keep-current applies at the chain's first run)."""
+    if not reverse:
+        return _viterbi2(run_value, trans, anchor_run, left, left_theta, right, right_theta, last_now)
+    m = run_value.shape[0]
+    mirrored = np.empty((m, 2))
+    mirrored_trans = np.empty(max(m - 1, 0))
+    for j in range(m):
+        mirrored[j, 0] = run_value[m - 1 - j, 0]
+        mirrored[j, 1] = run_value[m - 1 - j, 1]
+    for j in range(m - 1):
+        mirrored_trans[j] = trans[m - 2 - j]
+    flipped = _viterbi2(mirrored, mirrored_trans, m - 1 - anchor_run if anchor_run >= 0 else -1, right, right_theta,
+                        left, left_theta, first_now)
+    path = np.empty(m, dtype=np.int8)
+    for j in range(m):
+        path[j] = flipped[m - 1 - j]
+    return path
+
+
+@njit(cache=True)
 def _root_block(root, potentials, genotype, selector, frame, orientation, starts, run_theta, anchor, group_child,
                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, quantum, decisions,
-                decision_count):
+                decision_count, reverse=False):
     """Exact update of root block ``root`` (Viterbi over its frame-chain runs); intervals of runs accepted on their own
     exact gains. Returns (accepted intervals, total gain)."""
     runs = len(starts) - 1
@@ -522,29 +630,11 @@ def _root_block(root, potentials, genotype, selector, frame, orientation, starts
                 run_value[run, f] += _root_term(root, site, f, genotype, selector, potentials, orientation,
                                                 group_child, child_offsets, child_groups, child_slots, log_keep,
                                                 log_error, log_match, log_miss)
-    score = np.empty(2)
-    new = np.empty(2)
-    back = np.zeros((max(runs, 1), 2), dtype=np.int8)
-    for f in range(2):
-        score[f] = -np.inf if (anchor_run == 0 and f == 1) else run_value[0, f]
-    for run in range(1, runs):
-        theta = run_theta[run - 1]
-        for f in range(2):
-            stay, jump = score[f] + _log_stay(theta), score[1 - f] + _log_theta(theta)
-            top = max(stay, jump)
-            back[run, f] = f if stay >= top - chains.CHAIN_TIE else 1 - f
-            new[f] = top + run_value[run, f]
-            if run == anchor_run and f == 1:
-                new[f] = -np.inf
-        score[0], score[1] = new[0], new[1]
-    top = max(score[0], score[1])
-    last_now = frame[root, starts[runs] - 1]
-    f = last_now if score[last_now] >= top - chains.CHAIN_TIE else (0 if score[0] >= score[1] else 1)
-    path = np.empty(runs, dtype=np.int8)
-    for run in range(runs - 1, -1, -1):
-        path[run] = f
-        if run > 0:
-            f = back[run, f]
+    trans = np.empty(max(runs - 1, 0))
+    for run in range(runs - 1):
+        trans[run] = run_theta[run]
+    path = _frame_path(run_value, trans, anchor_run, -1, 0.0, -1, 0.0, frame[root, starts[0]],
+                       frame[root, starts[runs] - 1], reverse)
     accepted, total = 0, 0.0
     run = 0
     while run < runs:
@@ -580,7 +670,7 @@ def _root_block(root, potentials, genotype, selector, frame, orientation, starts
 def _sweep_colour(blocks, is_root, node_group, potentials, genotype, selector, frame, orientation, roots, free_starts,
                   free_trans, frozen_starts, frozen_trans, frozen, anchors, group_parent, group_child, child_offsets,
                   child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
-                  log_match, log_miss, quantum, max_decisions):
+                  log_match, log_miss, quantum, max_decisions, reverse=False):
     """Exact updates of one colour's blocks (they share no free variable)."""
     count = len(blocks)
     accepted = np.zeros(count, dtype=np.int64)
@@ -595,12 +685,12 @@ def _sweep_colour(blocks, is_root, node_group, potentials, genotype, selector, f
             accepted[index], gains[index] = _root_block(
                 sample, potentials, genotype, selector, frame, orientation, starts, trans, anchors[sample], group_child,
                 child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, quantum,
-                decisions[index], decision_counts[index])
+                decisions[index], decision_counts[index], reverse)
         else:
             accepted[index], gains[index] = _child_block(
                 node_group[sample], potentials, genotype, selector, frame, orientation, roots, group_parent,
                 group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
-                log_keep, log_error, log_match, log_miss, quantum, decisions[index], decision_counts[index])
+                log_keep, log_error, log_match, log_miss, quantum, decisions[index], decision_counts[index], reverse)
     return accepted, gains, decisions, decision_counts
 
 
@@ -632,13 +722,15 @@ def _boundary_terms(root, boundary, run, starts, run_theta, frame, selector, chi
 
 @njit(cache=True)
 def _relabel_scan(root, frame, selector, starts, run_theta, anchor, child_offsets, child_groups, child_slots,
-                  marker_offsets, marker_sites, marker_theta, quantum, decisions, decision_count):
-    """Every relabelling move of ``root`` (module docstring), boundaries in position order, each evaluated on the
-    current configuration and applied at once if its exact gain exceeds ``quantum``. Returns (moves, total gain)."""
+                  marker_offsets, marker_sites, marker_theta, quantum, decisions, decision_count, reverse=False):
+    """Every relabelling move of ``root`` (module docstring), boundaries in position order (reversed under the
+    convention reversal), each evaluated on the current configuration and applied at once if its exact gain exceeds
+    ``quantum``. Returns (moves, total gain)."""
     runs = len(starts) - 1
     sites = frame.shape[1]
     accepted, total = 0, 0.0
-    for run in range(1, runs):
+    for index in range(1, runs):
+        run = runs - index if reverse else index
         boundary = starts[run] - 1
         before = _boundary_terms(root, boundary, run, starts, run_theta, frame, selector, child_offsets, child_groups,
                                  child_slots, marker_offsets, marker_sites, marker_theta, False)
@@ -750,7 +842,7 @@ def _window_end(group, hi, marker_offsets, marker_sites, sites):
 @njit(cache=True)
 def _window_child(group, lo, hi, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
                   child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
-                  log_error, log_match, log_miss):
+                  log_error, log_match, log_miss, reverse=False):
     """Exact re-decode of child block ``group`` inside [lo, hi): its markers there free, the markers outside pinned;
     changes sites [lo, _window_end) only. Applied as found: the compound move accepts or reverts the whole."""
     sites = genotype.shape[1]
@@ -771,7 +863,7 @@ def _window_child(group, lo, hi, potentials, genotype, selector, frame, orientat
     new_selector = np.empty(n, dtype=np.int8)
     new_genotype = np.empty(n, dtype=np.int8)
     _block_path(group, child, lo, base, table, genotype, selector, marker_offsets, marker_sites, marker_theta, a_idx,
-                b_idx, left, right, new_selector, new_genotype)
+                b_idx, left, right, new_selector, new_genotype, reverse)
     for i in range(n):
         selector[group, lo + i] = new_selector[i]
         genotype[child, lo + i] = new_genotype[i]
@@ -779,8 +871,10 @@ def _window_child(group, lo, hi, potentials, genotype, selector, frame, orientat
 
 @njit(cache=True)
 def _refit_genotypes(group, lo, end, potentials, genotype, selector, frame, orientation, roots, group_parent,
-                     group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss):
-    """Child ``group``'s genotypes on [lo, end) set to their argmax given its selector (ties keep the current one)."""
+                     group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss,
+                     reverse=False):
+    """Child ``group``'s genotypes on [lo, end) set to their argmax given its selector (ties keep the current one,
+    else the lowest; the highest under the convention reversal)."""
     child = group_child[group]
     n = end - lo
     if n <= 0:
@@ -793,7 +887,8 @@ def _refit_genotypes(group, lo, end, potentials, genotype, selector, frame, orie
         s = selector[group, lo + i]
         best, arg = -np.inf, -1
         g_now = genotype[child, lo + i]
-        for g in range(4):
+        for index in range(4):
+            g = 3 - index if reverse else index
             if base[i, g] == -np.inf:
                 continue
             value = base[i, g] + table[i, 0, _allele(g, 0), (s >> 1) & 1] + table[i, 1, _allele(g, 1), s & 1]
@@ -806,7 +901,8 @@ def _refit_genotypes(group, lo, end, potentials, genotype, selector, frame, orie
 
 @njit(cache=True)
 def _window_root(root, lo, hi, potentials, genotype, selector, frame, orientation, starts, run_theta, anchor,
-                 group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss):
+                 group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss,
+                 reverse=False):
     """Exact re-decode of root ``root``'s frame on its runs inside [lo, hi), the runs outside pinned (the anchor run
     at 0). Applied as found."""
     runs = len(starts) - 1
@@ -829,38 +925,15 @@ def _window_root(root, lo, hi, potentials, genotype, selector, frame, orientatio
                                               log_match, log_miss)
     left = frame[root, starts[r0] - 1] if r0 > 0 else -1
     right = frame[root, starts[r1]] if r1 < runs else -1
-    score = np.empty(2)
-    new = np.empty(2)
-    back = np.zeros((m, 2), dtype=np.int8)
-    for f in range(2):
-        score[f] = run_value[0, f]
-        if left >= 0:
-            theta = run_theta[r0 - 1]
-            score[f] += _log_stay(theta) if f == left else _log_theta(theta)
-        if anchor_run == 0 and f == 1:
-            score[f] = -np.inf
-    for j in range(1, m):
-        theta = run_theta[r0 + j - 1]
-        for f in range(2):
-            stay, jump = score[f] + _log_stay(theta), score[1 - f] + _log_theta(theta)
-            top = max(stay, jump)
-            back[j, f] = f if stay >= top - chains.CHAIN_TIE else 1 - f
-            new[f] = top + run_value[j, f]
-            if j == anchor_run and f == 1:
-                new[f] = -np.inf
-        score[0], score[1] = new[0], new[1]
-    if right >= 0:
-        theta = run_theta[r1 - 1]
-        for f in range(2):
-            score[f] += _log_stay(theta) if f == right else _log_theta(theta)
-    top = max(score[0], score[1])
-    last_now = frame[root, starts[r1] - 1]
-    f = last_now if score[last_now] >= top - chains.CHAIN_TIE else (0 if score[0] >= score[1] else 1)
-    for j in range(m - 1, -1, -1):
+    trans = np.empty(max(m - 1, 0))
+    for j in range(m - 1):
+        trans[j] = run_theta[r0 + j]
+    path = _frame_path(run_value, trans, anchor_run, left, run_theta[r0 - 1] if left >= 0 else 0.0, right,
+                       run_theta[r1 - 1] if right >= 0 else 0.0, frame[root, starts[r0]], frame[root, starts[r1] - 1],
+                       reverse)
+    for j in range(m):
         for site in range(starts[r0 + j], starts[r0 + j + 1]):
-            frame[root, site] = f
-        if j > 0:
-            f = back[j, f]
+            frame[root, site] = path[j]
 
 
 @njit(cache=True)
@@ -902,6 +975,7 @@ def _window_objective(lo, hi, root_mask, sample_mask, group_mask, transition_mas
     move's before and after scores."""
     samples = genotype.shape[0]
     total = 0.0
+    cavity = np.empty(4)
     for sample in range(samples):
         if roots[sample]:
             if not root_mask[sample]:
@@ -909,9 +983,10 @@ def _window_objective(lo, hi, root_mask, sample_mask, group_mask, transition_mas
             starts = frozen_starts if frozen[sample] else free_starts
             trans = frozen_trans if frozen[sample] else free_trans
             for site in range(lo, hi):
-                total += _root_term(sample, site, frame[sample, site], genotype, selector, potentials, orientation,
-                                    group_child, child_offsets, child_groups, child_slots, log_keep, log_error,
-                                    log_match, log_miss)
+                _root_cavity(sample, site, frame[sample, site], -1, genotype, selector, potentials, orientation,
+                             group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
+                             log_miss, cavity)
+                total += _lse4(cavity[0], cavity[1], cavity[2], cavity[3])
             runs = len(starts) - 1
             run = max(np.searchsorted(starts[:runs], lo), 1)
             while run < runs and starts[run] <= hi:
@@ -946,26 +1021,165 @@ def _window_objective(lo, hi, root_mask, sample_mask, group_mask, transition_mas
 
 
 @njit(cache=True)
+def _pair_run(group, mask, a, b, selector, sites):
+    """The change pair (c1, c2) of ``group``'s bits ``mask`` near the source pair (a, b): c1 in [a - span, b), c2 in
+    (a, b + span], span = b - a, a chromosome end standing in for a change when the source interval reaches it (then
+    no other change on that side). (-1, -1) when there is none."""
+    span = b - a
+    if a == 0:
+        c1 = 0
+    else:
+        c1 = -1
+        for site in range(max(1, a - span), b):
+            if (selector[group, site] & mask) != (selector[group, site - 1] & mask):
+                c1 = site
+                break
+        if c1 < 0:
+            return -1, -1
+    c2 = -1
+    for site in range(c1 + 1, min(sites, b + span + 1)):
+        if (selector[group, site] & mask) != (selector[group, site - 1] & mask):
+            c2 = site
+            break
+    if b == sites:
+        if c2 >= 0:
+            return -1, -1
+        for site in range(min(sites, b + span + 1), sites):
+            if (selector[group, site] & mask) != (selector[group, site - 1] & mask):
+                return -1, -1
+        c2 = sites
+    if c2 < 0 or c2 <= a or (c1 == 0 and c2 == sites):
+        return -1, -1
+    return c1, c2
+
+
+@njit(cache=True)
+def _pair_runs(root, a, b, selector, child_offsets, child_groups, child_slots, sites, runs):
+    """Sibship-pair runs with tolerance (kind 2, release 2.2 M3): every child of root ``root`` whose bit for the root
+    has a change pair (c1, c2) near the source pair (a, b) - c1 in [a - span, b), c2 in (a, b + span], span = b - a,
+    either homologue - with a chromosome end standing in for a change when the source interval reaches it (then the
+    child must have no other change on that side). Rows (group, c1, c2, mask) are written into ``runs``; returns
+    their number. The source child itself qualifies with (a, b)."""
+    span = b - a
+    count = 0
+    for index in range(child_offsets[root], child_offsets[root + 1]):
+        other = child_groups[index]
+        mask = 1 << (1 - child_slots[index])
+        if a == 0:
+            c1 = 0
+        else:
+            c1 = -1
+            for site in range(max(1, a - span), b):
+                if (selector[other, site] & mask) != (selector[other, site - 1] & mask):
+                    c1 = site
+                    break
+            if c1 < 0:
+                continue
+        c2 = -1
+        for site in range(c1 + 1, min(sites, b + span + 1)):
+            if (selector[other, site] & mask) != (selector[other, site - 1] & mask):
+                c2 = site
+                break
+        if b == sites:
+            if c2 >= 0:
+                continue                      # a later change: not a terminal run
+            for site in range(min(sites, b + span + 1), sites):
+                if (selector[other, site] & mask) != (selector[other, site - 1] & mask):
+                    c2 = -2
+                    break
+            if c2 == -2:
+                continue
+            c2 = sites
+        if c2 < 0 or c2 <= a or (c1 == 0 and c2 == sites):
+            continue
+        runs[count, 0] = other
+        runs[count, 1] = c1
+        runs[count, 2] = c2
+        runs[count, 3] = mask
+        count += 1
+    return count
+
+
+@njit(cache=True)
 def _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, selector, frame, orientation, roots,
               frozen, free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent,
               group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
-              log_keep, log_error, log_match, log_miss):
+              log_keep, log_error, log_match, log_miss, reverse=False):
     """One compound move (review I1), accepted as a whole when its exact window gain exceeds ``quantum``:
       kind 0 (switch pair): child ``centre``'s selector bits ``bits`` flipped on sites [a, b) - removing its change
-        pair at a and b - and its genotypes refitted there;
+        pair at a and b (or its first or last change, when the interval reaches a chromosome end) - and its genotypes
+        refitted there;
       kind 1 (track swap): non-root parent ``centre``'s two tracks swapped on [a, b) together with every child's bit
         for it (its children's copy terms are unchanged; the terms joining it to its own parents are not);
-      kind 2 (sibship pair): ``bits`` names one bit of centre whose parent is a root r; every child of r sharing
-        centre's change pair - its bit for r constant on [a, b) and equal to centre's there, different at sites a - 1
-        and b - has it flipped on [a, b) and its genotypes refitted: the children that moved to r's other homologue
-        together move back together;
-    then exact re-decodes inside [lo, hi) of centre's parents (root frames, non-root blocks), their other children,
-    centre's own children and centre (kind 0: neighbours first, centre last; kind 1: centre first). Returns
-    (gain, accepted); a rejected move is reverted."""
+      kind 2 (sibship pair): ``bits`` names one bit of centre whose parent is a root r; every child of r with a change
+        pair of its bit for r near centre's (_pair_runs: tolerance, release 2.2) has it flipped back on its own pair
+        and its genotypes refitted: children that changed homologue of r together change back together;
+    then the sibships of centre's parents and of centre are refitted jointly at every site of the seed interval
+    (_joint_refit, release 2.2), then exact re-decodes inside the window of centre's parents (root frames, non-root
+    blocks), their other children, centre's own children and centre (kind 0: neighbours first, centre last; kind 1:
+    centre first). Returns (gain, accepted); a rejected move is reverted."""
     sites = genotype.shape[1]
     own = node_group[centre]
-    # Involved blocks: parents, siblings (the parents' other children), children.
     parents = group_parent[own]
+    seed_lo, seed_hi = a, b
+    runs = np.zeros((max(child_offsets[parents[0] + 1] - child_offsets[parents[0]] if parents[0] >= 0 else 0,
+                         child_offsets[parents[1] + 1] - child_offsets[parents[1]] if parents[1] >= 0 else 0, 1), 4),
+                    dtype=np.int64)
+    run_count = 0
+    if kind == 3:
+        # Co-located switch pairs (release 2.2): every bit of centre and of its parents' other children with a change
+        # pair near centre's pair, whichever parent the bit belongs to (e.g. full and half siblings that all switch
+        # their non-shared parent's bit at the same two markers).
+        total = 1
+        for slot in range(2):
+            if parents[slot] >= 0:
+                total += child_offsets[parents[slot] + 1] - child_offsets[parents[slot]]
+        runs = np.zeros((2 * total, 4), dtype=np.int64)
+        seen_groups = np.full(total, -1, dtype=np.int64)
+        seen = 0
+        for slot in range(-1, 2):
+            if slot >= 0 and parents[slot] < 0:
+                continue
+            first = 0 if slot < 0 else child_offsets[parents[slot]]
+            last = 1 if slot < 0 else child_offsets[parents[slot] + 1]
+            for index in range(first, last):
+                other = own if slot < 0 else child_groups[index]
+                duplicate = False
+                for q in range(seen):
+                    if seen_groups[q] == other:
+                        duplicate = True
+                if duplicate:
+                    continue
+                seen_groups[seen] = other
+                seen += 1
+                for bit_slot in range(2):
+                    if group_parent[other, bit_slot] < 0:
+                        continue
+                    mask = 1 << (1 - bit_slot)
+                    c1, c2 = _pair_run(other, mask, a, b, selector, sites)
+                    if c1 < 0:
+                        continue
+                    runs[run_count, 0] = other
+                    runs[run_count, 1] = c1
+                    runs[run_count, 2] = c2
+                    runs[run_count, 3] = mask
+                    run_count += 1
+        for q in range(run_count):
+            seed_lo = min(seed_lo, runs[q, 1])
+            seed_hi = max(seed_hi, runs[q, 2])
+        width = max(COMPOUND_MARGIN, min(seed_hi - seed_lo, COMPOUND_WIDTH))
+        lo = min(lo, max(0, seed_lo - width))
+        hi = max(hi, min(sites, seed_hi + width))
+    if kind == 2:
+        root = parents[0] if bits == 2 else parents[1]
+        run_count = _pair_runs(root, a, b, selector, child_offsets, child_groups, child_slots, sites, runs)
+        for q in range(run_count):
+            seed_lo = min(seed_lo, runs[q, 1])
+            seed_hi = max(seed_hi, runs[q, 2])
+        width = max(COMPOUND_MARGIN, min(seed_hi - seed_lo, COMPOUND_WIDTH))
+        lo = min(lo, max(0, seed_lo - width))
+        hi = max(hi, min(sites, seed_hi + width))
+    # Involved blocks: parents, siblings (the parents' other children), children.
     count = 0
     for slot in range(2):
         parent = parents[slot]
@@ -1034,7 +1248,7 @@ def _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, s
             selector[own, site] ^= bits
         _refit_genotypes(own, a, b, potentials, genotype, selector, frame, orientation, roots, group_parent,
                          group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
-                         log_miss)
+                         log_miss, reverse)
     elif kind == 1:
         for site in range(a, b):
             g = genotype[centre, site]
@@ -1042,54 +1256,71 @@ def _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, s
             for index in range(child_offsets[centre], child_offsets[centre + 1]):
                 selector[child_groups[index], site] ^= 1 << (1 - child_slots[index])
     else:
-        root = parents[0] if bits == 2 else parents[1]
-        value = (selector[own, a] & bits) != 0
-        for index in range(child_offsets[root], child_offsets[root + 1]):
-            other = child_groups[index]
-            mask = 1 << (1 - child_slots[index])
-            same = (a == 0 or ((selector[other, a - 1] & mask) != 0) != value) and (
-                b == sites or ((selector[other, b] & mask) != 0) != value)
-            if same:
-                for site in range(a, b):
-                    if ((selector[other, site] & mask) != 0) != value:
-                        same = False
-                        break
-            if not same:
-                continue
-            for site in range(a, b):
+        # kinds 2 and 3
+        for q in range(run_count):
+            other, run_lo, run_hi, mask = runs[q, 0], runs[q, 1], runs[q, 2], runs[q, 3]
+            for site in range(run_lo, run_hi):
                 selector[other, site] ^= mask
-            _refit_genotypes(other, a, b, potentials, genotype, selector, frame, orientation, roots, group_parent,
-                             group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
-                             log_miss)
-    # Re-decodes.
-    for rnd in range(2):
-        if kind == 1 or rnd == 1:
-            _window_child(own, lo, hi, potentials, genotype, selector, frame, orientation, roots, group_parent,
-                          group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
-                          marker_theta, log_keep, log_error, log_match, log_miss)
-        for slot in range(2):
-            parent = parents[slot]
-            if parent < 0:
-                continue
-            if roots[parent]:
-                starts = frozen_starts if frozen[parent] else free_starts
-                trans = frozen_trans if frozen[parent] else free_trans
-                _window_root(parent, lo, hi, potentials, genotype, selector, frame, orientation, starts, trans,
-                             anchors[parent], group_child, child_offsets, child_groups, child_slots, log_keep,
-                             log_error, log_match, log_miss)
-            else:
-                _window_child(node_group[parent], lo, hi, potentials, genotype, selector, frame, orientation, roots,
+            _refit_genotypes(other, run_lo, run_hi, potentials, genotype, selector, frame, orientation, roots,
+                             group_parent, group_child, child_offsets, child_groups, child_slots, log_keep, log_error,
+                             log_match, log_miss, reverse)
+    # Joint sibship refit over the seed interval (M2): centre's parents and centre itself as a parent.
+    refit = np.full(3 + 2 * run_count, -1, dtype=np.int64)
+    refit_count = 0
+    for slot in range(2):
+        if parents[slot] >= 0:
+            refit[refit_count] = parents[slot]
+            refit_count += 1
+    if child_offsets[centre + 1] > child_offsets[centre]:
+        refit[refit_count] = centre
+        refit_count += 1
+
+    _joint_refit(refit, refit_count, seed_lo, seed_hi, SITE_MAX_COMBOS, potentials, genotype, selector, frame,
+                 orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans, node_group,
+                 group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
+                 marker_theta, log_keep, log_error, log_match, log_miss, reverse,
+                 seed_hi - seed_lo <= COMPOUND_WIDTH)
+    # Re-decodes: one window, or for a long seed interval the two zones around its ends (its interior keeps the
+    # seed's state; the gain is still scored over the whole window).
+    zone_count = 1
+    zones = np.empty((2, 2), dtype=np.int64)
+    zones[0, 0], zones[0, 1] = lo, hi
+    reach = COMPOUND_WIDTH + COMPOUND_MARGIN
+    if seed_hi - seed_lo > 4 * reach:
+        zone_count = 2
+        zones[0, 0], zones[0, 1] = lo, min(hi, seed_lo + reach)
+        zones[1, 0], zones[1, 1] = max(lo, seed_hi - reach), hi
+    for zone in range(zone_count):
+        z_lo, z_hi = zones[zone, 0], zones[zone, 1]
+        for rnd in range(2):
+            if kind == 1 or rnd == 1:
+                _window_child(own, z_lo, z_hi, potentials, genotype, selector, frame, orientation, roots,
                               group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets,
-                              marker_sites, marker_theta, log_keep, log_error, log_match, log_miss)
-        for q in range(sibling_lo, children_hi):
-            if groups[q] == own:
-                continue
-            _window_child(groups[q], lo, hi, potentials, genotype, selector, frame, orientation, roots, group_parent,
-                          group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
-                          marker_theta, log_keep, log_error, log_match, log_miss)
-    _window_child(own, lo, hi, potentials, genotype, selector, frame, orientation, roots, group_parent, group_child,
-                  child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
-                  log_error, log_match, log_miss)
+                              marker_sites, marker_theta, log_keep, log_error, log_match, log_miss, reverse)
+            for slot in range(2):
+                parent = parents[slot]
+                if parent < 0:
+                    continue
+                if roots[parent]:
+                    starts = frozen_starts if frozen[parent] else free_starts
+                    trans = frozen_trans if frozen[parent] else free_trans
+                    _window_root(parent, z_lo, z_hi, potentials, genotype, selector, frame, orientation, starts,
+                                 trans, anchors[parent], group_child, child_offsets, child_groups, child_slots,
+                                 log_keep, log_error, log_match, log_miss, reverse)
+                else:
+                    _window_child(node_group[parent], z_lo, z_hi, potentials, genotype, selector, frame,
+                                  orientation, roots, group_parent, group_child, child_offsets, child_groups,
+                                  child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
+                                  log_match, log_miss, reverse)
+            for q in range(sibling_lo, children_hi):
+                if groups[q] == own:
+                    continue
+                _window_child(groups[q], z_lo, z_hi, potentials, genotype, selector, frame, orientation, roots,
+                              group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets,
+                              marker_sites, marker_theta, log_keep, log_error, log_match, log_miss, reverse)
+        _window_child(own, z_lo, z_hi, potentials, genotype, selector, frame, orientation, roots, group_parent,
+                      group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
+                      marker_theta, log_keep, log_error, log_match, log_miss, reverse)
     after = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
                               selector, frame, orientation, roots, frozen, free_starts, free_trans, frozen_starts,
                               frozen_trans, group_parent, group_child, child_offsets, child_groups, child_slots,
@@ -1111,26 +1342,43 @@ def _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, s
 def _scan_pairs(kind, centre, source, mask, quantum, max_span, margin, potentials, genotype, selector, frame,
                 orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group,
                 group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
-                marker_theta, log_keep, log_error, log_match, log_miss, decisions, decision_count):
+                marker_theta, log_keep, log_error, log_match, log_miss, decisions, decision_count, reverse=False,
+                tier=2):
     """Compound moves of ``kind`` around ``centre`` on the change pairs of group ``source``'s selector bits ``mask``
-    (consecutive changes at most ``max_span`` sites apart, in position order; the state is re-read after each move).
-    Returns (accepted moves, total gain)."""
+    (consecutive changes at most ``max_span`` sites apart, in position order, right to left under the convention
+    reversal; the state is re-read after each move), then the two terminal segments. ``tier``: 0 = pairs of at most
+    LONG_SPAN sites, 1 = longer pairs and the terminal segments (kinds 0 and 1 only), 2 = all. Returns (accepted
+    moves, total gain)."""
     sites = genotype.shape[1]
     accepted, total = 0, 0.0
     first, stop = marker_offsets[source], marker_offsets[source + 1]
-    k = first + 1
-    while k < stop:
+    k = stop - 1 if reverse else first + 1
+    while (k > first) if reverse else (k < stop):
         if (selector[source, marker_sites[k]] & mask) == (selector[source, marker_sites[k - 1]] & mask):
-            k += 1
+            k = k - 1 if reverse else k + 1
             continue
-        j = k + 1
-        while j < stop and (selector[source, marker_sites[j]] & mask) == (selector[source, marker_sites[j - 1]] & mask):
-            j += 1
-        if j >= stop:
-            break
-        a, b = marker_sites[k], marker_sites[j]
-        bits = (selector[source, a] ^ selector[source, marker_sites[k - 1]]) & mask
-        usable = b - a <= max_span
+        if reverse:
+            # k is the pair's right change; find the change before it
+            j = k - 1
+            while j > first and (selector[source, marker_sites[j]] & mask) == (selector[source, marker_sites[j - 1]]
+                                                                               & mask):
+                j -= 1
+            if j <= first:
+                break
+            a, b = marker_sites[j], marker_sites[k]
+            bits = (selector[source, a] ^ selector[source, marker_sites[j - 1]]) & mask
+        else:
+            j = k + 1
+            while j < stop and (selector[source, marker_sites[j]] & mask) == (selector[source, marker_sites[j - 1]]
+                                                                              & mask):
+                j += 1
+            if j >= stop:
+                break
+            a, b = marker_sites[k], marker_sites[j]
+            bits = (selector[source, a] ^ selector[source, marker_sites[k - 1]]) & mask
+        usable = b - a <= max_span and (tier == 2 or (tier == 0) == (b - a <= LONG_SPAN))
+        if kind == 3:
+            usable = usable and b - a <= COMPOUND_WIDTH
         if kind == 2:
             parent = group_parent[source, 0] if bits == 2 else (group_parent[source, 1] if bits == 1 else -1)
             usable = usable and parent >= 0 and roots[parent]
@@ -1141,9 +1389,9 @@ def _scan_pairs(kind, centre, source, mask, quantum, max_span, margin, potential
                                  orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans,
                                  anchors, node_group, group_parent, group_child, child_offsets, child_groups,
                                  child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
-                                 log_match, log_miss)
+                                 log_match, log_miss, reverse)
             if abs(gain) < 1.0 and decision_count[0] < decisions.shape[0]:
-                decisions[decision_count[0], 0] = 3 + kind
+                decisions[decision_count[0], 0] = 3 + kind if kind < 3 else 8
                 decisions[decision_count[0], 1] = source
                 decisions[decision_count[0], 2] = a
                 decisions[decision_count[0], 3] = gain
@@ -1152,6 +1400,52 @@ def _scan_pairs(kind, centre, source, mask, quantum, max_span, margin, potential
                 accepted += 1
                 total += gain
         k = j
+    # Terminal segments (release 2.2): the stretch between a chromosome end and the nearest change of these bits,
+    # flipped as a whole (kinds 0-2 then remove that change), left end first (right end first under the reversal).
+    for side_index in range(2 if tier != 0 else 0):
+        side = 1 - side_index if reverse else side_index
+        k = -1
+        if side == 0:
+            for index in range(first + 1, stop):
+                if (selector[source, marker_sites[index]] & mask) != (selector[source, marker_sites[index - 1]]
+                                                                      & mask):
+                    k = index
+                    break
+        else:
+            for index in range(stop - 1, first, -1):
+                if (selector[source, marker_sites[index]] & mask) != (selector[source, marker_sites[index - 1]]
+                                                                      & mask):
+                    k = index
+                    break
+        if k < 0:
+            continue
+        bits = (selector[source, marker_sites[k]] ^ selector[source, marker_sites[k - 1]]) & mask
+        if side == 0:
+            a, b = 0, marker_sites[k]
+        else:
+            a, b = marker_sites[k], sites
+        usable = b - a <= max_span and b > a
+        if kind == 2:
+            parent = group_parent[source, 0] if bits == 2 else (group_parent[source, 1] if bits == 1 else -1)
+            usable = usable and parent >= 0 and roots[parent]
+        if not usable:
+            continue
+        width = max(margin, min(b - a, COMPOUND_WIDTH))
+        lo, hi = max(0, a - width), min(sites, b + width)
+        gain, ok = _compound(kind, centre, bits, a, b, lo, hi, quantum, potentials, genotype, selector, frame,
+                             orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans,
+                             anchors, node_group, group_parent, group_child, child_offsets, child_groups,
+                             child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
+                             log_match, log_miss, reverse)
+        if abs(gain) < 1.0 and decision_count[0] < decisions.shape[0]:
+            decisions[decision_count[0], 0] = 3 + kind if kind < 3 else 8
+            decisions[decision_count[0], 1] = source
+            decisions[decision_count[0], 2] = a
+            decisions[decision_count[0], 3] = gain
+            decision_count[0] += 1
+        if ok:
+            accepted += 1
+            total += gain
     return accepted, total
 
 
@@ -1159,16 +1453,18 @@ def _scan_pairs(kind, centre, source, mask, quantum, max_span, margin, potential
 def _compound_sweep(quantum, max_span, margin, potentials, genotype, selector, frame, orientation, roots, frozen,
                     free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent,
                     group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
-                    log_keep, log_error, log_match, log_miss, decisions, decision_count):
-    """Every compound move once, sequentially in canonical order (sample order, then position): kind 0 on every
+                    log_keep, log_error, log_match, log_miss, decisions, decision_count, reverse=False, tier=2):
+    """Every compound move once, sequentially in canonical order (sample order, then position; both reversed under
+    the convention reversal): kind 0 on every
     child's selector change pairs; kind 1 for every non-root parent on its own change pairs and on each child's change
     pairs of the bit for it; kind 2 on every child's change pairs of one bit whose parent is a root. Window = the
     pair's interval widened by max(``margin``, min(its span, COMPOUND_WIDTH)) on each side. Returns (accepted moves,
     total gain)."""
     accepted, total = 0, 0.0
     groups = len(group_child)
-    for kind in range(3):
-        for group in range(groups):
+    for kind in range(4 if tier != 1 else 2):
+        for index in range(groups):
+            group = groups - 1 - index if reverse else index
             centre = group_child[group]
             if kind == 1:
                 if child_offsets[centre] == child_offsets[centre + 1]:
@@ -1182,13 +1478,14 @@ def _compound_sweep(quantum, max_span, margin, potentials, genotype, selector, f
             else:
                 sources = np.full(1, group, dtype=np.int64)
                 masks = np.full(1, 3, dtype=np.int64)
-            for q in range(len(sources)):
+            for index_q in range(len(sources)):
+                q = len(sources) - 1 - index_q if reverse else index_q
                 moves, gain = _scan_pairs(kind, centre, sources[q], masks[q], quantum, max_span, margin, potentials,
                                           genotype, selector, frame, orientation, roots, frozen, free_starts,
                                           free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent,
                                           group_child, child_offsets, child_groups, child_slots, marker_offsets,
                                           marker_sites, marker_theta, log_keep, log_error, log_match, log_miss,
-                                          decisions, decision_count)
+                                          decisions, decision_count, reverse, tier)
                 accepted += moves
                 total += gain
     return accepted, total
@@ -1209,7 +1506,7 @@ def _relabel_flip(root, boundary, anchor, frame, selector, child_offsets, child_
 def _relabel_compound(root, run, lo, hi, quantum, potentials, genotype, selector, frame, orientation, roots, frozen,
                       free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent,
                       group_child, child_offsets, child_groups, child_slots, marker_offsets, marker_sites,
-                      marker_theta, log_keep, log_error, log_match, log_miss):
+                      marker_theta, log_keep, log_error, log_match, log_miss, reverse=False):
     """Compound relabelling (review I1): relabel ``root`` at the boundary into frame run ``run``, then exact windowed
     re-decodes inside [lo, hi) of its children, its frame and its children again (a child's switch that sat elsewhere
     in the stretch where r's bit is uninformative for it moves to the boundary or vanishes). Exact gain = the
@@ -1251,11 +1548,11 @@ def _relabel_compound(root, run, lo, hi, quantum, potentials, genotype, selector
         for index in range(first_child, last_child):
             _window_child(child_groups[index], lo, hi, potentials, genotype, selector, frame, orientation, roots,
                           group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets,
-                          marker_sites, marker_theta, log_keep, log_error, log_match, log_miss)
+                          marker_sites, marker_theta, log_keep, log_error, log_match, log_miss, reverse)
         if rnd == 0:
             _window_root(root, lo, hi, potentials, genotype, selector, frame, orientation, starts, trans, anchor,
                          group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
-                         log_miss)
+                         log_miss, reverse)
     after = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, potentials, genotype,
                               selector, frame, orientation, roots, frozen, free_starts, free_trans, frozen_starts,
                               frozen_trans, group_parent, group_child, child_offsets, child_groups, child_slots,
@@ -1277,13 +1574,16 @@ def _relabel_compound_sweep(quantum, max_span, margin, potentials, genotype, sel
                             frozen, free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group,
                             group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets,
                             marker_sites, marker_theta, log_keep, log_error, log_match, log_miss, decisions,
-                            decision_count):
+                            decision_count, reverse=False):
     """Every root (sample order) and every boundary of its frame chain nearest to a change of a child's bit for it
-    (within ``max_span`` sites; boundaries in position order, each once): a compound relabelling with the window
-    spanning the boundary and the triggering changes, widened by ``margin``. Returns (accepted moves, total gain)."""
+    (within ``max_span`` sites; boundaries in position order, each once; equidistant boundaries: the left one): a
+    compound relabelling with the window spanning the boundary and the triggering changes, widened by ``margin``.
+    Under the convention reversal roots, boundaries and the equidistant choice are reversed. Returns (accepted moves,
+    total gain)."""
     samples, sites = genotype.shape
     accepted, total = 0, 0.0
-    for root in range(samples):
+    for root_index in range(samples):
+        root = samples - 1 - root_index if reverse else root_index
         if not roots[root] or child_offsets[root] == child_offsets[root + 1]:
             continue
         starts = frozen_starts if frozen[root] else free_starts
@@ -1302,7 +1602,8 @@ def _relabel_compound_sweep(quantum, max_span, margin, potentials, genotype, sel
                     continue
                 r = np.searchsorted(starts[:runs], m)            # first run starting at or after m
                 best, best_d = -1, sites
-                for cand in (r - 1, r):
+                for cand_index in range(2):
+                    cand = (r - cand_index) if reverse else (r - 1 + cand_index)
                     if 1 <= cand < runs:
                         d = abs(starts[cand] - m)
                         if d < best_d:
@@ -1311,7 +1612,8 @@ def _relabel_compound_sweep(quantum, max_span, margin, potentials, genotype, sel
                     continue
                 reach_lo[best] = min(reach_lo[best], min(m, starts[best]))
                 reach_hi[best] = max(reach_hi[best], max(m, starts[best]))
-        for run in range(1, runs):
+        for run_index in range(1, runs):
+            run = runs - run_index if reverse else run_index
             if reach_hi[run] < 0:
                 continue
             lo = max(0, reach_lo[run] - margin)
@@ -1320,7 +1622,7 @@ def _relabel_compound_sweep(quantum, max_span, margin, potentials, genotype, sel
                                          roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans, anchors,
                                          node_group, group_parent, group_child, child_offsets, child_groups,
                                          child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
-                                         log_match, log_miss)
+                                         log_match, log_miss, reverse)
             if abs(gain) < 1.0 and decision_count[0] < decisions.shape[0]:
                 decisions[decision_count[0], 0] = 6
                 decisions[decision_count[0], 1] = root
@@ -1334,21 +1636,12 @@ def _relabel_compound_sweep(quantum, max_span, margin, potentials, genotype, sel
 
 
 @njit(cache=True)
-def _site_move(parent, site, quantum, max_combos, potentials, genotype, selector, frame, orientation, roots, frozen,
-               free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent, group_child,
-               child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
-               log_error, log_match, log_miss):
-    """Site move (sibship genotypes): at one site, the exact joint maximum over the ordered genotypes of
-    ``parent``'s children (and of the parent itself when it is not a root), selectors fixed - e.g. full siblings
-    swapping which parent transmitted which allele together, which no single child block can do. Candidates are the
-    genotypes of finite potential; skipped above ``max_combos`` joint configurations. The site's J terms are scored
-    by _window_objective on [site, site + 1); the current configuration is kept unless the best is better by more
-    than GENOTYPE_TIE, and accepted only above ``quantum``. Returns (gain, accepted)."""
-    samples = genotype.shape[0]
+def _sibship(parent, roots, node_group, group_child, child_offsets, child_groups):
+    """(members, groups) of ``parent``'s sibship: its children (and the parent itself when it is not a root)."""
     first, last = child_offsets[parent], child_offsets[parent + 1]
     count = last - first + (0 if roots[parent] else 1)
     members = np.empty(count, dtype=np.int64)
-    groups = np.empty(last - first + (0 if roots[parent] else 1), dtype=np.int64)
+    groups = np.empty(count, dtype=np.int64)
     used = 0
     for index in range(first, last):
         members[used] = group_child[child_groups[index]]
@@ -1357,85 +1650,237 @@ def _site_move(parent, site, quantum, max_combos, potentials, genotype, selector
     if not roots[parent]:
         members[used] = parent
         groups[used] = node_group[parent]
-        used += 1
+    return members, groups
+
+
+@njit(cache=True)
+def _site_lists(root_mask, sample_mask, group_mask, roots, group_parent):
+    """Index lists of the masked terms of one site: roots (R), non-root samples (psi), groups with a copy term to a
+    non-root parent or an unobserved slot."""
+    samples = len(roots)
+    root_list = np.empty(samples, dtype=np.int64)
+    sample_list = np.empty(samples, dtype=np.int64)
+    nr, ns = 0, 0
+    for sample in range(samples):
+        if roots[sample]:
+            if root_mask[sample]:
+                root_list[nr] = sample
+                nr += 1
+        elif sample_mask[sample]:
+            sample_list[ns] = sample
+            ns += 1
+    group_list = np.empty(len(group_mask), dtype=np.int64)
+    ng = 0
+    for group in range(len(group_mask)):
+        if group_mask[group]:
+            group_list[ng] = group
+            ng += 1
+    return root_list[:nr], sample_list[:ns], group_list[:ng]
+
+
+@njit(cache=True)
+def _site_terms(site, root_list, sample_list, group_list, potentials, genotype, selector, frame, orientation, roots,
+                group_parent, group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
+                log_miss):
+    """The J terms of one site restricted to the listed roots, samples and groups (selectors fixed): the same terms,
+    in the same order, as _window_objective on [site, site + 1) with the corresponding masks and no transitions."""
+    total = 0.0
+    for q in range(len(root_list)):
+        sample = root_list[q]
+        total += _root_term(sample, site, frame[sample, site], genotype, selector, potentials, orientation,
+                            group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
+                            log_miss)
+    for q in range(len(sample_list)):
+        sample = sample_list[q]
+        total += potentials[sample, site, genotype[sample, site]]
+    for q in range(len(group_list)):
+        group = group_list[q]
+        child = group_child[group]
+        for slot in range(2):
+            parent = group_parent[group, slot]
+            if parent >= 0 and roots[parent]:
+                continue
+            if parent < 0:
+                total += LOG_HALF
+            else:
+                homologue = (selector[group, site] >> (1 - slot)) & 1
+                total += (log_keep if _allele(genotype[parent, site], homologue)
+                          == _allele(genotype[child, site], slot) else log_error)
+    return total
+
+
+@njit(cache=True)
+def _site_conflict(parent, site, genotype, selector, frame, potentials, orientation, roots, group_child,
+                   child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss):
+    """Whether ``parent``'s best genotype at ``site`` (a root's mode of its summed terms, a non-root's current
+    genotype) leaves a child's allele mistransmitted (the per-site test of _conflicts)."""
+    if roots[parent]:
+        cavity = np.empty(4)
+        _root_cavity(parent, site, frame[parent, site], -1, genotype, selector, potentials, orientation, group_child,
+                     child_offsets, child_groups, child_slots, log_keep, log_error, log_match, log_miss, cavity)
+        best = 0
+        for g in range(1, 4):
+            if cavity[g] > cavity[best]:
+                best = g
+        g_parent = best
+    else:
+        g_parent = genotype[parent, site]
+    for index in range(child_offsets[parent], child_offsets[parent + 1]):
+        group = child_groups[index]
+        slot = child_slots[index]
+        homologue = (selector[group, site] >> (1 - slot)) & 1
+        if _allele(g_parent, homologue) != _allele(genotype[group_child[group], site], slot):
+            return True
+    return False
+
+
+@njit(cache=True)
+def _site_search(parent, site, max_combos, minimum_multi, potentials, genotype, selector, frame, orientation, roots,
+                 frozen, free_starts, free_trans, frozen_starts, frozen_trans, node_group, group_parent, group_child,
+                 child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
+                 log_error, log_match, log_miss, reverse, best):
+    """The exact joint maximum at one site over the ordered genotypes of ``parent``'s sibship (_sibship), selectors
+    fixed: candidates are the genotypes of finite potential; nothing is searched above ``max_combos`` joint
+    configurations or when fewer than ``minimum_multi`` members have more than one candidate. The site's J terms are
+    scored by _site_terms (those of _window_objective on [site, site + 1)). The current configuration is kept unless another is better by
+    more than GENOTYPE_TIE; among tied best configurations the first enumerated wins (the last under the convention
+    reversal). Writes the best configuration into ``best`` (members' order) and leaves the genotypes as they were.
+    Returns (gain, members); gain 0 when nothing was searched."""
+    samples = genotype.shape[0]
+    members, groups = _sibship(parent, roots, node_group, group_child, child_offsets, child_groups)
+    used = len(members)
     options = np.zeros((used, 4), dtype=np.int8)
     sizes = np.zeros(used, dtype=np.int64)
     combos = 1
+    multi = 0
     for q in range(used):
+        best[q] = genotype[members[q], site]
         for g in range(4):
             if potentials[members[q], site, g] > -np.inf:
                 options[q, sizes[q]] = g
                 sizes[q] += 1
+        if sizes[q] > 1:
+            multi += 1
         combos *= max(sizes[q], 1)
         if combos > max_combos:
-            return 0.0, False
-    if combos <= 1:
-        return 0.0, False
+            return 0.0, members
+    if combos <= 1 or multi < minimum_multi:
+        return 0.0, members
     root_mask, sample_mask, group_mask, transition_mask = _term_masks(
         groups, used, parent if roots[parent] else -1, roots, group_parent, group_child, child_offsets, child_groups,
         samples)
-    transition_mask[:] = False                      # selectors do not change
+    root_list, sample_list, group_list = _site_lists(root_mask, sample_mask, group_mask, roots, group_parent)
     current = np.empty(used, dtype=np.int8)
     for q in range(used):
         current[q] = genotype[members[q], site]
-    before = _window_objective(site, site + 1, root_mask, sample_mask, group_mask, transition_mask, potentials,
-                               genotype, selector, frame, orientation, roots, frozen, free_starts, free_trans,
-                               frozen_starts, frozen_trans, group_parent, group_child, child_offsets, child_groups,
-                               child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error, log_match,
-                               log_miss)
+    before = _site_terms(site, root_list, sample_list, group_list, potentials, genotype, selector, frame, orientation,
+                         roots, group_parent, group_child, child_offsets, child_groups, child_slots, log_keep,
+                         log_error, log_match, log_miss)
     best_value = before
-    best = current.copy()
     digits = np.zeros(used, dtype=np.int64)
-    for _ in range(combos):
+    for combo in range(combos):
+        code = combos - 1 - combo if reverse else combo
+        for q in range(used):
+            digits[q] = code % max(sizes[q], 1)
+            code //= max(sizes[q], 1)
         for q in range(used):
             genotype[members[q], site] = options[q, digits[q]]
-        value = _window_objective(site, site + 1, root_mask, sample_mask, group_mask, transition_mask, potentials,
-                                  genotype, selector, frame, orientation, roots, frozen, free_starts, free_trans,
-                                  frozen_starts, frozen_trans, group_parent, group_child, child_offsets, child_groups,
-                                  child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
-                                  log_match, log_miss)
+        value = _site_terms(site, root_list, sample_list, group_list, potentials, genotype, selector, frame,
+                            orientation, roots, group_parent, group_child, child_offsets, child_groups, child_slots,
+                            log_keep, log_error, log_match, log_miss)
         if value > best_value + GENOTYPE_TIE:
             best_value = value
             for q in range(used):
                 best[q] = genotype[members[q], site]
-        q = 0
-        while q < used:
-            digits[q] += 1
-            if digits[q] < sizes[q]:
-                break
-            digits[q] = 0
-            q += 1
-    gain = best_value - before
-    keep = best if gain > quantum else current
     for q in range(used):
-        genotype[members[q], site] = keep[q]
-    return gain, gain > quantum
+        genotype[members[q], site] = current[q]
+    return best_value - before, members
+
+
+@njit(cache=True)
+def _site_move(parent, site, quantum, max_combos, potentials, genotype, selector, frame, orientation, roots, frozen,
+               free_starts, free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent, group_child,
+               child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
+               log_error, log_match, log_miss, reverse=False):
+    """Site move (sibship genotypes): at one site, the exact joint maximum over the ordered genotypes of
+    ``parent``'s children (and of the parent itself when it is not a root), selectors fixed - e.g. full siblings
+    swapping which parent transmitted which allele together, which no single child block can do (_site_search);
+    accepted only above ``quantum``. Returns (gain, accepted)."""
+    best = np.empty(child_offsets[parent + 1] - child_offsets[parent] + 1, dtype=np.int8)
+    gain, members = _site_search(parent, site, max_combos, 1, potentials, genotype, selector, frame, orientation,
+                                 roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans, node_group,
+                                 group_parent, group_child, child_offsets, child_groups, child_slots, marker_offsets,
+                                 marker_sites, marker_theta, log_keep, log_error, log_match, log_miss, reverse, best)
+    if gain > quantum:
+        for q in range(len(members)):
+            genotype[members[q], site] = best[q]
+        return gain, True
+    return gain, False
+
+
+@njit(cache=True)
+def _joint_refit(parents, count, lo, hi, max_combos, potentials, genotype, selector, frame, orientation, roots, frozen,
+                 free_starts, free_trans, frozen_starts, frozen_trans, node_group, group_parent, group_child,
+                 child_offsets, child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep,
+                 log_error, log_match, log_miss, reverse, all_sites):
+    """Joint sibship genotype refit inside a compound seed (release 2.2, M2): at every site of [lo, hi) (only where it
+    has a Mendelian conflict, _site_conflict, unless ``all_sites``) each of ``parents[:count]`` (with at least two
+    children, or a non-root parent) has its sibship's genotypes set to their exact joint maximum (_site_search; at
+    least two members with more than one candidate) when it beats the current configuration by more than
+    GENOTYPE_TIE. Applied as found: the compound move accepts or reverts the whole."""
+    best = np.empty(64, dtype=np.int8)
+    for index in range(hi - lo):
+        site = hi - 1 - index if reverse else lo + index
+        for q in range(count):
+            parent = parents[q]
+            size = child_offsets[parent + 1] - child_offsets[parent]
+            if size + 1 > len(best):
+                best = np.empty(size + 1, dtype=np.int8)
+            if size < 2 and roots[parent]:
+                continue
+            conflict = _site_conflict(parent, site, genotype, selector, frame, potentials, orientation, roots,
+                                      group_child, child_offsets, child_groups, child_slots, log_keep, log_error,
+                                      log_match, log_miss)
+            if not (all_sites or conflict):
+                continue
+            gain, members = _site_search(parent, site,
+                                         max_combos if (conflict and all_sites) else min(max_combos, JOINT_REFIT_COMBOS),
+                                         2, potentials, genotype, selector, frame,
+                                         orientation, roots, frozen, free_starts, free_trans, frozen_starts,
+                                         frozen_trans, node_group, group_parent, group_child, child_offsets,
+                                         child_groups, child_slots, marker_offsets, marker_sites, marker_theta,
+                                         log_keep, log_error, log_match, log_miss, reverse, best)
+            if gain > GENOTYPE_TIE:
+                for m in range(len(members)):
+                    genotype[members[m], site] = best[m]
 
 
 @njit(cache=True)
 def _site_sweep(quantum, max_combos, potentials, genotype, selector, frame, orientation, roots, frozen, free_starts,
                 free_trans, frozen_starts, frozen_trans, anchors, node_group, group_parent, group_child, child_offsets,
                 child_groups, child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error, log_match,
-                log_miss, decisions, decision_count):
+                log_miss, decisions, decision_count, reverse=False):
     """Site moves at every Mendelian-conflict site (_conflicts at the sweep's start) of every root with at least two
-    children and every non-root parent, sequentially (parents in sample order, then sites). Returns (accepted moves,
-    total gain)."""
+    children and every non-root parent, sequentially (parents in sample order, then sites; both reversed under the
+    convention reversal). Returns (accepted moves, total gain)."""
     conflict = _conflicts(genotype, selector, frame, potentials, orientation, roots, group_child, child_offsets,
-                          child_groups, child_slots, log_keep, log_error, log_match, log_miss)
+                          child_groups, child_slots, log_keep, log_error, log_match, log_miss, reverse)
     samples, sites = genotype.shape
     accepted, total = 0, 0.0
-    for parent in range(samples):
+    for parent_index in range(samples):
+        parent = samples - 1 - parent_index if reverse else parent_index
         kids = child_offsets[parent + 1] - child_offsets[parent]
         if kids == 0 or (kids < 2 and roots[parent]):
             continue
-        for site in range(sites):
+        for site_index in range(sites):
+            site = sites - 1 - site_index if reverse else site_index
             if not conflict[parent, site]:
                 continue
             gain, ok = _site_move(parent, site, quantum, max_combos, potentials, genotype, selector, frame,
                                   orientation, roots, frozen, free_starts, free_trans, frozen_starts, frozen_trans,
                                   anchors, node_group, group_parent, group_child, child_offsets, child_groups,
                                   child_slots, marker_offsets, marker_sites, marker_theta, log_keep, log_error,
-                                  log_match, log_miss)
+                                  log_match, log_miss, reverse)
             if abs(gain) < 1.0 and decision_count[0] < decisions.shape[0]:
                 decisions[decision_count[0], 0] = 7
                 decisions[decision_count[0], 1] = parent
@@ -1448,9 +1893,10 @@ def _site_sweep(quantum, max_combos, potentials, genotype, selector, frame, orie
     return accepted, total
 
 
-def colouring(graph):
+def colouring(graph, reverse=False):
     """Colours of the conflict graph: parent-child edges plus a clique of each root's children (they share the root's
-    summed-out genotype). Greedy over samples by (-degree, sample index); a list of ascending sample arrays."""
+    summed-out genotype). Greedy over samples by (-degree, sample index); a list of ascending sample arrays in colour
+    order. Under the convention reversal the sample index order and the colour order are reversed."""
     samples = len(graph.roots)
     neighbours = [set() for _ in range(samples)]
     for parent, child in zip(graph.parents, graph.children):
@@ -1460,7 +1906,7 @@ def colouring(graph):
         kids = sorted({int(c) for p, c in zip(graph.parents, graph.children) if p == root})
         for a in kids:
             neighbours[a].update(k for k in kids if k != a)
-    order = sorted(range(samples), key=lambda n: (-len(neighbours[n]), n))
+    order = sorted(range(samples), key=lambda n: (-len(neighbours[n]), -n if reverse else n))
     colour = np.full(samples, -1, dtype=np.int64)
     for sample in order:
         used = {int(colour[m]) for m in neighbours[sample] if colour[m] >= 0}
@@ -1468,11 +1914,13 @@ def colouring(graph):
         while c in used:
             c += 1
         colour[sample] = c
-    return [np.flatnonzero(colour == c).astype(np.int64) for c in range(int(colour.max()) + 1 if samples else 0)]
+    result = [np.flatnonzero(colour == c).astype(np.int64) for c in range(int(colour.max()) + 1 if samples else 0)]
+    return result[::-1] if reverse else result
 
 
-def descent_order(graph):
-    """Child groups in generation order (a child after all its observed parents), then sample index."""
+def descent_order(graph, reverse=False):
+    """Child groups in generation order (a child after all its observed parents), then sample index (reversed under
+    the convention reversal)."""
     samples = len(graph.roots)
     depth = np.zeros(samples, dtype=np.int64)
     parents_of = [[] for _ in range(samples)]
@@ -1488,7 +1936,7 @@ def descent_order(graph):
         if not changed:
             break
     children = np.asarray(graph.group_child, dtype=np.int64)
-    return np.lexsort((children, depth[children])).astype(np.int64)
+    return np.lexsort((-children if reverse else children, depth[children])).astype(np.int64)
 
 
 def _children_of(graph, samples):
@@ -1500,10 +1948,94 @@ def _children_of(graph, samples):
     return offsets, graph.edge_group[order].astype(np.int64), graph.slots[order].astype(np.int64)
 
 
-class FamilyMap:
-    """The solver's fixed inputs for one chromosome (from a FamilyWorkspace)."""
+def _runs_of(mask):
+    """Half-open runs [start, stop) of True in a bool vector."""
+    index = np.flatnonzero(mask)
+    if len(index) == 0:
+        return []
+    cuts = np.flatnonzero(np.diff(index) > 1)
+    return list(zip(np.r_[index[0], index[cuts + 1]].tolist(), (np.r_[index[cuts], index[-1]] + 1).tolist()))
 
-    def __init__(self, workspace, config):
+
+def _difference_items(state, other, roots, graph):
+    """Differing runs of two configurations: (kind 'F'|'S'|'G', row, start, stop, family set) - roots' frames,
+    groups' selectors, non-roots' genotypes; family = the sample, its observed parents (and its children for a
+    genotype)."""
+    parents_of = {int(c): [int(p) for p in graph.group_parent[graph.node_group[c]] if p >= 0] for c in graph.group_child}
+    children_of = {}
+    for parent, child in zip(graph.parents, graph.children):
+        children_of.setdefault(int(parent), []).append(int(child))
+    items = []
+    for root in np.flatnonzero(roots):
+        for lo, hi in _runs_of(state.frame[root] != other.frame[root]):
+            items.append(("F", int(root), lo, hi, frozenset((int(root),))))
+    for group, child in enumerate(graph.group_child):
+        child = int(child)
+        family = frozenset((child, *parents_of[child]))
+        for lo, hi in _runs_of(state.selector[group] != other.selector[group]):
+            items.append(("S", group, lo, hi, family))
+        for lo, hi in _runs_of(state.genotype[child] != other.genotype[child]):
+            items.append(("G", child, lo, hi, family | frozenset(children_of.get(child, ()))))
+    return items
+
+
+def _difference_clusters(items, margin):
+    """Clusters of difference items joined by family overlap and site proximity (gap <= margin): a list of
+    (first site, member indices), in position order."""
+    count = len(items)
+    parent = list(range(count))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    order = sorted(range(count), key=lambda i: (items[i][2], items[i][3], items[i][0], items[i][1]))
+    for position, i in enumerate(order):
+        for j in order[position + 1:]:
+            if items[j][2] > items[i][3] + margin:
+                break
+            if items[i][4] & items[j][4]:
+                parent[find(i)] = find(j)
+    groups = {}
+    for i in range(count):
+        groups.setdefault(find(i), []).append(i)
+    clusters = [(min(items[i][2] for i in members), sorted(members)) for members in groups.values()]
+    return sorted(clusters, key=lambda c: (c[0], c[1]))
+
+
+def _apply_items(state, other, items, members):
+    for i in members:
+        kind, row, lo, hi, _ = items[i]
+        if kind == "F":
+            state.frame[row, lo:hi] = other.frame[row, lo:hi]
+        elif kind == "S":
+            state.selector[row, lo:hi] = other.selector[row, lo:hi]
+        else:
+            state.genotype[row, lo:hi] = other.genotype[row, lo:hi]
+
+
+def _save_items(state, items, members):
+    saved = []
+    for i in members:
+        kind, row, lo, hi, _ = items[i]
+        source = state.frame if kind == "F" else (state.selector if kind == "S" else state.genotype)
+        saved.append(source[row, lo:hi].copy())
+    return saved
+
+
+def _restore_items(state, items, members, saved):
+    for i, values in zip(members, saved):
+        kind, row, lo, hi, _ = items[i]
+        target = state.frame if kind == "F" else (state.selector if kind == "S" else state.genotype)
+        target[row, lo:hi] = values
+
+
+class FamilyMap:
+    """The solver's fixed inputs for one chromosome (from a FamilyWorkspace). ``reverse`` overrides the convention
+    reversal flag (None: maths.ties.reverse_conventions(); the two-schedule estimator builds its mirror with it)."""
+
+    def __init__(self, workspace, config, reverse=None):
         graph = workspace.graph
         samples, sites = workspace.potentials.shape[:2]
         self.workspace, self.config, self.graph = workspace, config, graph
@@ -1519,9 +2051,12 @@ class FamilyMap:
         self.marker_offsets = np.asarray(offsets, dtype=np.int64)
         self.marker_sites = np.asarray(marker_sites, dtype=np.int64)
         self.marker_theta = np.asarray(marker_theta, dtype=np.float64)
-        self.colours = colouring(graph)
+        # Convention reversal (release 2.2 acceptance test; maths.ties): every arbitrary order and tie convention of
+        # the solver runs reversed; the stated priors (fewest switches, keep-current inside a tie class) do not.
+        self.reverse = bool(ties.reverse_conventions()) if reverse is None else bool(reverse)
+        self.colours = colouring(graph, self.reverse)
         self.roots = np.asarray(graph.roots, dtype=np.bool_)
-        self.descent_order = descent_order(graph)
+        self.descent_order = descent_order(graph, self.reverse)
         self.quantum = GAIN_QUANTUM
         self.phase_steps, self.phase_seconds = {}, {}
 
@@ -1550,13 +2085,14 @@ class FamilyMap:
             _init_block(int(group), w.potentials, state.genotype, state.selector, state.frame, w.orientation,
                         self.roots, g.group_parent, g.group_child, self.child_offsets, self.child_groups,
                         self.child_slots, self.marker_offsets, self.marker_sites, self.marker_theta, self.log_keep,
-                        self.log_error, self.log_match, self.log_miss, decoded, soft, soft_index)
+                        self.log_error, self.log_match, self.log_miss, decoded, soft, soft_index, self.reverse)
         return state
 
-    def sweep(self, state, decisions_out=None):
-        """One sweep: every colour's blocks, every root's relabelling scan, the compound moves (kinds 0-2) and the
-        compound relabellings, in that order. Returns (steps, total gain); per-phase accepted steps and seconds
-        accumulate in self.phase_steps and self.phase_seconds."""
+    def sweep(self, state, decisions_out=None, tier=0):
+        """One sweep. Tier 0: every colour's blocks, every root's relabelling scan, the compound moves (kinds 0-2,
+        pairs of at most LONG_SPAN sites), the compound relabellings and the site moves, in that order. Tier 1: the
+        long compound moves (longer pairs and terminal segments). Returns (steps, total gain); per-phase accepted
+        steps and seconds accumulate in self.phase_steps and self.phase_seconds."""
         w, g = self.workspace, self.graph
         steps, total = 0, 0.0
 
@@ -1570,6 +2106,19 @@ class FamilyMap:
                 for row in decisions[:count]:
                     decisions_out.append((int(row[0]), int(row[1]), int(row[2]), float(row[3])))
 
+        common = (w.potentials, state.genotype, state.selector, state.frame, w.orientation, self.roots, w.frozen,
+                  self.free_starts, self.free_trans, self.frozen_starts, self.frozen_trans, w.anchors, g.node_group,
+                  g.group_parent, g.group_child, self.child_offsets, self.child_groups, self.child_slots,
+                  self.marker_offsets, self.marker_sites, self.marker_theta, self.log_keep, self.log_error,
+                  self.log_match, self.log_miss)
+        if tier == 1:
+            started = time.perf_counter()
+            decisions = np.zeros((4096, 4))
+            count = np.zeros(1, dtype=np.int64)
+            moves, gain = _compound_sweep(self.quantum, self.sites, COMPOUND_MARGIN, *common, decisions, count,
+                                          self.reverse, 1)
+            record("compound_long", moves, gain, decisions, count[0], started)
+            return steps, total
         started = time.perf_counter()
         for blocks in self.colours:
             is_root = self.roots[blocks]
@@ -1578,12 +2127,13 @@ class FamilyMap:
                 w.orientation, self.roots, self.free_starts, self.free_trans, self.frozen_starts, self.frozen_trans,
                 w.frozen, w.anchors, g.group_parent, g.group_child, self.child_offsets, self.child_groups,
                 self.child_slots, self.marker_offsets, self.marker_sites, self.marker_theta, self.log_keep,
-                self.log_error, self.log_match, self.log_miss, self.quantum, 256)
+                self.log_error, self.log_match, self.log_miss, self.quantum, 256, self.reverse)
             for index in range(len(blocks)):
                 record("blocks", accepted[index], gains[index], decisions[index], counts[index, 0], started)
                 started = time.perf_counter()
         started = time.perf_counter()
-        for root in np.flatnonzero(self.roots):
+        root_order = np.flatnonzero(self.roots)
+        for root in (root_order[::-1] if self.reverse else root_order):
             if self.child_offsets[root] == self.child_offsets[root + 1]:
                 continue
             starts, trans = ((self.frozen_starts, self.frozen_trans) if w.frozen[root]
@@ -1592,48 +2142,151 @@ class FamilyMap:
             count = np.zeros(1, dtype=np.int64)
             moves, gain = _relabel_scan(int(root), state.frame, state.selector, starts, trans, int(w.anchors[root]),
                                         self.child_offsets, self.child_groups, self.child_slots, self.marker_offsets,
-                                        self.marker_sites, self.marker_theta, self.quantum, decisions, count)
+                                        self.marker_sites, self.marker_theta, self.quantum, decisions, count,
+                                        self.reverse)
             record("relabel", moves, gain, decisions, count[0], started)
             started = time.perf_counter()
-        common = (w.potentials, state.genotype, state.selector, state.frame, w.orientation, self.roots, w.frozen,
-                  self.free_starts, self.free_trans, self.frozen_starts, self.frozen_trans, w.anchors, g.node_group,
-                  g.group_parent, g.group_child, self.child_offsets, self.child_groups, self.child_slots,
-                  self.marker_offsets, self.marker_sites, self.marker_theta, self.log_keep, self.log_error,
-                  self.log_match, self.log_miss)
         started = time.perf_counter()
         decisions = np.zeros((4096, 4))
         count = np.zeros(1, dtype=np.int64)
-        moves, gain = _compound_sweep(self.quantum, COMPOUND_MAX_SPAN, COMPOUND_MARGIN, *common, decisions, count)
+        moves, gain = _compound_sweep(self.quantum, self.sites, COMPOUND_MARGIN, *common, decisions, count,
+                                      self.reverse, 0)
         record("compound", moves, gain, decisions, count[0], started)
         started = time.perf_counter()
         decisions = np.zeros((4096, 4))
         count = np.zeros(1, dtype=np.int64)
-        moves, gain = _relabel_compound_sweep(self.quantum, COMPOUND_WIDTH, COMPOUND_MARGIN, *common, decisions, count)
+        moves, gain = _relabel_compound_sweep(self.quantum, RELABEL_REACH, COMPOUND_MARGIN, *common, decisions,
+                                              count, self.reverse)
         record("compound_relabel", moves, gain, decisions, count[0], started)
         started = time.perf_counter()
         decisions = np.zeros((4096, 4))
         count = np.zeros(1, dtype=np.int64)
-        moves, gain = _site_sweep(self.quantum, SITE_MAX_COMBOS, *common, decisions, count)
+        moves, gain = _site_sweep(self.quantum, SITE_MAX_COMBOS, *common, decisions, count, self.reverse)
         record("site", moves, gain, decisions, count[0], started)
         return steps, total
 
-    def solve(self, max_sweeps, state=None):
+    def solve(self, max_sweeps, state=None, long_tier=True):
         """MapResult from the default start (or ``state``); RuntimeError when ``max_sweeps`` sweeps still accept a
-        step, or when the from-scratch J does not rise by the accepted gains (review B2c)."""
+        step, or when the from-scratch J does not rise by the accepted gains (review B2c). ``long_tier`` False stops
+        when a tier-0 sweep accepts nothing (no long compound moves)."""
         state = self.initial_state() if state is None else state
         values = [self.objective(state)]
         accepted, decisions = [], []
+        tier = 0
         for _ in range(int(max_sweeps)):
-            steps, gain = self.sweep(state, decisions)
+            steps, gain = self.sweep(state, decisions, tier)
             accepted.append(steps)
             values.append(self.objective(state))
             tolerance = 1e-10 * abs(values[-1]) + 1e-6
             if steps and not values[-1] - values[-2] >= gain - tolerance:
                 raise RuntimeError(f"family MAP: J rose by {values[-1] - values[-2]!r} but the accepted gains sum to "
                                    f"{gain!r}")
-            if steps == 0:
+            # Two tiers (release 2.2): tier-0 sweeps until one accepts nothing, then one tier-1 sweep (long compound
+            # moves); converged when that accepts nothing too, else back to tier 0.
+            if steps == 0 and (tier == 1 or not long_tier):
                 return MapResult(state, len(accepted), tuple(accepted), tuple(values), tuple(decisions))
+            tier = 1 if (steps == 0 and tier == 0) else 0
         raise RuntimeError(f"family MAP did not converge in {max_sweeps} sweeps (accepted per sweep {accepted})")
+
+    def solve_symmetric(self, max_sweeps):
+        """The released family MAP (release 2.2, M5): the ascent from the default start under this map's schedule and
+        under its mirror (every order and tie convention reversed, FamilyMap(reverse=not self.reverse)), both without
+        the long compound moves, merged (merge_end_points) from the end point with the higher J, then the ascent to
+        convergence (with the long compound moves only when config.map_long_moves). Returns (MapResult of the release,
+        merge record dict)."""
+        first = self.solve(max_sweeps, long_tier=False)
+        mirror = FamilyMap(self.workspace, self.config, reverse=not self.reverse)
+        second = mirror.solve(max_sweeps, long_tier=False)
+        for phase, steps in mirror.phase_steps.items():
+            self.phase_steps["mirror_" + phase] = self.phase_steps.get("mirror_" + phase, 0) + steps
+        for phase, seconds in mirror.phase_seconds.items():
+            self.phase_seconds["mirror_" + phase] = self.phase_seconds.get("mirror_" + phase, 0.0) + seconds
+        j1, j2 = first.objective[-1], second.objective[-1]
+        tied_base = abs(j1 - j2) <= self.quantum
+        base, other = (first, second) if j1 >= j2 - self.quantum else (second, first)
+        started = time.perf_counter()
+        state, taken, tied, candidates = self.merge_end_points(base.state, other.state)
+        self.phase_seconds["merge"] = self.phase_seconds.get("merge", 0.0) + time.perf_counter() - started
+        final = self.solve(max_sweeps, state=state, long_tier=bool(getattr(self.config, "map_long_moves", False)))
+        record = dict(J_schedule=float(j1), J_mirror=float(j2), base="schedule" if base is first else "mirror",
+                      tied_base=bool(tied_base), clusters=int(candidates), transplanted=int(taken),
+                      tied_transplants=int(tied), J_release=float(final.objective[-1]))
+        return final, record
+
+    def merge_end_points(self, base, other):
+        """Exact best-first transplant of ``other``'s difference clusters into ``base`` (release 2.2, M5). A cluster
+        is a set of differing cells (roots' frames, selectors, non-roots' genotypes) linked by family (sample, its
+        parents and children) and site proximity (COMPOUND_MARGIN); each is scored by its exact change of J over the
+        terms it can alter (_window_objective); the best one above the quantum is taken, the rest re-scored, until
+        none gains more than the quantum. Exact ties within the quantum go to the leftmost cluster (the rightmost under
+        the convention reversal) and are counted. Returns (state, taken, tied, clusters)."""
+        w, g = self.workspace, self.graph
+        state = MapState(base.genotype.copy(), base.selector.copy(), base.frame.copy())
+        items = _difference_items(state, other, self.roots, g)
+        clusters = _difference_clusters(items, COMPOUND_MARGIN)
+        taken = tied = 0
+        remaining = list(range(len(clusters)))
+        while remaining:
+            gains = []
+            for index in remaining:
+                gains.append(self._transplant_gain(state, other, items, clusters[index]))
+            best = max(gains)
+            if not best > self.quantum:
+                break
+            winners = [k for k in range(len(remaining)) if gains[k] >= best - self.quantum]
+            if len(winners) > 1:
+                tied += 1
+
+            def first_site(k):
+                return clusters[remaining[k]][0]
+            pick = max(winners, key=first_site) if self.reverse else min(winners, key=first_site)
+            _apply_items(state, other, items, clusters[remaining[pick]][1])
+            taken += 1
+            remaining.pop(pick)
+        return state, taken, tied, len(clusters)
+
+    def _transplant_gain(self, state, other, items, cluster):
+        """Exact change of J when ``cluster``'s cells take ``other``'s values (state restored)."""
+        w, g = self.workspace, self.graph
+        lo, members = cluster[0], cluster[1]
+        hi = max(items[i][3] for i in members)
+        root_mask = np.zeros(self.samples, dtype=np.bool_)
+        sample_mask = np.zeros(self.samples, dtype=np.bool_)
+        group_mask = np.zeros(len(g.group_child), dtype=np.bool_)
+        transition_mask = np.zeros(len(g.group_child), dtype=np.bool_)
+        end = hi
+        for i in members:
+            kind, row = items[i][0], items[i][1]
+            if kind == "F":
+                root_mask[row] = True
+            elif kind == "S":
+                group_mask[row] = True
+                transition_mask[row] = True
+                end = max(end, int(_window_end(row, hi, self.marker_offsets, self.marker_sites, self.sites)))
+                for parent in g.group_parent[row]:
+                    if parent >= 0 and self.roots[parent]:
+                        root_mask[parent] = True
+            else:
+                sample_mask[row] = True
+                own = g.node_group[row]
+                if own >= 0:
+                    group_mask[own] = True
+                    for parent in g.group_parent[own]:
+                        if parent >= 0 and self.roots[parent]:
+                            root_mask[parent] = True
+                for index in range(self.child_offsets[row], self.child_offsets[row + 1]):
+                    group_mask[self.child_groups[index]] = True
+        end = min(self.sites, end + 1)
+        args = (w.potentials, state.genotype, state.selector, state.frame, w.orientation, self.roots, w.frozen,
+                self.free_starts, self.free_trans, self.frozen_starts, self.frozen_trans, g.group_parent,
+                g.group_child, self.child_offsets, self.child_groups, self.child_slots, self.marker_offsets,
+                self.marker_sites, self.marker_theta, self.log_keep, self.log_error, self.log_match, self.log_miss)
+        before = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, *args)
+        saved = _save_items(state, items, members)
+        _apply_items(state, other, items, members)
+        after = _window_objective(lo, end, root_mask, sample_mask, group_mask, transition_mask, *args)
+        _restore_items(state, items, members, saved)
+        return after - before
 
 
 # ------------------------------------------------------------------------------------------------ release
@@ -1702,13 +2355,19 @@ def phase_emission(belief_row, orientation_value, phase_value, phase_error):
 
 @njit(cache=True, parallel=True)
 def _frames_kernel(conditionals, frame, scaffold_orientation, roots, phase_theta, anchors, parent_counts, phase_error,
-                   frozen, frozen_theta):
-    """Family MAP frames int8 [N, L] (inferred, displayed): roots release their frame chain; every other sample its MAP
-    frame path over painting-bin runs with its per-site Gibbs conditionals as phase_view emissions (review I4; 2.0's
-    phase_view rules, FRAME_TIE for unanchored chains). Displayed = inferred for two-parent samples, 0 else."""
+                   frozen, frozen_theta, reverse=False):
+    """Family MAP frames int8 [N, L] (inferred, displayed) and, for non-roots, the released ambiguity bool [N, L]:
+    roots release their frame chain; every other sample its MAP frame path over painting-bin runs with its per-site
+    Gibbs conditionals as phase_view emissions (review I4; 2.0's phase_view rules, FRAME_TIE for unanchored chains).
+    Displayed = inferred for two-parent samples, 0 else. Ambiguity (release 2.2): the sites where the two extreme tie
+    placements of the chain (decoded forward and mirrored, maths.chains reverse) differ; the released path is the
+    forward one (the mirrored one under the convention reversal). Also returns ``evidence`` float32 [N, L]: each
+    non-root site's phase_view log-likelihood ratio log P(frame 1) - log P(frame 0) (0: no frame evidence)."""
     samples, sites, _ = conditionals.shape
     inferred = np.empty((samples, sites), dtype=np.int8)
     displayed = np.empty_like(inferred)
+    undetermined = np.zeros((samples, sites), dtype=np.bool_)
+    evidence = np.zeros((samples, sites), dtype=np.float32)
     free_starts, free_trans = chains.chain_segments(phase_theta, sites)
     frozen_starts, frozen_trans = chains.chain_segments(frozen_theta, sites)
     for sample in prange(samples):
@@ -1723,16 +2382,60 @@ def _frames_kernel(conditionals, frame, scaffold_orientation, roots, phase_theta
             emissions[site, 0], emissions[site, 1] = phase_emission(conditionals[sample, site],
                                                                     scaffold_orientation[sample, site], .5,
                                                                     phase_error)
+            evidence[sample, site] = math.log(emissions[site, 1]) - math.log(emissions[site, 0])
         compact, anchor_run = chains.contracted_emissions(emissions, starts, anchors[sample])
-        path = chains.binary_viterbi(compact, trans, anchor_run, chains.CHAIN_TIE,
-                                     chains.FRAME_TIE if anchor_run < 0 else chains.CHAIN_TIE)
+        final_tie = chains.FRAME_TIE if anchor_run < 0 else chains.CHAIN_TIE
+        forward = chains.binary_viterbi(compact, trans, anchor_run, chains.CHAIN_TIE, final_tie, False)
+        mirrored = chains.binary_viterbi(compact, trans, anchor_run, chains.CHAIN_TIE, final_tie, True)
         for run in range(len(starts) - 1):
-            flip = path[run]
+            flip = mirrored[run] if reverse else forward[run]
             shown = flip if parent_counts[sample] >= 2 else 0
+            tied = forward[run] != mirrored[run]
             for site in range(starts[run], starts[run + 1]):
                 inferred[sample, site] = flip
                 displayed[sample, site] = shown
-    return inferred, displayed
+                undetermined[sample, site] = tied
+    return inferred, displayed, undetermined, evidence
+
+
+@njit(cache=True, parallel=True)
+def _root_undetermined(potentials, genotype, selector, frame, orientation, roots, frozen, free_starts, free_trans,
+                       frozen_starts, frozen_trans, anchors, group_child, child_offsets, child_groups, child_slots,
+                       log_keep, log_error, log_match, log_miss):
+    """bool [N, L]: for every root, the sites where either extreme tie placement of its frame chain at the converged
+    configuration (root block Viterbi forward and mirrored, _frame_path) differs from its released frame (release 2.2
+    released ambiguity; e.g. a frame switch inside a stretch without scaffold-heterozygous sites of the root)."""
+    samples, sites = genotype.shape
+    out = np.zeros((samples, sites), dtype=np.bool_)
+    for sample in prange(samples):
+        if not roots[sample]:
+            continue
+        starts = frozen_starts if frozen[sample] else free_starts
+        run_theta = frozen_trans if frozen[sample] else free_trans
+        runs = len(starts) - 1
+        run_value = np.zeros((runs, 2))
+        anchor_run = -1
+        for run in range(runs):
+            if starts[run] <= anchors[sample] < starts[run + 1]:
+                anchor_run = run
+            for site in range(starts[run], starts[run + 1]):
+                for f in range(2):
+                    run_value[run, f] += _root_term(sample, site, f, genotype, selector, potentials, orientation,
+                                                    group_child, child_offsets, child_groups, child_slots, log_keep,
+                                                    log_error, log_match, log_miss)
+        trans = np.empty(max(runs - 1, 0))
+        for run in range(runs - 1):
+            trans[run] = run_theta[run]
+        left = _frame_path(run_value, trans, anchor_run, -1, 0.0, -1, 0.0, frame[sample, starts[0]],
+                           frame[sample, starts[runs] - 1], False)
+        right = _frame_path(run_value, trans, anchor_run, -1, 0.0, -1, 0.0, frame[sample, starts[0]],
+                            frame[sample, starts[runs] - 1], True)
+        for run in range(runs):
+            f = frame[sample, starts[run]]
+            if left[run] != f or right[run] != f:
+                for site in range(starts[run], starts[run + 1]):
+                    out[sample, site] = True
+    return out
 
 
 @njit(cache=True)
@@ -1816,9 +2519,10 @@ def _repair_emissions(potentials, genotype, selector, frame, orientation, roots,
 
 @njit(cache=True, parallel=True)
 def _conflicts(genotype, selector, frame, potentials, orientation, roots, group_child, child_offsets, child_groups,
-               child_slots, log_keep, log_error, log_match, log_miss):
+               child_slots, log_keep, log_error, log_match, log_miss, reverse=False):
     """Mendelian-conflict diagnostic (review M4): bool [N, L] (parent, site) where the parent's best genotype (a
-    root's mode of its summed terms, a non-root's MAP genotype) leaves at least one child's allele mistransmitted."""
+    root's mode of its summed terms, the lowest on an exact tie, the highest under the convention reversal; a
+    non-root's MAP genotype) leaves at least one child's allele mistransmitted."""
     samples, sites = genotype.shape
     conflict = np.zeros((samples, sites), dtype=np.bool_)
     for parent in prange(samples):
@@ -1830,8 +2534,9 @@ def _conflicts(genotype, selector, frame, potentials, orientation, roots, group_
                 _root_cavity(parent, site, frame[parent, site], -1, genotype, selector, potentials, orientation,
                              group_child, child_offsets, child_groups, child_slots, log_keep, log_error, log_match,
                              log_miss, cavity)
-                best = 0
-                for g in range(1, 4):
+                best = 3 if reverse else 0
+                for index in range(1, 4):
+                    g = 3 - index if reverse else index
                     if cavity[g] > cavity[best]:
                         best = g
                 g_parent = best
@@ -1848,15 +2553,24 @@ def _conflicts(genotype, selector, frame, potentials, orientation, roots, group_
 
 
 def release_frames(family_map, state):
-    """(inferred, displayed) family MAP frames int8 [N, L] of the converged configuration (_frames_kernel)."""
+    """(inferred, displayed) family MAP frames int8 [N, L] of the converged configuration (_frames_kernel), the
+    released ambiguity bool [N, L] of the inferred frames (roots: _root_undetermined; others: _frames_kernel) and the
+    per-site frame evidence float32 [N, L] of non-roots' phase_view emissions (log-likelihood ratio of frame 1)."""
     w, g = family_map.workspace, family_map.graph
     conditionals = _conditionals(w.potentials, state.genotype, state.selector, state.frame, w.orientation,
                                  family_map.roots, g.node_group, g.group_parent, g.group_child,
                                  family_map.child_offsets, family_map.child_groups, family_map.child_slots,
                                  family_map.log_keep, family_map.log_error, family_map.log_match, family_map.log_miss)
-    return _frames_kernel(conditionals, state.frame, w.scaffold_orientation, family_map.roots, w.phase_theta,
-                          w.anchors, g.parent_counts, family_map.config.scaffold_phase_error, w.frozen,
-                          w.frozen_theta)
+    inferred, displayed, undetermined, evidence = _frames_kernel(
+        conditionals, state.frame, w.scaffold_orientation, family_map.roots, w.phase_theta, w.anchors,
+        g.parent_counts, family_map.config.scaffold_phase_error, w.frozen, w.frozen_theta, family_map.reverse)
+    del conditionals
+    undetermined |= _root_undetermined(
+        w.potentials, state.genotype, state.selector, state.frame, w.orientation, family_map.roots, w.frozen,
+        family_map.free_starts, family_map.free_trans, family_map.frozen_starts, family_map.frozen_trans, w.anchors,
+        g.group_child, family_map.child_offsets, family_map.child_groups, family_map.child_slots, family_map.log_keep,
+        family_map.log_error, family_map.log_match, family_map.log_miss)
+    return inferred, displayed, undetermined, evidence
 
 
 def selector_emissions(family_map, state):
@@ -1875,5 +2589,5 @@ def conflict_sites(family_map, state):
     mask = _conflicts(state.genotype, state.selector, state.frame, w.potentials, w.orientation, family_map.roots,
                       family_map.graph.group_child, family_map.child_offsets, family_map.child_groups,
                       family_map.child_slots, family_map.log_keep, family_map.log_error, family_map.log_match,
-                      family_map.log_miss)
+                      family_map.log_miss, family_map.reverse)
     return np.argwhere(mask).astype(np.int64)

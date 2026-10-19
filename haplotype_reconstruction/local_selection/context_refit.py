@@ -17,6 +17,12 @@ component's published (completion-filled) call when it has one.
 Release 2.1 (noise stability): the component's distinct founder rows enter the refit, and each
 block's proposal rows leave it, in canonical content (lexicographic) order, so neither the
 refit's arithmetic nor the recorded proposals depend on the component's founder order.
+
+Release 2.2 (no conventions): duplicate founder rows share the consensus of their released
+templates (-1 where called templates differ); duplicate local rows of a block carry their summed support and
+support-weighted ALT posterior; a bin's MAP background-copy count is the smallest count among the
+state pairs within BACKGROUND_COUNT_BAND of the largest weight. 2.1 took the first occurrence and
+the first maximum.
 """
 from __future__ import annotations
 
@@ -31,6 +37,10 @@ from ..execution import BudgetedPool, claim_threads
 from ..maths.ties import census, census_enabled
 from .fit import unique_rows
 
+# MAP background-copy count band of the carrier weights (release 2.2): the probability tie quantum
+# of maths.ties (2^-20, as the release's unknown_count_band); a larger count must win by more than
+# this relative weight.
+BACKGROUND_COUNT_BAND = 2.0 ** -20
 # Census window of the carrier-probability band at 1/2 (diagnostics only).
 HALF_CENSUS_WINDOW = 1e-3
 
@@ -144,13 +154,15 @@ def _redraw_backward(x, pi, r):
 
 
 @njit(cache=True, parallel=True)
-def _carrier_weights(weights, centers, rate, background_mass):
+def _carrier_weights(weights, centers, rate, background_mass, count_band):
     """Per sample and bin, the normalised cavity weights (bin emission excluded) of the ordered
     state pairs (forward-backward over bins, each step normalised), written over ``weights``,
     which holds the summed log emissions on entry (a sample's are read before its cavity weights
     replace them, so one (N, B, S, S) array serves both). Returns per sample and bin the MAP
-    pair's number of background copies (0, 1, 2; the first maximum of the posterior weights in
-    row-major pair order)."""
+    number of background copies (0, 1, 2): release 2.2, the smallest count among the state pairs
+    whose posterior weight is within ``count_band`` x the largest of it (the conservative side,
+    as the release's unknown-copy count; 2.1 took the first maximum in row-major pair order, a
+    convention)."""
     n, bins, s, _ = weights.shape
     pi = np.full(s, (1 - background_mass) / (s - 1))
     pi[-1] = background_mass
@@ -173,12 +185,20 @@ def _carrier_weights(weights, centers, rate, background_mass):
             weights[sample, b] = w
             w = w * emit[b]
             w /= w.sum()
-            best, best_i, best_j = w[0, 0], 0, 0
+            best = w[0, 0]
             for i in range(s):
                 for j in range(s):
                     if w[i, j] > best:
-                        best, best_i, best_j = w[i, j], i, j
-            slots[sample, b] = (1 if best_i == s - 1 else 0) + (1 if best_j == s - 1 else 0)
+                        best = w[i, j]
+            floor = best - count_band * best
+            count = 2
+            for i in range(s):
+                for j in range(s):
+                    if w[i, j] >= floor:
+                        value = (1 if i == s - 1 else 0) + (1 if j == s - 1 else 0)
+                        if value < count:
+                            count = value
+            slots[sample, b] = count
             if b:
                 beta = _redraw_backward(beta * emit[b], pi, -np.expm1(-rate * (centers[b] - centers[b - 1])))
                 beta /= beta.sum()
@@ -225,6 +245,36 @@ def _refit_sites(result, probabilities, supporters, gl, observed, cavity, backgr
         site_withheld[site] = withheld
 
 
+def _consensus_rows(released, inverse, count) -> np.ndarray:
+    """int8[count, L]: per distinct row (``inverse`` maps each original row to it) the call on which
+    all its original rows' released calls agree (uncalled rows abstain), -1 where called rows differ
+    or none is called."""
+    released = np.asarray(released, dtype=np.int8)
+    alt = np.zeros((count, released.shape[1]), dtype=np.int64)
+    ref = np.zeros((count, released.shape[1]), dtype=np.int64)
+    np.add.at(alt, inverse, (released == 1).astype(np.int64))
+    np.add.at(ref, inverse, (released == 0).astype(np.int64))
+    out = np.full((count, released.shape[1]), -1, dtype=np.int8)
+    out[(alt > 0) & (ref == 0)] = 1
+    out[(ref > 0) & (alt == 0)] = 0
+    return np.ascontiguousarray(out)
+
+
+def _combine_duplicates(posterior, support, inverse, count):
+    """(posterior, support) per distinct local row: summed support, support-weighted mean posterior
+    (the plain mean where the support is zero)."""
+    total = np.zeros((count, posterior.shape[1]))
+    weighted = np.zeros((count, posterior.shape[1]))
+    plain = np.zeros((count, posterior.shape[1]))
+    members = np.bincount(inverse, minlength=count).astype(np.float64)
+    for row, target in enumerate(inverse):
+        total[target] += support[row]
+        weighted[target] += support[row] * posterior[row]
+        plain[target] += posterior[row]
+    mean = plain / members[:, None]
+    return np.where(total > 0, weighted / np.where(total > 0, total, 1.0), mean), total
+
+
 def refit_task_bytes(samples: int, sites: int, blocks: int, founders: int) -> int:
     """Planned peak additional bytes of one component refit: its sites' GL and mask slices,
     the (N, B, S, S) emission / cavity array, each thread's (B, S, S) forward and emission
@@ -248,7 +298,7 @@ def refit_component(h, gl, observed, starts, stops, centers, rate, config, unkno
     cavity, background = _emission_grid(h, gl, observed, starts, stops,
                                         float(config.emission_mix))
     claim_threads()
-    slots = _carrier_weights(cavity, centers, float(rate), float(unknown_mass))
+    slots = _carrier_weights(cavity, centers, float(rate), float(unknown_mass), BACKGROUND_COUNT_BAND)
     if census_key is not None and census_enabled():
         k = len(h)
         carried = (cavity[:, :, :k, :].sum(axis=3) + cavity[:, :, :, :k].sum(axis=2)
@@ -359,11 +409,12 @@ def refine(panels, components, evidence, genetic_map, config, generations, budge
             skipped += 1
             continue
         inference = np.asarray(component.inference, np.int8)
-        # Distinct founder rows in content order (unique_rows sorts them; the index is each
-        # row's first occurrence, whose released template row it keeps).
-        _, representatives = unique_rows(inference, return_index=True)
-        h = np.ascontiguousarray(inference[representatives])
-        template = np.ascontiguousarray(np.asarray(component.released)[representatives])
+        # Distinct founder rows in content order; the released template of duplicate inference
+        # rows is their consensus (release 2.2: an allele where every duplicate's released call
+        # agrees, -1 elsewhere; 2.1 kept the first occurrence's, a convention).
+        h, inverse = unique_rows(inference, return_inverse=True)
+        h = np.ascontiguousarray(h)
+        template = _consensus_rows(np.asarray(component.released), inverse, len(h))
         lengths = [panels[b].sites for b in members]
         starts = np.r_[0, np.cumsum(lengths)[:-1]].astype(np.int64)
         stops = np.r_[starts[1:], len(positions)].astype(np.int64)
@@ -405,16 +456,20 @@ def refine(panels, components, evidence, genetic_map, config, generations, budge
                 max_founders = max(max_founders, len(result))
                 for b, lo, hi, block_slots in zip(members, starts, stops, slots):
                     rows = result[:, lo:hi]
-                    # Distinct local rows in content order; each keeps its first founder's
-                    # posterior and support (founders are in content order too).
-                    _, unique = unique_rows(rows, return_index=True)
+                    # Distinct local rows in content order. Founders whose local rows are equal
+                    # carry the same local haplotype: its support is their summed support and its
+                    # ALT posterior their support-weighted mean (release 2.2: order-free; 2.1 kept
+                    # the first founder's, a convention).
+                    local, inverse = unique_rows(rows, return_inverse=True)
+                    posterior_alt, local_support = _combine_duplicates(
+                        q[:, lo:hi], support[:, lo:hi], inverse, len(local))
                     panel = panels[b]
                     depth = np.any(observed[:, panel.site_start:panel.site_start + panel.sites],
                                    axis=1)
                     proposals[b] = ContextProposal(
                         block=panel.block, covered=True,
-                        calls=np.ascontiguousarray(rows[unique]),
-                        posterior_alt=q[unique, lo:hi].copy(), support=support[unique, lo:hi].copy(),
+                        calls=np.ascontiguousarray(local),
+                        posterior_alt=posterior_alt, support=local_support,
                         unknown_slots=np.where(depth, block_slots, 2).astype(np.int8))
     tie_events = {"ls.refit.half.band": dict(decisions=bands["sites"], inside_tie=bands["half"], wide=0, boundary=0),
                   "ls.refit.support.band": dict(decisions=bands["sites"], inside_tie=bands["support"], wide=0,

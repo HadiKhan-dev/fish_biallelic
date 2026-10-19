@@ -15,6 +15,7 @@ import numpy as np
 from numba import njit, prange
 
 from ..model.local_panels import unknown_copy_mass
+from .panel import known_content_key, unknown_alleles
 from .search import BlockSearch, SearchSummary
 
 
@@ -35,6 +36,14 @@ class DiscoveredBlock:
     unknown_mass: float, the selected assignment's unknown-copy fraction over samples with depth.
     nll: float, the selected panel's binned switching-Viterbi negative log likelihood (nats).
     search: small typed summary of the search (scores per represented K, limits, counts).
+    latent_unknown: bool[K, L_kept] (release 2.2), True where no sample assigned to the founder (either copy)
+        observes the site: the founder's allele there is unknown; ``latent`` keeps a binary value only as the fit's
+        initial value (no evidence depends on it) and ``calls`` withholds it. None for records before 2.2.
+    tied_panels: tuple of int8[K_i, L_kept] (release 2.2), the tied alternatives of the released panel (the other
+        panels of its K's first NLL tie class and other-K representatives in its score class; rows canonical like
+        ``latent``), without those that equal the released panel, or another alternative, at every allele some
+        assigned carrier observes (the same science); the order carries no meaning. tied_panel_nll: their NLLs;
+        tied_unknown: tuple of bool[K_i, L_kept], their unknown alleles. Empty tuples without alternatives.
     """
 
     block: int
@@ -48,6 +57,10 @@ class DiscoveredBlock:
     unknown_mass: float
     nll: float
     search: SearchSummary
+    latent_unknown: np.ndarray | None = None
+    tied_panels: tuple = ()
+    tied_panel_nll: tuple = ()
+    tied_unknown: tuple = ()
 
     @property
     def founders(self) -> int:
@@ -176,6 +189,18 @@ def materialise(block: int, site_start: int, positions, kept, likelihoods, obser
     support[:, kept] = supporters_kept
     calls = np.full((k, length), -1, dtype=np.int8)
     calls[:, kept] = calls_kept
+    latent_unknown = unknown_alleles(solution.assignments, observed_kept, k)
+    seen = {known_content_key(solution.haplotypes, latent_unknown)}
+    tied, tied_nll, tied_unknown = [], [], []
+    for panel in search.alternatives:
+        unknown = unknown_alleles(panel.assignments, observed_kept, panel.k)
+        key = known_content_key(panel.haplotypes, unknown)
+        if key in seen:
+            continue
+        seen.add(key)
+        tied.append(np.ascontiguousarray(panel.haplotypes, dtype=np.int8))
+        tied_nll.append(float(panel.nll))
+        tied_unknown.append(np.ascontiguousarray(unknown, dtype=np.bool_))
     return DiscoveredBlock(
         block=int(block), site_start=int(site_start),
         positions=np.ascontiguousarray(positions, dtype=np.int64),
@@ -183,4 +208,6 @@ def materialise(block: int, site_start: int, positions, kept, likelihoods, obser
         latent=np.ascontiguousarray(solution.haplotypes, dtype=np.int8), calls=calls,
         alt_probability=alt_probability, support=support,
         unknown_mass=unknown_copy_mass(solution.unknown_slots, observed_kept.any(axis=1)),
-        nll=float(solution.nll), search=summary)
+        nll=float(solution.nll), search=summary,
+        latent_unknown=np.ascontiguousarray(latent_unknown, dtype=np.bool_),
+        tied_panels=tuple(tied), tied_panel_nll=tuple(tied_nll), tied_unknown=tuple(tied_unknown))

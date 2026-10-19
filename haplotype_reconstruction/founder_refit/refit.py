@@ -22,6 +22,12 @@ together with one of its rows at the site, whose score it would change); the oth
 the next round. A row changes at most once per phase and sweep; a sweep that changes nothing ends the
 site. 2.0 applied the first move reaching its minimum gain in row-index order (Gauss-Seidel), so its
 result depended on the row order whenever two candidate moves interacted.
+
+Ambiguous cells (release 2.2, tickets/IC/DESIGN_22.md B3): two moves of one tie class that interact
+and exclude each other (after either is applied the other no longer reaches its minimum gain) are
+alternatives the data do not separate -- typically two rows painted only together, either of which
+could carry the allele the carriers show. Their rows' alleles at the site are released unknown (-1,
+'.' in the exports) instead of being decided by row order, and the round is re-scored without them.
 """
 from __future__ import annotations
 
@@ -31,6 +37,7 @@ import math
 import numpy as np
 from numba import njit, prange
 
+from ..maths import ties
 from ..model.components import ComponentPanel
 from ..model.evidence import ContigEvidence
 from ..painting.release import ChromosomePainting
@@ -47,15 +54,18 @@ WIDE_QUANTA = 4.0
 
 
 @njit(cache=True)
-def _decision_order(values, n, quantum):
+def _decision_order(values, n, quantum, reverse, classes):
     """Decision order of n candidate moves with gains values[:n] (candidates listed in content order):
     exact gain descending, then tie classes chaining gaps <= quantum, content (list) order inside a
-    class; a class wider than WIDE_QUANTA x quantum keeps value order (list order among equal gains)."""
+    class; a class wider than WIDE_QUANTA x quantum keeps value order (list order among equal gains).
+    Under the convention reversal (reverse) the list order is reversed. classes[i] receives the class of
+    candidate i (equal values = same tie class)."""
     order = np.arange(n)
     for i in range(1, n):
         j = i
         while j > 0 and (values[order[j]] > values[order[j - 1]] or (
-                values[order[j]] == values[order[j - 1]] and order[j] < order[j - 1])):
+                values[order[j]] == values[order[j - 1]] and ((order[j] > order[j - 1]) if reverse
+                                                              else (order[j] < order[j - 1])))):
             order[j - 1], order[j] = order[j], order[j - 1]
             j -= 1
     start = 0
@@ -63,10 +73,14 @@ def _decision_order(values, n, quantum):
         end = start + 1
         while end < n and values[order[end - 1]] - values[order[end]] <= quantum:
             end += 1
+        wide = values[order[start]] - values[order[end - 1]] > WIDE_QUANTA * quantum
+        for t in range(start, end):
+            # a wide class keeps value order: its members are not tied alternatives (own class ids)
+            classes[order[t]] = n + t if wide else start
         if end - start > 1 and values[order[start]] - values[order[end - 1]] <= WIDE_QUANTA * quantum:
             for i in range(start + 1, end):
                 j = i
-                while j > start and order[j] < order[j - 1]:
+                while j > start and ((order[j] > order[j - 1]) if reverse else (order[j] < order[j - 1])):
                     order[j - 1], order[j] = order[j], order[j - 1]
                     j -= 1
         start = end
@@ -86,6 +100,79 @@ def _flip_gain(table, alleles, row):
         ll0 += table[lo, hi, other]
         ll1 += table[lo, hi, other + 1]
     return ll1 - ll0 if alleles[row] == 0 else ll0 - ll1
+
+
+@njit(cache=True)
+def _painted_together(together, a, b):
+    """Rows a and b share a painted sample at the site (or are the same row)."""
+    return a == b or together[min(a, b), max(a, b)]
+
+
+@njit(cache=True)
+def _flip_conflicts(table, refit, site, together, cand_a, cand_class, n, minimum_gain, marked):
+    """Marks (in ``marked``) the rows of flip candidates of one tie class that interact and exclude each
+    other: after either flip the other no longer reaches the minimum gain, so the row order would decide.
+    Returns whether any row was marked."""
+    marked[:] = False
+    found = False
+    column = refit[:, site]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if cand_class[i] != cand_class[j]:
+                continue
+            ri, rj = cand_a[i], cand_a[j]
+            if not _painted_together(together, ri, rj):
+                continue
+            column[ri] = 1 - column[ri]
+            gj = _flip_gain(table, column, rj)
+            column[ri] = 1 - column[ri]
+            column[rj] = 1 - column[rj]
+            gi = _flip_gain(table, column, ri)
+            column[rj] = 1 - column[rj]
+            if not (gj > 0.0 and gj >= minimum_gain and gi > 0.0 and gi >= minimum_gain):
+                marked[ri] = True
+                marked[rj] = True
+                found = True
+    return found
+
+
+@njit(cache=True)
+def _swap_conflicts(table, refit, site, together, cand_a, cand_b, cand_class, n, minimum_gain, marked):
+    """As _flip_conflicts for swap candidates: two swaps of one tie class that share a row or a row painted
+    together, each excluding the other."""
+    marked[:] = False
+    found = False
+    column = refit[:, site]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if cand_class[i] != cand_class[j]:
+                continue
+            a1, b1, a2, b2 = cand_a[i], cand_b[i], cand_a[j], cand_b[j]
+            if not (_painted_together(together, a1, a2) or _painted_together(together, a1, b2)
+                    or _painted_together(together, b1, a2) or _painted_together(together, b1, b2)):
+                continue
+            # swap i applied: does swap j still pass (with different alleles)?
+            x1, y1 = column[a1], column[b1]
+            column[a1], column[b1] = y1, x1
+            pass_j = column[a2] >= 0 and column[b2] >= 0 and column[a2] != column[b2]
+            if pass_j:
+                gj = _swap_gain(table, column, a2, b2)
+                pass_j = gj > 0.0 and gj >= minimum_gain
+            column[a1], column[b1] = x1, y1
+            x2, y2 = column[a2], column[b2]
+            column[a2], column[b2] = y2, x2
+            pass_i = column[a1] >= 0 and column[b1] >= 0 and column[a1] != column[b1]
+            if pass_i:
+                gi = _swap_gain(table, column, a1, b1)
+                pass_i = gi > 0.0 and gi >= minimum_gain
+            column[a2], column[b2] = x2, y2
+            if not (pass_i and pass_j):
+                marked[a1] = True
+                marked[b1] = True
+                marked[a2] = True
+                marked[b2] = True
+                found = True
+    return found
 
 
 @njit(cache=True)
@@ -121,7 +208,7 @@ def _swap_gain(table, alleles, a, b):
 
 @njit(cache=True, parallel=True)
 def _refit_kernel(calls, first, second, likelihoods, observed, evidence_sites,
-                  robustness_epsilon, minimum_gain, sweeps):
+                  robustness_epsilon, minimum_gain, sweeps, reverse):
     """Coordinate ascent per site on a founder-pair log-likelihood table.
 
     ``table[a, b, g]`` (a <= b) sums log((1 - eps) P(reads | dosage g) + eps / 3)
@@ -151,6 +238,7 @@ def _refit_kernel(calls, first, second, likelihoods, observed, evidence_sites,
         cand_a = np.empty(founders * founders, dtype=np.int64)
         cand_b = np.empty(founders * founders, dtype=np.int64)
         cand_gain = np.empty(founders * founders, dtype=np.float64)
+        cand_class = np.empty(founders * founders, dtype=np.int64)
         for site in range(tile * SITE_TILE, min(sites, (tile + 1) * SITE_TILE)):
             table[:] = 0.0
             together[:] = False
@@ -187,8 +275,17 @@ def _refit_kernel(calls, first, second, likelihoods, observed, evidence_sites,
                             n += 1
                     if n == 0:
                         break
+                    order = _decision_order(cand_gain, n, REFIT_TIE_QUANTUM, reverse, cand_class)
+                    if _flip_conflicts(table, refit, site, together, cand_a, cand_class, n, minimum_gain,
+                                       touched):
+                        for row in range(founders):
+                            if touched[row]:
+                                refit[row, site] = -1
+                                gain[row, site] = 0.0
+                                moved = True
+                        continue
                     touched[:] = False
-                    for t in _decision_order(cand_gain, n, REFIT_TIE_QUANTUM):
+                    for t in order:
                         row = cand_a[t]
                         if touched[row]:
                             continue
@@ -220,8 +317,17 @@ def _refit_kernel(calls, first, second, likelihoods, observed, evidence_sites,
                                 n += 1
                     if n == 0:
                         break
+                    order = _decision_order(cand_gain, n, REFIT_TIE_QUANTUM, reverse, cand_class)
+                    if _swap_conflicts(table, refit, site, together, cand_a, cand_b, cand_class, n,
+                                       swap_minimum_gain, touched):
+                        for row in range(founders):
+                            if touched[row]:
+                                refit[row, site] = -1
+                                gain[row, site] = 0.0
+                                moved = True
+                        continue
                     touched[:] = False
-                    for t in _decision_order(cand_gain, n, REFIT_TIE_QUANTUM):
+                    for t in order:
                         a, b = cand_a[t], cand_b[t]
                         if touched[a] or touched[b]:
                             continue
@@ -258,7 +364,8 @@ def refit_alleles(calls: np.ndarray, first: np.ndarray, second: np.ndarray,
         np.ascontiguousarray(second, dtype=np.int16), likelihoods,
         np.ascontiguousarray(observed, dtype=np.bool_),
         np.ascontiguousarray(evidence_sites, dtype=np.int64),
-        float(robustness_epsilon), float(minimum_gain_nats), int(coordinate_sweeps))
+        float(robustness_epsilon), float(minimum_gain_nats), int(coordinate_sweeps),
+        bool(ties.reverse_conventions()))
 
 
 @dataclass(frozen=True)
@@ -339,6 +446,10 @@ def summary(refit: FounderRefit) -> dict:
         "called_alleles": sum(int(np.sum(component.panel.released >= 0))
                               for component in refit.components),
         "changed_alleles": int(len(gains)),
+        # release 2.2: cells released unknown because two tied moves excluded each other (module docstring)
+        "ambiguous_alleles": sum(
+            int(np.sum(component.panel.released[component.changed_rows, component.changed_sites] < 0))
+            for component in refit.components),
         "changed_inference_alleles": sum(
             int(np.sum(component.panel.inference[component.changed_rows,
                                                  component.changed_sites] >= 0))

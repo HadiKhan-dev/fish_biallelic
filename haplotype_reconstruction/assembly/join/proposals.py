@@ -23,6 +23,7 @@ import numpy as np
 from numba import njit, prange
 from numba.typed import List
 
+from ...maths import ties
 from .objective import max_range
 
 
@@ -157,15 +158,20 @@ def candidate_novelty(local, candidates, penalty, panel_scores, eligible, *, wor
 
 
 @njit(cache=True)
-def _top_replacement_indices(gains, eligible, quota):
-    """Same finite-gain order as (-gain, ('replace', founder, candidate))."""
-    capacity = min(quota, gains.shape[0] * len(eligible))
+def _top_replacement_indices(gains, eligible, quota, reverse):
+    """Same finite-gain order as (-gain, ('replace', founder, candidate)); the index order of equal gains is
+    reversed under the convention reversal."""
+    capacity = min(quota + 1, gains.shape[0] * len(eligible))
     scores = np.empty(capacity)
     founders = np.empty(capacity, np.int64)
     candidates = np.empty(capacity, np.int64)
     count = 0
-    for founder in range(gains.shape[0]):
-        for candidate in eligible:
+    n_founders = gains.shape[0]
+    n_eligible = len(eligible)
+    for f_index in range(n_founders):
+        founder = n_founders - 1 - f_index if reverse else f_index
+        for c_index in range(n_eligible):
+            candidate = eligible[n_eligible - 1 - c_index] if reverse else eligible[c_index]
             gain = gains[founder, candidate]
             at = 0
             # Equal gains retain founder/candidate order from the traversal.
@@ -181,27 +187,50 @@ def _top_replacement_indices(gains, eligible, quota):
                 founders[at] = founder
                 candidates[at] = candidate
                 count = min(count + 1, capacity)
+    count = _cut_exact_ties(scores, count, quota)
     return scores[:count], founders[:count], candidates[:count]
 
 
 def replacement_proposals(gains, eligible, quota):
     """The top ``quota`` replace(f, c) edits by gains[f, c] over the eligible pool paths."""
-    scores, founders, candidates = _top_replacement_indices(gains, eligible, quota)
+    scores, founders, candidates = _top_replacement_indices(gains, eligible, quota,
+                                                            bool(ties.reverse_conventions()))
     return [(float(score), ("replace", int(founder), int(candidate)))
             for score, founder, candidate in zip(scores, founders, candidates)]
 
 
 @njit(cache=True)
-def _insert_edit(scores, edits, count, gain, first, second, third):
-    """Bounded insertion in (-gain, integer-description) order."""
+def _cut_exact_ties(scores, count, quota):
+    """Release 2.2: the number of top items kept from a list sorted by score (descending) holding up to quota + 1
+    items, without letting the index order choose among items whose score equals the quota-th score: when the
+    (quota + 1)-th item ties the quota-th exactly, that whole tie group is dropped (kept whole only when it is the
+    first group, which then fills the quota in traversal order)."""
+    if quota <= 0:
+        return 0
+    if count <= quota:
+        return count
+    boundary = scores[quota - 1]
+    if scores[quota] != boundary:
+        return quota
+    start = quota - 1
+    while start > 0 and scores[start - 1] == boundary:
+        start -= 1
+    return start if start > 0 else quota
+
+
+@njit(cache=True)
+def _insert_edit(scores, edits, count, gain, first, second, third, reverse):
+    """Bounded insertion in (-gain, integer-description) order (the description order reversed under the
+    convention reversal)."""
     at = 0
     while at < count:
         if gain > scores[at]:
             break
         if gain == scores[at]:
             a, b, c = edits[at]
-            if (first < a or (first == a and
-                    (second < b or (second == b and third < c)))):
+            before = (first < a or (first == a and (second < b or (second == b and third < c))))
+            after = (first > a or (first == a and (second > b or (second == b and third > c))))
+            if (after if reverse else before):
                 break
         at += 1
     if at < len(scores):
@@ -217,9 +246,9 @@ def _insert_edit(scores, edits, count, gain, first, second, third):
 
 
 @njit(cache=True)
-def _top_local_edits(fields, local, quota):
-    scores = np.empty(quota)
-    edits = np.empty((quota, 3), np.int64)
+def _top_local_edits(fields, local, quota, reverse):
+    scores = np.empty(quota + 1)
+    edits = np.empty((quota + 1, 3), np.int64)
     count = 0
     screened = 0
     for founder in range(len(local)):
@@ -228,7 +257,8 @@ def _top_local_edits(fields, local, quota):
                 if hap != local[founder, block]:
                     screened += 1
                     count = _insert_edit(scores, edits, count,
-                                         fields[block][founder, hap], founder, block, hap)
+                                         fields[block][founder, hap], founder, block, hap, reverse)
+    count = _cut_exact_ties(scores, count, quota)
     return scores[:count], edits[:count], screened
 
 
@@ -237,21 +267,22 @@ def local_proposals(fields, local, quota):
     arrays = List()
     for values in fields:
         arrays.append(values)
-    scores, edits, screened = _top_local_edits(arrays, local, quota)
+    scores, edits, screened = _top_local_edits(arrays, local, quota, bool(ties.reverse_conventions()))
     return [(float(score), ("local", int(a), int(b), int(c)))
             for score, (a, b, c) in zip(scores, edits)], screened
 
 
 @njit(cache=True)
-def _top_boundary_edits(gains, boundary, quota, upper_triangle):
-    scores = np.empty(quota)
-    edits = np.empty((quota, 3), np.int64)
+def _top_boundary_edits(gains, boundary, quota, upper_triangle, reverse):
+    scores = np.empty(quota + 1)
+    edits = np.empty((quota + 1, 3), np.int64)
     count = 0
     for first in range(len(gains)):
         for second in range(first + 1 if upper_triangle else 0, len(gains)):
             if first != second:
                 count = _insert_edit(scores, edits, count,
-                                     gains[first, second], first, second, boundary)
+                                     gains[first, second], first, second, boundary, reverse)
+    count = _cut_exact_ties(scores, count, quota)
     return scores[:count], edits[:count]
 
 
@@ -259,7 +290,8 @@ def boundary_proposals(gains, boundary, quota, kind):
     """The top ``quota`` (kind, f, g, boundary) edits by gains[f, g] (splices: f < g only)."""
     # Keeping q from every boundary is sufficient for the global top-q.
     # Its final ranking still precedes cross-category panel de-duplication.
-    scores, edits = _top_boundary_edits(gains, boundary, quota, kind == "splice")
+    scores, edits = _top_boundary_edits(gains, boundary, quota, kind == "splice",
+                                        bool(ties.reverse_conventions()))
     return [(float(score), (kind, int(a), int(b), int(c)))
             for score, (a, b, c) in zip(scores, edits)]
 
@@ -420,10 +452,38 @@ def static_replacement_gains(local, candidates, *, totals, workspace):
                                 excluded, chunks)
 
 
-def cycle_permutation(preference):
-    """Take cycles from a best-target graph; no cubic assignment solver."""
+def cycle_permutations(preference) -> list:
+    """The distinct cycle permutations of the best-target graph under both tie conventions (equal preferences
+    resolved to the lowest index, then to the highest): their union does not depend on the index order
+    (release 2.2). Proposal generation only; each is scored exactly."""
+    found = []
+    for highest in (False, True):
+        permutation = cycle_permutation(preference, highest=highest)
+        if not any(np.array_equal(permutation, other) for other in found):
+            found.append(permutation)
+    return found
+
+
+def greedy_permutations(weights) -> list:
+    """greedy_permutation under both tie conventions (equal weights in flat index order, then reversed),
+    distinct results (release 2.2: an order-invariant union; proposal generation only)."""
+    found = []
+    for highest in (False, True):
+        permutation = greedy_permutation(weights, highest=highest)
+        if not any(np.array_equal(permutation, other) for other in found):
+            found.append(permutation)
+    return found
+
+
+def cycle_permutation(preference, highest=False):
+    """Take cycles from a best-target graph; no cubic assignment solver. Equal preferences go to the lowest
+    target index (the highest with ``highest``)."""
     size = len(preference)
-    target = np.argmax(preference, axis=1)
+    preference = np.asarray(preference)
+    if highest:
+        target = (preference.shape[1] - 1 - np.argmax(preference[:, ::-1], axis=1)).astype(np.int64)
+    else:
+        target = np.argmax(preference, axis=1).astype(np.int64)
     permutation = np.arange(size)
     finished = set()
     for first in range(size):
@@ -445,12 +505,16 @@ def cycle_permutation(preference):
     return permutation
 
 
-def greedy_permutation(weights):
-    """Quadratic-log greedy assignment plus a fixed quadratic swap search."""
+def greedy_permutation(weights, highest=False):
+    """Quadratic-log greedy assignment plus a fixed quadratic swap search (equal weights in flat index order,
+    reversed with ``highest``)."""
     k = len(weights)
     permutation = np.full(k, -1, dtype=np.int64)
     used = np.zeros(k, bool)
-    for flat in np.argsort(-weights.ravel(), kind='stable'):
+    flat_weights = np.asarray(weights).ravel()
+    ranked = (np.argsort(-flat_weights, kind='stable') if not highest
+              else len(flat_weights) - 1 - np.argsort(-flat_weights[::-1], kind='stable'))
+    for flat in ranked:
         first, second = divmod(int(flat), k)
         if permutation[first] < 0 and not used[second]:
             permutation[first] = second

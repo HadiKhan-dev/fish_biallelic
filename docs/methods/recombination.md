@@ -122,6 +122,16 @@ call's decoded segment, when that widened span is at least `RecombinationConfig.
 bp (always, at the default). Calls, counts and the map use the calls themselves, not the reported widths. Bin edges
 come from the family-phase product.
 
+Released frame ambiguity (release 2.2). Family phase releases, per sample and site, whether its decoder frame is
+undetermined (`frame_undetermined` bit 0: the two extreme tie placements of the sample's phase chain disagree there,
+e.g. a frame switch the data cannot place inside a stretch without informative sites). Such a stretch holds no
+informative observation of any meiosis through that frame (a parent's undetermined stretch has no heterozygous
+decoder site; a child's has no site whose transmitted allele depends on its frame), so moving the switch inside it
+changes no observation: called crossovers, their flanking supported sites and their reported intervals are invariant
+to where the family phase places such a switch, which is what makes them interval-censored by construction. The
+convention-reversal test (`HAPLOTYPES_TIE_REVERSE=1`, which places such switches at the rightmost tied position)
+checks this.
+
 ## Reference-order breakpoints
 
 The map assumes that reference order is meiotic order. Where a reference segment is misplaced or inverted, a

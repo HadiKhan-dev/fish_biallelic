@@ -9,6 +9,8 @@ and sample-switch tables of one painted chromosome.
   founder_counts.tsv           per component: how firmly its founder count is determined (final count step,
                                count cycles and band-straddling decisions of the final and feedback join searches)
   sample_switches.tsv          painted switches per sample relative to the cohort median
+  sample_segments.tsv          the released painting per sample: runs of bins with one release (status, named
+                               founder row, candidate rows), switch intervals included (release 2.2)
 
 Carrier support uses released named painting tracks intersected with positive read depth: it is
 painting-dependent, not independent lineage evidence or a phasing probability, and samples are correlated.
@@ -255,5 +257,12 @@ def _write_tables(output, file, contig: str, positions, store_manifest=None) -> 
               f"{', '.join(map(str, flagged))} (founder_counts.tsv)", flush=True)
     frames = (pd.DataFrame(support), pd.DataFrame(windows), pd.DataFrame(search_rows), switches,
               pd.DataFrame(counts))
-    return [write_frame(directory / f"{name}.tsv", json_cells(frame), sep="\t")
-            for name, frame in zip(TABLES, frames)]
+    written = [write_frame(directory / f"{name}.tsv", json_cells(frame), sep="\t")
+               for name, frame in zip(TABLES, frames)]
+    # The released painting per sample (release 2.2): one row per run of bins with one release, switch intervals
+    # included (painting.release.segment_rows); samples in the run's input order.
+    from ..painting.release import segment_rows
+    segments = pd.DataFrame(segment_rows(painting, recorded_input_order(store_manifest)),
+                            columns=("SampleID", "Component", "Track", "Start", "End", "Status", "Label", "Rows"))
+    written.append(write_frame(directory / "sample_segments.tsv", segments, sep="\t"))
+    return written

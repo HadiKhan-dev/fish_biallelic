@@ -48,9 +48,10 @@ def vcf_column(component: int, row: int) -> str:
 
 
 def component_record(contig: str, component: int, positions: np.ndarray, calls: np.ndarray, stage: str,
-                     filename: str | None = None, vcf_file: str | None = None) -> dict:
+                     filename: str | None = None, vcf_file: str | None = None,
+                     withheld: int | None = None) -> dict:
     """The manifest entry of one exported component (``filename``: its track TSV; ``vcf_file``: the founder VCF
-    holding its columns)."""
+    holding its columns; ``withheld``: alleles released as '.' because no painted carrier observes them)."""
     calls = np.asarray(calls)
     entry = dict(contig=contig, component=component)
     if filename is not None:
@@ -58,6 +59,8 @@ def component_record(contig: str, component: int, positions: np.ndarray, calls: 
     entry.update(first_position=int(positions[0]), last_position=int(positions[-1]), markers=len(positions),
                  called_alleles=int((calls >= 0).sum()), missing_alleles=int((calls < 0).sum()),
                  founder_stage=stage)
+    if withheld is not None:
+        entry["withheld_unobserved_alleles"] = int(withheld)
     if filename is not None:
         entry["file"] = filename
     if vcf_file is not None:
@@ -89,10 +92,11 @@ def founder_values(sites: SiteTable, panels) -> list[tuple[int, int, np.ndarray]
 
 
 def write_founder_vcf(path: Path, sites: SiteTable, panels, stage: str, *, synthetic: bool,
-                      file_format: str) -> None:
+                      file_format: str, withheld=None) -> None:
     """Write the founder VCF of one chromosome (module docstring) to ``path`` (format "bcf" or "vcf").
 
-    ``panels``: [(positions int64 [L_c], released int8 [K_c, L_c])] in component order.
+    ``panels``: [(positions int64 [L_c], released int8 [K_c, L_c])] in component order; ``withheld``: alleles
+    per component released as '.' because no painted carrier observes them (header ##component lines).
     """
     from cyvcf2 import Writer
     contig = sites.contig
@@ -106,7 +110,7 @@ def write_founder_vcf(path: Path, sites: SiteTable, panels, stage: str, *, synth
               "##source=haplotype-reconstruction\n"
               + contig_line(contig, length) +
               '##FORMAT=<ID=GT,Number=1,Type=String,Description="Founder allele (haploid): 0 REF, 1 ALT, . unknown '
-              'or outside the column\'s component; no imputation">\n'
+              '(withheld, or no painted carrier observes it) or outside the column\'s component; no imputation">\n'
               + site_header_lines(sites) +
               '##founder_columns="cC_Hk is founder row k of assembly component C of this chromosome. Founder labels '
               'are component-local: columns of different components (c0_H1, c1_H1) are not implied to be one '
@@ -114,8 +118,13 @@ def write_founder_vcf(path: Path, sites: SiteTable, panels, stage: str, *, synth
               '##component lines) and . outside it; inside the span . marks an allele the panel withholds"\n'
               f"##founder_stage={stage}\n")
     for component, (positions, calls) in enumerate(panels):
+        unobserved = "" if withheld is None else f",UnobservedWithheld={int(withheld[component])}"
         header += (f"##component=<ID=c{component},Start={int(positions[0])},End={int(positions[-1])},"
-                   f"Founders={len(calls)},Sites={len(positions)}>\n")
+                   f"Founders={len(calls)},Sites={len(positions)}{unobserved}>\n")
+    if withheld is not None:
+        header += (f'##unobserved_founder_alleles={int(sum(withheld))}\n'
+                   '##unobserved_founder_alleles_rule="a founder allele is written as . when no sample whose '
+                   'released painting names that founder at the site has read depth there (release 2.2)"\n')
     if sites.full_length:
         header += common_allele_line()
     if synthetic:

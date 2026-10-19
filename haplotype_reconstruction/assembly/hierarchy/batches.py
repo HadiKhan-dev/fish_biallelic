@@ -1,6 +1,7 @@
 """Break-aware batch partition of one hierarchy level.
 
-At every level the current components are cut into batches of ``batch_size`` adjacent components.
+At every level the current components are cut into batches of at most ``batch_size`` adjacent components,
+orientation-symmetrically (release 2.2, :func:`symmetric_ranges`: mirroring the chromosome mirrors the partition).
 A batch never crosses a phase break: a boundary between two adjacent components where fewer than
 ``min_boundary_informative_samples`` samples are informative on both sides (a sample is informative
 for a component when its evidence is non-uniform at one of the component's informative linking-proxy
@@ -83,6 +84,38 @@ class LevelPartition:
     batch_samples: tuple[np.ndarray, ...]
 
 
+def symmetric_ranges(breaks, batch_size: int) -> list:
+    """Orientation-symmetric batches (release 2.2; 2.1 grouped left-anchored, so mirroring the chromosome changed the
+    partition): the components between phase breaks (breaks[i]: a break after component i) form segments; a segment
+    of L components is cut into m = ceil(L / batch_size) consecutive batches, one more when L is odd and m even (an
+    even number of batches has an even total when sizes mirror), with sizes as equal as possible and the larger ones
+    placed in mirrored pairs from both ends (one in the middle when the remainder is odd). The size sequence is a
+    palindrome, so the partition of the mirrored chromosome is the mirror of this one. Returns [(start, stop)]."""
+    n = len(breaks)
+    ranges = []
+    start = 0
+    while start < n:
+        end = start + 1
+        while end < n and not breaks[end - 1]:
+            end += 1
+        length = end - start
+        count = -(-length // batch_size)
+        if length % 2 == 1 and count % 2 == 0:
+            count += 1
+        base, extra = divmod(length, count)
+        sizes = [base] * count
+        if extra % 2 == 1:
+            sizes[count // 2] += 1
+            extra -= 1
+        for position in range(extra // 2):
+            sizes[position] += 1
+            sizes[count - 1 - position] += 1
+        for size in sizes:
+            ranges.append((start, start + size))
+            start += size
+    return ranges
+
+
 def partition(components, prepared, neutral, *, batch_size: int, min_informative: int,
               max_sites: int) -> LevelPartition:
     """Mark phase breaks and cut the components into batches (see the module docstring)."""
@@ -100,16 +133,7 @@ def partition(components, prepared, neutral, *, batch_size: int, min_informative
                 components[boundary] = left = replace(left, break_after=reason)
             if right.break_before != reason:
                 components[boundary + 1] = replace(right, break_before=reason)
-    ranges = []
-    start = 0
-    while start < len(components):
-        stop = min(start + batch_size, len(components))
-        for candidate in range(start + 1, stop):
-            if components[candidate - 1].break_after is not None:
-                stop = candidate
-                break
-        ranges.append((start, stop))
-        start = stop
+    ranges = symmetric_ranges([component.break_after is not None for component in components], batch_size)
     batch_samples = tuple(np.flatnonzero(np.logical_and.reduce(masks[first:end])).astype(np.int64)
                           for first, end in ranges)
     return LevelPartition(tuple(components), tuple(ranges), masks, joint, batch_samples)

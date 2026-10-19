@@ -16,6 +16,8 @@ import numba
 import numpy as np
 from numba import njit, prange
 
+from ..conventions import rev
+
 
 
 @njit(cache=True, nogil=True)
@@ -58,10 +60,13 @@ def founder_buckets(assignments, k):
 
 
 @njit(cache=True, nogil=True)
-def usage_order(usage):
-    """Founders with positive usage in stable decreasing-usage order (lower index on ties)."""
+def usage_order(usage, reverse):
+    """Founders with positive usage in stable decreasing-usage order (lower index on ties; higher under reversed
+    conventions)."""
     k = usage.shape[0]
     order = np.arange(k, dtype=np.int64)
+    if reverse:
+        order = order[::-1].copy()
     for index in range(1, k):
         current = order[index]
         position = index
@@ -190,7 +195,7 @@ def update_founders(workspace, haplotypes, assignments) -> int:
     k = haplotypes.shape[0]
     (homozygous, with_partner, with_unknown, partner, n_homozygous, n_with_partner,
      n_with_unknown, usage) = founder_buckets(assignments, k)
-    order = usage_order(usage)
+    order = usage_order(usage, rev("d3"))
     if numba.get_num_threads() == 1:
         return int(sweep_one_thread(
             haplotypes, order, homozygous, with_partner, with_unknown, partner, n_homozygous,

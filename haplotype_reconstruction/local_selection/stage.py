@@ -28,6 +28,19 @@ from .rounds import BlockTask, run_round
 ROUNDS = records.ROUNDS
 
 
+def _tied_panels(block) -> tuple:
+    """Release 2.2: discovery's NLL-tied alternative latent panels of a block (DiscoveredBlock
+    ``tied_panels``, stacked rows split by ``tied_panel_k``; None in 2.1 records), candidates in every
+    round on the same footing as the latent panel."""
+    rows = getattr(block, "tied_panels", None)
+    sizes = getattr(block, "tied_panel_k", None)
+    if rows is None or sizes is None or not len(sizes):
+        return ()
+    bounds = np.cumsum(np.asarray(sizes, dtype=np.int64))[:-1]
+    return tuple(np.ascontiguousarray(panel, dtype=np.int64)
+                 for panel in np.split(np.asarray(rows), bounds) if len(panel))
+
+
 def _block_tasks(discovered, evidence, genetic_map):
     """Per informative block (in block order): its task fields shared by every round."""
     tasks = []
@@ -39,7 +52,8 @@ def _block_tasks(discovered, evidence, genetic_map):
             positions=block.positions, kept=kept,
             columns=block.site_start + np.flatnonzero(kept),
             intervals=genetic_map.interval_morgans(positions[:-1], positions[1:]),
-            latent=np.ascontiguousarray(block.latent, dtype=np.int64)))
+            latent=np.ascontiguousarray(block.latent, dtype=np.int64),
+            alternatives=_tied_panels(block)))
     return tasks
 
 

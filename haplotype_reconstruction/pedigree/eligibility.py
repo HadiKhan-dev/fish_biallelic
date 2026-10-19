@@ -49,6 +49,9 @@ class ParentEligibility:
     policy:           short policy name recorded in reports.
     assumptions:      plain-language statements of what the policy assumes.
     source_fields:    metadata fields the adapter read to build the policy.
+    sexes:            recorded sex label per sample (upper-cased; "F", "M", or anything else = unknown), or
+                      None without metadata. Never inferred. Release 2.2: it orders released parent pairs
+                      (dam = F first, sire = M second; pedigree.slots) and enters the identity.
     """
 
     sample_ids: tuple[str, ...]
@@ -59,6 +62,7 @@ class ParentEligibility:
     policy: str
     assumptions: tuple[str, ...] = ()
     source_fields: tuple[str, ...] = ()
+    sexes: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         # Real boundary: adapters build this record from user metadata or JSON constraints.
@@ -90,6 +94,11 @@ class ParentEligibility:
         object.__setattr__(self, "chronology", chronology)
         object.__setattr__(self, "assumptions", tuple(str(value) for value in self.assumptions))
         object.__setattr__(self, "source_fields", tuple(str(value) for value in self.source_fields))
+        if self.sexes is not None:
+            sexes = tuple(str(value).strip().upper() for value in self.sexes)
+            if len(sexes) != n:
+                raise ValueError("one recorded sex label is required per sample")
+            object.__setattr__(self, "sexes", sexes)
 
     # ---------------------------------------------------------------- construction
     @classmethod
@@ -134,7 +143,8 @@ class ParentEligibility:
             female, male = sex == "F", sex == "M"
             pairs = (female[:, None] & male[None, :]) | (male[:, None] & female[None, :])
         return cls(tuple(sample_ids), children, parents, pairs, parents.copy(), policy,
-                   tuple(assumptions), tuple(source_fields))
+                   tuple(assumptions), tuple(source_fields),
+                   sexes=None if sexes is None else tuple(str(value) for value in sexes))
 
     @classmethod
     def from_constraints(cls, sample_ids: Sequence[str],
@@ -224,10 +234,11 @@ class ParentEligibility:
     def identity(self) -> str:
         """SHA-256 of the policy text and every mask (a cache identity, not an integrity check)."""
         # DEDUP(T0): use store/identity's canonical digest once it exists.
-        digest = hashlib.sha256(json.dumps({
-            "sample_ids": list(self.sample_ids), "policy": self.policy,
-            "assumptions": list(self.assumptions), "source_fields": list(self.source_fields),
-        }, sort_keys=True, separators=(",", ":")).encode())
+        fields = {"sample_ids": list(self.sample_ids), "policy": self.policy,
+                  "assumptions": list(self.assumptions), "source_fields": list(self.source_fields)}
+        if self.sexes is not None:          # release 2.2: recorded sexes order released parent pairs
+            fields["sexes"] = list(self.sexes)
+        digest = hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode())
         arrays = (("children", self.children), ("parents", self.parents),
                   ("compatible_pairs", self.compatible_pairs), ("chronology", self.chronology))
         for name, array in arrays:
@@ -258,4 +269,9 @@ class ParentEligibility:
             "individual_parentage_ground_truth": False,
             "assumptions": list(self.assumptions),
             "source_fields": list(self.source_fields),
+            "recorded_sexes": (None if self.sexes is None else
+                               {label: int(sum(sex == label for sex in self.sexes))
+                                for label in sorted(set(self.sexes))}),
+            "parent_slot_basis": ("dam_sire where both parents have recorded sexes F and M, else unordered "
+                                  "(canonical order by observed sites); sexes are never inferred"),
         }

@@ -53,6 +53,7 @@ from numba import njit, prange
 from numba.typed import List
 
 from ... import execution
+from ...maths import ties
 from .objective import row_max
 
 DOMINANCE_TOLERANCE = 1e-6
@@ -2199,7 +2200,7 @@ def solve_focal(emissions, cols, cands, offsets, focal, incumbent, first, second
 
 
 @njit(cache=True, nogil=True)
-def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop, store_limit):
+def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop, store_limit, reverse=False):
     """Every listed focal founder's problem of one window (shared emissions and flanks).
 
     cols[u, k] is founder k's row on unit u (the focal's incumbent); the alphabet of
@@ -2214,7 +2215,8 @@ def solve_template(emissions, cols, sizes, focals, penalty, start, end, backstop
     cands = np.empty(offsets[units], np.int64)
     for u in range(units):
         for r in range(sizes[u]):
-            cands[offsets[u] + r] = r
+            # ascending alphabet index (content order), descending under the convention reversal
+            cands[offsets[u] + r] = sizes[u] - 1 - r if reverse else r
     states = founders * (founders + 1) // 2
     first = np.empty(states, np.int64)
     second = np.empty(states, np.int64)
@@ -2411,7 +2413,7 @@ class WindowSolver:
                                                  for width, unit in zip(alphabets, unit_bins))
         return tables + frontier + coarse
 
-    def _template(self, emissions, bins, cols, sizes, start, end, frontier_bytes, focals=None):
+    def _template(self, emissions, bins, cols, sizes, start, end, frontier_bytes, focals=None, convention=None):
         """Every (listed) founder's problem of one window in one nogil call (bins: the largest
         unit's bins). Returns [(focal, unit choices or None, diagnostic)]; a frontier fallback
         keeps the incumbent."""
@@ -2430,7 +2432,8 @@ class WindowSolver:
             with (nullcontext() if step == 0 else
                   execution.reserve_memory(budget_bytes, label="founder_refinement window frontier")):
                 status, rows, box, dp, frontier, fixing = solve_template(
-                    emissions, cols, sizes, pending, self.penalty, start, end, int(limit), int(store_limit))
+                    emissions, cols, sizes, pending, self.penalty, start, end, int(limit), int(store_limit),
+                    bool(ties.reverse_conventions() if convention is None else convention))
             again = []
             for i, k in enumerate(pending):
                 if status[i] == FRONTIER_LIMIT and not final:
@@ -2450,7 +2453,7 @@ class WindowSolver:
                              fixing_dps=int(fixing), fallback=bool(status == FRONTIER_LIMIT))))
         return out
 
-    def fine(self, X, fwd, bwd, a, c, frontier_bytes, focals=None):
+    def fine(self, X, fwd, bwd, a, c, frontier_bytes, focals=None, convention=None):
         """Proposals of every (listed) founder on blocks [a, c): [(kind, a, c, k, rows | None,
         diagnostic)]."""
         emissions = slice_list(self.emissions, a, c)
@@ -2458,9 +2461,10 @@ class WindowSolver:
         bins = max(self.arrays[b].shape[3] for b in range(a, c))
         return [("fine", a, c, k, rows, diagnostic)
                 for k, rows, diagnostic in self._template(emissions, bins, X[:, a:c].T, sizes,
-                                                          fwd[a], bwd[c], frontier_bytes, focals)]
+                                                          fwd[a], bwd[c], frontier_bytes, focals,
+                                                          convention)]
 
-    def coarse_window(self, X, fwd, bwd, i, j, frontier_bytes):
+    def coarse_window(self, X, fwd, bwd, i, j, frontier_bytes, convention=None):
         """Proposals of every founder over L1 spans [i, j). A span's alphabet: the distinct row
         tuples the founders use there and the L1 context paths, in content order (release 2.1,
         design 5.3: the tuples sorted lexicographically, so the window programme's canonical-tie
@@ -2490,7 +2494,7 @@ class WindowSolver:
         out = []
         for k, choice, diagnostic in self._template(emissions, bins, cols,
                                                     [len(x) for x in alphabets], fwd[a], bwd[c],
-                                                    frontier_bytes):
+                                                    frontier_bytes, convention=convention):
             rows = None
             if choice is not None:
                 rows = np.concatenate([alphabets[u][int(choice[u])] for u in range(j - i)])
@@ -2499,10 +2503,10 @@ class WindowSolver:
             out.append(("coarse", a, c, k, rows, diagnostic))
         return out
 
-    def solve(self, index, X, fwd, bwd, frontier_bytes):
+    def solve(self, index, X, fwd, bwd, frontier_bytes, convention=None):
         """The proposals of template `index` for panel X with messages fwd, bwd (a pure function of
         X's rows in the window and the flank messages fwd[a], bwd[c], unless a frontier fallback)."""
         kind, a, c = self.templates[index]
         if kind == "fine":
-            return self.fine(X, fwd, bwd, a, c, frontier_bytes)
-        return self.coarse_window(X, fwd, bwd, a, c, frontier_bytes)
+            return self.fine(X, fwd, bwd, a, c, frontier_bytes, convention=convention)
+        return self.coarse_window(X, fwd, bwd, a, c, frontier_bytes, convention)

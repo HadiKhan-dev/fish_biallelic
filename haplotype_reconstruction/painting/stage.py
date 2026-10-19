@@ -54,7 +54,12 @@ class ComponentDecoding:
     """The HMM decoding of one component before the release rule.
 
     paths: int32[N, 2, B] gauge-fixed Viterbi state per track and bin;
-    qv, qa: float64[N, B] release posteriors (see painting/release.py);
+    masks: int64[N, 2, B] candidate states per track and bin as bits (the Viterbi
+        state, plus the other side inside a switch interval, over both traceback
+        conventions; release 2.2); qv/qa are the 2.1 Viterbi-pair masses, the smaller
+        of the two conventions' pairs;
+    switch_counts: int64[N] minimum track changes (the fewer of the two conventions' paths);
+    qv, qa: float64[N, B] release posteriors over the candidate sets (see painting/release.py);
     support: bool[N, 2, B] direct read support of each Viterbi track
         (False for ineligible samples);
     batch_size, working_memory_bytes: the sample batching used (execution only).
@@ -67,6 +72,8 @@ class ComponentDecoding:
     local_keys: np.ndarray
     eligible: np.ndarray
     paths: np.ndarray
+    masks: np.ndarray
+    switch_counts: np.ndarray
     qv: np.ndarray
     qa: np.ndarray
     support: np.ndarray
@@ -133,6 +140,8 @@ def decode_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: n
             transitions=PaintingTransitions(n_states, no_edges, no_edges.copy(), no_edges.copy()),
             local_keys=np.zeros((0, n_states), dtype=np.int32),
             eligible=np.zeros(n_samples, dtype=np.bool_), paths=empty_grid,
+            masks=np.zeros((n_samples, 2, 0), dtype=np.int64),
+            switch_counts=np.zeros(n_samples, dtype=np.int64),
             qv=np.zeros((n_samples, 0)), qa=np.zeros((n_samples, 0)),
             support=np.zeros((n_samples, 2, 0), dtype=np.bool_), packed_emissions=None,
             batch_size=0, working_memory_bytes=0)
@@ -154,6 +163,8 @@ def decode_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: n
         size = batch_size(n_samples, threads, bytes_per_sample, fixed_bytes, budget)
 
         paths = np.empty((n_samples, 2, n_bins), dtype=np.int32)
+        masks = np.empty((n_samples, 2, n_bins), dtype=np.int64)
+        switch_counts = np.zeros(n_samples, dtype=np.int64)
         qv = np.empty((n_samples, n_bins))
         qa = np.empty((n_samples, n_bins))
         support = np.empty((n_samples, 2, n_bins), dtype=np.bool_)
@@ -168,10 +179,14 @@ def decode_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: n
                 log_floor=config.emission_log_floor)
             if packed is not None:
                 hmm.pack_emissions(emissions, packed, start, n_states)
-            batch_paths = hmm.parsimonious_track_order(
-                hmm.viterbi_paths(emissions, transitions), local_keys, states.n_classes)
+            # Switch intervals (release 2.2): runs of bins where a switch's two classes have the same calls at
+            # every site the sample observes, over both traceback conventions. The release gate stays 2.1's
+            # Viterbi-pair masses, taken as the smaller of the two conventions' pairs (never more permissive).
+            batch_paths, batch_masks, batch_switches, other_paths = hmm.decode_candidates(
+                emissions, transitions, local_keys, states.named_alleles, batch_observed, bins.starts,
+                bins.stops, states.n_classes)
             qv[start:stop], qa[start:stop] = hmm.release_posteriors(
-                emissions, transitions, batch_paths, public_ids, local_keys)
+                emissions, transitions, batch_paths, public_ids, local_keys, other_paths=other_paths)
             del emissions
             informative = hmm.informative_sites(batch_likelihoods, batch_observed)
             batch_eligible = np.any(informative, axis=1)
@@ -179,11 +194,14 @@ def decode_component(panel: ComponentPanel, likelihoods: np.ndarray, observed: n
                                                bins.starts, bins.stops, states.n_classes)
             batch_support[~batch_eligible] = False
             paths[start:stop] = batch_paths
+            masks[start:stop] = batch_masks
+            switch_counts[start:stop] = batch_switches
             support[start:stop] = batch_support
             eligible[start:stop] = batch_eligible
     return ComponentDecoding(
         states=states, bins=bins, transitions=transitions, local_keys=local_keys,
-        eligible=eligible, paths=paths, qv=qv, qa=qa, support=support, packed_emissions=packed,
+        eligible=eligible, paths=paths, masks=masks, switch_counts=switch_counts, qv=qv, qa=qa, support=support,
+        packed_emissions=packed,
         batch_size=size, working_memory_bytes=budget)
 
 
@@ -202,9 +220,13 @@ def release_component(panel: ComponentPanel, decoding: ComponentDecoding,
                             [float(values[sample, bin_index]) - tau])
     labels, classes, status = release_tracks(
         states, decoding.paths, decoding.eligible, decoding.qv, decoding.qa,
-        decoding.local_keys, decoding.support, config.minimum_release_posterior)
-    member_ids, member_sets = track_members(status, classes, decoding.local_keys, states.classes)
-    switch_counts = hmm.minimum_switch_counts(decoding.paths)
+        decoding.local_keys, decoding.support, config.minimum_release_posterior, masks=decoding.masks)
+    # A released interval track of a bin below the stage-1 threshold was released at stage 2 (local keys).
+    member_ids, member_sets = track_members(status, classes, decoding.local_keys, states.classes,
+                                            masks=decoding.masks,
+                                            stage_two=decoding.qv < config.minimum_release_posterior,
+                                            anchored=states.anchored)
+    switch_counts = decoding.switch_counts.copy()
     switch_counts[~decoding.eligible] = 0
     return ComponentPainting(
         panel=panel, states=states, bins=decoding.bins, transitions=decoding.transitions,
@@ -268,5 +290,8 @@ def run_contig(store, contig: str, config: PaintingConfig, genetic_map, budget) 
     after = sum(outcome.switches_after or 0 for outcome in painting.label_continuity)
     print(f"  [label continuity] {contig}: {moves} row-suffix relabellings; "
           f"painted switches {before} -> {after}", flush=True)
+    counts = [records.interval_counts(component) for component in painting.components]
+    print(f"  [painting] {contig}: {sum(count[0] for count in counts)} switch intervals "
+          f"({sum(count[1] for count in counts)} track bins) released", flush=True)
     records.write(file, painting)
     return records.progress(file)

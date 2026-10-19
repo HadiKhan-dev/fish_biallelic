@@ -13,7 +13,8 @@ from .config import ExportConfig
 
 STAGE = "export"
 KEY = "export"
-SCHEMA = 1
+# 2: release 2.2 (founder alleles no painted carrier observes are '.'; the painting record is an input).
+SCHEMA = 2
 
 
 def identity(file, config: ExportConfig) -> dict:
@@ -21,9 +22,11 @@ def identity(file, config: ExportConfig) -> dict:
     from ..evidence import records as evidence_records
     from ..family_phase import records as phase_records
     from .run import founder_source_key
+    from ..painting import records as painting_records
     upstream = {"evidence": file.info(evidence_records.EVIDENCE).identity}
     if "founders" in config.products or "tracks" in config.products:
         upstream["founders"] = file.info(founder_source_key(file)).identity
+        upstream["painting"] = file.info(painting_records.KEY).identity
     if "samples" in config.products:
         upstream["family_phase"] = file.info(phase_records.KEY).identity
     return stage_identity(STAGE, schema=SCHEMA, config=config, upstream=upstream)

@@ -20,7 +20,7 @@ diagnostic product.
 The stage has no user options; its constants are those of `DiscoveryConfig` (`discovery/config.py`),
 listed in [configuration](../configuration.md).
 
-## Ties and order (release 2.1)
+## Ties and order (releases 2.1 and 2.2)
 
 No discrete outcome of discovery may depend on floating-point rounding, on perturbations of the genotype
 likelihoods far below any real difference, or on the order of the samples. Every block therefore has its tie quanta
@@ -42,24 +42,80 @@ the block's `SearchSummary.tie_events`.
 The same evidence gives the same result on every CPU. Discovery evaluates log and exp with the C library's scalar
 functions (Numba kernels), not with NumPy's float64 ufuncs, whose SIMD code paths NumPy chooses at run time from the
 CPU (AVX-512 kernels differ from the scalar functions by an ulp in about 5% (exp) and 0.3% (log) of values); its other
-arithmetic is element-wise or summed in a fixed order, and it makes no BLAS calls. HDBSCAN (the K = 1 seeds and the
-residual-strand clusters) runs the hdbscan package's precomputed-distance algorithm with the minimum spanning tree's
-edges ordered by weight and, among equal weights, by a fixed pseudo-random key of the edge's two record indices
-(splitmix64; `residual_births.exact_hdbscan_labels`). The package orders them with NumPy's unstable default sort, whose
-order among equal weights depends on the CPU's sort kernel, and equal Hamming distances are the rule, so the clusters
-and their order changed with the CPU (release 2.0 and 2.1 before this rule: actm3 chr8 block 204 under OpenBLAS
-Haswell kernels with NumPy's AVX-512 paths disabled). The key depends only on the canonical record order; it keeps the
-unstable sort's effectively random resolution of equal-weight merges, which the 2.1 quality measurements were made
-with. (A stable order resolves every multi-way merge as a chain, so equidistant residual strands fall out of the
-growing cluster instead of pairing up: on TroMau 255 blocks changed, K up/down 60/96, net -9.4k nats.)
+arithmetic is element-wise or summed in a fixed order, and it makes no BLAS calls.
 
-Ordering equal-weight links by this content key is a deterministic convention, under review for release 2.2: any
-fixed order among exactly equal links is a choice the data do not make. Merging equal links simultaneously (the
-order-invariant HDBSCAN* hierarchy) lets equidistant strands fall out instead of pairing up and so drops those
-candidates (TroMau: K up/down 64/116 and -9.7k nats against this convention's predecessor). The 2.2 plan carries every
-tie resolution forward as a candidate and lets the block score decide. Such ties are not confined to Hamming
-distances: with min_samples > 1 (the K = 1 seeds) mutual reachability ties links through shared core distances even
-when the distances themselves are continuous.
+**Equal-distance links (release 2.2).** HDBSCAN (the K = 1 seeds and the residual-strand clusters) is HDBSCAN* on the
+hdbscan package's mutual reachability and minimum spanning tree with every link of one weight merged at once, as
+Campello, Moulavi and Sander (2013) and Campello et al. (2015) define it (edges of equal weight are removed
+simultaneously): at every distance the hierarchy is the set of connected components of the links of at most that
+distance, which no merge order changes (`residual_births.level_hdbscan`). A cluster splitting at lambda = 1/distance
+into several components makes those with at least the minimum cluster size child clusters when at least two qualify;
+otherwise it persists as its qualifying component and the other records fall out at lambda (two components: the
+package's rule). Stability (sum of lambda - lambda_birth, summed exactly), excess-of-mass selection and labelling are
+the package's; clusters are numbered by their smallest record. The package's binary dendrogram orders equal-weight
+links by NumPy's unstable sort (CPU-dependent: actm3 chr8 block 204 under OpenBLAS Haswell kernels with NumPy's AVX-512
+paths disabled), and release 2.1 by a fixed content key. Such ties are not confined to Hamming distances: with
+min_samples > 1 (the K = 1 seeds) mutual reachability ties links through shared core distances.
+
+**Tied resolutions carried forward (release 2.2).** A binary merge order decides what happens to records that fall out
+together at a multi-way merge: it can pair them into clusters of their own, or let them fall out of the growing
+cluster. Release 2.2 keeps both. The residual clustering's groups are every cluster of the level-wise HDBSCAN's
+condensed tree (all density levels, selected or not) within the diameter bound (`max_cluster_hamming`) plus, as
+alternatives, every maximal clique (at least two strands) of the graph
+"distance at most `max_cluster_hamming`" on the strands HDBSCAN leaves as noise, the strands of clusters wider than the
+bound, and the stragglers of multi-way merges (strands of at least two small components falling out where a big
+component continues; they stay in their cluster as well). Every complete-linkage group at the bound and every pair-up
+of tied stragglers within it, under any order, lies inside one of these cliques; complete linkage itself is not
+used. Each group's consensus is a candidate and the block's cavity score decides between the panels they produce. The
+bounds are order-invariant: per connected component of that graph the enumeration (Bron-Kerbosch with pivoting in a
+degeneracy order) runs unless an a-priori bound on the number of maximal cliques (the smaller of the degeneracy bound
+and the complement's Moon-Moser bound) exceeds `max_clique_enumeration`, or it reaches `max_clique_calls` calls; at
+most `max_alternative_groups` cliques are kept, by whole size classes (largest first). The candidates are emitted by
+support class (more distinct supporting samples first); a candidate is a near-duplicate only of a panel row or of a
+candidate of a more supported class (equally supported near-duplicates are all kept; exact duplicates once), and at
+most `search.max_proposals_per_expansion` are emitted, by whole support classes. The K = 1 seeds are the largest
+HDBSCAN clusters by whole size classes. The search's other budgets are order-invariant too: same-K replacement starts
+(each K + 1 birth minus one row) are taken by whole NLL tie classes of the births (the best class always, when it
+has at most twice `max_replacement_children` starts); gauge rewires use every maximum cut while there are at most
+4 x `max_cut_ties` of them, else none (`gauge_max_cut_ties_truncated`); a soft candidate is a near-duplicate of a row
+when the rows tied at its nearest (distance, joint fraction) include one with enough coverage both ways. Every
+overflow is counted in `tie_events` (`discovery.residual.group_overflow`, `discovery.residual.emission_overflow`,
+`discovery.k1.seed_overflow`) or in the search limits.
+
+**Released ambiguity (release 2.2).** A founder allele that no sample assigned to the founder observes is unknown:
+`DiscoveredBlock.latent_unknown` marks it (`latent` keeps a binary value only as the fit's initial value; `calls`
+withholds it), and local selection, completion and export release '.' there. Panels of the released panel's NLL tie
+class at its K (and other-K representatives in its score class) that differ from it, or from each other, at some
+observed allele are released with it as `tied_panels` (`tied_panel_k`, `tied_panel_nll`, `tied_unknown`); local
+selection takes them as proposals, so neighbouring blocks decide.
+
+**Convention reversal (release 2.2).** With `HAPLOTYPES_TIE_REVERSE=1` (maths.ties.reverse_conventions) every remaining
+arbitrary convention runs in reverse: content-key and index orders inside tie classes, the sample-name order, the
+Gauss-Seidel founder order on usage ties, the binary default state at exactly 1/2, argmax ties, the gauge max-cut code
+order, the proposal order before the expansion budget, dominant-partner ties and the mean-field start order
+(`discovery/conventions.py`; the diagnostic variable `HAPLOTYPES_TIE_REVERSE_KEEP` keeps named conventions at their default). Stated preferences (priors)
+are not reversed: a smaller K, keep-current inside a tie (incumbent allele, first fit unless better by a quantum,
+incumbent search state), the conservative release band at an exact zero, more supporting samples first, more observed
+sites first and fewer unknown copies first; nor canonical labels (a panel's lexicographic row order and key).
+
+**Tied A-step states: the meet rule (release 2.2).** In 2.1 the A step took the first state in row order among the
+states tied within the `sample` quantum (convention D1). A sample whose tied states are identical over its observed
+sites thereby gave its evidence to whichever founder rows came first, which steered the fit: under the reversal D1
+moved about 6% of TroMau blocks (593 of 9,979; 13 of the 18 reversal changes on actm3 chr8). Release 2.2 assigns such a
+sample the *meet* of its tied states, the multiset intersection of their founder pairs inside the winning
+(fewest-unknown-copies) category: founders that every tied explanation shares receive the sample's evidence, and a copy
+that differs between tied states goes to no founder row (it is held as an unknown copy in the H step, the founder
+field of the cavity score and the release). So {(i, j), (i, j')} gives (i, -) and {(1, 1), (1, 2), (2, 2)} or
+{(0, 1), (2, 3)} give (-, -). The intersection depends only on the tied set, so the assignment is invariant to row order,
+sample order and the reversal. The ambiguity is not counted as copies from outside the panel: the sample's
+`unknown_slots` (and the released `unknown_mass`) are those of its tied states, its NLL is the Viterbi over all
+states (unchanged), and the cavity score's Dirichlet state prior counts it 1/|T| at each of its tied states T
+(`fixed_k.assign.tie_mask`), which leaves the predictive of a sample whose tied states predict alike unchanged. The
+consequence is released ambiguity: founder rows that only tied samples observe get fewer supporters (withheld calls)
+or unknown alleles ('.'). Local selection's bank fits keep the 2.1 rule (`prepare_workspace(tie_meet=False)`).
+Fractional assignment (1/|T| of the sample's evidence to each tied state in the H step and the founder field) would
+keep more of a tied sample's information (a homozygous sample tied between two identical rows contributes nothing
+under the meet) and is a possible refinement.
 
 ## Block evidence and missingness
 
@@ -97,8 +153,10 @@ the sum over samples.
 A fit alternates two steps from a start panel:
 
 - **A step**: each sample's single best state for the whole block, by its summed (uncapped) bin
-  emissions: the first state, in the order row pairs (row-major), row with an unknown copy, two
-  unknown copies, whose cost is within the block's `sample` quantum of the cheapest;
+  emissions: among the states whose cost is within the block's `sample` quantum of the cheapest, the
+  category with the fewest unknown copies (row pairs, then a row with an unknown copy, then two
+  unknown copies; a stated preference), and in it the meet of the tied states (release 2.2, see
+  "Ties and order");
 - **H step**: Gauss-Seidel founder-bit updates for the fixed assignments, founders in decreasing
   order of usage; for founder k at site l the costs of allele 0 and 1 are summed over its carriers
   (homozygous carriers, carriers with a known partner, carriers with an unknown copy), each cost
@@ -123,7 +181,9 @@ leave-one-sample-out predictive score (`discovery/cavity.py`):
 
 - **State prior.** pi_-i(s) = (n_s - [s = s_i] + alpha beta_s) / (N - 1 + alpha) is the
   Dirichlet-multinomial predictive of the state counts n_s of the panel's assignments with sample i's
-  own count removed; alpha = `DiscoveryConfig.cavity.state_concentration = 0.5`. The prior masses
+  own count removed; alpha = `DiscoveryConfig.cavity.state_concentration = 0.5`. A sample whose A step
+  held several tied states T counts 1/|T| at each of them (and removes 1/|T| from each when held out;
+  release 2.2). The prior masses
   beta give the row-pair states 1 - omega (a heterozygous pair twice the weight of a homozygous one),
   each row-with-unknown state omega (1 - delta) / K and the two-unknown state omega delta, with
   omega = `DiscoveryConfig.cavity.unknown_prior_mass = 0.02` and
@@ -203,7 +263,8 @@ at least `DiscoveryConfig.residual_births.min_soft_responsibility = 0.25` expect
 is subtracted from it, leaving a residual strand whose ALT probability at an observed site is
 P(GL | subtracted allele + residual allele) normalised over the residual allele. Residual strands
 called at `DiscoveryConfig.residual_births.residual_call_probability = 0.8` are clustered by
-missing-aware Hamming distance (HDBSCAN, then complete linkage on its noise; cluster diameter at
+missing-aware Hamming distance (level-wise HDBSCAN, plus maximal cliques of its noise and tied stragglers as
+alternative groups, see [Ties and order](#ties-and-order-releases-21-and-22); diameter at
 most `DiscoveryConfig.residual_births.max_cluster_hamming = 0.1` of the sites), over all strands and
 within each (subtracted row, dominant partner) route. A cluster's consensus pools its strands'
 responsibility-weighted log odds with one capped vote per sample; it is emitted when at least

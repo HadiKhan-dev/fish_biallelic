@@ -15,7 +15,7 @@ from ..evidence import records as evidence_records
 from ..painting import records as painting_records
 from ..store import CheckpointStore
 from . import decision as decision_module
-from . import exclusion, panel, prepare, records, scoring, tables
+from . import exclusion, panel, prepare, records, scoring, slots, tables
 from .config import PedigreeConfig
 from .eligibility import ParentEligibility
 from .records import NO_PARENT, GenomeScores, ParentEdges, PedigreeCalls, PedigreeProduct
@@ -175,21 +175,62 @@ def _exclusion_bytes(store, contig: str) -> int:
 
 
 # --------------------------------------------------------------------------- product views
-def _calls(tier, rows: np.ndarray) -> PedigreeCalls:
+def _calls(tier, rows: np.ndarray, orientation: slots.ParentOrientation | None = None) -> PedigreeCalls:
+    """Released calls; parents in the released slot order (pedigree.slots, release 2.2) when ``orientation``
+    is given, else in the configuration row's order."""
     parents = np.full((len(tier.state), 2), NO_PARENT, dtype=np.int64)
     for child, row in enumerate(tier.row):
         if row >= 0:
             named = [int(parent) for parent in rows[row, 1:] if parent >= 0]
             parents[child, :len(named)] = named
+    if orientation is not None:
+        parents = orientation.orient(parents)[0]
     return PedigreeCalls(tier.state.copy(), parents, tier.status)
 
 
-def _edges(partial, sample_ids) -> ParentEdges:
-    """Released parent edges in (child, slot) order (base refinement.model.pedigree_edges)."""
-    children, slots = np.nonzero(partial.supported)
-    return ParentEdges(tuple(sample_ids), partial.parents[children, slots].astype(np.int64),
-                       children.astype(np.int64), slots.astype(np.int64),
+def _edges(partial, sample_ids, orientation: slots.ParentOrientation | None = None) -> ParentEdges:
+    """Released parent edges in (child, slot) order (base refinement.model.pedigree_edges); slots in the
+    released order (pedigree.slots, release 2.2) when ``orientation`` is given."""
+    children, slot_index = np.nonzero(partial.supported)
+    parents = partial.parents[children, slot_index].astype(np.int64)
+    slot_index = slot_index.astype(np.int64)
+    if orientation is not None and len(children):
+        slot_index = slots.orient_edges(parents, children, slot_index, orientation)
+        order = np.lexsort((slot_index, children))
+        children, parents, slot_index = children[order], parents[order], slot_index[order]
+    return ParentEdges(tuple(sample_ids), parents, children.astype(np.int64), slot_index,
                        partial.count_minimum.copy(), partial.count_maximum.copy())
+
+
+def _orientation(store, contigs, sample_ids, eligibility, parent_arrays) -> slots.ParentOrientation:
+    """The released parent order (pedigree.slots): recorded sexes from the eligibility, canonical ranks from the
+    evidence observed masks, read contig by contig only while an unsexed released pair is still undecided."""
+    sexes = eligibility.sexes
+    pairs = set()
+    for parents in parent_arrays:
+        for first, second in np.asarray(parents, dtype=np.int64).tolist():
+            if first >= 0 and second >= 0:
+                if sexes is None or {sexes[first], sexes[second]} != {slots.DAM, slots.SIRE}:
+                    pairs.add((first, second))
+    if not pairs:
+        return slots.ParentOrientation(sexes, np.arange(len(sample_ids), dtype=np.int64))
+
+    def counts():
+        for contig in contigs:
+            observed = evidence_records.load_arrays(store.contig(contig), ("observed",))["observed"]
+            yield np.count_nonzero(observed, axis=1).astype(np.int64)
+
+    return slots.ParentOrientation(sexes, slots.canonical_ranks(counts(), sample_ids, pairs))
+
+
+def _orient_report(report, sample_ids, orientation: slots.ParentOrientation):
+    """The report with its relationship and candidate-set tables in the released parent order (diagnostic tables
+    keep the internal configuration order)."""
+    from dataclasses import replace
+    names = ("tier_b_relationships", "tier_b_partial_relationships", "tier_a_relationships",
+             "tier_a_partial_relationships", "complete_relationships", "tier_b_candidate_sets")
+    return replace(report, **{name: slots.orient_frame(getattr(report, name), sample_ids, orientation)
+                              for name in names})
 
 
 # --------------------------------------------------------------------------- the stage
@@ -287,7 +328,15 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         decided.informative, rows, sample_ids, eligibility, dyads, log_e, observed, config)
     exclusion_summary["released"] = int(np.count_nonzero(released.released))
 
-    calls = _calls(released.tier_b, rows)
+    # Released parent order (release 2.2, pedigree.slots): dam/sire where the metadata records sexes {F, M},
+    # else a canonical rename-invariant order; scoring and the internal slots are unchanged.
+    orientation = _orientation(store, contigs, sample_ids, eligibility, [
+        _calls(released.tier_b, rows).parents, _calls(decided.tier_a, rows).parents,
+        _calls(decided.complete, rows).parents, decided.candidates.parents,
+        np.where(released.partial_b.supported, released.partial_b.parents, NO_PARENT),
+        np.where(decided.partial_b.supported, decided.partial_b.parents, NO_PARENT),
+        np.where(decided.partial_a.supported, decided.partial_a.parents, NO_PARENT)])
+    calls = _calls(released.tier_b, rows, orientation)
     search = panel.search_diagnostics(candidate_panel, eligibility, calls.parents, sample_ids)
     by_contig = {value.contig: value for value in chromosome_scores}
     chromosome_summary = pd.DataFrame([dict(
@@ -297,11 +346,12 @@ def run(store, contigs: tuple[str, ...], sample_ids: tuple[str, ...],
         OmittedReason=omitted.get(contig)) for contig in contigs])
     product = PedigreeProduct(
         sample_ids=sample_ids, contigs=contigs, informative_contigs=informative, omitted=omitted,
-        calls=calls, edges=_edges(released.partial_b, sample_ids),
-        tier_a=_calls(decided.tier_a, rows), complete=_calls(decided.complete, rows),
+        calls=calls, edges=_edges(released.partial_b, sample_ids, orientation),
+        tier_a=_calls(decided.tier_a, rows, orientation), complete=_calls(decided.complete, rows, orientation),
         reach=decided.reach, calibration=decided.calibration, family_solve=decided.family_solve,
         exclusion=exclusion_summary, eligibility=eligibility.summary(), panel=candidate_panel,
-        report=tables.build(decided, released, search, chromosome_summary, config),
+        report=_orient_report(tables.build(decided, released, search, chromosome_summary, config), sample_ids,
+                              orientation),
         tie_events=decided.tie_events)
     store.run.put(records.PRODUCT, records.encode_product(product))
     store.mark_stage_complete(records.STAGE)

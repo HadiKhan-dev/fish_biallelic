@@ -40,10 +40,11 @@ import numpy as np
 from ..maths.ties import (NOISE_MOTION, BlockQuanta, TieCounter, block_scale, improves,
                           inverse_permutation, run_sample_order, tie_classes)
 from .cavity import CavityWorkspace, score_solutions
+from .fixed_k.assign import tie_mask
 from .fixed_k.fit import prepare_workspace
 from .moves import (MaximumCuts, SoftBirths, data_births, growth_inputs, initial_solutions,
                     ordinary_moves, replacements, soft_births)
-from .panel import FixedKSolution, deduplicate
+from .panel import FixedKSolution, deduplicate, known_content_key, unknown_alleles, whole_class_cut
 from .residual_births import ResidualInputs
 
 # Relative K of the moves a search step generates (death, same-K, birth, bridge).
@@ -109,10 +110,13 @@ class SearchSummary:
 
 @dataclass(frozen=True)
 class BlockSearch:
-    """The selected solution of a block search and its summary."""
+    """The selected solution of a block search, its summary and its tied alternatives (release 2.2): the other
+    panels of the selected K's first NLL tie class and the representatives of other K in the selected score class,
+    in decision order (the released set does not depend on which member represents it)."""
 
     selected: FixedKSolution
     summary: SearchSummary
+    alternatives: tuple = ()
 
 
 def natural_k_ceiling(n_samples: int, n_sites: int) -> int:
@@ -165,8 +169,9 @@ def search_block(likelihoods, observed, config, *, sample_ids=None) -> BlockSear
     result = _search(likelihood, observed, config)
     if order is None:
         return result
-    return BlockSearch(selected=_sample_subset(result.selected, inverse_permutation(order)),
-                       summary=result.summary)
+    inverse = inverse_permutation(order)
+    return BlockSearch(selected=_sample_subset(result.selected, inverse), summary=result.summary,
+                       alternatives=tuple(_sample_subset(panel, inverse) for panel in result.alternatives))
 
 
 def select_scores(values, quantum: float, content):
@@ -187,14 +192,29 @@ class _Archive:
     when better by more than the quantum). A K's retained list is re-ordered over its previous
     members and the new arrivals and cut at ``width`` (a cut inside a class falls by content)."""
 
-    def __init__(self, width: int, quanta: BlockQuanta, content, counter: TieCounter):
+    def __init__(self, width: int, quanta: BlockQuanta, content, counter: TieCounter, observed=None):
         self.width = int(width)
         self.quantum = float(quanta.nll)
         self.content = content
         self.counter = counter
+        self.observed = observed
         self.fitted: dict[bytes, float] = {}
         self.beams: dict[int, list] = {}
+        self.beam_classes: dict[int, list] = {}
+        self.science: dict[bytes, bytes] = {}
         self.max_k = 0
+
+    def known_key(self, solution) -> bytes:
+        """The panel's science (rows with alleles no assigned carrier observes masked; release 2.2)."""
+        key = self.science.get(solution.key)
+        if key is None:
+            if self.observed is None or solution.assignments is None:
+                key = solution.key
+            else:
+                key = known_content_key(solution.haplotypes,
+                                        unknown_alleles(solution.assignments, self.observed, solution.k))
+            self.science[solution.key] = key
+        return key
 
     def add(self, solutions) -> None:
         touched: dict[int, None] = {}
@@ -207,14 +227,28 @@ class _Archive:
             panels = self.beams.setdefault(solution.k, [])
             if previous is not None:
                 panels[:] = [entry for entry in panels if entry.key != solution.key]
+            # Panels that differ only at alleles no assigned carrier observes are the same science: one archive
+            # entry, the lower NLL beyond the quantum, else the canonical (smaller) key -- a label (release 2.2).
+            science = self.known_key(solution)
+            twin = next((entry for entry in panels if self.known_key(entry) == science), None)
+            if twin is not None:
+                if solution.nll < twin.nll - self.quantum or (not twin.nll < solution.nll - self.quantum
+                                                              and solution.key < twin.key):
+                    panels[:] = [entry for entry in panels if entry is not twin]
+                else:
+                    continue
             panels.append(solution)
             touched[solution.k] = None
         for k in touched:
-            self.beams[k] = self._ordered(self.beams[k])[:self.width]
+            ordered, classes = self._ordered(self.beams[k])
+            kept, _ = whole_class_cut(ordered, classes, self.width)
+            self.beams[k] = kept
+            self.beam_classes[k] = classes[:len(kept)]
 
     def _ordered(self, panels):
+        """(panels in decision order, their NLL tie-class ids)."""
         if len(panels) == 1:
-            return panels
+            return panels, [0]
         classes = tie_classes([panel.nll for panel in panels], self.quantum,
                               content=[self.content(panel) for panel in panels],
                               motion=NOISE_MOTION["nll"])
@@ -224,7 +258,16 @@ class _Archive:
                       == classes.classes[classes.order[self.width]])
         self.counter.add("discovery.archive", classes,
                          decided_inside=bool(classes.tied_winner or cut_inside))
-        return ordered
+        return ordered, [int(classes.classes[index]) for index in classes.order]
+
+    def first_class(self, k: int) -> list:
+        """The retained panels of K in the first NLL class, in decision order."""
+        panels = list(self.beams.get(k, ()))
+        if len(panels) <= 1:
+            return panels
+        classes = tie_classes([panel.nll for panel in panels], self.quantum,
+                              content=[self.content(panel) for panel in panels])
+        return [panels[int(index)] for index in classes.order if classes.classes[int(index)] == 0]
 
     def first_class_size(self, k: int) -> int:
         """Members of the first NLL class among the retained panels of K."""
@@ -256,7 +299,7 @@ class _Search:
             self.content = lambda solution: solution.key
         else:
             self.content = lambda solution: solution.key.translate(_COMPLEMENT)
-        self.workspace = prepare_workspace(likelihood, observed, config.model, self.quanta)
+        self.workspace = prepare_workspace(likelihood, observed, config.model, self.quanta, tie_meet=True)
         self.growth = growth_inputs(likelihood, observed)
         self.residual_inputs = ResidualInputs(likelihood, observed)
         self.cuts = MaximumCuts(search.exact_cut_max_k, search.max_cut_ties)
@@ -265,7 +308,7 @@ class _Search:
         width = search.beam_width
         if search.escalation:
             width = max(width, search.escalate_beam_width)
-        self.archive = _Archive(width, self.quanta, self.content, self.counter)
+        self.archive = _Archive(width, self.quanta, self.content, self.counter, observed)
         self.beam_width = int(search.beam_width)
         self.replacement_limit = int(search.max_replacement_children)
         self.representatives: dict[int, FixedKSolution] = {}
@@ -313,7 +356,8 @@ class _Search:
         backstop = self.search.exact_score_backstop(self.archive.max_k) * self.score_backstop_factor
         room = max(0, backstop - self.exact_scores)
         retained = novel[:room]
-        for score in score_solutions(self.cavity_workspace, retained, self.active):
+        masks = [tie_mask(self.workspace, solution.haplotypes) for solution in retained]
+        for score in score_solutions(self.cavity_workspace, retained, self.active, tie_masks=masks):
             self.score_cache[score.solution.key] = score
             self.representatives[score.k] = score.solution
             self.scores[score.k] = score
@@ -346,7 +390,10 @@ class _Search:
 
     # ---------------------------------------------------------------------------------- moves
     def beam(self, k: int):
-        return list(self.archive.beams.get(k, ()))[:self.beam_width]
+        """The panels of K to expand: the archive's leading whole NLL classes up to the beam width (release 2.2)."""
+        panels = list(self.archive.beams.get(k, ()))
+        kept, _ = whole_class_cut(panels, self.archive.beam_classes.get(k, list(range(len(panels)))), self.beam_width)
+        return kept
 
     def soft(self, solution) -> SoftBirths:
         if solution.k >= self.ceiling:
@@ -571,4 +618,7 @@ def _search(likelihood, observed, config) -> BlockSearch:
         tie_quantum=float(forward.quanta.nll), escalated=bool(forward.escalated),
         conventions=len(searches), ambiguous=bool(tied > 0), tied_alternatives=int(tied),
         score_margin=float(margin), tie_events=counter.record())
-    return BlockSearch(selected=best.solution, summary=summary)
+    alternatives = [panel for panel in forward.archive.first_class(best.k) if panel.key != best.solution.key]
+    alternatives += [value.solution for value, cls in zip(values, classes.classes)
+                     if cls == 0 and value.k != best.k]
+    return BlockSearch(selected=best.solution, summary=summary, alternatives=tuple(alternatives))

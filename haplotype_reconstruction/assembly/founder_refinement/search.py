@@ -80,6 +80,9 @@ class FitSummary:
     accepted: totals over the kept search's sweeps (fine, coarse, exchange moves and gains,
     evaluated candidates, guard counters). max_deviation: largest |F_new - (F + accepted gains)|
     of a sweep (the exactness check). wall, worker_cpu, thread_cpu: seconds (both searches).
+    tied_panels (release 2.2): when the forward- and reverse-first results are tied on F (one tie class)
+    but are different panels, their panel keys (sorted): equally supported alternatives, released flagged;
+    the kept one is then decided by the canonical panel key (a fully symmetric choice). Empty otherwise.
     """
 
     label: str
@@ -98,6 +101,7 @@ class FitSummary:
     wall: float
     worker_cpu: float
     thread_cpu: float
+    tied_panels: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -317,7 +321,7 @@ class SweepEngine:
                                             fscale, bscale, known, s0, s1)
         return (fwd, bwd, fcnt, bcnt, fscale, bscale), time.perf_counter() - started
 
-    def proposals(self, X, fwd, bwd, budget, cache=None):
+    def proposals(self, X, fwd, bwd, budget, cache=None, convention=None):
         """Every window template's proposals for panel X with messages fwd, bwd.
 
         cache (a search's ProposalCache, updated in place): a window problem is a pure function of
@@ -329,7 +333,7 @@ class SweepEngine:
 
         def run(index):
             started = time.thread_time()
-            result = self.windows.solve(index, X, fwd, bwd, frontier_bytes)
+            result = self.windows.solve(index, X, fwd, bwd, frontier_bytes, convention)
             return result, time.thread_time() - started
 
         spans = self.windows.spans
@@ -390,38 +394,30 @@ class SweepEngine:
                                              proposals=int(sum(map(len, props.values()))),
                                              accepted=int(acc["fine"]), gain=float(acc["fine_gain"]))
 
-    def _sweep_inputs(self, X, budget, cache, held=None):
-        """The messages of panel X and its window proposals (pure functions of the panel)."""
+    def _sweep_inputs(self, X, budget, cache, held=None, convention=None):
+        """The messages of panel X and its window proposals (pure functions of the panel and the convention)."""
         message_state, message_wall = self._messages(X, budget, held)
         started = time.perf_counter()
-        proposals, stats = self.proposals(X, message_state[0], message_state[1], budget, cache)
+        proposals, stats = self.proposals(X, message_state[0], message_state[1], budget, cache, convention)
         return dict(messages=message_state, proposals=proposals, stats=stats,
                     message_wall=message_wall, proposal_wall=time.perf_counter() - started)
 
     # ------------------------------------------------------------------ fixed-K fit
     def converge(self, start, label, budget):
-        """C(start): the better of the forward-first and the reverse-first search (module
-        docstring). Both run concurrently, each with its share of the budget; the higher exact F is
-        kept (tie classes of F; within a class the canonically smaller panel). Returns a Fit whose
-        rows are in canonical founder order."""
+        """C(start): the better of the forward-first search (default content-order convention) and the
+        reverse-first search (reversed convention) (module docstring). Both run concurrently, each with its share
+        of the budget; the higher exact F is kept (tie classes of F; within a class the canonically smaller panel,
+        flagged as tied_panels when the panels differ). Returns a Fit whose rows are in canonical founder order."""
         done = self._load(f"{label}.done")
         if done is not None:
             return Fit(np.asarray(done["rows"], np.int64).copy(), FitSummary(**done["summary"]),
                        tuple(WeakJunction(*item) for item in done["weak_junctions"]))
         started = time.perf_counter()
-        # Both searches start from the same panel, so the F (and per-sample scores), messages and
-        # window proposals of their sweep 0 (pure functions of the panel) are computed once, with
-        # the fit's whole budget, and shared; only their acceptance passes differ. A search that
-        # resumes from its own records computes its sweeps itself.
+        # Release 2.2: the two searches differ in their start direction and in their content-order convention
+        # (forward-first: the default order, reverse-first: the reversed one), so the kept fit is the better of
+        # both conventions rather than a product of one (equal F with different panels: flagged tied_panels).
+        # Their sweep-0 proposals then differ, so the start panel's inputs are not shared (2.1 computed them once).
         shared = None
-        if all(self._load(f"{label}.{first}.{stage}") is None
-               for first in ("fwd", "rev") for stage in ("done", "sweep0")):
-            X = np.ascontiguousarray(start, np.int64)
-            scores0 = self.per_sample(X, budget)
-            cache = ProposalCache()
-            shared = dict(F0=float(scores0.sum()), scores0=scores0,
-                          inputs=self._sweep_inputs(X, budget, cache), cache=cache,
-                          waiting={"fwd", "rev"}, readers=set(), lock=threading.Lock())
         searches = [None, None]
         for index, result in budget.concurrent(
                 [lambda child, first=first: self._converge_direction(start, label, first, child,
@@ -442,6 +438,11 @@ class SweepEngine:
         if self.census_prefix is not None:
             tie_rules.census("assembly.refine_converge", f"{self.census_prefix}/{label}", [-v for v in values])
         chosen = ("fwd", "rev")[result.winner]
+        tied_panels = ()
+        if result.tied_winner and contents[0] != contents[1]:
+            tied_panels = tuple(sorted(contents))
+            if self.counter is not None:
+                self.counter.note("assembly.refine_converge.symmetric", inside_tie=True)
         X, kept = (X_rev, rev) if chosen == "rev" else (X_fwd, fwd)
         # Canonical founder order of the fit (weak-junction founder pairs follow the permutation).
         X, order = tie_rules.canonical_rows(np.asarray(X, np.int64))
@@ -458,7 +459,7 @@ class SweepEngine:
             max_deviation=float(kept["max_deviation"]),
             wall=time.perf_counter() - started,
             worker_cpu=float(fwd["worker_cpu"] + rev["worker_cpu"]),
-            thread_cpu=float(fwd["thread_cpu"] + rev["thread_cpu"]))
+            thread_cpu=float(fwd["thread_cpu"] + rev["thread_cpu"]), tied_panels=tied_panels)
         weak = tuple(WeakJunction(first, last, tuple(sorted((int(inverse[pair[0]]), int(inverse[pair[1]])))),
                                   gain) for first, last, pair, gain in kept["weak_junctions"])
         self._save(f"{label}.done", dict(rows=X.astype(np.int32), summary=vars(summary).copy(),
@@ -529,7 +530,7 @@ class SweepEngine:
                 else:
                     owned = False
             else:
-                inputs = self._sweep_inputs(X, budget, cache, held)
+                inputs = self._sweep_inputs(X, budget, cache, held, convention=(first == "rev"))
             held = None
             fwd, bwd, fcnt, bcnt, fscale, bscale = inputs["messages"]
             proposals, stats = inputs["proposals"], inputs["stats"]
@@ -565,7 +566,8 @@ class SweepEngine:
             del fwd, bwd, fcnt, bcnt, fscale, bscale
             acc, gains, pairs = accept_pass(orientation, Xo, stored, stored_cnt, stored_scale, props,
                                             self.penalty, self.guarded, budget,
-                                            start_fwd=start_fwd, start_fcnt=start_fcnt, scale=abs(F))
+                                            start_fwd=start_fwd, start_fcnt=start_fcnt, scale=abs(F),
+                                            reverse=(first == "rev"))
             del stored, stored_cnt, stored_scale, start_fwd, start_fcnt
             if sweep == 0 and shared is not None:
                 # Run one after the other (a one-thread or memory-limited budget), the other search

@@ -31,9 +31,10 @@ from numba import njit, prange
 
 from ..execution import claim_threads
 from ..maths.ties import NOISE_MOTION, WIDE_CLASS_QUANTA, tie_classes
+from .conventions import rev
 from .fixed_k.fit import FIT_MAX_THREADS, fit_one, fit_panels, fit_starts
-from .panel import canonical_solution, deduplicate, has_distinct_rows, panel_key, sort_solutions
-from .residual_births import (HALF_BAND, alt_fraction_rule, exact_hdbscan_labels, half_band_rows,
+from .panel import _nll_quantum, canonical_solution, class_beam, deduplicate, has_distinct_rows, panel_key, sort_solutions
+from .residual_births import (HALF_BAND, alt_fraction_rule, capped_by_size, exact_hdbscan_labels, half_band_rows,
                               hardening_fallback, note_band, scalar_log_floored,
                               soft_candidates)
 
@@ -79,24 +80,37 @@ def _soft_cluster_seeds(likelihoods, n_seeds, min_cluster_size, counter=None):
     np.fill_diagonal(distance, 0.0)
     labels = exact_hdbscan_labels(distance, min_cluster_size=int(min_cluster_size),
                                   min_samples=int(min_cluster_size), allow_single_cluster=False)
-    clusters = [np.flatnonzero(labels == label) for label in np.unique(labels) if label != -1]
-    clusters.sort(key=lambda members: -len(members))
+    clusters = [tuple(np.flatnonzero(labels == label).tolist()) for label in np.unique(labels) if label != -1]
+    # Largest first (a stated preference), in whole size classes while at most n_seeds are kept: a size class that
+    # does not fit is dropped with the smaller ones (release 2.2: no label order cuts inside a class).
+    kept, overflow = capped_by_size(clusters, int(n_seeds))
+    if counter is not None:
+        counter.note("discovery.k1.seed_overflow", inside_tie=overflow)
+    clusters = [np.asarray(members, dtype=np.int64) for members in kept]
     alt_fraction = 0.5 * likelihoods[:, :, 1] + likelihoods[:, :, 2]
     population = alt_fraction.mean(axis=0)
     marginal = alt_fraction_rule(population, False)
     note_band(counter, "discovery.k1.half_band", population, 0.5, HALF_BAND)
     rows = []
-    for members in clusters[:n_seeds]:
+    for members in clusters:
         mean = alt_fraction[members].mean(axis=0)
         note_band(counter, "discovery.k1.half_band", mean, 0.5, HALF_BAND)
         rows.append(half_band_rows(mean, marginal).astype(np.int64))
     return rows
 
 
+def argmax_last_axis(values):
+    """argmax over the last axis with exact ties to the lowest index (the highest under reversed conventions)."""
+    values = np.asarray(values)
+    if not rev("d8a"):
+        return np.argmax(values, axis=-1)
+    return values.shape[-1] - 1 - np.argmax(values[..., ::-1], axis=-1)
+
+
 def _dosage_seed(likelihoods, sample):
     """The sample's argmax dosage as a row: dosage 2 -> 1, dosage 1 -> 1 where the population
     ALT fraction exceeds 1/2 (outside HALF_BAND), else 0."""
-    dosage = likelihoods[sample].argmax(axis=1)
+    dosage = argmax_last_axis(likelihoods[sample])
     population_alt = likelihoods[..., 1].mean(axis=0) * 0.5 + likelihoods[..., 2].mean(axis=0)
     row = np.zeros(likelihoods.shape[1], dtype=np.int64)
     row[dosage == 2] = 1
@@ -115,6 +129,17 @@ def _most_decisive(likelihoods, observed, sample_quantum):
     return int(candidates[classes.winner])
 
 
+def _most_decisive_class(likelihoods, observed, sample_quantum):
+    """The samples tied for the fallback seed: most observed sites (exact), then the best class of decisiveness (sum
+    of the largest GL over observed sites; tie classes of kind ``sample``, descending), in sample order."""
+    observed_sites = observed.sum(axis=1)
+    candidates = np.flatnonzero(observed_sites == observed_sites.max())
+    decisiveness = np.where(observed, likelihoods.max(axis=2), 0.0).sum(axis=1)
+    classes = tie_classes(decisiveness[candidates], sample_quantum, descending=True)
+    first = classes.classes[classes.winner]
+    return [int(candidates[i]) for i in range(len(candidates)) if classes.classes[i] == first]
+
+
 def initial_solutions(workspace, likelihoods, active, config, counter=None):
     """The K = 1 search starts: fitted soft-cluster seeds (of the samples with depth), at most
     ``data_start_beam_width`` distinct ones in tie-class order of NLL (kind ``nll``)."""
@@ -124,11 +149,17 @@ def initial_solutions(workspace, likelihoods, active, config, counter=None):
                                 search.seed_min_cluster_size, counter)
     if not seeds:
         seed_observed = workspace.observed if np.all(active) else workspace.observed[active]
-        sample = _most_decisive(seed_likelihoods, seed_observed, workspace.quanta.sample)
-        seeds = [_dosage_seed(seed_likelihoods, sample)]
+        # Every sample of the most decisive class (release 2.2: no sample order picks one), while the class has at
+        # most data_seed_count members; otherwise the population's dosage row (alt fraction rule).
+        samples = _most_decisive_class(seed_likelihoods, seed_observed, workspace.quanta.sample)
+        if len(samples) <= search.data_seed_count:
+            seeds = [_dosage_seed(seed_likelihoods, sample) for sample in samples]
+        else:
+            population = 0.5 * seed_likelihoods[..., 1].mean(axis=0) + seed_likelihoods[..., 2].mean(axis=0)
+            seeds = [alt_fraction_rule(population, False).astype(np.int64)]
     fits = fit_starts(workspace, [seed[None, :] for seed in seeds], config.model.max_iterations)
     solutions = [canonical_solution(fit, workspace) for fit in fits]
-    return deduplicate(solutions, search.data_start_beam_width)
+    return class_beam(deduplicate(solutions), search.data_start_beam_width)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -189,11 +220,11 @@ def _exact_cut_scores(weights):
 
 
 @njit(cache=True, nogil=True)
-def _component_exact_cuts(weights, max_ties):
+def _component_exact_cuts(weights, max_ties, reverse):
     """Maximum cuts by independent components: bipartite components by 2-colouring,
     the others by exhaustive enumeration. Cuts are integer codes with vertex order as most to
-    least significant bit; the smallest codes are kept (byte-lexicographic tie rule), at most
-    ``max_ties`` non-empty cuts."""
+    least significant bit; the smallest codes are kept (byte-lexicographic tie rule; the largest under reversed
+    conventions), at most ``max_ties`` non-empty cuts."""
     k = len(weights)
     component = np.full(k, -1, dtype=np.int64)
     color = np.zeros(k, dtype=np.bool_)
@@ -261,14 +292,20 @@ def _component_exact_cuts(weights, max_ties):
                 if c > 0:
                     choices[cursor] = code ^ mask
                     cursor += 1
-        choices = np.sort(choices)[:limit]
+        choices = np.sort(choices)
+        if reverse:
+            choices = choices[::-1].copy()
+        choices = choices[:limit]
         joined = np.empty(len(combined) * len(choices), dtype=np.int64)
         cursor = 0
         for previous in combined:
             for choice in choices:
                 joined[cursor] = previous | choice
                 cursor += 1
-        combined = np.sort(joined)[:limit]
+        combined = np.sort(joined)
+        if reverse:
+            combined = combined[::-1].copy()
+        combined = combined[:limit]
     combined = combined[combined != 0][:max_ties]
     result = np.zeros((len(combined), k), dtype=np.bool_)
     for row in range(len(combined)):
@@ -344,10 +381,11 @@ class MaximumCuts:
             return cached
         k = len(matrix)
         if k <= self.exact_max_k:
-            result = tuple(side.copy() for side in _component_exact_cuts(matrix, max_ties))
+            result = tuple(side.copy() for side in _component_exact_cuts(matrix, max_ties, rev("d9")))
         else:
+            reverse = rev("d9")
             order = np.asarray(sorted(range(1, k), key=lambda index: (-int(np.sum(matrix[index])),
-                                                                      index)), dtype=np.int64)
+                                                                      -index if reverse else index)), dtype=np.int64)
             candidates = []
             for index in range(1, k):
                 side = np.zeros(k, dtype=bool)
@@ -365,7 +403,7 @@ class MaximumCuts:
                 best_cross = max(item[0][0] for item in scored)
                 best_within = min(item[0][1] for item in scored if item[0][0] == best_cross)
                 winners = sorted((item for item in scored if item[0] == (best_cross, best_within)),
-                                 key=lambda item: item[1])
+                                 key=lambda item: item[1], reverse=reverse)
                 result = tuple(item[2].copy() for item in winners[:max_ties])
             else:
                 result = ()
@@ -455,7 +493,7 @@ class GrowthInputs:
 
 def growth_inputs(likelihoods, observed) -> GrowthInputs:
     maximum = np.max(likelihoods, axis=2)
-    dosage = np.argmax(likelihoods, axis=2)
+    dosage = argmax_last_axis(likelihoods)
     active = np.any(observed, axis=1)
     oracle_nll = -np.sum(np.where(observed, scalar_log_floored(
         np.ascontiguousarray(maximum, dtype=np.float64), _TINY), 0.0), axis=1)
@@ -494,7 +532,8 @@ def data_birth_order(excess, observed_sites, samples, quantum):
     if not samples:
         return [], [], None
     classes = tie_classes([float(excess[sample]) for sample in samples], quantum,
-                          content=[(-int(observed_sites[sample]), sample) for sample in samples],
+                          secondary=[(-int(observed_sites[sample]),) for sample in samples],
+                          content=[sample for sample in samples],
                           descending=True, motion=NOISE_MOTION["sample"])
     wide = classes.spans > WIDE_CLASS_QUANTA * quantum
     order, groups = [], []
@@ -644,7 +683,8 @@ def soft_births(workspace, solution, likelihoods, residual_inputs, config, cache
     cached = cache.get(key)
     if cached is not None:
         return cached
-    soft = soft_candidates(solution.haplotypes, residual_inputs, config.residual_births, counter)
+    soft = soft_candidates(solution.haplotypes, residual_inputs, config.residual_births, counter,
+                           limit=config.search.max_proposals_per_expansion)
     if len(soft) == 0:
         result = SoftBirths((), 0, 0)
     else:
@@ -662,28 +702,46 @@ def soft_births(workspace, solution, likelihoods, residual_inputs, config, cache
 
 
 def replacements(workspace, parent, births, config, limit=None):
-    """Same-K starts: each K + 1 birth (in tie-class order of NLL, then key) with any one row
-    deleted, distinct by the remaining rows, at most ``limit`` (default
-    ``max_replacement_children``); returns (children, omitted)."""
+    """Same-K starts: every K + 1 birth with any one row deleted, distinct by the remaining rows, taken by whole
+    NLL tie classes of the births (best first) while at most ``limit`` (default ``max_replacement_children``)
+    starts are taken; the best class is always taken when it has at most 2 x limit starts; a class that does not fit
+    ends the list (release 2.2: no content-key order or row index cuts inside a class, so the set of starts does not
+    depend on any order). Returns (children, omitted starts)."""
     width = parent.sites
-    descriptors = []
-    seen: set[bytes] = set()
-    for birth in sort_solutions(deduplicate(births)):
-        if birth.k != parent.k + 1:
-            continue
-        for deleted in range(birth.k):
-            offset = deleted * width
-            key = birth.key[:offset] + birth.key[offset + width:]
-            if key in seen:
-                continue
-            seen.add(key)
-            descriptors.append((birth, deleted))
     limit = config.search.max_replacement_children if limit is None else int(limit)
-    starts = [np.ascontiguousarray(np.delete(birth.haplotypes, deleted, axis=0))
-              for birth, deleted in descriptors[:limit]]
+    pool = [birth for birth in deduplicate(births) if birth.k == parent.k + 1]
+    if not pool:
+        return (), 0
+    classes = tie_classes([birth.nll for birth in pool], _nll_quantum(pool, None),
+                          content=[birth.key for birth in pool])
+    by_class: dict[int, list] = {}
+    for index in classes.order:
+        by_class.setdefault(int(classes.classes[int(index)]), []).append(pool[int(index)])
+    seen: set[bytes] = set()
+    descriptors = []
+    omitted = 0
+    stopped = False
+    for cls in sorted(by_class):
+        unit, unit_keys = [], set()
+        for birth in by_class[cls]:
+            for deleted in range(birth.k):
+                offset = deleted * width
+                key = birth.key[:offset] + birth.key[offset + width:]
+                if key in seen or key in unit_keys:
+                    continue
+                unit_keys.add(key)
+                unit.append((birth, deleted))
+        if not stopped and (len(descriptors) + len(unit) <= limit or (not descriptors and len(unit) <= 2 * limit)):
+            descriptors.extend(unit)
+            seen |= unit_keys
+        else:
+            stopped = True
+            omitted += len(unit)
+            seen |= unit_keys
+    starts = [np.ascontiguousarray(np.delete(birth.haplotypes, deleted, axis=0)) for birth, deleted in descriptors]
     synchronized, refitted = fit_panels(workspace, starts, config.model.max_iterations)
     children = deduplicate((*synchronized, *refitted))
-    return tuple(child for child in children if child.k == parent.k), max(0, len(descriptors) - limit)
+    return tuple(child for child in children if child.k == parent.k), omitted
 
 
 @dataclass(frozen=True)
@@ -707,18 +765,21 @@ def ordinary_moves(workspace, solution, likelihoods, growth, ceiling, cuts: Maxi
     if solution.k > 1:
         buckets[-1].extend(death_starts(solution))
         weights = assignment_graph(solution.assignments, solution.k)
-        partitions = cuts.partitions(weights, search.max_cut_ties + 1)
-        if len(partitions) > search.max_cut_ties:
+        # Every maximum cut while there are at most 4 x max_cut_ties of them, else none (release 2.2: no code order
+        # picks among equal cuts; the overflow is reported as gauge_max_cut_ties_truncated).
+        cap = 4 * search.max_cut_ties
+        partitions = cuts.partitions(weights, cap + 1)
+        if len(partitions) > cap:
             limits.append("gauge_max_cut_ties_truncated")
-        buckets[0].extend(gauge_starts(solution, likelihoods, partitions[:search.max_cut_ties],
-                                       workspace.quanta.nll))
+            partitions = ()
+        buckets[0].extend(gauge_starts(solution, likelihoods, partitions, workspace.quanta.nll))
     unique = {}
     for offset, starts in buckets.items():
         by_key = {}
         for start in starts:
             value = np.ascontiguousarray(start, dtype=np.int64)
             by_key.setdefault((value.shape, value.tobytes()), value)
-        unique[offset] = [by_key[key] for key in sorted(by_key)]
+        unique[offset] = [by_key[key] for key in sorted(by_key, reverse=rev("d9p"))]
     total = sum(len(starts) for starts in unique.values())
     retained = []
     index = 0

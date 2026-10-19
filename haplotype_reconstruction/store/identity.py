@@ -137,13 +137,17 @@ def stage_identity(stage: str, *, schema: int, config, upstream: Mapping[str, st
     from .registry import stage as registered
     if packages is None:
         packages = registered(stage).packages
-    return dict(
+    identity = dict(
         stage=str(stage),
         schema=int(schema),
         config=jsonable(config),
         upstream={str(name): str(identity) for name, identity in sorted((upstream or {}).items())},
         code=code_identity(*packages),
     )
+    from ..maths.ties import reverse_conventions
+    if reverse_conventions():          # reversed-convention records never mix with default ones (absent by default)
+        identity["tie_reverse"] = True
+    return identity
 
 
 def bound_identity(file, section: str) -> dict | None:

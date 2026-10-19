@@ -67,6 +67,14 @@ class ResidualBirthConfig:
     min_soft_responsibility: minimum expected copies of a subtracted row for a residual record.
     min_unique_sample_support: distinct samples behind an emitted consensus.
     min_effective_sample_support: responsibility-weighted samples behind an emitted consensus.
+    max_alternative_groups: at most this many alternative residual groups (maximal cliques) per clustering, kept by
+        whole size classes, largest first; a straddling class and the smaller ones are dropped and counted as
+        released ambiguity (tie_events discovery.residual.group_overflow).
+    max_clique_enumeration: a component of the alternative pool whose order-invariant bound on its number of maximal
+        cliques exceeds this offers no alternative groups (overflow, counted); the bound, not a measured count,
+        decides, so dense pools (simulations: up to 1.4e5 maximal cliques) are skipped without enumeration.
+    max_clique_calls: safety work limit of one component's enumeration (Bron-Kerbosch calls); a component that reaches
+        it offers no alternative groups (overflow, counted). Not reached under the default bound.
     """
 
     usable_founder_known_fraction: float = 0.80
@@ -81,6 +89,9 @@ class ResidualBirthConfig:
     min_soft_responsibility: float = 0.25
     min_unique_sample_support: int = 2
     min_effective_sample_support: float = 1.50
+    max_alternative_groups: int = 64
+    max_clique_enumeration: int = 10_000_000
+    max_clique_calls: int = 200_000
 
 
 @dataclass(frozen=True)

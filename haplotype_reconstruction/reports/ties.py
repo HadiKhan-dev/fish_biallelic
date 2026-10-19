@@ -208,15 +208,18 @@ def write_ties(output, store, contigs, pedigree_events: dict | None = None) -> l
     directory = Path(output) / "ties"
     written = [write_rows(directory / "decisions.csv", rows,
                           columns=("contig", "stage", "records", "kind") + FIELDS)]
+    from ..maths.ties import reverse_conventions
+    reversed_run = reverse_conventions()
     written.append(write_json(directory / "summary.json", dict(
-        conventions="docs/methods/ties.md (release 2.1 conventions, under review for release 2.2)",
+        conventions="docs/methods/ties.md", reverse_conventions=reversed_run,
         contigs=list(contigs), stages=stages, kinds=kinds, ambiguity=ambiguity)))
     discovery, assembly = ambiguity["discovery"], ambiguity["assembly"]
     classes = "; ".join(f"{stage} {value['tie_classes']['inside_tie']:,} of {value['tie_classes']['decisions']:,}"
                         for stage, value in stages.items())
     inside_band = sum(value["bands"]["inside_band"] for value in stages.values())
     comparisons = sum(value["bands"]["comparisons"] for value in stages.values())
-    print(f"[Ties] tie-class decisions taken by the fixed conventions (docs/methods/ties.md): {classes}; "
+    print(f"[Ties] tie-class decisions taken by the fixed conventions (docs/methods/ties.md"
+          + ("; conventions REVERSED, HAPLOTYPES_TIE_REVERSE" if reversed_run else "") + f"): {classes}; "
           f"threshold comparisons inside a band: {inside_band:,} of {comparisons:,}. Discovery blocks selected "
           f"inside a tie: {discovery['ambiguous']:,} of {discovery['blocks']:,}; founder-count calls ambiguous: "
           f"{assembly['ambiguous']:,} of {assembly['count_calls']:,}; tied refits that disagree: "

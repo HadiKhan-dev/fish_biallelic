@@ -32,7 +32,8 @@ SCREEN = "pedigree/screen"
 SCORES = "pedigree/scores"
 EXCLUSION = "pedigree/exclusion"
 PRODUCT = "pedigree"
-SCHEMA_VERSION = 1
+# 2: release 2.2 released parent order (pedigree.slots: dam/sire or canonical), eligibility sexes.
+SCHEMA_VERSION = 2
 
 # Parent states: number of parents among the sequenced candidates (M0 is not "founder generation").
 M0, M1, M2 = 0, 1, 2

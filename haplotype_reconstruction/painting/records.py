@@ -21,14 +21,15 @@ from ..evidence import records as evidence_records
 from ..model.components import ComponentPanel, materialise
 from ..store.identity import bound_identity, json_digest, stage_identity as build_identity
 from .config import PaintingConfig
-from .release import ChromosomePainting, ComponentPainting, LabelContinuity, RelabelMove
+from .release import ChromosomePainting, ComponentPainting, LabelContinuity, RelabelMove, TrackStatus
 from .states import PaintingBins, PaintingStates
 from .transitions import PaintingTransitions
 
 STAGE = "painting"
 KEY = "painting"
 SUMMARY_KEY = "painting/summary"
-SCHEMA = 1
+# 2: release 2.2 switch intervals (TrackStatus.SWITCH_INTERVAL, candidate-set posteriors).
+SCHEMA = 2
 EVIDENCE_KEY = evidence_records.EVIDENCE
 ASSEMBLY_KEY = f"{assembly_records.FINAL_PREFIX}/final"
 
@@ -48,7 +49,8 @@ class ComponentShape:
 
 @dataclass(frozen=True)
 class PaintingSummary:
-    """Record ``painting/summary``: shapes, eligible sample-component pairs and label continuity."""
+    """Record ``painting/summary``: shapes, eligible sample-component pairs and label continuity;
+    released switch intervals (runs of SWITCH_INTERVAL bins per sample track) and their track bins."""
 
     contig: str
     samples: int
@@ -57,6 +59,8 @@ class PaintingSummary:
     relabel_moves: int
     switches_before: int
     switches_after: int
+    switch_intervals: int = 0
+    interval_track_bins: int = 0
 
 
 def stage_identity(file, config: PaintingConfig, genetic_map) -> dict:
@@ -97,7 +101,8 @@ def progress(file) -> dict:
     summary = load_summary(file)
     return {"stage": STAGE, "complete": file.has(KEY), "components": len(summary.components),
             "eligible_pairs": summary.eligible_pairs, "relabel_moves": summary.relabel_moves,
-            "switches_before": summary.switches_before, "switches_after": summary.switches_after}
+            "switches_before": summary.switches_before, "switches_after": summary.switches_after,
+            "switch_intervals": summary.switch_intervals, "interval_track_bins": summary.interval_track_bins}
 
 
 # ------------------------------------------------------------------------------- encoding
@@ -140,8 +145,20 @@ def encode(painting: ChromosomePainting) -> dict:
     }
 
 
+def interval_counts(component: ComponentPainting) -> tuple[int, int]:
+    """(released switch intervals, SWITCH_INTERVAL track bins) of one component."""
+    flagged = np.asarray(component.status) == int(TrackStatus.SWITCH_INTERVAL)
+    if flagged.size == 0:
+        return 0, 0
+    ids = np.asarray(component.member_ids)
+    starts = flagged.copy()
+    starts[..., 1:] &= ~flagged[..., :-1] | (ids[..., 1:] != ids[..., :-1])
+    return int(np.sum(starts)), int(np.sum(flagged))
+
+
 def summarise(painting: ChromosomePainting) -> PaintingSummary:
     outcomes = painting.label_continuity
+    counts = [interval_counts(component) for component in painting.components]
     return PaintingSummary(
         contig=painting.contig, samples=len(painting.sample_ids),
         components=tuple(ComponentShape(
@@ -154,7 +171,9 @@ def summarise(painting: ChromosomePainting) -> PaintingSummary:
                                for component in painting.components)),
         relabel_moves=sum(len(outcome.moves) for outcome in outcomes if outcome.accepted),
         switches_before=sum(outcome.switches_before or 0 for outcome in outcomes),
-        switches_after=sum(outcome.switches_after or 0 for outcome in outcomes))
+        switches_after=sum(outcome.switches_after or 0 for outcome in outcomes),
+        switch_intervals=sum(count[0] for count in counts),
+        interval_track_bins=sum(count[1] for count in counts))
 
 
 def write(file, painting: ChromosomePainting):

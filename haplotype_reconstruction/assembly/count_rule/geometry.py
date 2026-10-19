@@ -18,6 +18,8 @@ from typing import Sequence
 
 import numpy as np
 
+from ...maths import ties
+
 
 class RowGeometry:
     """Called-site distances between the rows of a batch's blocks (computed lazily, cached).
@@ -48,7 +50,8 @@ class RowGeometry:
             candidates = calls[list(covered)]
             both = (target >= 0)[None, :] & (candidates >= 0)
             distance = ((candidates != target[None, :]) & both).sum(axis=1)
-            found = covered[int(np.argmin(distance))]   # covered is sorted: ties -> lowest row
+            # covered is sorted: ties -> lowest row (the highest under ties.reverse_conventions())
+            found = covered[ties.conv_argmin(distance)]
             self._nearest[key] = found
         return found
 

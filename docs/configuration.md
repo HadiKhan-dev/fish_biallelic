@@ -510,6 +510,9 @@ Stage `discovery`, `discovery/config.py`. All raw-discovery settings (one record
 | `residual_births.min_soft_responsibility` | `0.25` | minimum expected copies of a subtracted row for a residual record. |
 | `residual_births.min_unique_sample_support` | `2` | distinct samples behind an emitted consensus. |
 | `residual_births.min_effective_sample_support` | `1.5` | responsibility-weighted samples behind an emitted consensus. |
+| `residual_births.max_alternative_groups` | `64` | at most this many alternative residual groups (maximal cliques) per clustering, kept by whole size classes, largest first; a straddling class and the smaller ones are dropped and counted as released ambiguity (tie_events discovery.residual.group_overflow). |
+| `residual_births.max_clique_enumeration` | `10000000` | a component of the alternative pool whose order-invariant bound on its number of maximal cliques exceeds this offers no alternative groups (overflow, counted); the bound, not a measured count, decides, so dense pools (simulations: up to 1.4e5 maximal cliques) are skipped without enumeration. |
+| `residual_births.max_clique_calls` | `200000` | safety work limit of one component's enumeration (Bron-Kerbosch calls); a component that reaches it offers no alternative groups (overflow, counted). Not reached under the default bound. |
 | **release** (ReleaseRuleConfig) |  | Raw-discovery allele release (release.py): a founder allele is released when its capped fixed-assignment pseudo-probability reaches ``min_call_probability`` and at least ``min_supporters`` informative samples (of either direction) carry the founder there. |
 | `release.min_call_probability` | `0.85` |  |
 | `release.min_supporters` | `2` |  |
@@ -524,7 +527,7 @@ Stage `local_selection`, `local_selection/config.py`. All local-selection settin
 | `model.unknown_mass` | `0.01` | fixed prior mass of the unknown state (base ``background_mass``; also the background-state mass of the context refit's bin-level HMM). |
 | **search** (PathSearchConfig) |  | Drop / merge / add search with GEM refits (search.py, fit.py). |
 | `search.refits_per_kind` | `8` | top proposals per kind (drop, merge, add) refitted each round. round_backstop_base/_per_founder: reported round backstop, K of the current panel. update_backstop_base/_per_founder/_per_site: reported backstop of fixed-K GEM updates, base + per_founder K + per_site L. |
-| `search.refits_per_kind_cap` | `12` | release 2.1: the proposals tied with the last of the top refits_per_kind (its tie class of the screened score at decision_tolerance) join the refits, up to this many per kind; a cut still inside the class goes by panel bytes, then generation order. |
+| `search.refits_per_kind_cap` | `16` | release 2.2: the proposal cut takes whole tie classes of the screened score (at decision_tolerance) until at least refits_per_kind; a class that would take the refits of a kind past this cap is left out whole (counted as an overflow; no member of a tie class is preferred to another). |
 | `search.round_backstop_base` | `10` |  |
 | `search.round_backstop_per_founder` | `2` |  |
 | `search.update_backstop_base` | `20` |  |
@@ -534,6 +537,7 @@ Stage `local_selection`, `local_selection/config.py`. All local-selection settin
 | `search.decision_tolerance` | `0.0009765625` | tie quantum of every decision between EM-fitted or screened objectives (release 2.1): the proposal cut per kind, the round winner and the stop of the climb, the start-or-incumbent choice and the keep-incumbent rule between rounds; values chained within it are tied and decided by content (fewer founders, then the canonical panel bytes). A power of two placed by the valley census far above EM convergence residuals and the motion of 1e-9 relative GL noise, far below genuine drop / merge / add differences (nats). |
 | **bank** (CandidateBankConfig) |  | Candidate-bank search (bank.py): refits of the context proposals with discovery's fixed-K model, ranked by its binned-Viterbi BIC, K * complexity_scale * (L / 200) * N_active - 2 log L; K-scaled reported backstops with K the current panel's founder count: at most start_backstop(K) novel starts per call, score_backstop(K) admitted panels, round_backstop(K) rounds. Release 2.1: the block's discovery tie quanta (maths.ties BlockQuanta of the fixed-K workspace) order the BIC selection and the cavity-best endpoints (kind ``nll``) and stop the rounds (an improvement must exceed the ``improvement`` quantum). |
 | `bank.round_backstop_base` | `8` |  |
+| `bank.completion_variant_cap` | `8` | release 2.2: a proposal panel whose partial rows have tied completions becomes one source per combination of them, up to this many; above it the panel's source keeps only its rows with a unique completion (counted as an overflow, "ls.bank.completion.overflow"). |
 | `bank.score_backstop_base` | `1024` |  |
 | `bank.score_backstop_per_founder` | `128` |  |
 | `bank.start_backstop_base` | `512` |  |
@@ -727,7 +731,8 @@ Stage `family_phase`, `family_phase/config.py`. Pedigree-conditioned phase of on
 | `transmission_error` | `0.001` | probability that a copy factor transmits the other parental allele. |
 | `scaffold_phase_error` | `0.01` | probability that a root's scaffold orientation is wrong at a heterozygous site. |
 | `phase_switch_probability` | `0.005` | probability of a frame switch at a painting-bin edge inside a component (the family phase chain and the polish's coarse bins); component edges switch with probability 1/2 and the family chain never switches phase inside a painting bin (the polish's refinement: polish_window_sites). |
-| `map_max_sweeps` | `60` | safety cap on block-ascent sweeps. Every accepted step raises the posterior by more than a tie quantum, so the solver terminates by construction; reaching the cap is an error. Ten times the most sweeps measured (6: stress_n80; TroMau and std_n80 at most 3; validation of 18 Oct 2026, review M1). 2.0's belief-propagation settings (damping, tolerance, max_iterations, gauge_move_interval, minimum_gauge_support) are gone. |
+| `map_max_sweeps` | `60` | safety cap on the sweeps of one ascent (release 2.2: both sweep tiers count; the two-schedule estimator runs up to three ascents). Every accepted step raises the posterior by more than a tie quantum, so the solver terminates by construction; reaching the cap is an error. Measured (19 Oct 2026): at most 9 sweeps (stress_n80), TroMau and std_n80 at most 4. |
+| `map_long_moves` | `False` | run the long compound moves (change pairs longer than map_solver.LONG_SPAN sites and the |
 | `root_frame_window_bp` | `500000.0` | flank reach W around a bin edge |
 | `root_frame_location_bp` | `250000.0` | location tolerance (net votes ignore +- this around the edge) |
 | `root_frame_minimum_children` | `3` | children needed to move a frame (also the junction guard's parent size) |
@@ -804,6 +809,9 @@ No setting is read from the environment: every setting is in the configuration. 
 | `LSB_JOBID` | LSF job identity (automatic kernel cache directory); also `LSB_JOBINDEX`. |
 | `SGE_ROOT` | Marks a Grid Engine site, whose `JOB_ID` and `SGE_TASK_ID` then scope the automatic kernel cache directory. |
 | `HAPLOTYPES_TIE_CENSUS` | Diagnostic, unset in normal use: a directory into which every tie decision appends its compared values (`DIR/census.<pid>.jsonl`, one JSON line per decision) for the valley census that places the tie quanta (maths/ties.py). Results do not depend on it. |
+| `HAPLOTYPES_TIE_REVERSE` | Diagnostic, unset in normal use: `1` reverses every remaining arbitrary tie convention (index, content-key, default-state, sample-name and keep-first orders; maths/ties.py `reverse_conventions`), never the stated priors. The release acceptance test compares such a run with a default run: released outputs must agree outside released ambiguity. Records written under it carry `tie_reverse` in their identities and are never resumed by a default run. |
+| `HAPLOTYPES_TIE_REVERSE_KEEP` | Diagnostic, with `HAPLOTYPES_TIE_REVERSE`: comma-separated names of discovery conventions (or `all`) kept at their default while the others are reversed, to attribute a reversal difference (discovery/conventions.py). The central reversals of maths/ties.py are not covered. |
+| `HAPLOTYPES_DISCOVERY_CLIQUE_STATS` | Diagnostic, unset in normal use: a directory into which discovery's tie-carrying residual clustering appends its alternative-pool statistics (one file per process). Results do not depend on it. |
 
 and sets these for itself and its worker processes:
 

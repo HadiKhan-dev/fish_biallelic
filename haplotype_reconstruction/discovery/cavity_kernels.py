@@ -127,7 +127,7 @@ def _solve_cavity_site(
         heldout, site, k, log_likelihood, rw_log_likelihood, haplotypes,
         assignments, founder_support, unary, pair, edge_first, edge_second,
         neighbours, neighbour_counts, mean_field_max_iter,
-        mean_field_tolerance, work, edge_lookup, elbo_tie):
+        mean_field_tolerance, work, edge_lookup, elbo_tie, reverse):
     (
         q,
         candidate_q,
@@ -392,7 +392,7 @@ def _solve_cavity_site(
         candidate_q[start_index,:] = q
 
     # The best ELBO among the converged starts (all starts when none converged), then the first
-    # start in the fixed order whose ELBO is within elbo_tie of it.
+    # start in the fixed order (H, 1 - H, 1/2; reversed conventions: the last) whose ELBO is within elbo_tie of it.
     any_converged = False
     for start_index in range(3):
         if candidate_converged[start_index] == 1:
@@ -405,7 +405,8 @@ def _solve_cavity_site(
                 and candidate_elbo[start_index] > best_elbo:
             best_elbo = candidate_elbo[start_index]
     best_start = 0
-    for start_index in range(3):
+    for position in range(3):
+        start_index = 2 - position if reverse else position
         if (not any_converged or candidate_converged[start_index] == 1) \
                 and candidate_elbo[start_index] >= best_elbo - elbo_tie:
             best_start = start_index
@@ -435,7 +436,7 @@ def grouped_cavity_predictions(
         haplotypes, assignments, founder_support, unary, pair, edge_first,
         edge_second, edge_lookup, neighbours, neighbour_counts,
         mean_field_max_iter, mean_field_tolerance, likelihood_floor,
-        site_start, site_stop, shared_triple, elbo_tie):
+        site_start, site_stop, shared_triple, elbo_tie, reverse):
     """Solve and predict exact cases once in a bounded, site-parallel tile.
 
     ``edge_lookup[a, b]`` is the edge index of the pair factor of founders
@@ -474,7 +475,7 @@ def grouped_cavity_predictions(
                 heldout, site, k, log_likelihood, rw_log_likelihood, haplotypes,
                 assignments, founder_support, unary, pair, edge_first,
                 edge_second, neighbours, neighbour_counts, mean_field_max_iter,
-                mean_field_tolerance, work, edge_lookup, elbo_tie)
+                mean_field_tolerance, work, edge_lookup, elbo_tie, reverse)
             not_converged[offset, heldout] = failed
 
             g0 = likelihood[heldout, site, 0]
@@ -637,6 +638,8 @@ def _score_mode_cavity_kernel(
     likelihood_floor: float,
     shared_triple: np.ndarray,
     elbo_tie: float,
+    reverse: bool,
+    tie_mask: np.ndarray,
 ) -> tuple[np.ndarray, int]:
     """Fixed-assignment cavity log predictive of every sample of one complete panel, and the
     number of held-out site solves whose three mean-field starts all failed to converge
@@ -656,7 +659,17 @@ def _score_mode_cavity_kernel(
     # sample-ordered pass storing only the edges some row-pair assignment uses.
     pair_counts = np.zeros((k, k), dtype=np.int64)
     founder_support = np.zeros(k, dtype=np.int64)
-    state_counts = np.zeros(n_states, dtype=np.int64)
+    state_counts = np.zeros(n_states, dtype=np.float64)
+    # Release 2.2: a sample whose A step held several tied states T (tie_mask rows, discovery) counts 1/|T| at each
+    # of them; every other sample one count at its assigned state (the same values as integer counts).
+    with_ties = tie_mask.shape[0] == n_samples
+    tie_size = np.ones(n_samples, dtype=np.int64)
+    if with_ties:
+        for sample in range(n_samples):
+            size = 0
+            for state in range(n_states):
+                size += tie_mask[sample, state]
+            tie_size[sample] = size if size > 0 else 1
 
     # Dense (K+1)^2 state lookup (K <= 30: under 8 KB).
     state_lookup = np.empty((k + 1, k + 1), dtype=np.int64)
@@ -677,7 +690,13 @@ def _score_mode_cavity_kernel(
     for sample in range(n_samples):
         a = assignments[sample, 0]
         b = assignments[sample, 1]
-        state_counts[state_lookup[a, b]] += 1
+        if tie_size[sample] > 1:
+            share = 1.0 / tie_size[sample]
+            for state in range(n_states):
+                if tie_mask[sample, state]:
+                    state_counts[state] += share
+        else:
+            state_counts[state_lookup[a, b]] += 1.0
         if a < wildcard:
             founder_support[a] += 1
         if b < wildcard and b != a:
@@ -751,7 +770,7 @@ def _score_mode_cavity_kernel(
         full_log_state_mass[state] = math.log(
             state_counts[state] + prior_mass
         )
-        if state_counts[state] > 0:
+        if state_counts[state] >= 1.0:
             deleted_log_state_mass[state] = math.log(
                 state_counts[state] - 1 + prior_mass
             )
@@ -768,7 +787,7 @@ def _score_mode_cavity_kernel(
             haplotypes, assignments, founder_support, unary, pair, edge_first,
             edge_second, edge_lookup, neighbours, neighbour_counts,
             mean_field_max_iter, mean_field_tolerance, likelihood_floor,
-            site_start, site_stop, shared_triple, elbo_tie,
+            site_start, site_stop, shared_triple, elbo_tie, reverse,
         )
         for heldout in prange(n_samples):
             heldout_not_converged = not_converged_by_heldout[heldout]
@@ -785,10 +804,17 @@ def _score_mode_cavity_kernel(
 
     for heldout in prange(n_samples):
         log_state_predictive = np.empty(n_states, dtype=np.float64)
-        held_state = state_lookup[assignments[heldout, 0], assignments[heldout, 1]]
         for state in range(n_states):
             log_state_predictive[state] = full_log_state_mass[state]
-        log_state_predictive[held_state] = deleted_log_state_mass[held_state]
+        if tie_size[heldout] > 1:
+            share = 1.0 / tie_size[heldout]
+            for state in range(n_states):
+                if tie_mask[heldout, state]:
+                    log_state_predictive[state] = math.log(
+                        state_counts[state] - share + state_concentration * prior_base[state])
+        else:
+            held_state = state_lookup[assignments[heldout, 0], assignments[heldout, 1]]
+            log_state_predictive[held_state] = deleted_log_state_mass[held_state]
         for state in range(n_states):
             log_state_predictive[state] += emissions[heldout, state]
             log_state_predictive[state] -= log_prior_denominator

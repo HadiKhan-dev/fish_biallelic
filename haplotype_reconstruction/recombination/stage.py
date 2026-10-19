@@ -1,6 +1,7 @@
 """Recombination stage: missing-aware maps from the final phase of every chromosome.
 
-Per chromosome: decoder-frame calls (family phase) -> optional shared-family orientation fit -> per-meiosis
+Per chromosome: decoder-frame calls (family phase; sites of an undetermined decoder frame that are not called
+homozygotes are decoded as unknown, release 2.2) -> optional shared-family orientation fit -> per-meiosis
 decoding (expected crossovers, called events, exposure) -> map aggregation -> bin-honest intervals and the
 junction table. Supplied order breakpoints split the axis first (junctions.split_at_breakpoints). Results are
 conditional on the final phase and the fixed inferred pedigree, not calibrated joint-pedigree uncertainty.
@@ -46,6 +47,13 @@ def map_chromosome(phase, edges, observed, config, chromosome_map):
         segments, origin, masked = junction_report.split_at_breakpoints(positions, components, breakpoints, bin_edges)
     parents, children, slots = (np.asarray(x, dtype=np.int64) for x in (edges.parents, edges.children, edges.slots))
     calls = phase.decoder_calls()
+    if phase.frame_undetermined is not None:
+        # Released ambiguity (release 2.2): where a sample's decoder frame is undetermined, which track holds which
+        # allele is a tie convention, so a site there that is not a called homozygote (a half call; such stretches hold
+        # no heterozygous call) carries no observation of the transmitted homologue: it is decoded as unknown.
+        undetermined = (np.asarray(phase.frame_undetermined) & 1) > 0
+        homozygous = (calls[..., 0] >= 0) & (calls[..., 0] == calls[..., 1])
+        calls[undetermined & ~homozygous] = -1
     coverage, offsets, read_free_tracts, read_free_sites = observed_coverage(
         phase.coverage, phase.coverage_offsets, observed, config.read_free_tract_sites)
     fit = None

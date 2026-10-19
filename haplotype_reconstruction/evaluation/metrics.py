@@ -103,3 +103,91 @@ def long_switch_counts(calls, truth, components, minimum_runs):
             for index in range(len(minimum_runs)):
                 result[sample, index] += int(shorter >= minimum_runs[index])
     return result.sum(axis=0)
+
+
+@njit(cache=True)
+def _phase_sets_of_sample(calls, truth, components, undetermined, positions, spans):
+    """One sample's released phase sets (release 2.2; evaluation only).
+
+    calls, truth int8 [L, 2]; components int [L] (-1 between components); undetermined bool [L] (the displayed phase
+    of the site is undetermined: family phase's frame_undetermined bit 1); positions int64 [L]; spans int64 [L]
+    (output buffer). A phase set is a maximal run of sites of one component whose displayed phase is determined:
+    a component change, a site outside components or an undetermined site ends the set, and the next determined
+    site starts a new one (as the export breaks the VCF phase set there). Returns int64 [4]: allele errors aligned
+    by one strand swap per phase set (undetermined called sites add their per-site minimum, i.e. genotype-level
+    errors only), phase sets holding at least two called heterozygotes, called alleles at undetermined sites, and the
+    number of spans written (bp from the first to the last called heterozygote of each such set)."""
+    out = np.zeros(4, dtype=np.int64)
+    direct = swapped = 0
+    hets = 0
+    first = last = 0
+    current = -2               # component of the open set (-2: no open set)
+    for site in range(calls.shape[0]):
+        a, b = calls[site, 0], calls[site, 1]
+        x, y = truth[site, 0], truth[site, 1]
+        component = components[site]
+        d = int(a >= 0 and a != x) + int(b >= 0 and b != y)
+        w = int(a >= 0 and a != y) + int(b >= 0 and b != x)
+        closes = component < 0 or undetermined[site] or (current != -2 and component != current)
+        if closes and current != -2:
+            out[0] += min(direct, swapped)
+            if hets >= 2:
+                out[1] += 1
+                spans[out[3]] = last - first
+                out[3] += 1
+            direct = swapped = hets = 0
+            current = -2
+        if component < 0:
+            continue
+        if undetermined[site]:
+            out[0] += min(d, w)
+            out[2] += int(a >= 0) + int(b >= 0)
+            continue
+        if current == -2:
+            current = component
+        direct += d
+        swapped += w
+        if a >= 0 and b >= 0 and a != b:
+            if hets == 0:
+                first = positions[site]
+            last = positions[site]
+            hets += 1
+    if current != -2:
+        out[0] += min(direct, swapped)
+        if hets >= 2:
+            out[1] += 1
+            spans[out[3]] = last - first
+            out[3] += 1
+    return out
+
+
+def phase_set_counts(calls, truth, components, undetermined, positions):
+    """Released-phase-set metrics of one chromosome (release 2.2): (ps_aligned_allele_errors, phase_sets,
+    undetermined_called_alleles, spans int64[...]). ``undetermined`` bool [N, L] or None (2.1 records: phase sets are
+    the components, and ps_aligned_allele_errors equals component_aligned_allele_errors)."""
+    samples, sites, _ = calls.shape
+    if undetermined is None:
+        undetermined = np.zeros((samples, sites), dtype=np.bool_)
+    positions = np.ascontiguousarray(positions, dtype=np.int64)
+    components = np.ascontiguousarray(components)
+    buffer = np.empty(sites + 1, dtype=np.int64)
+    errors = sets = loose = 0
+    spans = []
+    for sample in range(samples):
+        result = _phase_sets_of_sample(np.ascontiguousarray(calls[sample]), np.ascontiguousarray(truth[sample]),
+                                       components, np.ascontiguousarray(undetermined[sample], dtype=np.bool_),
+                                       positions, buffer)
+        errors += int(result[0])
+        sets += int(result[1])
+        loose += int(result[2])
+        spans.append(buffer[:int(result[3])].copy())
+    return errors, sets, loose, (np.concatenate(spans) if spans else np.zeros(0, dtype=np.int64))
+
+
+def n50(lengths) -> int:
+    """The N50 of a set of lengths (the length at which the longest ones reach half the total); 0 if empty."""
+    values = np.sort(np.asarray(lengths, dtype=np.int64))[::-1]
+    if len(values) == 0 or values.sum() == 0:
+        return 0
+    cumulative = np.cumsum(values)
+    return int(values[int(np.searchsorted(cumulative, cumulative[-1] / 2.0))])

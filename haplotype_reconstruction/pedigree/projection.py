@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit, prange
 
+from ..maths import ties
 from ..painting.states import background_alt_frequency, state_alt_probabilities
 from .records import PreparedComponent
 
@@ -367,10 +368,22 @@ def _bisect_root(a, b, large_index, q_max, max_iterations):
     return upper, used
 
 
+def _bridges(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tolerance, max_iterations,
+             reverse=None):
+    """Every normalised zero-diagonal maximum-entropy completion (one task per candidate x boundary).
+
+    Among states tied up to rounding (Hall state, bracketing large branch, pivot) the lowest state is taken, or the
+    highest under the convention reversal (``reverse``; default maths.ties.reverse_conventions(), release 2.2)."""
+    if reverse is None:
+        reverse = ties.reverse_conventions()
+    return _bridges_kernel(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tolerance,
+                           max_iterations, bool(reverse))
+
+
 @njit(cache=True, parallel=True)
-def _bridges(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tolerance,
-             max_iterations):
-    """Every normalised zero-diagonal maximum-entropy completion (one task per candidate x boundary)."""
+def _bridges_kernel(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tolerance,
+                    max_iterations, reverse):
+    """:func:`_bridges` (the kernel)."""
     candidates, bins, states = pi.shape
     boundaries = bins - 1
     stay = np.zeros((candidates, boundaries, states), dtype=np.float64)
@@ -448,7 +461,8 @@ def _bridges(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tole
         for state in range(states):
             if a[state] + b[state] >= load_floor:
                 hub_mass = max(hub_mass, pi[candidate, boundary, state] + pi[candidate, boundary + 1, state])
-        for state in range(states):
+        for rank in range(states):
+            state = states - 1 - rank if reverse else rank
             if (a[state] + b[state] >= load_floor
                     and pi[candidate, boundary, state] + pi[candidate, boundary + 1, state] >= hub_mass - HUB_MASS_TIE):
                 hall_index = state
@@ -502,7 +516,8 @@ def _bridges(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tole
                 # Tied maximisers of L first, then every state.
                 selected = -1
                 for search_pass in range(2):
-                    for state in range(states):
+                    for rank in range(states):
+                        state = states - 1 - rank if reverse else rank
                         root_sum = math.sqrt(a[state]) + math.sqrt(b[state])
                         state_l = root_sum * root_sum
                         if search_pass == 0 and (max_l - state_l
@@ -548,7 +563,8 @@ def _bridges(pi, diagonal_flow, outgoing_change_flow, incoming_change_flow, tole
             for state in range(1, states):
                 top_beta = max(top_beta, beta[candidate, boundary, state])
             pivot = 0
-            for state in range(states):
+            for rank in range(states):
+                state = states - 1 - rank if reverse else rank
                 if beta[candidate, boundary, state] >= top_beta - HALL_ULPS * epsilon * abs(top_beta):
                     pivot = state
                     break

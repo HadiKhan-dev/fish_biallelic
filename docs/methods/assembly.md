@@ -83,7 +83,9 @@ variable shared by every sample, and evidence enters through the robust mixture 
 `AssemblyConfig.completion.crossfit.log_floor = -2.0`.
 
 1. **Cross-fitted carrier profiles** (`assembly/completion/crossfit.py`). The samples are split into two deterministic
-   folds (`AssemblyConfig.completion.crossfit.fold_seed = 1729`). On one fold a variational EM over
+   folds (`AssemblyConfig.completion.crossfit.fold_seed = 1729`): ordered by a seeded SHA-256 of their observation
+   pattern on the contig and alternated (release 2.2), so the split does not depend on sample names, input order or
+   the convention reversal, and genotype-likelihood noise cannot move it. On one fold a variational EM over
    per-sample pair states and per-site configurations of the unresolved alleles runs from one
    start (uniform configurations, pair posteriors from the complete sites) until the evidence
    lower bound converges (at most `AssemblyConfig.completion.crossfit.max_iterations = 100`

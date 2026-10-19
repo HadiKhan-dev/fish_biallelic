@@ -159,18 +159,40 @@ def _endpoint_order(paths, scores, block, quota, overrides, *, counter=None, cen
         if len(members) <= limit:
             kept[members] = True
             continue
-        kept[members[:limit]] = True
         cut = in_order[members[limit - 1]]
         cut_classes.add(int(cut))
-        if in_order[members[limit]] == cut:
+        # The whole class the quota cuts is kept, unless it would take the endpoint beyond twice its quota: then
+        # the whole class is dropped (release 2.2: order-invariant; 2.1 kept its first members in content order).
+        start = limit - 1
+        while start > 0 and in_order[members[start - 1]] == cut:
+            start -= 1
+        end = limit
+        while end < len(members) and in_order[members[end]] == cut:
+            end += 1
+        if end > limit:
             inside = True
-            for position in members[limit:2 * limit]:
-                if in_order[position] != cut:
-                    break
-                kept[position] = True
+        kept[members[:end] if (end <= 2 * limit or start == 0) else members[:start]] = True
     boundary = _cut_boundaries(scores[ranked], in_order, cut_classes, q)
     count_vector_classes(counter, "assembly.beam_cut", in_order, wide, boundary, inside)
     return ranked[kept]
+
+
+def path_linkage(transitions: Transitions, max_gap: int | None = None):
+    """A function path -> the path's linker log-probability score (float64 sum of its step scores, the beam's
+    ranking value) for this batch's transitions; the join search's data criterion inside log-likelihood tie classes
+    (release 2.2). Results are cached per path."""
+    lookup = _lookup(transitions)
+    gap_limit = max_gap if max_gap is not None else transitions.blocks
+    cache = {}
+
+    def score(path) -> float:
+        key = tuple(int(row) for row in path)
+        found = cache.get(key)
+        if found is None:
+            found = cache[key] = float(_step_scores(np.asarray(key, dtype=np.int64), lookup, gap_limit).sum())
+        return found
+
+    return score
 
 
 def endpoint_beam(transitions: Transitions, *, quota: int,

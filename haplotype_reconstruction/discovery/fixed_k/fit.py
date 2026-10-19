@@ -23,8 +23,9 @@ import numpy as np
 from numba import njit, prange
 
 from ...execution import claim_threads
+from ..conventions import rev
 from ..panel import canonical_solution, deduplicate, unique_rows
-from .assign import assign, haplotype_patterns, pair_indices
+from .assign import assign, haplotype_patterns, meet_pairs, pair_indices
 from .update import founder_buckets, sweep_one_thread, update_founders, usage_order
 from .workspace import FixedKWorkspace
 
@@ -115,7 +116,7 @@ def _frontier_layout(batch, first, second):
 @njit(cache=True, parallel=True, nogil=True)
 def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emissions,
                      ww_total_cost, row_slots, pair_i, pair_j, pair_slots, state_indices, first,
-                     second, penalty, k, n_bins, tile_width, tie):
+                     second, penalty, k, n_bins, tile_width, tie, reverse, meet):
     """A step of every panel of a frontier, sharing the emissions of distinct rows and row
     pairs within sample tiles; per panel the state order, argmin tie rule and Viterbi are those
     of the single-panel A step (identical values)."""
@@ -175,12 +176,58 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
                 if ww_total_cost[s] < best_cost[t]:
                     best_cost[t] = ww_total_cost[s]
                 alpha[n_states - 1, t] = ww_bin_emissions[s, 0]
-                # The first state (state order) within the tie quantum of the cheapest, as assign.py.
                 threshold = best_cost[t] + tie
+                if meet:
+                    # As assign.band_meet (release 2.2): the meet of the winning category's tied states; the
+                    # unknown-copy count is the category's.
+                    m0 = k
+                    m1 = k
+                    category_won = 2
+                    for category in range(2):
+                        lo = 0 if category == 0 else n_rr
+                        hi = n_rr if category == 0 else n_states - 1
+                        tied = 0
+                        for st in range(lo, hi):
+                            if -totals[state_indices[panel, st], t] <= threshold:
+                                if st < n_rr:
+                                    c = first[st]
+                                    d = second[st]
+                                else:
+                                    c = st - n_rr
+                                    d = k
+                                if tied == 0:
+                                    m0 = c
+                                    m1 = d
+                                else:
+                                    m0, m1 = meet_pairs(m0, m1, c, d, k)
+                                tied += 1
+                        if tied > 0:
+                            category_won = category
+                            break
+                    assignments[panel, s, 0] = m0
+                    assignments[panel, s, 1] = m1
+                    unknown_slots[panel, s] = category_won
+                    continue
+                # Release 2.1 rule, as assign.band_state: fewest unknown copies first
+                # (row pairs, then (k, U), then (U, U)), then row order (the last under reversed conventions).
                 chosen = n_states - 1
-                for st in range(n_states - 1):
-                    if -totals[state_indices[panel, st], t] <= threshold:
-                        chosen = st
+                found = False
+                for category in range(2):
+                    lo = 0 if category == 0 else n_rr
+                    hi = n_rr if category == 0 else n_states - 1
+                    if reverse:
+                        for st in range(hi - 1, lo - 1, -1):
+                            if -totals[state_indices[panel, st], t] <= threshold:
+                                chosen = st
+                                found = True
+                                break
+                    else:
+                        for st in range(lo, hi):
+                            if -totals[state_indices[panel, st], t] <= threshold:
+                                chosen = st
+                                found = True
+                                break
+                    if found:
                         break
                 best_state[t] = chosen
                 state = best_state[t]
@@ -232,7 +279,7 @@ def _assign_frontier(c0b, diff1_table, w_table, kw_cb, kw_diff_table, ww_bin_emi
 
 @njit(cache=True, parallel=True, nogil=True)
 def _update_frontier(batch, assignments, unknown_slots, uninformative, genotype_cost_by_sample,
-                     unknown_cost_by_sample, tie):
+                     unknown_cost_by_sample, tie, reverse):
     """Uninformative samples to (U, U), then every panel's one-thread H sweep (parallel over
     panels)."""
     following = batch.copy()
@@ -246,7 +293,7 @@ def _update_frontier(batch, assignments, unknown_slots, uninformative, genotype_
                 unknown_slots[panel, sample] = 2
         (homozygous, with_partner, with_unknown, partner, n_homozygous, n_with_partner,
          n_with_unknown, usage) = founder_buckets(assignments[panel], k)
-        order = usage_order(usage)
+        order = usage_order(usage, reverse)
         changes[panel] = sweep_one_thread(
             following[panel], order, homozygous, with_partner, with_unknown, partner,
             n_homozygous, n_with_partner, n_with_unknown, genotype_cost_by_sample,
@@ -285,11 +332,11 @@ def _batched_transitions(workspace, batch):
         workspace.c0b, tables.diff1_table, tables.w_table, workspace.kw_cb, tables.kw_diff_table,
         workspace.ww_bin_emissions, workspace.ww_total_cost, row_slots, pair_i, pair_j,
         pair_slots, state_indices, first, second, workspace.switch_penalty, k, n_bins,
-        tile_width, float(workspace.quanta.sample))
+        tile_width, float(workspace.quanta.sample), rev("d1"), bool(workspace.tie_meet))
     following, changes = _update_frontier(
         batch, assignments, unknown_slots, workspace.uninformative,
         workspace.genotype_cost_by_sample, workspace.unknown_cost_by_sample,
-        float(workspace.quanta.h_step))
+        float(workspace.quanta.h_step), rev("d3"))
     return following, assignments, cost, unknown_slots, changes
 
 
@@ -531,7 +578,8 @@ def _check_quanta(workspace, quanta):
         raise ValueError("a fixed-K fit uses its workspace's tie quanta; pass None or workspace.quanta")
 
 
-def prepare_workspace(likelihoods, observed, model, quanta=None) -> FixedKWorkspace:
+def prepare_workspace(likelihoods, observed, model, quanta=None, *, tie_meet=False) -> FixedKWorkspace:
     """A block's fixed-K workspace (see workspace.FixedKWorkspace); ``quanta``: the block's BlockQuanta
-    (None: derived from the block's null NLL, maths.ties.block_scale)."""
-    return FixedKWorkspace(likelihoods, observed, model, quanta)
+    (None: derived from the block's null NLL, maths.ties.block_scale); ``tie_meet``: the A step's release 2.2 meet
+    rule for tied states (discovery), else the 2.1 rule (local selection's bank)."""
+    return FixedKWorkspace(likelihoods, observed, model, quanta, tie_meet=tie_meet)

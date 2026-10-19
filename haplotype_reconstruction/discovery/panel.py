@@ -16,7 +16,7 @@ import math
 import numpy as np
 from numba import njit
 
-from ..maths.ties import BlockQuanta, class_sort
+from ..maths.ties import BlockQuanta, class_sort, tie_classes
 
 # Release 2.1: NLL comparisons use the block's ``nll`` tie quantum (BlockQuanta.nll; the old absolute
 # NLL_TOLERANCE = 1e-10 sat at the 1e-9-noise scale). Duplicates keep the first fit seen unless the
@@ -28,9 +28,11 @@ class FixedKSolution:
     """A fitted fixed-K factorisation in canonical form (arrays read-only).
 
     haplotypes: int64[K, L] binary rows, canonical order.
-    assignments: int64[N, 2] sorted row pairs, K = unknown copy.
+    assignments: int64[N, 2] sorted row pairs, K = unknown copy (release 2.2, discovery's meet rule: also a copy
+        that differs between the sample's tied A-step states, which goes to no founder row).
     per_sample_cost: float64[N] per-sample binned switching-Viterbi NLL.
-    unknown_slots: int64[N] unknown copies in the sample's pair (0, 1, 2).
+    unknown_slots: int64[N] unknown copies of the sample's (tied) A-step states (0, 1, 2); without ties the unknown
+        copies in its pair.
     iterations: coordinate-descent iterations the fit reported.
     nll: total NLL (sum of per_sample_cost, as the fitter reported it).
     fixed_point: the fitter proved haplotypes an A(H), H(A) fixed point in this workspace.
@@ -188,6 +190,54 @@ def deduplicate(solutions, beam_width: int | None = None, *, quanta=None) -> tup
             unique[solution.key] = solution
     ordered = sort_solutions(unique.values(), quanta)
     return tuple(ordered if beam_width is None else ordered[:beam_width])
+
+
+def unknown_alleles(assignments, observed, k):
+    """bool[K, L]: True where no sample assigned to the founder (either copy; K = unknown copy) observes the site
+    (exact integer counts): the founder's allele there is unknown (release 2.2)."""
+    assignments = np.asarray(assignments, dtype=np.int64)
+    observed = np.asarray(observed, dtype=np.bool_)
+    known = np.zeros((k, observed.shape[1]), dtype=np.bool_)
+    for copy in (0, 1):
+        rows = assignments[:, copy]
+        for founder in np.unique(rows[rows < k]):
+            known[founder] |= observed[rows == founder].any(axis=0)
+    return ~known
+
+
+def known_content_key(haplotypes, unknown) -> bytes:
+    """A panel's science: its rows with unknown alleles masked (-1), as a sorted multiset (bytes)."""
+    masked = np.where(np.asarray(unknown, dtype=bool), -1, np.asarray(haplotypes, dtype=np.int64)).astype(np.int8)
+    return b"|".join(sorted(row.tobytes() for row in masked)) + b"#" + str(masked.shape).encode()
+
+
+def whole_class_cut(ordered, classes, width: int):
+    """The leading members of ``ordered`` (tie-class ids ``classes``, non-decreasing) taken by whole classes while
+    fewer than ``width`` are kept; a class that would take the count beyond 2 x width ends the cut (the first class is
+    always kept). No content order cuts inside a class (release 2.2). Returns (kept, a class was left out)."""
+    kept = []
+    position = 0
+    while position < len(ordered) and len(kept) < width:
+        stop = position
+        while stop < len(ordered) and classes[stop] == classes[position]:
+            stop += 1
+        if kept and len(kept) + (stop - position) > 2 * width:
+            return kept, True
+        kept.extend(ordered[position:stop])
+        position = stop
+    return kept, False
+
+
+def class_beam(solutions, width: int, quanta=None):
+    """The solutions in tie-class order of NLL (sort_solutions), cut at ``width`` by whole NLL classes
+    (whole_class_cut)."""
+    ordered = sort_solutions(solutions, quanta)
+    if len(ordered) <= width:
+        return tuple(ordered)
+    q = _nll_quantum(ordered, quanta)
+    classes = tie_classes([solution.nll for solution in ordered], q).classes
+    kept, _ = whole_class_cut(ordered, [int(classes[i]) for i in range(len(ordered))], width)
+    return tuple(kept)
 
 
 def unique_rows(matrix: np.ndarray) -> np.ndarray:

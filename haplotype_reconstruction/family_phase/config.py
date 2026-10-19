@@ -20,9 +20,14 @@ class FamilyPhaseConfig:
         family phase chain and the polish's coarse bins); component edges switch with probability 1/2 and the
         family chain never switches phase inside a painting bin (the polish's refinement: polish_window_sites).
     Family MAP solver (map_solver.py, release 2.1):
-      map_max_sweeps: safety cap on block-ascent sweeps. Every accepted step raises the posterior by more than
-        a tie quantum, so the solver terminates by construction; reaching the cap is an error. Ten times the most
-        sweeps measured (6: stress_n80; TroMau and std_n80 at most 3; validation of 18 Oct 2026, review M1).
+      map_max_sweeps: safety cap on the sweeps of one ascent (release 2.2: both sweep tiers count; the two-schedule
+        estimator runs up to three ascents). Every accepted step raises the posterior by more than a tie quantum, so
+        the solver terminates by construction; reaching the cap is an error. Measured (19 Oct 2026): at most 9 sweeps
+        (stress_n80), TroMau and std_n80 at most 4.
+      map_long_moves: run the long compound moves (change pairs longer than map_solver.LONG_SPAN sites and the
+        terminal segments, sweep tier 1) in the final ascent of the two-schedule MAP. Off by default (release 2.2):
+        they cost 4-6x the family-phase time of 2.1 on dense data (one pass ~200 s on reallike6 chr13) and changed
+        about 10 of 63 validated reference releases.
         2.0's belief-propagation settings (damping, tolerance, max_iterations, gauge_move_interval,
         minimum_gauge_support) are gone.
     Root-frame repair (frames.py), on the final family state:
@@ -47,6 +52,7 @@ class FamilyPhaseConfig:
     scaffold_phase_error: float = 0.01
     phase_switch_probability: float = 0.005
     map_max_sweeps: int = 60
+    map_long_moves: bool = False
     root_frame_window_bp: float = 5e5
     root_frame_location_bp: float = 2.5e5
     root_frame_minimum_children: int = 3

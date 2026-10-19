@@ -10,10 +10,12 @@ backstop is reported (termination "update_backstop").
 Release 2.1 (noise stability): a fit is returned with its rows in canonical (lexicographic) order
 (frequencies and per-row posteriors permuted with them). GEM flips move rows past one another, so
 2.0's final row order depended on the trajectory: two fits ending at the same founders and
-frequencies were different panels to every byte-keyed comparison, tie-break and record. The
-choice of the founder whose sites flip and of the single exact flip take the first candidate
-(row, then site order) within FLIP_TIE (relative) of the largest gain, so mathematically equal
-gains computed through different arithmetic cannot steer the fit by their last bits.
+frequencies were different panels to every byte-keyed comparison, tie-break and record.
+
+Release 2.2: founders (or single exact flips) whose gains lie within FLIP_TIE (relative) of the
+largest are compared by the exact objective after each flip; a remaining tie between different
+panels stops the ascent (keep-current, a stated prior: termination "tied_flips" /
+"tied_exact_flips"). 2.1 took the first candidate in row, then site order (a convention).
 """
 from __future__ import annotations
 
@@ -23,22 +25,62 @@ import numpy as np
 from scipy.special import expit
 
 from ..execution import claim_threads
-from ..maths.ties import census
+from ..maths.ties import census, reverse_conventions
 from .objective import regularizer
 from .path_model import COUNTS, EXACT, FLIPS, PathWorkspace
 
-# Relative tie band of the GEM's flip choices (release 2.1): candidates whose gain is within
-# FLIP_TIE x |largest gain| of the largest are tied and the first in row, then site order is
-# taken. Far above the rounding of the gains (~1e-16 relative) and their motion under 1e-9
-# relative GL noise; it only fixes the order of ascent steps among (near-)equal gains.
+# Relative tie band of the GEM's flip choices: candidates whose gain is within FLIP_TIE x |largest
+# gain| of the largest are tied (release 2.2: decided by the exact objective after each flip, see
+# _tied_move). Far above the rounding of the gains (~1e-16 relative) and their motion under 1e-9
+# relative GL noise.
 FLIP_TIE = 2.0 ** -20
 
 
-def first_within(values, tie=FLIP_TIE) -> int:
-    """Flat index of the first element within tie x |max| of the maximum of ``values``."""
+def tied_within(values, tie=FLIP_TIE) -> np.ndarray:
+    """Flat indices of every element within tie x |max| of the maximum of ``values``."""
     flat = np.ravel(values)
     best = float(flat.max())
-    return int(np.flatnonzero(flat >= best - tie * abs(best))[0])
+    return np.flatnonzero(flat >= best - tie * abs(best))
+
+
+def first_within(values, tie=FLIP_TIE) -> int:
+    """Flat index of the first element within tie x |max| of the maximum of ``values`` (the last
+    one under maths.ties.reverse_conventions: the row / site order is a convention)."""
+    flat = np.ravel(values)
+    best = float(flat.max())
+    within = np.flatnonzero(flat >= best - tie * abs(best))
+    return int(within[-1] if reverse_conventions() else within[0])
+
+
+def _tied_move(panel, frequencies, moves, workspace, objective):
+    """Among tied GEM moves ((founder, sites to flip), gains within FLIP_TIE), the one whose flipped
+    panel has the best exact objective, as (founder, changed, trial panel, trial log likelihood).
+    Moves that duplicate a row are skipped ("collision" when every move does). Objectives within
+    FLIP_TIE x |best objective gain| of the best are tied: if they lead to one panel (the same rows
+    and frequencies in canonical order, i.e. a relabelling) any of them is that move; if they lead
+    to different panels, None (the data cannot decide: the caller stops the ascent, keep-current
+    being the stated prior)."""
+    candidates = []
+    for founder, changed in moves:
+        trial = panel.copy()
+        trial[founder, changed] = 1 - trial[founder, changed]
+        if has_duplicate_rows(trial):
+            continue
+        score = workspace.state(trial, frequencies, COUNTS)["log_likelihood"]
+        gain = score + regularizer(trial, frequencies) - objective
+        candidates.append((gain, founder, changed, trial, score))
+    if not candidates:
+        return "collision"
+    best = max(candidate[0] for candidate in candidates)
+    tied = [candidate for candidate in candidates if candidate[0] >= best - FLIP_TIE * abs(best)]
+    identities = set()
+    for _gain, _founder, _changed, trial, _score in tied:
+        rows, mass = canonical(trial, frequencies)
+        identities.add((rows.tobytes(), mass.tobytes()))
+    if len(identities) > 1:
+        return None
+    _gain, founder, changed, trial, score = tied[0]
+    return founder, changed, trial, score
 
 
 def canonical_order(panel) -> np.ndarray:
@@ -58,7 +100,9 @@ class PathFit:
     one-bit conditional posterior); occupancy: float64[K, L] expected copies per site (both are
     None while a fit is restored from a memo). log_likelihood, objective (log_likelihood +
     regularizer): nats. converged: ended at a conditional fixed point; termination:
-    "conditional_fixed_point", "row_collision_requires_outer_selection" or "update_backstop".
+    "conditional_fixed_point", "row_collision_requires_outer_selection", "update_backstop", or
+    (release 2.2) "tied_flips" / "tied_exact_flips": the best moves tied and led to different panels,
+    so the ascent stopped (keep-current; converged is True).
     """
 
     panel: np.ndarray
@@ -168,30 +212,67 @@ def fit_fixed(panel, frequencies, prepared, search_config, buffers=None, census_
         sums = positive.sum(axis=1)
         if census_key is not None and len(sums) > 1 and sums.max() > 0:
             _census_top("ls.gem.founder", f"{census_key}/u{update}", sums)
-        founder = first_within(sums)
-        changed = positive[founder] > 0
-        stationary = not changed.any()
+        stationary = not (sums.max() > 0)
+        trial = trial_score = None
+        if not stationary:
+            founders = tied_within(sums)
+            if len(founders) == 1:
+                founder = int(founders[0])
+                changed = positive[founder] > 0
+            else:
+                # Tied founders (release 2.2): the data decide by the exact objective after each
+                # founder's flip; a remaining tie between different panels stops the ascent here
+                # (keep-current, a stated prior), never a row-order choice.
+                moves = [(int(a), positive[int(a)] > 0) for a in founders]
+                choice = _tied_move(panel, frequencies, moves, workspace, objective)
+                if choice == "collision":
+                    termination = "row_collision_requires_outer_selection"
+                    break
+                if choice is None:
+                    converged = True
+                    termination = "tied_flips"
+                    break
+                founder, changed, trial, trial_score = choice
         if stationary:
             # A conditional one-bit improvement can escape a stationary GEM point (checked with
             # the exact marginal likelihood; computed only here and for the reported posteriors).
             exact = workspace.state(panel, frequencies, EXACT)["conditional_flip_gains"]
             if census_key is not None and exact.max() > tolerance:
                 _census_top("ls.gem.exact", f"{census_key}/u{update}", exact)
-            founder, site = np.unravel_index(first_within(exact), exact.shape)
-            if exact[founder, site] <= tolerance:
+            cells = [int(cell) for cell in tied_within(exact) if exact.flat[int(cell)] > tolerance]
+            if not cells:
                 if frequency_gain > tolerance:
                     continue
                 converged = True
                 termination = "conditional_fixed_point"
                 break
-            changed = np.zeros(panel.shape[1], dtype=bool)
-            changed[site] = True
-        trial = panel.copy()
-        trial[founder, changed] = 1 - trial[founder, changed]
-        if has_duplicate_rows(trial):
-            termination = "row_collision_requires_outer_selection"
-            break
-        trial_score = workspace.state(trial, frequencies, COUNTS)["log_likelihood"]
+            if len(cells) == 1:
+                founder, site = np.unravel_index(int(cells[0]), exact.shape)
+                changed = np.zeros(panel.shape[1], dtype=bool)
+                changed[site] = True
+            else:
+                moves = []
+                for cell in cells:
+                    a, site = np.unravel_index(int(cell), exact.shape)
+                    one = np.zeros(panel.shape[1], dtype=bool)
+                    one[site] = True
+                    moves.append((int(a), one))
+                choice = _tied_move(panel, frequencies, moves, workspace, objective)
+                if choice == "collision":
+                    termination = "row_collision_requires_outer_selection"
+                    break
+                if choice is None:
+                    converged = True
+                    termination = "tied_exact_flips"
+                    break
+                founder, changed, trial, trial_score = choice
+        if trial is None:
+            trial = panel.copy()
+            trial[founder, changed] = 1 - trial[founder, changed]
+            if has_duplicate_rows(trial):
+                termination = "row_collision_requires_outer_selection"
+                break
+            trial_score = workspace.state(trial, frequencies, COUNTS)["log_likelihood"]
         panel, score = trial, trial_score
         objective = trial_score + regularizer(trial, frequencies)
     allele_probability, occupancy = posteriors(workspace.state(panel, frequencies, EXACT), panel)

@@ -7,7 +7,9 @@ candidate flip is scored exactly by the selector x artifact marginal likelihood 
 orientation-error CTMC prior of the sample, and accepted greedily (descending degree order) when it gains more
 than ``minimum_objective_gain`` nats. The objective is conditional (margins, not Bayes factors). Segment trees
 (trees.py) make each trial O(log J); maps with flat stretches or no artifact process (non-mixing products) use
-the streaming recurrences instead.
+the streaming recurrences instead. Under the convention reversal (HAPLOTYPES_TIE_REVERSE,
+maths.ties.reverse_conventions) candidates of equal degree are visited by descending sample, start and stop; the
+degree order and the acceptance threshold are kept.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ import numpy as np
 from numba import njit, prange
 
 from ..maths.chains import binary_posterior, chain_segments, contracted_emissions
+from ..maths.ties import reverse_conventions
 from ..model.genetic_map import haldane_fraction
 from .decoder import edge_log_evidence
 from .trees import EdgeProductTree, OrientationPriorTree
@@ -347,7 +350,8 @@ def _candidate_scores(data, orientation, candidates, adjacent, config, epochs, o
 
 
 def fit_shared_orientations(data, config):
-    """(orientation int8 [N, L], SharedOrientationFit) for decoder-frame data (stage.shared_data)."""
+    """(orientation int8 [N, L], SharedOrientationFit) for decoder-frame data (stage.shared_data). Equal-degree
+    candidates go by descending sample, start and stop under the convention reversal (module docstring)."""
     started = time.monotonic()
     shared = config.shared_orientation
     calls, positions, runs, parents, children, slots, genetic = data
@@ -378,8 +382,11 @@ def fit_shared_orientations(data, config):
     tested = 0
     converged = False
     # Deterministic descending degree order lets well-supported shared parents resolve before the more
-    # ambiguous degree-two child cases.
-    candidates.sort(key=lambda c: (-len(adjacent[c[0]]), c[0], c[1], c[2]))
+    # ambiguous degree-two child cases. Equal degrees: sample, start, stop (all descending under the reversal).
+    if reverse_conventions():
+        candidates.sort(key=lambda c: (-len(adjacent[c[0]]), -c[0], -c[1], -c[2]))
+    else:
+        candidates.sort(key=lambda c: (-len(adjacent[c[0]]), c[0], c[1], c[2]))
     epochs = np.zeros(len(parents), dtype=np.int64)
     orientation_epochs = np.zeros(len(calls), dtype=np.int64)
     sweep = 0

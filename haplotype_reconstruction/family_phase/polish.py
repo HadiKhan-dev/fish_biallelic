@@ -24,6 +24,12 @@ only above q: inside q the current configuration is kept. The biological conditi
 whose copy-consistency gain is exactly 0 up to rounding passes it). Colours by descending degree, then sample index
 (the canonical sample order); colours forward on even sweeps, backward on odd ones; the vertices of a colour share
 no variable, so their parallel updates do not depend on thread count.
+
+Convention reversal (HAPLOTYPES_TIE_REVERSE, maths.ties.reverse_conventions; read once per polish): the Viterbi
+chains are decoded from the right end (an unavoidable switch inside a tied stretch lands at its rightmost position,
+the eight-state chain maximises its axes in the order 2, 1, 0), a tied end state is the highest (initial selectors:
+state 1), colouring ties go to the highest index and the sweeps start backward. Fewest switches, keep-current, the
+quantum q, descending degree and the all-zero starting frames (the scaffold orientation) are kept.
 """
 from __future__ import annotations
 
@@ -35,17 +41,21 @@ from numba import njit, prange
 
 from ..execution import claim_threads
 from ..maths import chains
+from ..maths.ties import reverse_conventions
 
 
 @dataclass(frozen=True)
 class PolishResult:
     """frames int8 [N, L] (relative to the polished scaffold), selectors int8 [E, L], accepted vertex updates
-    per sweep; ``converged`` = the last sweep accepted nothing."""
+    per sweep; ``converged`` = the last sweep accepted nothing; ``undetermined`` bool [N, L] (release 2.2): sites
+    where a tie-equivalent decode of a two-parent child's frame (the two extreme tie placements of its converged
+    vertex chain, undetermined_frames) differs from the released frame."""
 
     frames: np.ndarray
     selectors: np.ndarray
     sweep_updates: tuple[int, ...]
     converged: bool
+    undetermined: np.ndarray | None = None
 
 
 @njit(cache=True, inline='always')
@@ -56,9 +66,10 @@ def copy_log(a, b, match, mismatch):
     return match if a == b else mismatch
 
 
-def pedigree_layout(samples, parents, children, slots):
+def pedigree_layout(samples, parents, children, slots, reverse=False):
     """(incoming int64 [N, 2] edge per parental slot or -1, outgoing offsets int64 [N+1], outgoing edges
-    int64 [E], colour classes): a greedy colouring by descending degree (ties by index) of the pedigree graph."""
+    int64 [E], colour classes): a greedy colouring by descending degree (ties by index) of the pedigree graph.
+    ``reverse`` (the convention reversal): degree ties by descending index; the degree order is kept."""
     incoming = np.full((samples, 2), -1, dtype=np.int64)
     outgoing = [[] for _ in range(samples)]
     adjacent = [set() for _ in range(samples)]
@@ -68,7 +79,11 @@ def pedigree_layout(samples, parents, children, slots):
         adjacent[p].add(int(c))
         adjacent[c].add(int(p))
     colours = np.full(samples, -1, dtype=np.int64)
-    for i in sorted(range(samples), key=lambda j: (-len(adjacent[j]), j)):
+    if reverse:
+        order = sorted(range(samples), key=lambda j: (-len(adjacent[j]), -j))
+    else:
+        order = sorted(range(samples), key=lambda j: (-len(adjacent[j]), j))
+    for i in order:
         used = {colours[j] for j in adjacent[i] if colours[j] >= 0}
         colour = 0
         while colour in used:
@@ -123,8 +138,12 @@ def phase_transitions(bins, components, probability, frames, selectors, window):
 
 
 @njit(cache=True, parallel=True)
-def initialize_selectors(scaffold, frames, parents, children, slots, logstay, logjump, error):
-    """Per edge, the MAP selector path given the current frames (two-state Viterbi on copy consistency)."""
+def initialize_selectors(scaffold, frames, parents, children, slots, logstay, logjump, error, reverse=False):
+    """Per edge, the MAP selector path given the current frames (two-state Viterbi on copy consistency).
+
+    ``reverse`` (the convention reversal): the chain is decoded from the right end, so an unavoidable switch inside
+    a tied stretch lands at its rightmost position instead of its leftmost, and a tied end state (now at site 0) is
+    1 instead of 0. Back-pointers stay within CHAIN_TIE (fewest switches) either way."""
     edges, sites = len(parents), scaffold.shape[1]
     result = np.zeros((edges, sites), dtype=np.int8)
     match, mismatch = math.log(2.) + math.log1p(-error), math.log(2.) + math.log(error)
@@ -133,21 +152,28 @@ def initialize_selectors(scaffold, frames, parents, children, slots, logstay, lo
         back = np.zeros((sites, 2), dtype=np.int8)
         score = np.full(2, -math.log(2.))
         current = np.empty(2)
-        for j in range(sites):
+        for t in range(sites):
+            # Decoding order: site j; k is the marker interval between j and the previously decoded site.
+            j = sites - 1 - t if reverse else t
+            k = j if reverse else j - 1
             child = scaffold[c, j, slot ^ frames[c, j]]
             for s in range(2):
                 value = score[s]
-                if j:
-                    stay = score[s] + logstay[j - 1]
-                    jump = score[1 - s] + logjump[j - 1]
+                if t:
+                    stay = score[s] + logstay[k]
+                    jump = score[1 - s] + logjump[k]
                     value = max(stay, jump)
                     back[j, s] = s if stay >= value - chains.CHAIN_TIE else 1 - s
                 current[s] = value + copy_log(scaffold[p, j, s ^ frames[p, j]], child, match, mismatch)
             score, current = current, score
-        state = 0 if score[0] >= max(score[0], score[1]) - chains.CHAIN_TIE else 1
-        for j in range(sites - 1, -1, -1):
+        if reverse:
+            state = 1 if score[1] >= max(score[0], score[1]) - chains.CHAIN_TIE else 0
+        else:
+            state = 0 if score[0] >= max(score[0], score[1]) - chains.CHAIN_TIE else 1
+        for t in range(sites):
+            j = t if reverse else sites - 1 - t
             result[e, j] = state
-            if j:
+            if t < sites - 1:
                 state = back[j, state]
     return result
 
@@ -267,10 +293,16 @@ def accept_supported_intervals(i, path, scaffold, frames, selectors, incoming, o
 
 
 @njit(cache=True)
-def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
-                  parents, logstay, logjump, phase_stay, phase_jump, error, minimum_gain,
-                  minimum_biological_gain):
-    """Re-decode vertex i (frame bit 0, incoming selector bits 1 and 2) by a factorised 8-state Viterbi."""
+def vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump, phase_stay,
+                phase_jump, error, reverse=False):
+    """The factorised 8-state Viterbi path int8 [L] of vertex i (frame bit 0, incoming selector bits 1 and 2) with
+    its neighbours fixed (update_vertex's decode).
+
+    ``reverse`` (the convention reversal): the chain is decoded from the right end (an unavoidable switch inside a
+    tied stretch lands at its rightmost position), the axes are maximised in the order 2, 1, 0 (equal-count switch
+    alternatives on different axes go to the highest bit), and the end state (at site 0) is the current one when
+    within CHAIN_TIE of the best, else the highest such state. The stay-within-CHAIN_TIE back-pointers, keep-current
+    and the interval acceptance are unchanged."""
     sites = scaffold.shape[1]
     e0, e1 = incoming[i, 0], incoming[i, 1]
     match, mismatch = math.log(2.) + math.log1p(-error), math.log(2.) + math.log(error)
@@ -279,23 +311,28 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
     origin = np.empty(8, dtype=np.int8)
     origins = np.empty(8, dtype=np.int8)
     back = np.zeros((sites, 8), dtype=np.int8)
-    for j in range(sites):
+    for t in range(sites):
+        # Decoding order: site j; the transition from the previously decoded site crosses marker interval k (sites
+        # k and k + 1).
+        j = sites - 1 - t if reverse else t
+        k = j if reverse else j - 1
         trans_stay, trans_jump = 0., 0.
-        if j:
-            trans_stay, trans_jump = phase_stay[j - 1], phase_jump[j - 1]
-            old_flip = frames[i, j] != frames[i, j - 1]
-            for k in range(offsets[i], offsets[i + 1]):
-                edge = outgoing[k]
-                source_changed = (selectors[edge, j] != selectors[edge, j - 1]) ^ old_flip
-                trans_stay += logjump[j - 1] if source_changed else logstay[j - 1]
-                trans_jump += logstay[j - 1] if source_changed else logjump[j - 1]
-        if j:
+        if t:
+            trans_stay, trans_jump = phase_stay[k], phase_jump[k]
+            old_flip = frames[i, k + 1] != frames[i, k]
+            for o in range(offsets[i], offsets[i + 1]):
+                edge = outgoing[o]
+                source_changed = (selectors[edge, k + 1] != selectors[edge, k]) ^ old_flip
+                trans_stay += logjump[k] if source_changed else logstay[k]
+                trans_jump += logstay[k] if source_changed else logjump[k]
+        if t:
             for state in range(8):
                 origin[state] = state
             # Factorised max-product transition: 3 binary axes, O(8 log 8).
-            for bit in range(3):
-                stay = trans_stay if bit == 0 else logstay[j - 1]
-                jump = trans_jump if bit == 0 else logjump[j - 1]
+            for axis in range(3):
+                bit = 2 - axis if reverse else axis
+                stay = trans_stay if bit == 0 else logstay[k]
+                jump = trans_jump if bit == 0 else logjump[k]
                 absent = (bit == 1 and e0 < 0) or (bit == 2 and e1 < 0)
                 if absent:
                     stay, jump = 0., -np.inf
@@ -324,21 +361,37 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
                 emission += copy_log(scaffold[p, j, s1 ^ frames[p, j]], scaffold[i, j, 1 ^ f], match, mismatch)
             scores[state] += emission
     best = scores.max()
-    state = int(frames[i, sites - 1])
+    end = 0 if reverse else sites - 1
+    state = int(frames[i, end])
     if e0 >= 0:
-        state += 2 * int(selectors[e0, sites - 1])
+        state += 2 * int(selectors[e0, end])
     if e1 >= 0:
-        state += 4 * int(selectors[e1, sites - 1])
+        state += 4 * int(selectors[e1, end])
     if not scores[state] >= best - chains.CHAIN_TIE:
-        for candidate in range(8):
+        for rank in range(8):
+            candidate = 7 - rank if reverse else rank
             if scores[candidate] >= best - chains.CHAIN_TIE:
                 state = candidate
                 break
     path = np.empty(sites, dtype=np.int8)
-    for j in range(sites - 1, -1, -1):
+    for t in range(sites):
+        j = t if reverse else sites - 1 - t
         path[j] = state
-        if j:
+        if t < sites - 1:
             state = back[j, state]
+    return path
+
+
+@njit(cache=True)
+def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
+                  parents, logstay, logjump, phase_stay, phase_jump, error, minimum_gain,
+                  minimum_biological_gain, reverse=False):
+    """Re-decode vertex i (frame bit 0, incoming selector bits 1 and 2) by a factorised 8-state Viterbi (vertex_path)
+    and accept the maximal differing intervals that gain enough (accept_supported_intervals)."""
+    sites = scaffold.shape[1]
+    e0, e1 = incoming[i, 0], incoming[i, 1]
+    path = vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump,
+                       phase_stay, phase_jump, error, reverse)
     # Gains are exact interval differences (accept_supported_intervals), never this DP maximum (review B2): an
     # unchanged configuration is not a move.
     different_configuration = False
@@ -356,15 +409,38 @@ def update_vertex(i, scaffold, frames, selectors, incoming, offsets, outgoing,
 
 
 @njit(cache=True, parallel=True)
+def undetermined_frames(vertices, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump,
+                        phase_stay, phase_jump, error):
+    """bool [N, L]: for each vertex of ``vertices`` (two-parent children at the converged polish), the sites where
+    the frame of either extreme tie placement of its vertex chain (vertex_path decoded forward: unavoidable switches
+    at the leftmost tied position; mirrored: rightmost) differs from its released frame (release 2.2 released
+    ambiguity). Both placements are optima of the same chain within CHAIN_TIE."""
+    samples, sites = frames.shape
+    out = np.zeros((samples, sites), dtype=np.bool_)
+    for v in prange(len(vertices)):
+        i = vertices[v]
+        left = vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump,
+                           phase_stay, phase_jump, error, False)
+        right = vertex_path(i, scaffold, frames, selectors, incoming, offsets, outgoing, parents, logstay, logjump,
+                            phase_stay, phase_jump, error, True)
+        for j in range(sites):
+            f = frames[i, j]
+            if (left[j] & 1) != f or (right[j] & 1) != f:
+                out[i, j] = True
+    return out
+
+
+@njit(cache=True, parallel=True)
 def update_colour(vertices, scaffold, frames, selectors, incoming, offsets, outgoing,
                   parents, logstay, logjump, phase_stay, phase_jump, error, minimum_gain,
-                  minimum_biological_gain):
-    """Independent vertex updates of one colour class; returns the accepted gain of each vertex."""
+                  minimum_biological_gain, reverse=False):
+    """Independent vertex updates of one colour class; returns the accepted gain of each vertex (``reverse``:
+    update_vertex's convention reversal)."""
     gains = np.zeros(len(vertices))
     for v in prange(len(vertices)):
         gains[v], _ = update_vertex(vertices[v], scaffold, frames, selectors, incoming, offsets, outgoing,
                                     parents, logstay, logjump, phase_stay, phase_jump, error, minimum_gain,
-                                    minimum_biological_gain)
+                                    minimum_biological_gain, reverse)
     return gains
 
 
@@ -376,18 +452,20 @@ def selector_log_terms(theta):
 
 
 def polish(scaffold, bins, components, parents, children, slots, meiosis_theta, config):
-    """Polish the frames of two-parent children starting from the scaffold (module docstring)."""
+    """Polish the frames of two-parent children starting from the scaffold (module docstring; the convention
+    reversal is read once here)."""
+    rev = reverse_conventions()
     scaffold = np.ascontiguousarray(scaffold, dtype=np.int8)
     frames = np.zeros(scaffold.shape[:2], dtype=np.int8)
     bins = np.asarray(bins, dtype=np.int64)
     components = np.asarray(components, dtype=np.int64)
-    incoming, offsets, outgoing, colours = pedigree_layout(len(scaffold), parents, children, slots)
+    incoming, offsets, outgoing, colours = pedigree_layout(len(scaffold), parents, children, slots, rev)
     eligible = np.sum(incoming >= 0, axis=1) == 2
     theta = np.array(meiosis_theta, dtype=np.float64)
     theta[components[1:] != components[:-1]] = .5
     logstay, logjump = selector_log_terms(theta)
     selectors = initialize_selectors(scaffold, frames, parents, children, slots, logstay, logjump,
-                                     config.polish_copy_error)
+                                     config.polish_copy_error, rev)
     phase_theta = phase_transitions(bins, components, config.phase_switch_probability, frames, selectors,
                                     config.polish_window_sites)
     phase_stay, phase_jump = selector_log_terms(phase_theta)
@@ -395,17 +473,24 @@ def polish(scaffold, bins, components, parents, children, slots, meiosis_theta, 
     converged = False
     for sweep in range(config.polish_max_sweeps):
         updates = 0
-        for vertices in (colours if sweep % 2 == 0 else colours[::-1]):
+        # Colours forward on even sweeps and backward on odd ones (the other way round under the reversal).
+        forward = (sweep % 2 == 0) != rev
+        for vertices in (colours if forward else colours[::-1]):
             claim_threads()
             vertices = vertices[eligible[vertices]]
             if not len(vertices):
                 continue
             gains = update_colour(vertices, scaffold, frames, selectors, incoming, offsets, outgoing, parents,
                                   logstay, logjump, phase_stay, phase_jump, config.polish_copy_error,
-                                  config.polish_minimum_gain, config.polish_minimum_biological_gain)
+                                  config.polish_minimum_gain, config.polish_minimum_biological_gain, rev)
             updates += int((gains > 0).sum())
         sweep_updates.append(updates)
         if updates == 0:
             converged = True
             break
-    return PolishResult(frames, selectors, tuple(sweep_updates), converged)
+    undetermined = None
+    if converged:
+        undetermined = undetermined_frames(np.flatnonzero(eligible).astype(np.int64), scaffold, frames, selectors,
+                                           incoming, offsets, outgoing, parents, logstay, logjump, phase_stay,
+                                           phase_jump, config.polish_copy_error)
+    return PolishResult(frames, selectors, tuple(sweep_updates), converged, undetermined)

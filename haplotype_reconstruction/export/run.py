@@ -40,8 +40,11 @@ def _released_alleles(calls: np.ndarray) -> bool:
     return calls.size == 0 or (int(calls.min()) >= -1 and int(calls.max()) <= 1)
 
 
-def founder_panels(file) -> tuple[str, list[tuple[np.ndarray, np.ndarray]]]:
-    """(founder stage, [(positions, released calls)]) of a contig: founder refit when recorded, else painting."""
+def founder_panels(file, *, withhold_unobserved: bool = True) -> tuple[str, list[tuple[np.ndarray, np.ndarray]]]:
+    """(founder stage, [(positions, released calls)]) of a contig: founder refit when recorded, else painting.
+
+    ``withhold_unobserved`` (release 2.2, :func:`unobserved_founder_alleles`): founder alleles that no painted
+    carrier observes are released as -1 ('.')."""
     from ..founder_refit import records as refit_records
     from ..painting import records as painting_records
     if refit_records.complete(file):
@@ -50,7 +53,71 @@ def founder_panels(file) -> tuple[str, list[tuple[np.ndarray, np.ndarray]]]:
         stage, panels = "painting", painting_records.founder_panels(file)
     else:
         raise FileNotFoundError(f"{file.label}: no painted founder panels")
-    return stage, [(panel.positions, panel.released) for panel in panels]
+    panels = [(panel.positions, panel.released) for panel in panels]
+    if withhold_unobserved:
+        panels, _ = unobserved_founder_alleles(file, panels)
+    return stage, panels
+
+
+def refit_ambiguous_alleles(file) -> int | None:
+    """Founder alleles the founder refit released unknown because two tied refit moves exclude each other (2.2;
+    observed but not attributable to one row; written '.' like every unknown), or None without a refit record."""
+    from ..founder_refit import records as refit_records
+    if not refit_records.complete(file):
+        return None
+    refit = refit_records.load(file)
+    return int(sum(int(np.sum(component.panel.released[component.changed_rows, component.changed_sites] < 0))
+                   for component in refit.components))
+
+
+def phase_ambiguity(file):
+    """(phase breaks per call row, frame_undetermined int8 [N, L]) of the contig's family phase, or None when its
+    record does not carry the released phase ambiguity (release 2.2; records before it)."""
+    from ..family_phase import records as phase_records
+    names = ("frame_undetermined", "phase_breaks", "phase_break_offsets")
+    if not all(name in getattr(phase_records, "ARRAYS", ()) for name in names):
+        return None
+    try:
+        arrays = phase_records.load_arrays(file, names)
+    except KeyError:
+        return None
+    offsets = np.asarray(arrays["phase_break_offsets"], dtype=np.int64)
+    breaks = np.asarray(arrays["phase_breaks"], dtype=np.int64)
+    return ([breaks[offsets[row]:offsets[row + 1]] for row in range(len(offsets) - 1)],
+            np.asarray(arrays["frame_undetermined"]))
+
+
+def unobserved_founder_alleles(file, panels) -> tuple[list[tuple[np.ndarray, np.ndarray]], list[int]]:
+    """(panels with unobserved alleles set to -1, withheld alleles per component) of a contig (release 2.2).
+
+    A released founder allele (row k, site j) is kept only if some sample whose released painting names k at j
+    (a track's member set: named, pooled, local equivalence or switch interval; painting
+    ComponentPainting.carrier_observed) has read depth at j (the evidence observed mask). Elsewhere no carrier
+    observes it and the allele is the upstream fit's convention (e.g. a seed allele kept by keep-current rules),
+    so it is withheld. Panels are the painting's components in order (the founder-refit panels keep its rows)."""
+    from ..evidence import records as evidence_records
+    from ..painting import records as painting_records
+    painting = painting_records.load(file, panels=False, emissions=False)
+    if len(painting.components) != len(panels):
+        raise ValueError(f"{file.label}: founder panels and painting components differ")
+    evidence = evidence_records.load_arrays(file, ("positions", "observed"))
+    sites, observed = np.asarray(evidence["positions"]), np.asarray(evidence["observed"], dtype=bool)
+    result, withheld = [], []
+    for component, (positions, calls) in zip(painting.components, panels):
+        positions = np.asarray(positions, dtype=np.int64)
+        calls = np.asarray(calls, dtype=np.int8)
+        columns = np.searchsorted(sites, positions)
+        if np.any(columns >= len(sites)) or not np.array_equal(sites[np.minimum(columns, len(sites) - 1)],
+                                                                 positions):
+            raise ValueError(f"{file.label}: founder panel sites are missing from the evidence record")
+        seen = component.carrier_observed(positions, columns, observed, len(calls))
+        hidden = (calls >= 0) & ~seen
+        withheld.append(int(np.count_nonzero(hidden)))
+        if withheld[-1]:
+            calls = calls.copy()
+            calls[hidden] = -1
+        result.append((positions, calls))
+    return result, withheld
 
 
 def founder_source_key(file) -> str:
@@ -85,6 +152,13 @@ def contig_bytes(file, products, *, full_length: bool = False, synthetic: bool =
         elif painting_records.complete(file):
             completion = file.info(f"{assembly_records.FINAL_PREFIX}/{assembly_records.COMPLETION}")
             source = file.info(painting_records.KEY).decoded_bytes + 2 * completion.decoded_bytes
+        # Unobserved-allele withholding (release 2.2): the painting's release grids (labels, classes, status,
+        # members, direct: 28 bytes per sample, track pair and bin, twice for decoding) and the evidence observed
+        # mask with its positions (one byte per sample and site, 8 per site).
+        evidence = evidence_sites(file) if evidence is None else evidence
+        summary = painting_records.load_summary(file)
+        bins = sum(shape.bins for shape in summary.components)
+        total += 2 * 28 * summary.samples * bins + (summary.samples + 8) * len(evidence["kept_positions"])
     total += source
     if "samples" in products and phase_records.complete(file):
         total += file.info(phase_records.KEY).decoded_bytes
@@ -101,7 +175,8 @@ def contig_bytes(file, products, *, full_length: bool = False, synthetic: bool =
 
 
 def export_contig(destination: Path, contig: str, *, products, founders=None, phase=None, reference=None,
-                  synthetic=False, file_format="bcf", sites=None, index=False, input_sample_ids=None) -> dict:
+                  synthetic=False, file_format="bcf", sites=None, index=False, input_sample_ids=None,
+                  withheld=None, phase_ambiguity=None) -> dict:
     """Write one chromosome's files; returns its manifest entry.
 
     ``founders``: (stage, [(positions int64 [L], released int8 [K, L])]) in component order; ``phase``:
@@ -109,7 +184,9 @@ def export_contig(destination: Path, contig: str, *, products, founders=None, ph
     ``sites``: the export.sites table of the VCF rows (default: the phase positions as kept sites, REF/ALT from
     ``reference``); ``index``: write each VCF/BCF's index (.tbi / .csi); ``input_sample_ids``: the run's input
     sample order (the sample columns are written in it; the records hold the canonical order, release 2.1), None
-    to write the records' order.
+    to write the records' order; ``withheld``: founder alleles withheld per component as unobserved
+    (unobserved_founder_alleles; recorded in the manifest entry and the founder VCF header); ``phase_ambiguity``:
+    family phase's (phase breaks per row, frame_undetermined) (phase_ambiguity; None = component phase sets only).
     """
     destination = Path(destination)
     stem = quote(contig, safe="")
@@ -135,7 +212,8 @@ def export_contig(destination: Path, contig: str, *, products, founders=None, ph
     if "founders" in products:
         vcf_name = stem + ".founders" + suffix(file_format)
         temporary = destination / f".{vcf_name}.tmp"
-        write_founder_vcf(temporary, sites, panels, stage, synthetic=synthetic, file_format=file_format)
+        write_founder_vcf(temporary, sites, panels, stage, synthetic=synthetic, file_format=file_format,
+                          withheld=withheld)
         files.extend(place(temporary, destination / vcf_name, file_format=file_format,
                            last_position=int(sites.positions[-1]), index=index))
     for component, (positions, calls) in enumerate(panels or ()):
@@ -144,7 +222,8 @@ def export_contig(destination: Path, contig: str, *, products, founders=None, ph
             filename = f"{stem}.component{component:04d}.founders.tsv.gz"
             write_founder_tracks(destination / filename, contig, positions, calls)
             files.append(filename)
-        components.append(component_record(contig, component, positions, calls, stage, filename, vcf_name))
+        components.append(component_record(contig, component, positions, calls, stage, filename, vcf_name,
+                                           None if withheld is None else withheld[component]))
     if "samples" in products:
         sample_ids, positions, component_ids, calls = phase
         calls = np.asarray(calls)
@@ -154,11 +233,15 @@ def export_contig(destination: Path, contig: str, *, products, founders=None, ph
         temporary = destination / f".{filename}.tmp"
         rows = input_rows(sample_ids, input_sample_ids)
         names = tuple(sample_ids) if rows is None else tuple(map(str, input_sample_ids))
+        breaks, undetermined = (None, None) if phase_ambiguity is None else phase_ambiguity
         write_sample_phase(temporary, sites, np.asarray(positions), calls, np.asarray(component_ids),
-                           names, synthetic=synthetic, file_format=file_format, sample_rows=rows)
+                           names, synthetic=synthetic, file_format=file_format, sample_rows=rows,
+                           phase_breaks=breaks, frame_undetermined=undetermined)
         files.extend(place(temporary, destination / filename, file_format=file_format,
                            last_position=int(sites.positions[-1]), index=index))
     entry = dict(contig=contig, files=files, founder_components=components)
+    if withheld is not None:
+        entry["unobserved_founder_alleles"] = int(sum(withheld))
     if summarise_sites:
         entry["sites"] = sites.summary()
     return entry
@@ -176,13 +259,24 @@ def _export_task(task, shared, budget):
     if "founders" in products or "samples" in products:
         sites = build_site_table(file, task["contig"], full_length=task["full_length"],
                                  reference=task["reference"], synthetic=task["synthetic"])
-    founders = founder_panels(file) if ("founders" in products or "tracks" in products) else None
+    founders = withheld = ambiguous = None
+    if "founders" in products or "tracks" in products:
+        stage, panels = founder_panels(file, withhold_unobserved=False)
+        panels, withheld = unobserved_founder_alleles(file, panels)
+        founders = (stage, panels)
+        ambiguous = refit_ambiguous_alleles(file)
+        print(f"  [export] {task['contig']}: {sum(withheld)} founder alleles withheld (no observing painted "
+              f"carrier)" + ("" if ambiguous is None else f"; {ambiguous} unknown from tied refit moves"), flush=True)
     phase = phase_records.load_calls(file) if "samples" in products else None
+    ambiguity = phase_ambiguity(file) if "samples" in products else None
     destination = Path(task["destination"])
     entry = export_contig(destination, task["contig"], products=products, founders=founders, phase=phase,
                           reference=task["reference"], synthetic=task["synthetic"],
                           file_format=task["file_format"], sites=sites, index=True,
-                          input_sample_ids=task.get("input_sample_ids"))
+                          input_sample_ids=task.get("input_sample_ids"), withheld=withheld,
+                          phase_ambiguity=ambiguity)
+    if ambiguous is not None:
+        entry["refit_ambiguous_alleles"] = ambiguous
     if task.get("record") is not None:
         from . import records
         for name in set(task.get("previous_files", ())) - set(entry["files"]):
@@ -200,7 +294,13 @@ def write_manifest(destination: Path, checkpoint_root, *, synthetic: bool, refer
                     checkpoint_root=str(Path(checkpoint_root).resolve()),
                     coordinate_system="1-based input SNP positions", unknown_allele=".",
                     founder_identity="chromosome AND component local; H0 across components is not an identity",
-                    sample_phase="PS resets at supported component boundaries; no invented phase qualities",
+                    unobserved_founder_alleles=("released founder alleles that no painted carrier observes (no "
+                                                "sample painted with the founder there has read depth) are '.'; "
+                                                "counts per contig (unobserved_founder_alleles) and component "
+                                                "(withheld_unobserved_alleles)"),
+                    sample_phase=("PS resets at supported component boundaries and after each undetermined phase "
+                                  "boundary of the sample (family phase); a site whose displayed frame is "
+                                  "undetermined is unphased; no invented phase qualities"),
                     synthetic_alleles=synthetic, reference_vcf=reference, contigs=contigs)
     if settings is not None:
         manifest.update(

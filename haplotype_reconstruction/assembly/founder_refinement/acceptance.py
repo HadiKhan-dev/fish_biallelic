@@ -45,6 +45,7 @@ from .guard import canonical_sites, path_switch_events, removed_events, shared_s
 from .messages import advance, advance_lex, backward_chain, backward_chain_lex, forward_chain, forward_chain_lex
 from .objective import unordered_pairs
 from ... import execution
+from ...maths import ties
 from ..tie_rules import quantum as tie_quantum
 
 # A move is accepted while its exact F gain exceeds TOL (log units).
@@ -391,7 +392,7 @@ def _score_items(n_items, it_kind, it_k, it_p1, it_p2, it_rs, cand_rows, p, fron
 @njit(cache=True, nogil=True)
 def _uncredited_switches(haps, leaves, logs, offsets, penalty, p, k, p1, p2, cand_rows, rs, gains_s,
                          switches_s, frontier, local, local_cnt, stored, stored_cnt, gperm, permuted,
-                         f, fcnt, first, second, chain, ahead, acc):
+                         f, fcnt, first, second, chain, ahead, acc, reverse):
     """N_shared of a coarse candidate (founder k's rows cand_rows[rs:] on [p1, p2)): the samples it
     affects are traced with and without it on a window around [p1, p2) that doubles until the two
     paths of a sample agree at both window ends (or the window is the whole component); their
@@ -431,9 +432,9 @@ def _uncredited_switches(haps, leaves, logs, offsets, penalty, p, k, p1, p2, can
             ga[i] = g_hi[affected[i]]
             gca[i] = gc_hi[affected[i]]
         old = path_switch_events(haps, leaves, logs, offsets, penalty, fa, ca, ga, gca, lo, hi,
-                                 affected, -1, 0, 0, rows)
+                                 affected, -1, 0, 0, rows, reverse)
         new = path_switch_events(haps, leaves, logs, offsets, penalty, fa, ca, ga, gca, lo, hi,
-                                 affected, k, p1, p2, rows)
+                                 affected, k, p1, p2, rows, reverse)
         acc[_A_TRACED] += (hi - lo) * len(affected)
         everything = lo == 0 and hi == blocks
         keep = np.ones(len(affected), np.bool_)
@@ -477,9 +478,9 @@ def _virtual_cmp(X, p, f1, f2, g1, g2):
 
 
 @njit(cache=True, nogil=True)
-def _exchange_cmp(X, p, a1, b1, a2, b2):
+def _exchange_cmp(X, p, a1, b1, a2, b2, reverse):
     """Content order of two suffix exchanges at junction p: their resulting pairs of founder paths (each pair
-    sorted, smaller path first) compared lexicographically."""
+    sorted, smaller path first) compared lexicographically; inverted under the convention reversal."""
     if _virtual_cmp(X, p, a1, b1, b1, a1) <= 0:
         l1a, l1b, h1a, h1b = a1, b1, b1, a1
     else:
@@ -489,13 +490,13 @@ def _exchange_cmp(X, p, a1, b1, a2, b2):
     else:
         l2a, l2b, h2a, h2b = b2, a2, a2, b2
     c = _virtual_cmp(X, p, l1a, l1b, l2a, l2b)
-    if c != 0:
-        return c
-    return _virtual_cmp(X, p, h1a, h1b, h2a, h2b)
+    if c == 0:
+        c = _virtual_cmp(X, p, h1a, h1b, h2a, h2b)
+    return -c if reverse else c
 
 
 @njit(cache=True, nogil=True)
-def _exchange_winner(gains, pa, pb, X, p, q, floor):
+def _exchange_winner(gains, pa, pb, X, p, q, floor, reverse):
     """The chosen suffix exchange among those with gain > floor: the best tie class of the exact gains (quantum
     q), inside it the content-smallest exchange (_exchange_cmp); a class wider than WIDE_QUANTA x q keeps value
     order (content among exactly equal values). Returns (index or -1, class size, wide)."""
@@ -529,46 +530,49 @@ def _exchange_winner(gains, pa, pb, X, p, q, floor):
             if gains[i] > gains[winner]:
                 winner = i
             continue
-        if _exchange_cmp(X, p, pa[i], pb[i], pa[winner], pb[winner]) < 0:
+        if _exchange_cmp(X, p, pa[i], pb[i], pa[winner], pb[winner], reverse) < 0:
             winner = i
     return winner, size, wide
 
 
 @njit(cache=True, nogil=True)
-def _move_cmp(X, cand_rows, k1, a1, c1, r1, i1, k2, a2, c2, r2, i2):
+def _move_cmp(X, cand_rows, k1, a1, c1, r1, i1, k2, a2, c2, r2, i2, reverse):
     """Content order of two content moves: the moved founder's resulting path (rows cand_rows[r:] on blocks
     [a, c), its current rows elsewhere), then the founder slot, then proposal order."""
+    c = 0
     for x in range(X.shape[1]):
         u = cand_rows[r1 + x - a1] if a1 <= x < c1 else X[k1, x]
         v = cand_rows[r2 + x - a2] if a2 <= x < c2 else X[k2, x]
         if u != v:
-            return -1 if u < v else 1
-    if k1 != k2:
-        return -1 if k1 < k2 else 1
-    if i1 != i2:
-        return -1 if i1 < i2 else 1
-    return 0
+            c = -1 if u < v else 1
+            break
+    if c == 0 and k1 != k2:
+        c = -1 if k1 < k2 else 1
+    if c == 0 and i1 != i2:
+        c = -1 if i1 < i2 else 1
+    return -c if reverse else c
 
 
 @njit(cache=True, nogil=True)
-def _move_before(u, v, gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, it_cand, by_value):
+def _move_before(u, v, gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, it_cand, by_value, reverse):
     """Decision order of ranked content moves u, v (indices into the scored items): by exact gain (when by_value),
     then content (_move_cmp)."""
     if by_value and gain[u] != gain[v]:
         return gain[u] > gain[v]
     return _move_cmp(X, cand_rows, it_k[u], it_p1[u], it_p2[u], it_rs[u], it_cand[u], it_k[v], it_p1[v],
-                     it_p2[v], it_rs[v], it_cand[v]) < 0
+                     it_p2[v], it_rs[v], it_cand[v], reverse) < 0
 
 
 @njit(cache=True, nogil=True)
-def _rank_moves(order, n_ranked, gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, it_cand, q, class_size, acc):
+def _rank_moves(order, n_ranked, gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, it_cand, q, class_size, acc,
+                reverse):
     """Sorts order[:n_ranked] (moves above TOL) into decision order: tie classes of the exact gains (descending,
     quantum q; a class wider than WIDE_QUANTA x q keeps value order), content order inside a class. class_size[r]
     receives the size of the class of position r."""
     for i in range(1, n_ranked):
         j = i
         while j > 0 and _move_before(order[j], order[j - 1], gain, X, cand_rows, it_k, it_p1, it_p2, it_rs,
-                                     it_cand, True):
+                                     it_cand, True, reverse):
             order[j - 1], order[j] = order[j], order[j - 1]
             j -= 1
     start = 0
@@ -583,7 +587,7 @@ def _rank_moves(order, n_ranked, gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, 
                 for i in range(start + 1, end):
                     j = i
                     while j > start and _move_before(order[j], order[j - 1], gain, X, cand_rows, it_k, it_p1,
-                                                     it_p2, it_rs, it_cand, False):
+                                                     it_p2, it_rs, it_cand, False, reverse):
                         order[j - 1], order[j] = order[j], order[j - 1]
                         j -= 1
         for r in range(start, end):
@@ -596,7 +600,7 @@ def _rank_moves(order, n_ranked, gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, 
 def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, fcnt0, local,
                local_cnt, stored, stored_cnt, stored_scale, gperm0, lab, cand_start, cand_kind,
                cand_end, cand_k0, cand_row_start, cand_rows, pa, pb, guarded, exchanges, acc, ahead0,
-               chain0, start_fwd, start_fcnt, pristine0, tie_q):
+               chain0, start_fwd, start_fcnt, pristine0, tie_q, reverse):
     """Junctions [j0, j1) of one acceptance pass (module docstring); haps, X and lab are modified in
     place, acc (ACC_KEYS) accumulated.
 
@@ -609,7 +613,8 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
     recursion on the same panel) instead of being advanced. The candidates anchored at junction q
     are cand_start[q] .. cand_start[q + 1] - 1 in proposal order (kind, end block, founder label,
     rows cand_rows[cand_row_start[i]:] over [q, end)). Arrays of switch counts are one-element
-    placeholders without the guard. tie_q: the tie quantum of the gains (module docstring).
+    placeholders without the guard. tie_q: the tie quantum of the gains (module docstring). reverse: the
+    convention reversal (maths.ties.reverse_conventions(); content orders inverted).
     Returns (junction_gain, junction_pair of the best exchange at each junction (first look), gperm,
     the forward message and counts at j1, frontier, whether a move was accepted, ahead, chain).
     """
@@ -644,14 +649,14 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
                 gains = exchange_gains(f, np.ascontiguousarray(g))
                 if first_look:
                     # the junction's best gain (value) and its exchange by the tie rule (all pairs)
-                    top, top_size, top_wide = _exchange_winner(gains, pa, pb, X, p, tie_q, -np.inf)
+                    top, top_size, top_wide = _exchange_winner(gains, pa, pb, X, p, tie_q, -np.inf, reverse)
                     if top < 0:
                         top = 0
                     junction_gain[p - j0] = np.max(gains)
                     junction_pair[p - j0, 0] = pa[top]
                     junction_pair[p - j0, 1] = pb[top]
                     first_look = False
-                best, tied, wide = _exchange_winner(gains, pa, pb, X, p, tie_q, TOL)
+                best, tied, wide = _exchange_winner(gains, pa, pb, X, p, tie_q, TOL, reverse)
                 if best < 0:
                     break
                 if tied > 1:
@@ -712,7 +717,7 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
                         n_ranked += 1
                 class_size = np.ones(max(n_ranked, 1), np.int64)
                 _rank_moves(order, n_ranked, act_gain, X, cand_rows, it_k, it_p1, it_p2, it_rs, it_cand,
-                            tie_q, class_size, acc)
+                            tie_q, class_size, acc, reverse)
                 chosen = -1
                 chosen_rank = -1
                 for r in range(n_ranked):
@@ -726,7 +731,7 @@ def pass_chunk(haps, X, leaves, logs, offsets, penalty, j0, j1, frontier0, f0, f
                             haps, leaves, logs, offsets, penalty, p, it_k[i], it_p1[i], it_p2[i],
                             cand_rows, it_rs[i], act_gains_s[i], act_switches_s[i], frontier, local,
                             local_cnt, stored, stored_cnt, gperm, permuted, f, fcnt, first, second,
-                            chain, ahead, acc)
+                            chain, ahead, acc, reverse)
                         if not gain - penalty * shared > TOL:
                             acc[_A_GUARD_SWITCHES] += shared
                             acc[_A_GUARD_REJECTED] += 1
@@ -808,7 +813,7 @@ def candidate_arrays(props, blocks):
 
 
 def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty, guarded, budget,
-                exchanges=True, start_fwd=None, start_fcnt=None, scale=0.0):
+                exchanges=True, start_fwd=None, start_fcnt=None, scale=0.0, reverse=None):
     """One exact acceptance pass on `orientation` (search.Orientation); X (K x B, that orientation's
     block order) is modified in place.
 
@@ -820,7 +825,8 @@ def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty
     forward messages (and counts) of X itself in this orientation, if known; until the first
     accepted move the carried forward message is read from them. budget: the live thread share
     (execution.CpuBudget), re-read before every JUNCTION_BATCH junctions. scale: |F| of the pass's
-    start panel (the tie quantum's scale, tie_rules.quantum("refine_F", scale)).
+    start panel (the tie quantum's scale, tie_rules.quantum("refine_F", scale)). reverse: the content-order
+    convention of the pass (default: maths.ties.reverse_conventions(); the fixed-K search passes its own).
     Returns (counters {ACC_KEYS}, junction_gain (B + 1), junction_pair (B + 1, 2)).
     """
     tie_q = float(tie_quantum("refine_F", scale))
@@ -861,7 +867,8 @@ def accept_pass(orientation, X, stored, stored_cnt, stored_scale, props, penalty
                 haps, X, orientation.leaves, orientation.logs, orientation.offsets, float(penalty),
                 p, stop, frontier, f, fcnt, local, local_cnt, stored,
                 stored_cnt if guarded else count3, stored_scale, gperm, lab, *cands, pa, pb,
-                bool(guarded), bool(exchanges), acc, ahead, chain, start_fwd, start_fcnt, pristine, tie_q)
+                bool(guarded), bool(exchanges), acc, ahead, chain, start_fwd, start_fcnt, pristine, tie_q,
+                bool(ties.reverse_conventions() if reverse is None else reverse))
         pristine = pristine and not accepted
         junction_gain[p:stop] = jg
         junction_pair[p:stop] = jp

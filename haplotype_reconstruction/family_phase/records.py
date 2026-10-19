@@ -9,7 +9,7 @@ run ``family_phase``       the per-contig FamilyPhaseSummary rows
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
@@ -22,9 +22,11 @@ from .frames import ChildFrameChange, FrameDecision, FrameRepair, GuardBlock
 
 STAGE = "family_phase"
 KEY = "family_phase"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ARRAYS = ("positions", "component_ids", "bin_edges", "bin_edge_offsets", "calls", "displayed_frame",
-          "decoder_frame", "coverage", "coverage_offsets")
+          "decoder_frame", "coverage", "coverage_offsets", "frame_undetermined", "phase_breaks", "phase_break_offsets")
+# Arrays added in release 2.2 (absent from schema-1 payloads; decoded as 'nothing undetermined').
+ARRAYS_2_2 = ("frame_undetermined", "phase_breaks", "phase_break_offsets")
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,9 @@ class FamilyPhaseDiagnostics:
     polished frame differs from the family MAP frame; frame_repair: root-frame decisions (masks dropped).
     map_conflicts: Mendelian-conflict diagnostic, (parent sample, bp position) of every site where the parent's best
     genotype leaves a child's allele mistransmitted in the MAP (a root's best summed genotype).
+    map_two_schedules (release 2.2): the two-schedule estimator's record (J of the canonical and mirrored end points,
+    which was the base, clusters, transplanted and tied transplants, released J); map_sweeps / map_accepted /
+    map_objective describe the final ascent.
     (Release 2.1; 2.0 recorded belief-propagation ``iterations`` and ``residuals`` instead of the map_* fields:
     such payloads decode with map_sweeps = iterations and empty map_accepted / map_objective / map_conflicts.)"""
 
@@ -52,6 +57,7 @@ class FamilyPhaseDiagnostics:
     frame_repair: FrameRepair
     elapsed_seconds: float
     map_conflicts: tuple = ()
+    map_two_schedules: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -65,7 +71,12 @@ class FamilyPhaseProduct:
     [N, L] (1 = the painting scaffold's tracks swapped; calls[n, j, k] = scaffold[n, j, k ^ displayed_frame], the
     family model's internal frame is decoder_frame, so recombination reads calls[..., k ^ displayed ^ decoder]);
     coverage int64 [R, 2] + coverage_offsets int64 [N+1] (each sample's painted site ranges [start, stop));
-    edges_identity: identity of the ParentEdges the phase was conditioned on.
+    edges_identity: identity of the ParentEdges the phase was conditioned on. Released ambiguity (release 2.2,
+    stage.released_ambiguity): frame_undetermined int8 [N, L] (bit 0: decoder frame, bit 1: displayed frame
+    undetermined there; a displayed-undetermined heterozygous or half-called site has no determined phase);
+    phase_breaks int64 [B] + phase_break_offsets int64 [N+1] (per sample, marker boundaries i, between sites i and
+    i + 1, where the displayed phase of the right side relative to the left side is not determined by data; component
+    edges are not listed).
     """
 
     contig: str
@@ -81,10 +92,19 @@ class FamilyPhaseProduct:
     coverage_offsets: np.ndarray
     edges_identity: str
     diagnostics: FamilyPhaseDiagnostics
+    frame_undetermined: np.ndarray | None = None
+    phase_breaks: np.ndarray | None = None
+    phase_break_offsets: np.ndarray | None = None
 
     def component_bin_edges(self, component):
         """Half-open bp bin edges of one component."""
         return self.bin_edges[self.bin_edge_offsets[component]:self.bin_edge_offsets[component + 1]]
+
+    def phase_breaks_of(self, sample):
+        """int64 marker boundaries of one sample's phase-set breaks (released ambiguity)."""
+        if self.phase_breaks is None:
+            return np.zeros(0, dtype=np.int64)
+        return self.phase_breaks[self.phase_break_offsets[sample]:self.phase_break_offsets[sample + 1]]
 
     def decoder_calls(self):
         """int8 [N, L, 2]: calls in the decoder (internal family) frame."""
@@ -143,6 +163,11 @@ def progress(file) -> dict:
 def encode(product):
     """Record payload: a dict of the product's arrays and plain data."""
     record = {name: getattr(product, name) for name in ARRAYS}
+    if record["frame_undetermined"] is None:          # a product built without released ambiguity
+        samples, sites = np.asarray(product.calls).shape[:2]
+        record.update(frame_undetermined=np.zeros((samples, sites), dtype=np.int8),
+                      phase_breaks=np.zeros(0, dtype=np.int64),
+                      phase_break_offsets=np.zeros(samples + 1, dtype=np.int64))
     record.update(schema=SCHEMA_VERSION, contig=product.contig, sample_ids=list(product.sample_ids),
                   edges_identity=product.edges_identity, diagnostics=asdict(product.diagnostics))
     return record
@@ -169,6 +194,12 @@ def _decode_diagnostics(record):
 
 
 def decode(record):
+    record = dict(record)
+    if "frame_undetermined" not in record:          # a schema-1 (release 2.0/2.1) payload
+        samples, sites = np.asarray(record["calls"]).shape[:2]
+        record.update(frame_undetermined=np.zeros((samples, sites), dtype=np.int8),
+                      phase_breaks=np.zeros(0, dtype=np.int64),
+                      phase_break_offsets=np.zeros(samples + 1, dtype=np.int64))
     return FamilyPhaseProduct(
         contig=record["contig"], sample_ids=tuple(record["sample_ids"]),
         **{name: record[name] for name in ARRAYS}, edges_identity=record["edges_identity"],

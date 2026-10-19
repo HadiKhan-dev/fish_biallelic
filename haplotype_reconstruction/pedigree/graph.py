@@ -122,7 +122,8 @@ def _visit_order(local_rows, rows, state_margins, identity_margins, orientation)
     classes = tie_rules.tie_classes(np.where(np.isfinite(confidence), confidence, -np.inf), max(quantum, 1e-300),
                                     descending=True).classes
     rank = {child: int(classes[index]) for index, child in enumerate(children)}
-    return sorted(children, key=lambda child: (-role[child], rank[child], child))
+    # The index is the arbitrary last key (reversed under the convention reversal, release 2.2).
+    return sorted(children, key=lambda child: (-role[child], rank[child], tie_rules.conv_key(child)))
 
 
 def select_local(rows: np.ndarray, local_rows: Mapping[int, int], state_margins: np.ndarray,

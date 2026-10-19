@@ -32,6 +32,7 @@ from scipy.linalg import LinAlgError, cho_factor, cho_solve
 from scipy.optimize import brentq, minimize, minimize_scalar
 from scipy.special import logit
 
+from ...maths import ties
 from ..config import ReadModelConfig
 from .emission import (em_statistics, samples_objective_parallel, samples_objective_serial)
 
@@ -363,7 +364,8 @@ def fit_shared(hist, depth, alt, config: ReadModelConfig) -> ReadModelFit:
         raise RuntimeError(f"No shared-binomial EM fit converged: {failed}")
     top = max(value["log_likelihood"] for value in candidates)
     band = _EM_START_BAND_PER_OBSERVATION * max(1., float(hist.sum()))
-    best = next(value for value in candidates if value["log_likelihood"] >= top - band)
+    # Keep-first among the starts in the band (the last under the convention reversal, release 2.2).
+    best = ties.conv_first([value for value in candidates if value["log_likelihood"] >= top - band])
     error, heterozygote = best["error"], best["heterozygote_alt"]
     mixture = np.maximum(best["mixture"], 1e-300)
     n = len(hist)

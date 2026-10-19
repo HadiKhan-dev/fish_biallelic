@@ -20,7 +20,8 @@ relabelling P's homologues from e on:
     differ between the flanks? The zone is e +- ``root_frame_location_bp``, or the flagged stretch widened by
     that tolerance.
 A child supports a change near e if it changes homologue there (exact, or inside at a flagged edge, >= tau) and
-its flanks do not deny a net change (net > -tau); it opposes if its flanks show no net change (net <= -tau).
+its flanks do not deny a net change (net > -tau); it opposes if its flanks show no net change (net <= -tau) and its
+exact votes agree (the best relabelling inside the stretch costs at least tau; release 2.2 vote-counting fix).
 
 Move (internal frame and scaffold together). Where P's family MAP frame agrees with its scaffold over the whole
 net window, both are relabelled from e to the end of the component if at least ``root_frame_minimum_children``
@@ -43,6 +44,11 @@ internal frame changes, such children's frames follow it (``follow_child_frames`
 
 All inputs are computed from the converged family MAP without changing it, so a recomputed stage makes the same
 decisions.
+
+Convention reversal (HAPLOTYPES_TIE_REVERSE, maths.ties.reverse_conventions; read once per repair): the selector
+paths use gauges' reversal, proposals of equal total go by descending root and edge, the junction guard reports the
+last blocking parent, and the following children's frames take the last of tied switches, changes and steps (and
+anchor an unanchored run at its right end). Thresholds, minimum counts and the all-or-none rules are kept.
 """
 from __future__ import annotations
 
@@ -53,12 +59,16 @@ import numpy as np
 from numba import njit
 
 from ..maths import chains
+from ..maths.ties import reverse_conventions
 from . import gauges
 
 
 @dataclass(frozen=True)
 class FrameDecision:
-    """One accepted move, revert or transfer of a root's frame at marker boundary ``boundary``."""
+    """One accepted move, revert or transfer of a root's frame at marker boundary ``boundary``. interval_left_bp /
+    interval_right_bp (release 2.2): the positions bounding the boundaries with the same votes (the flagged stretch
+    around a flagged edge, else the edge's own two positions): the decision's position is released as that
+    interval."""
 
     kind: str
     sample: int
@@ -72,6 +82,8 @@ class FrameDecision:
     child_gains: tuple[float, ...]
     child_net_gains: tuple[float, ...]
     round: int = -1
+    interval_left_bp: int = -1
+    interval_right_bp: int = -1
 
 
 @dataclass(frozen=True)
@@ -103,7 +115,10 @@ class FrameRepair:
     """Decisions of one chromosome; masks are None when nothing was accepted.
 
     internal int8 [N, L]: relabelling of the decoder frame (moves ^ reverts for roots, plus the following
-    frames of their one-parent children); display int8 [N, L]: relabelling of the scaffold (moves ^ transfers).
+    frames of their one-parent children); display int8 [N, L]: relabelling of the scaffold (moves ^ transfers);
+    ambiguous bool [N, L] (release 2.2): the sites of a decided root whose frame depends on where inside its flagged
+    stretch a decision is placed; undecided_ties {root: int64 boundaries}: painting tie boundaries of the repaired
+    roots that neither a decision nor the children's votes decide (released as phase-set breaks).
     """
 
     moves: tuple[FrameDecision, ...] = ()
@@ -115,6 +130,8 @@ class FrameRepair:
     flagged_edges: tuple[tuple[int, int], ...] = ()
     internal: np.ndarray | None = field(default=None, repr=False)
     display: np.ndarray | None = field(default=None, repr=False)
+    ambiguous: np.ndarray | None = field(default=None, repr=False)
+    undecided_ties: dict | None = field(default=None, repr=False)
 
 
 @njit(cache=True)
@@ -221,6 +238,14 @@ def orientation_flags(scaffold, bins, components, sample, tie_boundaries=None):
     return flags
 
 
+def proposal_order(proposals, reverse=False):
+    """Move proposals (-total, root, i, ...) by descending total; exact ties by root, then bin edge (both descending
+    under the convention reversal ``reverse``; the total order is kept)."""
+    if reverse:
+        return sorted(proposals, key=lambda x: (x[0], -x[1], -x[2]))
+    return sorted(proposals, key=lambda x: x[:3])
+
+
 def _component_runs(components):
     sites = len(components)
     cuts = np.r_[0, np.flatnonzero(components[1:] != components[:-1]) + 1, sites]
@@ -236,8 +261,10 @@ def repair_root_frames(workspace, emissions, family_frame, config, *, tie_bounda
 
     ``emissions`` float64 [G, L, 4] are the final selector emissions (map_solver.selector_emissions; relabelled in
     place here); ``family_frame`` int8 [N, L] the family MAP (inferred) frames; ``tie_boundaries`` {sample:
-    marker boundaries}; ``protected`` int64 (n, 2) closed bp intervals. Masks are relative to the scaffold.
+    marker boundaries}; ``protected`` int64 (n, 2) closed bp intervals. Masks are relative to the scaffold. The
+    convention reversal is read once here (module docstring).
     """
+    rev = reverse_conventions()
     cfg = config
     graph = workspace.graph
     pos = np.asarray(workspace.positions, dtype=np.int64)
@@ -335,7 +362,10 @@ def repair_root_frames(workspace, emissions, family_frame, config, *, tie_bounda
                 net.append(zone_gain(array, theta, lo, zone_lo, zone_hi, hi, theta[i], mask))
             exact, net, inside = (np.asarray(x, dtype=np.float64) for x in (exact, net, inside))
             support = (inside >= tau) & (net > -tau)
-            cache[key] = (exact, net, support, net <= -tau, (lo, hi))
+            # Release 2.2 (vote-counting fix): a child opposes only when its exact gains agree with its flanks - the
+            # best relabelling inside the stretch costs at least tau AND its flanks show no net change; a child whose
+            # exact gain supports the change but whose flanks do not (a double switch inside the zone) is neither.
+            cache[key] = (exact, net, support, (net <= -tau) & (inside <= -tau), (lo, hi))
         return cache[key]
 
     def local_gains(parent, i, cache):
@@ -367,7 +397,8 @@ def repair_root_frames(workspace, emissions, family_frame, config, *, tie_bounda
         # A child shared with ``parent`` has one joint selector chain, where a frame error of ``parent`` can be
         # absorbed by the other parent's bit: it is not independent evidence about the other parent's pattern.
         shared = set(children[edges_of[parent]].tolist())
-        for other in guard_parents:
+        # The first blocking parent is reported (the last under the reversal); the decision does not depend on it.
+        for other in (guard_parents[::-1] if rev else guard_parents):
             if other == parent:
                 continue
             own = np.asarray([int(children[edge]) not in shared for edge in edges_of[other]])
@@ -384,18 +415,25 @@ def repair_root_frames(workspace, emissions, family_frame, config, *, tie_bounda
         if block is not None:
             guard_blocks.append(block)
 
+    def stretch_of(root, i):
+        """Boundaries (left, right) whose relabelling is equivalent for the votes at i (the flagged stretch)."""
+        stretch = flagged_stretch(root, i)
+        return (i, i) if stretch is None else stretch
+
     def record(kind, root, i, prior, total, exact, net, round_index=-1):
         flags = flags_of.get(root)
+        left, right = stretch_of(root, i)
         return FrameDecision(kind, root, i, int(pos[i]), int(pos[i + 1]), int(pos[run_stop[i] - 1]),
                              float(prior), float(total), bool(flags is not None and flags[i]),
                              tuple(round(float(v), 3) for v in exact),
-                             tuple(round(float(v), 3) for v in net), round_index)
+                             tuple(round(float(v), 3) for v in net), round_index, int(pos[left]),
+                             int(pos[min(right + 1, sites - 1)]))
 
     def bit_paths(edges, cache):
         """MAP selector bit of each edge (its parent's homologue) from its group's chain, as gauges computes."""
         groups = sorted({int(edge_group[edge]) for edge in edges} - set(cache))
         if groups:
-            paths = gauges.selector_paths(emissions, theta, np.asarray(groups, dtype=np.int64))
+            paths = gauges.selector_paths(emissions, theta, np.asarray(groups, dtype=np.int64), reverse=rev)
             for group in groups:
                 cache[group] = paths[group]
         return {int(edge): (cache[int(edge_group[edge])] & edge_mask[edge]) != 0 for edge in edges}
@@ -441,7 +479,7 @@ def repair_root_frames(workspace, emissions, family_frame, config, *, tie_bounda
                     continue
                 proposals.append((-total, root, i, exact, net, lo, hi))
         accepted = []
-        for negative_total, root, i, exact, net, lo, hi in sorted(proposals, key=lambda x: x[:3]):
+        for negative_total, root, i, exact, net, lo, hi in proposal_order(proposals, rev):
             # One move per root and net window in a round: edges of one flagged stretch share their votes,
             # and the next round sees the result.
             if any(r == root and lo < b and a < hi for r, _, _, a, b in accepted):
@@ -497,16 +535,44 @@ def repair_root_frames(workspace, emissions, family_frame, config, *, tie_bounda
             decisions.append(record(kind, root, i, prior, total, exact, net))
     report = dict(rejected=tuple(sorted(rejected.items())), guard_blocks=tuple(guard_blocks),
                   flagged_edges=tuple(flagged_edges))
+    # Released ambiguity (release 2.2): a decision at a flagged edge could sit at any boundary of its stretch.
+    ambiguous = np.zeros((samples, sites), dtype=np.bool_)
+    decided = {}
+    for item in (*moves, *reverts, *transfers):
+        left, right = stretch_of(item.sample, item.boundary)
+        decided.setdefault(item.sample, []).append((left, right))
+        if right > left:
+            ambiguous[item.sample, left + 1:right + 1] = True
+    # Painting tie boundaries of the repaired roots: decided by a decision whose stretch holds them, or by the
+    # children (at least kmin oppose a change there and none supports it); otherwise undecided.
+    undecided = {}
+    cache = {}
+    for root in roots:
+        ties = np.asarray(tie_boundaries.get(root, ()), dtype=np.int64)
+        open_ties = []
+        for i in map(int, ties):
+            if i < 0 or i >= sites - 1 or comps[i] < 0 or comps[i] != comps[i + 1]:
+                continue
+            if any(left <= i <= right for left, right in decided.get(root, ())):
+                continue
+            vote = votes(root, i, cache) if candidate[i] else None
+            if vote is not None:
+                _, _, support, oppose, _ = vote
+                if np.sum(oppose) >= kmin and not np.any(support):
+                    continue
+            open_ties.append(i)
+        undecided[root] = np.asarray(open_ties, dtype=np.int64)
     if not (moves or reverts or transfers):
-        return FrameRepair(**report)
+        return FrameRepair(**report, undecided_ties=undecided)
     internal = move ^ revert
     follow, child_frames = follow_child_frames(
-        workspace.scaffold, family_frame, internal, parents, children, graph.slots, comps, pos)
+        workspace.scaffold, family_frame, internal, parents, children, graph.slots, comps, pos, reverse=rev)
     return FrameRepair(tuple(moves), tuple(reverts), tuple(transfers), tuple(child_frames), **report,
-                       internal=internal ^ follow, display=move ^ transfer)
+                       internal=internal ^ follow, display=move ^ transfer, ambiguous=ambiguous,
+                       undecided_ties=undecided)
 
 
-def follow_child_frames(scaffold, frame, internal, parents, children, slots, components, positions):
+def follow_child_frames(scaffold, frame, internal, parents, children, slots, components, positions, reverse=False):
     """Frames of one-parent children that follow their root's internal frame changes.
 
     A sample with one observed parent releases its family MAP frame (``frame``), and recombination decodes its
@@ -521,7 +587,9 @@ def follow_child_frames(scaffold, frame, internal, parents, children, slots, com
     differs, the data on the two sides change parity, so the run's own observation switch nearest to the label
     change is removed, or, if the run has none, the switch at the label change is kept (the data require one).
     Children with children of their own (their frame is also a parental frame) are recorded, not changed.
-    Returns (mask int8 [N, L], records).
+    ``reverse`` (the convention reversal): the last of equally near switches, the last label change of a run
+    without a switch and the last step are used, and a run bounded by component ends on both sides keeps its
+    frame at its right end instead of its left. Returns (mask int8 [N, L], records).
     """
     ref = np.asarray(scaffold)
     frame = np.asarray(frame)
@@ -568,7 +636,7 @@ def follow_child_frames(scaffold, frame, internal, parents, children, slots, com
                 span = label[start:stop]
                 switch_bp = -1
                 if left is None or right is None or mark[left] == mark[right]:
-                    bound = span[0] if left is None and right is None else (
+                    bound = (span[-1] if reverse else span[0]) if left is None and right is None else (
                         mark[right] if left is None else mark[left])
                     adjust, kind = span ^ bound, "follow"
                 else:
@@ -576,10 +644,15 @@ def follow_child_frames(scaffold, frame, internal, parents, children, slots, com
                     switches = np.flatnonzero(values[1:] != values[:-1])
                     changes = np.flatnonzero(marks[1:] != marks[:-1])
                     if len(switches):
-                        k = int(switches[np.argmin(np.abs(switches[:, None] - changes[None, :]).min(axis=1))])
+                        if reverse:
+                            # Equally near switches: the last (the first by default).
+                            nearest = np.abs(switches[:, None] - changes[None, :]).min(axis=1)
+                            k = int(switches[len(nearest) - 1 - np.argmin(nearest[::-1])])
+                        else:
+                            k = int(switches[np.argmin(np.abs(switches[:, None] - changes[None, :]).min(axis=1))])
                         kind = "cancel"
                     else:
-                        k, kind = int(changes[0]), "keep"
+                        k, kind = int(changes[-1] if reverse else changes[0]), "keep"
                     # The parity step goes where the label changes between the two observations around the
                     # switch, else where either frame does.
                     a, b = int(used[ext[k]]), int(used[ext[k + 1]])
@@ -587,7 +660,7 @@ def follow_child_frames(scaffold, frame, internal, parents, children, slots, com
                     if not len(steps):
                         steps = np.flatnonzero((frame[child, a + 1:b + 1] != frame[child, a:b])
                                                | (frame[parent, a + 1:b + 1] != frame[parent, a:b]))
-                    split = a + 1 + int(steps[0]) if len(steps) else b
+                    split = a + 1 + int(steps[-1] if reverse else steps[0]) if len(steps) else b
                     adjust = span ^ mark[left] ^ (np.arange(start, stop) >= split).astype(np.int8)
                     switch_bp = int(pos[split])
                 follow[child, start:stop] = adjust

@@ -22,7 +22,10 @@ changes; this module adds:
   ends of a displaced or inverted segment switch in the same meioses: the pairing statistic compares y at a
   second locus predicted from the first (up to a discordance probability e) with independent switching there,
   takes the smaller of the two directions and subtracts log(number of locus pairs tested on the chromosome).
-  Likelihood ratios are conditional on the calls, not calibrated posterior odds.
+  Likelihood ratios are conditional on the calls, not calibrated posterior odds. Under the convention reversal
+  (HAPLOTYPES_TIE_REVERSE, maths.ties.reverse_conventions) the report's exact ties (best paired locus, profile
+  maximum on the switch grid, nearest supplied breakpoint) go to the last candidate instead of the first; the
+  positive-score and flag thresholds are kept.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ import math
 import numpy as np
 from numba import njit
 
+from ..maths.ties import conv_argmax, reverse_conventions
 from ..model.genetic_map import haldane_fraction
 
 
@@ -272,7 +276,9 @@ def _hotspot_ceiling(left, right, config, chromosome_map):
 
 def detect_junctions(contig, names, parents, children, crossovers, crossover_offsets, reported, callable_spans,
                      callable_offsets, config, chromosome_map, breakpoints=None):
-    """Junction loci of one chromosome (module docstring); per-edge tables are packed with offsets."""
+    """Junction loci of one chromosome (module docstring); per-edge tables are packed with offsets. Exact ties of
+    the report go to the last candidate under the convention reversal (module docstring)."""
+    rev = reverse_conventions()
     edges = len(parents)
     members_of = sorted((int(reported[index, 0]), int(reported[index, 1]), edge, index)
                         for edge in range(edges) for index in range(crossover_offsets[edge], crossover_offsets[edge + 1]))
@@ -323,7 +329,8 @@ def detect_junctions(contig, names, parents, children, crossovers, crossover_off
         if breakpoints is not None:
             for start, end in breakpoint_intervals(breakpoints):
                 gap = max(int(start) - locus["right"], locus["left"] - int(end), 0)
-                if not gap >= distance:
+                # The first nearest interval (the last under the reversal); distance starts as NaN.
+                if (not gap > distance) if rev else (not gap >= distance):
                     nearest, distance = f"{start}-{end}", gap
         rows.append(dict(
             contig=contig, locus=f"{contig}:{number}", left_bp=int(locus["left"]), right_bp=int(locus["right"]),
@@ -331,7 +338,7 @@ def detect_junctions(contig, names, parents, children, crossovers, crossover_off
             parents_with_calls=len(parent_text), odd_meioses=int(counts[:, 0].sum()),
             decidable_meioses=int(counts[:, 1].sum()),
             switch_fraction=float(counts[:, 0].sum() / max(counts[:, 1].sum(), 1)),
-            flip_adjusted_switch_fraction=float(SWITCH_GRID[np.argmax(mixture)]),
+            flip_adjusted_switch_fraction=float(SWITCH_GRID[conv_argmax(mixture)]),
             hotspot_ceiling=ceiling, mixed_parents=mixed, all_or_none_parents=all_or_none,
             parents=";".join(parent_text), children=";".join(children_text),
             mixing_log_lr=max(float(mixture.max() - bounded.max()), 0.),
@@ -340,8 +347,8 @@ def detect_junctions(contig, names, parents, children, crossovers, crossover_off
     tests = len(loci) * (len(loci) - 1) // 2
     scores = _pairing_log_lr(loci, parents) if len(loci) > 1 else None
     for i, locus in enumerate(loci):
-        # The best pairing is the first locus with the largest positive score.
-        j = -1 if scores is None else int(np.argmax(scores[i]))
+        # The best pairing is the first locus with the largest positive score (the last under the reversal).
+        j = -1 if scores is None else conv_argmax(scores[i])
         if j >= 0 and scores[i, j] > 0.:
             other = loci[j]
             both = locus["decidable"] & other["decidable"]

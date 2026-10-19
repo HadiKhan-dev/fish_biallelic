@@ -59,9 +59,9 @@ def _test_record(test) -> dict:
 
 def main_coverer(panel, path) -> int:
     """The panel path sharing most cells with ``path`` (ties: lowest index; the panel is in canonical
-    order, so the lexicographically smallest path)."""
+    order, so the lexicographically smallest path; the highest under ties.reverse_conventions())."""
     shared = [sum(int(a == b) for a, b in zip(row, path)) for row in panel]
-    return int(np.argmax(shared))
+    return ties.conv_argmax(shared)
 
 
 class CountStep:
@@ -75,8 +75,10 @@ class CountStep:
     """
 
     def __init__(self, *, layout, penalty, cost, samples, geometry, config, score, tie_counter=None,
-                 label=None):
+                 label=None, linkage=None):
         self.layout = layout
+        # The batch linker's path score (release 2.2): the data criterion inside tie classes (None: content).
+        self.linkage = linkage
         self.total_bins = layout.total_bins
         self.offsets = np.ascontiguousarray(layout.offsets[:-1], dtype=np.int64)
         self.penalty = float(penalty)
@@ -93,19 +95,27 @@ class CountStep:
         self.tie_counter = tie_counter
         self.label = label
 
-    def _choose(self, kind, items, value, content, scale, key=None, quantum_kind='join_ll'):
+    def _choose(self, kind, items, value, content, scale, key=None, quantum_kind='join_ll', link=None):
         """The tie-class winner of ``items`` by value(item) (descending; nats of the join log
-        likelihood, quantum_kind's quantum at |scale|), content(item) deciding inside a class."""
+        likelihood, quantum_kind's quantum at |scale|); inside a class link(item) (the batch linker's
+        score, descending; release 2.2), then content(item)."""
         items = list(items)
         values = [float(value(item)) for item in items]
         quantum = tie_rules.quantum(quantum_kind, scale)
-        result = ties.tie_classes(values, quantum, content=[content(item) for item in items], descending=True)
+        contents = [content(item) for item in items]
+        result = ties.tie_classes(values, quantum, content=contents, descending=True)
         with self._counts:
             tie_rules.add_decision(self.tie_counter, kind, result, values, quantum,
                                    tie_rules.motion(quantum_kind, scale), descending=True)
             if key is not None and self.label is not None and ties.census_enabled():
                 ties.census(kind, f"{self.label}/{key}", [-v for v in values])
-        return items[int(result.order[0])]
+        links = None
+        if link is not None and self.linkage is not None and result.tied_winner:
+            links = [link(item) for item in items]
+        if result.tied_winner and self.tie_counter is not None:
+            with self._counts:
+                self.tie_counter.note(kind + ".symmetric", inside_tie=bool(tie_rules.symmetric_members(result, links)))
+        return items[tie_rules.linkage_order(result, links, contents)[0]]
 
     @staticmethod
     def rows(paths) -> np.ndarray:
@@ -152,7 +162,8 @@ class CountStep:
         pool = pure if len(pure) else np.arange(k)
         founder = int(self._choose('assembly.join_death', pool.tolist(), lambda f: totals[f],
                                    lambda f: tie_rules.path_key(panel[f]), float(np.sum(base)), key,
-                                   quantum_kind='join_ll_wide'))
+                                   quantum_kind='join_ll_wide',
+                                   link=lambda f: -self.linkage(panel[f])))
         rest = [path for i, path in enumerate(panel) if i != founder]
         smaller = removal[:, founder]
         if len(pure):
@@ -231,7 +242,9 @@ class CountStep:
         totals = totals_all[novel_index]
         survivors = np.flatnonzero(passing[novel_index])
         record['survivors'] = int(len(survivors))
-        order = survivors[np.lexsort((survivors, -totals[survivors]))]
+        # Decreasing exact total, equal totals in pool order (reversed under the convention reversal).
+        tie_order = -survivors if ties.reverse_conventions() else survivors
+        order = survivors[np.lexsort((tie_order, -totals[survivors]))]
         # Births whose bound reaches the tie classes of the best accepted total gain are scored too.
         scale = float(np.sum(base))
         reach = ties.WIDE_CLASS_QUANTA * tie_rules.quantum('join_ll', scale)
@@ -259,7 +272,7 @@ class CountStep:
             return record, None, None, indicators
         total, index, decision, larger, lost = self._choose(
             'assembly.join_birth', accepted, lambda item: item[0], lambda item: tie_rules.path_key(novel[item[1]]),
-            scale, None if key is None else f"{key}/birth")
+            scale, None if key is None else f"{key}/birth", link=lambda item: self.linkage(novel[item[1]]))
         record.update(accepted=list(novel[index]), lost_cells=int(lost), total_gain=total,
                       margin=decision.margin, band=list(decision.band), ambiguous=decision.ambiguous,
                       total=_test_record(decision.total), sequence=_test_record(decision.sequence))
@@ -291,7 +304,7 @@ class CountStep:
             founder = int(self._choose('assembly.join_death', pure.tolist(), lambda f: totals[f],
                                        lambda f: tie_rules.path_key(panel[f]), float(np.sum(scores)),
                                        None if key is None else f"{key}/pure{removed}",
-                                       quantum_kind='join_ll_wide'))
+                                       quantum_kind='join_ll_wide', link=lambda f: -self.linkage(panel[f])))
             scores = removal[:, founder]
             panel = [path for i, path in enumerate(panel) if i != founder]
             removed += 1

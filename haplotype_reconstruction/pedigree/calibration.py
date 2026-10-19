@@ -121,9 +121,11 @@ def _maximize(prediction, derivatives=None):
         quantum = ties.tie_quantum(max(abs(value) for value in finite), "nll")
         ranked = ties.tie_classes(values_only, quantum, descending=True)
         tied = [candidates[index] for index in ranked.members(0)]
-        best, log_scale = min(tied, key=lambda item: (abs(item[1]), item[1]))
+        # Prior: the scale nearest 1 (smallest |log scale|); then the smaller scale by convention (the larger under
+        # the convention reversal, release 2.2).
+        best, log_scale = min(tied, key=lambda item: (abs(item[1]), ties.conv_key(item[1])))
     else:
-        best, log_scale = max(candidates)
+        best, log_scale = max(candidates, key=lambda item: (item[0], ties.conv_key(item[1])))
     return best, log_scale, converged, grid, values
 
 
