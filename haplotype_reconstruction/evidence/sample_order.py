@@ -84,7 +84,9 @@ class CanonicalOrderSource:
         if np.array_equal(order, np.arange(len(order))):
             return reads
         # One permuted copy of the counts (int32 [N, L, 2]); the input-order reads are freed on return.
-        return replace(reads, sample_ids=tuple(ids[index] for index in order), counts=reads.counts[order])
+        from ..execution import reserve_memory
+        with reserve_memory(reads.counts.nbytes, label="evidence sample ordering"):
+            return replace(reads, sample_ids=tuple(ids[index] for index in order), counts=reads.counts[order])
 
 
 def canonical_order_source(source):

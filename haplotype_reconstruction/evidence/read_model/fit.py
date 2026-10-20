@@ -16,8 +16,8 @@ Optimiser stop reasons (convergence, iteration cap, line-search stop) are record
 (``ReadModelFit.success``) and never decide which fit is used (class-B fix B-RM). Every L-BFGS-B fit is finished by
 a Newton polish to its stationary point (release 2.1, design A-5): the optimiser's stopping point depends on its
 path, which rounding-level arithmetic changes (another CPU, BLAS kernel or SIMD path) alter, while the optimum does
-not; shared-binomial EM endpoints are likewise finished at stationarity before checking that all starts
-represent a common optimum within the existing Newton convergence tolerance. Homozygotes are
+not; successful shared-binomial EM endpoints are likewise finished at stationarity before the
+endpoint-equivalence and training-likelihood policy is applied. Homozygotes are
 binomial in every candidate: the shared homozygote-overdispersion extension of earlier versions
 was removed by the owner's decision (17 Oct 2026; tickets/B-RM).
 """
@@ -74,8 +74,10 @@ _POLISH_CURVATURE_FLOOR = 1e-12
 # EM starts whose converged log likelihoods lie within this many nats per observation of the best are the same
 # optimum (EM stops at a gain of em_tolerance_per_observation per observation; three starts of real contigs end
 # within 1e-11 per observation of each other, measured on actm3). Kept for diagnostics after stationary polishing;
-# distinct stationary models require a separately approved observation-model policy.
+# distinct stationary models use the training-likelihood rule below.
 _EM_START_BAND_PER_OBSERVATION = 1e-7
+# One nat is the existing read-model likelihood tie band, shared with held-out selection.
+_LIKELIHOOD_TIE_NATS = 1.0
 # Empirical-Bayes hyperfit: the boundary tau = 0 is kept when its profile value is within this relative band of the
 # interior optimum's (the two coincide when the optimum is the boundary; a band at that exact tie, design A-7).
 _HYPERFIT_BOUNDARY_BAND = 1e-10
@@ -525,7 +527,11 @@ def _polish_shared(vector, hist, depth, alt, *, diagnostics=None):
 
 
 class SharedStationarityError(RuntimeError):
-    """A shared read-model endpoint needs review, not uncalibrated fallback."""
+    """No resolved shared fit; calibration records diagnostics and uses the fixed model."""
+
+    def __init__(self, reason, diagnostics):
+        super().__init__(reason)
+        self.diagnostics = diagnostics
 
 
 def fit_shared(hist, depth, alt, config: ReadModelConfig) -> ReadModelFit:
@@ -534,7 +540,8 @@ def fit_shared(hist, depth, alt, config: ReadModelConfig) -> ReadModelFit:
     Shared logits use the existing small-step resolution, nuisance logits the
     existing stagnation resolution. This is numerical equivalence, not an error
     bound. Maximum training likelihood then lexicographic parameters chooses the
-    representative; distinct endpoints still require observation-model review.
+    representative. Distinct competitors must lose by more than the likelihood
+    tie band; otherwise the contig uses the fixed model. A failed polish is a failed start.
     """
     # Fix only the floating-point evaluation order, using training data content.
     # The objective and weights are unchanged. Equal histogram rows are identical
@@ -542,45 +549,84 @@ def fit_shared(hist, depth, alt, config: ReadModelConfig) -> ReadModelFit:
     order = np.asarray(sorted(range(len(hist)), key=lambda i: hist[i].tobytes()), dtype=np.int64)
     undo = np.argsort(order)
     hist = np.ascontiguousarray(hist[order])
-    candidates, failed = [], []
+    candidates, failed, start_records = [], [], []
     for initial in config.em_starts:
+        start = dict(initial=list(initial))
+        start_records.append(start)
         try:
             endpoint = _em(hist, depth, alt, initial, config)
         except (ValueError, RuntimeError) as error:
             failed.append(str(error))
+            start.update(failure=str(error), phase="em")
             continue
         polish = {}
-        vector, steps, converged = _polish_shared(_shared_em_vector(endpoint), hist, depth, alt,
-                                                diagnostics=polish)
-        value, gradient = shared_objective(vector, hist, depth, alt)
-        candidates.append(dict(vector=vector, endpoint=endpoint, polish_steps=steps,
-                               polish_converged=converged, polish_termination=polish.get("termination"),
-                               gradient_max=float(np.max(np.abs(gradient), initial=0.)),
-                               log_likelihood=-value * max(1., float(hist.sum()))))
+        try:
+            initial_vector = _shared_em_vector(endpoint)
+            start.update(em_vector=initial_vector.tolist(), em_log_likelihood=endpoint["log_likelihood"])
+            vector, steps, converged = _polish_shared(initial_vector, hist, depth, alt,
+                                                    diagnostics=polish)
+            value, gradient = shared_objective(vector, hist, depth, alt)
+        except (ValueError, RuntimeError, LinAlgError) as error:
+            failed.append(str(error))
+            start.update(failure=str(error), phase="polish", em_iterations=endpoint["iterations"])
+            continue
+        candidate = dict(vector=vector, endpoint=endpoint, polish_steps=steps,
+                         polish_converged=converged, polish_termination=polish.get("termination"),
+                         gradient_max=float(np.max(np.abs(gradient), initial=0.)),
+                         log_likelihood=-value * max(1., float(hist.sum())))
+        start.update(vector=vector.tolist(), train_log_likelihood=candidate["log_likelihood"],
+                     em_iterations=endpoint["iterations"], polish_iterations=steps,
+                     polish_converged=converged, polish_termination=polish.get("termination"))
+        if not converged:
+            reason = f"Shared-binomial stationary polish did not converge: {polish.get('termination')}"
+            failed.append(reason)
+            start.update(failure=reason, phase="polish")
+            continue
+        candidates.append(candidate)
     if not candidates:
-        raise RuntimeError(f"No shared-binomial EM fit converged: {failed}")
-    if not all(c["polish_converged"] for c in candidates):
-        raise SharedStationarityError("Shared-binomial stationary polish did not converge for every EM endpoint")
+        reason = f"No shared-binomial EM fit converged: {failed}"
+        raise SharedStationarityError(reason, dict(reason="no_shared_start_converged",
+                                      starts=start_records, pairwise_distances=[]))
     vectors = np.asarray([c["vector"] for c in candidates])
     # Numerical equivalence, not an error bound: shared observation parameters
     # retain the small-step resolution; nuisance logits use the existing Newton
     # stagnation resolution. Both distances are checked over the complete family.
     shared_distance = nuisance_distance = 0.
+    distances = []
+    distinct = np.zeros((len(vectors), len(vectors)), dtype=bool)
     for i in range(len(vectors)):
         for j in range(i):
             scale = np.maximum(1., np.maximum(np.abs(vectors[i]), np.abs(vectors[j])))
             difference = np.abs(vectors[i] - vectors[j]) / scale
-            shared_distance = max(shared_distance, float(np.max(difference[:2], initial=0.)))
-            nuisance_distance = max(nuisance_distance, float(np.max(difference[2:], initial=0.)))
-    if shared_distance > _POLISH_TOLERANCE or nuisance_distance > _POLISH_STAGNATION:
-        scores = [c["log_likelihood"] for c in candidates]
-        raise SharedStationarityError(f"Distinct shared-binomial stationary endpoints require observation-model review: "
-                           f"shared_relative_distance={shared_distance!r}, "
-                           f"nuisance_relative_distance={nuisance_distance!r}, training_log_likelihoods={scores!r}")
-    # Only numerically equivalent endpoints reach this content-based selection:
-    # largest training likelihood, then lexicographically smallest parameter vector.
+            shared = float(np.max(difference[:2], initial=0.))
+            nuisance = float(np.max(difference[2:], initial=0.))
+            shared_distance = max(shared_distance, shared)
+            nuisance_distance = max(nuisance_distance, nuisance)
+            distinct[i, j] = distinct[j, i] = (shared > _POLISH_TOLERANCE
+                                              or nuisance > _POLISH_STAGNATION)
+            distances.append(dict(first=i, second=j, shared=shared, nuisance=nuisance))
+    # Largest training likelihood, then lexicographically smallest parameter vector.
     # Start order, duplicates, convention reversal and held-out data have no vote.
-    best = min(candidates, key=lambda c: (-c["log_likelihood"], tuple(c["vector"])))
+    best_index = min(range(len(candidates)),
+                     key=lambda i: (-candidates[i]["log_likelihood"], tuple(candidates[i]["vector"])))
+    best = candidates[best_index]
+    warning = None
+    diagnostics_policy = None
+    if failed or distinct.any():
+        warning = "shared_start_failed" if failed else None
+        diagnostics_policy = dict(starts=start_records, pairwise_distances=distances,
+                                  successful_start_indices=[i for i, row in enumerate(start_records)
+                                                            if "failure" not in row],
+                                  best_successful_start=best_index,
+                                  likelihood_tie_nats=_LIKELIHOOD_TIE_NATS)
+        if distinct.any():
+            resolved = all(best["log_likelihood"] - candidate["log_likelihood"] > _LIKELIHOOD_TIE_NATS
+                           for i, candidate in enumerate(candidates) if distinct[best_index, i])
+            if not resolved:
+                diagnostics_policy["reason"] = "shared_endpoints_unresolved"
+                raise SharedStationarityError("shared_endpoints_unresolved", diagnostics_policy)
+            warning = "shared_endpoints_resolved" + ("; shared_start_failed" if failed else "")
+        diagnostics_policy["reason"] = warning
     vector = best["vector"]
     n = len(hist)
     top = max(c["log_likelihood"] for c in candidates)
@@ -605,7 +651,9 @@ def fit_shared(hist, depth, alt, config: ReadModelConfig) -> ReadModelFit:
                      stationary_nuisance_resolution=_POLISH_STAGNATION,
                      stationary_representative="maximum_training_ll_then_lexicographic_parameters",
                      stationary_sample_order="training_histogram_content",
-                     stationary_starts=diagnostics))
+                     stationary_starts=diagnostics,
+                     **({} if warning is None else dict(shared_fit_warning=warning,
+                                                       shared_fit_diagnostics=diagnostics_policy))))
 
 
 # ---------------------------------------------------------------------------------------------

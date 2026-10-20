@@ -232,6 +232,43 @@ def gather_likelihoods(counts, table, cap):
 
 
 @njit(cache=True, nogil=True, parallel=True)
+def likelihoods_by_sample(counts, error, heterozygote, het_inverse, lookup_depth):
+    """Apply the same lookup/direct kernels with one lookup table per active sample.
+
+    Prefix sums and cell normalisation have the same evaluation order as
+    ``calibrate.likelihoods``. Only table lifetime changes: O(threads * cap**2)
+    scratch instead of O(samples * cap**2), with no second contig-sized output.
+    """
+    n, length = counts.shape[:2]
+    out = np.empty((n, length, 3), np.float64)
+    for sample in prange(n):
+        deepest = 0
+        for site in range(length):
+            depth = int(counts[sample, site, 0]) + int(counts[sample, site, 1])
+            deepest = max(deepest, depth)
+        cap = min(lookup_depth, deepest)
+        hom = prefix(error[sample], 0., deepest)
+        het = prefix(heterozygote[sample], het_inverse, deepest)
+        table = np.empty((cap + 1, cap + 1, 3), np.float64)
+        table[0, 0, :] = 1. / 3.
+        for depth in range(1, cap + 1):
+            for alt in range(depth + 1):
+                table[depth, alt, 0], table[depth, alt, 1], table[depth, alt, 2] = (
+                    cell_probabilities(hom, het, alt, depth - alt, depth))
+        for site in range(length):
+            ref = int(counts[sample, site, 0])
+            alt = int(counts[sample, site, 1])
+            depth = ref + alt
+            if depth <= cap:
+                for genotype in range(3):
+                    out[sample, site, genotype] = table[depth, alt, genotype]
+            else:
+                out[sample, site, 0], out[sample, site, 1], out[sample, site, 2] = (
+                    cell_probabilities(hom, het, alt, ref, depth))
+    return out
+
+
+@njit(cache=True, nogil=True, parallel=True)
 def shared_nuisance_curvature(local, hist, depth, alt):
     """Negative-LL mixture curvature, evaluated through three pair covariances.
 

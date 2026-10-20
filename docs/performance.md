@@ -113,13 +113,45 @@ anticipate their outcomes.
 
 | stage | parallel unit | main cost |
 | --- | --- | --- |
-| evidence | contig (read in parallel windows); prepared one contig ahead of discovery | VCF decoding, read-model fits |
+| evidence | contig (metadata scan, then direct shared-array decode in parallel windows); at most one contig ahead of discovery | site/sample QC, read-model fits; 33 bytes per retained cell, plus phase scratch |
 | discovery | block, in one persistent pool for all pending contigs | fixed-K fits and the reversible K search per block |
 | local selection | block (path fits), component (context refits), inside a contig lane | path-model fits and the candidate bank; two context assemblies |
 | assembly | joined batch (hierarchy), component (founder refinement), inside a contig lane | linker EM and certified panel searches; converged refinement fits and count decisions |
 | painting | sample block, inside a contig lane | binned emissions and the diploid HMM |
 | pedigree | chromosome (preparation, scoring, exclusion); genome-wide decisions are a barrier | pair scoring on the fixed candidate panel; bootstrap and leave-one-chromosome-out resampling |
 | founder refit, family phase, recombination | chromosome | coordinate sweeps; family message passing and polishing; per-meiosis decoding |
+
+Evidence-only allocation measurements for 2.4 (cpu-q-307, 18-core ceiling, base23 versus E2;
+site/sample filters unchanged) are below. Values are peak parent RSS in decimal GB and include
+allocator/JIT overhead. They are per-phase peaks, not additive. The largest contig is TroMau chr3,
+N=116, 749,986 input SNPs, 127,172 kept, one flagged sample.
+
+| Evidence measurement | base23 | E2 |
+| --- | ---: | ---: |
+| chr3 source decode/canonical ordering | 3.077 GB | 1.532 GB |
+| chr3 site filter including QC | 4.952 GB | 4.333 GB |
+| chr3 read model | 1.796 GB | 0.492 GB |
+| chr3 likelihood emission | 2.185 GB | 0.848 GB |
+| chr3 record write | 1.713 GB | 1.074 GB |
+| chr3 founder-view construction | 2.031 GB | 0.923 GB |
+| N=10,000, M=2,048 generated-BCF decoder, added bytes/input cell | 32.66 | 8.25 |
+| N=10,000, M=2,048 synthetic GL emission | 1.234 GB | 0.834 GB |
+| N=10,000, M=2,048 synthetic founder-view construction | 1.544 GB | 0.891 GB |
+
+The filter's lower RSS reflects fewer retained decoder allocations, not an E2 filter change.
+At N=10,000 and chr3's present retained count, current evidence plus its founder view is
+43.24 rather than 83.93 GB; with three times as many retained sites, 129.72 rather than
+251.80 GB. The next contig, site-filter scratch and discovery workers are additional. E2 alone
+still projects about 403 GB for current evidence/view plus the next base23 filter at today's
+retained count: E1's filter changes must be included before claiming a complete large-N remedy.
+
+Six-worker isolated chr19 decode time was 1.886/1.899 seconds (base/E2); the extra metadata scan
+costs worker CPU while eliminating whole-count result transfers. A three-worker decode alongside
+three real discovery workers measured 1.957/2.128 seconds and did not reproduce the production
+3–4x slowdown. These bounded warm-cache observations do not establish full-node overlap speed.
+Both pools still receive independent full driver budgets. All required bounded evidence arrays
+and report values were bit-identical apart from timings; detailed allocation formulas are in
+[Evidence implementation and cost](methods/evidence.md#implementation-and-cost).
 
 The [methods](methods/README.md) give each stage's complexity in the founder count K, the samples N and the sites L.
 Checkpoint I/O, process start-up, ordered beam and panel updates, and the dependencies between stages can leave

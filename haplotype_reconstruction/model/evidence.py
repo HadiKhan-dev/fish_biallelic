@@ -145,21 +145,17 @@ class ContigEvidence:
         return slice(int(start), int(stop))
 
     def founder_view(self) -> "ContigEvidence":
-        """The evidence founder construction uses (discovery, local selection, assembly, founder
-        refinement, founder refit): samples flagged by the contamination QC on this contig have
-        zero counts, uniform likelihoods and no observation -- the state of a zero-depth cell.
-        Site axis, discovery sites and blocks are unchanged (they are computed from all samples).
-        Returns ``self`` when no sample is flagged (no copy).
+        """Founder construction's missing-data view (discovery through founder refit).
+
+        Excluded rows have no observations. Immutable counts and likelihoods are shared:
+        consumers must mask unobserved cells before reading them, or materialise their
+        neutral values (zero counts, likelihoods 1/3) in the block/view they already copy.
+        Site axis, discovery sites and blocks are unchanged. No exclusions returns self.
         """
-        excluded = self.founder_excluded
-        if not excluded.any():
+        if not self.founder_excluded.any():
             return self
-        likelihoods = np.array(self.likelihoods, copy=True)
-        likelihoods[excluded] = 1.0 / 3.0
-        observed = np.array(self.observed, copy=True)
-        observed[excluded] = False
-        counts = None
-        if self.counts is not None:
-            counts = np.array(self.counts, copy=True)
-            counts[excluded] = 0
-        return replace(self, counts=counts, likelihoods=likelihoods, observed=observed)
+        from ..execution import reserve_memory
+        with reserve_memory(self.observed.nbytes, label="founder observation mask"):
+            observed = np.array(self.observed, copy=True)
+            observed[self.founder_excluded] = False
+        return replace(self, observed=observed)

@@ -17,9 +17,10 @@ from numba import njit, prange
 from ..execution import numba_threads, reserve_memory, stage_timer
 from ..execution.budget import as_budget
 from ..model.evidence import ContigEvidence, ContigReads
-from . import records
+from . import records, site_quality
 from .config import EvidenceConfig
 from .read_model import calibrate as calibration
+from .read_model.emission import likelihoods_by_sample
 from .read_model.fit import fixed_model
 from .reports import EvidenceReport, EvidenceSummary, log_lines, summarise
 from .site_quality import filter_sites
@@ -57,6 +58,17 @@ def _block_spans(n_sites: int, width: int) -> np.ndarray:
     return np.column_stack((starts, np.minimum(starts + width, n_sites)))
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def _observation_mask(counts):
+    """One output allocation, without two full-contig comparison temporaries."""
+    n, length = counts.shape[:2]
+    observed = np.empty((n, length), np.bool_)
+    for sample in prange(n):
+        for site in range(length):
+            observed[sample, site] = counts[sample, site, 0] > 0 or counts[sample, site, 1] > 0
+    return observed
+
+
 def prepare_contig(reads: ContigReads, config: EvidenceConfig, budget) -> PreparedEvidence:
     """The evidence of one contig from its allele depths.
 
@@ -68,53 +80,94 @@ def prepare_contig(reads: ContigReads, config: EvidenceConfig, budget) -> Prepar
     if reads.n_sites == 0:
         raise ValueError(f"{reads.contig}: no biallelic SNPs to analyse")
     contig = reads.contig
+    input_positions, dropped = reads.positions, dict(reads.dropped)
     timings = {}
     started = time.monotonic()
     threads = budget.threads()
-    with stage_timer("site_quality", contig), numba_threads(threads):
+    with reserve_memory(preparation_bytes(reads.n_samples, reads.n_sites)
+                        if config.site_quality.enabled else reads.n_sites,
+                        label="evidence site quality"), \
+            stage_timer("site_quality", contig), numba_threads(threads):
         site = filter_sites(reads.positions, reads.counts, config.site_quality,
                             config.sample_quality, threads=threads)
     timings["site_quality"] = time.monotonic() - started
-    kept = reads if site.kept.all() else reads.select_sites(site.kept)
+    if site.kept.all():
+        kept = reads
+    else:
+        indices = np.flatnonzero(site.kept)
+        with reserve_memory(8 * len(indices) * (reads.n_samples + 1), label="evidence kept counts"):
+            # Advanced indexing [:, keep] gives a transposed layout and ContigReads then copies
+            # it again. take writes the final C-order sample/site/allele layout directly.
+            kept = replace(reads, positions=reads.positions[indices],
+                           counts=np.take(reads.counts, indices, axis=1))
+        del indices
+    del reads
     if kept.n_sites == 0:
         raise ValueError(f"{contig}: the site filter kept no sites")
     counts, positions = kept.counts, kept.positions
 
     started = time.monotonic()
     threads = budget.threads()
-    with stage_timer("read_calibration", contig), numba_threads(threads):
+    with reserve_memory(calibration_bytes(kept.n_samples, kept.n_sites, config.read_model)
+                        if config.read_model.enabled else 0, label="evidence calibration"), \
+            stage_timer("read_calibration", contig), numba_threads(threads):
         fitted, report = calibration.calibrate(counts, positions, config.read_model, threads=threads)
     timings["read_model"] = time.monotonic() - started
     model = fitted if fitted is not None else fixed_model(config.fixed_error, kept.n_samples)
 
     started = time.monotonic()
-    with stage_timer("likelihoods", contig), numba_threads(budget.threads()):
-        likelihoods = calibration.likelihoods(counts, model, config.read_model.lookup_depth)
+    threads = budget.threads()
+    with numba_threads(threads):
+        deepest = int(calibration._maximum_depth(counts))
+    with reserve_memory(25 * kept.n_samples * kept.n_sites + 16 * kept.n_sites
+                        + min(threads, kept.n_samples) * (
+                            24 * (min(config.read_model.lookup_depth, deepest) + 1) ** 2
+                            + 128 * (deepest + 1)) + (16 << 20),
+                        label="evidence likelihoods"), \
+            stage_timer("likelihoods", contig), numba_threads(threads):
+        error, heterozygote = model.error_and_heterozygote()
+        likelihoods = likelihoods_by_sample(
+            counts, error, heterozygote, model.heterozygote_inverse_concentration,
+            config.read_model.lookup_depth)
         invalid = _invalid_likelihood_cells(likelihoods, counts, _ROW_SUM_TOLERANCE)
         if invalid:
             raise RuntimeError(f"{contig}: {invalid} genotype-likelihood cells are not normalised "
                                "probabilities (zero depth must be exactly 1/3)")
-        observed = (counts[:, :, 0] > 0) | (counts[:, :, 1] > 0)
+        observed = _observation_mask(counts)
         total_depth = counts.sum(axis=(0, 2), dtype=np.int64)
         discovery_sites = total_depth >= config.discovery_sites.threshold(kept.n_samples)
     founder_excluded = (np.zeros(kept.n_samples, bool) if site.sample_quality is None
                         else np.asarray(site.sample_quality.flagged, bool))
     timings["likelihoods"] = time.monotonic() - started
     evidence = ContigEvidence(
-        contig=contig, sample_ids=reads.sample_ids, positions=positions, counts=counts,
+        contig=contig, sample_ids=kept.sample_ids, positions=positions, counts=counts,
         likelihoods=likelihoods, observed=observed, discovery_sites=discovery_sites,
         founder_excluded=founder_excluded, block_spans=_block_spans(kept.n_sites, config.block_sites))
     return PreparedEvidence(evidence, EvidenceReport(
-        contig=contig, input_positions=reads.positions, dropped=dict(reads.dropped),
+        contig=contig, input_positions=input_positions, dropped=dropped,
         site_quality=site, calibration=report, timings=timings))
 
 
 def preparation_bytes(samples: int, sites: int) -> int:
-    """Peak bytes of preparing one contig's evidence beyond its allele depths (the reservation of
-    run_contig, execution.memory): float64 likelihoods (24 per sample and site), the observation mask,
-    the site-quality depth arrays (two float64 sites x samples arrays, real data) and the depth
-    totals, plus 256 MiB of tiles and model fitting."""
-    return 41 * samples * sites + (256 << 20)
+    """Additional site/QC scratch; the filter owns the estimate for its implementation."""
+    estimate = getattr(site_quality, "peak_scratch_bytes", None)
+    if estimate is not None:
+        return estimate(samples, sites)
+    # Base23: transposes + float heterogeneity temporaries; native sample-QC calls
+    # release their int32 arguments on conversion and fit within the same bound.
+    return 40 * samples * sites + 256 * sites + (16 << 20)
+
+
+def calibration_bytes(samples: int, sites: int, config) -> int:
+    """Histogram construction and fitting workspace, beyond the retained kept counts."""
+    stride_sites = (sites + config.marker_stride - 1) // config.marker_stride
+    width = config.maximum_fit_depth + 1
+    cells = width * (width + 1) // 2 - 1
+    # Sampled int64 AD/depth/mask + square four-fold histogram and its compact copy;
+    # fitting retains four folds, training/content-order copies and per-objective scratch.
+    histogram = 27 * samples * stride_sites + 32 * samples * (width * width + cells)
+    fitting = 96 * samples * cells
+    return max(histogram, fitting) + (16 << 20)
 
 
 def run_contig(store, source, contig: str, config: EvidenceConfig, budget, *,
@@ -142,14 +195,19 @@ def run_contig(store, source, contig: str, config: EvidenceConfig, budget, *,
                 payload = file.get(records.EVIDENCE, items=("sample_ids", "positions"))
                 sites, sample_ids = len(payload["positions"]), payload["sample_ids"]
             return replace(summarise(report, sites, sample_ids, resumed=True), prepared=prepared)
-        started = time.monotonic()
-        with stage_timer("read_input", contig):
-            reads = source.reads(contig, budget)
-        loaded = time.monotonic() - started
-        # Admitted by the run's memory governor (the next contig's preparation runs beside discovery).
-        with reserve_memory(preparation_bytes(reads.n_samples, reads.n_sites), label="evidence preparation"):
-            prepared = prepare_contig(reads, config, budget)
-        del reads
+        loaded = 0.
+
+        def load_reads():
+            nonlocal loaded
+            started = time.monotonic()
+            with stage_timer("read_input", contig):
+                reads = source.reads(contig, budget)
+            loaded = time.monotonic() - started
+            return reads
+
+        # No caller-held input-count reference: prepare_contig can release all input counts
+        # after selecting kept sites, before calibration and likelihood allocation.
+        prepared = prepare_contig(load_reads(), config, budget)
         started = time.monotonic()
         with stage_timer("record", contig):
             records.write(file, prepared.evidence, prepared.report)

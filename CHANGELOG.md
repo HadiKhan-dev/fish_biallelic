@@ -1,5 +1,86 @@
 # Changelog
 
+## 2.4.0 (20 October 2026)
+
+Release 2.4 changes the evidence stage only. Evidence products on all 22 TroMau chromosomes are identical to 2.3,
+so released TroMau results are unchanged.
+
+### Site filter: what it removes, and the heterozygote-balance rule
+- The site filter keeps 33.7% of TroMau's biallelic SNPs (1,993,684 of 5,918,884). A diagnosis on chr1, chr3 and
+  chr8 shows the removed sites are not clean sites lost to over-filtering:
+  - At heterozygous genotypes they carry marked reference bias: the heterozygote ALT fraction is 0.38-0.43,
+    against 0.49 at kept sites.
+  - Their homozygote wrong-allele rate is 4-5x that of kept sites.
+  - At matched depth they fit the founder paintings far worse: 0.93 against 0.06 nats per sample for
+    depth-heterogeneity-only removals on chr3.
+
+  There is no 2x excess-depth (duplication) mode. The removed sites form broad deficit-depth shoulders, consistent
+  with cross-species reference divergence and mismapping. Two relaxations of the depth rules, one pooled and one
+  per cell, failed a depth-matched thinning control and admitted severe high-depth inconsistencies. The filter's
+  rules and decisions are unchanged.
+- The heterozygote-balance rule (r4) never applies at TroMau coverage. Its clean class is exactly binomial, and
+  its separation gate (three binomial SDs at the median pooled heterozygote depth) depends on coverage. A
+  replacement was built and validated: a clean beta-binomial with fitted overdispersion against an artefact
+  beta-binomial, separated by three intrinsic SDs. It would remove a further 2-4% of today's kept sites, and those
+  sites fit the paintings about 3x worse than the sites retained.
+
+  The replacement is deferred. On TroMau chr13 it removes the few sites that distinguish two full siblings. The
+  siblings then become identical in family phase's discrete coordinate keys while their likelihoods differ, and
+  family phase does not yet support such connected duplicate samples: it stops rather than order them by name.
+
+### Discovery sites and calibration failures
+- Discovery uses a fixed minimum of five total reads per site across the analysed cohort. The threshold no longer
+  grows with sample count (formerly max(5, 0.02 N)), and later inference still uses the other sites. No discovery
+  site or block changes on TroMau, std_n80, stress_n80, the N=320 N-series or sim_s10000.
+- A read-model calibration failure no longer stops the run:
+  - a shared-binomial polish failure discards only the failed start;
+  - distinct successful endpoints are resolved by training likelihood only when the best leads every distinct
+    competitor by more than one nat;
+  - otherwise that contig uses the fixed binomial model;
+  - decisions are logged ("[Read model WARNING]") and kept in the evidence diagnostics and run summary;
+  - ordinary empty-fold fallbacks remain unflagged.
+
+### Numerical record
+- E3's 2.3 shared-curvature change of at most 1.97e-11 (absolute) in applied GLs, with every selected model
+  unchanged, is accepted and documented.
+- After the 2.1 Newton polish, GLs move at most 3.67749e-10 (relative) under a changed numerical environment across
+  all 22 TroMau contigs. This replaces the stale "about 0.3 nats" limitation.
+
+### Memory and speed
+Results are unchanged.
+- The VCF/BCF decoder writes straight into the final shared count array: 32.66 -> 8.25 bytes per input cell on a
+  10,000-sample check.
+- Input-site counts are released after site selection.
+- Likelihood tables are built per active sample, and the observation mask needs no full-size temporaries.
+- Record compression scratch is bounded and reserved.
+- `founder_view()` shares the immutable counts and likelihoods and copies only the observation mask (1 byte per
+  cell instead of 33). Local selection neutralises its private block copy, so its persisted search keys are
+  unchanged.
+- The site filter processes bounded site tiles with sparse sample-QC cells and reserves its real scratch. Its
+  scratch is 0.54 GB at N=10,000 on a chr3-sized contig, against about 300 GB for the former whole-contig float
+  arrays.
+- Peaks on TroMau chr3 (N=116): site filter 4.05 -> 1.05 GiB; decode 3.08 -> 1.53 GB; read model 1.80 -> 0.49 GB;
+  likelihoods 2.19 -> 0.85 GB; founder view 2.03 -> 0.92 GB.
+- At N=10,000 the remaining evidence peak is dominated by the input counts and their one sample-order copy (about
+  120 GB on a chr3-sized contig), down from about 0.5 TB.
+- Evidence is also faster. On 76 cores the site filter with sample QC takes 8.0 s on chr3 and 9.2 s on chr7,
+  against 20.0 s and 22.9 s in 2.3. Site work runs as one shared queue through the run's dynamic CPU budget,
+  largest spans first, so freed cores pass to the remaining work. Mixture likelihoods are compiled and
+  parallel, and fixed genotype likelihoods are cached per site.
+- Decode plus site selection takes 11.6 s against 26.5 s on chr3, and 12.2 s against 28.0 s on chr7.
+- Average core use in the filter is about 21%. The rest is the fits' sequential optimiser steps; in a full run
+  evidence overlaps with discovery.
+- Across all 22 TroMau chromosomes the largest per-chromosome evidence peak falls from 4.54 to 1.42 GiB.
+
+### Validation
+- Focused tests: 15 for the failure policy, 5 for the tiled filter, and the memory checks, including exact
+  likelihood lookups and founder-view sharing.
+- Evidence products identical to 2.3 on all 22 TroMau chromosomes and on std_n80 chr1/chr2.
+- Downstream results identical on TroMau chr19 through discovery, local selection, assembly, painting and founder
+  refit (386,368 values).
+- A 3-chromosome TroMau subset completes end to end.
+- No simulations were rerun: the site filter is off for simulations, and the discovery-site census shows no change.
+
 ## 2.3.0 (20 October 2026)
 
 ### Scientific model and released results

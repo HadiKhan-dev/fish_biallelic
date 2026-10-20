@@ -282,6 +282,9 @@ def _select_task(task, shared, budget):
     block, settings = task
     likelihoods = np.ascontiguousarray(shared["likelihoods"][:, block.columns], dtype=np.float64)
     observed = np.asarray(shared["observed"][:, block.columns], dtype=bool, order="C")
+    # founder_view shares immutable raw GLs; this private block copy also enters the
+    # persisted search key, which must retain the literal uniform missing-cell values.
+    likelihoods[~observed] = 1.0 / 3.0
     return select_block(block, likelihoods, observed, settings)
 
 

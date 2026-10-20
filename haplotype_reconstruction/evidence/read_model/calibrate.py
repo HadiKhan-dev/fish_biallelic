@@ -14,6 +14,7 @@ No truth, pedigree or founder panel enters fitting.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Mapping
 
 import numpy as np
@@ -25,13 +26,10 @@ from .emission import cell_probabilities, gather_likelihoods, genotype_probabili
 
 MODEL_VERSION = "heldout-read-model-v6"
 _TRAIN_FOLDS, _SELECTION_FOLD, _DIAGNOSTIC_FOLD = (0, 1), 2, 3
-# Selection-fold log likelihoods (~1e6-2e7 nats) within this many nats of the best are ties and
-# the simplest tied candidate wins: a more complex model must improve the held-out log likelihood
-# by more than one nat (a likelihood ratio of e). The joint fit's score moves by up to ~0.3 nats
-# under rounding-level arithmetic changes (flat in log kappa) and the gaps between candidates are
-# spread continuously from 0.002 nats up, so no smaller tolerance keeps the selection
-# reproducible (measurements: tickets/B-RM/design.md).
-_SELECTION_TIE_NATS = 1.0
+# The same one-nat tie band governs held-out model selection and separation of
+# distinct shared training endpoints. The two decisions use separate data folds.
+_SELECTION_TIE_NATS = fits._LIKELIHOOD_TIE_NATS
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -54,6 +52,8 @@ class CalibrationReport:
     fits: Mapping[str, fits.ReadModelFit] = field(default_factory=dict)
     scores: Mapping[str, tuple[float, float]] = field(default_factory=dict)
     complex_fit_failure: str | None = None
+    shared_fit_warning: str | None = None
+    shared_fit_diagnostics: Mapping | None = None
 
     @property
     def selection_gain_over_shared(self) -> float | None:
@@ -75,7 +75,10 @@ class CalibrationReport:
                     high_depth_excluded=self.high_depth_excluded,
                     fits={name: value.record() for name, value in self.fits.items()},
                     scores={name: list(value) for name, value in self.scores.items()},
-                    complex_fit_failure=self.complex_fit_failure)
+                    complex_fit_failure=self.complex_fit_failure,
+                    **({} if self.shared_fit_warning is None else dict(
+                        shared_fit_warning=self.shared_fit_warning,
+                        shared_fit_diagnostics=self.shared_fit_diagnostics)))
 
     @classmethod
     def from_record(cls, record: Mapping) -> "CalibrationReport":
@@ -87,7 +90,9 @@ class CalibrationReport:
                    fits={name: fits.ReadModelFit.from_record(value)
                          for name, value in record["fits"].items()},
                    scores={name: tuple(value) for name, value in record["scores"].items()},
-                   complex_fit_failure=record["complex_fit_failure"])
+                   complex_fit_failure=record["complex_fit_failure"],
+                   shared_fit_warning=record.get("shared_fit_warning"),
+                   shared_fit_diagnostics=record.get("shared_fit_diagnostics"))
 
 
 def histograms(counts, positions, config: ReadModelConfig):
@@ -136,13 +141,24 @@ def calibrate(counts, positions, config: ReadModelConfig, *, threads: int):
     training = hist[_TRAIN_FOLDS[0]] + hist[_TRAIN_FOLDS[1]]
     try:
         shared = fits.fit_shared(training, depth, alt, config)
-    except fits.SharedStationarityError:
-        # Distinct stationary modes need an explicit observation-model policy.
-        # They must not silently select the uncalibrated fallback.
-        raise
-    except (ValueError, RuntimeError) as error:
+    except fits.SharedStationarityError as error:
+        _LOG.warning("Read calibration uses fixed binomial fallback: %s "
+                     "(%d shared starts; endpoints and distances recorded in the evidence report)",
+                     error, len(error.diagnostics["starts"]))
         return None, CalibrationReport(applied=False, selected=None, fallback_reason=str(error),
-                                       **report)
+                                       shared_fit_warning=error.diagnostics["reason"],
+                                       shared_fit_diagnostics=error.diagnostics, **report)
+    except (ValueError, RuntimeError) as error:
+        _LOG.warning("Read calibration uses fixed binomial fallback: %s", error)
+        return None, CalibrationReport(applied=False, selected=None, fallback_reason=str(error),
+                                       shared_fit_warning=str(error), **report)
+    warning = shared.details.get("shared_fit_warning")
+    if warning is not None:
+        diagnostics = shared.details["shared_fit_diagnostics"]
+        _LOG.warning("Read calibration shared fit: %s "
+                     "(%d starts; endpoints and distances recorded in the evidence report)",
+                     warning, len(diagnostics["starts"]))
+        report.update(shared_fit_warning=warning, shared_fit_diagnostics=diagnostics)
     candidates = {fits.BINOMIAL: shared}
     complex_failure = None
     try:

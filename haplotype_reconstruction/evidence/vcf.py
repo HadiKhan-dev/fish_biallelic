@@ -17,13 +17,16 @@ that contains its POS), so the result does not depend on the number of workers.
 """
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass
 from typing import Sequence
+import weakref
 
 import numpy as np
 from cyvcf2 import VCF
 
-from ..execution import BudgetedPool
+from ..execution import (BudgetedPool, attach_shared_array, close_shared_memory,
+                         empty_shared_array, reserve_memory)
 from ..execution.budget import as_budget
 from ..model.evidence import (ContigReads, DROPPED_DUPLICATE_POSITION, DROPPED_MULTIALLELIC,
                               DROPPED_NOT_SNP)
@@ -63,19 +66,15 @@ def _is_snp(reference, alternates):
             and reference in _BASES and alternates[0] in _BASES)
 
 
-def _read_window(path, contig, start, stop, samples):
-    """Biallelic SNP depths of the records with start <= POS < stop (stop None: to the end).
-
-    Returns (positions int64[k], depths int32[k, N, 2], not_snp, multiallelic).
-    """
-    reader = VCF(str(path)) if samples is None else VCF(str(path), samples=list(samples))
+def _scan_window(path, contig, start, stop, samples):
+    """Find the output site axis without decoding sample FORMAT fields."""
+    reader = VCF(str(path), lazy=True)
     try:
-        n_samples = len(reader.samples)
         if stop is None:
             region = contig if start <= 1 else f"{contig}:{start}-"
         else:
             region = f"{contig}:{start}-{stop - 1}"
-        positions, depths = [], []
+        positions = array("q")
         not_snp = multiallelic = 0
         previous = 0
         for record in reader(region):
@@ -92,27 +91,106 @@ def _read_window(path, contig, start, stop, samples):
             if not _is_snp(record.REF, alternates):
                 not_snp += 1
                 continue
+            positions.append(position)
+    finally:
+        reader.close()
+    positions = np.asarray(positions, np.int64)
+    # Equal positions always belong to the same physical window. Drop every member of each
+    # duplicate run, just as the former whole-contig unique/isin pass did.
+    keep = np.ones(len(positions), bool)
+    repeated = positions[1:] == positions[:-1]
+    keep[1:] &= ~repeated
+    keep[:-1] &= ~repeated
+    duplicated = int(len(positions) - np.count_nonzero(keep))
+    return positions[keep], not_snp, multiallelic, duplicated
+
+
+def _read_window_into(task, positions, counts):
+    """Decode directly into this window's columns of the final sample-major count array."""
+    path, contig, start, stop, samples = task
+    reader = (VCF(str(path), lazy=True) if samples is None
+              else VCF(str(path), samples=list(samples), lazy=True))
+    try:
+        n_samples = len(reader.samples)
+        if stop is None:
+            region = contig if start <= 1 else f"{contig}:{start}-"
+        else:
+            region = f"{contig}:{start}-{stop - 1}"
+        site = 0
+        for record in reader(region):
+            position = record.POS
+            if position < start or (stop is not None and position >= stop):
+                continue
+            if not _is_snp(record.REF, record.ALT):
+                continue
             ad = record.format("AD")
             if ad is None or (ad.shape[1] == 1 and np.all(ad < 0)):
                 # No AD, or HTSlib's single all-missing sentinel column: zero observed reads.
-                ad = np.zeros((n_samples, 2), np.int32)
+                ad = None
             elif ad.shape != (n_samples, 2):
                 raise ValueError(f"{path}: {contig}:{position}: AD must hold REF and ALT depths "
                                  f"for every sample (found shape {ad.shape})")
-            positions.append(position)
-            depths.append(ad)
+            # Validate AD even at duplicate positions: these errors were visible before filtering.
+            if site < len(positions) and position == positions[site]:
+                if ad is None:
+                    counts[:, site, :] = 0
+                else:
+                    np.maximum(ad, 0, out=counts[:, site, :])
+                site += 1
+        if site != len(positions):
+            raise ValueError(f"{path}: {contig}: input changed while decoding allele depths")
     finally:
         reader.close()
-    if not positions:
-        return np.empty(0, np.int64), np.empty((0, n_samples, 2), np.int32), not_snp, multiallelic
-    depths = np.stack(depths).astype(np.int32, copy=False)
-    depths[depths < 0] = 0          # missing values
-    return np.asarray(positions, np.int64), depths, not_snp, multiallelic
+
+
+def _scan_window_task(task, shared, budget):
+    return _scan_window(*task)
 
 
 def _read_window_task(task, shared, budget):
-    """Pool task wrapper of _read_window (module level, picklable)."""
-    return _read_window(*task)
+    """Workers attach the final output; only small task results cross the pool's pipes."""
+    window, positions, start, reference = task
+    handle, counts = attach_shared_array(reference)
+    try:
+        _read_window_into(window, positions, counts[:, start:start + len(positions), :])
+    finally:
+        del counts
+        close_shared_memory([handle])
+
+
+def _decode_windows(tasks, results, sample_ids, contig, pool):
+    positions = np.concatenate([result[0] for result in results])
+    dropped = {DROPPED_NOT_SNP: sum(result[1] for result in results),
+               DROPPED_MULTIALLELIC: sum(result[2] for result in results),
+               DROPPED_DUPLICATE_POSITION: sum(result[3] for result in results)}
+    n_samples, n_sites = len(sample_ids), len(positions)
+    # The output is the only sample-by-site allocation. Workers need one decoded AD record,
+    # plus HTSlib buffers; neither window depths nor counts travel through pickle.
+    scratch = (1 << 20) + 32 * n_samples
+    output_bytes = 8 * n_samples * n_sites + positions.nbytes
+    with reserve_memory(output_bytes, label="vcf decoded counts"):
+        if pool is None:
+            counts = np.empty((n_samples, n_sites, 2), np.int32)
+            with reserve_memory(scratch, label="vcf record"):
+                _read_window_into(tasks[0], positions, counts)
+        else:
+            handle, reference, counts = empty_shared_array((n_samples, n_sites, 2), np.int32)
+            try:
+                offset = 0
+                decoding = []
+                for task, result in zip(tasks, results):
+                    decoding.append((task, result[0], offset, reference))
+                    offset += len(result[0])
+                pool.map(_read_window_task, decoding, task_bytes=scratch)
+            except BaseException:
+                del counts
+                close_shared_memory([handle], unlink=True)
+                raise
+            # ContigReads freezes a view whose base retains this array. Its finalizer owns the
+            # shared-memory handle, so descendants can keep views without a whole-contig copy.
+            weakref.finalize(counts, close_shared_memory, [handle], unlink=True)
+        return ContigReads(contig=contig, sample_ids=sample_ids, positions=positions,
+                           counts=counts, dropped=dropped)
 
 
 def _windows(length, workers):
@@ -150,18 +228,7 @@ def read_contig(path, contig: str, budget, *, samples: Sequence[str] | None = No
     tasks = [(str(path), contig, start, stop, None if samples is None else sample_ids)
              for start, stop in _windows(header.lengths.get(contig), workers)]
     if len(tasks) == 1:
-        results = [_read_window(*tasks[0])]
-    else:
-        with BudgetedPool(budget, processes=min(workers, len(tasks)), label="vcf windows") as pool:
-            results = pool.map(_read_window_task, tasks)
-    positions = np.concatenate([result[0] for result in results])
-    depths = np.concatenate([result[1] for result in results])        # (L, N, 2)
-    dropped = {DROPPED_NOT_SNP: sum(result[2] for result in results),
-               DROPPED_MULTIALLELIC: sum(result[3] for result in results)}
-    unique, counts = np.unique(positions, return_counts=True)
-    duplicated = unique[counts > 1]
-    keep = ~np.isin(positions, duplicated)
-    dropped[DROPPED_DUPLICATE_POSITION] = int((~keep).sum())
-    return ContigReads(contig=contig, sample_ids=sample_ids, positions=positions[keep],
-                       counts=np.ascontiguousarray(depths[keep].transpose(1, 0, 2)),
-                       dropped=dropped)
+        return _decode_windows(tasks, [_scan_window(*tasks[0])], sample_ids, contig, None)
+    with BudgetedPool(budget, processes=min(workers, len(tasks)), label="vcf windows") as pool:
+        results = pool.map(_scan_window_task, tasks)
+        return _decode_windows(tasks, results, sample_ids, contig, pool)

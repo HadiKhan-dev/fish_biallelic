@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..model.evidence import ContigEvidence
+from ..execution import reserve_memory
 from ..store.identity import json_digest, stage_identity
 from .config import EvidenceConfig
 from .reports import EvidenceReport
@@ -37,7 +38,13 @@ def write(file, evidence: ContigEvidence, report: EvidenceReport):
     payload = dict(schema=SCHEMA, contig=evidence.contig, sample_ids=evidence.sample_ids,
                    report=report.record())
     payload.update({name: getattr(evidence, name) for name in ARRAYS})
-    return file.put(EVIDENCE, payload)
+    # The codec streams existing contiguous buffers, never a second full evidence payload.
+    # Its rolling chunks need <=2 GiB raw/compressed space plus grouping and metadata;
+    # smaller records need at most twice their raw arrays plus that bounded overhead.
+    raw_bytes = sum(getattr(evidence, name).nbytes for name in ARRAYS)
+    raw_bytes += report.input_positions.nbytes
+    with reserve_memory(min(2 * raw_bytes, 2 << 30) + (256 << 20), label="evidence record write"):
+        return file.put(EVIDENCE, payload)
 
 
 def complete(file) -> bool:

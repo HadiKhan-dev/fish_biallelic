@@ -25,14 +25,18 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 import math
+import ctypes
 from typing import Any, Mapping
 
 import numpy as np
-from numba import njit, prange
+from numba import njit, prange, config as numba_config
+from numba.extending import get_cython_function_address
 from scipy import special
 from scipy.optimize import minimize
 
 from ..maths import ties
+from ..execution import numba_threads
+from ..execution.budget import current_budget, CpuBudget
 from .config import SampleQualityConfig, SiteQualityConfig
 from . import sample_quality
 
@@ -45,7 +49,9 @@ _SITE_EM_ITERATIONS = 60
 _MIXTURE_ITERATIONS = 300
 _HISTOGRAM_RANGE_PERCENTILES = (0.5, 99.5)
 _NELDER_MEAD_OPTIONS = dict(xatol=1e-4, fatol=1e-3, maxiter=200)
-_MINIMUM_CHUNK_SITES = 8192   # keeps thread scheduling negligible beside each chunk's special functions
+_SITE_TILE_CELLS = 1 << 20
+_MAXIMUM_TILE_SITES = 4096
+_MINIMUM_CHUNK_SITES = 16384   # amortize thread dispatch for vectorized special functions
 
 
 @dataclass(frozen=True)
@@ -113,6 +119,13 @@ def _site_genotype_fit(a, n, eps, h, iters, f, ll):
         ll[s, 0] = a[s] * le + (n[s] - a[s]) * l1e
         ll[s, 1] = a[s] * lh + (n[s] - a[s]) * l1h
         ll[s, 2] = a[s] * l1e + (n[s] - a[s]) * le
+    # These likelihoods do not depend on the EM frequencies. Evaluate the same
+    # exponentials once, preserving the original operation and sample order.
+    maximum = np.empty(S)
+    for s in range(S):
+        maximum[s] = max(ll[s, 0], ll[s, 1], ll[s, 2])
+        for g in range(3):
+            ll[s, g] = math.exp(ll[s, g] - maximum[s])
     f[0] = f[1] = f[2] = 1.0 / 3.0
     old = -1e300
     wrong = 0.0; homn = 0.0; heta = 0.0; hetn = 0.0
@@ -123,10 +136,10 @@ def _site_genotype_fit(a, n, eps, h, iters, f, ll):
         for s in range(S):
             if n[s] == 0:
                 continue
-            m = max(ll[s, 0], ll[s, 1], ll[s, 2])
-            p0 = f[0] * math.exp(ll[s, 0] - m)
-            p1 = f[1] * math.exp(ll[s, 1] - m)
-            p2 = f[2] * math.exp(ll[s, 2] - m)
+            m = maximum[s]
+            p0 = f[0] * ll[s, 0]
+            p1 = f[1] * ll[s, 1]
+            p2 = f[2] * ll[s, 2]
             t = p0 + p1 + p2
             value += m + math.log(t)
             p0 /= t; p1 /= t; p2 /= t
@@ -168,6 +181,55 @@ def _genotype_expectations(alt, dep, eps, h, iters):
         wrong[i] = w; homn[i] = hn; heta[i] = ha; hetn[i] = hh
         frequencies[i, 0] = f[0]; frequencies[i, 1] = f[1]; frequencies[i, 2] = f[2]
     return frequencies, wrong, homn, heta, hetn, covered
+
+
+@njit(cache=True, nogil=True)
+def _genotype_counts_into(counts, samples, eps, h, iters, start, stop,
+                          frequencies, wrong, homn, heta, hetn, covered):
+    S = len(samples)
+    for i in range(start, stop):
+        a = np.empty(S); n = np.empty(S)
+        c = 0
+        for j in range(S):
+            sample = samples[j]
+            a[j] = counts[sample, i, 1]
+            n[j] = np.int32(counts[sample, i, 0] + counts[sample, i, 1])
+            if n[j] > 0:
+                c += 1
+        covered[i] = c
+        if c == 0:
+            frequencies[i, 0] = 1.0
+            continue
+        f = np.zeros(3); ll = np.zeros((S, 3))
+        w, hn, ha, hh = _site_genotype_fit(a, n, eps, h, iters, f, ll)
+        wrong[i] = w; homn[i] = hn; heta[i] = ha; hetn[i] = hh
+        frequencies[i, 0] = f[0]; frequencies[i, 1] = f[1]; frequencies[i, 2] = f[2]
+
+
+def _genotype_expectations_counts(counts, samples, eps, h, iters):
+    """One live-budget queue, with direct-count tasks and disjoint output slices."""
+    L = counts.shape[1]
+    values = (np.zeros((L, 3)), np.zeros(L), np.zeros(L), np.zeros(L),
+              np.zeros(L), np.zeros(L, np.int32))
+    if L == 0:
+        return values
+    # Limit the number of simultaneous O(N) workspaces to the reserved capacity.
+    # Increasing this site's span adds no dense sample-by-site allocation.
+    capacity = _tile_sites(counts.shape[0])
+    tasks = min(capacity, 4 * numba_config.NUMBA_NUM_THREADS)
+    span = max(1, (L + tasks - 1) // tasks)
+    chunks = [(start, min(start + span, L)) for start in range(0, L, span)]
+    chunks.sort(key=lambda bounds: bounds[1] - bounds[0], reverse=True)
+    # Compile once before dispatch, preventing compilation races among workers.
+    _genotype_counts_into(counts, samples, eps, h, iters, 0, 0, *values)
+
+    def work(bounds):
+        _genotype_counts_into(counts, samples, eps, h, iters, *bounds, *values)
+
+    # The outer stage reservation covers the output vectors and all worker scratch.
+    # Freed workers immediately take the next task; a live lease can admit more.
+    current_budget().thread_map(work, chunks, label="site genotype queue")
+    return values
 
 
 # ---------------------------------------------------------------------------------------------
@@ -260,18 +322,47 @@ def _posterior_clean(log_clean, log_artefact):
     return 1 / (1 + np.exp(np.clip(log_artefact - log_clean, -700, 700)))
 
 
-class _Chunks:
-    """Evaluate one elementwise expression over contiguous chunks in threads.
+# Use the same SciPy scalar special functions as its NumPy ufuncs. Passing the
+# pointers as kernel arguments keeps cached machine code process-independent.
+_GAMMALN = ctypes.CFUNCTYPE(ctypes.c_double, ctypes.c_double, ctypes.c_int)(
+    get_cython_function_address("scipy.special.cython_special", "gammaln"))
+_BETALN = ctypes.CFUNCTYPE(ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int)(
+    get_cython_function_address("scipy.special.cython_special", "betaln"))
 
-    NumPy and scipy.special ufuncs release the GIL. Each element is computed by the same
-    expression, so values equal a whole-array evaluation; reductions stay single-threaded over the
-    whole array, so sums do not depend on the thread count.
+
+@njit(cache=True, parallel=True, nogil=True)
+def _negative_binomial_values(W, N, lw, rate, shape, gamma_shape, function):
+    result = np.empty(len(W))
+    for i in prange(len(W)):
+        mu = N[i] * rate
+        result[i] = (function(W[i] + shape, 1) - gamma_shape - lw[i]
+                     + shape * math.log(shape / (shape + mu))
+                     + W[i] * math.log(mu / (shape + mu)))
+    return result
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _beta_values(A, H, a, b, function):
+    result = np.empty(len(A))
+    for i in prange(len(A)):
+        result[i] = function(A[i] + a, H[i] - A[i] + b, 1)
+    return result
+
+
+class _Chunks:
+    """Mixture evaluation under the caller's live CPU allowance.
+
+    Native sitewise special-function kernels reclaim available CPUs at every objective
+    boundary. The vectorized chunk evaluator remains a reference path. Reductions retain
+    the original NumPy order; r4 eligibility still waits for the completed r3 decision.
     """
 
     def __init__(self, pool, size, threads):
         count = max(1, min(4 * threads, size // _MINIMUM_CHUNK_SITES))
         bounds = np.linspace(0, size, count + 1).astype(np.int64)
         self.pool, self.size = pool, size
+        budget = current_budget()
+        self.budget = budget if budget.live else CpuBudget.fixed(min(threads, budget.threads()))
         self.chunks = [(start, stop) for start, stop in zip(bounds[:-1], bounds[1:]) if stop > start]
 
     def __call__(self, function, *arrays):
@@ -284,6 +375,17 @@ class _Chunks:
             pass
         return out
 
+    def negative_binomial(self, W, N, lw, rate, shape):
+        with numba_threads(self.budget.threads()):
+            return _negative_binomial_values(W, N, lw, rate, shape,
+                                             special.gammaln(shape), _GAMMALN)
+
+    def beta_binomial(self, A, H, lc, mean, concentration):
+        a = mean * concentration; b = (1 - mean) * concentration
+        with numba_threads(self.budget.threads()):
+            beta = _beta_values(A, H, a, b, _BETALN)
+        return lc + beta - special.betaln(a, b)
+
 
 def _error_mixture(W, N, evaluate):
     """Clean: W ~ Poisson(N eps0). Artefact: W ~ NegBin(mean N eps1, shape k). Returns parameters and P(clean)."""
@@ -291,7 +393,7 @@ def _error_mixture(W, N, evaluate):
     lw = special.gammaln(W + 1)
 
     def artefact(rate, shape):
-        return evaluate(lambda W, N, lw: _log_negative_binomial_pmf(W, N * rate, shape, lw), W, N, lw)
+        return evaluate.negative_binomial(W, N, lw, rate, shape)
     for it in range(_MIXTURE_ITERATIONS):
         wc = _posterior_clean(np.log(pi) + _log_poisson_pmf(W, N * e0, lw),
                               np.log1p(-pi) + artefact(e1, k))
@@ -318,7 +420,7 @@ def _balance_mixture(A, H, evaluate):
     lc = special.gammaln(H + 1) - special.gammaln(A + 1) - special.gammaln(H - A + 1)
 
     def artefact(mean, concentration):
-        return evaluate(lambda A, H, lc: _log_beta_binomial_pmf(A, H, mean, concentration, lc), A, H, lc)
+        return evaluate.beta_binomial(A, H, lc, mean, concentration)
     for it in range(_MIXTURE_ITERATIONS):
         wc = _posterior_clean(np.log(pi) + _log_binomial_pmf(A, H, h0, lc),
                               np.log1p(-pi) + artefact(m1, c1))
@@ -343,36 +445,94 @@ def _balance_mixture(A, H, evaluate):
 # Rules
 # ---------------------------------------------------------------------------------------------
 
-def site_quality_flags(alt, dep, config: SiteQualityConfig, *, threads: int):
-    """Rule flags r1-r5 for one contig's SNPs and the fitted parameters.
+def _tile_sites(n_samples):
+    """Bound dense working arrays by cells as well as sites (large cohorts use shorter tiles)."""
+    return max(1, min(_MAXIMUM_TILE_SITES, _SITE_TILE_CELLS // max(1, n_samples)))
 
-    alt, dep: int32 (sites, samples) ALT and total depths. Returns ({rule: bool[L]}, parameters).
-    Runs on the caller's Numba team; elementwise mixture terms use ``threads`` threads.
+
+def peak_scratch_bytes(n_samples: int, n_input_sites: int) -> int:
+    """Conservative peak beyond input counts, including site fits and sample QC.
+
+    Site vectors and sparse near-private cells are O(M); dense work is at most one bounded
+    tile. The direct genotype queue admits at most min(live CPUs, tile) sample workspaces,
+    also covered by the tile allowance. No extra adaptive allocation is made. The fixed
+    allowance covers histogram/optimizer and allocator overhead.
+    This reservation does not include the input counts or the later kept-site/GL arrays.
     """
-    L, S = dep.shape
-    depth = dep.astype(np.float64); D = depth.sum(1)
+    tile = min(n_input_sites, _tile_sites(n_samples))
+    return int(512 * n_input_sites + 128 * n_samples * tile + 512 * n_samples + (16 << 20))
+
+
+def _count_tile(counts, start, stop, selected=None):
+    counts = counts[:, start:stop, :]
+    if selected is not None:
+        counts = counts[selected]
+    alt = np.ascontiguousarray(counts[:, :, 1].T, dtype=np.int32)
+    # Two int32 alleles: addition has the same overflow semantics as sum, without
+    # a length-two reduction for every cell (repeated in all three depth passes).
+    dep = np.ascontiguousarray((counts[:, :, 0] + counts[:, :, 1]).T)
+    return alt, dep
+
+
+def _quality_flags(n_sites, n_samples, read_tile, config, *, threads, counts=None):
+    """The original rule calculations with O(sites) summaries and bounded dense tiles."""
+    L, S = n_sites, n_samples
+    tile = _tile_sites(S)
+    D = np.empty(L)
+    if counts is not None:
+        # One live-budget work queue with only per-worker sample vectors.
+        # The task count also bounds worker scratch for unusually large N.
+        with numba_threads(min(threads, tile)):
+            F, W, N, A, H, covered = _genotype_expectations_counts(
+                counts, np.arange(S), config.classification_error,
+                config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
+        for start in range(0, L, tile):
+            stop = min(start + tile, L)
+            alt, dep = read_tile(start, stop)
+            D[start:stop] = dep.sum(axis=1, dtype=np.float64)
+        del alt, dep
+    else:
+        F = np.empty((L, 3))
+        W = np.empty(L); N = np.empty(L); A = np.empty(L); H = np.empty(L)
+        covered = np.empty(L, np.int32)
+        for start in range(0, L, tile):
+            stop = min(start + tile, L)
+            alt, dep = read_tile(start, stop)
+            D[start:stop] = dep.sum(axis=1, dtype=np.float64)
+            values = _genotype_expectations(alt, dep, config.classification_error,
+                                           config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
+            for output, value in zip((F, W, N, A, H, covered), values):
+                output[start:stop] = value
+        del alt, dep, values
     parameters = dict(records=int(L), samples=int(S), snp=int(L))
-    # r1 total depth
     core = _peak_core(D, config.histogram_smoothing_bins, integer=True)
     lo, hi = _bounds(core, config.core_posterior_level)
     r1 = (D < lo) | (D > hi)
-    parameters["depth"] = dict(_core_record(core), low=lo, high=hi, poisson_sd=float(np.sqrt(core["mode"])))
-    # r2 depth heterogeneity across samples given the site's own depth factor
+    parameters["depth"] = dict(_core_record(core), low=lo, high=hi,
+                               poisson_sd=float(np.sqrt(core["mode"])))
     reference = ~r1
-    mean_depth = depth[reference].mean(0)
-    expected = np.outer(D / mean_depth.sum(), mean_depth)
-    X = ((depth - expected) ** 2 / np.maximum(expected, 1e-9)).sum(1) / (S - 1)
-    del expected, depth
+    # Integer input depths have exact float64 sums on the supported contigs. Sum before
+    # dividing, as the original full-array mean does, rather than averaging tile means.
+    depth_sum = np.zeros(S)
+    for start in range(0, L, tile):
+        stop = min(start + tile, L)
+        alt, dep = read_tile(start, stop)
+        depth_sum += dep[reference[start:stop]].sum(axis=0, dtype=np.float64)
+    mean_depth = depth_sum / reference.sum()
+    X = np.empty(L)
+    for start in range(0, L, tile):
+        stop = min(start + tile, L)
+        alt, dep = read_tile(start, stop)
+        depth = dep.astype(np.float64)
+        expected = np.outer(D[start:stop] / mean_depth.sum(), mean_depth)
+        X[start:stop] = ((depth - expected) ** 2 / np.maximum(expected, 1e-9)).sum(1) / (S - 1)
+    del alt, dep, depth, expected
     core = _peak_core(np.log(X[reference & (X > 0)]), config.histogram_smoothing_bins)
     _, high = _bounds(core, config.core_posterior_level)
     r2 = X > np.exp(high)
     parameters["heterogeneity"] = dict(mode=float(np.exp(core["mode"])), sd_log_left=core["sd_left"],
                                        sd_log_right=core["sd_right"], high=float(np.exp(high)),
                                        core_weight=core["core_weight"])
-    # Genotype classification under the fixed read model; the clean rates are fitted below.
-    F, W, N, A, H, covered = _genotype_expectations(
-        alt, dep, config.classification_error, config.classification_heterozygote_alt,
-        _SITE_EM_ITERATIONS)
     base = ~r1 & ~r2
     separation = config.minimum_artefact_separation
     # r3 wrong-allele reads in homozygotes
@@ -403,12 +563,25 @@ def site_quality_flags(alt, dep, config: SiteQualityConfig, *, threads: int):
     return dict(r1=r1, r2=r2, r3=r3, r4=r4, r5=r5), parameters
 
 
+def site_quality_flags(alt, dep, config: SiteQualityConfig, *, threads: int):
+    """Compatibility entry point for (sites, samples) integer ALT and total depths."""
+    return _quality_flags(len(dep), dep.shape[1],
+                          lambda start, stop: (alt[start:stop], dep[start:stop]), config,
+                          threads=threads)
+
+
 def uninformative_sites(alt, dep, config: SiteQualityConfig):
-    """r5 alone for the samples in alt/dep: the same per-site genotype fit and carrier rule."""
-    F, _, _, _, _, covered = _genotype_expectations(
-        np.ascontiguousarray(alt, dtype=np.int32), np.ascontiguousarray(dep, dtype=np.int32),
-        config.classification_error, config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
-    return covered * (1 - F.max(1)) < config.minimum_expected_carriers
+    """r5 alone with bounded per-site genotype fits, preserving the original sample order."""
+    result = np.empty(len(dep), bool)
+    tile = _tile_sites(dep.shape[1])
+    for start in range(0, len(dep), tile):
+        stop = min(start + tile, len(dep))
+        F, _, _, _, _, covered = _genotype_expectations(
+            np.ascontiguousarray(alt[start:stop], dtype=np.int32),
+            np.ascontiguousarray(dep[start:stop], dtype=np.int32),
+            config.classification_error, config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
+        result[start:stop] = covered * (1 - F.max(1)) < config.minimum_expected_carriers
+    return result
 
 
 def filter_sites(positions, counts, config: SiteQualityConfig, sample_config: SampleQualityConfig, *,
@@ -427,19 +600,23 @@ def filter_sites(positions, counts, config: SiteQualityConfig, sample_config: Sa
         return SiteQualityResult(
             enabled=True, applied=False, kept=np.ones(n_sites, bool),
             reason=f"fewer than {config.minimum_calibration_sites} biallelic SNPs")
-    # (sites, samples) C-ordered: the row sums run over samples in sample order.
-    alt = np.ascontiguousarray(counts[:, :, 1].T, dtype=np.int32)
-    dep = np.ascontiguousarray(counts.sum(axis=2, dtype=np.int32).T)
-    flags, parameters = site_quality_flags(alt, dep, config, threads=threads)
+    flags, parameters = _quality_flags(
+        n_sites, counts.shape[0], lambda start, stop: _count_tile(counts, start, stop),
+        config, threads=threads, counts=counts)
     samples = None
     if sample_config.enabled:
         passing = ~np.any([flags[rule] for rule in QUALITY_RULES], axis=0)
-        samples = sample_quality.assess(alt[passing], dep[passing], positions[passing],
-                                        parameters["balance"]["h0"], sample_config)
+        samples = sample_quality.assess_counts(
+            counts, positions, passing, parameters["balance"]["h0"], sample_config,
+            chunk_sites=_tile_sites(counts.shape[0]))
         counted = ~samples.flagged
         if not np.all(counted):
-            flags["r5"] = uninformative_sites(alt[:, counted], dep[:, counted], config)
-    del alt, dep
+            tile = _tile_sites(counts.shape[0])
+            with numba_threads(min(threads, tile)):
+                F, _, _, _, _, covered = _genotype_expectations_counts(
+                    counts, np.flatnonzero(counted), config.classification_error,
+                    config.classification_heterozygote_alt, _SITE_EM_ITERATIONS)
+            flags["r5"] = covered * (1 - F.max(1)) < config.minimum_expected_carriers
     applied = RULES if config.drop_uninformative_sites else QUALITY_RULES
     remove = np.zeros(n_sites, bool)
     for rule in applied:

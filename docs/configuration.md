@@ -423,9 +423,8 @@ Stage `evidence`, `evidence/config.py`. Evidence stage: loader policy -> site/sa
 | constant | default | meaning |
 | --- | --- | --- |
 | `block_sites` | `200` | Discovery block width in sites (consecutive, non-overlapping windows of the site axis). |
-| **discovery_sites** (DiscoverySiteRule) |  | Which sites the discovery search uses (base loader ``keep_flags``). |
+| **discovery_sites** (DiscoverySiteRule) |  | Minimum read support for discovery, independent of cohort size. |
 | `discovery_sites.minimum_total_depth` | `5` |  |
-| `discovery_sites.depth_per_sample` | `0.02` |  |
 | **site_quality** (SiteQualityConfig) |  | Self-calibrated site filter r1-r5 (``evidence/site_quality.py``). |
 | `site_quality.enabled` | `True` | *Set by* `[quality] site_filter`. |
 | `site_quality.classification_error` | `0.01` | Read model used only to classify each sample's genotype at a site; the clean-core error rate and allele balance are then fitted, not these. |

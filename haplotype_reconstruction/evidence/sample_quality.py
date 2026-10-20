@@ -59,6 +59,7 @@ _BISECTIONS = 50                 # interval halvings (precision 2**-50)
 _FIT_ITERATIONS = 200
 _FRACTION_TOLERANCE = 1e-7
 _MINIMUM_LOW_FRACTION = 1e-6
+_CHUNK_SITES = 1024
 
 
 @dataclass(frozen=True)
@@ -224,37 +225,93 @@ def _robust_z(values, observed, config: SampleQualityConfig):
     return z, median, spread, floor, None
 
 
+def _collect_near_private(tiles, n_samples, heterozygote_balance):
+    """Collect at most two cells per site, preserving site-then-sample order.
+
+    A tile supplies int64 ALT/depth arrays (sites, samples) and positions. Partner counts are
+    retained with each cell so inherited-segment reporting does not need the dense read arrays.
+    """
+    columns = [[] for _ in range(8)]
+    observed = np.zeros(n_samples, np.int64)
+    passing_sites = 0
+    for alt, dep, positions in tiles:
+        passing_sites += len(positions)
+        # At equal read totals ALT is minor by convention (REF under convention reversal).
+        alt_total, ref_total = alt.sum(axis=1), (dep - alt).sum(axis=1)
+        minor_is_alt = ((alt_total < ref_total) if ties.reverse_conventions()
+                        else (alt_total <= ref_total))
+        minor = np.where(minor_is_alt[:, None], alt, dep - alt)
+        carrier = minor > 0
+        carriers = carrier.sum(axis=1)
+        observed += (dep > 0).sum(axis=0)
+        site, sample = np.nonzero(carrier & (carriers <= 2)[:, None])
+        partner = np.full(len(site), -1, np.int64)
+        first = np.flatnonzero((carriers[site] == 2) & np.r_[True, site[1:] != site[:-1]])
+        partner[first] = sample[first + 1]
+        partner[first + 1] = sample[first]
+        shared = partner >= 0
+        partner_k = np.zeros(len(site), np.int64)
+        partner_d = np.zeros(len(site), np.int64)
+        partner_k[shared] = minor[site[shared], partner[shared]]
+        partner_d[shared] = dep[site[shared], partner[shared]]
+        values = (
+            minor[site, sample].astype(float), dep[site, sample].astype(float),
+            np.where(minor_is_alt[site], heterozygote_balance, 1.0 - heterozygote_balance),
+            positions[site], sample, partner, partner_k, partner_d,
+        )
+        for column, value in zip(columns, values):
+            column.append(value)
+    dtypes = (float, float, float, np.int64, np.int64, np.int64, np.int64, np.int64)
+    cells = tuple(np.concatenate(column) if column else np.empty(0, dtype)
+                  for column, dtype in zip(columns, dtypes))
+    return passing_sites, observed, cells
+
+
+def assess_counts(counts, positions, passing, heterozygote_balance, config: SampleQualityConfig, *,
+                  chunk_sites: int = _CHUNK_SITES) -> SampleQualityResult:
+    """Assess raw counts without allocating arrays across the full sample/site axes.
+
+    counts: int32 (samples, input sites, 2), REF then ALT; passing: bool[input sites] selecting
+    r1-r4-passing sites. Dense scratch is bounded by ``chunk_sites``; retained cell summaries
+    have at most two entries per passing site. The statistical operations match ``assess``.
+    """
+    def tiles():
+        for start in range(0, len(positions), chunk_sites):
+            selected = np.flatnonzero(passing[start:start + chunk_sites]) + start
+            if not len(selected):
+                continue
+            alt = np.asarray(counts[:, selected, 1].T, np.int64)
+            dep = np.asarray(counts[:, selected, :].sum(axis=2, dtype=np.int32).T, np.int64)
+            yield alt, dep, np.asarray(positions[selected], np.int64)
+
+    n_samples = counts.shape[0]
+    passing_sites, observed, cells = _collect_near_private(tiles(), n_samples, heterozygote_balance)
+    return _assess_cells(n_samples, passing_sites, observed, *cells, heterozygote_balance, config)
+
+
 def assess(alt, dep, positions, heterozygote_balance, config: SampleQualityConfig) -> SampleQualityResult:
     """One contig's per-sample statistics, flags and inherited-segment regions.
 
-    alt, dep: (sites, samples) ALT and total reads of the analysed cohort at the contig's
-    r1-r4-passing SNPs; positions: their coordinates; heterozygote_balance: the r4 clean
-    heterozygote ALT fraction.
+    alt, dep: (sites, samples) ALT and total reads at r1-r4-passing SNPs; positions: their
+    coordinates; heterozygote_balance: the r4 clean heterozygote ALT fraction. Conversion and
+    minor-allele selection use bounded tiles, including for callers with non-int64 inputs.
     """
-    alt = np.asarray(alt, np.int64)
-    dep = np.asarray(dep, np.int64)
-    positions = np.asarray(positions, np.int64)
-    n_samples = dep.shape[1]
-    # The minor allele; at exactly equal read totals ALT by convention (REF under the convention reversal,
-    # release 2.2).
-    alt_total, ref_total = alt.sum(axis=1), (dep - alt).sum(axis=1)
-    minor_is_alt = (alt_total < ref_total) if ties.reverse_conventions() else (alt_total <= ref_total)
-    minor = np.where(minor_is_alt[:, None], alt, dep - alt)
-    carrier = minor > 0
-    carriers = carrier.sum(axis=1)
-    observed = (dep > 0).sum(axis=0)
-    # Near-private cells (row-major: by site, then sample); the partner is the other carrier at a
-    # two-carrier site, -1 at a private one.
-    site, sample = np.nonzero(carrier & (carriers <= 2)[:, None])
-    partner = np.full(len(site), -1, np.int64)
-    first = np.flatnonzero((carriers[site] == 2) & np.r_[True, site[1:] != site[:-1]])
-    partner[first] = sample[first + 1]
-    partner[first + 1] = sample[first]
-    k = minor[site, sample].astype(float)
-    d = dep[site, sample].astype(float)
-    het = np.where(minor_is_alt[site], heterozygote_balance, 1.0 - heterozygote_balance)
-    position = positions[site]
+    alt, dep, positions = np.asarray(alt), np.asarray(dep), np.asarray(positions)
 
+    def tiles():
+        for start in range(0, len(positions), _CHUNK_SITES):
+            stop = start + _CHUNK_SITES
+            yield (np.asarray(alt[start:stop], np.int64), np.asarray(dep[start:stop], np.int64),
+                   np.asarray(positions[start:stop], np.int64))
+
+    n_samples = dep.shape[1]
+    passing_sites, observed, cells = _collect_near_private(tiles(), n_samples, heterozygote_balance)
+    return _assess_cells(n_samples, passing_sites, observed, *cells, heterozygote_balance, config)
+
+
+def _assess_cells(n_samples, passing_sites, observed, k, d, het, position, sample, partner,
+                  partner_k, partner_d, heterozygote_balance, config):
+    """The unchanged event fits and cohort statistics, using only near-private cells."""
     private_cells = np.zeros(n_samples, np.int64)
     private_events = np.zeros(n_samples)
     low_events = np.zeros(n_samples)
@@ -301,13 +358,13 @@ def assess(alt, dep, positions, heterozygote_balance, config: SampleQualityConfi
                                & (position <= last_position))
         partner_fraction = None
         if p >= 0:
-            partner_fraction = float(minor[site[cells], p].sum() / dep[site[cells], p].sum())
+            partner_fraction = float(partner_k[cells].sum() / partner_d[cells].sum())
         segments.append(InheritedSegment(
             sample=s, partner=p, start=int(first_position), end=int(last_position), events=events,
             cells=int(len(cells)), minor_read_fraction=float(k[cells].sum() / d[cells].sum()),
             partner_minor_read_fraction=partner_fraction))
     return SampleQualityResult(
-        applied=reason is None, reason=reason, passing_sites=int(len(positions)),
+        applied=reason is None, reason=reason, passing_sites=passing_sites,
         heterozygote_balance=float(heterozygote_balance), flagged=flagged, robust_z=z,
         statistic=statistic, low_fraction_events=low_events, fitted_low_fraction=low_fraction,
         private_events=private_events, private_minor_read_fraction=private_fraction,

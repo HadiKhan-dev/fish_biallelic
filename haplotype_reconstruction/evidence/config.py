@@ -12,20 +12,19 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DiscoverySiteRule:
-    """Which sites the discovery search uses (base loader ``keep_flags``).
+    """Minimum read support for discovery, independent of cohort size.
 
-    A site is a discovery site when its total read depth over all N analysed samples is at
-    least ``max(minimum_total_depth, depth_per_sample * N)``. Kept from base for parity: the
-    per-sample term was the inference read-error constant (0.02) reused as a threshold; it is
-    not derived from a model. Other sites stay on the site axis (painting and later stages use
-    them); only discovery skips them.
+    Discovery and local selection fit and release alleles at sites with at least
+    ``minimum_total_depth`` reads across all analysed samples. Other sites remain
+    on the site axis for later filling and inference. This is a read-support floor,
+    not a requirement that a fixed fraction of the cohort observes the site.
     """
 
     minimum_total_depth: int = 5
-    depth_per_sample: float = 0.02
 
     def threshold(self, n_samples: int) -> float:
-        return max(self.minimum_total_depth, self.depth_per_sample * n_samples)
+        """Keep the stage's call signature; cohort size does not change support."""
+        return self.minimum_total_depth
 
 
 @dataclass(frozen=True)

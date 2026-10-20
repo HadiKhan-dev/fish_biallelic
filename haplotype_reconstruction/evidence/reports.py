@@ -59,12 +59,15 @@ class EvidenceSummary:
     timings: Mapping[str, float]
     # In-memory evidence for the next stage (run_contig(..., keep=True)); never stored.
     prepared: object = None
+    read_model_warning: str | None = None
 
     def record(self) -> dict:
         return dict(contig=self.contig, resumed=self.resumed, input_sites=self.input_sites,
                     sites=self.sites, dropped=dict(self.dropped), site_filter=self.site_filter,
                     flagged_samples=list(self.flagged_samples), read_model=self.read_model,
-                    timings=dict(self.timings))
+                    timings=dict(self.timings),
+                    **({} if self.read_model_warning is None else dict(
+                        read_model_warning=self.read_model_warning)))
 
 
 def summarise(report: EvidenceReport, evidence_sites: int, sample_ids, *, resumed: bool) -> EvidenceSummary:
@@ -84,7 +87,8 @@ def summarise(report: EvidenceReport, evidence_sites: int, sample_ids, *, resume
                            input_sites=int(len(report.input_positions)), sites=int(evidence_sites),
                            dropped=dict(report.dropped), site_filter=site_filter,
                            flagged_samples=flagged, read_model=read_model,
-                           timings=dict(report.timings))
+                           timings=dict(report.timings),
+                           read_model_warning=calibration_report.shared_fit_warning)
 
 
 def log_lines(summary: EvidenceSummary, report: EvidenceReport) -> list[str]:
@@ -117,6 +121,9 @@ def log_lines(summary: EvidenceSummary, report: EvidenceReport) -> list[str]:
                      f"{calibration_report.diagnostic_gain_over_shared:.3f}")
     else:
         lines.append(f"    [Read model] {summary.contig}: fixed model ({calibration_report.fallback_reason})")
+    if calibration_report.shared_fit_warning is not None:
+        lines.append(f"    [Read model WARNING] {summary.contig}: "
+                     f"{calibration_report.shared_fit_warning}; endpoints and distances in evidence report")
     return lines
 
 
