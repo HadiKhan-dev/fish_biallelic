@@ -578,8 +578,25 @@ No repository-level concurrency cap or delegation-depth rule is imposed here. Us
 1. Preserve the mathematical and statistical meaning of the implementation.
 2. Do not silently change algorithms, objective functions, convergence criteria, filtering rules, thresholds, priors, likelihood calculations, or biological assumptions.
 3. Distinguish numerical implementation changes from scientific-model changes.
-4. Bit-for-bit floating-point identity is not required.
-5. Differences of up to a few hundred ULP are acceptable when caused solely by mathematically equivalent evaluation order, vectorisation, parallel reduction order, or equivalent library implementations.
+4. **"Same results" means scientifically identical results, never bit-identical arrays.** The owner said on
+   20 October 2026: "I don't need bit identicality when I say I want the same results, I want scientific result
+   identicality, and if some bits shift around due to getting faster that's 100% perfectly fine."
+   - Same results means the same released scientific outputs and decisions: called genotypes and missingness,
+     founder alleles and counts, selected panels and haplotypes, released ambiguity, pedigree calls and support,
+     phase assignments and phase sets, crossovers and intervals. Continuous outputs must agree to well below any
+     scientifically meaningful scale.
+   - Bit-for-bit floating-point identity is not required anywhere, including for "behaviour-identical"
+     refactors and speedups.
+5. Floating-point differences of any size in bits are acceptable when they come solely from faster but
+   mathematically equivalent computation, and the results in rule 4 are unchanged. Such computation includes:
+   - a different evaluation or reduction order;
+   - vectorisation, SIMD or FMA;
+   - parallel reductions;
+   - equivalent libraries or kernels.
+
+   Do not reject, slow down or complicate an implementation to preserve bits. Do not make byte equality of
+   arrays a gate for performance work. Instead, compare the released scientific outputs and decisions, and
+   report the size of any numerical drift in key continuous quantities.
 6. A numerically small difference is not automatically harmless. If it changes a threshold comparison, branch, convergence outcome, selected haplotype, inferred pedigree, phase assignment, validation metric, or other scientific result, report it as a behavioural change.
 7. Do not assume an improved headline metric proves correctness.
 8. When uncertain whether behaviour changed, report the uncertainty and validate it.
@@ -966,6 +983,33 @@ when the canary is evaluated.
 Performance measurements should normally be collected from the live
 speculative run. Do not insert a separate preliminary benchmark when the same
 evidence can be obtained from the authorized work.
+
+### Retire superseded runs; keep validation proportionate
+
+Compute is limited. The user said on 19 October 2026: "we aren't made of
+compute you know. Please don't go overboard on validations and tests and runs."
+Spend it on tests that can still change a decision.
+
+- **Cancel superseded work promptly.** A queued or running task is superseded
+  when its question has been answered, or when a newer candidate, tree or
+  configuration replaces the one it tests. Examples: noise matrices for a
+  rejected candidate, timing of a frozen tree that has been replaced, or
+  duplicates of a check already running. Cancel it as soon as that happens.
+  Remove or hold pending tasks. Stop running ones with the safe stopping rules
+  under **Stopping processes safely**, including a check for orphaned children,
+  and keep outputs that have already completed. In a shared task queue, the
+  agent that owns the task asks the coordinator, who acts on it.
+- **Check the queue before submitting.** Do not queue a test whose answer, or a
+  newer version of it, is already queued or known.
+- **Proportionate validation.** Use focused, bounded tests for the behaviour that
+  changed. Run broad matrices (every dataset, noise cell, reversal and renaming)
+  once, on the final integrated candidate, not on every intermediate candidate.
+  Do not rerun checks whose inputs and code have not changed.
+- **Ask whether a run can change a decision.** If no plausible outcome of a run
+  would change what is done next, do not launch it.
+- **Do not busy-wait.** An agent waiting for long-running work should end its
+  turn, or sleep without repeatedly re-reading large state, rather than poll.
+  Every poll costs model tokens as well as scheduler or filesystem load.
 
 ### Allocation-utilization reassessment
 
